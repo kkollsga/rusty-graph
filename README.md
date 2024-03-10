@@ -56,9 +56,9 @@ kg = rusty_graph.KnowledgeGraph()
 kg.add_nodes(
     data=nodes_data.astype(str).to_numpy().tolist(),  # Convert DataFrame to list of lists
     columns=list(nodes_data.columns),  # Use DataFrame column names
-    node_type="MyNodeType",
-    unique_id_field="unique_id",
-    conflict_handling="update"  # Options: "update", "replace", "skip"
+    node_type="MyNodeType",  # Type of node (example: Artist)
+    unique_id_field="unique_id", # Column name of unique identifier
+    conflict_handling="update"  # Conflict handling: "update", "replace", or "skip"
 )
 
 # Query the knowledge graph
@@ -85,11 +85,11 @@ kg = rusty_graph.KnowledgeGraph()
 
 # Add nodes to the knowledge graph from DataFrame
 kg.add_nodes(
-    df.astype(str).to_numpy().tolist(),  # Data from DataFrame as list of lists
-    list(df.columns),  # Column names
-    "NodeType",  # Type of nodes
-    "unique_id",  # Field for unique identifier
-    "update"  # Conflict handling: "update", "replace", or "skip"
+    data=df.astype(str).to_numpy().tolist(),  # Data from DataFrame as list of lists
+    columns=list(df.columns),  # Column names
+    node_type="NodeType",  # Type of node (example: Artist)
+    unique_id_field="unique_id",  # Column name of unique identifier
+    conflict_handling="update"  # Conflict handling: "update", "replace", or "skip"
 )
 
 # Execute another SQL query for relationship data
@@ -97,14 +97,14 @@ relationship_df = pd.read_sql_query("SELECT source_id, target_id, relation_attri
 
 # Add relationships to the knowledge graph
 kg.add_relationships(
-    relationship_df.astype(str).to_numpy().tolist(),  # Data from DataFrame
-    list(relationship_df.columns),  # Column names
-    "RELATIONSHIP_TYPE",  # Name for the relationship type
-    "SourceNodeType",  # Source node type
-    "source_id",  # Source node unique identifier
-    "TargetNodeType",  # Target node type
-    "target_id",  # Target node unique identifier
-    "update"  # Conflict handling: "update", "replace", or "skip"
+    data=relationship_df.astype(str).to_numpy().tolist(),  # Data from DataFrame
+    columns=list(relationship_df.columns),  # Column names
+    relationship_type="RELATIONSHIP_TYPE",  # Name for the relationship type
+    source_type="SourceNodeType",  # Source node type
+    source_id="source_id",  # Column name of source node unique identifier
+    target_type="TargetNodeType",  # Target node type
+    target_id="target_id",  # Column name of target node unique identifier
+    conflict_handling="update"  # Conflict handling: "update", "replace", or "skip"
 )
 
 # Retrieve node data by unique identifier
