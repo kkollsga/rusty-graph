@@ -10,6 +10,7 @@ Rusty Graph is a Rust-based project that aims to empower the generation of high-
 ## Direct Download and Install
 Users can download the .whl file directly from the repository and install it using pip. 
 *Note that the release is only compatible with Python 3.12 on win_amd64.*
+*Library is still in alpha, so the functionality is very limited.*
 ```sh
 pip install https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.1.0-cp312-none-win_amd64.whl?raw=true
 ```
