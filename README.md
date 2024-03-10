@@ -28,20 +28,80 @@ maturin develop
 ```
 
 ## Usage
+
+### Getting Started
 Start using Rusty Graph in your Python code to build and manipulate knowledge graphs:
 
 ```python
 import rusty_graph
+import pandas as pd
 
+nodes_data = pd.DataFrame({
+    "unique_id": ["1", "2"],
+    "name": ["Node A", "Node B"],
+    "design": ["Type X", "Type Y"]
+})
 # Initialize a new KnowledgeGraph instance
 kg = rusty_graph.KnowledgeGraph()
 
 # Add nodes and relationships from SQL data
-kg.add_node_from_sql("your_sql_query_for_nodes")
-kg.add_relationship_from_sql("your_sql_query_for_relationships")
+kg.add_nodes(
+    data=nodes_data.astype(str).to_numpy().tolist(),  # Convert DataFrame to list of lists
+    columns=list(nodes_data.columns),  # Use DataFrame column names
+    node_type="MyNodeType",
+    unique_id_field="unique_id",
+    conflict_handling="update"  # Options: "update", "replace", "skip"
+)
 
 # Query the knowledge graph
-node_info = kg.get_node_by_id("node_id")
+node_info = kg.get_node_by_id("1")
+print(node_info)
+```
+
+### Advanced Usage with pandas and SQL
+Rusty Graph allows for the efficient transformation of SQL database data into a knowledge graph. By leveraging pandas' SQL functionality, you can query your SQL database directly and use the resulting DataFrame with Rusty Graph. Here's an example that demonstrates this process:
+
+```python
+import rusty_graph
+import pandas as pd
+from sqlalchemy import create_engine
+
+# Create a database engine
+engine = create_engine('sqlite:///your_database.db')  # Adjust for your database
+
+# Execute SQL query and load data into a pandas DataFrame
+df = pd.read_sql_query("SELECT unique_id, attribute1, attribute2 FROM your_table", engine)
+
+# Initialize Rusty Graph
+kg = rusty_graph.KnowledgeGraph()
+
+# Add nodes to the knowledge graph from DataFrame
+kg.add_nodes(
+    df.astype(str).to_numpy().tolist(),  # Data from DataFrame as list of lists
+    list(df.columns),  # Column names
+    "NodeType",  # Type of nodes
+    "unique_id",  # Field for unique identifier
+    "update"  # Conflict handling: "update", "replace", or "skip"
+)
+
+# Execute another SQL query for relationship data
+relationship_df = pd.read_sql_query("SELECT source_id, target_id, relation_attribute FROM relationships_table", engine)
+
+# Add relationships to the knowledge graph
+kg.add_relationships(
+    relationship_df.astype(str).to_numpy().tolist(),  # Data from DataFrame
+    list(relationship_df.columns),  # Column names
+    "RELATIONSHIP_TYPE",  # Name for the relationship type
+    "SourceNodeType",  # Source node type
+    "source_id",  # Source node unique identifier
+    "TargetNodeType",  # Target node type
+    "target_id",  # Target node unique identifier
+    "update"  # Conflict handling: "update", "replace", or "skip"
+)
+
+# Retrieve node data by unique identifier
+node_data = kg.get_nodes_by_id("specific_unique_id")
+print(node_data)
 ```
 
 ## Contributing
