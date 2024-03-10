@@ -62,7 +62,7 @@ kg.add_nodes(
 )
 
 # Query the knowledge graph
-node_info = kg.get_node_by_id("1")
+node_info = kg.get_nodes_by_id("1")
 print(node_info)
 ```
 
