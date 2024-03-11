@@ -12,7 +12,9 @@ Users can download the .whl file directly from the repository and install it usi
 - *Note that the release is only compatible with Python 3.12 on win_amd64.*
 - *The library is still in alpha, so the functionality is very limited.*
 ```sh
-pip install https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.1.0-cp312-none-win_amd64.whl?raw=true
+pip install https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.1.1-cp312-none-win_amd64.whl?raw=true
+# or upgrade an already installed library
+pip install --upgrade https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.1.1-cp312-none-win_amd64.whl?raw=true
 ```
 
 
@@ -59,12 +61,13 @@ kg.add_nodes(
     columns=list(nodes_data.columns),  # Use DataFrame column names
     node_type="MyNodeType",  # Type of node (example: Artist)
     unique_id_field="unique_id", # Column name of unique identifier
+    node_title_field="name", # node title
     conflict_handling="update"  # Conflict handling: "update", "replace", or "skip"
 )
 
 # Query the knowledge graph
-node_info = kg.get_nodes_by_id("1")
-print(node_info)
+matching_nodes = kg.get_nodes("unique_id", "1")
+print(matching_nodes)
 ```
 
 ### Advanced Usage with pandas and SQL
@@ -90,6 +93,7 @@ kg.add_nodes(
     columns=list(df.columns),  # Column names
     node_type="NodeType",  # Type of node (example: Artist)
     unique_id_field="unique_id",  # Column name of unique identifier
+    node_title_field="title", # node title
     conflict_handling="update"  # Conflict handling: "update", "replace", or "skip"
 )
 
@@ -102,15 +106,17 @@ kg.add_relationships(
     columns=list(relationship_df.columns),  # Column names
     relationship_type="RELATIONSHIP_TYPE",  # Name for the relationship type
     source_type="SourceNodeType",  # Source node type
-    source_id="source_id",  # Column name of source node unique identifier
+    source_id_field="source_id",  # Column name of source node unique identifier
+    source_title_field= "source_title", # Source title
     target_type="TargetNodeType",  # Target node type
-    target_id="target_id",  # Column name of target node unique identifier
+    target_id_field="target_id",  # Column name of target node unique identifier
+    target_title_field= "target_title", # Source title
     conflict_handling="update"  # Conflict handling: "update", "replace", or "skip"
 )
 
 # Retrieve node data by unique identifier
-node_data = kg.get_nodes_by_id("specific_unique_id")
-print(node_data)
+matching_nodes = kg.get_nodes("title", "specific_title_name")
+print(matching_nodes)
 ```
 
 ## Contributing

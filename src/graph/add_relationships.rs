@@ -10,42 +10,52 @@ pub fn add_relationships(
     graph: &mut DiGraph<Node, Relation>,
     data: &PyList,  // 2D list where each inner list represents a row
     columns: Vec<String>,  // Column header names
-    relationship_name: String,  // Configuration items directly in the function call
-    left_node_type: String,
-    left_unique_id_field: String,
-    right_node_type: String,
-    right_unique_id_field: String,
+    relationship_type: String,  // Configuration items directly in the function call
+    source_type: String,
+    source_id_field: String,
+    source_title_field: String,
+    target_type: String,
+    target_id_field: String,
+    target_title_field: String,
     conflict_handling: String,  // Default value handled inside function if necessary
 ) -> PyResult<Vec<(usize, usize)>> {
     let mut indices = Vec::new();
 
     // Create lookup tables for left and right nodes
-    let mut left_node_lookup = HashMap::new();
-    let mut right_node_lookup = HashMap::new();
+    let mut source_node_lookup = HashMap::new();
+    let mut target_node_lookup = HashMap::new();
     // Populate the lookup tables by filtering nodes based on type
     for index in graph.node_indices() {
         let node = &graph[index];
-        if node.node_type == left_node_type {
-            left_node_lookup.insert(node.unique_id.clone(), index);
-        } else if node.node_type == right_node_type {
-            right_node_lookup.insert(node.unique_id.clone(), index);
+        if node.node_type == source_type {
+            source_node_lookup.insert(node.unique_id.clone(), index);
+        } else if node.node_type == target_type {
+            target_node_lookup.insert(node.unique_id.clone(), index);
         }
     }
 
     // Find indices for unique ID fields
-    let left_unique_id_index = columns.iter().position(|col| col == &left_unique_id_field)
+    let source_unique_id_index = columns.iter().position(|col| col == &source_id_field)
         .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("'{}' column not found", left_unique_id_field)
+            format!("'{}' column not found", source_id_field)
         ))?;
-    let right_unique_id_index = columns.iter().position(|col| col == &right_unique_id_field)
+    let source_title_index = columns.iter().position(|col| col == &source_title_field)
         .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("'{}' column not found", right_unique_id_field)
+            format!("'{}' column not found", source_title_field)
+        ))?;
+    let target_unique_id_index = columns.iter().position(|col| col == &target_id_field)
+        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            format!("'{}' column not found", target_id_field)
+        ))?;
+    let target_title_index = columns.iter().position(|col| col == &target_title_field)
+        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            format!("'{}' column not found", target_title_field)
         ))?;
 
     // Determine attribute indexes, excluding left and right unique ID indexes
     let attribute_indexes: Vec<usize> = columns.iter().enumerate()
         .filter_map(|(index, _)| {
-            if index != left_unique_id_index && index != right_unique_id_index {
+            if index != source_unique_id_index && index != target_unique_id_index {
                 Some(index)
             } else {
                 None
@@ -55,28 +65,29 @@ pub fn add_relationships(
 
     for py_row in data {
         let row: Vec<String> = py_row.extract()?;
-        // Process left_unique_id
-        let left_unique_id = row[left_unique_id_index].parse::<f64>()
+        // Process source_unique_id
+        let source_unique_id = row[source_unique_id_index].parse::<f64>()
             .map(|num| num.trunc().to_string())  // Convert to integer string if parse is successful
-            .unwrap_or_else(|_| row[left_unique_id_index].clone());  // Keep original string if parse fails
+            .unwrap_or_else(|_| row[source_unique_id_index].clone());  // Keep original string if parse fails
+        let source_title = &row[source_title_index];
 
-        // Process right_unique_id
-        let right_unique_id = row[right_unique_id_index].parse::<f64>()
+        // Process target_unique_id
+        let target_unique_id = row[target_unique_id_index].parse::<f64>()
             .map(|num| num.trunc().to_string())  // Convert to integer string if parse is successful
-            .unwrap_or_else(|_| row[right_unique_id_index].clone());  // Keep original string if parse fails
-
+            .unwrap_or_else(|_| row[target_unique_id_index].clone());  // Keep original string if parse fails
+        let target_title = &row[target_title_index];
         // Find or create left node
-        let left_node_index = *left_node_lookup.entry(left_unique_id.clone())
+        let source_node_index = *source_node_lookup.entry(source_unique_id.clone())
             .or_insert_with(|| {
                 // Create a new Node by passing string slices instead of owned String objects
-                let node = Node::new(&left_node_type, &left_unique_id, HashMap::new());
+                let node = Node::new(&source_type, &source_unique_id, &source_title, HashMap::new());
                 graph.add_node(node)
             });
-        // Find or create right node
-        let right_node_index = *right_node_lookup.entry(right_unique_id.clone())
+        // Find or create target node
+        let target_node_index = *target_node_lookup.entry(target_unique_id.clone())
             .or_insert_with(|| {
                 // Same here, pass string slices to the new Node
-                let node = Node::new(&right_node_type, &right_unique_id, HashMap::new());
+                let node = Node::new(&target_type, &target_unique_id, &target_title, HashMap::new());
                 graph.add_node(node)
             });
         
@@ -93,32 +104,32 @@ pub fn add_relationships(
 
         match conflict_handling.as_str() {
             "update" => {
-                if let Some(edge_id) = graph.find_edge(left_node_index, right_node_index) {
+                if let Some(edge_id) = graph.find_edge(source_node_index, target_node_index) {
                     let existing_relation = &mut graph[edge_id];
                     for (key, value) in attributes.iter() {
                         existing_relation.attributes.insert(key.clone(), value.clone());
                     }
                 } else {
-                    graph.add_edge(left_node_index, right_node_index, Relation {
-                        relation_type: relationship_name.clone(),
+                    graph.add_edge(source_node_index, target_node_index, Relation {
+                        relation_type: relationship_type.clone(),
                         attributes,
                     });
                 }
             },
             "replace" => {
-                let edges: Vec<_> = graph.edges_connecting(left_node_index, right_node_index).map(|e| e.id()).collect();
+                let edges: Vec<_> = graph.edges_connecting(source_node_index, target_node_index).map(|e| e.id()).collect();
                 for edge_id in edges {
                     graph.remove_edge(edge_id);
                 }
-                graph.add_edge(left_node_index, right_node_index, Relation {
-                    relation_type: relationship_name.clone(),
+                graph.add_edge(source_node_index, target_node_index, Relation {
+                    relation_type: relationship_type.clone(),
                     attributes,
                 });
             },
             "skip" => {
-                if graph.find_edge(left_node_index, right_node_index).is_none() {
-                    graph.add_edge(left_node_index, right_node_index, Relation {
-                        relation_type: relationship_name.clone(),
+                if graph.find_edge(source_node_index, target_node_index).is_none() {
+                    graph.add_edge(source_node_index, target_node_index, Relation {
+                        relation_type: relationship_type.clone(),
                         attributes,
                     });
                 }
@@ -126,7 +137,7 @@ pub fn add_relationships(
             _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid 'conflict_handling' value")),
         }
 
-        indices.push((left_node_index.index(), right_node_index.index()));
+        indices.push((source_node_index.index(), target_node_index.index()));
     }
 
     Ok(indices)
