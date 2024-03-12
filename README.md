@@ -12,9 +12,9 @@ Users can download the .whl file directly from the repository and install it usi
 - *Note that the release is only compatible with Python 3.12 on win_amd64.*
 - *The library is still in alpha, so the functionality is very limited.*
 ```sh
-pip install https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.1.1-cp312-none-win_amd64.whl?raw=true
+pip install https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.1.2-cp312-none-win_amd64.whl?raw=true
 # or upgrade an already installed library
-pip install --upgrade https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.1.1-cp312-none-win_amd64.whl?raw=true
+pip install --upgrade https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.1.2-cp312-none-win_amd64.whl?raw=true
 ```
 
 
@@ -117,6 +117,20 @@ kg.add_relationships(
 # Retrieve node data by unique identifier
 matching_nodes = kg.get_nodes("title", "specific_title_name")
 print(matching_nodes)
+```
+
+### Traverse Graph and return node properties
+```python
+# Get all relationships found in selected nodes
+unique_relationships = kg.get_relationships(matching_nodes)
+print(unique_relationships)
+
+# Traverse graph, and return matching nodes
+outgoing_nodes = kg.traverse_outgoing(matching_nodes, 'MADE_DISCOVERY')
+incoming_nodes = kg.traverse_incoming(matching_nodes, 'DRILLED_BY')
+
+# Get values
+print(kg.get_node_attributes(outgoing_nodes, ['title']))
 ```
 
 ## Contributing
