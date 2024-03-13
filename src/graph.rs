@@ -40,6 +40,7 @@ impl KnowledgeGraph {
         unique_id_field: String,
         node_title_field: Option<String>,
         conflict_handling: Option<String>,
+        column_types: Option<&PyDict>,
     ) -> PyResult<Vec<usize>> {
         add_nodes::add_nodes(
             &mut self.graph, 
@@ -49,6 +50,7 @@ impl KnowledgeGraph {
             unique_id_field,
             node_title_field,
             conflict_handling,
+            column_types,
         ) // Call the standalone function
     }
 

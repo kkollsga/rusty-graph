@@ -23,6 +23,15 @@ pub fn add_relationships(
     // Default handling for optional parameters
     let conflict_handling = conflict_handling.unwrap_or_else(|| "update".to_string());
 
+    // Step 1: Extract each column into a Rust vector of strings
+    let mut columns_data: HashMap<String, Vec<String>> = HashMap::new();
+    for (index, column_name) in columns.iter().enumerate() {
+        let py_column: &PyList = data.get_item(index)?.extract()?;
+        let column_data: Vec<String> = py_column.into_iter()
+            .map(|item| item.extract::<String>())
+            .collect::<PyResult<Vec<String>>>()?;
+        columns_data.insert(column_name.clone(), column_data);
+    }
 
     // Create lookup tables for left and right nodes
     let mut source_node_lookup = HashMap::new();
@@ -37,49 +46,22 @@ pub fn add_relationships(
         }
     }
 
-    // Find indices for unique ID fields
-    let source_unique_id_index = columns.iter().position(|col| col == &source_id_field)
-        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("'{}' column not found", source_id_field)
-        ))?;
-    let target_unique_id_index = columns.iter().position(|col| col == &target_id_field)
-        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("'{}' column not found", target_id_field)
-        ))?;
-    
-    // Optionally find indices for title fields
-    let source_title_index = source_title_field
-        .as_ref()
-        .and_then(|field| columns.iter().position(|col| col == field));
-    let target_title_index = target_title_field
-        .as_ref()
-        .and_then(|field| columns.iter().position(|col| col == field));
+    // Determine the number of rows (all columns should have the same length)
+    let num_rows = columns_data.values().next().ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("No data provided"))?.len();
 
-    // Determine attribute indexes, excluding left and right unique ID indexes
-    let attribute_indexes: Vec<usize> = columns.iter().enumerate()
-        .filter_map(|(index, _)| {
-            if index != source_unique_id_index && index != target_unique_id_index {
-                Some(index)
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for py_row in data {
-        let row: Vec<String> = py_row.extract()?;
-        // Process source_unique_id
-        let source_unique_id = row[source_unique_id_index].parse::<f64>()
-            .map(|num| num.trunc().to_string())  // Convert to integer string if parse is successful
-            .unwrap_or_else(|_| row[source_unique_id_index].clone());  // Keep original string if parse fails
-        // Process target_unique_id
-        let target_unique_id = row[target_unique_id_index].parse::<f64>()
-            .map(|num| num.trunc().to_string())  // Convert to integer string if parse is successful
-            .unwrap_or_else(|_| row[target_unique_id_index].clone());  // Keep original string if parse fails
-
-        let source_title = source_title_index.map(|index| row[index].clone());
-        let target_title = target_title_index.map(|index| row[index].clone());
-        
+    // Iterate over each row
+    for row_index in 0..num_rows {
+        // Extract source and target IDs for the current row
+        let source_unique_id: String = columns_data.get(&source_id_field)
+            .and_then(|col| col.get(row_index))
+            .cloned()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Source ID column '{}' value missing", source_id_field)))?;
+        // Optionally extract source and target titles
+        let source_title = source_title_field
+            .as_ref()  // Convert Option<String> to Option<&String>
+            .and_then(|title_field| columns_data.get(title_field))  // Use the dereferenced title_field
+            .and_then(|col| col.get(row_index))
+            .cloned();
         // Find or create left node
         let source_node_index = *source_node_lookup.entry(source_unique_id.clone())
             .or_insert_with(|| {
@@ -87,6 +69,16 @@ pub fn add_relationships(
                 let node = Node::new(&source_type, &source_unique_id, HashMap::new(), source_title.as_deref());
                 graph.add_node(node)
             });
+
+        let target_unique_id: String = columns_data.get(&target_id_field)
+            .and_then(|col| col.get(row_index))
+            .cloned()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Target ID column '{}' value missing", target_id_field)))?;
+        let target_title = target_title_field
+            .as_ref()  // Convert Option<String> to Option<&String>
+            .and_then(|title_field| columns_data.get(title_field))  // Use the dereferenced title_field
+            .and_then(|col| col.get(row_index))
+            .cloned();
         // Find or create target node
         let target_node_index = *target_node_lookup.entry(target_unique_id.clone())
             .or_insert_with(|| {
@@ -95,14 +87,16 @@ pub fn add_relationships(
                 graph.add_node(node)
             });
         
-
-        // Construct relation attributes using the attribute_indexes
-        let attributes: HashMap<String, String> = attribute_indexes.iter()
-            .map(|&index| {
-                // For each attribute index, get the column name and value from the row
-                let attribute_name = columns[index].clone();
-                let attribute_value = row[index].clone();
-                (attribute_name, attribute_value)
+        // Construct relation attributes using the attribute_indexes (excluding source and target ID fields)
+        let attributes: HashMap<String, String> = columns.iter().enumerate()
+            .filter_map(|(_, column_name)| {
+                if column_name != &source_id_field && column_name != &target_id_field {
+                    columns_data.get(column_name)
+                        .and_then(|col| col.get(row_index))
+                        .map(|value| (column_name.clone(), value.clone()))
+                } else {
+                    None
+                }
             })
             .collect();
 

@@ -1,9 +1,10 @@
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyList, PyDict};
 use petgraph::graph::DiGraph;
 use std::collections::HashMap;
 use crate::node::Node;
 use crate::relation::Relation;
+use crate::utils::{convert_column, DataType};
 pub fn add_nodes(
     graph: &mut DiGraph<Node, Relation>,
     data: &PyList,  // 2D list where each inner list represents a row
@@ -12,41 +13,80 @@ pub fn add_nodes(
     unique_id_field: String,
     node_title_field: Option<String>,
     conflict_handling: Option<String>,
+    column_types: Option<&PyDict>,
 ) -> PyResult<Vec<usize>> {
     let mut indices = Vec::new();
-    // Default handling for optional parameters
     let conflict_handling = conflict_handling.unwrap_or_else(|| "update".to_string());
-    // Initialize indices as None
-    let mut unique_id_index: Option<usize> = None;
-    let mut node_title_index: Option<usize> = None;
-    let mut attribute_indexes: Vec<usize> = Vec::new();
-    // Iterate once through columns to set unique id indices and attribute indices
-    for (index, col_name) in columns.iter().enumerate() {
-        if col_name == &unique_id_field {
-            unique_id_index = Some(index);
-        } else if node_title_field.as_ref().map_or(false, |ntf| col_name == ntf) {
-            node_title_index = Some(index);
-        } else {
-            attribute_indexes.push(index); // Any column that is not a unique id or title is an attribute
+    // Find indices for unique ID and node title fields
+    let unique_id_index = columns.iter().position(|c| c == &unique_id_field)
+        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            format!("'{}' column not found", unique_id_field)))?;
+    let node_title_index = node_title_field.as_ref().and_then(|ntf| columns.iter().position(|c| c == ntf));
+
+    // Indices for attributes (excluding unique ID and node title fields)
+    let attribute_indexes: Vec<usize> = columns.iter().enumerate()
+        .filter_map(|(i, _)| {
+            if i != unique_id_index && node_title_index != Some(i) { Some(i) } else { None }
+        })
+        .collect();
+
+    // Parse column types mapping from Python dictionary
+    let column_types_map: HashMap<String, DataType> = column_types.map_or_else(HashMap::new, |ct| {
+        ct.into_iter().filter_map(|(k, v)| {
+            let key = k.extract::<String>().ok()?;
+            let value = v.extract::<String>().ok()?;
+            let data_type = match value.as_str() {
+                "int" => DataType::Int,
+                "float" => DataType::Float,
+                "datetime" => DataType::DateTime,
+                _ => return None,
+            };
+            Some((key, data_type))
+        }).collect()
+    });
+
+    // Step 1: Extract each column into a Rust vector of strings
+    let mut columns_data: HashMap<String, Vec<String>> = HashMap::new();
+    for (index, column_name) in columns.iter().enumerate() {
+        let py_column: &PyList = data.get_item(index)?.extract()?;
+        let column_data: Vec<String> = py_column.into_iter()
+            .map(|item| item.extract::<String>())
+            .collect::<PyResult<Vec<String>>>()?;
+        columns_data.insert(column_name.clone(), column_data);
+    }
+
+    // Step 2 & 3: Convert the data in corresponding columns
+    for (column_name, data_type) in column_types_map.iter() {
+        if let Some(column_data) = columns_data.get_mut(column_name) {
+            let converted_column = convert_column(column_data.clone(), data_type.clone())?;
+            *column_data = converted_column; // Update the original column data with the converted values
         }
     }
-    // Ensure we found both unique ID columns
-    let unique_id_index = unique_id_index.ok_or_else(|| 
-        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("'{}' column not found", unique_id_field)))?;
-    
+    // Determine the number of rows
+    let num_rows = data.get_item(unique_id_index)?.extract::<&PyList>()?.len();
+    // Iterate over each row
+    // Iterate over each row
+    for row_index in 0..num_rows {
+        // Extract unique ID and node title for the current row
+        let unique_id: String = columns_data.get(&unique_id_field)
+            .and_then(|col| col.get(row_index))
+            .cloned()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Unique ID column value missing"))?;
 
-    for py_row in data {
-        let row: Vec<String> = py_row.extract()?;
-        // Attempt to parse the unique_id as a float and truncate it if successful; otherwise, keep the original string
-        let unique_id = row[unique_id_index].parse::<f64>()
-            .map(|num| num.trunc().to_string())  // Convert to integer string if parse is successful
-            .unwrap_or_else(|_| row[unique_id_index].clone());  // Keep original string if parse fails
-        // Get the node title if the title index is defined, otherwise use None
-        let node_title = node_title_index.map(|index| row[index].clone());
-    
-        // Construct relation attributes using the attribute_indexes
+        let node_title: Option<String> = node_title_index
+            .and_then(|index| columns.get(index))
+            .and_then(|title_col| columns_data.get(title_col))
+            .and_then(|col| col.get(row_index))
+            .cloned();
+
+        // Construct relation attributes for the current row using attribute_indexes
         let attributes: HashMap<String, String> = attribute_indexes.iter()
-            .map(|&index| (columns[index].clone(), row[index].clone()))
+            .filter_map(|&index| {
+                let column_name = &columns[index];
+                columns_data.get(column_name)
+                    .and_then(|col| col.get(row_index))
+                    .map(|value| (column_name.clone(), value.clone()))
+            })
             .collect();
 
         // Search for an existing node with the given unique_id and node_type
@@ -81,4 +121,6 @@ pub fn add_nodes(
     }
 
     Ok(indices)
+
+    
 }
