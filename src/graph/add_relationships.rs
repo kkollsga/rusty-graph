@@ -13,13 +13,16 @@ pub fn add_relationships(
     relationship_type: String,  // Configuration items directly in the function call
     source_type: String,
     source_id_field: String,
-    source_title_field: String,
     target_type: String,
     target_id_field: String,
-    target_title_field: String,
-    conflict_handling: String,  // Default value handled inside function if necessary
+    source_title_field: Option<String>,
+    target_title_field: Option<String>,
+    conflict_handling: Option<String>,  // Default value handled inside function if necessary
 ) -> PyResult<Vec<(usize, usize)>> {
     let mut indices = Vec::new();
+    // Default handling for optional parameters
+    let conflict_handling = conflict_handling.unwrap_or_else(|| "update".to_string());
+
 
     // Create lookup tables for left and right nodes
     let mut source_node_lookup = HashMap::new();
@@ -39,18 +42,18 @@ pub fn add_relationships(
         .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
             format!("'{}' column not found", source_id_field)
         ))?;
-    let source_title_index = columns.iter().position(|col| col == &source_title_field)
-        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("'{}' column not found", source_title_field)
-        ))?;
     let target_unique_id_index = columns.iter().position(|col| col == &target_id_field)
         .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
             format!("'{}' column not found", target_id_field)
         ))?;
-    let target_title_index = columns.iter().position(|col| col == &target_title_field)
-        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("'{}' column not found", target_title_field)
-        ))?;
+    
+    // Optionally find indices for title fields
+    let source_title_index = source_title_field
+        .as_ref()
+        .and_then(|field| columns.iter().position(|col| col == field));
+    let target_title_index = target_title_field
+        .as_ref()
+        .and_then(|field| columns.iter().position(|col| col == field));
 
     // Determine attribute indexes, excluding left and right unique ID indexes
     let attribute_indexes: Vec<usize> = columns.iter().enumerate()
@@ -69,25 +72,26 @@ pub fn add_relationships(
         let source_unique_id = row[source_unique_id_index].parse::<f64>()
             .map(|num| num.trunc().to_string())  // Convert to integer string if parse is successful
             .unwrap_or_else(|_| row[source_unique_id_index].clone());  // Keep original string if parse fails
-        let source_title = &row[source_title_index];
-
         // Process target_unique_id
         let target_unique_id = row[target_unique_id_index].parse::<f64>()
             .map(|num| num.trunc().to_string())  // Convert to integer string if parse is successful
             .unwrap_or_else(|_| row[target_unique_id_index].clone());  // Keep original string if parse fails
-        let target_title = &row[target_title_index];
+
+        let source_title = source_title_index.map(|index| row[index].clone());
+        let target_title = target_title_index.map(|index| row[index].clone());
+        
         // Find or create left node
         let source_node_index = *source_node_lookup.entry(source_unique_id.clone())
             .or_insert_with(|| {
                 // Create a new Node by passing string slices instead of owned String objects
-                let node = Node::new(&source_type, &source_unique_id, &source_title, HashMap::new());
+                let node = Node::new(&source_type, &source_unique_id, HashMap::new(), source_title.as_deref());
                 graph.add_node(node)
             });
         // Find or create target node
         let target_node_index = *target_node_lookup.entry(target_unique_id.clone())
             .or_insert_with(|| {
                 // Same here, pass string slices to the new Node
-                let node = Node::new(&target_type, &target_unique_id, &target_title, HashMap::new());
+                let node = Node::new(&target_type, &target_unique_id, HashMap::new(), target_title.as_deref());
                 graph.add_node(node)
             });
         

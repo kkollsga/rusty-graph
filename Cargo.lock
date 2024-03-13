@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "rusty_graph"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "petgraph",
  "pyo3",

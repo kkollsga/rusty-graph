@@ -25,8 +25,8 @@ impl KnowledgeGraph {
     }
 
     // Method to add a single node
-    pub fn add_node(&mut self, node_type: String, unique_id: String, node_title: String, attributes: HashMap<String, String>) -> usize {
-        let node = Node::new(&node_type, &unique_id, &node_title, attributes);
+    pub fn add_node(&mut self, node_type: String, unique_id: String,  attributes: HashMap<String, String>, node_title: Option<String>) -> usize {
+        let node = Node::new(&node_type, &unique_id, attributes, node_title.as_deref());
         let index = self.graph.add_node(node);
         index.index() // Convert NodeIndex to usize before returning
     }
@@ -38,8 +38,8 @@ impl KnowledgeGraph {
         columns: Vec<String>, // Column names
         node_type: String,
         unique_id_field: String,
-        node_title_field: String,
-        conflict_handling: String,
+        node_title_field: Option<String>,
+        conflict_handling: Option<String>,
     ) -> PyResult<Vec<usize>> {
         add_nodes::add_nodes(
             &mut self.graph, 
@@ -60,11 +60,11 @@ impl KnowledgeGraph {
         relationship_type: String,
         source_type: String,
         source_id_field: String,
-        source_title_field: String,
         target_type: String,        
         target_id_field: String,
-        target_title_field: String,
-        conflict_handling: String,
+        source_title_field: Option<String>,
+        target_title_field: Option<String>,
+        conflict_handling: Option<String>,
     ) -> PyResult<Vec<(usize, usize)>> {
         // Call the updated add_relationships function with the new parameters
         add_relationships::add_relationships(
@@ -74,15 +74,15 @@ impl KnowledgeGraph {
             relationship_type,
             source_type,
             source_id_field,
-            source_title_field,
             target_type,            
             target_id_field,
+            source_title_field,
             target_title_field,
             conflict_handling,
         )
     }
     
-    // Method to retrieve nodes by their unique ID, with an optional node_type filter
+    /// Method to retrieve nodes by their unique ID, with an optional node_type filter
     pub fn get_nodes(&self, attribute_key: &str, attribute_value: &str, filter_node_type: Option<&str>) -> Vec<usize> {
         self.graph.node_indices().filter_map(|node_index| {
             let node = &self.graph[node_index];
@@ -93,14 +93,14 @@ impl KnowledgeGraph {
                     return None;
                 }
             }
-    
+
             // Check if the node matches the specified attribute
             let matches = match attribute_key {
                 "unique_id" => &node.unique_id == attribute_value,
-                "title" => &node.title == attribute_value,
+                "title" => node.title.as_deref() == Some(attribute_value),  // Adjusted comparison
                 _ => node.attributes.get(attribute_key).map(String::as_str) == Some(attribute_value),
             };
-    
+
             if matches {
                 Some(node_index.index())  // Return the index of the matching node
             } else {
