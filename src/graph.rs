@@ -26,15 +26,18 @@ impl KnowledgeGraph {
     }
 
     // Method to add a single node
-    pub fn add_node(&mut self, node_type: String, unique_id: String,  attributes: HashMap<String, String>, node_title: Option<String>) -> usize {
+    pub fn add_node(
+        &mut self, node_type: String, unique_id: String,  attributes: HashMap<String, String>, node_title: Option<String>
+    ) -> usize {
         let node = Node::new(&node_type, &unique_id, attributes, node_title.as_deref());
         let index = self.graph.add_node(node);
         index.index() // Convert NodeIndex to usize before returning
     }
 
-    // Wrap the add_nodes function from the methods module
+    // Add nodes to graph
     pub fn add_nodes(
-        &mut self, data: &PyList, columns: Vec<String>, node_type: String, unique_id_field: String, node_title_field: Option<String>, conflict_handling: Option<String>, column_types: Option<&PyDict>,
+        &mut self, data: &PyList, columns: Vec<String>, node_type: String, unique_id_field: String, node_title_field: Option<String>, 
+        conflict_handling: Option<String>, column_types: Option<&PyDict>,
     ) -> PyResult<Vec<usize>> {
         add_nodes::add_nodes(
             &mut self.graph, 
@@ -48,12 +51,11 @@ impl KnowledgeGraph {
         ) // Call the standalone function
     }
 
-    // Within the KnowledgeGraph impl block
+    // Add relationships to graph
     pub fn add_relationships(
         &mut self, data: &PyList, columns: Vec<String>, relationship_type: String, source_type: String, source_id_field: String, 
         target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>, conflict_handling: Option<String>,
     ) -> PyResult<Vec<(usize, usize)>> {
-        // Call the updated add_relationships function with the new parameters
         add_relationships::add_relationships(
             &mut self.graph,
             data,
@@ -68,7 +70,7 @@ impl KnowledgeGraph {
             conflict_handling,
         )
     }
-    // Wrap the add_nodes function from the methods module
+    // Get attributes from nodes
     pub fn get_node_attributes(
         &mut self, py: Python, indices: Vec<usize>, specified_attributes: Option<Vec<String>>,
     ) -> PyResult<PyObject> {
@@ -77,9 +79,10 @@ impl KnowledgeGraph {
             py,
             indices,
             specified_attributes
-        ) // Call the standalone function
+        )
     }
-    //Navigate the graph
+
+    // Navigate the graph
     pub fn get_nodes(
         &mut self, attribute_key: &str, attribute_value: &str, filter_node_type: Option<&str>,
     ) -> Vec<usize> {
@@ -99,11 +102,9 @@ impl KnowledgeGraph {
             indices
         )
     }
-    
     pub fn traverse_incoming(&self, indices: Vec<usize>, relationship_type: String) -> Vec<usize> {
         navigate_graph::traverse_nodes(&self.graph, indices, relationship_type, true)
     }
-
     pub fn traverse_outgoing(&self, indices: Vec<usize>, relationship_type: String) -> Vec<usize> {
         navigate_graph::traverse_nodes(&self.graph, indices, relationship_type, false)
     }
