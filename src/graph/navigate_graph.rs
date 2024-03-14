@@ -23,14 +23,12 @@ pub fn get_nodes(
                 return None;
             }
         }
-
         // Check if the node matches the specified attribute
         let matches = match attribute_key {
             "unique_id" => &node.unique_id == attribute_value,
             "title" => node.title.as_deref() == Some(attribute_value),  // Adjusted comparison
             _ => node.attributes.get(attribute_key).map(String::as_str) == Some(attribute_value),
         };
-
         if matches {
             Some(node_index.index())  // Return the index of the matching node
         } else {
@@ -58,7 +56,6 @@ pub fn get_relationships(
                 incoming_relations.push(relation_type.clone());
             }
         }
-
         // Iterate over outgoing edges
         for edge in graph.edges_directed(node_index, petgraph::Direction::Outgoing) {
             let relation_type = &edge.weight().relation_type;
@@ -90,7 +87,6 @@ pub fn traverse_nodes(
     } else {
         petgraph::Direction::Outgoing
     };
-
     for index in indices {
         let node_index = petgraph::graph::NodeIndex::new(index);
         let edges = graph.edges_directed(node_index, direction)
@@ -107,7 +103,6 @@ pub fn traverse_nodes(
             related_nodes_set.insert(related_node_index.index());
         }
     }
-
     // Convert the HashSet to a Vec before returning
     related_nodes_set.into_iter().collect()
 }
