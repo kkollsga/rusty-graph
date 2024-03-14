@@ -72,13 +72,14 @@ impl KnowledgeGraph {
     }
     // Get attributes from nodes
     pub fn get_node_attributes(
-        &mut self, py: Python, indices: Vec<usize>, specified_attributes: Option<Vec<String>>,
+        &mut self, py: Python, indices: Vec<usize>, specified_attributes: Option<Vec<String>>, max_relations: Option<usize>,
     ) -> PyResult<PyObject> {
         get_attributes::get_node_attributes(
             &mut self.graph, 
             py,
             indices,
-            specified_attributes
+            specified_attributes,
+            max_relations,
         )
     }
 
