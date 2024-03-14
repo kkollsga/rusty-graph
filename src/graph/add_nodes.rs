@@ -68,10 +68,21 @@ pub fn add_nodes(
     // Iterate over each row
     for row_index in 0..num_rows {
         // Extract unique ID and node title for the current row
-        let unique_id: String = columns_data.get(&unique_id_field)
+        let unique_id_raw: String = columns_data.get(&unique_id_field)
             .and_then(|col| col.get(row_index))
             .cloned()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Unique ID column value missing"))?;
+        let unique_id = unique_id_raw.parse::<f64>()
+            .map(|float_id| {
+                // If parsing succeeds, convert the float to an integer (removing the decimal part),
+                // and then convert it back to a string.
+                float_id.trunc().to_string()
+            })
+            .unwrap_or_else(|_| {
+                // If parsing fails (e.g., the unique_id is not a numeric value),
+                // fall back to the original unique_id string.
+                unique_id_raw.clone()
+            });
 
         let node_title: Option<String> = node_title_index
             .and_then(|index| columns.get(index))

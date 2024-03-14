@@ -52,10 +52,21 @@ pub fn add_relationships(
     // Iterate over each row
     for row_index in 0..num_rows {
         // Extract source and target IDs for the current row
-        let source_unique_id: String = columns_data.get(&source_id_field)
+        let source_unique_id_raw: String = columns_data.get(&source_id_field)
             .and_then(|col| col.get(row_index))
             .cloned()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Source ID column '{}' value missing", source_id_field)))?;
+        let source_unique_id = source_unique_id_raw.parse::<f64>()
+            .map(|float_id| {
+                // If parsing succeeds, convert the float to an integer (removing the decimal part),
+                // and then convert it back to a string.
+                float_id.trunc().to_string()
+            })
+            .unwrap_or_else(|_| {
+                // If parsing fails (e.g., the unique_id is not a numeric value),
+                // fall back to the original unique_id string.
+                source_unique_id_raw.clone()
+            });
         // Optionally extract source and target titles
         let source_title = source_title_field
             .as_ref()  // Convert Option<String> to Option<&String>
@@ -70,10 +81,22 @@ pub fn add_relationships(
                 graph.add_node(node)
             });
 
-        let target_unique_id: String = columns_data.get(&target_id_field)
+        let target_unique_id_raw: String = columns_data.get(&target_id_field)
             .and_then(|col| col.get(row_index))
             .cloned()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Target ID column '{}' value missing", target_id_field)))?;
+        let target_unique_id = target_unique_id_raw.parse::<f64>()
+            .map(|float_id| {
+                // If parsing succeeds, convert the float to an integer (removing the decimal part),
+                // and then convert it back to a string.
+                float_id.trunc().to_string()
+            })
+            .unwrap_or_else(|_| {
+                // If parsing fails (e.g., the unique_id is not a numeric value),
+                // fall back to the original unique_id string.
+                target_unique_id_raw.clone()
+            });
+        
         let target_title = target_title_field
             .as_ref()  // Convert Option<String> to Option<&String>
             .and_then(|title_field| columns_data.get(title_field))  // Use the dereferenced title_field
