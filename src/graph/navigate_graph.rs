@@ -106,3 +106,45 @@ pub fn traverse_nodes(
     // Convert the HashSet to a Vec before returning
     related_nodes_set.into_iter().collect()
 }
+
+pub fn traverse_single_relationship(
+    graph: &DiGraph<Node, Relation>,
+    indices: Vec<usize>,
+    relationship_type: String,
+    is_incoming: bool,
+    sort_attribute: &str,
+    ascending: bool,
+) -> Vec<usize> {
+    let mut related_nodes = Vec::new();
+    let direction = if is_incoming { petgraph::Direction::Incoming } else { petgraph::Direction::Outgoing };
+
+    for index in indices {
+        let node_index = petgraph::graph::NodeIndex::new(index);
+        let mut edges: Vec<_> = graph.edges_directed(node_index, direction)
+            .filter(|edge| edge.weight().relation_type == relationship_type)
+            .collect();
+
+        // Sort edges based on the specified attribute and order
+        edges.sort_by(|a, b| {
+            let a_attr_value = a.weight().attributes.get(sort_attribute).map_or("", |v| v.as_str());
+            let b_attr_value = b.weight().attributes.get(sort_attribute).map_or("", |v| v.as_str());
+
+            if ascending {
+                a_attr_value.cmp(&b_attr_value)
+            } else {
+                b_attr_value.cmp(&a_attr_value)
+            }
+        });
+
+        // Select the first edge and its related node
+        if let Some(edge) = edges.first() {
+            let related_node_index = if is_incoming { edge.source() } else { edge.target() };
+            // Ensure we don't add duplicates
+            if !related_nodes.contains(&related_node_index.index()) {
+                related_nodes.push(related_node_index.index());
+            }
+        }
+    }
+
+    related_nodes
+}

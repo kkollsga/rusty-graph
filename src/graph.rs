@@ -109,6 +109,12 @@ impl KnowledgeGraph {
     pub fn traverse_outgoing(&self, indices: Vec<usize>, relationship_type: String) -> Vec<usize> {
         navigate_graph::traverse_nodes(&self.graph, indices, relationship_type, false)
     }
+    pub fn traverse_single_incoming(&self, indices: Vec<usize>, relationship_type: String, sort_attribute: String, ascending: bool) -> Vec<usize> {
+        navigate_graph::traverse_single_relationship(&self.graph, indices, relationship_type, true, &sort_attribute, ascending)
+    }
+    pub fn traverse_single_outgoing(&self, indices: Vec<usize>, relationship_type: String, sort_attribute: String, ascending: bool) -> Vec<usize> {
+        navigate_graph::traverse_single_relationship(&self.graph, indices, relationship_type, false, &sort_attribute, ascending)
+    }
 
     
 
