@@ -2,136 +2,148 @@ use pyo3::prelude::*;
 use pyo3::types::{PyList, PyDict};
 use petgraph::graph::DiGraph;
 use std::collections::HashMap;
-use crate::node::Node;
-use crate::relation::Relation;
-use crate::utils::{convert_column, DataType};
+use crate::graph::get_schema::update_or_retrieve_schema;
+use crate::schema::{Node, Relation};
+use crate::data_types::AttributeValue; 
+
+// Function to handle node updating or creation based on conflict handling strategy
+fn update_or_create_node(
+    graph: &mut DiGraph<Node, Relation>,
+    node_type: &String,
+    unique_id: String,
+    node_title: Option<String>,
+    attributes: Option<HashMap<String, AttributeValue>>, // Now an Option
+    conflict_handling: &String,
+) -> usize {
+    let existing_node_index = graph.node_indices().find(|&i| match &graph[i] {
+        Node::StandardNode {
+            node_type: nt,
+            unique_id: uid,
+            ..
+        } => nt == node_type && uid == &unique_id,
+        _ => false,
+    });
+
+    match existing_node_index {
+        Some(node_index) => {
+            match conflict_handling.as_str() {
+                "replace" => {
+                    // If replacing, create a new node with the provided attributes (which may be None)
+                    graph[node_index] = Node::new(&node_type, &unique_id, attributes, node_title.as_deref());
+                },
+                "update" => {
+                    if let Some(attrs) = attributes {
+                        if let Node::StandardNode {
+                            attributes: node_attrs,
+                            ..
+                        } = &mut graph[node_index]
+                        {
+                            for (key, value) in attrs {
+                                node_attrs.insert(key, value);
+                            }
+                        }
+                    }
+                },
+                "skip" => (),
+                _ => panic!("Invalid conflict_handling value"),
+            }
+            node_index.index()
+        },
+        None => {
+            // Create a new node with the provided attributes, which may be None
+            let node = Node::new(&node_type, &unique_id, attributes, node_title.as_deref());
+            graph.add_node(node).index()
+        },
+    }
+}
+
+// The simplified main function
 pub fn add_nodes(
     graph: &mut DiGraph<Node, Relation>,
-    data: &PyList,  // 2D list where each inner list represents a row
-    columns: Vec<String>,  // Column header names
+    data: &PyList, // Each item in this list is a sublist representing a single node's attributes
+    columns: Vec<String>,
     node_type: String,
     unique_id_field: String,
     node_title_field: Option<String>,
     conflict_handling: Option<String>,
     column_types: Option<&PyDict>,
 ) -> PyResult<Vec<usize>> {
-    let mut indices = Vec::new();
     let conflict_handling = conflict_handling.unwrap_or_else(|| "update".to_string());
-    // Find indices for unique ID and node title fields
-    let unique_id_index = columns.iter().position(|c| c == &unique_id_field)
-        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("'{}' column not found", unique_id_field)))?;
-    let node_title_index = node_title_field.as_ref().and_then(|ntf| columns.iter().position(|c| c == ntf));
+    let mut indices = Vec::new();
 
-    // Indices for attributes (excluding unique ID and node title fields)
-    let attribute_indexes: Vec<usize> = columns.iter().enumerate()
-        .filter_map(|(i, _)| {
-            if i != unique_id_index && node_title_index != Some(i) { Some(i) } else { None }
-        })
-        .collect();
+    // Convert PyDict to HashMap for easier handling
+    let column_types_map: HashMap<String, String> = column_types
+        .map_or(Ok(HashMap::new()), |ct| ct.extract())?;
 
-    // Parse column types mapping from Python dictionary
-    let column_types_map: HashMap<String, DataType> = column_types.map_or_else(HashMap::new, |ct| {
-        ct.into_iter().filter_map(|(k, v)| {
-            let key = k.extract::<String>().ok()?;
-            let value = v.extract::<String>().ok()?;
-            let data_type = match value.as_str() {
-                "int" => DataType::Int,
-                "float" => DataType::Float,
-                "datetime" => DataType::DateTime,
-                _ => return None,
-            };
-            Some((key, data_type))
-        }).collect()
-    });
+    // Update or retrieve the DataTypeNode schema once before processing the rows
+    let schema = update_or_retrieve_schema(
+        graph,
+        "Node",
+        &node_type,
+        Some(columns.clone()),
+        Some(column_types_map.clone())
+    )?;
 
-    // Step 1: Extract each column into a Rust vector of strings
-    let mut columns_data: HashMap<String, Vec<String>> = HashMap::new();
-    for (index, column_name) in columns.iter().enumerate() {
-        let py_column: &PyList = data.get_item(index)?.extract()?;
-        let column_data: Vec<String> = py_column.into_iter()
-            .map(|item| item.extract::<String>())
-            .collect::<PyResult<Vec<String>>>()?;
-        columns_data.insert(column_name.clone(), column_data);
-    }
+    for row in data.iter() {
+        let row: Vec<&PyAny> = row.extract()?; // Extract the row as a list of PyAny references
+        let mut attributes: HashMap<String, AttributeValue> = HashMap::new();
+        let mut unique_id = String::new();
+        let mut node_title: Option<String> = None;
 
-    // Step 2 & 3: Convert the data in corresponding columns
-    for (column_name, data_type) in column_types_map.iter() {
-        if let Some(column_data) = columns_data.get_mut(column_name) {
-            let converted_column = convert_column(column_data.clone(), data_type.clone())?;
-            *column_data = converted_column; // Update the original column data with the converted values
+        for (col_index, column_name) in columns.iter().enumerate() {
+            let item = row.get(col_index).unwrap(); // Safe to use unwrap() due to the structure of the data
+
+            if column_name == &unique_id_field {
+                unique_id = item.extract()?;
+                continue;
+            }
+
+            if node_title_field.as_deref() == Some(column_name.as_str()) {
+                node_title = Some(item.extract()?);
+                continue;
+            }
+
+            // Determine the attribute's data type from the schema and extract value accordingly
+            let data_type = schema.get(column_name).map_or("String", String::as_str);
+            let attribute_value = match data_type {
+                "Int" => match item.extract::<i32>() {
+                    Ok(value) => Ok(AttributeValue::Int(value)),
+                    Err(_) => {
+                        // Attempt to parse from String if direct extraction fails
+                        item.extract::<String>()
+                            .and_then(|s| s.parse::<i32>().map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("Failed to parse Int from String")))
+                            .map(AttributeValue::Int)
+                    }
+                },
+                "Float" => match item.extract::<f64>() {
+                    Ok(value) => Ok(AttributeValue::Float(value)),
+                    Err(_) => {
+                        // Attempt to parse from String if direct extraction fails
+                        item.extract::<String>()
+                            .and_then(|s| s.parse::<f64>().map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("Failed to parse Float from String")))
+                            .map(AttributeValue::Float)
+                    }
+                },
+                "String" => item.extract::<String>().map(AttributeValue::String),
+                // Extend cases for other data types like 'DateTime', 'Date', etc.
+                _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Unsupported data type")),
+            }?;
+
+            attributes.insert(column_name.clone(), attribute_value);
         }
-    }
-    // Determine the number of rows
-    let num_rows = data.get_item(unique_id_index)?.extract::<&PyList>()?.len();
-    // Iterate over each row
-    // Iterate over each row
-    for row_index in 0..num_rows {
-        // Extract unique ID and node title for the current row
-        let unique_id_raw: String = columns_data.get(&unique_id_field)
-            .and_then(|col| col.get(row_index))
-            .cloned()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Unique ID column value missing"))?;
-        let unique_id = unique_id_raw.parse::<f64>()
-            .map(|float_id| {
-                // If parsing succeeds, convert the float to an integer (removing the decimal part),
-                // and then convert it back to a string.
-                float_id.trunc().to_string()
-            })
-            .unwrap_or_else(|_| {
-                // If parsing fails (e.g., the unique_id is not a numeric value),
-                // fall back to the original unique_id string.
-                unique_id_raw.clone()
-            });
 
-        let node_title: Option<String> = node_title_index
-            .and_then(|index| columns.get(index))
-            .and_then(|title_col| columns_data.get(title_col))
-            .and_then(|col| col.get(row_index))
-            .cloned();
+        // Create or update the node in the graph based on the conflict handling strategy
+        let index = update_or_create_node(
+            graph,
+            &node_type,
+            unique_id,
+            node_title,
+            Some(attributes),
+            &conflict_handling,
+        );
 
-        // Construct relation attributes for the current row using attribute_indexes
-        let attributes: HashMap<String, String> = attribute_indexes.iter()
-            .filter_map(|&index| {
-                let column_name = &columns[index];
-                columns_data.get(column_name)
-                    .and_then(|col| col.get(row_index))
-                    .map(|value| (column_name.clone(), value.clone()))
-            })
-            .collect();
-
-        // Search for an existing node with the given unique_id and node_type
-        let existing_node_index = graph.node_indices().find(|&i| {
-            graph[i].node_type == node_type && graph[i].unique_id == unique_id
-        });
-
-        match existing_node_index {
-            Some(node_index) => match conflict_handling.as_str() {
-                "replace" => {
-                    graph[node_index] = Node::new(&node_type, &unique_id, attributes, node_title.as_deref());
-                    indices.push(node_index.index());
-                },
-                "update" => {
-                    let node = &mut graph[node_index];
-                    node.attributes.extend(attributes);
-                    indices.push(node_index.index());
-                },
-                "skip" => {
-                    indices.push(node_index.index());
-                },
-                _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Invalid conflict_handling value"
-                )),
-            },
-            None => {
-                let node = Node::new(&node_type, &unique_id, attributes, node_title.as_deref());
-                let index = graph.add_node(node);
-                indices.push(index.index());
-            },
-        }
+        indices.push(index);
     }
 
     Ok(indices)
-
-    
 }

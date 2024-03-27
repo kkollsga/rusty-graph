@@ -1,13 +1,10 @@
-use pyo3::prelude::*;
 use petgraph::graph::DiGraph;
 use petgraph::visit::EdgeRef;
+use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use pyo3::PyResult;
-use crate::node::Node;
-use crate::relation::Relation;
-use std::collections::HashSet;
+use crate::schema::{Node, Relation};
 
-/// Method to retrieve nodes by their unique ID, with an optional node_type filter
+/// Retrieves nodes by their unique ID, with an optional node_type filter
 pub fn get_nodes(
     graph: &mut DiGraph<Node, Relation>,
     attribute_key: &str, 
@@ -15,28 +12,39 @@ pub fn get_nodes(
     filter_node_type: Option<&str>
 ) -> Vec<usize> {
     graph.node_indices().filter_map(|node_index| {
-        let node = &graph[node_index];
-        
-        // Apply node_type filter if provided
-        if let Some(filter_type) = filter_node_type {
-            if &node.node_type != filter_type {
-                return None;
+        if let Some(node) = graph.node_weight(node_index) {
+            match node {
+                Node::StandardNode { node_type, unique_id, attributes, title } => {
+                    // Apply node_type filter if provided
+                    if let Some(filter_type) = filter_node_type {
+                        if node_type != filter_type {
+                            return None;
+                        }
+                    }
+
+                    // Check if the node matches the specified attribute
+                    let matches = match attribute_key {
+                        "unique_id" => unique_id == attribute_value,
+                        "title" => title.as_deref() == Some(attribute_value),
+                        _ => attributes.get(attribute_key).map_or(false, |v| v.to_string() == attribute_value),
+                    };
+
+                    if matches {
+                        Some(node_index.index())  // Return the index of the matching node
+                    } else {
+                        None
+                    }
+                },
+                // Handle other node variants if necessary
+                _ => None,
             }
-        }
-        // Check if the node matches the specified attribute
-        let matches = match attribute_key {
-            "unique_id" => &node.unique_id == attribute_value,
-            "title" => node.title.as_deref() == Some(attribute_value),  // Adjusted comparison
-            _ => node.attributes.get(attribute_key).map(String::as_str) == Some(attribute_value),
-        };
-        if matches {
-            Some(node_index.index())  // Return the index of the matching node
         } else {
             None
         }
     }).collect()
 }
 
+/// Retrieves relationships for specified nodes
 pub fn get_relationships(
     graph: &mut DiGraph<Node, Relation>,
     py: Python, 
@@ -48,20 +56,23 @@ pub fn get_relationships(
     for index in indices {
         let node_index = petgraph::graph::NodeIndex::new(index);
 
-        // Iterate over incoming edges
-        for edge in graph.edges_directed(node_index, petgraph::Direction::Incoming) {
-            let relation_type = &edge.weight().relation_type;
-            // Use `relation_type` to identify unique relationships
-            if !incoming_relations.contains(relation_type) {
-                incoming_relations.push(relation_type.clone());
-            }
-        }
-        // Iterate over outgoing edges
-        for edge in graph.edges_directed(node_index, petgraph::Direction::Outgoing) {
-            let relation_type = &edge.weight().relation_type;
-            // Use `relation_type` to identify unique relationships
-            if !outgoing_relations.contains(relation_type) {
-                outgoing_relations.push(relation_type.clone());
+        // Iterate over incoming and outgoing edges and collect unique relation types
+        for direction in &[petgraph::Direction::Incoming, petgraph::Direction::Outgoing] {
+            for edge in graph.edges_directed(node_index, *direction) {
+                let relation_type = &edge.weight().relation_type;
+                match direction {
+                    petgraph::Direction::Incoming => {
+                        if !incoming_relations.contains(relation_type) {
+                            incoming_relations.push(relation_type.clone());
+                        }
+                    },
+                    petgraph::Direction::Outgoing => {
+                        if !outgoing_relations.contains(relation_type) {
+                            outgoing_relations.push(relation_type.clone());
+                        }
+                    },
+                    _ => {}
+                }
             }
         }
     }
@@ -74,46 +85,15 @@ pub fn get_relationships(
     Ok(result.into())
 }
 
-// Adjusted private method to use a boolean flag for direction
+/// Traverses nodes in a specified direction based on relationship type
 pub fn traverse_nodes(
-    graph: &DiGraph<Node, Relation>,
-    indices: Vec<usize>, 
-    relationship_type: String, 
-    is_incoming: bool
-) -> Vec<usize> {
-    let mut related_nodes_set = HashSet::new(); // Use a HashSet to ensure uniqueness
-    let direction = if is_incoming {
-        petgraph::Direction::Incoming
-    } else {
-        petgraph::Direction::Outgoing
-    };
-    for index in indices {
-        let node_index = petgraph::graph::NodeIndex::new(index);
-        let edges = graph.edges_directed(node_index, direction)
-            .filter(|edge| edge.weight().relation_type == relationship_type);
-
-        for edge in edges {
-            let related_node_index = if is_incoming {
-                edge.source()
-            } else {
-                edge.target()
-            };
-
-            // Add the index to the HashSet, which automatically ensures uniqueness
-            related_nodes_set.insert(related_node_index.index());
-        }
-    }
-    // Convert the HashSet to a Vec before returning
-    related_nodes_set.into_iter().collect()
-}
-
-pub fn traverse_single_relationship(
     graph: &DiGraph<Node, Relation>,
     indices: Vec<usize>,
     relationship_type: String,
     is_incoming: bool,
-    sort_attribute: &str,
-    ascending: bool,
+    sort_attribute: Option<&str>, 
+    ascending: Option<bool>, 
+    max_relations: Option<usize>
 ) -> Vec<usize> {
     let mut related_nodes = Vec::new();
     let direction = if is_incoming { petgraph::Direction::Incoming } else { petgraph::Direction::Outgoing };
@@ -124,20 +104,28 @@ pub fn traverse_single_relationship(
             .filter(|edge| edge.weight().relation_type == relationship_type)
             .collect();
 
-        // Sort edges based on the specified attribute and order
-        edges.sort_by(|a, b| {
-            let a_attr_value = a.weight().attributes.get(sort_attribute).map_or("", |v| v.as_str());
-            let b_attr_value = b.weight().attributes.get(sort_attribute).map_or("", |v| v.as_str());
+        // Optional sorting based on a specified attribute
+        if let Some(attr) = sort_attribute {
+            edges.sort_by(|a, b| {
+                let a_attr_value = a.weight().attributes.as_ref()
+                    .and_then(|attrs| attrs.get(attr))
+                    .map(|v| v.to_string());  // Keep this as a String
 
-            if ascending {
-                a_attr_value.cmp(&b_attr_value)
-            } else {
-                b_attr_value.cmp(&a_attr_value)
-            }
-        });
+                let b_attr_value = b.weight().attributes.as_ref()
+                    .and_then(|attrs| attrs.get(attr))
+                    .map(|v| v.to_string());  // Keep this as a String
 
-        // Select the first edge and its related node
-        if let Some(edge) = edges.first() {
+                let order = ascending.unwrap_or(true);
+                if order {
+                    a_attr_value.cmp(&b_attr_value)
+                } else {
+                    b_attr_value.cmp(&a_attr_value)
+                }
+            });
+        }
+
+        // Process edges up to the max_relations limit (if specified)
+        for edge in edges.iter().take(max_relations.unwrap_or(usize::MAX)) {
             let related_node_index = if is_incoming { edge.source() } else { edge.target() };
             // Ensure we don't add duplicates
             if !related_nodes.contains(&related_node_index.index()) {

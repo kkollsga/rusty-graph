@@ -8,7 +8,11 @@ edition = "2021"
 name = "rusty_graph"
 crate-type = ["cdylib"]
 
+[dependencies.pyo3]
+version = "0.19.0"  # Use the latest version compatible with your setup
+features = ["extension-module"]
+
 [dependencies]
 chrono = "0.4.35"
 petgraph = "0.6.4"
-pyo3 = "0.19.0"
+serde_json = "1.0.115"

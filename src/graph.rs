@@ -1,14 +1,16 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyDict};
 use pyo3::PyResult;
-use crate::node::Node;
-use crate::relation::Relation;
 use petgraph::graph::DiGraph;
 use std::collections::HashMap;
+
+use crate::schema::{Node, Relation};
+use crate::data_types::AttributeValue; 
 
 mod add_nodes;
 mod add_relationships;
 mod get_attributes;
+mod get_schema;
 mod navigate_graph;
 
 #[pyclass]
@@ -27,7 +29,7 @@ impl KnowledgeGraph {
 
     // Method to add a single node
     pub fn add_node(
-        &mut self, node_type: String, unique_id: String,  attributes: HashMap<String, String>, node_title: Option<String>
+        &mut self, node_type: String, unique_id: String,  attributes: Option<HashMap<String, AttributeValue>>, node_title: Option<String>
     ) -> usize {
         let node = Node::new(&node_type, &unique_id, attributes, node_title.as_deref());
         let index = self.graph.add_node(node);
@@ -103,19 +105,12 @@ impl KnowledgeGraph {
             indices
         )
     }
-    pub fn traverse_incoming(&self, indices: Vec<usize>, relationship_type: String) -> Vec<usize> {
-        navigate_graph::traverse_nodes(&self.graph, indices, relationship_type, true)
+    pub fn traverse_incoming(&self, indices: Vec<usize>, relationship_type: String, sort_attribute: Option<&str>, ascending: Option<bool>, max_relations: Option<usize>) -> Vec<usize> {
+        navigate_graph::traverse_nodes(&self.graph, indices, relationship_type, true, sort_attribute, ascending, max_relations)
     }
-    pub fn traverse_outgoing(&self, indices: Vec<usize>, relationship_type: String) -> Vec<usize> {
-        navigate_graph::traverse_nodes(&self.graph, indices, relationship_type, false)
+    pub fn traverse_outgoing(&self, indices: Vec<usize>, relationship_type: String, sort_attribute: Option<&str>, ascending: Option<bool>, max_relations: Option<usize>) -> Vec<usize> {
+        navigate_graph::traverse_nodes(&self.graph, indices, relationship_type, false, sort_attribute, ascending, max_relations)
     }
-    pub fn traverse_single_incoming(&self, indices: Vec<usize>, relationship_type: String, sort_attribute: String, ascending: bool) -> Vec<usize> {
-        navigate_graph::traverse_single_relationship(&self.graph, indices, relationship_type, true, &sort_attribute, ascending)
-    }
-    pub fn traverse_single_outgoing(&self, indices: Vec<usize>, relationship_type: String, sort_attribute: String, ascending: bool) -> Vec<usize> {
-        navigate_graph::traverse_single_relationship(&self.graph, indices, relationship_type, false, &sort_attribute, ascending)
-    }
-
     
 
     
