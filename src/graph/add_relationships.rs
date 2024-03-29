@@ -15,10 +15,8 @@ pub fn add_relationships(
     target_id_field: String,
     source_title_field: Option<String>,
     target_title_field: Option<String>,
-    conflict_handling: Option<String>,  // Default value handled inside function if necessary
 ) -> PyResult<Vec<(usize, usize)>> {
     let mut indices = Vec::new();
-    // let conflict_handling = conflict_handling.unwrap_or_else(|| "update".to_string());
 
     // Create lookup tables for source and target nodes
     let mut source_node_lookup = HashMap::new();
@@ -64,7 +62,7 @@ pub fn add_relationships(
 
         // Construct and add the relationship
         let relation = Relation::new(&relationship_type, None);  // Construct a Relation instance, attributes can be added as needed
-        let edge = graph.add_edge(source_node_index, target_node_index, relation);
+        let _edge = graph.add_edge(source_node_index, target_node_index, relation);
 
         indices.push((source_node_index.index(), target_node_index.index()));
     }

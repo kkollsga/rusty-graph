@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use petgraph::graph::DiGraph;
+use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
+use petgraph::Direction;
 use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue;
 use crate::graph::get_schema::retrieve_schema;
@@ -22,7 +23,7 @@ pub fn get_node_attributes(
 
     // First pass: Populate the schemas HashMap for all node types in indices
     for index in &indices {
-        let node_index = petgraph::graph::NodeIndex::new(*index);
+        let node_index = NodeIndex::new(*index);
         if let Some(Node::StandardNode { node_type, .. }) = graph.node_weight(node_index) {
             if !schemas.contains_key(node_type) {
                 let schema = retrieve_schema(
@@ -37,16 +38,27 @@ pub fn get_node_attributes(
 
     // Main loop: Process each node using the pre-fetched schemas
     for index in indices {
-        let node_index = petgraph::graph::NodeIndex::new(index);
+        let node_index = NodeIndex::new(index);
         if let Some(Node::StandardNode { node_type, unique_id, attributes, title }) = graph.node_weight(node_index) {
             let schema = schemas.get(node_type).expect("Schema should be present");
 
             let return_attributes = PyDict::new(py);
-            return_attributes.set_item("graph_id", index)?;
-            return_attributes.set_item("node_type", node_type)?;
-            return_attributes.set_item("unique_id", unique_id)?;
+            if specified_attributes.as_ref().map_or(true, |attrs| attrs.contains(&"graph_id".to_string())) {
+                return_attributes.set_item("graph_id", node_type)?;
+            }
+            // Check if "node_type" should be included
+            if specified_attributes.as_ref().map_or(true, |attrs| attrs.contains(&"node_type".to_string())) {
+                return_attributes.set_item("node_type", node_type)?;
+            }
+            // Check if "unique_id" should be included
+            if specified_attributes.as_ref().map_or(true, |attrs| attrs.contains(&"unique_id".to_string())) {
+                return_attributes.set_item("unique_id", unique_id)?;
+            }
+            // Check if "title" should be included
             if let Some(t) = title {
-                return_attributes.set_item("title", t)?;
+                if specified_attributes.as_ref().map_or(true, |attrs| attrs.contains(&"title".to_string())) {
+                    return_attributes.set_item("title", t)?;
+                }
             }
 
             // Extract and set attributes using the pre-fetched schema
@@ -60,7 +72,7 @@ pub fn get_node_attributes(
 
             // Incoming relations
             if specified_attributes.as_ref().map_or(true, |attrs| attrs.contains(&"incoming_relations".to_string())) {
-                let incoming = graph.edges_directed(node_index, petgraph::Direction::Incoming)
+                let incoming = graph.edges_directed(node_index, Direction::Incoming)
                     .take(max_relations)
                     .filter_map(|edge| {
                         let source_node_index = edge.source();
@@ -84,7 +96,7 @@ pub fn get_node_attributes(
 
             // Outgoing relations
             if specified_attributes.as_ref().map_or(true, |attrs| attrs.contains(&"outgoing_relations".to_string())) {
-                let outgoing = graph.edges_directed(node_index, petgraph::Direction::Outgoing)
+                let outgoing = graph.edges_directed(node_index, Direction::Outgoing)
                     .take(max_relations)
                     .filter_map(|edge| {
                         let target_node_index = edge.target();

@@ -35,15 +35,17 @@ impl AttributeValue {
             },
             AttributeValue::DateTime(v) => match data_type {
                 Some("DateTime") => {
-                    // Convert the timestamp to a Python datetime object
+                    // Convert the timestamp to a Python datetime object and then to a string
                     let datetime_module = PyModule::import(py, "datetime")?;
                     let datetime_class = datetime_module.getattr("datetime")?;
                     let py_timestamp = (*v).into_py(py);
                     let datetime = datetime_class.call_method1("fromtimestamp", (py_timestamp,))?;
-                    Ok(datetime.into_py(py))
+                    let datetime_str = datetime.call_method0("isoformat")?; // Convert datetime to ISO format string
+                    Ok(datetime_str.into_py(py))
                 },
                 _ => Err(PyTypeError::new_err("Type mismatch for DateTime value")),
-            },
+            }
+            
             AttributeValue::String(v) => match data_type {
                 Some("String") | None => Ok(v.into_py(py)),
                 _ => Err(PyTypeError::new_err("Type mismatch for String value")),

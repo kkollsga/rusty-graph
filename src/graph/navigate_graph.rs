@@ -2,8 +2,6 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::Direction;
 use petgraph::visit::EdgeRef;
 use crate::data_types::AttributeValue; 
-use std::cmp::Ordering;
-use std::collections::HashSet;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use crate::schema::{Node, Relation};
@@ -75,7 +73,6 @@ pub fn get_relationships(
                             outgoing_relations.push(relation_type.clone());
                         }
                     },
-                    _ => {}
                 }
             }
         }

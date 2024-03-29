@@ -56,7 +56,7 @@ impl KnowledgeGraph {
     // Add relationships to graph
     pub fn add_relationships(
         &mut self, data: &PyList, columns: Vec<String>, relationship_type: String, source_type: String, source_id_field: String, 
-        target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>, conflict_handling: Option<String>,
+        target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>,
     ) -> PyResult<Vec<(usize, usize)>> {
         add_relationships::add_relationships(
             &mut self.graph,
@@ -69,7 +69,6 @@ impl KnowledgeGraph {
             target_id_field,
             source_title_field,
             target_title_field,
-            conflict_handling,
         )
     }
     // Get attributes from nodes

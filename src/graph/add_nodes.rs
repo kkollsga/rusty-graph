@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyList, PyDict};
 use petgraph::graph::DiGraph;
 use std::collections::HashMap;
+use chrono::NaiveDateTime;
 use crate::graph::get_schema::update_or_retrieve_schema;
 use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue; 
@@ -70,10 +71,28 @@ pub fn add_nodes(
 ) -> PyResult<Vec<usize>> {
     let conflict_handling = conflict_handling.unwrap_or_else(|| "update".to_string());
     let mut indices = Vec::new();
+    let default_datetime_format = "%Y-%m-%d %H:%M:%S".to_string();
 
-    // Convert PyDict to HashMap for easier handling
-    let column_types_map: HashMap<String, String> = column_types
-        .map_or(Ok(HashMap::new()), |ct| ct.extract())?;
+    // Initialize column_types_map based on whether column_types is Some or None
+    let mut column_types_map = match column_types {
+        Some(ct) => {
+            // Attempt to convert PyDict to HashMap, default to empty HashMap on failure
+            ct.extract().unwrap_or_default()
+        },
+        None => {
+            // If column_types is None, use an empty HashMap
+            HashMap::new()
+        }
+    };
+
+    // Extract datetime formats if column_types_map is not empty
+    let datetime_formats = if !column_types_map.is_empty() {
+        extract_datetime_formats(&mut column_types_map, &default_datetime_format)
+    } else {
+        // If column_types_map is empty, there are no datetime formats to extract
+        HashMap::new()
+    };
+    println!("DateFormats: {:?}", datetime_formats);
 
     // Update or retrieve the DataTypeNode schema once before processing the rows
     let schema = update_or_retrieve_schema(
@@ -84,6 +103,7 @@ pub fn add_nodes(
         Some(column_types_map.clone())
     )?;
 
+    
     for row in data.iter() {
         let row: Vec<&PyAny> = row.extract()?; // Extract the row as a list of PyAny references
         let mut attributes: HashMap<String, AttributeValue> = HashMap::new();
@@ -124,6 +144,27 @@ pub fn add_nodes(
                             .map(AttributeValue::Float)
                     }
                 },
+                "DateTime" => {
+                    let format = datetime_formats.get(column_name).unwrap_or(&default_datetime_format);
+                    // Attempt to directly extract a timestamp (i64)
+                    if let Ok(timestamp) = item.extract::<i64>() {
+                        Ok(AttributeValue::DateTime(timestamp))
+                    } else {
+                        // If direct extraction fails, try parsing from a string representation
+                        let datetime_str: String = item.extract()?;
+                        // Here you'll need to parse the string into a datetime
+                        // The exact method depends on the format of your datetime strings
+                        // For example, using chrono::NaiveDateTime for "YYYY-MM-DD HH:MM:SS" format:
+                        match NaiveDateTime::parse_from_str(&datetime_str, format) {
+                            Ok(naive_datetime) => {
+                                // Convert NaiveDateTime to a timestamp
+                                let timestamp = naive_datetime.and_utc().timestamp();
+                                Ok(AttributeValue::DateTime(timestamp))
+                            },
+                            Err(_) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Failed to parse DateTime")),
+                        }
+                    }
+                },
                 "String" => item.extract::<String>().map(AttributeValue::String),
                 // Extend cases for other data types like 'DateTime', 'Date', etc.
                 _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Unsupported data type")),
@@ -146,4 +187,30 @@ pub fn add_nodes(
     }
 
     Ok(indices)
+}
+
+fn extract_datetime_formats(column_types_map: &mut HashMap<String, String>, default_datetime_format: &str) -> HashMap<String, String> {
+    
+    let mut datetime_formats: HashMap<String, String> = HashMap::new();
+
+    // Iterate through the map to find and process "DateTime" types
+    for (column, data_type) in column_types_map.iter() {
+        // Split the data_type into two parts, expecting "DateTime" and an optional format
+        let parts: Vec<&str> = data_type.splitn(2, ' ').collect();
+
+        if parts[0] == "DateTime" {
+            // Check if a custom format is provided; otherwise, use the default format
+            let format = parts.get(1).unwrap_or(&default_datetime_format);
+            datetime_formats.insert(column.clone(), format.to_string());
+        }
+    }
+
+    // Update column_types_map to remove the format from "DateTime" entries
+    for (_column, data_type) in column_types_map.iter_mut() {
+        if data_type.starts_with("DateTime") {
+            *data_type = "DateTime".to_string();  // Set to "DateTime" only, removing any format
+        }
+    }
+
+    datetime_formats
 }
