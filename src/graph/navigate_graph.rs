@@ -1,5 +1,9 @@
-use petgraph::graph::DiGraph;
+use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::Direction;
 use petgraph::visit::EdgeRef;
+use crate::data_types::AttributeValue; 
+use std::cmp::Ordering;
+use std::collections::HashSet;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use crate::schema::{Node, Relation};
@@ -54,19 +58,19 @@ pub fn get_relationships(
     let mut outgoing_relations = Vec::new();
 
     for index in indices {
-        let node_index = petgraph::graph::NodeIndex::new(index);
+        let node_index = NodeIndex::new(index);
 
         // Iterate over incoming and outgoing edges and collect unique relation types
-        for direction in &[petgraph::Direction::Incoming, petgraph::Direction::Outgoing] {
+        for direction in &[Direction::Incoming, Direction::Outgoing] {
             for edge in graph.edges_directed(node_index, *direction) {
                 let relation_type = &edge.weight().relation_type;
                 match direction {
-                    petgraph::Direction::Incoming => {
+                    Direction::Incoming => {
                         if !incoming_relations.contains(relation_type) {
                             incoming_relations.push(relation_type.clone());
                         }
                     },
-                    petgraph::Direction::Outgoing => {
+                    Direction::Outgoing => {
                         if !outgoing_relations.contains(relation_type) {
                             outgoing_relations.push(relation_type.clone());
                         }
@@ -85,54 +89,65 @@ pub fn get_relationships(
     Ok(result.into())
 }
 
-/// Traverses nodes in a specified direction based on relationship type
+
 pub fn traverse_nodes(
     graph: &DiGraph<Node, Relation>,
     indices: Vec<usize>,
     relationship_type: String,
     is_incoming: bool,
-    sort_attribute: Option<&str>, 
-    ascending: Option<bool>, 
-    max_relations: Option<usize>
+    sort_attribute: Option<&str>, // Changed from Option<String> to Option<&str>
+    ascending: Option<bool>,
+    max_relations: Option<usize>,
 ) -> Vec<usize> {
-    let mut related_nodes = Vec::new();
-    let direction = if is_incoming { petgraph::Direction::Incoming } else { petgraph::Direction::Outgoing };
+    let mut final_nodes: Vec<usize> = Vec::new();
+    let direction = if is_incoming { Direction::Incoming } else { Direction::Outgoing };
 
     for index in indices {
-        let node_index = petgraph::graph::NodeIndex::new(index);
-        let mut edges: Vec<_> = graph.edges_directed(node_index, direction)
-            .filter(|edge| edge.weight().relation_type == relationship_type)
-            .collect();
+        let node_index = NodeIndex::new(index);
+        let mut nodes_with_attrs: Vec<(usize, Option<AttributeValue>)> = Vec::new();
 
-        // Optional sorting based on a specified attribute
-        if let Some(attr) = sort_attribute {
-            edges.sort_by(|a, b| {
-                let a_attr_value = a.weight().attributes.as_ref()
-                    .and_then(|attrs| attrs.get(attr))
-                    .map(|v| v.to_string());  // Keep this as a String
+        for edge in graph.edges_directed(node_index, direction).filter(|edge| edge.weight().relation_type == relationship_type) {
+            let target_node_index = if is_incoming { edge.source() } else { edge.target() };
+            let target_node = graph.node_weight(target_node_index).expect("Node must exist");
 
-                let b_attr_value = b.weight().attributes.as_ref()
-                    .and_then(|attrs| attrs.get(attr))
-                    .map(|v| v.to_string());  // Keep this as a String
-
-                let order = ascending.unwrap_or(true);
-                if order {
-                    a_attr_value.cmp(&b_attr_value)
-                } else {
-                    b_attr_value.cmp(&a_attr_value)
-                }
-            });
+            if let Node::StandardNode { attributes, .. } = target_node {
+                let attr_value = sort_attribute.and_then(|attr| attributes.get(attr).cloned());
+                nodes_with_attrs.push((target_node_index.index(), attr_value));
+            }
         }
 
-        // Process edges up to the max_relations limit (if specified)
-        for edge in edges.iter().take(max_relations.unwrap_or(usize::MAX)) {
-            let related_node_index = if is_incoming { edge.source() } else { edge.target() };
-            // Ensure we don't add duplicates
-            if !related_nodes.contains(&related_node_index.index()) {
-                related_nodes.push(related_node_index.index());
-            }
+        // Sort and append the node indices, if sort_attribute is specified
+        if let Some(_attr) = sort_attribute {
+            final_nodes.extend(sort_nodes_by_attribute(nodes_with_attrs, ascending.unwrap_or(true)));
+        } else {
+            // Just append node indices without sorting, limited by max_relations
+            final_nodes.extend(nodes_with_attrs.into_iter().map(|(idx, _)| idx).take(max_relations.unwrap_or(usize::MAX)));
         }
     }
 
-    related_nodes
+    final_nodes
+}
+
+/// Sorts node indices by their associated attribute values, and combines sorting logic and attribute comparison.
+fn sort_nodes_by_attribute(nodes_with_attrs: Vec<(usize, Option<AttributeValue>)>, ascending: bool) -> Vec<usize> {
+    let mut sorted_nodes = nodes_with_attrs;
+
+    // Sort based on the attribute value, handling different types of AttributeValue
+    sorted_nodes.sort_by(|a, b| {
+        match (&a.1, &b.1) {
+            (Some(AttributeValue::Int(a_val)), Some(AttributeValue::Int(b_val))) => a_val.cmp(b_val),
+            (Some(AttributeValue::Float(a_val)), Some(AttributeValue::Float(b_val))) => a_val.partial_cmp(b_val).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(AttributeValue::DateTime(a_val)), Some(AttributeValue::DateTime(b_val))) => a_val.cmp(b_val),
+            (Some(AttributeValue::String(a_val)), Some(AttributeValue::String(b_val))) => a_val.cmp(b_val),
+            _ => std::cmp::Ordering::Equal, // If no attribute or non-comparable types, consider them equal
+        }
+    });
+
+    // Reverse the order if descending
+    if !ascending {
+        sorted_nodes.reverse();
+    }
+
+    // Return the sorted node indices
+    sorted_nodes.into_iter().map(|(idx, _)| idx).collect()
 }

@@ -18,7 +18,7 @@ pub fn add_relationships(
     conflict_handling: Option<String>,  // Default value handled inside function if necessary
 ) -> PyResult<Vec<(usize, usize)>> {
     let mut indices = Vec::new();
-    let conflict_handling = conflict_handling.unwrap_or_else(|| "update".to_string());
+    // let conflict_handling = conflict_handling.unwrap_or_else(|| "update".to_string());
 
     // Create lookup tables for source and target nodes
     let mut source_node_lookup = HashMap::new();

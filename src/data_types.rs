@@ -1,4 +1,5 @@
 use chrono::{NaiveDateTime, NaiveDate, Utc, TimeZone};
+use std::cmp::Ordering;
 use pyo3::{prelude::*, exceptions::PyTypeError};
 use pyo3::{PyResult, Python, FromPyObject, PyAny};
 #[derive(Debug)]
@@ -72,6 +73,29 @@ impl Clone for AttributeValue {
             AttributeValue::Float(v) => AttributeValue::Float(*v),
             AttributeValue::DateTime(v) => AttributeValue::DateTime(*v),
             AttributeValue::String(v) => AttributeValue::String(v.clone()),
+        }
+    }
+}
+impl PartialEq for AttributeValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (AttributeValue::Int(a), AttributeValue::Int(b)) => a == b,
+            (AttributeValue::Float(a), AttributeValue::Float(b)) => a == b,
+            (AttributeValue::DateTime(a), AttributeValue::DateTime(b)) => a == b,
+            (AttributeValue::String(a), AttributeValue::String(b)) => a == b,
+            _ => false, // Different types are always not equal
+        }
+    }
+}
+impl PartialOrd for AttributeValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (self, other) {
+            (AttributeValue::Int(a), AttributeValue::Int(b)) => a.partial_cmp(b),
+            (AttributeValue::Float(a), AttributeValue::Float(b)) => a.partial_cmp(b),
+            (AttributeValue::DateTime(a), AttributeValue::DateTime(b)) => a.partial_cmp(b),
+            // For strings, we'll default to a simple lexicographical comparison
+            (AttributeValue::String(a), AttributeValue::String(b)) => a.partial_cmp(b),
+            _ => None, // Comparison between different types is undefined
         }
     }
 }
