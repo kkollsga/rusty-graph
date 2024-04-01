@@ -2,7 +2,9 @@ use chrono::{NaiveDateTime, NaiveDate, Utc, TimeZone};
 use std::cmp::Ordering;
 use pyo3::{prelude::*, exceptions::PyTypeError};
 use pyo3::{PyResult, Python, FromPyObject, PyAny};
-#[derive(Debug)]
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Serialize, Deserialize)]
 pub enum AttributeValue {
     Int(i32),
     Float(f64),
@@ -15,11 +17,7 @@ impl AttributeValue {
         match self {
             AttributeValue::Int(v) => v.to_string(),
             AttributeValue::Float(v) => v.to_string(),
-            AttributeValue::DateTime(v) => {
-                // Convert the timestamp to a string representation
-                // You might want to format this in a more readable way
-                v.to_string()
-            },
+            AttributeValue::DateTime(v) => v.to_string(),
             AttributeValue::String(v) => v.clone(),
         }
     }
@@ -117,9 +115,6 @@ impl<'source> FromPyObject<'source> for AttributeValue {
         if let Ok(value) = ob.extract::<i64>() { // Assuming DateTime is represented as a timestamp
             return Ok(AttributeValue::DateTime(value));
         }
-
-        // Add more extraction logic here if you have other variants
-
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
             "Could not extract AttributeValue",
         ))

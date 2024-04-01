@@ -3,7 +3,8 @@ use pyo3::types::{PyList, PyDict};
 use pyo3::PyResult;
 use petgraph::graph::DiGraph;
 use std::collections::HashMap;
-
+//use std::fs::File;
+//use std::io::BufWriter;
 use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue; 
 
@@ -111,8 +112,31 @@ impl KnowledgeGraph {
         navigate_graph::traverse_nodes(&self.graph, indices, relationship_type, false, sort_attribute, ascending, max_relations)
     }
     
+    /* fn save_graph_to_file(&self, file_path: &str) -> PyResult<()> {
+        // Open a file in write mode
+        let file = File::create(file_path)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>((e.to_string(),)))?;
 
+        let writer = BufWriter::new(file);
+
+        // Serialize and write the graph to the file
+        bincode::serialize_into(writer, &self.graph)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>((e.to_string(),)))?;
+
+        Ok(())
+    }
+
+    fn load_graph_from_file(file_path: &str) -> Result<DiGraph<Node, Relation>, Box<dyn std::error::Error>> {
+        // Open the file in read mode
+        let file = File::open(file_path)?;
+        let reader = BufReader::new(file);
     
+        // Deserialize the graph from the file
+        let graph: DiGraph<Node, Relation> = bincode::deserialize_from(reader)?;
+    
+        Ok(graph)
+    } */
+
 
     // Additional methods as needed...
 }

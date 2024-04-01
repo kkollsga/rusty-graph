@@ -2,9 +2,10 @@
 
 use crate::data_types::AttributeValue;
 use std::collections::HashMap;
+use serde::{Serialize, Deserialize};
 
 // Node structure definition
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum Node {
     StandardNode {
         node_type: String,
@@ -41,7 +42,7 @@ impl Node {
 }
 
 // Relation structure definition
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Relation {
     pub relation_type: String,
     pub attributes: Option<HashMap<String, AttributeValue>>,  // Now an Option
