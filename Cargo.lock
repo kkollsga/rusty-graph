@@ -226,6 +226,7 @@ dependencies = [
  "fixedbitset",
  "indexmap",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]
@@ -317,7 +318,7 @@ dependencies = [
 
 [[package]]
 name = "rusty_graph"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "bincode",
  "chrono",

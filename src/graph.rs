@@ -1,10 +1,11 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyDict};
 use pyo3::PyResult;
+use pyo3::exceptions::PyIOError;
 use petgraph::graph::DiGraph;
 use std::collections::HashMap;
-//use std::fs::File;
-//use std::io::BufWriter;
+use std::fs::File;
+use std::io::{BufWriter, BufReader};
 use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue; 
 
@@ -112,7 +113,7 @@ impl KnowledgeGraph {
         navigate_graph::traverse_nodes(&self.graph, indices, relationship_type, false, sort_attribute, ascending, max_relations)
     }
     
-    /* fn save_graph_to_file(&self, file_path: &str) -> PyResult<()> {
+    fn save_graph_to_file(&self, file_path: &str) -> PyResult<()> {
         // Open a file in write mode
         let file = File::create(file_path)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>((e.to_string(),)))?;
@@ -126,17 +127,27 @@ impl KnowledgeGraph {
         Ok(())
     }
 
-    fn load_graph_from_file(file_path: &str) -> Result<DiGraph<Node, Relation>, Box<dyn std::error::Error>> {
-        // Open the file in read mode
-        let file = File::open(file_path)?;
+    fn load_graph_from_file(&mut self, file_path: &str) -> PyResult<()> {
+        // Attempt to open the file in read mode
+        let file = match File::open(file_path) {
+            Ok(file) => file,
+            Err(e) => return Err(PyIOError::new_err(e.to_string())), // Convert std::io::Error to PyO3's PyIOError
+        };
+        
         let reader = BufReader::new(file);
     
-        // Deserialize the graph from the file
-        let graph: DiGraph<Node, Relation> = bincode::deserialize_from(reader)?;
-    
-        Ok(graph)
-    } */
-
+        // Attempt to deserialize the graph from the file
+        match bincode::deserialize_from(reader) {
+            Ok(graph) => {
+                self.graph = graph; // Assign the deserialized graph to self.graph
+                Ok(()) // Return Ok(()) on success
+            },
+            Err(e) => {
+                // Convert bincode::Error (or any error implementing std::error::Error) to a generic PyO3 exception
+                Err(PyErr::new::<pyo3::exceptions::PyException, _>(e.to_string()))
+            }
+        }
+    }
 
     // Additional methods as needed...
 }

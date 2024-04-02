@@ -43,3 +43,5 @@ classes = kg.traverse_incoming(indices=school,relationship_type="klasse_i",sort_
 print("CLASSES")
 #print(classes)
 print_dict(kg.get_node_attributes(classes,["title","elever", "start"]))
+
+kg.save_graph_to_file("test_file")
