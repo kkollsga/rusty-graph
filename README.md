@@ -12,9 +12,9 @@ Users can download the .whl file directly from the repository and install it usi
 - *Note that the release is only compatible with Python 3.12 on win_amd64.*
 - *The library is still in alpha, so the functionality is very limited.*
 ```sh
-pip install https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.1.10-cp312-none-win_amd64.whl?raw=true
+pip install https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.1.11-cp312-none-win_amd64.whl?raw=true
 # or upgrade an already installed library
-pip install --upgrade https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.1.10-cp312-none-win_amd64.whl?raw=true
+pip install --upgrade https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.1.11-cp312-none-win_amd64.whl?raw=true
 ```
 
 
@@ -57,7 +57,7 @@ kg = rusty_graph.KnowledgeGraph()
 
 # Add nodes and relationships from SQL data
 kg.add_nodes(
-    data=nodes_data.T.astype(str).to_numpy().tolist(),  # Convert DataFrame to list of lists
+    data=nodes_data.astype(str).to_numpy().tolist(),  # Convert DataFrame to list of lists
     columns=list(nodes_data.columns),  # Use DataFrame column names
     node_type="MyNodeType",  # Type of node (example: Artist)
     unique_id_field="unique_id", # Column name of unique identifier
@@ -89,7 +89,7 @@ kg = rusty_graph.KnowledgeGraph()
 
 # Add nodes to the knowledge graph from DataFrame
 kg.add_nodes(
-    data=df.T.astype(str).to_numpy().tolist(),  # Data from DataFrame as list of lists
+    data=df.astype(str).to_numpy().tolist(),  # Data from DataFrame as list of lists
     columns=list(df.columns),  # Column names
     node_type="NodeType",  # Type of node (example: Artist)
     unique_id_field="unique_id",  # Column name of unique identifier
@@ -102,7 +102,7 @@ relationship_df = pd.read_sql_query("SELECT source_id, target_id, relation_attri
 
 # Add relationships to the knowledge graph
 kg.add_relationships(
-    data=relationship_df.T.astype(str).to_numpy().tolist(),  # Data from DataFrame
+    data=relationship_df.astype(str).to_numpy().tolist(),  # Data from DataFrame
     columns=list(relationship_df.columns),  # Column names
     relationship_type="RELATIONSHIP_TYPE",  # Name for the relationship type
     source_type="SourceNodeType",  # Source node type
@@ -113,7 +113,7 @@ kg.add_relationships(
     target_title_field= "target_title", # Source title
     conflict_handling="update"  # Conflict handling: "update", "replace", or "skip"
 )
-
+kg.save_to_file("KG.bin")
 # Retrieve node data by unique identifier
 matching_nodes = kg.get_nodes("title", "specific_title_name")
 print(matching_nodes)
@@ -121,7 +121,10 @@ print(matching_nodes)
 
 ### Traverse Graph and return node properties
 ```python
+import rusty_graph
+kg = rusty_graph.KnowledgeGraph()
 # Get all relationships found in selected nodes
+kg.load_from_file("KG.bin")
 unique_relationships = kg.get_relationships(matching_nodes)
 print(unique_relationships)
 

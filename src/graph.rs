@@ -113,7 +113,7 @@ impl KnowledgeGraph {
         navigate_graph::traverse_nodes(&self.graph, indices, relationship_type, false, sort_attribute, ascending, max_relations)
     }
     
-    fn save_graph_to_file(&self, file_path: &str) -> PyResult<()> {
+    fn save_to_file(&self, file_path: &str) -> PyResult<()> {
         // Open a file in write mode
         let file = File::create(file_path)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>((e.to_string(),)))?;
@@ -127,7 +127,7 @@ impl KnowledgeGraph {
         Ok(())
     }
 
-    fn load_graph_from_file(&mut self, file_path: &str) -> PyResult<()> {
+    fn load_from_file(&mut self, file_path: &str) -> PyResult<()> {
         // Attempt to open the file in read mode
         let file = match File::open(file_path) {
             Ok(file) => file,

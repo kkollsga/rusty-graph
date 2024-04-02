@@ -44,7 +44,7 @@ pub fn get_node_attributes(
 
             let return_attributes = PyDict::new(py);
             if specified_attributes.as_ref().map_or(true, |attrs| attrs.contains(&"graph_id".to_string())) {
-                return_attributes.set_item("graph_id", node_type)?;
+                return_attributes.set_item("graph_id", index)?;
             }
             // Check if "node_type" should be included
             if specified_attributes.as_ref().map_or(true, |attrs| attrs.contains(&"node_type".to_string())) {

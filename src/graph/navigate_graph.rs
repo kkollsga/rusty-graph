@@ -92,7 +92,7 @@ pub fn traverse_nodes(
     indices: Vec<usize>,
     relationship_type: String,
     is_incoming: bool,
-    sort_attribute: Option<&str>, // Changed from Option<String> to Option<&str>
+    sort_attribute: Option<&str>,
     ascending: Option<bool>,
     max_relations: Option<usize>,
 ) -> Vec<usize> {
@@ -113,19 +113,25 @@ pub fn traverse_nodes(
             }
         }
 
-        // Sort and append the node indices, if sort_attribute is specified
-        if let Some(_attr) = sort_attribute {
-            final_nodes.extend(sort_nodes_by_attribute(nodes_with_attrs, ascending.unwrap_or(true)));
+        // If sorting is enabled, sort the nodes based on the attribute value.
+        let mut sorted_or_filtered_nodes = if let Some(_attr) = sort_attribute {
+            sort_nodes_by_attribute(nodes_with_attrs, ascending.unwrap_or(true))
         } else {
-            // Just append node indices without sorting, limited by max_relations
-            final_nodes.extend(nodes_with_attrs.into_iter().map(|(idx, _)| idx).take(max_relations.unwrap_or(usize::MAX)));
+            // If sorting is not enabled, simply collect the node indices without sorting.
+            nodes_with_attrs.into_iter().map(|(idx, _)| idx).collect::<Vec<_>>()
+        };
+
+        // Limit the number of nodes based on `max_relations` after sorting or filtering.
+        if let Some(max) = max_relations {
+            sorted_or_filtered_nodes.truncate(max);
         }
+
+        final_nodes.extend(sorted_or_filtered_nodes);
     }
 
     final_nodes
 }
 
-/// Sorts node indices by their associated attribute values, and combines sorting logic and attribute comparison.
 fn sort_nodes_by_attribute(nodes_with_attrs: Vec<(usize, Option<AttributeValue>)>, ascending: bool) -> Vec<usize> {
     let mut sorted_nodes = nodes_with_attrs;
 
