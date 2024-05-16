@@ -88,13 +88,12 @@ impl KnowledgeGraph {
 
     // Navigate the graph
     pub fn get_nodes(
-        &mut self, attribute_key: &str, attribute_value: &str, filter_node_type: Option<&str>,
+        &mut self, node_type: Option<&str>, filters: Option<Vec<HashMap<String, String>>>,
     ) -> Vec<usize> {
         navigate_graph::get_nodes(
             &mut self.graph, 
-            attribute_key,
-            attribute_value,
-            filter_node_type
+            node_type,
+            filters
         )
     }
     pub fn get_relationships(

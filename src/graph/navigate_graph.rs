@@ -1,48 +1,51 @@
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::Direction;
 use petgraph::visit::EdgeRef;
+use std::collections::HashMap;
 use crate::data_types::AttributeValue; 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use crate::schema::{Node, Relation};
 
-/// Retrieves nodes by their unique ID, with an optional node_type filter
+/// Retrieves nodes by their unique ID, with an optional node_type filter and multiple attribute filters.
 pub fn get_nodes(
     graph: &mut DiGraph<Node, Relation>,
-    attribute_key: &str, 
-    attribute_value: &str, 
-    filter_node_type: Option<&str>
+    filter_node_type: Option<&str>,
+    filters: Option<Vec<HashMap<String, String>>>
 ) -> Vec<usize> {
     graph.node_indices().filter_map(|node_index| {
-        if let Some(node) = graph.node_weight(node_index) {
-            match node {
-                Node::StandardNode { node_type, unique_id, attributes, title } => {
-                    // Apply node_type filter if provided
-                    if let Some(filter_type) = filter_node_type {
-                        if node_type != filter_type {
-                            return None;
-                        }
-                    }
+        let node = graph.node_weight(node_index)?;
 
-                    // Check if the node matches the specified attribute
-                    let matches = match attribute_key {
-                        "unique_id" => unique_id == attribute_value,
-                        "title" => title.as_deref() == Some(attribute_value),
-                        _ => attributes.get(attribute_key).map_or(false, |v| v.to_string() == attribute_value),
-                    };
+        let Node::StandardNode { node_type, unique_id, attributes, title } = node else { return None };
 
-                    if matches {
-                        Some(node_index.index())  // Return the index of the matching node
-                    } else {
-                        None
-                    }
-                },
-                // Handle other node variants if necessary
-                _ => None,
+        // Apply node_type filter if provided
+        if let Some(filter_type) = filter_node_type {
+            if node_type != filter_type {
+                return None;
             }
-        } else {
-            None
         }
+
+        // Check if the node matches all the specified attribute filters
+        if let Some(filters) = &filters {
+            for filter in filters {
+                let mut matches = true;
+                for (key, value) in filter {
+                    matches = match key.as_str() {
+                        "unique_id" => unique_id == value,
+                        "title" => title.as_deref() == Some(value),
+                        _ => attributes.get(key).map_or(false, |v| v.to_string() == *value),
+                    };
+                    if !matches {
+                        break;
+                    }
+                }
+                if !matches {
+                    return None;
+                }
+            }
+        }
+
+        Some(node_index.index())  // Return the index of the matching node
     }).collect()
 }
 

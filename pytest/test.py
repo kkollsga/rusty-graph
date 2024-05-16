@@ -33,12 +33,12 @@ nums = kg.add_relationships(
     target_type="Skole", # right_node_type: String,
     target_id_field="skole_id", # right_unique_id_field: String,
 )
-node_data = kg.get_nodes('title', 'Klasse B')  # Replace "3144" with an actual unique_id from your data
+node_data = kg.get_nodes(node_type=None,filters=[{'title':'Klasse B'}])  # Replace "3144" with an actual unique_id from your data
 print(node_data)
 #print_dict(kg.get_node_attributes(node_data))
 #print("ATTRIBUTES OF ",[node_data],":")
 #print_dict(kg.get_node_attributes(node_data, ["title","elever","outgoing_relations"]))
-school = kg.get_nodes('title', 'Skole A')
+school = kg.get_nodes(node_type=None,filters=[{'title':'Skole A'}])
 classes = kg.traverse_incoming(indices=school,relationship_type="klasse_i",sort_attribute='start',max_relations=1)
 print("CLASSES", classes)
 #print(classes)
