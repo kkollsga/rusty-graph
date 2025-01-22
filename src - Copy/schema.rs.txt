@@ -1,7 +1,10 @@
+// In schema.rs
+
 use crate::data_types::AttributeValue;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 
+// Node structure definition
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Node {
     StandardNode {
@@ -15,38 +18,11 @@ pub enum Node {
         name: String,
         attributes: HashMap<String, String>,  // Attribute name to data type ('Int', 'Float', etc.)
     },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Relation {
-    pub relation_type: String,
-    pub attributes: Option<HashMap<String, AttributeValue>>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct NodeTypeStats {
-    pub title: String,
-    pub graph_id: String,
-    pub attributes: HashMap<String, AttributeMetadata>,
-    pub occurrences: usize,
-    pub relationships: RelationshipMetadata,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AttributeMetadata {
-    pub data_type: String,
-    pub nullable: bool,
-    pub unique_values: Option<usize>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RelationshipMetadata {
-    pub incoming_types: HashSet<String>,
-    pub outgoing_types: HashSet<String>,
-    pub connected_node_types: HashSet<String>,
+    // Add other variants as needed
 }
 
 impl Node {
+    // Implement constructor methods for each variant if needed
     pub fn new(node_type: &str, unique_id: &str, attributes: Option<HashMap<String, AttributeValue>>, node_title: Option<&str>) -> Self {
         Node::StandardNode {
             node_type: node_type.to_string(),
@@ -65,11 +41,19 @@ impl Node {
     }
 }
 
+// Relation structure definition
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Relation {
+    pub relation_type: String,
+    pub attributes: Option<HashMap<String, AttributeValue>>,  // Now an Option
+}
+
 impl Relation {
+    // Adjust the constructor to accept an Option for attributes
     pub fn new(name: &str, attributes: Option<HashMap<String, AttributeValue>>) -> Self {
         Relation {
             relation_type: name.to_string(),
-            attributes,
+            attributes,  // Directly passed as an Option
         }
     }
 }

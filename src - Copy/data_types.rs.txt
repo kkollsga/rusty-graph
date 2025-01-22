@@ -64,15 +64,6 @@ impl AttributeValue {
         })?;
         Ok(AttributeValue::DateTime(Utc.from_utc_datetime(&datetime).timestamp()))
     }
-
-    pub fn is_null(&self) -> bool {
-        match self {
-            AttributeValue::Int(v) => *v == 0,  // Consider 0 as null
-            AttributeValue::Float(v) => *v == 0.0 || v.is_nan(),  // Consider 0.0 or NaN as null
-            AttributeValue::DateTime(v) => *v == 0,  // Consider epoch (0 timestamp) as null
-            AttributeValue::String(v) => v.is_empty(),  // Consider empty string as null
-        }
-    }
 }
 
 impl Clone for AttributeValue {

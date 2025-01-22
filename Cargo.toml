@@ -1,18 +1,15 @@
 [package]
 name = "rusty_graph"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
 name = "rusty_graph"
 crate-type = ["cdylib"]
 
-[dependencies.pyo3]
-version = "0.19.0"  # Use the latest version compatible with your setup
-features = ["extension-module"]
-
 [dependencies]
+pyo3 = { version = "0.20.2", features = ["extension-module"] }
+pyo3-macros = "0.20.2"
 bincode = "1.3.3"
 chrono = "0.4.35"
 petgraph = { version = "0.6.4", features = ["serde-1"] }
