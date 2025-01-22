@@ -6,7 +6,7 @@ use serde::{Serialize, Deserialize};
 pub enum Node {
     StandardNode {
         node_type: String,
-        unique_id: String,
+        unique_id: i32,
         attributes: HashMap<String, AttributeValue>,
         title: Option<String>,
     },
@@ -47,10 +47,10 @@ pub struct RelationshipMetadata {
 }
 
 impl Node {
-    pub fn new(node_type: &str, unique_id: &str, attributes: Option<HashMap<String, AttributeValue>>, node_title: Option<&str>) -> Self {
+    pub fn new(node_type: &str, unique_id: i32, attributes: Option<HashMap<String, AttributeValue>>, node_title: Option<&str>) -> Self {
         Node::StandardNode {
             node_type: node_type.to_string(),
-            unique_id: unique_id.to_string(),
+            unique_id,
             attributes: attributes.unwrap_or_else(HashMap::new),
             title: node_title.map(|t| t.to_string()),
         }

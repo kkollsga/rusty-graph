@@ -10,43 +10,54 @@ use crate::schema::{Node, Relation};
 /// Retrieves nodes by their unique ID, with an optional node_type filter and multiple attribute filters.
 pub fn get_nodes(
     graph: &mut DiGraph<Node, Relation>,
-    filter_node_type: Option<&str>,
-    filters: Option<Vec<HashMap<String, String>>>
+    node_type: Option<&str>,
+    filters: Option<Vec<HashMap<String, String>>>,
 ) -> Vec<usize> {
-    graph.node_indices().filter_map(|node_index| {
-        let node = graph.node_weight(node_index)?;
+    let mut indices = Vec::new();
 
-        let Node::StandardNode { node_type, unique_id, attributes, title } = node else { return None };
-
-        // Apply node_type filter if provided
-        if let Some(filter_type) = filter_node_type {
-            if node_type != filter_type {
-                return None;
+    for index in graph.node_indices() {
+        if let Node::StandardNode { node_type: nt, unique_id, attributes, .. } = &graph[index] {
+            // Check node type if specified
+            if let Some(type_filter) = node_type {
+                if nt != type_filter {
+                    continue;
+                }
             }
-        }
 
-        // Check if the node matches all the specified attribute filters
-        if let Some(filters) = &filters {
-            for filter in filters {
+            // Apply filters if present
+            if let Some(filters) = &filters {
                 let mut matches = true;
-                for (key, value) in filter {
-                    matches = match key.as_str() {
-                        "unique_id" => unique_id == value,
-                        "title" => title.as_deref() == Some(value),
-                        _ => attributes.get(key).map_or(false, |v| v.to_string() == *value),
-                    };
-                    if !matches {
+                for filter in filters {
+                    for (key, value) in filter {
+                        let attribute_matches = match key.as_str() {
+                            "unique_id" => match value.parse::<i32>() {
+                                Ok(parsed_value) => unique_id == &parsed_value,
+                                Err(_) => false,
+                            },
+                            _ => if let Some(attr) = attributes.get(key) {
+                                attr.to_string() == *value
+                            } else {
+                                false
+                            },
+                        };
+                        if !attribute_matches {
+                            matches = false;
+                            break;
+                        }
+                    }
+                    if matches {
                         break;
                     }
                 }
                 if !matches {
-                    return None;
+                    continue;
                 }
             }
+            indices.push(index.index());
         }
+    }
 
-        Some(node_index.index())  // Return the index of the matching node
-    }).collect()
+    indices
 }
 
 /// Retrieves relationships for specified nodes

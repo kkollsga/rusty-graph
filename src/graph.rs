@@ -38,11 +38,11 @@ impl KnowledgeGraph {
     pub fn add_node(
         &mut self, 
         node_type: String, 
-        unique_id: String,  
+        unique_id: i32,  // Already using owned i32
         attributes: Option<HashMap<String, AttributeValue>>, 
         node_title: Option<String>
     ) -> usize {
-        let node = Node::new(&node_type, &unique_id, attributes, node_title.as_deref());
+        let node = Node::new(&node_type, unique_id, attributes, node_title.as_deref());
         let index = self.graph.add_node(node);
         index.index()
     }
@@ -52,7 +52,7 @@ impl KnowledgeGraph {
         data: &PyList, 
         columns: Vec<String>, 
         node_type: String, 
-        unique_id_field: String, 
+        unique_id_field: i32, 
         node_title_field: Option<String>, 
         conflict_handling: Option<String>, 
         column_types: Option<&PyDict>,
@@ -75,9 +75,9 @@ impl KnowledgeGraph {
         columns: Vec<String>, 
         relationship_type: String, 
         source_type: String, 
-        source_id_field: String, 
+        source_id_field: i32, 
         target_type: String, 
-        target_id_field: String, 
+        target_id_field: i32, 
         source_title_field: Option<String>, 
         target_title_field: Option<String>,
     ) -> PyResult<Vec<(usize, usize)>> {
