@@ -151,3 +151,28 @@ pub fn get_node_data(
 
     Ok(result)
 }
+
+pub fn get_simple_node_data(
+    graph: &DiGraph<Node, Relation>,
+    indices: Vec<usize>,
+    attribute: &str,
+) -> PyResult<Vec<PyObject>> {
+    let py = unsafe { Python::assume_gil_acquired() };
+    let mut result = Vec::new();
+
+    for idx in indices {
+        if let Some(Node::StandardNode { node_type, unique_id, attributes: node_attrs, title }) = graph.node_weight(NodeIndex::new(idx)) {
+            let value = match attribute {
+                "node_type" => node_type.clone().into_py(py),
+                "unique_id" => unique_id.to_string().into_py(py),
+                "title" => title.clone().unwrap_or_default().into_py(py),
+                _ => node_attrs.get(attribute)
+                    .map(|v| v.to_python_object(py, None).unwrap_or_else(|_| py.None()))
+                    .unwrap_or_else(|| py.None()),
+            };
+            result.push(value);
+        }
+    }
+
+    Ok(result)
+}

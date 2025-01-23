@@ -136,11 +136,23 @@ impl KnowledgeGraph {
     }
 
     pub fn get_title(&self, py: Python) -> PyResult<PyObject> {
-        self.get_node_attributes(py, Some(vec!["title".to_string()]))
+        let indices = if self.selected_nodes.is_empty() {
+            self.graph.node_indices().map(|n| n.index()).collect()
+        } else {
+            self.selected_nodes.clone()
+        };
+        let data = query_functions::get_simple_node_data(&self.graph, indices, "title")?;
+        Ok(data.into_py(py))
     }
-
+    
     pub fn get_id(&self, py: Python) -> PyResult<PyObject> {
-        self.get_node_attributes(py, Some(vec!["unique_id".to_string()]))
+        let indices = if self.selected_nodes.is_empty() {
+            self.graph.node_indices().map(|n| n.index()).collect()
+        } else {
+            self.selected_nodes.clone()
+        };
+        let data = query_functions::get_simple_node_data(&self.graph, indices, "unique_id")?;
+        Ok(data.into_py(py))
     }
 
     pub fn add_node(
