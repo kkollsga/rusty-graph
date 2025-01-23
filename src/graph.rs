@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyDict};
 use pyo3::PyResult;
-use pyo3::exceptions::{PyIOError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyIOError, PyValueError};
 use petgraph::graph::DiGraph;
 use std::collections::HashMap;
 use std::fs::File;
@@ -14,6 +14,102 @@ mod add_relationships;
 mod get_attributes;
 mod get_schema;
 mod navigate_graph;
+mod query;
+
+#[pyclass]
+pub struct GraphQuery {
+    indices: Vec<usize>,
+    graph: *mut DiGraph<Node, Relation>,
+}
+
+unsafe impl Send for GraphQuery {}
+
+#[pymethods]
+impl GraphQuery {
+    fn select(&self, indices: Option<Vec<usize>>) -> PyResult<Self> {
+        Ok(Self {
+            indices: indices.unwrap_or_else(|| self.indices.clone()),
+            graph: self.graph,
+        })
+    }
+
+    fn filter(&self, filter_dict: &PyDict) -> PyResult<Self> {
+        let filtered_indices = unsafe {
+            query::query_nodes(&mut *self.graph, self.indices.clone(), Some(filter_dict))?
+        };
+        
+        Ok(Self {
+            indices: filtered_indices,
+            graph: self.graph,
+        })
+    }
+
+    fn traverse_in(&self, relationship_type: String) -> PyResult<Self> {
+        let traversed_indices = unsafe {
+            query::traverse_nodes_in(
+                &*self.graph,
+                self.indices.clone(),
+                relationship_type,
+            )
+        };
+
+        Ok(Self {
+            indices: traversed_indices,
+            graph: self.graph,
+        })
+    }
+
+    fn traverse_out(&self, relationship_type: String) -> PyResult<Self> {
+        let traversed_indices = unsafe {
+            query::traverse_nodes_out(
+                &*self.graph,
+                self.indices.clone(),
+                relationship_type,
+            )
+        };
+
+        Ok(Self {
+            indices: traversed_indices,
+            graph: self.graph,
+        })
+    }
+
+    fn get_attributes(&self, py: Python) -> PyResult<PyObject> {
+        unsafe {
+            get_attributes::get_node_attributes(
+                &mut *self.graph,
+                py,
+                self.indices.clone(),
+                None,
+                None,
+            )
+        }
+    }
+
+    fn get_title(&self, py: Python) -> PyResult<PyObject> {
+        unsafe {
+            get_attributes::get_node_attributes(
+                &mut *self.graph,
+                py,
+                self.indices.clone(),
+                Some(vec!["title".to_string()]),
+                None,
+            )
+        }
+    }
+
+    fn get_id(&self, py: Python) -> PyResult<PyObject> {
+        unsafe {
+            get_attributes::get_node_attributes(
+                &mut *self.graph,
+                py,
+                self.indices.clone(),
+                Some(vec!["unique_id".to_string()]),
+                None,
+            )
+        }
+    }
+}
 
 #[pyclass]
 pub struct KnowledgeGraph {
@@ -54,6 +150,13 @@ impl KnowledgeGraph {
     #[new]
     pub fn new() -> Self {
         Self::new_impl()
+    }
+
+    pub fn query(&mut self) -> PyResult<GraphQuery> {
+        Ok(GraphQuery {
+            indices: Vec::new(),
+            graph: &mut self.graph,
+        })
     }
 
     pub fn add_node(
