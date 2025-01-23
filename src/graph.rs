@@ -15,14 +15,17 @@ mod get_schema;
 mod query_functions;
 
 #[pyclass]
+#[derive(Clone)]
 pub struct KnowledgeGraph {
     pub graph: DiGraph<Node, Relation>,
+    selected_nodes: Vec<usize>,
 }
 
 impl KnowledgeGraph {
     fn new_impl() -> Self {
         KnowledgeGraph {
             graph: DiGraph::new(),
+            selected_nodes: Vec::new(),
         }
     }
 }
@@ -55,26 +58,33 @@ impl KnowledgeGraph {
         Self::new_impl()
     }
 
-    pub fn filter(&mut self, filter_dict: &PyDict) -> PyResult<Vec<usize>> {
-        query_functions::filter_nodes(&self.graph, None, filter_dict)
+    pub fn filter(&mut self, filter_dict: &PyDict) -> PyResult<Self> {
+        self.selected_nodes = query_functions::filter_nodes(&self.graph, None, filter_dict)?;
+        Ok(self.clone())
     }
 
-    pub fn get_type(&self, node_type: String) -> PyResult<Vec<usize>> {
+    pub fn get_type(&mut self, node_type: String) -> PyResult<Self> {
         let py = unsafe { Python::assume_gil_acquired() };
         let filter_dict = PyDict::new(py);
         filter_dict.set_item("node_type", node_type)?;
-        query_functions::filter_nodes(&self.graph, None, filter_dict)
+        self.selected_nodes = query_functions::filter_nodes(&self.graph, None, filter_dict)?;
+        Ok(self.clone())
     }
 
     pub fn traverse_in(
-        &self,
-        indices: Vec<usize>,
+        &mut self,
         relationship_type: String,
         sort_attribute: Option<String>,
         ascending: Option<bool>,
         max_relations: Option<usize>,
-    ) -> Vec<usize> {
-        query_functions::traverse_relationships(
+    ) -> Self {
+        let indices = if self.selected_nodes.is_empty() {
+            self.graph.node_indices().map(|n| n.index()).collect()
+        } else {
+            self.selected_nodes.clone()
+        };
+
+        self.selected_nodes = query_functions::traverse_relationships(
             &self.graph,
             indices,
             &relationship_type,
@@ -82,18 +92,24 @@ impl KnowledgeGraph {
             sort_attribute.as_deref(),
             ascending,
             max_relations,
-        )
+        );
+        self.clone()
     }
 
     pub fn traverse_out(
-        &self,
-        indices: Vec<usize>,
+        &mut self,
         relationship_type: String,
         sort_attribute: Option<String>,
         ascending: Option<bool>,
         max_relations: Option<usize>,
-    ) -> Vec<usize> {
-        query_functions::traverse_relationships(
+    ) -> Self {
+        let indices = if self.selected_nodes.is_empty() {
+            self.graph.node_indices().map(|n| n.index()).collect()
+        } else {
+            self.selected_nodes.clone()
+        };
+
+        self.selected_nodes = query_functions::traverse_relationships(
             &self.graph,
             indices,
             &relationship_type,
@@ -101,33 +117,30 @@ impl KnowledgeGraph {
             sort_attribute.as_deref(),
             ascending,
             max_relations,
-        )
+        );
+        self.clone()
     }
 
     pub fn get_node_attributes(
         &self,
         py: Python,
-        indices: Vec<usize>,
         attributes: Option<Vec<String>>,
     ) -> PyResult<PyObject> {
+        let indices = if self.selected_nodes.is_empty() {
+            self.graph.node_indices().map(|n| n.index()).collect()
+        } else {
+            self.selected_nodes.clone()
+        };
         let data = query_functions::get_node_data(&self.graph, indices, attributes)?;
         Ok(data.into_py(py))
     }
 
-    pub fn get_title(
-        &self,
-        py: Python,
-        indices: Vec<usize>,
-    ) -> PyResult<PyObject> {
-        self.get_node_attributes(py, indices, Some(vec!["title".to_string()]))
+    pub fn get_title(&self, py: Python) -> PyResult<PyObject> {
+        self.get_node_attributes(py, Some(vec!["title".to_string()]))
     }
 
-    pub fn get_id(
-        &self,
-        py: Python,
-        indices: Vec<usize>,
-    ) -> PyResult<PyObject> {
-        self.get_node_attributes(py, indices, Some(vec!["unique_id".to_string()]))
+    pub fn get_id(&self, py: Python) -> PyResult<PyObject> {
+        self.get_node_attributes(py, Some(vec!["unique_id".to_string()]))
     }
 
     pub fn add_node(

@@ -2,7 +2,7 @@ use crate::data_types::AttributeValue;
 use std::collections::{HashMap, HashSet};
 use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Node {
     StandardNode {
         node_type: String,
@@ -17,13 +17,13 @@ pub enum Node {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Relation {
     pub relation_type: String,
     pub attributes: Option<HashMap<String, AttributeValue>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NodeTypeStats {
     pub title: String,
     pub graph_id: String,
@@ -32,14 +32,14 @@ pub struct NodeTypeStats {
     pub relationships: RelationshipMetadata,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AttributeMetadata {
     pub data_type: String,
     pub nullable: bool,
     pub unique_values: Option<usize>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RelationshipMetadata {
     pub incoming_types: HashSet<String>,
     pub outgoing_types: HashSet<String>,
