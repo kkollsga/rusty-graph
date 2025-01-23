@@ -11,105 +11,8 @@ use crate::data_types::AttributeValue;
 
 mod add_nodes;
 mod add_relationships;
-mod get_attributes;
 mod get_schema;
-mod navigate_graph;
-mod query;
-
-#[pyclass]
-pub struct GraphQuery {
-    indices: Vec<usize>,
-    graph: *mut DiGraph<Node, Relation>,
-}
-
-unsafe impl Send for GraphQuery {}
-
-#[pymethods]
-impl GraphQuery {
-    fn select(&self, indices: Option<Vec<usize>>) -> PyResult<Self> {
-        Ok(Self {
-            indices: indices.unwrap_or_else(|| self.indices.clone()),
-            graph: self.graph,
-        })
-    }
-
-    fn filter(&self, filter_dict: &PyDict) -> PyResult<Self> {
-        let filtered_indices = unsafe {
-            query::query_nodes(&mut *self.graph, self.indices.clone(), Some(filter_dict))?
-        };
-        
-        Ok(Self {
-            indices: filtered_indices,
-            graph: self.graph,
-        })
-    }
-
-    fn traverse_in(&self, relationship_type: String) -> PyResult<Self> {
-        let traversed_indices = unsafe {
-            query::traverse_nodes_in(
-                &*self.graph,
-                self.indices.clone(),
-                relationship_type,
-            )
-        };
-
-        Ok(Self {
-            indices: traversed_indices,
-            graph: self.graph,
-        })
-    }
-
-    fn traverse_out(&self, relationship_type: String) -> PyResult<Self> {
-        let traversed_indices = unsafe {
-            query::traverse_nodes_out(
-                &*self.graph,
-                self.indices.clone(),
-                relationship_type,
-            )
-        };
-
-        Ok(Self {
-            indices: traversed_indices,
-            graph: self.graph,
-        })
-    }
-
-    fn get_attributes(&self, py: Python) -> PyResult<PyObject> {
-        unsafe {
-            get_attributes::get_node_attributes(
-                &mut *self.graph,
-                py,
-                self.indices.clone(),
-                None,
-                None,
-            )
-        }
-    }
-
-    fn get_title(&self, py: Python) -> PyResult<PyObject> {
-        unsafe {
-            get_attributes::get_node_attributes(
-                &mut *self.graph,
-                py,
-                self.indices.clone(),
-                Some(vec!["title".to_string()]),
-                None,
-            )
-        }
-    }
-
-    fn get_id(&self, py: Python) -> PyResult<PyObject> {
-        unsafe {
-            get_attributes::get_node_attributes(
-                &mut *self.graph,
-                py,
-                self.indices.clone(),
-                Some(vec!["unique_id".to_string()]),
-                None,
-            )
-        }
-    }
-}
+mod query_functions;
 
 #[pyclass]
 pub struct KnowledgeGraph {
@@ -152,11 +55,79 @@ impl KnowledgeGraph {
         Self::new_impl()
     }
 
-    pub fn query(&mut self) -> PyResult<GraphQuery> {
-        Ok(GraphQuery {
-            indices: Vec::new(),
-            graph: &mut self.graph,
-        })
+    pub fn filter(&mut self, filter_dict: &PyDict) -> PyResult<Vec<usize>> {
+        query_functions::filter_nodes(&self.graph, None, filter_dict)
+    }
+
+    pub fn get_type(&self, node_type: String) -> PyResult<Vec<usize>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let filter_dict = PyDict::new(py);
+        filter_dict.set_item("node_type", node_type)?;
+        query_functions::filter_nodes(&self.graph, None, filter_dict)
+    }
+
+    pub fn traverse_in(
+        &self,
+        indices: Vec<usize>,
+        relationship_type: String,
+        sort_attribute: Option<String>,
+        ascending: Option<bool>,
+        max_relations: Option<usize>,
+    ) -> Vec<usize> {
+        query_functions::traverse_relationships(
+            &self.graph,
+            indices,
+            &relationship_type,
+            true,
+            sort_attribute.as_deref(),
+            ascending,
+            max_relations,
+        )
+    }
+
+    pub fn traverse_out(
+        &self,
+        indices: Vec<usize>,
+        relationship_type: String,
+        sort_attribute: Option<String>,
+        ascending: Option<bool>,
+        max_relations: Option<usize>,
+    ) -> Vec<usize> {
+        query_functions::traverse_relationships(
+            &self.graph,
+            indices,
+            &relationship_type,
+            false,
+            sort_attribute.as_deref(),
+            ascending,
+            max_relations,
+        )
+    }
+
+    pub fn get_node_attributes(
+        &self,
+        py: Python,
+        indices: Vec<usize>,
+        attributes: Option<Vec<String>>,
+    ) -> PyResult<PyObject> {
+        let data = query_functions::get_node_data(&self.graph, indices, attributes)?;
+        Ok(data.into_py(py))
+    }
+
+    pub fn get_title(
+        &self,
+        py: Python,
+        indices: Vec<usize>,
+    ) -> PyResult<PyObject> {
+        self.get_node_attributes(py, indices, Some(vec!["title".to_string()]))
+    }
+
+    pub fn get_id(
+        &self,
+        py: Python,
+        indices: Vec<usize>,
+    ) -> PyResult<PyObject> {
+        self.get_node_attributes(py, indices, Some(vec!["unique_id".to_string()]))
     }
 
     pub fn add_node(
@@ -195,7 +166,6 @@ impl KnowledgeGraph {
         column_types: Option<&PyDict>,
     ) -> PyResult<Vec<usize>> {
         let unique_id_field = unique_id_field.extract::<String>()?;
-        
         add_nodes::add_nodes(
             &mut self.graph,
             data,
@@ -237,84 +207,6 @@ impl KnowledgeGraph {
         )
     }
 
-    pub fn get_node_attributes(
-        &mut self,
-        py: Python,
-        indices: Vec<usize>,
-        specified_attributes: Option<Vec<String>>,
-        max_relations: Option<usize>,
-    ) -> PyResult<PyObject> {
-        get_attributes::get_node_attributes(
-            &mut self.graph,
-            py,
-            indices,
-            specified_attributes,
-            max_relations,
-        )
-    }
-
-    pub fn get_nodes(
-        &mut self,
-        node_type: Option<&str>,
-        filters: Option<Vec<HashMap<String, String>>>,
-    ) -> Vec<usize> {
-        navigate_graph::get_nodes(
-            &mut self.graph,
-            node_type,
-            filters
-        )
-    }
-
-    pub fn get_relationships(
-        &mut self,
-        py: Python,
-        indices: Vec<usize>,
-    ) -> PyResult<PyObject> {
-        navigate_graph::get_relationships(
-            &mut self.graph,
-            py,
-            indices
-        )
-    }
-
-    pub fn traverse_incoming(
-        &self,
-        indices: Vec<usize>,
-        relationship_type: String,
-        sort_attribute: Option<&str>,
-        ascending: Option<bool>,
-        max_relations: Option<usize>
-    ) -> Vec<usize> {
-        navigate_graph::traverse_nodes(
-            &self.graph,
-            indices,
-            relationship_type,
-            true,
-            sort_attribute,
-            ascending,
-            max_relations
-        )
-    }
-
-    pub fn traverse_outgoing(
-        &self,
-        indices: Vec<usize>,
-        relationship_type: String,
-        sort_attribute: Option<&str>,
-        ascending: Option<bool>,
-        max_relations: Option<usize>
-    ) -> Vec<usize> {
-        navigate_graph::traverse_nodes(
-            &self.graph,
-            indices,
-            relationship_type,
-            false,
-            sort_attribute,
-            ascending,
-            max_relations
-        )
-    }
-    
     pub fn save_to_file(&self, file_path: &str) -> PyResult<()> {
         let file = File::create(file_path)
             .map_err(|e| PyIOError::new_err(e.to_string()))?;
