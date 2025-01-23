@@ -28,9 +28,9 @@ pub fn add_relationships(
     columns: Vec<String>,
     relationship_type: String,
     source_type: String,
-    source_id_field: i32,
+    source_id_field: String,
     target_type: String,
-    target_id_field: i32,
+    target_id_field: String,
     source_title_field: Option<String>,
     target_title_field: Option<String>,
 ) -> PyResult<Vec<(usize, usize)>> {
@@ -65,7 +65,7 @@ pub fn add_relationships(
         let mut target_unique_id: Option<i32> = None;
         let mut source_title: Option<String> = None;
         let mut target_title: Option<String> = None;
-    
+
         for (col_index, column_name) in columns.iter().enumerate() {
             let item = match row.get(col_index) {
                 Some(i) => i,
@@ -74,26 +74,24 @@ pub fn add_relationships(
                     continue 'row_loop;
                 }
             };
-    
-            if let Ok(col_num) = column_name.parse::<i32>() {
-                if col_num == source_id_field {
-                    source_unique_id = parse_value_to_i32(item);
-                    if source_unique_id.is_none() {
-                        println!("Skipping row due to invalid source_id");
-                        continue 'row_loop;
-                    }
-                    continue;
+
+            if column_name == &source_id_field {
+                source_unique_id = parse_value_to_i32(item);
+                if source_unique_id.is_none() {
+                    println!("Skipping row due to invalid source_id");
+                    continue 'row_loop;
                 }
-                if col_num == target_id_field {
-                    target_unique_id = parse_value_to_i32(item);
-                    if target_unique_id.is_none() {
-                        println!("Skipping row due to invalid target_id");
-                        continue 'row_loop;
-                    }
-                    continue;
-                }
+                continue;
             }
-    
+            if column_name == &target_id_field {
+                target_unique_id = parse_value_to_i32(item);
+                if target_unique_id.is_none() {
+                    println!("Skipping row due to invalid target_id");
+                    continue 'row_loop;
+                }
+                continue;
+            }
+
             if let Some(ref title_field) = source_title_field {
                 if column_name == title_field {
                     source_title = match item.extract() {
@@ -119,10 +117,10 @@ pub fn add_relationships(
                 }
             }
         }
-    
-        let source_unique_id = source_unique_id.unwrap(); // Safe due to continue above
-        let target_unique_id = target_unique_id.unwrap(); // Safe due to continue above
-    
+
+        let source_unique_id = source_unique_id.unwrap();
+        let target_unique_id = target_unique_id.unwrap();
+
         if source_node_lookup.get(&source_unique_id).is_none() {
             println!("Source node {} not found, skipping relationship", source_unique_id);
             continue 'row_loop;
@@ -131,13 +129,13 @@ pub fn add_relationships(
             println!("Target node {} not found, skipping relationship", target_unique_id);
             continue 'row_loop;
         }
-    
+
         let source_node_index = find_or_create_node(graph, &source_type, source_unique_id, source_title, &mut source_node_lookup);
         let target_node_index = find_or_create_node(graph, &target_type, target_unique_id, target_title, &mut target_node_lookup);
-    
+
         let relation = Relation::new(&relationship_type, None);
         let _edge = graph.add_edge(source_node_index, target_node_index, relation);
-    
+
         indices.push((source_node_index.index(), target_node_index.index()));
     }
 

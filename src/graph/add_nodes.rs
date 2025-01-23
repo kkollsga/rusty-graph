@@ -78,7 +78,7 @@ pub fn add_nodes(
     data: &PyList,
     columns: Vec<String>,
     node_type: String,
-    unique_id_field: i32,
+    unique_id_field: String,
     node_title_field: Option<String>,
     conflict_handling: Option<String>,
     column_types: Option<&PyDict>,
@@ -117,7 +117,7 @@ pub fn add_nodes(
         let mut attributes: HashMap<String, AttributeValue> = HashMap::new();
         let mut unique_id: Option<i32> = None;
         let mut node_title: Option<String> = None;
-    
+
         for (col_index, column_name) in columns.iter().enumerate() {
             let item = match row.get(col_index) {
                 Some(i) => i,
@@ -126,18 +126,16 @@ pub fn add_nodes(
                     continue 'row_loop;
                 }
             };
-    
-            if let Ok(col_num) = column_name.parse::<i32>() {
-                if col_num == unique_id_field {
-                    unique_id = parse_value_to_i32(item);
-                    if unique_id.is_none() {
-                        println!("Skipping row due to invalid unique_id");
-                        continue 'row_loop;
-                    }
-                    continue;
+
+            if column_name == &unique_id_field {
+                unique_id = parse_value_to_i32(item);
+                if unique_id.is_none() {
+                    println!("Skipping row due to invalid unique_id");
+                    continue 'row_loop;
                 }
+                continue;
             }
-    
+
             if let Some(ref title_field) = node_title_field {
                 if column_name == title_field {
                     node_title = match item.extract() {
@@ -150,7 +148,7 @@ pub fn add_nodes(
                     continue;
                 }
             }
-    
+
             let data_type = schema.get(column_name).map_or("String", String::as_str);
             let attribute_value = match data_type {
                 "Int" => match parse_value_to_i32(item) {
@@ -206,10 +204,10 @@ pub fn add_nodes(
                     continue;
                 }
             };
-    
+
             attributes.insert(column_name.clone(), attribute_value);
         }
-    
+
         let unique_id = match unique_id {
             Some(id) => id,
             None => {
@@ -217,7 +215,7 @@ pub fn add_nodes(
                 continue 'row_loop;
             }
         };
-    
+
         let index = update_or_create_node(
             graph,
             &node_type,
@@ -226,7 +224,7 @@ pub fn add_nodes(
             Some(attributes),
             &conflict_handling,
         );
-    
+
         indices.push(index);
     }
 

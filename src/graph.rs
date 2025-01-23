@@ -91,10 +91,7 @@ impl KnowledgeGraph {
         conflict_handling: Option<String>,
         column_types: Option<&PyDict>,
     ) -> PyResult<Vec<usize>> {
-        let unique_id_field = match parse_id_field(unique_id_field)? {
-            Some(id) => id,
-            None => return Ok(Vec::new())
-        };
+        let unique_id_field = unique_id_field.extract::<String>()?;
         
         add_nodes::add_nodes(
             &mut self.graph,
@@ -120,15 +117,8 @@ impl KnowledgeGraph {
         source_title_field: Option<String>,
         target_title_field: Option<String>,
     ) -> PyResult<Vec<(usize, usize)>> {
-        let source_id_field = match parse_id_field(source_id_field)? {
-            Some(id) => id,
-            None => return Ok(Vec::new())
-        };
-        
-        let target_id_field = match parse_id_field(target_id_field)? {
-            Some(id) => id,
-            None => return Ok(Vec::new())
-        };
+        let source_id_field = source_id_field.extract::<String>()?;
+        let target_id_field = target_id_field.extract::<String>()?;
         
         add_relationships::add_relationships(
             &mut self.graph,
