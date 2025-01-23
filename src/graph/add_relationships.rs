@@ -4,11 +4,29 @@ use petgraph::graph::DiGraph;
 use std::collections::HashMap;
 use crate::schema::{Node, Relation};
 
+fn parse_value_to_i32(item: &PyAny) -> Option<i32> {
+    if let Ok(float_val) = item.extract::<f64>() {
+        return Some(float_val as i32);
+    }
+    if let Ok(int_val) = item.extract::<i32>() {
+        return Some(int_val);
+    }
+    if let Ok(s) = item.extract::<String>() {
+        if let Ok(num) = s.parse::<i32>() {
+            return Some(num);
+        }
+        if let Ok(num) = s.parse::<f64>() {
+            return Some(num as i32);
+        }
+    }
+    None
+}
+
 pub fn add_relationships(
     graph: &mut DiGraph<Node, Relation>,
-    data: &PyList,  // 2D list where each inner list represents a row
-    columns: Vec<String>,  // Column header names
-    relationship_type: String,  // Configuration items directly in the function call
+    data: &PyList,
+    columns: Vec<String>,
+    relationship_type: String,
     source_type: String,
     source_id_field: i32,
     target_type: String,
@@ -17,12 +35,9 @@ pub fn add_relationships(
     target_title_field: Option<String>,
 ) -> PyResult<Vec<(usize, usize)>> {
     let mut indices = Vec::new();
-
-    // Create lookup tables for source and target nodes
     let mut source_node_lookup: HashMap<i32, petgraph::graph::NodeIndex> = HashMap::new();
     let mut target_node_lookup: HashMap<i32, petgraph::graph::NodeIndex> = HashMap::new();
 
-    // Populate the lookup tables by filtering nodes based on type
     for index in graph.node_indices() {
         if let Some(node) = graph.node_weight(index) {
             match node {
@@ -38,84 +53,97 @@ pub fn add_relationships(
         }
     }
 
-    // Iterate over each row in the data
-    for row in data.iter() {
-        let row: Vec<&PyAny> = row.extract()?;
+    'row_loop: for row in data.iter() {
+        let row: Vec<&PyAny> = match row.extract() {
+            Ok(r) => r,
+            Err(_) => {
+                println!("Skipping malformed relationship row");
+                continue 'row_loop;
+            }
+        };
         let mut source_unique_id: Option<i32> = None;
         let mut target_unique_id: Option<i32> = None;
         let mut source_title: Option<String> = None;
         let mut target_title: Option<String> = None;
-
-        // Process each column in the row
+    
         for (col_index, column_name) in columns.iter().enumerate() {
-            let item = row.get(col_index).unwrap();
-
-            // Handle source ID field
+            let item = match row.get(col_index) {
+                Some(i) => i,
+                None => {
+                    println!("Skipping relationship row with missing columns");
+                    continue 'row_loop;
+                }
+            };
+    
             if let Ok(col_num) = column_name.parse::<i32>() {
                 if col_num == source_id_field {
-                    source_unique_id = Some(match item.extract::<f64>() {
-                        Ok(float_val) => float_val as i32,
-                        Err(_) => match item.extract::<i32>() {
-                            Ok(int_val) => int_val,
-                            Err(_) => return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                                "Source ID must be a number"
-                            ))
-                        }
-                    });
+                    source_unique_id = parse_value_to_i32(item);
+                    if source_unique_id.is_none() {
+                        println!("Skipping row due to invalid source_id");
+                        continue 'row_loop;
+                    }
                     continue;
                 }
                 if col_num == target_id_field {
-                    target_unique_id = Some(match item.extract::<f64>() {
-                        Ok(float_val) => float_val as i32,
-                        Err(_) => match item.extract::<i32>() {
-                            Ok(int_val) => int_val,
-                            Err(_) => return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                                "Target ID must be a number"
-                            ))
-                        }
-                    });
+                    target_unique_id = parse_value_to_i32(item);
+                    if target_unique_id.is_none() {
+                        println!("Skipping row due to invalid target_id");
+                        continue 'row_loop;
+                    }
                     continue;
                 }
             }
-
-            // Handle title fields
+    
             if let Some(ref title_field) = source_title_field {
                 if column_name == title_field {
-                    source_title = Some(item.extract()?);
+                    source_title = match item.extract() {
+                        Ok(title) => Some(title),
+                        Err(_) => {
+                            println!("Invalid source title, setting to None");
+                            None
+                        }
+                    };
                     continue;
                 }
             }
             if let Some(ref title_field) = target_title_field {
                 if column_name == title_field {
-                    target_title = Some(item.extract()?);
+                    target_title = match item.extract() {
+                        Ok(title) => Some(title),
+                        Err(_) => {
+                            println!("Invalid target title, setting to None");
+                            None
+                        }
+                    };
                     continue;
                 }
             }
         }
-
-        // Extract the IDs we found, returning error if not found
-        let source_unique_id = source_unique_id.ok_or_else(|| 
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Source ID field not found")
-        )?;
-        let target_unique_id = target_unique_id.ok_or_else(|| 
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Target ID field not found")
-        )?;
-
-        // Find or create source and target nodes - now passing owned values
+    
+        let source_unique_id = source_unique_id.unwrap(); // Safe due to continue above
+        let target_unique_id = target_unique_id.unwrap(); // Safe due to continue above
+    
+        if source_node_lookup.get(&source_unique_id).is_none() {
+            println!("Source node {} not found, skipping relationship", source_unique_id);
+            continue 'row_loop;
+        }
+        if target_node_lookup.get(&target_unique_id).is_none() {
+            println!("Target node {} not found, skipping relationship", target_unique_id);
+            continue 'row_loop;
+        }
+    
         let source_node_index = find_or_create_node(graph, &source_type, source_unique_id, source_title, &mut source_node_lookup);
         let target_node_index = find_or_create_node(graph, &target_type, target_unique_id, target_title, &mut target_node_lookup);
-
-        // Construct and add the relationship
+    
         let relation = Relation::new(&relationship_type, None);
         let _edge = graph.add_edge(source_node_index, target_node_index, relation);
-
+    
         indices.push((source_node_index.index(), target_node_index.index()));
     }
 
     Ok(indices)
 }
 
-// Helper function to find or create a node - now takes owned i32
 fn find_or_create_node(
     graph: &mut DiGraph<Node, Relation>,
     node_type: &str,

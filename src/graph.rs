@@ -28,25 +28,25 @@ impl KnowledgeGraph {
     }
 }
 
-// Helper function to parse i32 from Python input
-fn parse_id_field<'a>(value: &'a PyAny) -> PyResult<i32> {
-    // Try direct integer extraction first
-    if let Ok(num) = value.extract::<i32>() {
-        return Ok(num);
-    }
-    
-    // Try float extraction and conversion
-    if let Ok(num) = value.extract::<f64>() {
-        return Ok(num as i32);
-    }
-    
-    // Try string extraction and parsing
+fn parse_id_field<'a>(value: &'a PyAny) -> PyResult<Option<i32>> {
     if let Ok(s) = value.extract::<String>() {
-        return s.parse::<i32>()
-            .map_err(|_| PyTypeError::new_err(format!("Could not convert '{}' to integer", s)));
+        if let Ok(num) = s.parse::<i32>() {
+            return Ok(Some(num));
+        }
+        if let Ok(num) = s.parse::<f64>() {
+            return Ok(Some(num as i32));
+        }
+        return Ok(None);
     }
     
-    Err(PyTypeError::new_err("Value must be a number or string representing a number"))
+    if let Ok(num) = value.extract::<i32>() {
+        return Ok(Some(num));
+    }
+    if let Ok(num) = value.extract::<f64>() {
+        return Ok(Some(num as i32)); 
+    }
+    
+    Ok(None)
 }
 
 #[pymethods]
@@ -62,9 +62,11 @@ impl KnowledgeGraph {
         unique_id: &PyAny,
         attributes: Option<HashMap<String, AttributeValue>>,
         node_title: Option<String>
-    ) -> PyResult<usize> {
-        let unique_id = parse_id_field(unique_id)?;
-        Ok(self.add_node_impl(node_type, unique_id, attributes, node_title))
+    ) -> PyResult<Option<usize>> {
+        match parse_id_field(unique_id)? {
+            Some(id) => Ok(Some(self.add_node_impl(node_type, id, attributes, node_title))),
+            None => Ok(None)
+        }
     }
 
     fn add_node_impl(
@@ -89,7 +91,10 @@ impl KnowledgeGraph {
         conflict_handling: Option<String>,
         column_types: Option<&PyDict>,
     ) -> PyResult<Vec<usize>> {
-        let unique_id_field = parse_id_field(unique_id_field)?;
+        let unique_id_field = match parse_id_field(unique_id_field)? {
+            Some(id) => id,
+            None => return Ok(Vec::new())
+        };
         
         add_nodes::add_nodes(
             &mut self.graph,
@@ -115,8 +120,15 @@ impl KnowledgeGraph {
         source_title_field: Option<String>,
         target_title_field: Option<String>,
     ) -> PyResult<Vec<(usize, usize)>> {
-        let source_id_field = parse_id_field(source_id_field)?;
-        let target_id_field = parse_id_field(target_id_field)?;
+        let source_id_field = match parse_id_field(source_id_field)? {
+            Some(id) => id,
+            None => return Ok(Vec::new())
+        };
+        
+        let target_id_field = match parse_id_field(target_id_field)? {
+            Some(id) => id,
+            None => return Ok(Vec::new())
+        };
         
         add_relationships::add_relationships(
             &mut self.graph,
@@ -212,32 +224,23 @@ impl KnowledgeGraph {
     
     pub fn save_to_file(&self, file_path: &str) -> PyResult<()> {
         let file = File::create(file_path)
-            .map_err(|e| PyErr::new::<PyIOError, _>((e.to_string(),)))?;
-
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
         let writer = BufWriter::new(file);
-
         bincode::serialize_into(writer, &self.graph)
-            .map_err(|e| PyErr::new::<PyValueError, _>((e.to_string(),)))?;
-
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(())
     }
 
     pub fn load_from_file(&mut self, file_path: &str) -> PyResult<()> {
-        let file = match File::open(file_path) {
-            Ok(file) => file,
-            Err(e) => return Err(PyIOError::new_err(e.to_string())),
-        };
-        
+        let file = File::open(file_path)
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
         let reader = BufReader::new(file);
-    
         match bincode::deserialize_from(reader) {
             Ok(graph) => {
                 self.graph = graph;
                 Ok(())
             },
-            Err(e) => {
-                Err(PyErr::new::<pyo3::exceptions::PyException, _>(e.to_string()))
-            }
+            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyException, _>(e.to_string()))
         }
     }
 

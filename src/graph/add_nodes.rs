@@ -5,7 +5,25 @@ use std::collections::HashMap;
 use chrono::NaiveDateTime;
 use crate::graph::get_schema::update_or_retrieve_schema;
 use crate::schema::{Node, Relation};
-use crate::data_types::AttributeValue; 
+use crate::data_types::AttributeValue;
+
+fn parse_value_to_i32(item: &PyAny) -> Option<i32> {
+    if let Ok(float_val) = item.extract::<f64>() {
+        return Some(float_val as i32);
+    }
+    if let Ok(int_val) = item.extract::<i32>() {
+        return Some(int_val);
+    }
+    if let Ok(s) = item.extract::<String>() {
+        if let Ok(num) = s.parse::<i32>() {
+            return Some(num);
+        }
+        if let Ok(num) = s.parse::<f64>() {
+            return Some(num as i32);
+        }
+    }
+    None
+}
 
 fn update_or_create_node(
     graph: &mut DiGraph<Node, Relation>,
@@ -21,7 +39,7 @@ fn update_or_create_node(
             unique_id: uid,
             ..
         } => nt == node_type && *uid == unique_id,
-        Node::DataTypeNode { .. } => false  // DataTypeNodes can't match for node updates
+        Node::DataTypeNode { .. } => false
     });
 
     match existing_node_index {
@@ -79,7 +97,6 @@ pub fn add_nodes(
     } else {
         HashMap::new()
     };
-    println!("DateFormats: {:?}", datetime_formats);
 
     let schema = update_or_retrieve_schema(
         graph,
@@ -89,82 +106,118 @@ pub fn add_nodes(
         Some(column_types_map.clone())
     )?;
 
-    for row in data.iter() {
-        let row: Vec<&PyAny> = row.extract()?;
+    'row_loop: for row in data.iter() {
+        let row: Vec<&PyAny> = match row.extract() {
+            Ok(r) => r,
+            Err(_) => {
+                println!("Skipping malformed row");
+                continue 'row_loop;
+            }
+        };
         let mut attributes: HashMap<String, AttributeValue> = HashMap::new();
         let mut unique_id: Option<i32> = None;
         let mut node_title: Option<String> = None;
-
+    
         for (col_index, column_name) in columns.iter().enumerate() {
-            let item = row.get(col_index).unwrap();
-
+            let item = match row.get(col_index) {
+                Some(i) => i,
+                None => {
+                    println!("Skipping row with missing columns");
+                    continue 'row_loop;
+                }
+            };
+    
             if let Ok(col_num) = column_name.parse::<i32>() {
                 if col_num == unique_id_field {
-                    // Handle both float and integer cases for the unique ID
-                    unique_id = Some(match item.extract::<f64>() {
-                        Ok(float_val) => float_val as i32,
-                        Err(_) => match item.extract::<i32>() {
-                            Ok(int_val) => int_val,
-                            Err(_) => return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                                "Unique ID must be a number"
-                            ))
-                        }
-                    });
+                    unique_id = parse_value_to_i32(item);
+                    if unique_id.is_none() {
+                        println!("Skipping row due to invalid unique_id");
+                        continue 'row_loop;
+                    }
                     continue;
                 }
             }
-
+    
             if let Some(ref title_field) = node_title_field {
                 if column_name == title_field {
-                    node_title = Some(item.extract()?);
+                    node_title = match item.extract() {
+                        Ok(title) => Some(title),
+                        Err(_) => {
+                            println!("Invalid title value, setting to None");
+                            None
+                        }
+                    };
                     continue;
                 }
             }
-
+    
             let data_type = schema.get(column_name).map_or("String", String::as_str);
             let attribute_value = match data_type {
-                "Int" => match item.extract::<i32>() {
-                    Ok(value) => Ok(AttributeValue::Int(value)),
-                    Err(_) => {
-                        item.extract::<String>()
-                            .and_then(|s| s.parse::<i32>().map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("Failed to parse Int from String")))
-                            .map(AttributeValue::Int)
+                "Int" => match parse_value_to_i32(item) {
+                    Some(value) => AttributeValue::Int(value),
+                    None => {
+                        println!("Invalid integer for field {}, skipping attribute", column_name);
+                        continue;
                     }
                 },
                 "Float" => match item.extract::<f64>() {
-                    Ok(value) => Ok(AttributeValue::Float(value)),
-                    Err(_) => {
-                        item.extract::<String>()
-                            .and_then(|s| s.parse::<f64>().map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("Failed to parse Float from String")))
-                            .map(AttributeValue::Float)
+                    Ok(value) => AttributeValue::Float(value),
+                    Err(_) => match item.extract::<String>() {
+                        Ok(s) => match s.parse::<f64>() {
+                            Ok(num) => AttributeValue::Float(num),
+                            Err(_) => {
+                                println!("Invalid float for field {}, skipping attribute", column_name);
+                                continue;
+                            }
+                        },
+                        Err(_) => {
+                            println!("Invalid float for field {}, skipping attribute", column_name);
+                            continue;
+                        }
                     }
                 },
                 "DateTime" => {
                     let format = datetime_formats.get(column_name).unwrap_or(&default_datetime_format);
-                    if let Ok(timestamp) = item.extract::<i64>() {
-                        Ok(AttributeValue::DateTime(timestamp))
-                    } else {
-                        let datetime_str: String = item.extract()?;
+                    let timestamp = if let Ok(ts) = item.extract::<i64>() {
+                        ts
+                    } else if let Ok(datetime_str) = item.extract::<String>() {
                         match NaiveDateTime::parse_from_str(&datetime_str, format) {
-                            Ok(naive_datetime) => {
-                                let timestamp = naive_datetime.and_utc().timestamp();
-                                Ok(AttributeValue::DateTime(timestamp))
-                            },
-                            Err(_) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Failed to parse DateTime"))
+                            Ok(dt) => dt.and_utc().timestamp(),
+                            Err(_) => {
+                                println!("Invalid datetime for field {}, skipping attribute", column_name);
+                                continue;
+                            }
                         }
+                    } else {
+                        println!("Invalid datetime for field {}, skipping attribute", column_name);
+                        continue;
+                    };
+                    AttributeValue::DateTime(timestamp)
+                },
+                "String" => match item.extract::<String>() {
+                    Ok(s) => AttributeValue::String(s),
+                    Err(_) => {
+                        println!("Invalid string for field {}, skipping attribute", column_name);
+                        continue;
                     }
                 },
-                "String" => item.extract::<String>().map(AttributeValue::String),
-                _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Unsupported data type")),
-            }?;
-
+                _ => {
+                    println!("Unsupported data type for field {}, skipping attribute", column_name);
+                    continue;
+                }
+            };
+    
             attributes.insert(column_name.clone(), attribute_value);
         }
-
-        let unique_id = unique_id.ok_or_else(|| 
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Unique ID field not found")
-        )?;
-
+    
+        let unique_id = match unique_id {
+            Some(id) => id,
+            None => {
+                println!("No valid unique_id found, skipping row");
+                continue 'row_loop;
+            }
+        };
+    
         let index = update_or_create_node(
             graph,
             &node_type,
@@ -173,7 +226,7 @@ pub fn add_nodes(
             Some(attributes),
             &conflict_handling,
         );
-
+    
         indices.push(index);
     }
 
