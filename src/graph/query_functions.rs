@@ -1,10 +1,12 @@
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyList, PyDict}; 
+use pyo3::exceptions::PyValueError;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::Direction;
 use petgraph::visit::EdgeRef;
 use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue;
+use crate::graph::types::DataInput;
 use std::collections::HashMap;
 
 pub fn filter_nodes(
@@ -122,7 +124,7 @@ pub fn get_node_data(
                 node_data.insert("node_type".to_string(), node_type.clone().into_py(py));
             }
             if attributes.is_none() || attributes.as_ref().unwrap().contains(&"unique_id".to_string()) {
-                node_data.insert("unique_id".to_string(), unique_id.to_string().into_py(py));
+                node_data.insert("unique_id".to_string(), unique_id.into_py(py));
             }
             if let Some(title) = title {
                 if attributes.is_none() || attributes.as_ref().unwrap().contains(&"title".to_string()) {
@@ -164,7 +166,7 @@ pub fn get_simple_node_data(
         if let Some(Node::StandardNode { node_type, unique_id, attributes: node_attrs, title }) = graph.node_weight(NodeIndex::new(idx)) {
             let value = match attribute {
                 "node_type" => node_type.clone().into_py(py),
-                "unique_id" => unique_id.to_string().into_py(py),
+                "unique_id" => unique_id.into_py(py),
                 "title" => title.clone().unwrap_or_default().into_py(py),
                 _ => node_attrs.get(attribute)
                     .map(|v| v.to_python_object(py, None).unwrap_or_else(|_| py.None()))
@@ -175,4 +177,78 @@ pub fn get_simple_node_data(
     }
 
     Ok(result)
+}
+
+pub fn sort_nodes(
+    graph: &DiGraph<Node, Relation>, 
+    mut nodes: Vec<usize>,
+    sort_fn: impl Fn(&usize, &usize) -> std::cmp::Ordering
+) -> Vec<usize> {
+    if nodes.is_empty() {
+        nodes = graph.node_indices().map(|n| n.index()).collect();
+    }
+    nodes.sort_by(|a, b| sort_fn(a, b));
+    nodes
+}
+
+pub fn extract_attribute_value(value: &PyAny) -> PyResult<Option<AttributeValue>> {
+    if value.is_none() {
+        return Ok(None);
+    }
+
+    // Try direct numeric extraction
+    if let Ok(num) = value.extract::<i32>() {
+        return Ok(Some(AttributeValue::Int(num)));
+    }
+    if let Ok(num) = value.extract::<f64>() {
+        if num.is_finite() {
+            return Ok(Some(AttributeValue::Float(num)));
+        }
+    }
+    
+    // Try converting to string first
+    if let Ok(s) = value.str()?.extract::<String>() {
+        // Try parsing numeric strings
+        if let Ok(num) = s.parse::<i32>() {
+            return Ok(Some(AttributeValue::Int(num)));
+        }
+        if let Ok(num) = s.parse::<f64>() {
+            if num.is_finite() {
+                return Ok(Some(AttributeValue::Float(num)));
+            }
+        }
+        if !s.is_empty() {
+            return Ok(Some(AttributeValue::String(s)));
+        }
+    }
+
+    Ok(None)
+}
+
+pub fn extract_dataframe_content(df: &PyAny) -> PyResult<DataInput> {
+    let values = match df.call_method0("to_numpy") {
+        Ok(v) => v,
+        Err(e) => return Err(PyErr::new::<PyValueError, _>(
+            format!("Failed to convert DataFrame to numpy array: {}", e)
+        )),
+    };
+    
+    let values_list = match values.call_method0("tolist") {
+        Ok(v) => v,
+        Err(e) => return Err(PyErr::new::<PyValueError, _>(
+            format!("Failed to convert numpy array to list: {}", e)
+        )),
+    };
+
+    let columns = match df.getattr("columns")?.call_method0("tolist") {
+        Ok(v) => v.extract()?,
+        Err(e) => return Err(PyErr::new::<PyValueError, _>(
+            format!("Failed to get columns: {}", e)
+        )),
+    };
+    
+    Ok(DataInput {
+        data: values_list.downcast::<PyList>()?.into(),
+        columns
+    })
 }

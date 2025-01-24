@@ -2,31 +2,26 @@ use pyo3::prelude::*;
 use pyo3::types::{PyList, PyDict};
 use pyo3::PyResult;
 use pyo3::exceptions::{PyIOError, PyValueError};
-use petgraph::graph::DiGraph;
+use petgraph::graph::{DiGraph, NodeIndex}; 
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, BufReader};
 use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue;
 
+mod types;
 mod add_nodes;
 mod add_relationships;
 mod get_schema;
 mod query_functions;
 
-struct DataInput {
-    data: Py<PyList>,
-    columns: Vec<String>
-}
+use types::DataInput;
+use query_functions::extract_dataframe_content;
 
-fn extract_dataframe_content(df: &PyAny) -> PyResult<DataInput> {
-    let values = df.call_method0("values")?.call_method0("tolist")?;
-    let columns = df.getattr("columns")?.call_method0("tolist")?;
-    
-    Ok(DataInput {
-        data: values.downcast::<PyList>()?.into(),
-        columns: columns.extract()?
-    })
+#[derive(Debug)]
+enum SortSetting {
+   Attribute(String),
+   AttributeWithOrder(String, bool)
 }
 
 #[pyclass]
@@ -52,13 +47,27 @@ impl KnowledgeGraph {
         {
             return extract_dataframe_content(input);
         }
+    
+        if let Ok(true) = input.getattr("__class__")?
+            .getattr("__name__")?
+            .extract::<String>()
+            .map(|x| x == "ndarray")
+        {
+            let values = input.call_method0("tolist")?;
+            let columns = input.getattr("dtype")?.getattr("names")?.extract()?;
+            
+            return Ok(DataInput {
+                data: values.downcast::<PyList>()?.into(),
+                columns
+            });
+        }
         
         let data = input.downcast::<PyList>()?;
         let columns: Vec<String> = if let Ok(cols) = data.get_item(0)?.call_method0("keys") {
             cols.extract()?
         } else {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Data must be a pandas DataFrame or list of dicts"
+                "Data must be a pandas DataFrame, NumPy array, or list of dicts"
             ));
         };
         
@@ -67,27 +76,6 @@ impl KnowledgeGraph {
             columns
         })
     }
-}
-
-fn parse_id_field<'a>(value: &'a PyAny) -> PyResult<Option<i32>> {
-    if let Ok(s) = value.extract::<String>() {
-        if let Ok(num) = s.parse::<i32>() {
-            return Ok(Some(num));
-        }
-        if let Ok(num) = s.parse::<f64>() {
-            return Ok(Some(num as i32));
-        }
-        return Ok(None);
-    }
-    
-    if let Ok(num) = value.extract::<i32>() {
-        return Ok(Some(num));
-    }
-    if let Ok(num) = value.extract::<f64>() {
-        return Ok(Some(num as i32)); 
-    }
-    
-    Ok(None)
 }
 
 #[pymethods]
@@ -165,46 +153,149 @@ impl KnowledgeGraph {
         self.clone()
     }
 
+    pub fn sort(&mut self, sort_attribute: &str, ascending: Option<bool>) -> PyResult<Self> {
+        self.selected_nodes = query_functions::sort_nodes(&self.graph, self.selected_nodes.clone(), |&a, &b| {
+            let compare_values = |idx: usize| self.graph
+                .node_weight(petgraph::graph::NodeIndex::new(idx))
+                .and_then(|node| match node {
+                    Node::StandardNode { attributes, .. } => attributes.get(sort_attribute).map(|v| v.clone()),
+                    _ => None
+                });
+     
+            let ordering = match (compare_values(a), compare_values(b)) {
+                (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            };
+            
+            if !ascending.unwrap_or(true) {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        });
+        Ok(self.clone())
+    }
+     
+    pub fn sort_by(&mut self, sort_settings: Vec<PyObject>) -> PyResult<Self> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let settings = sort_settings.iter().map(|setting| {
+            if let Ok(attr) = setting.extract::<String>(py) {
+                Ok(SortSetting::Attribute(attr))
+            } else if let Ok(tuple) = setting.extract::<Vec<PyObject>>(py) {
+                if tuple.len() == 2 {
+                    let attr = tuple[0].extract::<String>(py)?;
+                    let ascending = tuple[1].extract::<bool>(py)?;
+                    Ok(SortSetting::AttributeWithOrder(attr, ascending))
+                } else {
+                    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Sort tuple must contain [attribute, ascending]"
+                    ))
+                }
+            } else {
+                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Sort settings must be either string or [attribute, ascending] tuple"
+                ))
+            }
+        }).collect::<PyResult<Vec<_>>>()?;
+     
+        self.selected_nodes = query_functions::sort_nodes(&self.graph, self.selected_nodes.clone(), |&a, &b| {
+            for setting in &settings {
+                let (sort_attribute, ascending) = match setting {
+                    SortSetting::Attribute(attr) => (attr, true),
+                    SortSetting::AttributeWithOrder(attr, asc) => (attr, *asc),
+                };
+     
+                let compare_values = |idx: usize| self.graph
+                    .node_weight(petgraph::graph::NodeIndex::new(idx))
+                    .and_then(|node| match node {
+                        Node::StandardNode { attributes, .. } => attributes.get(sort_attribute).map(|v| v.clone()),
+                        _ => None
+                    });
+     
+                let ordering = match (compare_values(a), compare_values(b)) {
+                    (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                };
+     
+                if ordering != std::cmp::Ordering::Equal {
+                    return if ascending { ordering } else { ordering.reverse() };
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+        
+        Ok(self.clone())
+    }
+
     pub fn get_attributes(
         &self,
         py: Python,
         attributes: Option<Vec<String>>,
+        max_results: Option<usize>
     ) -> PyResult<PyObject> {
-        let indices = if self.selected_nodes.is_empty() {
+        let mut indices = if self.selected_nodes.is_empty() {
             self.graph.node_indices().map(|n| n.index()).collect()
         } else {
             self.selected_nodes.clone()
         };
+        if let Some(limit) = max_results {
+            if limit == 0 {
+                return Err(PyValueError::new_err("max_results must be positive"));
+            }
+            indices.truncate(limit);
+        }
         let data = query_functions::get_node_data(&self.graph, indices, attributes)?;
         Ok(data.into_py(py))
     }
 
-    pub fn get_title(&self, py: Python) -> PyResult<PyObject> {
-        let indices = if self.selected_nodes.is_empty() {
+    pub fn get_title(&self, py: Python, max_results: Option<usize>) -> PyResult<PyObject> {
+        let mut indices = if self.selected_nodes.is_empty() {
             self.graph.node_indices().map(|n| n.index()).collect()
         } else {
             self.selected_nodes.clone()
         };
+        if let Some(limit) = max_results {
+            if limit == 0 {
+                return Err(PyValueError::new_err("max_results must be positive"));
+            }
+            indices.truncate(limit);
+        }
         let data = query_functions::get_simple_node_data(&self.graph, indices, "title")?;
         Ok(data.into_py(py))
     }
     
-    pub fn get_id(&self, py: Python) -> PyResult<PyObject> {
-        let indices = if self.selected_nodes.is_empty() {
+    pub fn get_id(&self, py: Python, max_results: Option<usize>) -> PyResult<PyObject> {
+        let mut indices = if self.selected_nodes.is_empty() {
             self.graph.node_indices().map(|n| n.index()).collect()
         } else {
             self.selected_nodes.clone()
         };
+        if let Some(limit) = max_results {
+            if limit == 0 {
+                return Err(PyValueError::new_err("max_results must be positive"));
+            }
+            indices.truncate(limit);
+        }
         let data = query_functions::get_simple_node_data(&self.graph, indices, "unique_id")?;
         Ok(data.into_py(py))
     }
 
-    pub fn get_index(&self, py: Python) -> PyResult<PyObject> {
-        let indices = if self.selected_nodes.is_empty() {
+    pub fn get_index(&self, py: Python, max_results: Option<usize>) -> PyResult<PyObject> {
+        let mut indices = if self.selected_nodes.is_empty() {
             self.graph.node_indices().map(|n| n.index()).collect()
         } else {
             self.selected_nodes.clone()
         };
+        if let Some(limit) = max_results {
+            if limit == 0 {
+                return Err(PyValueError::new_err("max_results must be positive"));
+            }
+            indices.truncate(limit);
+        }
         Ok(indices.into_py(py))
     }
 
@@ -215,9 +306,14 @@ impl KnowledgeGraph {
         attributes: Option<HashMap<String, AttributeValue>>,
         node_title: Option<String>
     ) -> PyResult<Option<usize>> {
-        match parse_id_field(unique_id)? {
-            Some(id) => Ok(Some(self.add_node_impl(node_type, id, attributes, node_title))),
-            None => Ok(None)
+        if let Ok(id) = unique_id.extract::<i32>() {
+            Ok(Some(self.add_node_impl(node_type, id, attributes, node_title)))
+        } else if let Ok(id) = unique_id.extract::<i64>() {
+            Ok(Some(self.add_node_impl(node_type, id as i32, attributes, node_title)))
+        } else if let Ok(id) = unique_id.extract::<f64>() {
+            Ok(Some(self.add_node_impl(node_type, id as i32, attributes, node_title)))
+        } else {
+            Ok(None)
         }
     }
 

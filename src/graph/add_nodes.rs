@@ -8,6 +8,9 @@ use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue;
 
 fn parse_value_to_i32(item: &PyAny) -> Option<i32> {
+    if let Ok(int_val) = item.extract::<i64>() {
+        return Some(int_val as i32);
+    }
     if let Ok(float_val) = item.extract::<f64>() {
         return Some(float_val as i32);
     }
@@ -17,9 +20,6 @@ fn parse_value_to_i32(item: &PyAny) -> Option<i32> {
     if let Ok(s) = item.extract::<String>() {
         if let Ok(num) = s.parse::<i32>() {
             return Some(num);
-        }
-        if let Ok(num) = s.parse::<f64>() {
-            return Some(num as i32);
         }
     }
     None
@@ -87,9 +87,28 @@ pub fn add_nodes(
     let mut indices = Vec::new();
     let default_datetime_format = "%Y-%m-%d %H:%M:%S".to_string();
 
+    // Infer types from first row if no column_types provided
+    let mut inferred_types = HashMap::new();
+    if column_types.is_none() {
+        if let Ok(first_row) = data.get_item(0).and_then(|r| r.extract::<Vec<&PyAny>>()) {
+            for (i, col) in columns.iter().enumerate() {
+                if let Some(item) = first_row.get(i) {
+                    let type_str = if item.extract::<i64>().is_ok() || item.extract::<i32>().is_ok() {
+                        "Int"
+                    } else if item.extract::<f64>().is_ok() {
+                        "Float"
+                    } else {
+                        "String"
+                    };
+                    inferred_types.insert(col.clone(), type_str.to_string());
+                }
+            }
+        }
+    }
+
     let mut column_types_map = match column_types {
         Some(ct) => ct.extract().unwrap_or_default(),
-        None => HashMap::new(),
+        None => inferred_types,
     };
 
     let datetime_formats = if !column_types_map.is_empty() {
@@ -151,61 +170,51 @@ pub fn add_nodes(
 
             let data_type = schema.get(column_name).map_or("String", String::as_str);
             let attribute_value = match data_type {
-                "Int" => match parse_value_to_i32(item) {
-                    Some(value) => AttributeValue::Int(value),
-                    None => {
-                        println!("Invalid integer for field {}, skipping attribute", column_name);
-                        continue;
+                "Int" => {
+                    if let Ok(value) = item.extract::<i64>() {
+                        Some(AttributeValue::Int(value as i32))
+                    } else if let Ok(value) = item.extract::<i32>() {
+                        Some(AttributeValue::Int(value))
+                    } else if let Ok(value) = item.extract::<f64>() {
+                        Some(AttributeValue::Int(value as i32))
+                    } else {
+                        println!("Invalid integer for field {}, skipping", column_name);
+                        None
                     }
                 },
-                "Float" => match item.extract::<f64>() {
-                    Ok(value) => AttributeValue::Float(value),
-                    Err(_) => match item.extract::<String>() {
-                        Ok(s) => match s.parse::<f64>() {
-                            Ok(num) => AttributeValue::Float(num),
-                            Err(_) => {
-                                println!("Invalid float for field {}, skipping attribute", column_name);
-                                continue;
-                            }
-                        },
-                        Err(_) => {
-                            println!("Invalid float for field {}, skipping attribute", column_name);
-                            continue;
-                        }
+                "Float" => {
+                    if let Ok(value) = item.extract::<f64>() {
+                        Some(AttributeValue::Float(value))
+                    } else if let Ok(value) = item.extract::<i64>() {
+                        Some(AttributeValue::Float(value as f64))
+                    } else {
+                        println!("Invalid float for field {}, skipping", column_name);
+                        None
                     }
                 },
                 "DateTime" => {
                     let format = datetime_formats.get(column_name).unwrap_or(&default_datetime_format);
-                    let timestamp = if let Ok(ts) = item.extract::<i64>() {
-                        ts
+                    if let Ok(ts) = item.extract::<i64>() {
+                        Some(AttributeValue::DateTime(ts))
                     } else if let Ok(datetime_str) = item.extract::<String>() {
                         match NaiveDateTime::parse_from_str(&datetime_str, format) {
-                            Ok(dt) => dt.and_utc().timestamp(),
+                            Ok(dt) => Some(AttributeValue::DateTime(dt.and_utc().timestamp())),
                             Err(_) => {
-                                println!("Invalid datetime for field {}, skipping attribute", column_name);
-                                continue;
+                                println!("Invalid datetime for field {}, skipping", column_name);
+                                None
                             }
                         }
                     } else {
-                        println!("Invalid datetime for field {}, skipping attribute", column_name);
-                        continue;
-                    };
-                    AttributeValue::DateTime(timestamp)
-                },
-                "String" => match item.extract::<String>() {
-                    Ok(s) => AttributeValue::String(s),
-                    Err(_) => {
-                        println!("Invalid string for field {}, skipping attribute", column_name);
-                        continue;
+                        println!("Invalid datetime for field {}, skipping", column_name);
+                        None
                     }
                 },
-                _ => {
-                    println!("Unsupported data type for field {}, skipping attribute", column_name);
-                    continue;
-                }
+                _ => Some(AttributeValue::String(item.extract::<String>().unwrap_or_default())),
             };
 
-            attributes.insert(column_name.clone(), attribute_value);
+            if let Some(value) = attribute_value {
+                attributes.insert(column_name.clone(), value);
+            }
         }
 
         let unique_id = match unique_id {
