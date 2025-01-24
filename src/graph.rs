@@ -155,15 +155,29 @@ impl KnowledgeGraph {
 
     pub fn sort(&mut self, sort_attribute: &str, ascending: Option<bool>) -> PyResult<Self> {
         self.selected_nodes = query_functions::sort_nodes(&self.graph, self.selected_nodes.clone(), |&a, &b| {
-            let compare_values = |idx: usize| self.graph
-                .node_weight(petgraph::graph::NodeIndex::new(idx))
-                .and_then(|node| match node {
-                    Node::StandardNode { attributes, .. } => attributes.get(sort_attribute).map(|v| v.clone()),
+            let compare_values = |idx: usize| {
+                let node = self.graph.node_weight(petgraph::graph::NodeIndex::new(idx));
+                
+                match node {
+                    Some(Node::StandardNode { attributes, .. }) => {
+                        let val = match sort_attribute {
+                            "title" => node.and_then(|n| match n {
+                                Node::StandardNode { title, .. } => title.clone(),
+                                _ => None
+                            }),
+                            _ => attributes.get(sort_attribute).map(|v| v.to_string())
+                        };
+                        val
+                    },
                     _ => None
-                });
+                }
+            };
      
-            let ordering = match (compare_values(a), compare_values(b)) {
-                (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+            let a_val = compare_values(a);
+            let b_val = compare_values(b);
+     
+            let ordering = match (a_val, b_val) {
+                (Some(val1), Some(val2)) => val1.cmp(&val2),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (None, None) => std::cmp::Ordering::Equal,
@@ -207,15 +221,29 @@ impl KnowledgeGraph {
                     SortSetting::AttributeWithOrder(attr, asc) => (attr, *asc),
                 };
      
-                let compare_values = |idx: usize| self.graph
-                    .node_weight(petgraph::graph::NodeIndex::new(idx))
-                    .and_then(|node| match node {
-                        Node::StandardNode { attributes, .. } => attributes.get(sort_attribute).map(|v| v.clone()),
+                let compare_values = |idx: usize| {
+                    let node = self.graph.node_weight(petgraph::graph::NodeIndex::new(idx));
+                    
+                    match node {
+                        Some(Node::StandardNode { attributes, .. }) => {
+                            let val = match sort_attribute.as_str() {
+                                "title" => node.and_then(|n| match n {
+                                    Node::StandardNode { title, .. } => title.clone(),
+                                    _ => None
+                                }),
+                                _ => attributes.get(sort_attribute).map(|v| v.to_string())
+                            };
+                            val
+                        },
                         _ => None
-                    });
-     
-                let ordering = match (compare_values(a), compare_values(b)) {
-                    (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+                    }
+                };
+         
+                let a_val = compare_values(a);
+                let b_val = compare_values(b);
+         
+                let ordering = match (a_val, b_val) {
+                    (Some(val1), Some(val2)) => val1.cmp(&val2),
                     (Some(_), None) => std::cmp::Ordering::Less,
                     (None, Some(_)) => std::cmp::Ordering::Greater,
                     (None, None) => std::cmp::Ordering::Equal,
