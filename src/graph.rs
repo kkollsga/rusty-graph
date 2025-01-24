@@ -160,24 +160,23 @@ impl KnowledgeGraph {
                 
                 match node {
                     Some(Node::StandardNode { attributes, .. }) => {
-                        let val = match sort_attribute {
+                        match sort_attribute {
                             "title" => node.and_then(|n| match n {
-                                Node::StandardNode { title, .. } => title.clone(),
+                                Node::StandardNode { title, .. } => title.clone().map(AttributeValue::String),
                                 _ => None
                             }),
-                            _ => attributes.get(sort_attribute).map(|v| v.to_string())
-                        };
-                        val
+                            _ => attributes.get(sort_attribute).cloned()
+                        }
                     },
                     _ => None
                 }
             };
-     
+    
             let a_val = compare_values(a);
             let b_val = compare_values(b);
-     
+    
             let ordering = match (a_val, b_val) {
-                (Some(val1), Some(val2)) => val1.cmp(&val2),
+                (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (None, None) => std::cmp::Ordering::Equal,
@@ -191,7 +190,7 @@ impl KnowledgeGraph {
         });
         Ok(self.clone())
     }
-     
+
     pub fn sort_by(&mut self, sort_settings: Vec<PyObject>) -> PyResult<Self> {
         let py = unsafe { Python::assume_gil_acquired() };
         let settings = sort_settings.iter().map(|setting| {
@@ -213,42 +212,41 @@ impl KnowledgeGraph {
                 ))
             }
         }).collect::<PyResult<Vec<_>>>()?;
-     
+
         self.selected_nodes = query_functions::sort_nodes(&self.graph, self.selected_nodes.clone(), |&a, &b| {
             for setting in &settings {
                 let (sort_attribute, ascending) = match setting {
                     SortSetting::Attribute(attr) => (attr, true),
                     SortSetting::AttributeWithOrder(attr, asc) => (attr, *asc),
                 };
-     
+
                 let compare_values = |idx: usize| {
                     let node = self.graph.node_weight(petgraph::graph::NodeIndex::new(idx));
                     
                     match node {
                         Some(Node::StandardNode { attributes, .. }) => {
-                            let val = match sort_attribute.as_str() {
+                            match sort_attribute.as_str() {
                                 "title" => node.and_then(|n| match n {
-                                    Node::StandardNode { title, .. } => title.clone(),
+                                    Node::StandardNode { title, .. } => title.clone().map(AttributeValue::String),
                                     _ => None
                                 }),
-                                _ => attributes.get(sort_attribute).map(|v| v.to_string())
-                            };
-                            val
+                                _ => attributes.get(sort_attribute).cloned()
+                            }
                         },
                         _ => None
                     }
                 };
-         
+
                 let a_val = compare_values(a);
                 let b_val = compare_values(b);
-         
+
                 let ordering = match (a_val, b_val) {
-                    (Some(val1), Some(val2)) => val1.cmp(&val2),
+                    (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
                     (Some(_), None) => std::cmp::Ordering::Less,
                     (None, Some(_)) => std::cmp::Ordering::Greater,
                     (None, None) => std::cmp::Ordering::Equal,
                 };
-     
+
                 if ordering != std::cmp::Ordering::Equal {
                     return if ascending { ordering } else { ordering.reverse() };
                 }
