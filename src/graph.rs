@@ -63,12 +63,17 @@ impl KnowledgeGraph {
         Ok(self.clone())
     }
 
-    pub fn get_type(&mut self, node_type: String) -> PyResult<Self> {
+    pub fn type_filter(&mut self, node_type: String) -> PyResult<Self> {
         let py = unsafe { Python::assume_gil_acquired() };
         let filter_dict = PyDict::new(py);
         filter_dict.set_item("node_type", node_type)?;
         self.selected_nodes = query_functions::filter_nodes(&self.graph, None, filter_dict)?;
         Ok(self.clone())
+    }
+
+    pub fn select_nodes(&mut self, node_indices: Vec<usize>) -> Self {
+        self.selected_nodes = node_indices;
+        self.clone()
     }
 
     pub fn traverse_in(
@@ -153,6 +158,15 @@ impl KnowledgeGraph {
         };
         let data = query_functions::get_simple_node_data(&self.graph, indices, "unique_id")?;
         Ok(data.into_py(py))
+    }
+
+    pub fn get_index(&self, py: Python) -> PyResult<PyObject> {
+        let indices = if self.selected_nodes.is_empty() {
+            self.graph.node_indices().map(|n| n.index()).collect()
+        } else {
+            self.selected_nodes.clone()
+        };
+        Ok(indices.into_py(py))
     }
 
     pub fn add_node(
