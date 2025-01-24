@@ -14,6 +14,21 @@ mod add_relationships;
 mod get_schema;
 mod query_functions;
 
+struct DataInput {
+    data: Py<PyList>,
+    columns: Vec<String>
+}
+
+fn extract_dataframe_content(df: &PyAny) -> PyResult<DataInput> {
+    let values = df.call_method0("values")?.call_method0("tolist")?;
+    let columns = df.getattr("columns")?.call_method0("tolist")?;
+    
+    Ok(DataInput {
+        data: values.downcast::<PyList>()?.into(),
+        columns: columns.extract()?
+    })
+}
+
 #[pyclass]
 #[derive(Clone)]
 pub struct KnowledgeGraph {
@@ -27,6 +42,30 @@ impl KnowledgeGraph {
             graph: DiGraph::new(),
             selected_nodes: Vec::new(),
         }
+    }
+
+    fn process_input_data(input: &PyAny) -> PyResult<DataInput> {
+        if let Ok(true) = input.getattr("__class__")?
+            .getattr("__name__")?
+            .extract::<String>()
+            .map(|x| x == "DataFrame") 
+        {
+            return extract_dataframe_content(input);
+        }
+        
+        let data = input.downcast::<PyList>()?;
+        let columns: Vec<String> = if let Ok(cols) = data.get_item(0)?.call_method0("keys") {
+            cols.extract()?
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Data must be a pandas DataFrame or list of dicts"
+            ));
+        };
+        
+        Ok(DataInput {
+            data: data.into(),
+            columns
+        })
     }
 }
 
@@ -126,7 +165,7 @@ impl KnowledgeGraph {
         self.clone()
     }
 
-    pub fn get_node_attributes(
+    pub fn get_attributes(
         &self,
         py: Python,
         attributes: Option<Vec<String>>,
@@ -196,21 +235,21 @@ impl KnowledgeGraph {
 
     pub fn add_nodes(
         &mut self,
-        data: &PyList,
-        columns: Vec<String>,
+        data: &PyAny,
         node_type: String,
         unique_id_field: &PyAny,
         node_title_field: Option<String>,
         conflict_handling: Option<String>,
         column_types: Option<&PyDict>,
     ) -> PyResult<Vec<usize>> {
-        let unique_id_field = unique_id_field.extract::<String>()?;
+        let input = Self::process_input_data(data)?;
+        
         add_nodes::add_nodes(
             &mut self.graph,
-            data,
-            columns,
+            input.data.as_ref(data.py()),
+            input.columns,
             node_type,
-            unique_id_field,
+            unique_id_field.extract()?,
             node_title_field,
             conflict_handling,
             column_types,
