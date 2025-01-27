@@ -15,12 +15,8 @@ kg.add_nodes(classes,"Class",'class_id','title')
 kg.add_nodes(students,"Student","student_id","name")
 kg.add_nodes(subjects,"Subject","subject_id","subject_name")
 kg.add_nodes(subject_records,"Subject Record","subject_record_id","title")
-kg.add_relationships(
-    students, 
-    "ENROLLED_IN", 
-    "Student", "student_id",
-    "Class", "class_id",
-    attribute_columns=["age"],
-    conflict_handling="skip"
-)
-print("Unsorted: ", kg.type_filter("Class").get_attributes())
+kg.add_relationships(students, "ENROLLED_IN", "Student", "student_id", "Class", "class_id")
+kg.add_relationships(subject_records, "HAS_SUBJECT", "Student", "student_id", "Subject","subject_id")
+kg.add_relationships(subject_records, "HAS_RECORD", "Subject", "subject_id", "Subject Record","subject_record_id")
+kg.add_relationships(subject_records, "EVALUATED_STUDENT", "Subject Record","subject_record_id", "Student", "student_id")
+print("Unsorted: ", kg.type_filter("Student").get_relationships())

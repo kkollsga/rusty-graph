@@ -325,6 +325,24 @@ impl KnowledgeGraph {
         Ok(indices.into_py(py))
     }
 
+    pub fn get_relationships(&self, py: Python, max_results: Option<usize>) -> PyResult<PyObject> {
+        let mut indices = if self.selected_nodes.is_empty() {
+            self.graph.node_indices().map(|n| n.index()).collect()
+        } else {
+            self.selected_nodes.clone()
+        };
+    
+        if let Some(limit) = max_results {
+            if limit == 0 {
+                return Err(PyValueError::new_err("max_results must be positive"));
+            }
+            indices.truncate(limit);
+        }
+    
+        let results = query_functions::get_simplified_relationships(&self.graph, indices)?;
+        Ok(results.into_py(py))
+    }
+
     pub fn add_node(
         &mut self,
         node_type: String,
