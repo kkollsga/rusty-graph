@@ -380,8 +380,7 @@ impl KnowledgeGraph {
 
     pub fn add_relationships(
         &mut self,
-        data: &PyList,
-        columns: Vec<String>,
+        data: &PyAny,
         relationship_type: String,
         source_type: String,
         source_id_field: &PyAny,
@@ -389,14 +388,17 @@ impl KnowledgeGraph {
         target_id_field: &PyAny,
         source_title_field: Option<String>,
         target_title_field: Option<String>,
+        attribute_columns: Option<Vec<String>>,
+        conflict_handling: Option<String>,
     ) -> PyResult<Vec<(usize, usize)>> {
         let source_id_field = source_id_field.extract::<String>()?;
         let target_id_field = target_id_field.extract::<String>()?;
+        let input = Self::process_input_data(data)?;
         
         add_relationships::add_relationships(
             &mut self.graph,
             data,
-            columns,
+            input.columns,  // Pass the columns from the processed input
             relationship_type,
             source_type,
             source_id_field,
@@ -404,6 +406,8 @@ impl KnowledgeGraph {
             target_id_field,
             source_title_field,
             target_title_field,
+            attribute_columns,
+            conflict_handling,
         )
     }
 

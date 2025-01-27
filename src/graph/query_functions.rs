@@ -117,9 +117,11 @@ pub fn get_node_data(
     let mut result = Vec::new();
 
     for idx in indices {
-        if let Some(Node::StandardNode { node_type, unique_id, attributes: node_attrs, title }) = graph.node_weight(NodeIndex::new(idx)) {
+        let node_idx = NodeIndex::new(idx);
+        if let Some(Node::StandardNode { node_type, unique_id, attributes: node_attrs, title }) = graph.node_weight(node_idx) {
             let mut node_data = HashMap::new();
             
+            // Add basic node information if no specific attributes requested or if they're in the requested list
             if attributes.is_none() || attributes.as_ref().unwrap().contains(&"node_type".to_string()) {
                 node_data.insert("node_type".to_string(), node_type.clone().into_py(py));
             }
@@ -132,6 +134,7 @@ pub fn get_node_data(
                 }
             }
 
+            // Add requested or all attributes
             match &attributes {
                 Some(attr_list) => {
                     for attr in attr_list {
@@ -146,6 +149,56 @@ pub fn get_node_data(
                     }
                 }
             }
+
+            // Add incoming relationships
+            let mut incoming = Vec::new();
+            for edge in graph.edges_directed(node_idx, Direction::Incoming) {
+                let mut rel_data = HashMap::new();
+                if let Some(Node::StandardNode { node_type, unique_id, title, .. }) = graph.node_weight(edge.source()) {
+                    rel_data.insert("source_type".to_string(), node_type.clone().into_py(py));
+                    rel_data.insert("source_id".to_string(), unique_id.into_py(py));
+                    if let Some(title) = title {
+                        rel_data.insert("source_title".to_string(), title.clone().into_py(py));
+                    }
+                }
+                rel_data.insert("relationship_type".to_string(), edge.weight().relation_type.clone().into_py(py));
+                if let Some(rel_attrs) = &edge.weight().attributes {
+                    rel_data.insert("attributes".to_string(), rel_attrs
+                        .iter()
+                        .map(|(k, v)| {
+                            Ok::<_, PyErr>((k.clone(), v.to_python_object(py, None)?))
+                        })
+                        .collect::<PyResult<HashMap<_, _>>>()?
+                        .into_py(py));
+                }
+                incoming.push(rel_data);
+            }
+            node_data.insert("incoming_relationships".to_string(), incoming.into_py(py));
+
+            // Add outgoing relationships
+            let mut outgoing = Vec::new();
+            for edge in graph.edges_directed(node_idx, Direction::Outgoing) {
+                let mut rel_data = HashMap::new();
+                if let Some(Node::StandardNode { node_type, unique_id, title, .. }) = graph.node_weight(edge.target()) {
+                    rel_data.insert("target_type".to_string(), node_type.clone().into_py(py));
+                    rel_data.insert("target_id".to_string(), unique_id.into_py(py));
+                    if let Some(title) = title {
+                        rel_data.insert("target_title".to_string(), title.clone().into_py(py));
+                    }
+                }
+                rel_data.insert("relationship_type".to_string(), edge.weight().relation_type.clone().into_py(py));
+                if let Some(rel_attrs) = &edge.weight().attributes {
+                    rel_data.insert("attributes".to_string(), rel_attrs
+                        .iter()
+                        .map(|(k, v)| {
+                            Ok::<_, PyErr>((k.clone(), v.to_python_object(py, None)?))
+                        })
+                        .collect::<PyResult<HashMap<_, _>>>()?
+                        .into_py(py));
+                }
+                outgoing.push(rel_data);
+            }
+            node_data.insert("outgoing_relationships".to_string(), outgoing.into_py(py));
 
             result.push(node_data);
         }

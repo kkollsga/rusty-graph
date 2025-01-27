@@ -2,12 +2,12 @@ import rusty_graph
 import pandas as pd
 print("rusty_graph: ", rusty_graph.__version__)
 school = pd.DataFrame(
-    columns=['id','title','age','students', 'score'], 
+    columns=['id','title'], 
     data=[
-        [2,'Class D', 15.8, 30, 'D'], 
-        [0,'Class A', 1, 23, 'A'], 
-        [1,'Class B', 2, 21, 'B'], 
-        [3,'Class C', 11, 30, 'C']
+        [0,'Class A'], 
+        [1,'Class B'], 
+        [2,'Class C'], 
+        [3,'Class D']
 ])
 
 kg = rusty_graph.KnowledgeGraph()
