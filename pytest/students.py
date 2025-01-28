@@ -19,4 +19,8 @@ kg.add_relationships(students, "ENROLLED_IN", "Student", "student_id", "Class", 
 kg.add_relationships(subject_records, "HAS_SUBJECT", "Student", "student_id", "Subject","subject_id")
 kg.add_relationships(subject_records, "HAS_RECORD", "Subject", "subject_id", "Subject Record","subject_record_id")
 kg.add_relationships(subject_records, "EVALUATED_STUDENT", "Subject Record","subject_record_id", "Student", "student_id")
-print("Unsorted: ", kg.type_filter("Student").get_relationships())
+#print("Unsorted: ", kg.type_filter("Student").get_relationships())
+
+#print(kg.type_filter("Class"))
+print("\nStudents in Class A and their subjects:")
+print("Classes with traversals: ", kg.type_filter("Class").traverse("ENROLLED_IN").get_title())

@@ -7,6 +7,7 @@ use petgraph::visit::EdgeRef;
 use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue;
 use crate::graph::types::DataInput;
+use crate::graph::traversal_functions::TraversalContext;
 use std::collections::HashMap;
 
 pub fn filter_nodes(
@@ -57,55 +58,6 @@ pub fn filter_nodes(
     }
 
     Ok(result)
-}
-
-pub fn traverse_relationships(
-    graph: &DiGraph<Node, Relation>,
-    indices: Vec<usize>,
-    relationship_type: &str,
-    incoming: bool,
-    sort_attribute: Option<&str>,
-    ascending: Option<bool>,
-    max_relations: Option<usize>,
-) -> Vec<usize> {
-    let mut connected_nodes = Vec::new();
-    let direction = if incoming { Direction::Incoming } else { Direction::Outgoing };
-
-    for idx in indices {
-        let node_idx = NodeIndex::new(idx);
-        for edge in graph.edges_directed(node_idx, direction) {
-            if edge.weight().relation_type == relationship_type {
-                let connected_idx = if incoming { edge.source() } else { edge.target() };
-                
-                if let (Some(attr), Some(Node::StandardNode { attributes, .. })) = 
-                    (sort_attribute, graph.node_weight(connected_idx)) {
-                    connected_nodes.push((connected_idx.index(), attributes.get(attr).cloned()));
-                } else {
-                    connected_nodes.push((connected_idx.index(), None));
-                }
-            }
-        }
-    }
-
-    if let Some(_) = sort_attribute {
-        connected_nodes.sort_by(|a, b| match (&a.1, &b.1) {
-            (Some(a_val), Some(b_val)) => a_val.partial_cmp(b_val).unwrap_or(std::cmp::Ordering::Equal),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        });
-
-        if !ascending.unwrap_or(true) {
-            connected_nodes.reverse();
-        }
-    }
-
-    let result: Vec<_> = connected_nodes.into_iter()
-        .map(|(idx, _)| idx)
-        .take(max_relations.unwrap_or(usize::MAX))
-        .collect();
-
-    result
 }
 
 pub fn get_node_data(
@@ -205,6 +157,69 @@ pub fn get_node_data(
     }
 
     Ok(result)
+}
+
+pub fn process_with_traversals<T: Clone + IntoPy<Py<PyAny>>>(
+    graph: &DiGraph<Node, Relation>,
+    values: Vec<T>,
+    indices: &[usize],
+    traversal_context: &Option<TraversalContext>,
+    value_key: &str,
+) -> PyResult<PyObject> {
+    let py = unsafe { Python::assume_gil_acquired() };
+    
+    if let Some(context) = traversal_context {
+        if let Some(relationships) = &context.node_relationships {
+            let mut result = Vec::new();
+            
+            // Process each original node
+            for &original_node in &context.nodes {
+                let node_idx = NodeIndex::new(original_node);
+                
+                // Get the original node's value
+                if let Some(node) = graph.node_weight(node_idx) {
+                    let value = match (node, value_key) {
+                        (Node::StandardNode { title, .. }, "title") => title.clone(),
+                        (Node::StandardNode { unique_id, .. }, "id") => Some(unique_id.to_string()),
+                        (Node::StandardNode { attributes, .. }, _) => attributes.get(value_key).map(|v| v.to_string()),
+                        _ => None
+                    };
+
+                    if let Some(value) = value {
+                        let mut node_data = HashMap::new();
+                        node_data.insert(value_key.to_string(), value.into_py(py));
+
+                        // Get and process traversed nodes
+                        if let Some(traversed) = relationships.get(&original_node) {
+                            let traversal_values: Vec<String> = traversed.iter()
+                                .filter_map(|&t_idx| {
+                                    graph.node_weight(NodeIndex::new(t_idx))
+                                        .and_then(|node| match node {
+                                            Node::StandardNode { title, .. } => title.clone(),
+                                            _ => None
+                                        })
+                                })
+                                .collect();
+
+                            if !traversal_values.is_empty() {
+                                node_data.insert("traversals".to_string(), traversal_values.into_py(py));
+                            }
+                        }
+
+                        result.push(node_data);
+                    }
+                }
+            }
+            
+            return Ok(result.into_py(py));
+        }
+    }
+    
+    // Default case if no context or relationships
+    Ok(values.into_iter()
+        .map(|v| v.into_py(py))
+        .collect::<Vec<_>>()
+        .into_py(py))
 }
 
 pub fn get_simple_node_data(

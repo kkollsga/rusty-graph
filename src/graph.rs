@@ -2,10 +2,14 @@ use pyo3::prelude::*;
 use pyo3::types::{PyList, PyDict};
 use pyo3::PyResult;
 use pyo3::exceptions::{PyIOError, PyValueError};
-use petgraph::graph::{DiGraph, NodeIndex}; 
+use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::visit::EdgeRef;
+use petgraph::Direction;
+use traversal_functions::{TraversalContext, traverse_relationships};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, BufReader};
+
 use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue;
 
@@ -14,6 +18,7 @@ mod add_nodes;
 mod add_relationships;
 mod get_schema;
 mod query_functions;
+mod traversal_functions;
 
 use types::DataInput;
 use query_functions::extract_dataframe_content;
@@ -29,6 +34,7 @@ enum SortSetting {
 pub struct KnowledgeGraph {
     pub graph: DiGraph<Node, Relation>,
     selected_nodes: Vec<usize>,
+    traversal_context: Option<TraversalContext>,
 }
 
 impl KnowledgeGraph {
@@ -36,6 +42,7 @@ impl KnowledgeGraph {
         KnowledgeGraph {
             graph: DiGraph::new(),
             selected_nodes: Vec::new(),
+            traversal_context: None,
         }
     }
 
@@ -85,75 +92,60 @@ impl KnowledgeGraph {
         Self::new_impl()
     }
 
-    pub fn filter(&mut self, filter_dict: &PyDict) -> PyResult<Self> {
+    pub fn filter(&mut self, filter_dict: &PyDict) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
         self.selected_nodes = query_functions::filter_nodes(&self.graph, None, filter_dict)?;
-        Ok(self.clone())
+        Py::new(py, self.clone())
     }
 
-    pub fn type_filter(&mut self, node_type: String) -> PyResult<Self> {
+    pub fn type_filter(&mut self, node_type: String) -> PyResult<Py<Self>> {
         let py = unsafe { Python::assume_gil_acquired() };
         let filter_dict = PyDict::new(py);
         filter_dict.set_item("node_type", node_type)?;
-        self.selected_nodes = query_functions::filter_nodes(&self.graph, None, filter_dict)?;
-        Ok(self.clone())
+        self.selected_nodes = query_functions::filter_nodes(&self.graph, None, &filter_dict)?;
+        Py::new(py, self.to_owned())
     }
 
-    pub fn select_nodes(&mut self, node_indices: Vec<usize>) -> Self {
+    pub fn select_nodes(&mut self, node_indices: Vec<usize>) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
         self.selected_nodes = node_indices;
-        self.clone()
+        Py::new(py, self.clone())
     }
 
-    pub fn traverse_in(
-        &mut self,
-        relationship_type: String,
-        sort_attribute: Option<String>,
-        ascending: Option<bool>,
-        max_relations: Option<usize>,
-    ) -> Self {
-        let indices = if self.selected_nodes.is_empty() {
+    pub fn traverse(&mut self, rel_type: String, direction: Option<String>) -> PyResult<Py<Self>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let start_nodes = if self.selected_nodes.is_empty() {
             self.graph.node_indices().map(|n| n.index()).collect()
         } else {
             self.selected_nodes.clone()
         };
 
-        self.selected_nodes = query_functions::traverse_relationships(
-            &self.graph,
-            indices,
-            &relationship_type,
-            true,
-            sort_attribute.as_deref(),
-            ascending,
-            max_relations,
-        );
-        self.clone()
-    }
+        if start_nodes.is_empty() {
+            return Py::new(py, self.to_owned());
+        }
 
-    pub fn traverse_out(
-        &mut self,
-        relationship_type: String,
-        sort_attribute: Option<String>,
-        ascending: Option<bool>,
-        max_relations: Option<usize>,
-    ) -> Self {
-        let indices = if self.selected_nodes.is_empty() {
-            self.graph.node_indices().map(|n| n.index()).collect()
-        } else {
-            self.selected_nodes.clone()
+        let dir = match direction.as_deref() {
+            Some("incoming") => Direction::Incoming,
+            Some("outgoing") => Direction::Outgoing,
+            Some("both") => Direction::Outgoing,
+            Some(d) => return Err(PyValueError::new_err(format!("Invalid direction: {}", d))),
+            None => Direction::Outgoing,
         };
 
-        self.selected_nodes = query_functions::traverse_relationships(
-            &self.graph,
-            indices,
-            &relationship_type,
-            false,
-            sort_attribute.as_deref(),
-            ascending,
-            max_relations,
-        );
-        self.clone()
+        let (traversed_nodes, relationships) = traverse_relationships(&self.graph, &start_nodes, rel_type.clone(), direction.clone())?;
+        
+        self.traversal_context = Some(TraversalContext::new_relationship(
+            start_nodes,
+            rel_type,
+            dir,
+            relationships
+        ));
+
+        Py::new(py, self.to_owned())
     }
 
-    pub fn sort(&mut self, sort_attribute: &str, ascending: Option<bool>) -> PyResult<Self> {
+    pub fn sort(&mut self, sort_attribute: &str, ascending: Option<bool>) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
         self.selected_nodes = query_functions::sort_nodes(&self.graph, self.selected_nodes.clone(), |&a, &b| {
             let compare_values = |idx: usize| {
                 let node = self.graph.node_weight(petgraph::graph::NodeIndex::new(idx));
@@ -188,10 +180,10 @@ impl KnowledgeGraph {
                 ordering
             }
         });
-        Ok(self.clone())
+        Py::new(py, self.clone())
     }
 
-    pub fn sort_by(&mut self, sort_settings: Vec<PyObject>) -> PyResult<Self> {
+    pub fn sort_by(&mut self, sort_settings: Vec<PyObject>) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
         let settings = sort_settings.iter().map(|setting| {
             if let Ok(attr) = setting.extract::<String>(py) {
@@ -254,7 +246,7 @@ impl KnowledgeGraph {
             std::cmp::Ordering::Equal
         });
         
-        Ok(self.clone())
+        Py::new(py, self.clone())
     }
 
     pub fn get_attributes(
@@ -280,18 +272,20 @@ impl KnowledgeGraph {
 
     pub fn get_title(&self, py: Python, max_results: Option<usize>) -> PyResult<PyObject> {
         let mut indices = if self.selected_nodes.is_empty() {
-            self.graph.node_indices().map(|n| n.index()).collect()
+            self.graph.node_indices().map(|n| n.index()).collect::<Vec<_>>()
         } else {
             self.selected_nodes.clone()
         };
+        
         if let Some(limit) = max_results {
             if limit == 0 {
                 return Err(PyValueError::new_err("max_results must be positive"));
             }
             indices.truncate(limit);
         }
-        let data = query_functions::get_simple_node_data(&self.graph, indices, "title")?;
-        Ok(data.into_py(py))
+    
+        let data = query_functions::get_simple_node_data(&self.graph, indices.clone(), "title")?;
+        query_functions::process_with_traversals(&self.graph, data, &indices, &self.traversal_context, "title")
     }
     
     pub fn get_id(&self, py: Python, max_results: Option<usize>) -> PyResult<PyObject> {
