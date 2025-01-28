@@ -22,5 +22,7 @@ kg.add_relationships(subject_records, "EVALUATED_STUDENT", "Subject Record","sub
 #print("Unsorted: ", kg.type_filter("Student").get_relationships())
 
 #print(kg.type_filter("Class"))
-print("\nStudents in Class A and their subjects:")
-print("Classes with traversals: ", kg.type_filter("Class").traverse("ENROLLED_IN").get_title())
+print("\nTraversal tests:")
+print("Classes with no traversals: ", kg.type_filter("Class").get_title())
+print("Classes with one traversal: ", kg.type_filter("Class").traverse("ENROLLED_IN", direction="outgoing").get_title())
+print("Classes with two traversals: ", kg.type_filter("Class").traverse("ENROLLED_IN").traverse("HAS_SUBJECT").get_title())

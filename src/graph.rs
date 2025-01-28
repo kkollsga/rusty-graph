@@ -2,16 +2,15 @@ use pyo3::prelude::*;
 use pyo3::types::{PyList, PyDict};
 use pyo3::PyResult;
 use pyo3::exceptions::{PyIOError, PyValueError};
-use petgraph::graph::{DiGraph, NodeIndex};
-use petgraph::visit::EdgeRef;
-use petgraph::Direction;
-use traversal_functions::{TraversalContext, traverse_relationships};
+use petgraph::graph::DiGraph;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, BufReader};
+use std::sync::{Arc, RwLock};
 
 use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue;
+use traversal_functions::{TraversalContext, traverse_relationships, process_node_data};
 
 mod types;
 mod add_nodes;
@@ -33,17 +32,40 @@ enum SortSetting {
 #[derive(Clone)]
 pub struct KnowledgeGraph {
     pub graph: DiGraph<Node, Relation>,
-    selected_nodes: Vec<usize>,
-    traversal_context: Option<TraversalContext>,
+    traversal_context: Arc<RwLock<TraversalContext>>,
 }
 
 impl KnowledgeGraph {
     fn new_impl() -> Self {
         KnowledgeGraph {
             graph: DiGraph::new(),
-            selected_nodes: Vec::new(),
-            traversal_context: None,
+            traversal_context: Arc::new(RwLock::new(TraversalContext::new_base())),
         }
+    }
+
+    // Helper to safely get context
+    fn get_context(&self) -> PyResult<TraversalContext> {
+        self.traversal_context.read()
+            .map(|guard| (*guard).clone())
+            .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire read lock"))
+    }
+
+    // Helper to safely update context
+    fn update_context(&self, new_context: TraversalContext) -> PyResult<()> {
+        let mut guard = self.traversal_context.write()
+            .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
+        *guard = new_context;
+        Ok(())
+    }
+
+    // Helper to get nodes with empty check
+    fn get_context_nodes(&self) -> PyResult<Vec<usize>> {
+        let context = self.get_context()?;
+        Ok(if context.is_empty() {
+            self.graph.node_indices().map(|n| n.index()).collect()
+        } else {
+            context.current_nodes()
+        })
     }
 
     fn process_input_data(input: &PyAny) -> PyResult<DataInput> {
@@ -94,7 +116,10 @@ impl KnowledgeGraph {
 
     pub fn filter(&mut self, filter_dict: &PyDict) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
-        self.selected_nodes = query_functions::filter_nodes(&self.graph, None, filter_dict)?;
+        let filtered_nodes = query_functions::filter_nodes(&self.graph, None, filter_dict)?;
+        let mut context = TraversalContext::new_base();
+        context.add_level(filtered_nodes, None, None);
+        self.update_context(context)?;
         Py::new(py, self.clone())
     }
 
@@ -102,84 +127,94 @@ impl KnowledgeGraph {
         let py = unsafe { Python::assume_gil_acquired() };
         let filter_dict = PyDict::new(py);
         filter_dict.set_item("node_type", node_type)?;
-        self.selected_nodes = query_functions::filter_nodes(&self.graph, None, &filter_dict)?;
+        let filtered_nodes = query_functions::filter_nodes(&self.graph, None, &filter_dict)?;
+        let mut context = TraversalContext::new_base();
+        context.add_level(filtered_nodes, None, None);
+        self.update_context(context)?;
         Py::new(py, self.to_owned())
     }
 
     pub fn select_nodes(&mut self, node_indices: Vec<usize>) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
-        self.selected_nodes = node_indices;
+        let mut context = TraversalContext::new_base();
+        context.add_level(node_indices, None, None);
+        self.update_context(context)?;
         Py::new(py, self.clone())
     }
 
     pub fn traverse(&mut self, rel_type: String, direction: Option<String>) -> PyResult<Py<Self>> {
         let py = unsafe { Python::assume_gil_acquired() };
-        let start_nodes = if self.selected_nodes.is_empty() {
-            self.graph.node_indices().map(|n| n.index()).collect()
-        } else {
-            self.selected_nodes.clone()
-        };
-
+        let current_context = self.get_context()?;
+        
+        let start_nodes = current_context.current_nodes();
+        
         if start_nodes.is_empty() {
             return Py::new(py, self.to_owned());
         }
-
-        let dir = match direction.as_deref() {
-            Some("incoming") => Direction::Incoming,
-            Some("outgoing") => Direction::Outgoing,
-            Some("both") => Direction::Outgoing,
-            Some(d) => return Err(PyValueError::new_err(format!("Invalid direction: {}", d))),
-            None => Direction::Outgoing,
-        };
-
-        let (traversed_nodes, relationships) = traverse_relationships(&self.graph, &start_nodes, rel_type.clone(), direction.clone())?;
+    
+        let relationships = traverse_relationships(&self.graph, &start_nodes, rel_type.clone(), direction)?;
         
-        self.traversal_context = Some(TraversalContext::new_relationship(
-            start_nodes,
-            rel_type,
-            dir,
-            relationships
-        ));
-
+        // Create new context with additional level and relationships
+        let mut new_context = current_context;
+        let mut all_target_nodes = Vec::new();
+        for targets in relationships.values() {
+            for &target in targets {
+                if !all_target_nodes.contains(&target) {
+                    all_target_nodes.push(target);
+                }
+            }
+        }
+        new_context.add_level(all_target_nodes, None, Some(rel_type));
+        new_context.add_relationships(relationships);
+        
+        self.update_context(new_context)?;
         Py::new(py, self.to_owned())
     }
 
     pub fn sort(&mut self, sort_attribute: &str, ascending: Option<bool>) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
-        self.selected_nodes = query_functions::sort_nodes(&self.graph, self.selected_nodes.clone(), |&a, &b| {
-            let compare_values = |idx: usize| {
-                let node = self.graph.node_weight(petgraph::graph::NodeIndex::new(idx));
+        let mut context = self.get_context()?;
+        
+        if let Some(last_level) = context.levels.last_mut() {
+            let sorted_nodes = query_functions::sort_nodes(&self.graph, last_level.nodes.clone(), |&a, &b| {
+                let compare_values = |idx: usize| {
+                    let node = self.graph.node_weight(petgraph::graph::NodeIndex::new(idx));
+                    
+                    match node {
+                        Some(Node::StandardNode { attributes, .. }) => {
+                            match sort_attribute {
+                                "title" => node.and_then(|n| match n {
+                                    Node::StandardNode { title, .. } => title.clone().map(AttributeValue::String),
+                                    _ => None
+                                }),
+                                _ => attributes.get(sort_attribute).cloned()
+                            }
+                        },
+                        _ => None
+                    }
+                };
+        
+                let a_val = compare_values(a);
+                let b_val = compare_values(b);
+        
+                let ordering = match (a_val, b_val) {
+                    (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                };
                 
-                match node {
-                    Some(Node::StandardNode { attributes, .. }) => {
-                        match sort_attribute {
-                            "title" => node.and_then(|n| match n {
-                                Node::StandardNode { title, .. } => title.clone().map(AttributeValue::String),
-                                _ => None
-                            }),
-                            _ => attributes.get(sort_attribute).cloned()
-                        }
-                    },
-                    _ => None
+                if !ascending.unwrap_or(true) {
+                    ordering.reverse()
+                } else {
+                    ordering
                 }
-            };
+            });
     
-            let a_val = compare_values(a);
-            let b_val = compare_values(b);
-    
-            let ordering = match (a_val, b_val) {
-                (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            };
-            
-            if !ascending.unwrap_or(true) {
-                ordering.reverse()
-            } else {
-                ordering
-            }
-        });
+            last_level.nodes = sorted_nodes;
+        }
+        
+        self.update_context(context)?;
         Py::new(py, self.clone())
     }
 
@@ -205,7 +240,9 @@ impl KnowledgeGraph {
             }
         }).collect::<PyResult<Vec<_>>>()?;
 
-        self.selected_nodes = query_functions::sort_nodes(&self.graph, self.selected_nodes.clone(), |&a, &b| {
+        let nodes = self.get_context_nodes()?;
+        
+        let sorted_nodes = query_functions::sort_nodes(&self.graph, nodes, |&a, &b| {
             for setting in &settings {
                 let (sort_attribute, ascending) = match setting {
                     SortSetting::Attribute(attr) => (attr, true),
@@ -246,20 +283,12 @@ impl KnowledgeGraph {
             std::cmp::Ordering::Equal
         });
         
+        self.update_context(TraversalContext::new_with_nodes(sorted_nodes))?;
         Py::new(py, self.clone())
     }
 
-    pub fn get_attributes(
-        &self,
-        py: Python,
-        attributes: Option<Vec<String>>,
-        max_results: Option<usize>
-    ) -> PyResult<PyObject> {
-        let mut indices = if self.selected_nodes.is_empty() {
-            self.graph.node_indices().map(|n| n.index()).collect()
-        } else {
-            self.selected_nodes.clone()
-        };
+    pub fn get_attributes(&self, py: Python, attributes: Option<Vec<String>>, max_results: Option<usize>) -> PyResult<PyObject> {
+        let mut indices = self.get_context_nodes()?;
         if let Some(limit) = max_results {
             if limit == 0 {
                 return Err(PyValueError::new_err("max_results must be positive"));
@@ -270,30 +299,21 @@ impl KnowledgeGraph {
         Ok(data.into_py(py))
     }
 
-    pub fn get_title(&self, py: Python, max_results: Option<usize>) -> PyResult<PyObject> {
-        let mut indices = if self.selected_nodes.is_empty() {
-            self.graph.node_indices().map(|n| n.index()).collect::<Vec<_>>()
-        } else {
-            self.selected_nodes.clone()
-        };
-        
+    pub fn get_title(&self, _py: Python, max_results: Option<usize>) -> PyResult<PyObject> {
+        let mut context = self.get_context()?;
         if let Some(limit) = max_results {
             if limit == 0 {
                 return Err(PyValueError::new_err("max_results must be positive"));
             }
-            indices.truncate(limit);
+            if let Some(level) = context.levels.last_mut() {
+                level.nodes.truncate(limit);
+            }
         }
-    
-        let data = query_functions::get_simple_node_data(&self.graph, indices.clone(), "title")?;
-        query_functions::process_with_traversals(&self.graph, data, &indices, &self.traversal_context, "title")
+        Ok(process_node_data(&self.graph, &context, "title")?.into_py(_py))
     }
     
     pub fn get_id(&self, py: Python, max_results: Option<usize>) -> PyResult<PyObject> {
-        let mut indices = if self.selected_nodes.is_empty() {
-            self.graph.node_indices().map(|n| n.index()).collect()
-        } else {
-            self.selected_nodes.clone()
-        };
+        let mut indices = self.get_context_nodes()?;
         if let Some(limit) = max_results {
             if limit == 0 {
                 return Err(PyValueError::new_err("max_results must be positive"));
@@ -305,11 +325,7 @@ impl KnowledgeGraph {
     }
 
     pub fn get_index(&self, py: Python, max_results: Option<usize>) -> PyResult<PyObject> {
-        let mut indices = if self.selected_nodes.is_empty() {
-            self.graph.node_indices().map(|n| n.index()).collect()
-        } else {
-            self.selected_nodes.clone()
-        };
+        let mut indices = self.get_context_nodes()?;
         if let Some(limit) = max_results {
             if limit == 0 {
                 return Err(PyValueError::new_err("max_results must be positive"));
@@ -320,11 +336,7 @@ impl KnowledgeGraph {
     }
 
     pub fn get_relationships(&self, py: Python, max_results: Option<usize>) -> PyResult<PyObject> {
-        let mut indices = if self.selected_nodes.is_empty() {
-            self.graph.node_indices().map(|n| n.index()).collect()
-        } else {
-            self.selected_nodes.clone()
-        };
+        let mut indices = self.get_context_nodes()?;
     
         if let Some(limit) = max_results {
             if limit == 0 {
@@ -410,7 +422,7 @@ impl KnowledgeGraph {
         add_relationships::add_relationships(
             &mut self.graph,
             data,
-            input.columns,  // Pass the columns from the processed input
+            input.columns,
             relationship_type,
             source_type,
             source_id_field,
@@ -439,6 +451,7 @@ impl KnowledgeGraph {
         match bincode::deserialize_from(reader) {
             Ok(graph) => {
                 self.graph = graph;
+                self.update_context(TraversalContext::new_base())?;
                 Ok(())
             },
             Err(e) => Err(PyErr::new::<pyo3::exceptions::PyException, _>(e.to_string()))
