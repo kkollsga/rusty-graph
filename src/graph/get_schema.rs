@@ -21,55 +21,43 @@ pub fn update_or_retrieve_schema(
     data_type: &str,
     name: &str,
     columns: Option<Vec<String>>,
-    column_types: Option<HashMap<String, String>>,
+    types: Option<HashMap<String, String>>,
 ) -> PyResult<HashMap<String, String>> {
-    // Find the existing DataTypeNode or create a new one if it doesn't exist
-    let data_type_node_index = match graph.node_indices().find(|&i| {
-        if let Node::DataTypeNode { data_type: dt, name: n, .. } = &graph[i] {
-            return dt.as_str() == data_type && n == name;
-        }
-        false
-    }) {
-        Some(index) => index,
-        None => {
-            let new_data_type_node = Node::new_data_type(data_type, name, HashMap::new());
-            graph.add_node(new_data_type_node)
+    let schema_node = graph.node_indices().find(|&i| match &graph[i] {
+        Node::DataTypeNode { data_type: dt, name: nt, .. } => {
+            dt == data_type && nt == name
         },
-    };
+        _ => false
+    });
 
-    // If columns are provided, update the DataTypeNode's attributes
-    if let Some(cols) = columns {
-        if let Node::DataTypeNode { attributes: attr, .. } = &mut graph[data_type_node_index] {
-            for column in cols.iter() {
-                let column_data_type = column_types
-                    .as_ref()
-                    .and_then(|ct| ct.get(column))
-                    .unwrap_or(&"String".to_string())
-                    .clone();
-
-                match attr.entry(column.clone()) {
-                    Entry::Occupied(entry) if entry.get() != &column_data_type => {
-                        return Err(PyErr::new::<PyValueError, _>(format!(
-                            "Data type conflict for attribute '{}': existing type '{}', new type '{}'",
-                            column,
-                            entry.get(),
-                            column_data_type
-                        )));
-                    },
-                    Entry::Vacant(entry) => {
-                        entry.insert(column_data_type);
-                    },
-                    _ => (),
-                }
+    match schema_node {
+        Some(idx) => {
+            if let Some(new_types) = types {
+                let mut curr_attrs = if let Node::DataTypeNode { attributes, .. } = &mut graph[idx] {
+                    attributes.clone()
+                } else {
+                    HashMap::new()
+                };
+                
+                // Merge new types with existing
+                curr_attrs.extend(new_types);
+                
+                // Replace entire node to ensure update is atomic
+                graph[idx] = Node::new_data_type(data_type, name, curr_attrs.clone());
+                
+                Ok(curr_attrs)
+            } else if let Node::DataTypeNode { attributes, .. } = &graph[idx] {
+                Ok(attributes.clone())
+            } else {
+                unreachable!()
             }
+        },
+        None => {
+            let attributes = types.unwrap_or_default();
+            let node = Node::new_data_type(data_type, name, attributes.clone());
+            graph.add_node(node);
+            Ok(attributes)
         }
-    }
-
-    // Return the updated attributes HashMap
-    if let Node::DataTypeNode { attributes: attr, .. } = &graph[data_type_node_index] {
-        Ok(attr.clone())
-    } else {
-        Err(PyErr::new::<PyValueError, _>("Failed to retrieve or update DataTypeNode"))
     }
 }
 

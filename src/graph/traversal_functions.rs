@@ -1,11 +1,15 @@
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::Direction;
 use petgraph::visit::EdgeRef;
-use crate::schema::{Node, Relation};
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use std::collections::{HashMap, HashSet};
 use pyo3::types::PyDict;
+
+use crate::schema::{Node, Relation};
+use crate::data_types::AttributeValue;
+use crate::graph::add_nodes::update_node_attribute;
+use crate::graph::get_schema::update_or_retrieve_schema;
 
 #[derive(Debug, Clone)]
 pub struct TraversalLevel {
@@ -17,13 +21,15 @@ pub struct TraversalLevel {
 
 #[derive(Debug, Clone)]
 pub struct TraversalContext {
-    pub levels: Vec<TraversalLevel>
+    pub levels: Vec<TraversalLevel>,
+    pub results: Option<PyObject>
 }
 
 impl TraversalContext {
     pub fn new_base() -> Self {
         TraversalContext {
-            levels: Vec::new()
+            levels: Vec::new(),
+            results: None
         }
     }
 
@@ -134,6 +140,71 @@ pub fn traverse_relationships(
     Ok(relationships)
 }
 
+pub fn process_attributes_levels(
+    graph: &DiGraph<Node, Relation>,
+    context: &TraversalContext,
+    attributes: Option<Vec<String>>,
+    max_results: Option<usize>,
+) -> PyResult<PyObject> {
+    let py = unsafe { Python::assume_gil_acquired() };
+
+    // Get nodes from context, or return empty list if no context
+    let mut nodes = if context.levels.is_empty() {
+        Vec::new()
+    } else {
+        context.levels[0].nodes.clone()
+    };
+
+    // Apply max_results if specified
+    if let Some(limit) = max_results {
+        if limit == 0 {
+            return Err(PyValueError::new_err("max_results must be positive"));
+        }
+        nodes.truncate(limit);
+    }
+
+    let mut result = Vec::new();
+    
+    for &root_idx in &nodes {
+        if let Some(node) = graph.node_weight(NodeIndex::new(root_idx)) {
+            if let Ok(mut root_data) = node.to_node_data(root_idx, py, attributes.as_deref()) {
+                // Add traversal data if we have more levels
+                if context.levels.len() > 1 {
+                    if let Some(child_nodes) = context.levels[1].node_relationships.get(&root_idx) {
+                        let mut children = Vec::new();
+                        
+                        for &child_idx in child_nodes {
+                            if let Some(child_node) = graph.node_weight(NodeIndex::new(child_idx)) {
+                                if let Ok(mut child_data) = child_node.to_node_data(child_idx, py, attributes.as_deref()) {
+                                    // Add grandchildren if they exist
+                                    if context.levels.len() > 2 {
+                                        if let Some(grandchild_nodes) = context.levels[2].node_relationships.get(&child_idx) {
+                                            for &grandchild_idx in grandchild_nodes {
+                                                if let Some(grandchild_node) = graph.node_weight(NodeIndex::new(grandchild_idx)) {
+                                                    if let Ok(grandchild_data) = grandchild_node.to_node_data(grandchild_idx, py, attributes.as_deref()) {
+                                                        child_data.traversals.push(grandchild_data);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    children.push(child_data);
+                                }
+                            }
+                        }
+                        
+                        root_data.traversals = children;
+                    }
+                }
+                
+                result.push(Node::node_data_to_py(&root_data, py)?);
+            }
+        }
+    }
+
+    Ok(result.into_py(py))
+}
+
 pub fn process_traversal_levels(
     graph: &DiGraph<Node, Relation>,
     context: &TraversalContext,
@@ -221,4 +292,167 @@ pub fn process_traversal_levels(
     }
 
     Ok(result.into())
+}
+
+pub fn count_traversal_levels(
+    context: &TraversalContext,
+    max_results: Option<usize>,
+) -> PyResult<PyObject> {
+    let py = unsafe { Python::assume_gil_acquired() };
+
+    if context.levels.is_empty() {
+        return Ok(0_usize.into_py(py));
+    }
+
+    // Single level case: return total count
+    if context.levels.len() == 1 {
+        let mut count = context.levels[0].nodes.len();
+        if let Some(limit) = max_results {
+            if limit == 0 {
+                return Err(PyValueError::new_err("max_results must be positive"));
+            }
+            count = count.min(limit);
+        }
+        return Ok(count.into_py(py));
+    }
+
+    let result = PyDict::new(py);
+
+    // Process root nodes
+    for &root_idx in &context.levels[0].nodes {
+        // For single traversal, return dictionary with counts
+        if context.levels.len() == 2 {
+            let count = context.levels[1]
+                .node_relationships
+                .get(&root_idx)
+                .map_or(0, |children| children.len());
+            result.set_item(root_idx.to_string(), count)?;
+        } 
+        // For multiple traversals
+        else {
+            let second_level = PyDict::new(py);
+            if let Some(child_nodes) = context.levels[1].node_relationships.get(&root_idx) {
+                for &child_idx in child_nodes {
+                    let final_count = context.levels[2]
+                        .node_relationships
+                        .get(&child_idx)
+                        .map_or(0, |grandchildren| grandchildren.len());
+                    second_level.set_item(child_idx.to_string(), final_count)?;
+                }
+            }
+            result.set_item(root_idx.to_string(), second_level)?;
+        }
+    }
+
+    Ok(result.into())
+}
+
+pub fn store_traversal_values(
+    graph: &mut DiGraph<Node, Relation>,
+    context: &TraversalContext,
+    attribute_name: &str,
+    store_values: &PyObject,
+) -> PyResult<()> {
+    let py = unsafe { Python::assume_gil_acquired() };
+    
+    println!("Store function called with attribute_name: {}", attribute_name);
+    
+    if context.levels.is_empty() {
+        println!("Context levels empty, returning");
+        return Ok(());
+    }
+
+    if context.levels.len() == 1 {
+        println!("Only one context level, returning");
+        return Ok(());
+    }
+
+    let dict = store_values.downcast::<PyDict>(py)?;
+    println!("Store values: {:?}", dict.to_string());
+    
+    let mut node_types_to_update = HashSet::new();
+    
+    for (key, value) in dict.iter() {
+        let parent_idx = key.extract::<String>()?.parse::<usize>()
+            .map_err(|_| PyValueError::new_err("Invalid node index"))?;
+            
+        println!("Processing node index: {}", parent_idx);
+            
+        if let Ok(count) = value.extract::<usize>() {
+            println!("Found count value: {}", count);
+            
+            // Debug node before update
+            if let Node::StandardNode { node_type, attributes, .. } = &graph[NodeIndex::new(parent_idx)] {
+                println!("Before update - Node type: {}, Attributes: {:?}", node_type, attributes);
+                node_types_to_update.insert(node_type.clone());
+            }
+            
+            match update_node_attribute(
+                graph,
+                parent_idx,
+                attribute_name,
+                AttributeValue::Int(count as i32)
+            ) {
+                Ok(_) => println!("Successfully updated attribute"),
+                Err(e) => println!("Error updating attribute: {:?}", e),
+            }
+            
+            // Debug node after update
+            if let Node::StandardNode { attributes, .. } = &graph[NodeIndex::new(parent_idx)] {
+                println!("After update - Attributes: {:?}", attributes);
+            }
+            
+        } else if let Ok(inner_dict) = value.downcast::<PyDict>() {
+            println!("Processing inner dictionary");
+            for (inner_key, inner_value) in inner_dict.iter() {
+                let child_idx = inner_key.extract::<String>()?.parse::<usize>()
+                    .map_err(|_| PyValueError::new_err("Invalid node index"))?;
+                let count = inner_value.extract::<usize>()?;
+                
+                println!("Processing child node index: {} with count: {}", child_idx, count);
+                
+                // Debug node before update
+                if let Node::StandardNode { node_type, attributes, .. } = &graph[NodeIndex::new(child_idx)] {
+                    println!("Before update - Node type: {}, Attributes: {:?}", node_type, attributes);
+                    node_types_to_update.insert(node_type.clone());
+                }
+                
+                match update_node_attribute(
+                    graph,
+                    child_idx,
+                    attribute_name,
+                    AttributeValue::Int(count as i32)
+                ) {
+                    Ok(_) => println!("Successfully updated child attribute"),
+                    Err(e) => println!("Error updating child attribute: {:?}", e),
+                }
+                
+                // Debug node after update
+                if let Node::StandardNode { attributes, .. } = &graph[NodeIndex::new(child_idx)] {
+                    println!("After update - Attributes: {:?}", attributes);
+                }
+            }
+        }
+    }
+    
+    println!("Node types to update: {:?}", node_types_to_update);
+    
+    for node_type in node_types_to_update {
+        let mut schema_types = HashMap::new();
+        schema_types.insert(attribute_name.to_string(), "Int".to_string());
+        
+        match update_or_retrieve_schema(
+            graph,
+            "Node",
+            &node_type,
+            Some(vec![attribute_name.to_string()]),
+            Some(schema_types)
+        ) {
+            Ok(_) => println!("Successfully updated schema for type: {}", node_type),
+            Err(e) => println!("Error updating schema: {:?}", e),
+        }
+    }
+    
+    println!("Store function completed");
+    Ok(())
 }

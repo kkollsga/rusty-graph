@@ -10,7 +10,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue;
-use traversal_functions::{TraversalContext, traverse_relationships, process_traversal_levels};
+use traversal_functions::{TraversalContext, traverse_relationships, process_traversal_levels, process_attributes_levels, count_traversal_levels, store_traversal_values};
 
 mod types;
 mod add_nodes;
@@ -121,6 +121,16 @@ impl KnowledgeGraph {
         context.add_level(filtered_nodes, None, None);
         self.update_context(context)?;
         Py::new(py, self.clone())
+    }
+    pub fn debug_schema(&self) {
+        println!("\nDebug: Current Schema Nodes:");
+        for node_idx in self.graph.node_indices() {
+            if let Node::DataTypeNode { data_type, name, attributes } = &self.graph[node_idx] {
+                println!("Schema Node - Type: {}, Name: {}, Attributes: {:?}", 
+                    data_type, name, attributes);
+            }
+        }
+        println!("");
     }
 
     pub fn type_filter(&mut self, node_type: String) -> PyResult<Py<Self>> {
@@ -288,15 +298,7 @@ impl KnowledgeGraph {
     }
 
     pub fn get_attributes(&self, py: Python, attributes: Option<Vec<String>>, max_results: Option<usize>) -> PyResult<PyObject> {
-        let mut indices = self.get_context_nodes()?;
-        if let Some(limit) = max_results {
-            if limit == 0 {
-                return Err(PyValueError::new_err("max_results must be positive"));
-            }
-            indices.truncate(limit);
-        }
-        let data = query_functions::get_node_data(&self.graph, indices, attributes)?;
-        Ok(data.into_py(py))
+        process_attributes_levels(&self.graph, &self.get_context()?, attributes, max_results)
     }
 
     pub fn get_id(&self, max_results: Option<usize>) -> PyResult<PyObject> {
@@ -309,6 +311,50 @@ impl KnowledgeGraph {
 
     pub fn get_index(&self, max_results: Option<usize>) -> PyResult<PyObject> {
         process_traversal_levels(&self.graph, &self.get_context()?, "graph_index", max_results)
+    }
+
+    pub fn count(&mut self) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let context = self.get_context()?;
+        let counts = count_traversal_levels(&context, None)?;
+        
+        Python::with_gil(|py| -> PyResult<()> {
+            let mut guard = self.traversal_context.write()
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
+            guard.results = Some(counts.into_py(py));
+            Ok(())
+        })?;
+        
+        Py::new(py, self.clone())
+    }
+
+    pub fn get_results(&self) -> PyResult<PyObject> {
+        let context = self.get_context()?;
+        match &context.results {
+            Some(results) => Ok(results.clone()),
+            None => Python::with_gil(|py| Ok(py.None()))
+        }
+    }
+
+    pub fn store(&mut self, attribute_name: String) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let context = self.get_context()?;
+        match &context.results {
+            Some(results) => {
+                store_traversal_values(&mut self.graph, &context, &attribute_name, results)?;
+                
+                // Create new KG instance with the updated graph
+                let new_kg = KnowledgeGraph {
+                    graph: self.graph.clone(),
+                    traversal_context: Arc::new(RwLock::new(TraversalContext::new_base())),
+                };
+                
+                Py::new(py, new_kg)
+            },
+            None => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "No results available to store. Call count() first."
+            ))
+        }
     }
 
     pub fn get_relationships(&self, py: Python, max_results: Option<usize>) -> PyResult<PyObject> {

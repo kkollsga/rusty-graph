@@ -21,8 +21,21 @@ kg.add_relationships(subject_records, "HAS_RECORD", "Subject", "subject_id", "Su
 kg.add_relationships(subject_records, "EVALUATED_STUDENT", "Subject Record","subject_record_id", "Student", "student_id")
 #print("Unsorted: ", kg.type_filter("Student").get_relationships())
 
+#kg.type_filter("Class").traverse("ENROLLED_IN", direction="outgoing").count().store("Students")
+#print("Counts: ", kg.type_filter("Class").get_attributes(attributes=["school_year", "title", "Students"]))
+
 #print(kg.type_filter("Class"))
-print("\nTraversal tests:")
-print("Classes with no traversals: ", kg.type_filter("Class").get_title())
-print("Classes with one traversal: ", kg.type_filter("Class").traverse("ENROLLED_IN", direction="outgoing").get_title())
-print("Classes with two traversals: ", kg.type_filter("Class").traverse("ENROLLED_IN").traverse("HAS_SUBJECT").get_title())
+#print("\nTraversal tests:")
+#print("Classes with no traversals: ", kg.type_filter("Class").get_title())
+#print("Counts: ", kg.type_filter("Class").count())
+kg.debug_schema()  # Before operations
+print("Results: ", kg.type_filter("Class").traverse("ENROLLED_IN", direction="outgoing").count().get_results())
+kg.type_filter("Class").traverse("ENROLLED_IN", direction="outgoing").count().store("Students")
+kg.debug_schema()  # After operations
+print("Classes: ", kg.type_filter("Class").get_attributes())
+
+
+#print("Classes with one traversal: ", kg.type_filter("Class").traverse("ENROLLED_IN", direction="outgoing").get_title())
+
+#print("Classes with two traversals: ", kg.type_filter("Class").traverse("ENROLLED_IN").traverse("HAS_SUBJECT").get_title())
+#print("Counts: ", kg.type_filter("Class").traverse("ENROLLED_IN").traverse("HAS_SUBJECT").count())
