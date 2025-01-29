@@ -158,31 +158,6 @@ pub fn get_node_data(
     Ok(result)
 }
 
-pub fn get_simple_node_data(
-    graph: &DiGraph<Node, Relation>,
-    indices: Vec<usize>,
-    attribute: &str,
-) -> PyResult<Vec<PyObject>> {
-    let py = unsafe { Python::assume_gil_acquired() };
-    let mut result = Vec::new();
-
-    for idx in indices {
-        if let Some(Node::StandardNode { node_type, unique_id, attributes: node_attrs, title }) = graph.node_weight(NodeIndex::new(idx)) {
-            let value = match attribute {
-                "node_type" => node_type.clone().into_py(py),
-                "unique_id" => unique_id.into_py(py),
-                "title" => title.clone().unwrap_or_default().into_py(py),
-                _ => node_attrs.get(attribute)
-                    .map(|v| v.to_python_object(py, None).unwrap_or_else(|_| py.None()))
-                    .unwrap_or_else(|| py.None()),
-            };
-            result.push(value);
-        }
-    }
-
-    Ok(result)
-}
-
 pub fn get_simplified_relationships(
     graph: &DiGraph<Node, Relation>,
     indices: Vec<usize>,
@@ -254,41 +229,6 @@ pub fn sort_nodes(
     }
     nodes.sort_by(|a, b| sort_fn(a, b));
     nodes
-}
-
-
-pub fn extract_attribute_value(value: &PyAny) -> PyResult<Option<AttributeValue>> {
-    if value.is_none() {
-        return Ok(None);
-    }
-
-    // Try direct numeric extraction
-    if let Ok(num) = value.extract::<i32>() {
-        return Ok(Some(AttributeValue::Int(num)));
-    }
-    if let Ok(num) = value.extract::<f64>() {
-        if num.is_finite() {
-            return Ok(Some(AttributeValue::Float(num)));
-        }
-    }
-    
-    // Try converting to string first
-    if let Ok(s) = value.str()?.extract::<String>() {
-        // Try parsing numeric strings
-        if let Ok(num) = s.parse::<i32>() {
-            return Ok(Some(AttributeValue::Int(num)));
-        }
-        if let Ok(num) = s.parse::<f64>() {
-            if num.is_finite() {
-                return Ok(Some(AttributeValue::Float(num)));
-            }
-        }
-        if !s.is_empty() {
-            return Ok(Some(AttributeValue::String(s)));
-        }
-    }
-
-    Ok(None)
 }
 
 pub fn extract_dataframe_content(df: &PyAny) -> PyResult<DataInput> {

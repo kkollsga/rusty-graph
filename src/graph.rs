@@ -10,7 +10,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue;
-use traversal_functions::{TraversalContext, traverse_relationships, process_node_data};
+use traversal_functions::{TraversalContext, traverse_relationships, process_traversal_levels};
 
 mod types;
 mod add_nodes;
@@ -299,40 +299,16 @@ impl KnowledgeGraph {
         Ok(data.into_py(py))
     }
 
-    pub fn get_title(&self, _py: Python, max_results: Option<usize>) -> PyResult<PyObject> {
-        let mut context = self.get_context()?;
-        if let Some(limit) = max_results {
-            if limit == 0 {
-                return Err(PyValueError::new_err("max_results must be positive"));
-            }
-            if let Some(level) = context.levels.last_mut() {
-                level.nodes.truncate(limit);
-            }
-        }
-        Ok(process_node_data(&self.graph, &context, "title")?.into_py(_py))
-    }
-    
-    pub fn get_id(&self, py: Python, max_results: Option<usize>) -> PyResult<PyObject> {
-        let mut indices = self.get_context_nodes()?;
-        if let Some(limit) = max_results {
-            if limit == 0 {
-                return Err(PyValueError::new_err("max_results must be positive"));
-            }
-            indices.truncate(limit);
-        }
-        let data = query_functions::get_simple_node_data(&self.graph, indices, "unique_id")?;
-        Ok(data.into_py(py))
+    pub fn get_id(&self, max_results: Option<usize>) -> PyResult<PyObject> {
+        process_traversal_levels(&self.graph, &self.get_context()?, "unique_id", max_results)
     }
 
-    pub fn get_index(&self, py: Python, max_results: Option<usize>) -> PyResult<PyObject> {
-        let mut indices = self.get_context_nodes()?;
-        if let Some(limit) = max_results {
-            if limit == 0 {
-                return Err(PyValueError::new_err("max_results must be positive"));
-            }
-            indices.truncate(limit);
-        }
-        Ok(indices.into_py(py))
+    pub fn get_title(&self, max_results: Option<usize>) -> PyResult<PyObject> {
+        process_traversal_levels(&self.graph, &self.get_context()?, "title", max_results)
+    }
+
+    pub fn get_index(&self, max_results: Option<usize>) -> PyResult<PyObject> {
+        process_traversal_levels(&self.graph, &self.get_context()?, "graph_index", max_results)
     }
 
     pub fn get_relationships(&self, py: Python, max_results: Option<usize>) -> PyResult<PyObject> {

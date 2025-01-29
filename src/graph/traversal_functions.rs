@@ -5,6 +5,7 @@ use crate::schema::{Node, Relation};
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use std::collections::{HashMap, HashSet};
+use pyo3::types::PyDict;
 
 #[derive(Debug, Clone)]
 pub struct TraversalLevel {
@@ -29,12 +30,6 @@ impl TraversalContext {
     pub fn new_with_nodes(nodes: Vec<usize>) -> Self {
         let mut context = Self::new_base();
         context.add_level(nodes, None, None);
-        context
-    }
-
-    pub fn new_with_traversal(nodes: Vec<usize>, parent: Option<usize>, rel_type: String) -> Self {
-        let mut context = Self::new_base();
-        context.add_level(nodes, parent, Some(rel_type));
         context
     }
 
@@ -139,90 +134,91 @@ pub fn traverse_relationships(
     Ok(relationships)
 }
 
-pub fn process_node_data(
+pub fn process_traversal_levels(
     graph: &DiGraph<Node, Relation>,
     context: &TraversalContext,
-    value_key: &str,
-) -> PyResult<Vec<HashMap<String, PyObject>>> {
+    selector: &str,
+    max_results: Option<usize>,
+) -> PyResult<PyObject> {
     let py = unsafe { Python::assume_gil_acquired() };
-    let mut result = Vec::new();
+
+    if context.levels.is_empty() {
+        return Ok(PyDict::new(py).into());
+    }
 
     // Helper function to get node value
-    fn get_node_value(graph: &DiGraph<Node, Relation>, node_idx: usize, value_key: &str) -> Option<String> {
+    let get_value = |node_idx: usize| -> Option<String> {
         if let Some(Node::StandardNode { title, unique_id, attributes, .. }) = graph.node_weight(NodeIndex::new(node_idx)) {
-            match value_key {
+            match selector {
                 "title" => title.clone(),
-                "id" => Some(unique_id.to_string()),
-                _ => attributes.get(value_key).map(|v| v.to_string()),
+                "unique_id" => Some(unique_id.to_string()),
+                "graph_index" => Some(node_idx.to_string()),
+                _ => attributes.get(selector).map(|v| v.to_string())
             }
         } else {
             None
         }
+    };
+
+    // Single level case: return a list
+    if context.levels.len() == 1 {
+        let mut nodes = context.levels[0].nodes.clone();
+        if let Some(limit) = max_results {
+            if limit == 0 {
+                return Err(PyValueError::new_err("max_results must be positive"));
+            }
+            nodes.truncate(limit);
+        }
+
+        let mut values = Vec::new();
+        for node_idx in nodes {
+            if let Some(value) = get_value(node_idx) {
+                values.push(value);
+            }
+        }
+        return Ok(values.into_py(py));
     }
 
-    // Helper function to process node and its children recursively
-    fn process_node_recursively(
-        graph: &DiGraph<Node, Relation>,
-        node_idx: usize,
-        value_key: &str,
-        current_level: usize,
-        levels: &[TraversalLevel],
-        py: Python,
-    ) -> PyResult<Option<HashMap<String, PyObject>>> {
-        // Get current node's value
-        if let Some(value) = get_node_value(graph, node_idx, value_key) {
-            let mut node_data = HashMap::new();
-            node_data.insert(value_key.to_string(), value.into_py(py));
+    let result = PyDict::new(py);
 
-            // If there are more levels to process
-            if current_level + 1 < levels.len() {
-                // Get the next level's relationships
-                let next_level = &levels[current_level + 1];
-                
-                // If this node has children in the next level
-                if let Some(child_nodes) = next_level.node_relationships.get(&node_idx) {
-                    // Process each child recursively
-                    let mut child_data = Vec::new();
+    // Process root nodes
+    for &root_idx in &context.levels[0].nodes {
+        if let Some(root_value) = get_value(root_idx) {
+            // For single traversal, return dictionary with lists
+            if context.levels.len() == 2 {
+                let mut children = Vec::new();
+                if let Some(child_nodes) = context.levels[1].node_relationships.get(&root_idx) {
                     for &child_idx in child_nodes {
-                        if let Some(child_result) = process_node_recursively(
-                            graph,
-                            child_idx,
-                            value_key,
-                            current_level + 1,
-                            levels,
-                            py
-                        )? {
-                            child_data.push(child_result);
+                        if let Some(child_value) = get_value(child_idx) {
+                            children.push(child_value);
                         }
                     }
-                    
-                    if !child_data.is_empty() {
-                        node_data.insert("traversals".to_string(), child_data.into_py(py));
+                }
+                result.set_item(root_value, children)?;
+            } 
+            // For multiple traversals
+            else {
+                let second_level = PyDict::new(py);
+                if let Some(child_nodes) = context.levels[1].node_relationships.get(&root_idx) {
+                    for &child_idx in child_nodes {
+                        if let Some(child_value) = get_value(child_idx) {
+                            // Always create a list for the final level
+                            let mut final_level = Vec::new();
+                            if let Some(grandchild_nodes) = context.levels[2].node_relationships.get(&child_idx) {
+                                for &grandchild_idx in grandchild_nodes {
+                                    if let Some(grandchild_value) = get_value(grandchild_idx) {
+                                        final_level.push(grandchild_value);
+                                    }
+                                }
+                            }
+                            second_level.set_item(child_value, final_level)?;
+                        }
                     }
                 }
-            }
-            
-            Ok(Some(node_data))
-        } else {
-            Ok(None)
-        }
-    }
-
-    // Process each root node
-    if let Some(first_level) = context.levels.first() {
-        for &node_idx in &first_level.nodes {
-            if let Some(node_data) = process_node_recursively(
-                graph,
-                node_idx,
-                value_key,
-                0,
-                &context.levels,
-                py
-            )? {
-                result.push(node_data);
+                result.set_item(root_value, second_level)?;
             }
         }
     }
 
-    Ok(result)
+    Ok(result.into())
 }
