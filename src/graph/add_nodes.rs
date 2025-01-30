@@ -121,7 +121,6 @@ pub fn add_nodes(
         graph,
         "Node",
         &node_type,
-        Some(columns.clone()),
         Some(column_types_map.clone())
     )?;
 
@@ -129,7 +128,6 @@ pub fn add_nodes(
         let row: Vec<&PyAny> = match row.extract() {
             Ok(r) => r,
             Err(_) => {
-                println!("Skipping malformed row");
                 continue 'row_loop;
             }
         };
@@ -141,7 +139,6 @@ pub fn add_nodes(
             let item = match row.get(col_index) {
                 Some(i) => i,
                 None => {
-                    println!("Skipping row with missing columns");
                     continue 'row_loop;
                 }
             };
@@ -149,7 +146,6 @@ pub fn add_nodes(
             if column_name == &unique_id_field {
                 unique_id = parse_value_to_i32(item);
                 if unique_id.is_none() {
-                    println!("Skipping row due to invalid unique_id");
                     continue 'row_loop;
                 }
                 continue;
@@ -160,7 +156,6 @@ pub fn add_nodes(
                     node_title = match item.extract() {
                         Ok(title) => Some(title),
                         Err(_) => {
-                            println!("Invalid title value, setting to None");
                             None
                         }
                     };
@@ -178,7 +173,6 @@ pub fn add_nodes(
                     } else if let Ok(value) = item.extract::<f64>() {
                         Some(AttributeValue::Int(value as i32))
                     } else {
-                        println!("Invalid integer for field {}, skipping", column_name);
                         None
                     }
                 },
@@ -188,7 +182,6 @@ pub fn add_nodes(
                     } else if let Ok(value) = item.extract::<i64>() {
                         Some(AttributeValue::Float(value as f64))
                     } else {
-                        println!("Invalid float for field {}, skipping", column_name);
                         None
                     }
                 },
@@ -200,12 +193,10 @@ pub fn add_nodes(
                         match NaiveDateTime::parse_from_str(&datetime_str, format) {
                             Ok(dt) => Some(AttributeValue::DateTime(dt.and_utc().timestamp())),
                             Err(_) => {
-                                println!("Invalid datetime for field {}, skipping", column_name);
                                 None
                             }
                         }
                     } else {
-                        println!("Invalid datetime for field {}, skipping", column_name);
                         None
                     }
                 },
@@ -220,7 +211,6 @@ pub fn add_nodes(
         let unique_id = match unique_id {
             Some(id) => id,
             None => {
-                println!("No valid unique_id found, skipping row");
                 continue 'row_loop;
             }
         };
@@ -276,11 +266,10 @@ pub fn update_node_attribute(
         attributes.insert(attribute_name.to_string(), value.clone());
 
         // Update schema
-        let schema = update_or_retrieve_schema(
+        let _schema = update_or_retrieve_schema(
             graph,
             "Node",
             &node_type,
-            Some(vec![attribute_name.to_string()]),
             Some(HashMap::from([(
                 attribute_name.to_string(),
                 match value {

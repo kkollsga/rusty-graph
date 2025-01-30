@@ -10,8 +10,9 @@ pub struct NodeData {
     pub graph_index: usize,
     pub title: String,
     pub attributes: HashMap<String, AttributeValue>,
-    pub traversals: Vec<NodeData>,
+    pub traversals: Option<Vec<NodeData>>,  // Changed to Option
 }
+
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Node {
@@ -78,29 +79,21 @@ impl Node {
     pub fn to_node_data(&self, graph_index: usize, _py: Python, filter_attributes: Option<&[String]>) -> PyResult<NodeData> {
         match self {
             Node::StandardNode { node_type, unique_id, attributes, title } => {
-                println!("to_node_data - Original attributes: {:?}", attributes);
-                
                 let filtered_attrs = match filter_attributes {
                     Some(filter) => {
-                        println!("Filtering attributes with: {:?}", filter);
                         let mut filtered = HashMap::new();
                         for attr_name in filter {
                             if let Some(value) = attributes.get(attr_name) {
                                 filtered.insert(attr_name.clone(), value.clone());
                             }
                         }
-                        println!("Filtered attributes: {:?}", filtered);
                         filtered
                     },
                     None => {
-                        println!("No filter, cloning all attributes");
                         let cloned = attributes.clone();
-                        println!("Cloned attributes: {:?}", cloned);
                         cloned
                     }
                 };
-
-                println!("Final attributes being returned: {:?}", filtered_attrs);
 
                 Ok(NodeData {
                     unique_id: *unique_id,
@@ -108,7 +101,7 @@ impl Node {
                     graph_index,
                     attributes: filtered_attrs,
                     node_type: node_type.clone(),
-                    traversals: Vec::new(),
+                    traversals: None,  // Initialize as None
                 })
             },
             Node::DataTypeNode { .. } => {
@@ -130,10 +123,15 @@ impl Node {
             .collect::<PyResult<_>>()?;
         dict.insert("attributes".to_string(), py_attrs.into_py(py));
         
-        let traversals: Vec<PyObject> = node_data.traversals.iter()
-            .map(|node| Self::node_data_to_py(node, py))
-            .collect::<PyResult<_>>()?;
-        dict.insert("traversals".to_string(), traversals.into_py(py));
+        // Only include traversals if Some and non-empty
+        if let Some(ref traversals) = node_data.traversals {
+            if !traversals.is_empty() {
+                let traversals: Vec<PyObject> = traversals.iter()
+                    .map(|node| Self::node_data_to_py(node, py))
+                    .collect::<PyResult<_>>()?;
+                dict.insert("traversals".to_string(), traversals.into_py(py));
+            }
+        }
         
         Ok(dict.into_py(py))
     }

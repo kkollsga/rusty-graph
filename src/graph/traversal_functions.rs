@@ -10,11 +10,14 @@ use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue;
 use crate::graph::add_nodes::update_node_attribute;
 use crate::graph::get_schema::update_or_retrieve_schema;
+use crate::graph::query_functions::filter_nodes;
 
 #[derive(Debug, Clone)]
 pub struct TraversalLevel {
     pub nodes: Vec<usize>,
+    #[allow(dead_code)]
     pub parent_node: Option<usize>,
+    #[allow(dead_code)]
     pub relationship_type: Option<String>,
     pub node_relationships: HashMap<usize, Vec<usize>>, // Maps parent nodes to their child nodes
 }
@@ -82,54 +85,52 @@ pub fn traverse_relationships(
     start_nodes: &[usize],
     rel_type: String,
     direction: Option<String>,
+    filter: Option<&PyDict>,
 ) -> PyResult<HashMap<usize, Vec<usize>>> {
     
-    let dir = match direction.as_deref() {
-        Some("incoming") => Direction::Outgoing,
-        Some("outgoing") => Direction::Incoming,
-        Some("both") => Direction::Outgoing,
-        Some(d) => return Err(PyValueError::new_err(format!("Invalid direction: {}", d))),
-        None => Direction::Incoming,
-    };
+    let check_both = direction.is_none() || direction.as_deref() == Some("both");
     
     let mut relationships = HashMap::new();
-    let handle_both = direction.is_none() || direction.as_deref() == Some("both");
     
     for &node_idx in start_nodes {
         let node_index = NodeIndex::new(node_idx);
         let mut node_traversals = Vec::new();
         
-        // Handle primary direction
-        let edges = graph.edges_directed(node_index, dir);
-        for edge in edges {
-            if edge.weight().relation_type == rel_type {
-                let target_idx = match dir {
-                    Direction::Incoming => edge.source().index(),
-                    Direction::Outgoing => edge.target().index(),
-                };
-                if !node_traversals.contains(&target_idx) {
-                    node_traversals.push(target_idx);
-                }
-            }
-        }
-        
-        if handle_both {
-            let opposite_dir = match dir {
-                Direction::Incoming => Direction::Outgoing,
-                Direction::Outgoing => Direction::Incoming,
-            };
-            
-            let opposite_edges = graph.edges_directed(node_index, opposite_dir);
-            for edge in opposite_edges {
+        // Helper closure to collect target nodes from edges in a given direction
+        let mut collect_targets = |dir: Direction| {
+            let edges = graph.edges_directed(node_index, dir);
+            for edge in edges {
                 if edge.weight().relation_type == rel_type {
-                    let target_idx = match opposite_dir {
+                    let target_idx = match dir {
                         Direction::Incoming => edge.source().index(),
                         Direction::Outgoing => edge.target().index(),
                     };
+                    
                     if !node_traversals.contains(&target_idx) {
                         node_traversals.push(target_idx);
                     }
                 }
+            }
+        };
+
+        // Process edges based on direction
+        if check_both {
+            collect_targets(Direction::Incoming);
+            collect_targets(Direction::Outgoing);
+        } else {
+            match direction.as_deref() {
+                Some("incoming") => collect_targets(Direction::Incoming),
+                Some("outgoing") => collect_targets(Direction::Outgoing),
+                Some(d) => return Err(PyValueError::new_err(format!("Invalid direction: {}", d))),
+                None => unreachable!(), // This case is handled by check_both
+            }
+        }
+        
+        // Apply filter to all collected nodes only if filter is provided and not empty
+        if let Some(filter_dict) = filter {
+            if !filter_dict.is_empty() {
+                let filtered_nodes = filter_nodes(graph, Some(node_traversals), filter_dict)?;
+                node_traversals = filtered_nodes;
             }
         }
         
@@ -168,24 +169,35 @@ pub fn process_attributes_levels(
     for &root_idx in &nodes {
         if let Some(node) = graph.node_weight(NodeIndex::new(root_idx)) {
             if let Ok(mut root_data) = node.to_node_data(root_idx, py, attributes.as_deref()) {
-                // Add traversal data if we have more levels
-                if context.levels.len() > 1 {
+                // Add traversal data only if we have more levels AND relationships exist
+                if context.levels.len() > 1 && 
+                   context.levels[1].node_relationships.contains_key(&root_idx) &&
+                   !context.levels[1].node_relationships[&root_idx].is_empty() {
+                    
+                    let mut children = Vec::new();
+                    
                     if let Some(child_nodes) = context.levels[1].node_relationships.get(&root_idx) {
-                        let mut children = Vec::new();
-                        
                         for &child_idx in child_nodes {
                             if let Some(child_node) = graph.node_weight(NodeIndex::new(child_idx)) {
                                 if let Ok(mut child_data) = child_node.to_node_data(child_idx, py, attributes.as_deref()) {
-                                    // Add grandchildren if they exist
-                                    if context.levels.len() > 2 {
+                                    // Add grandchildren only if they exist
+                                    if context.levels.len() > 2 && 
+                                       context.levels[2].node_relationships.contains_key(&child_idx) &&
+                                       !context.levels[2].node_relationships[&child_idx].is_empty() {
+                                        
+                                        let mut grandchildren = Vec::new();
                                         if let Some(grandchild_nodes) = context.levels[2].node_relationships.get(&child_idx) {
                                             for &grandchild_idx in grandchild_nodes {
                                                 if let Some(grandchild_node) = graph.node_weight(NodeIndex::new(grandchild_idx)) {
                                                     if let Ok(grandchild_data) = grandchild_node.to_node_data(grandchild_idx, py, attributes.as_deref()) {
-                                                        child_data.traversals.push(grandchild_data);
+                                                        grandchildren.push(grandchild_data);
                                                     }
                                                 }
                                             }
+                                        }
+                                        
+                                        if !grandchildren.is_empty() {
+                                            child_data.traversals = Some(grandchildren);
                                         }
                                     }
                                     children.push(child_data);
@@ -193,7 +205,9 @@ pub fn process_attributes_levels(
                             }
                         }
                         
-                        root_data.traversals = children;
+                        if !children.is_empty() {
+                            root_data.traversals = Some(children);
+                        }
                     }
                 }
                 
@@ -355,20 +369,15 @@ pub fn store_traversal_values(
 ) -> PyResult<()> {
     let py = unsafe { Python::assume_gil_acquired() };
     
-    println!("Store function called with attribute_name: {}", attribute_name);
-    
     if context.levels.is_empty() {
-        println!("Context levels empty, returning");
         return Ok(());
     }
 
     if context.levels.len() == 1 {
-        println!("Only one context level, returning");
         return Ok(());
     }
 
     let dict = store_values.downcast::<PyDict>(py)?;
-    println!("Store values: {:?}", dict.to_string());
     
     let mut node_types_to_update = HashSet::new();
     
@@ -376,14 +385,8 @@ pub fn store_traversal_values(
         let parent_idx = key.extract::<String>()?.parse::<usize>()
             .map_err(|_| PyValueError::new_err("Invalid node index"))?;
             
-        println!("Processing node index: {}", parent_idx);
-            
         if let Ok(count) = value.extract::<usize>() {
-            println!("Found count value: {}", count);
-            
-            // Debug node before update
-            if let Node::StandardNode { node_type, attributes, .. } = &graph[NodeIndex::new(parent_idx)] {
-                println!("Before update - Node type: {}, Attributes: {:?}", node_type, attributes);
+            if let Node::StandardNode { node_type, .. } = &graph[NodeIndex::new(parent_idx)] {
                 node_types_to_update.insert(node_type.clone());
             }
             
@@ -393,27 +396,17 @@ pub fn store_traversal_values(
                 attribute_name,
                 AttributeValue::Int(count as i32)
             ) {
-                Ok(_) => println!("Successfully updated attribute"),
-                Err(e) => println!("Error updating attribute: {:?}", e),
-            }
-            
-            // Debug node after update
-            if let Node::StandardNode { attributes, .. } = &graph[NodeIndex::new(parent_idx)] {
-                println!("After update - Attributes: {:?}", attributes);
+                Ok(_) => (),
+                Err(e) => return Err(e),
             }
             
         } else if let Ok(inner_dict) = value.downcast::<PyDict>() {
-            println!("Processing inner dictionary");
             for (inner_key, inner_value) in inner_dict.iter() {
                 let child_idx = inner_key.extract::<String>()?.parse::<usize>()
                     .map_err(|_| PyValueError::new_err("Invalid node index"))?;
                 let count = inner_value.extract::<usize>()?;
-                
-                println!("Processing child node index: {} with count: {}", child_idx, count);
-                
-                // Debug node before update
-                if let Node::StandardNode { node_type, attributes, .. } = &graph[NodeIndex::new(child_idx)] {
-                    println!("Before update - Node type: {}, Attributes: {:?}", node_type, attributes);
+
+                if let Node::StandardNode { node_type, .. } = &graph[NodeIndex::new(child_idx)] {
                     node_types_to_update.insert(node_type.clone());
                 }
                 
@@ -423,19 +416,12 @@ pub fn store_traversal_values(
                     attribute_name,
                     AttributeValue::Int(count as i32)
                 ) {
-                    Ok(_) => println!("Successfully updated child attribute"),
-                    Err(e) => println!("Error updating child attribute: {:?}", e),
-                }
-                
-                // Debug node after update
-                if let Node::StandardNode { attributes, .. } = &graph[NodeIndex::new(child_idx)] {
-                    println!("After update - Attributes: {:?}", attributes);
+                    Ok(_) => (),
+                    Err(e) => return Err(e),
                 }
             }
         }
     }
-    
-    println!("Node types to update: {:?}", node_types_to_update);
     
     for node_type in node_types_to_update {
         let mut schema_types = HashMap::new();
@@ -445,14 +431,11 @@ pub fn store_traversal_values(
             graph,
             "Node",
             &node_type,
-            Some(vec![attribute_name.to_string()]),
             Some(schema_types)
         ) {
-            Ok(_) => println!("Successfully updated schema for type: {}", node_type),
-            Err(e) => println!("Error updating schema: {:?}", e),
+            Ok(_) => (),
+            Err(e) => return Err(e),
         }
     }
-    
-    println!("Store function completed");
     Ok(())
 }

@@ -19,6 +19,7 @@ kg.add_relationships(students, "ENROLLED_IN", "Student", "student_id", "Class", 
 kg.add_relationships(subject_records, "HAS_SUBJECT", "Student", "student_id", "Subject","subject_id")
 kg.add_relationships(subject_records, "HAS_RECORD", "Subject", "subject_id", "Subject Record","subject_record_id")
 kg.add_relationships(subject_records, "EVALUATED_STUDENT", "Subject Record","subject_record_id", "Student", "student_id")
+
 #print("Unsorted: ", kg.type_filter("Student").get_relationships())
 
 #kg.type_filter("Class").traverse("ENROLLED_IN", direction="outgoing").count().store("Students")
@@ -28,14 +29,17 @@ kg.add_relationships(subject_records, "EVALUATED_STUDENT", "Subject Record","sub
 #print("\nTraversal tests:")
 #print("Classes with no traversals: ", kg.type_filter("Class").get_title())
 #print("Counts: ", kg.type_filter("Class").count())
-kg.debug_schema()  # Before operations
+
+print("Sorting: ", )
+print("\n\nTraversals\n--------------")
+print("Classes with no traversals: ", kg.type_filter("Class").get_title())
+print("Classes with one traversal: ", kg.type_filter("Class").traverse("ENROLLED_IN", filter={'title':'Zack'}).get_title())
+print("Classes with two traversals: ", kg.type_filter("Class").traverse("ENROLLED_IN").traverse("HAS_SUBJECT").get_title())
+
+print("\n\nCounts\n--------------")
 print("Results: ", kg.type_filter("Class").traverse("ENROLLED_IN", direction="outgoing").count().get_results())
-kg.type_filter("Class").traverse("ENROLLED_IN", direction="outgoing").count().store("Students")
-kg.debug_schema()  # After operations
+kg=kg.type_filter("Class").traverse("ENROLLED_IN", direction="outgoing").count().store("Students")
 print("Classes: ", kg.type_filter("Class").get_attributes())
 
-
-#print("Classes with one traversal: ", kg.type_filter("Class").traverse("ENROLLED_IN", direction="outgoing").get_title())
-
-#print("Classes with two traversals: ", kg.type_filter("Class").traverse("ENROLLED_IN").traverse("HAS_SUBJECT").get_title())
-#print("Counts: ", kg.type_filter("Class").traverse("ENROLLED_IN").traverse("HAS_SUBJECT").count())
+print("\n\nSorting\n--------------")
+print("Class with the most student: ", kg.type_filter("Class").sort("Students", ascending=False).get_title(1))

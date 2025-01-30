@@ -1,11 +1,10 @@
 use petgraph::graph::DiGraph;
 use petgraph::Direction;
 use petgraph::visit::EdgeRef;  // Added for edge.source() and edge.target()
-use std::collections::{HashMap, HashSet, hash_map::Entry};
+use std::collections::{HashMap, HashSet};
 use crate::schema::{Node, Relation, NodeTypeStats, AttributeMetadata, RelationshipMetadata};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;  // Added for Python dict creation
-use pyo3::exceptions::PyValueError;
+use pyo3::types::PyDict;
 
 /// Updates or retrieves the schema (DataTypeNode) from the graph
 ///
@@ -20,7 +19,6 @@ pub fn update_or_retrieve_schema(
     graph: &mut DiGraph<Node, Relation>,
     data_type: &str,
     name: &str,
-    columns: Option<Vec<String>>,
     types: Option<HashMap<String, String>>,
 ) -> PyResult<HashMap<String, String>> {
     let schema_node = graph.node_indices().find(|&i| match &graph[i] {
@@ -58,32 +56,6 @@ pub fn update_or_retrieve_schema(
             graph.add_node(node);
             Ok(attributes)
         }
-    }
-}
-
-pub fn retrieve_schema(
-    graph: &DiGraph<Node, Relation>,  // Use immutable borrow
-    data_type: &str,
-    name: &str,
-) -> PyResult<HashMap<String, String>> {
-    // Find the existing DataTypeNode
-    let data_type_node_index = graph.node_indices().find(|&i| {
-        if let Node::DataTypeNode { data_type: dt, name: n, .. } = &graph[i] {
-            return dt.as_str() == data_type && n == name;
-        }
-        false
-    }).ok_or_else(|| {
-        PyErr::new::<PyValueError, _>(format!(
-            "DataTypeNode with data_type '{}' and name '{}' not found",
-            data_type, name
-        ))
-    })?;
-
-    // Return the attributes HashMap if the DataTypeNode is found
-    if let Node::DataTypeNode { attributes: attr, .. } = &graph[data_type_node_index] {
-        Ok(attr.clone())
-    } else {
-        Err(PyErr::new::<PyValueError, _>("Failed to retrieve DataTypeNode"))
     }
 }
 
