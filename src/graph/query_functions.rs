@@ -8,6 +8,7 @@ use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue;
 use crate::graph::types::DataInput;
 use std::collections::HashMap;
+use std::cmp::Ordering;
 
 pub fn filter_nodes(
     graph: &DiGraph<Node, Relation>,
@@ -23,7 +24,7 @@ pub fn filter_nodes(
     let mut filters = HashMap::new();
     for (key, value) in filter_dict.iter() {
         let key = key.extract::<String>()?;
-        let value = value.extract::<String>()?;
+        let value = value.extract::<&PyDict>()?;
         filters.insert(key, value);
     }
 
@@ -31,20 +32,37 @@ pub fn filter_nodes(
         if let Some(Node::StandardNode { node_type, unique_id, attributes, title }) = graph.node_weight(idx) {
             let mut matches = true;
 
-            for (key, value) in &filters {
-                let matches_filter = match key.as_str() {
-                    "type" | "node_type" => node_type == value,
-                    "title" => title.as_ref().map_or(false, |t| t == value),
-                    "unique_id" => unique_id.to_string() == *value,
-                    _ => attributes.get(key).map_or(false, |attr| match attr {
-                        AttributeValue::String(s) => s == value,
-                        AttributeValue::Int(i) => i.to_string() == *value,
-                        AttributeValue::Float(f) => f.to_string() == *value,
-                        AttributeValue::DateTime(dt) => dt.to_string() == *value,
-                    }),
+            for (key, conditions) in &filters {
+                let node_value = match key.as_str() {
+                    "type" | "node_type" => Some(AttributeValue::String(node_type.clone())),
+                    "title" => title.clone().map(AttributeValue::String),
+                    "unique_id" => Some(AttributeValue::Int(*unique_id)),
+                    _ => attributes.get(key).cloned(),
                 };
 
-                if !matches_filter {
+                if let Some(node_value) = node_value {
+                    for (op, filter_value) in conditions.iter() {
+                        let op = op.extract::<String>()?;
+                        let filter_value = filter_value.extract::<PyObject>()?;
+                        
+                        let comparison_result = compare_values(&node_value, &filter_value)?;
+                        
+                        let matches_condition = match op.as_str() {
+                            "==" | "=" => comparison_result == Ordering::Equal,
+                            "!=" | "<>" => comparison_result != Ordering::Equal,
+                            ">=" | "=>" => comparison_result != Ordering::Less,
+                            "<=" | "=<" => comparison_result != Ordering::Greater,
+                            ">" => comparison_result == Ordering::Greater,
+                            "<" => comparison_result == Ordering::Less,
+                            _ => return Err(PyValueError::new_err(format!("Unsupported operation: {}", op))),
+                        };
+
+                        if !matches_condition {
+                            matches = false;
+                            break;
+                        }
+                    }
+                } else {
                     matches = false;
                     break;
                 }
@@ -55,8 +73,52 @@ pub fn filter_nodes(
             }
         }
     }
-
     Ok(result)
+}
+
+fn compare_values(node_value: &AttributeValue, filter_value: &PyObject) -> PyResult<Ordering> {
+    let py = unsafe { Python::assume_gil_acquired() };
+    
+    match node_value {
+        AttributeValue::String(s) => {
+            let filter_str = filter_value.extract::<String>(py)?;
+            Ok(s.cmp(&filter_str))
+        }
+        AttributeValue::Int(i) => {
+            if let Ok(filter_int) = filter_value.extract::<i32>(py) {
+                Ok(i.cmp(&filter_int))
+            } else if let Ok(filter_float) = filter_value.extract::<f64>(py) {
+                let node_float = *i as f64;
+                compare_floats(node_float, filter_float)
+            } else {
+                Err(PyValueError::new_err("Invalid comparison value type"))
+            }
+        }
+        AttributeValue::Float(f) => {
+            if let Ok(filter_float) = filter_value.extract::<f64>(py) {
+                compare_floats(*f, filter_float)
+            } else if let Ok(filter_int) = filter_value.extract::<i32>(py) {
+                compare_floats(*f, filter_int as f64)
+            } else {
+                Err(PyValueError::new_err("Invalid comparison value type"))
+            }
+        }
+        AttributeValue::DateTime(dt) => {
+            let filter_str = filter_value.extract::<String>(py)?;
+            Ok(dt.to_string().cmp(&filter_str))
+        }
+    }
+}
+
+fn compare_floats(a: f64, b: f64) -> PyResult<Ordering> {
+    if a.is_nan() || b.is_nan() {
+        return Err(PyValueError::new_err("Cannot compare NaN values"));
+    }
+    
+    match a.partial_cmp(&b) {
+        Some(ordering) => Ok(ordering),
+        None => Err(PyValueError::new_err("Invalid float comparison"))
+    }
 }
 
 pub fn get_simplified_relationships(

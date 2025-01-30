@@ -146,7 +146,9 @@ impl KnowledgeGraph {
     pub fn type_filter(&self, node_type: String) -> PyResult<Py<Self>> {
         let py = unsafe { Python::assume_gil_acquired() };
         let filter_dict = PyDict::new(py);
-        filter_dict.set_item("node_type", node_type)?;
+        let type_condition = PyDict::new(py);
+        type_condition.set_item("==", node_type)?;
+        filter_dict.set_item("node_type", type_condition)?;
         let graph = self.get_graph()?;
         let filtered_nodes = query_functions::filter_nodes(&graph, None, &filter_dict)?;
         let mut context = TraversalContext::new_base();

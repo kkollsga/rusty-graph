@@ -33,7 +33,7 @@ kg.add_relationships(subject_records, "EVALUATED_STUDENT", "Subject Record","sub
 print("Sorting: ", )
 print("\n\nTraversals\n--------------")
 print("Classes with no traversals: ", kg.type_filter("Class").get_title())
-print("Classes with one traversal: ", kg.type_filter("Class").traverse("ENROLLED_IN", filter={'title':'Zack'}).get_title())
+print("Classes with one traversal: ", kg.type_filter("Class").traverse("ENROLLED_IN", filter={'title':{"<=":"M"}}).get_title())
 print("Classes with two traversals: ", kg.type_filter("Class").traverse("ENROLLED_IN").traverse("HAS_SUBJECT").get_title())
 
 print("\n\nCounts\n--------------")
