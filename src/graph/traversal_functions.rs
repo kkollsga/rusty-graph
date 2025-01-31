@@ -504,3 +504,87 @@ pub fn store_traversal_values(
     }
     Ok(())
 }
+
+pub fn calculate_aggregate(
+    graph: &DiGraph<Node, Relation>,
+    context: &TraversalContext,
+    attribute: &str,
+    operation: &str,
+    max_results: Option<usize>,
+) -> PyResult<PyObject> {
+    let py = unsafe { Python::assume_gil_acquired() };
+
+    if context.levels.is_empty() {
+        return Ok(0_f64.into_py(py));
+    }
+
+    fn value_to_float(value: &AttributeValue) -> Option<f64> {
+        match value {
+            AttributeValue::Int(i) => Some(*i as f64),
+            AttributeValue::Float(f) => Some(*f),
+            AttributeValue::String(s) => s.parse::<f64>().ok(),
+            _ => None,
+        }
+    }
+
+    // Get the last level
+    let last_level = context.levels.last().unwrap();
+
+    // If we have relationships, calculate per parent node
+    if !last_level.node_relationships.is_empty() {
+        let result = PyDict::new(py);
+        
+        for (&parent_idx, children) in &last_level.node_relationships {
+            let mut values: Vec<f64> = Vec::new();
+            
+            for &child_idx in children {
+                if let Some(Node::StandardNode { attributes, .. }) = graph.node_weight(NodeIndex::new(child_idx)) {
+                    if let Some(value) = attributes.get(attribute) {
+                        if let Some(num) = value_to_float(value) {
+                            values.push(num);
+                        }
+                    }
+                }
+            }
+
+            let aggregate_value = match operation {
+                "sum" => values.iter().sum::<f64>(),
+                "avg" => if !values.is_empty() { values.iter().sum::<f64>() / values.len() as f64 } else { 0.0 },
+                "max" => values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
+                "min" => values.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
+                _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid operation")),
+            };
+
+            result.set_item(parent_idx.to_string(), aggregate_value)?;
+        }
+        Ok(result.into())
+    } else {
+        // No relationships, calculate for all nodes in the level
+        let mut values: Vec<f64> = Vec::new();
+        let nodes = if let Some(limit) = max_results {
+            last_level.nodes.iter().take(limit).copied().collect()
+        } else {
+            last_level.nodes.clone()
+        };
+
+        for node_idx in nodes {
+            if let Some(Node::StandardNode { attributes, .. }) = graph.node_weight(NodeIndex::new(node_idx)) {
+                if let Some(value) = attributes.get(attribute) {
+                    if let Some(num) = value_to_float(value) {
+                        values.push(num);
+                    }
+                }
+            }
+        }
+
+        let result = match operation {
+            "sum" => values.iter().sum::<f64>(),
+            "avg" => if !values.is_empty() { values.iter().sum::<f64>() / values.len() as f64 } else { 0.0 },
+            "max" => values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
+            "min" => values.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
+            _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid operation")),
+        };
+
+        Ok(result.into_py(py))
+    }
+}

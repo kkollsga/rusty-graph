@@ -38,6 +38,7 @@ print("Results skip: ", kg.type_filter("Class").traverse("ENROLLED_IN").traverse
 print("Student results: ", kg.type_filter("Class").traverse("ENROLLED_IN").count().get_results())
 kg=kg.type_filter("Class").traverse("ENROLLED_IN").count().store("Students")
 print("Classes: ", kg.type_filter("Class").get_attributes())
+print("Average scores: ", kg.type_filter("Class").traverse("ENROLLED_IN").traverse("EVALUATED_STUDENT", skip_level=True).max("score").get_results())
 
 print("\n\nSorting\n--------------")
 print("Class with the most student: ", kg.type_filter("Class").sort("Students", ascending=False).get_title())

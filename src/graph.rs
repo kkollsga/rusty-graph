@@ -10,8 +10,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue;
-use traversal_functions::{TraversalContext, traverse_relationships, process_traversal_levels, process_attributes_levels, count_traversal_levels, store_traversal_values};
-
+use crate::graph::traversal_functions::{TraversalContext, traverse_relationships, process_traversal_levels, process_attributes_levels, count_traversal_levels, store_traversal_values, calculate_aggregate};
 mod types;
 mod add_nodes;
 mod add_relationships;
@@ -388,6 +387,70 @@ impl KnowledgeGraph {
             let mut guard = self.traversal_context.write()
                 .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
             guard.results = Some(counts.into_py(py));
+            Ok(())
+        })?;
+        
+        Py::new(py, self.clone())
+    }
+
+    pub fn sum(&self, attribute: String, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let context = self.get_context()?;
+        let graph = self.get_graph()?;
+        let result = calculate_aggregate(&graph, &context, &attribute, "sum", max_results)?;
+        
+        Python::with_gil(|py| -> PyResult<()> {
+            let mut guard = self.traversal_context.write()
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
+            guard.results = Some(result.into_py(py));
+            Ok(())
+        })?;
+        
+        Py::new(py, self.clone())
+    }
+
+    pub fn avg(&self, attribute: String, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let context = self.get_context()?;
+        let graph = self.get_graph()?;
+        let result = calculate_aggregate(&graph, &context, &attribute, "avg", max_results)?;
+        
+        Python::with_gil(|py| -> PyResult<()> {
+            let mut guard = self.traversal_context.write()
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
+            guard.results = Some(result.into_py(py));
+            Ok(())
+        })?;
+        
+        Py::new(py, self.clone())
+    }
+
+    pub fn max(&self, attribute: String, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let context = self.get_context()?;
+        let graph = self.get_graph()?;
+        let result = calculate_aggregate(&graph, &context, &attribute, "max", max_results)?;
+        
+        Python::with_gil(|py| -> PyResult<()> {
+            let mut guard = self.traversal_context.write()
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
+            guard.results = Some(result.into_py(py));
+            Ok(())
+        })?;
+        
+        Py::new(py, self.clone())
+    }
+
+    pub fn min(&self, attribute: String, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let context = self.get_context()?;
+        let graph = self.get_graph()?;
+        let result = calculate_aggregate(&graph, &context, &attribute, "min", max_results)?;
+        
+        Python::with_gil(|py| -> PyResult<()> {
+            let mut guard = self.traversal_context.write()
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
+            guard.results = Some(result.into_py(py));
             Ok(())
         })?;
         
