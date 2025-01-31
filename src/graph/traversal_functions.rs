@@ -505,32 +505,30 @@ pub fn store_traversal_values(
     Ok(())
 }
 
+fn get_float_value(value: &AttributeValue) -> Option<f64> {
+    match value {
+        AttributeValue::Int(i) => Some(*i as f64),
+        AttributeValue::Float(f) => Some(*f),
+        _ => None,
+    }
+}
+
 pub fn calculate_aggregate(
     graph: &DiGraph<Node, Relation>,
     context: &TraversalContext,
     attribute: &str,
     operation: &str,
+    quantile: Option<f64>,
     max_results: Option<usize>,
 ) -> PyResult<PyObject> {
     let py = unsafe { Python::assume_gil_acquired() };
 
     if context.levels.is_empty() {
-        return Ok(0_f64.into_py(py));
+        return Ok(py.None());
     }
 
-    fn value_to_float(value: &AttributeValue) -> Option<f64> {
-        match value {
-            AttributeValue::Int(i) => Some(*i as f64),
-            AttributeValue::Float(f) => Some(*f),
-            AttributeValue::String(s) => s.parse::<f64>().ok(),
-            _ => None,
-        }
-    }
-
-    // Get the last level
     let last_level = context.levels.last().unwrap();
 
-    // If we have relationships, calculate per parent node
     if !last_level.node_relationships.is_empty() {
         let result = PyDict::new(py);
         
@@ -540,18 +538,28 @@ pub fn calculate_aggregate(
             for &child_idx in children {
                 if let Some(Node::StandardNode { attributes, .. }) = graph.node_weight(NodeIndex::new(child_idx)) {
                     if let Some(value) = attributes.get(attribute) {
-                        if let Some(num) = value_to_float(value) {
+                        if let Some(num) = get_float_value(value) {
                             values.push(num);
                         }
                     }
                 }
             }
 
+            if values.is_empty() {
+                result.set_item(parent_idx.to_string(), py.None())?;
+                continue;
+            }
+
             let aggregate_value = match operation {
                 "sum" => values.iter().sum::<f64>(),
-                "avg" => if !values.is_empty() { values.iter().sum::<f64>() / values.len() as f64 } else { 0.0 },
+                "avg" => values.iter().sum::<f64>() / values.len() as f64,
                 "max" => values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
                 "min" => values.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
+                "median" => calculate_median(&values),
+                "mode" => calculate_mode(&values),
+                "std" => calculate_std(&values),
+                "var" => calculate_variance(&values),
+                "quantile" => calculate_quantile(&values, quantile.unwrap_or(0.5)),
                 _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid operation")),
             };
 
@@ -559,7 +567,6 @@ pub fn calculate_aggregate(
         }
         Ok(result.into())
     } else {
-        // No relationships, calculate for all nodes in the level
         let mut values: Vec<f64> = Vec::new();
         let nodes = if let Some(limit) = max_results {
             last_level.nodes.iter().take(limit).copied().collect()
@@ -570,21 +577,90 @@ pub fn calculate_aggregate(
         for node_idx in nodes {
             if let Some(Node::StandardNode { attributes, .. }) = graph.node_weight(NodeIndex::new(node_idx)) {
                 if let Some(value) = attributes.get(attribute) {
-                    if let Some(num) = value_to_float(value) {
+                    if let Some(num) = get_float_value(value) {
                         values.push(num);
                     }
                 }
             }
         }
 
+        if values.is_empty() {
+            return Ok(py.None());
+        }
+
         let result = match operation {
             "sum" => values.iter().sum::<f64>(),
-            "avg" => if !values.is_empty() { values.iter().sum::<f64>() / values.len() as f64 } else { 0.0 },
+            "avg" => values.iter().sum::<f64>() / values.len() as f64,
             "max" => values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
             "min" => values.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
+            "median" => calculate_median(&values),
+            "mode" => calculate_mode(&values),
+            "std" => calculate_std(&values),
+            "var" => calculate_variance(&values),
+            "quantile" => calculate_quantile(&values, quantile.unwrap_or(0.5)),
             _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid operation")),
         };
 
         Ok(result.into_py(py))
+    }
+}
+
+fn calculate_median(values: &[f64]) -> f64 {
+    let mut sorted_values = values.to_vec();
+    sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    
+    let len = sorted_values.len();
+    if len % 2 == 0 {
+        (sorted_values[len/2 - 1] + sorted_values[len/2]) / 2.0
+    } else {
+        sorted_values[len/2]
+    }
+}
+
+fn calculate_mode(values: &[f64]) -> f64 {
+    let precision = 1e10; // Adjust based on desired precision
+    let mut counts = std::collections::HashMap::new();
+    
+    // Convert to integers with fixed precision to allow for HashMap usage
+    for &value in values {
+        let key = (value * precision).round() as i64;
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    
+    counts.into_iter()
+        .max_by_key(|&(_, count)| count)
+        .map(|(key, _)| (key as f64) / precision)
+        .unwrap_or(0.0)
+}
+
+fn calculate_variance(values: &[f64]) -> f64 {
+    let len = values.len() as f64;
+    let mean = values.iter().sum::<f64>() / len;
+    values.iter()
+        .map(|&x| (x - mean).powi(2))
+        .sum::<f64>() / len
+}
+
+fn calculate_std(values: &[f64]) -> f64 {
+    calculate_variance(values).sqrt()
+}
+
+fn calculate_quantile(values: &[f64], q: f64) -> f64 {
+    if q < 0.0 || q > 1.0 {
+        return 0.0;
+    }
+    
+    let mut sorted_values = values.to_vec();
+    sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    
+    let pos = (sorted_values.len() as f64 - 1.0) * q;
+    let floor = pos.floor() as usize;
+    let ceil = pos.ceil() as usize;
+    
+    if floor == ceil {
+        sorted_values[floor]
+    } else {
+        let weight = pos - floor as f64;
+        (1.0 - weight) * sorted_values[floor] + weight * sorted_values[ceil]
     }
 }

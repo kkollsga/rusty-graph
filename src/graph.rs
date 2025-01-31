@@ -393,19 +393,64 @@ impl KnowledgeGraph {
         Py::new(py, self.clone())
     }
 
+    pub fn median(&self, attribute: String, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let context = self.get_context()?;
+        let graph = self.get_graph()?;
+        let result = calculate_aggregate(&graph, &context, &attribute, "median", None, max_results)?;
+        
+        self.update_results(result)?;
+        Py::new(py, self.clone())
+    }
+
+    pub fn mode(&self, attribute: String, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let context = self.get_context()?;
+        let graph = self.get_graph()?;
+        let result = calculate_aggregate(&graph, &context, &attribute, "mode", None, max_results)?;
+        
+        self.update_results(result)?;
+        Py::new(py, self.clone())
+    }
+
+    pub fn std(&self, attribute: String, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let context = self.get_context()?;
+        let graph = self.get_graph()?;
+        let result = calculate_aggregate(&graph, &context, &attribute, "std", None, max_results)?;
+        
+        self.update_results(result)?;
+        Py::new(py, self.clone())
+    }
+
+    pub fn var(&self, attribute: String, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let context = self.get_context()?;
+        let graph = self.get_graph()?;
+        let result = calculate_aggregate(&graph, &context, &attribute, "var", None, max_results)?;
+        
+        self.update_results(result)?;
+        Py::new(py, self.clone())
+    }
+
+    pub fn quantile(&self, attribute: String, q: f64, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let context = self.get_context()?;
+        let graph = self.get_graph()?;
+        let result = calculate_aggregate(&graph, &context, &attribute, "quantile", Some(q), max_results)?;
+        
+        self.update_results(result)?;
+        Py::new(py, self.clone())
+    }
+
+    // Also need to update the existing methods:
     pub fn sum(&self, attribute: String, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
         let context = self.get_context()?;
         let graph = self.get_graph()?;
-        let result = calculate_aggregate(&graph, &context, &attribute, "sum", max_results)?;
+        let result = calculate_aggregate(&graph, &context, &attribute, "sum", None, max_results)?;
         
-        Python::with_gil(|py| -> PyResult<()> {
-            let mut guard = self.traversal_context.write()
-                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
-            guard.results = Some(result.into_py(py));
-            Ok(())
-        })?;
-        
+        self.update_results(result)?;
         Py::new(py, self.clone())
     }
 
@@ -413,31 +458,9 @@ impl KnowledgeGraph {
         let py = unsafe { Python::assume_gil_acquired() };
         let context = self.get_context()?;
         let graph = self.get_graph()?;
-        let result = calculate_aggregate(&graph, &context, &attribute, "avg", max_results)?;
+        let result = calculate_aggregate(&graph, &context, &attribute, "avg", None, max_results)?;
         
-        Python::with_gil(|py| -> PyResult<()> {
-            let mut guard = self.traversal_context.write()
-                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
-            guard.results = Some(result.into_py(py));
-            Ok(())
-        })?;
-        
-        Py::new(py, self.clone())
-    }
-
-    pub fn max(&self, attribute: String, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
-        let py = unsafe { Python::assume_gil_acquired() };
-        let context = self.get_context()?;
-        let graph = self.get_graph()?;
-        let result = calculate_aggregate(&graph, &context, &attribute, "max", max_results)?;
-        
-        Python::with_gil(|py| -> PyResult<()> {
-            let mut guard = self.traversal_context.write()
-                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
-            guard.results = Some(result.into_py(py));
-            Ok(())
-        })?;
-        
+        self.update_results(result)?;
         Py::new(py, self.clone())
     }
 
@@ -445,16 +468,30 @@ impl KnowledgeGraph {
         let py = unsafe { Python::assume_gil_acquired() };
         let context = self.get_context()?;
         let graph = self.get_graph()?;
-        let result = calculate_aggregate(&graph, &context, &attribute, "min", max_results)?;
+        let result = calculate_aggregate(&graph, &context, &attribute, "min", None, max_results)?;
         
+        self.update_results(result)?;
+        Py::new(py, self.clone())
+    }
+
+    pub fn max(&self, attribute: String, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let context = self.get_context()?;
+        let graph = self.get_graph()?;
+        let result = calculate_aggregate(&graph, &context, &attribute, "max", None, max_results)?;
+        
+        self.update_results(result)?;
+        Py::new(py, self.clone())
+    }
+
+    // Helper method to update results
+    fn update_results(&self, result: PyObject) -> PyResult<()> {
         Python::with_gil(|py| -> PyResult<()> {
             let mut guard = self.traversal_context.write()
                 .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
             guard.results = Some(result.into_py(py));
             Ok(())
-        })?;
-        
-        Py::new(py, self.clone())
+        })
     }
 
     pub fn get_results(&self) -> PyResult<PyObject> {
