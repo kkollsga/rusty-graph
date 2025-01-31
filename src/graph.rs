@@ -143,11 +143,22 @@ impl KnowledgeGraph {
         Py::new(py, self.clone())
     }
     
-    pub fn type_filter(&self, node_type: String) -> PyResult<Py<Self>> {
+    pub fn type_filter(&self, node_types: &PyAny) -> PyResult<Py<Self>> {
         let py = unsafe { Python::assume_gil_acquired() };
         let filter_dict = PyDict::new(py);
         let type_condition = PyDict::new(py);
-        type_condition.set_item("==", node_type)?;
+        
+        // Handle both single string and list of strings
+        if let Ok(single_type) = node_types.extract::<String>() {
+            type_condition.set_item("==", single_type)?;
+        } else if let Ok(type_list) = node_types.extract::<Vec<String>>() {
+            type_condition.set_item("==", type_list)?;
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "node_types must be either a string or a list of strings"
+            ));
+        }
+        
         filter_dict.set_item("node_type", type_condition)?;
         let graph = self.get_graph()?;
         let filtered_nodes = query_functions::filter_nodes(&graph, None, &filter_dict)?;
@@ -165,7 +176,15 @@ impl KnowledgeGraph {
         Py::new(py, self.clone())
     }
 
-    pub fn traverse(&self, rel_type: String, filter: Option<&PyDict>, direction: Option<String>) -> PyResult<Py<Self>> {
+    pub fn traverse(
+        &self, 
+        rel_type: String, 
+        filter: Option<&PyDict>, 
+        direction: Option<String>, 
+        sort: Option<&PyDict>, 
+        max_traversals: Option<usize>,
+        skip_level: Option<bool>,
+    ) -> PyResult<Py<Self>> {
         let py = unsafe { Python::assume_gil_acquired() };
         let current_context = self.get_context()?;
         let graph = self.get_graph()?;
@@ -176,19 +195,47 @@ impl KnowledgeGraph {
             return Py::new(py, self.clone());
         }
     
-        let relationships = traverse_relationships(&graph, &start_nodes, rel_type.clone(), direction, filter)?;
+        let relationships = traverse_relationships(&graph, &start_nodes, rel_type.clone(), direction, filter, sort, max_traversals)?;
+    
+        let all_target_nodes: Vec<usize> = relationships.values()
+            .flat_map(|targets| targets.iter().copied())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
         
-        let mut new_context = current_context;
-        let mut all_target_nodes = Vec::new();
-        for targets in relationships.values() {
-            for &target in targets {
-                if !all_target_nodes.contains(&target) {
-                    all_target_nodes.push(target);
+        let mut new_context = if skip_level.unwrap_or(false) {
+            let level_0 = &current_context.levels[0].nodes.clone();
+            let level_1_rels = &current_context.levels[1].node_relationships.clone();
+            
+            let mut translated_relationships = HashMap::new();
+            
+            for &class_id in level_0 {
+                let mut evaluated_students = Vec::new();
+                if let Some(students) = level_1_rels.get(&class_id) {
+                    for &student_id in students {
+                        if let Some(student_subjects) = relationships.get(&student_id) {
+                            evaluated_students.extend(student_subjects);
+                        }
+                    }
                 }
+                evaluated_students.sort_unstable();
+                evaluated_students.dedup();
+                translated_relationships.insert(class_id, evaluated_students);
             }
+            
+            let mut new_single_context = TraversalContext::new_base();
+            new_single_context.add_level(level_0.clone(), None, None);
+            new_single_context.add_level(all_target_nodes.clone(), None, Some(rel_type.clone()));
+            new_single_context.add_relationships(translated_relationships);
+            new_single_context
+        } else {
+            current_context.clone()
+        };
+    
+        if !skip_level.unwrap_or(false) {
+            new_context.add_level(all_target_nodes, None, Some(rel_type));
+            new_context.add_relationships(relationships);
         }
-        new_context.add_level(all_target_nodes, None, Some(rel_type));
-        new_context.add_relationships(relationships);
         
         self.update_context(new_context)?;
         Py::new(py, self.clone())

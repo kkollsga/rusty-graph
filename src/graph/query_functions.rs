@@ -15,6 +15,7 @@ pub fn filter_nodes(
     indices: Option<Vec<usize>>,
     filter_dict: &PyDict,
 ) -> PyResult<Vec<usize>> {
+    let py = unsafe { Python::assume_gil_acquired() };
     let mut result = Vec::new();
     let nodes_to_check = match indices {
         Some(idx) => idx.into_iter().map(NodeIndex::new).collect::<Vec<_>>(),
@@ -24,14 +25,23 @@ pub fn filter_nodes(
     let mut filters = HashMap::new();
     for (key, value) in filter_dict.iter() {
         let key = key.extract::<String>()?;
-        let value = value.extract::<&PyDict>()?;
-        filters.insert(key, value);
+        // Try to extract as PyDict first (new format), fall back to direct value (old format)
+        let conditions = if let Ok(dict) = value.extract::<&PyDict>() {
+            dict.into()
+        } else {
+            // For direct values, create a dict with equality comparison
+            let simple_condition = PyDict::new(py);
+            simple_condition.set_item("==", value)?;
+            simple_condition
+        };
+        filters.insert(key, conditions);
     }
 
     for idx in nodes_to_check {
         if let Some(Node::StandardNode { node_type, unique_id, attributes, title }) = graph.node_weight(idx) {
             let mut matches = true;
 
+            // Check each filter attribute
             for (key, conditions) in &filters {
                 let node_value = match key.as_str() {
                     "type" | "node_type" => Some(AttributeValue::String(node_type.clone())),
@@ -41,23 +51,29 @@ pub fn filter_nodes(
                 };
 
                 if let Some(node_value) = node_value {
+                    // Check all conditions for this attribute
                     for (op, filter_value) in conditions.iter() {
                         let op = op.extract::<String>()?;
-                        let filter_value = filter_value.extract::<PyObject>()?;
                         
-                        let comparison_result = compare_values(&node_value, &filter_value)?;
+                        // Check if the filter value is a list
+                        let mut condition_matches = false;
                         
-                        let matches_condition = match op.as_str() {
-                            "==" | "=" => comparison_result == Ordering::Equal,
-                            "!=" | "<>" => comparison_result != Ordering::Equal,
-                            ">=" | "=>" => comparison_result != Ordering::Less,
-                            "<=" | "=<" => comparison_result != Ordering::Greater,
-                            ">" => comparison_result == Ordering::Greater,
-                            "<" => comparison_result == Ordering::Less,
-                            _ => return Err(PyValueError::new_err(format!("Unsupported operation: {}", op))),
-                        };
+                        if let Ok(value_list) = filter_value.extract::<Vec<PyObject>>() {
+                            // If it's a list, any match makes the condition true
+                            for value in value_list {
+                                let comparison_result = compare_values(&node_value, &value.into_py(py))?;
+                                if matches_operator(&comparison_result, &op) {
+                                    condition_matches = true;
+                                    break;
+                                }
+                            }
+                        } else {
+                            // Single value comparison
+                            let comparison_result = compare_values(&node_value, &filter_value.into_py(py))?;
+                            condition_matches = matches_operator(&comparison_result, &op);
+                        }
 
-                        if !matches_condition {
+                        if !condition_matches {
                             matches = false;
                             break;
                         }
@@ -74,6 +90,19 @@ pub fn filter_nodes(
         }
     }
     Ok(result)
+}
+
+// Helper function to match operators
+fn matches_operator(comparison: &Ordering, op: &str) -> bool {
+    match op {
+        "==" | "=" => *comparison == Ordering::Equal,
+        "!=" | "<>" => *comparison != Ordering::Equal,
+        ">=" | "=>" => *comparison != Ordering::Less,
+        "<=" | "=<" => *comparison != Ordering::Greater,
+        ">" => *comparison == Ordering::Greater,
+        "<" => *comparison == Ordering::Less,
+        _ => false,
+    }
 }
 
 fn compare_values(node_value: &AttributeValue, filter_value: &PyObject) -> PyResult<Ordering> {

@@ -10,7 +10,7 @@ use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue;
 use crate::graph::add_nodes::update_node_attribute;
 use crate::graph::get_schema::update_or_retrieve_schema;
-use crate::graph::query_functions::filter_nodes;
+use crate::graph::query_functions;
 
 #[derive(Debug, Clone)]
 pub struct TraversalLevel {
@@ -86,6 +86,8 @@ pub fn traverse_relationships(
     rel_type: String,
     direction: Option<String>,
     filter: Option<&PyDict>,
+    sort: Option<&PyDict>,
+    max_traversals: Option<usize>,  // New parameter
 ) -> PyResult<HashMap<usize, Vec<usize>>> {
     
     let check_both = direction.is_none() || direction.as_deref() == Some("both");
@@ -129,8 +131,71 @@ pub fn traverse_relationships(
         // Apply filter to all collected nodes only if filter is provided and not empty
         if let Some(filter_dict) = filter {
             if !filter_dict.is_empty() {
-                let filtered_nodes = filter_nodes(graph, Some(node_traversals), filter_dict)?;
+                let filtered_nodes = query_functions::filter_nodes(graph, Some(node_traversals), filter_dict)?;
                 node_traversals = filtered_nodes;
+            }
+        }
+
+        // Apply sorting if provided
+        if let Some(sort_dict) = sort {
+            if !sort_dict.is_empty() {
+                node_traversals = query_functions::sort_nodes(graph, node_traversals, |&a, &b| {
+                    for (key, value) in sort_dict.iter() {
+                        let key = match key.extract::<String>() {
+                            Ok(k) => k,
+                            Err(_) => continue,
+                        };
+                        
+                        // Handle both direct values and condition dictionaries
+                        let ascending = if let Ok(dict) = value.extract::<&PyDict>() {
+                            // Fixed extraction of order parameter
+                            match dict.get_item("order") {
+                                Ok(Some(v)) => v.extract::<bool>().unwrap_or(true),
+                                _ => true,
+                            }
+                        } else {
+                            true
+                        };
+
+                        let compare_values = |idx: usize| {
+                            let node = graph.node_weight(petgraph::graph::NodeIndex::new(idx));
+                            match node {
+                                Some(Node::StandardNode { attributes, .. }) => {
+                                    match key.as_str() {
+                                        "title" => node.and_then(|n| match n {
+                                            Node::StandardNode { title, .. } => title.clone().map(AttributeValue::String),
+                                            _ => None
+                                        }),
+                                        _ => attributes.get(&key).cloned()
+                                    }
+                                },
+                                _ => None
+                            }
+                        };
+
+                        let a_val = compare_values(a);
+                        let b_val = compare_values(b);
+
+                        let ordering = match (a_val, b_val) {
+                            (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+                            (Some(_), None) => std::cmp::Ordering::Less,
+                            (None, Some(_)) => std::cmp::Ordering::Greater,
+                            (None, None) => std::cmp::Ordering::Equal,
+                        };
+
+                        if ordering != std::cmp::Ordering::Equal {
+                            return if ascending { ordering } else { ordering.reverse() };
+                        }
+                    }
+                    std::cmp::Ordering::Equal
+                });
+            }
+        }
+        
+        // Apply max_traversals limit if provided
+        if let Some(limit) = max_traversals {
+            if limit > 0 {  // Protect against zero limit
+                node_traversals.truncate(limit);
             }
         }
         
