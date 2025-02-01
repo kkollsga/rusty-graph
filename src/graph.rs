@@ -10,13 +10,16 @@ use std::sync::{Arc, RwLock};
 
 use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue;
-use crate::graph::traversal_functions::{TraversalContext, traverse_relationships, process_traversal_levels, process_attributes_levels, count_traversal_levels, store_traversal_values, calculate_aggregate};
+use crate::graph::traversal_functions::{TraversalContext, traverse_relationships, process_traversal_levels, process_attributes_levels, count_traversal_levels};
+use crate::graph::calculation_functions::{calculate_aggregate, store_calculation_values, process_calculation_levels};
+
 mod types;
 mod add_nodes;
 mod add_relationships;
 mod get_schema;
 mod query_functions;
 mod traversal_functions;
+mod calculation_functions;  // Add the new module
 
 use types::DataInput;
 use query_functions::extract_dataframe_content;
@@ -42,26 +45,22 @@ impl KnowledgeGraph {
         }
     }
 
-    // Helper to safely get graph
     fn get_graph(&self) -> PyResult<std::sync::RwLockReadGuard<DiGraph<Node, Relation>>> {
         self.graph.read()
             .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire read lock on graph"))
     }
 
-    // Helper to safely get mutable graph
     fn get_graph_mut(&self) -> PyResult<std::sync::RwLockWriteGuard<DiGraph<Node, Relation>>> {
         self.graph.write()
             .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock on graph"))
     }
 
-    // Helper to safely get context
     fn get_context(&self) -> PyResult<TraversalContext> {
         self.traversal_context.read()
             .map(|guard| (*guard).clone())
             .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire read lock"))
     }
 
-    // Helper to safely update context
     fn update_context(&self, new_context: TraversalContext) -> PyResult<()> {
         let mut guard = self.traversal_context.write()
             .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
@@ -69,7 +68,6 @@ impl KnowledgeGraph {
         Ok(())
     }
 
-    // Helper to get nodes with empty check
     fn get_context_nodes(&self) -> PyResult<Vec<usize>> {
         let context = self.get_context()?;
         let graph = self.get_graph()?;
@@ -126,6 +124,95 @@ impl KnowledgeGraph {
         Self::new_impl()
     }
 
+    pub fn add_node(
+        &self,
+        node_type: String,
+        unique_id: &PyAny,
+        attributes: Option<HashMap<String, AttributeValue>>,
+        node_title: Option<String>
+    ) -> PyResult<Option<usize>> {
+        if let Ok(id) = unique_id.extract::<i32>() {
+            Ok(Some(self.add_node_impl(node_type, id, attributes, node_title)))
+        } else if let Ok(id) = unique_id.extract::<i64>() {
+            Ok(Some(self.add_node_impl(node_type, id as i32, attributes, node_title)))
+        } else if let Ok(id) = unique_id.extract::<f64>() {
+            Ok(Some(self.add_node_impl(node_type, id as i32, attributes, node_title)))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    fn add_node_impl(
+        &self,
+        node_type: String,
+        unique_id: i32,
+        attributes: Option<HashMap<String, AttributeValue>>,
+        node_title: Option<String>
+    ) -> usize {
+        let node = Node::new(&node_type, unique_id, attributes, node_title.as_deref());
+        let mut graph = self.get_graph_mut().expect("Failed to acquire write lock");
+        let index = graph.add_node(node);
+        index.index()
+    }
+    
+    pub fn add_nodes(
+        &self,
+        data: &PyAny,
+        node_type: String,
+        unique_id_field: &PyAny,
+        node_title_field: Option<String>,
+        conflict_handling: Option<String>,
+        column_types: Option<&PyDict>,
+    ) -> PyResult<Vec<usize>> {
+        let input = Self::process_input_data(data)?;
+        let mut graph = self.get_graph_mut()?;
+        
+        add_nodes::add_nodes(
+            &mut graph,
+            input.data.as_ref(data.py()),
+            input.columns,
+            node_type,
+            unique_id_field.extract()?,
+            node_title_field,
+            conflict_handling,
+            column_types,
+        )
+    }
+    
+    pub fn add_relationships(
+        &self,
+        data: &PyAny,
+        relationship_type: String,
+        source_type: String,
+        source_id_field: &PyAny,
+        target_type: String,
+        target_id_field: &PyAny,
+        source_title_field: Option<String>,
+        target_title_field: Option<String>,
+        attribute_columns: Option<Vec<String>>,
+        conflict_handling: Option<String>,
+    ) -> PyResult<Vec<(usize, usize)>> {
+        let source_id_field = source_id_field.extract::<String>()?;
+        let target_id_field = target_id_field.extract::<String>()?;
+        let input = Self::process_input_data(data)?;
+        let mut graph = self.get_graph_mut()?;
+        
+        add_relationships::add_relationships(
+            &mut graph,
+            data,
+            input.columns,
+            relationship_type,
+            source_type,
+            source_id_field,
+            target_type,
+            target_id_field,
+            source_title_field,
+            target_title_field,
+            attribute_columns,
+            conflict_handling,
+        )
+    }
+
     pub fn reset(&self) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
         self.update_context(TraversalContext::new_base())?;
@@ -147,7 +234,6 @@ impl KnowledgeGraph {
         let filter_dict = PyDict::new(py);
         let type_condition = PyDict::new(py);
         
-        // Handle both single string and list of strings
         if let Ok(single_type) = node_types.extract::<String>() {
             type_condition.set_item("==", single_type)?;
         } else if let Ok(type_list) = node_types.extract::<Vec<String>>() {
@@ -363,6 +449,11 @@ impl KnowledgeGraph {
         process_attributes_levels(&graph, &self.get_context()?, attributes, max_results)
     }
 
+    pub fn get_calculations(&self, _py: Python, calculation_names: Option<Vec<String>>, max_results: Option<usize>) -> PyResult<PyObject> {
+        let graph = self.get_graph()?;
+        process_calculation_levels(&graph, &self.get_context()?, calculation_names, max_results)
+    }
+
     pub fn get_id(&self, max_results: Option<usize>) -> PyResult<PyObject> {
         let graph = self.get_graph()?;
         process_traversal_levels(&graph, &self.get_context()?, "unique_id", max_results)
@@ -433,17 +524,6 @@ impl KnowledgeGraph {
         Py::new(py, self.clone())
     }
 
-    pub fn quantile(&self, attribute: String, q: f64, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
-        let py = unsafe { Python::assume_gil_acquired() };
-        let context = self.get_context()?;
-        let graph = self.get_graph()?;
-        let result = calculate_aggregate(&graph, &context, &attribute, "quantile", Some(q), max_results)?;
-        
-        self.update_results(result)?;
-        Py::new(py, self.clone())
-    }
-
-    // Also need to update the existing methods:
     pub fn sum(&self, attribute: String, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
         let context = self.get_context()?;
@@ -484,14 +564,60 @@ impl KnowledgeGraph {
         Py::new(py, self.clone())
     }
 
-    // Helper method to update results
-    fn update_results(&self, result: PyObject) -> PyResult<()> {
-        Python::with_gil(|py| -> PyResult<()> {
-            let mut guard = self.traversal_context.write()
-                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
-            guard.results = Some(result.into_py(py));
-            Ok(())
-        })
+    pub fn quantile(&self, attribute: String, q: f64, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let context = self.get_context()?;
+        let graph = self.get_graph()?;
+        let result = calculate_aggregate(&graph, &context, &attribute, "quantile", Some(q), max_results)?;
+        
+        self.update_results(result)?;
+        Py::new(py, self.clone())
+    }
+
+    pub fn store(&self, calculation_name: String) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let context = self.get_context()?;
+        let mut graph = self.get_graph_mut()?;
+        
+        match &context.results {
+            Some(results) => {
+                store_calculation_values(&mut graph, &context, &calculation_name, results)?;
+                Py::new(py, self.clone())
+            },
+            None => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "No results available to store. Call an aggregation function first."
+            ))
+        }
+    }
+
+    pub fn has_calculation(&self, calculation_name: &str) -> PyResult<bool> {
+        let graph = self.get_graph()?;
+        let context = self.get_context()?;
+        
+        for node_idx in context.current_nodes() {
+            if let Some(Node::StandardNode { calculations, .. }) = graph.node_weight(petgraph::graph::NodeIndex::new(node_idx)) {
+                if let Some(calcs) = calculations {
+                    if calcs.contains_key(calculation_name) {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn clear_calculations(&self) -> PyResult<Py<KnowledgeGraph>> {
+        let py = unsafe { Python::assume_gil_acquired() };
+        let mut graph = self.get_graph_mut()?;
+        let context = self.get_context()?;
+        
+        for node_idx in context.current_nodes() {
+            if let Some(Node::StandardNode { calculations, .. }) = graph.node_weight_mut(petgraph::graph::NodeIndex::new(node_idx)) {
+                *calculations = None;
+            }
+        }
+        
+        Py::new(py, self.clone())
     }
 
     pub fn get_results(&self) -> PyResult<PyObject> {
@@ -502,20 +628,13 @@ impl KnowledgeGraph {
         }
     }
 
-    pub fn store(&self, attribute_name: String) -> PyResult<Py<KnowledgeGraph>> {
-        let py = unsafe { Python::assume_gil_acquired() };
-        let context = self.get_context()?;
-        let mut graph = self.get_graph_mut()?;
-        
-        match &context.results {
-            Some(results) => {
-                store_traversal_values(&mut graph, &context, &attribute_name, results)?;
-                Py::new(py, self.clone())
-            },
-            None => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "No results available to store. Call count() first."
-            ))
-        }
+    fn update_results(&self, result: PyObject) -> PyResult<()> {
+        Python::with_gil(|py| -> PyResult<()> {
+            let mut guard = self.traversal_context.write()
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
+            guard.results = Some(result.into_py(py));
+            Ok(())
+        })
     }
 
     pub fn get_relationships(&self, py: Python, max_results: Option<usize>) -> PyResult<PyObject> {
@@ -531,95 +650,6 @@ impl KnowledgeGraph {
     
         let results = query_functions::get_simplified_relationships(&graph, indices)?;
         Ok(results.into_py(py))
-    }
-
-    pub fn add_node(
-        &self,
-        node_type: String,
-        unique_id: &PyAny,
-        attributes: Option<HashMap<String, AttributeValue>>,
-        node_title: Option<String>
-    ) -> PyResult<Option<usize>> {
-        if let Ok(id) = unique_id.extract::<i32>() {
-            Ok(Some(self.add_node_impl(node_type, id, attributes, node_title)))
-        } else if let Ok(id) = unique_id.extract::<i64>() {
-            Ok(Some(self.add_node_impl(node_type, id as i32, attributes, node_title)))
-        } else if let Ok(id) = unique_id.extract::<f64>() {
-            Ok(Some(self.add_node_impl(node_type, id as i32, attributes, node_title)))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn add_node_impl(
-        &self,
-        node_type: String,
-        unique_id: i32,
-        attributes: Option<HashMap<String, AttributeValue>>,
-        node_title: Option<String>
-    ) -> usize {
-        let node = Node::new(&node_type, unique_id, attributes, node_title.as_deref());
-        let mut graph = self.get_graph_mut().expect("Failed to acquire write lock");
-        let index = graph.add_node(node);
-        index.index()
-    }
-
-    pub fn add_nodes(
-        &self,
-        data: &PyAny,
-        node_type: String,
-        unique_id_field: &PyAny,
-        node_title_field: Option<String>,
-        conflict_handling: Option<String>,
-        column_types: Option<&PyDict>,
-    ) -> PyResult<Vec<usize>> {
-        let input = Self::process_input_data(data)?;
-        let mut graph = self.get_graph_mut()?;
-        
-        add_nodes::add_nodes(
-            &mut graph,
-            input.data.as_ref(data.py()),
-            input.columns,
-            node_type,
-            unique_id_field.extract()?,
-            node_title_field,
-            conflict_handling,
-            column_types,
-        )
-    }
-
-    pub fn add_relationships(
-        &self,
-        data: &PyAny,
-        relationship_type: String,
-        source_type: String,
-        source_id_field: &PyAny,
-        target_type: String,
-        target_id_field: &PyAny,
-        source_title_field: Option<String>,
-        target_title_field: Option<String>,
-        attribute_columns: Option<Vec<String>>,
-        conflict_handling: Option<String>,
-    ) -> PyResult<Vec<(usize, usize)>> {
-        let source_id_field = source_id_field.extract::<String>()?;
-        let target_id_field = target_id_field.extract::<String>()?;
-        let input = Self::process_input_data(data)?;
-        let mut graph = self.get_graph_mut()?;
-        
-        add_relationships::add_relationships(
-            &mut graph,
-            data,
-            input.columns,
-            relationship_type,
-            source_type,
-            source_id_field,
-            target_type,
-            target_id_field,
-            source_title_field,
-            target_title_field,
-            attribute_columns,
-            conflict_handling,
-        )
     }
 
     pub fn save_to_file(&self, file_path: &str) -> PyResult<()> {

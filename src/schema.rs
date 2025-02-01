@@ -10,9 +10,9 @@ pub struct NodeData {
     pub graph_index: usize,
     pub title: String,
     pub attributes: HashMap<String, AttributeValue>,
-    pub traversals: Option<Vec<NodeData>>,  // Changed to Option
+    pub calculations: Option<HashMap<String, AttributeValue>>,  // Made optional
+    pub traversals: Option<Vec<NodeData>>,
 }
-
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Node {
@@ -20,12 +20,15 @@ pub enum Node {
         node_type: String,
         unique_id: i32,
         attributes: HashMap<String, AttributeValue>,
+        calculations: Option<HashMap<String, AttributeValue>>,  // Made optional
         title: Option<String>,
     },
     DataTypeNode {
         data_type: String, // 'Node' or 'Relation'
         name: String,
-        attributes: HashMap<String, String>, // Attribute name to data type ('Int', 'Float', etc.)
+        attributes: HashMap<String, String>, // Attribute name to data type
+        calculations: Option<HashMap<String, String>>, // Made optional
+        metadata: HashMap<String, String>,  // For storing calculation metadata
     },
 }
 
@@ -40,6 +43,7 @@ pub struct NodeTypeStats {
     pub title: String,
     pub graph_id: String,
     pub attributes: HashMap<String, AttributeMetadata>,
+    pub calculations: Option<HashMap<String, AttributeMetadata>>,  // Made optional
     pub occurrences: usize,
     pub relationships: RelationshipMetadata,
 }
@@ -59,26 +63,39 @@ pub struct RelationshipMetadata {
 }
 
 impl Node {
-    pub fn new(node_type: &str, unique_id: i32, attributes: Option<HashMap<String, AttributeValue>>, node_title: Option<&str>) -> Self {
+    pub fn new(
+        node_type: &str, 
+        unique_id: i32, 
+        attributes: Option<HashMap<String, AttributeValue>>, 
+        node_title: Option<&str>
+    ) -> Self {
         Node::StandardNode {
             node_type: node_type.to_string(),
             unique_id,
             attributes: attributes.unwrap_or_else(HashMap::new),
+            calculations: None,  // Initialize as None
             title: node_title.map(|t| t.to_string()),
         }
     }
 
-    pub fn new_data_type(data_type: &str, name: &str, attributes: HashMap<String, String>) -> Self {
+    pub fn new_data_type(
+        data_type: &str, 
+        name: &str, 
+        attributes: HashMap<String, String>,
+        calculations: Option<HashMap<String, String>>  // Already optional
+    ) -> Self {
         Node::DataTypeNode {
             data_type: data_type.to_string(),
             name: name.to_string(),
             attributes,
+            calculations,
+            metadata: HashMap::new(),
         }
     }
 
     pub fn to_node_data(&self, graph_index: usize, _py: Python, filter_attributes: Option<&[String]>) -> PyResult<NodeData> {
         match self {
-            Node::StandardNode { node_type, unique_id, attributes, title } => {
+            Node::StandardNode { node_type, unique_id, attributes, calculations, title } => {
                 let filtered_attrs = match filter_attributes {
                     Some(filter) => {
                         let mut filtered = HashMap::new();
@@ -89,10 +106,7 @@ impl Node {
                         }
                         filtered
                     },
-                    None => {
-                        let cloned = attributes.clone();
-                        cloned
-                    }
+                    None => attributes.clone(),
                 };
 
                 Ok(NodeData {
@@ -100,8 +114,9 @@ impl Node {
                     title: title.clone().unwrap_or_default(),
                     graph_index,
                     attributes: filtered_attrs,
+                    calculations: calculations.clone(),
                     node_type: node_type.clone(),
-                    traversals: None,  // Initialize as None
+                    traversals: None,
                 })
             },
             Node::DataTypeNode { .. } => {
@@ -118,10 +133,19 @@ impl Node {
         dict.insert("graph_index".to_string(), node_data.graph_index.into_py(py));
         dict.insert("title".to_string(), node_data.title.clone().into_py(py));
         
+        // Convert attributes
         let py_attrs: HashMap<String, PyObject> = node_data.attributes.iter()
             .map(|(k, v)| Ok((k.clone(), v.to_python_object(py, None)?)))
             .collect::<PyResult<_>>()?;
         dict.insert("attributes".to_string(), py_attrs.into_py(py));
+        
+        // Convert calculations if they exist
+        if let Some(ref calculations) = node_data.calculations {
+            let py_calcs: HashMap<String, PyObject> = calculations.iter()
+                .map(|(k, v)| Ok((k.clone(), v.to_python_object(py, None)?)))
+                .collect::<PyResult<_>>()?;
+            dict.insert("calculations".to_string(), py_calcs.into_py(py));
+        }
         
         // Only include traversals if Some and non-empty
         if let Some(ref traversals) = node_data.traversals {

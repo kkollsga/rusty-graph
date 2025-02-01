@@ -1,20 +1,11 @@
 use petgraph::graph::DiGraph;
 use petgraph::Direction;
-use petgraph::visit::EdgeRef;  // Added for edge.source() and edge.target()
+use petgraph::visit::EdgeRef;
 use std::collections::{HashMap, HashSet};
 use crate::schema::{Node, Relation, NodeTypeStats, AttributeMetadata, RelationshipMetadata};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-/// Updates or retrieves the schema (DataTypeNode) from the graph
-///
-/// # Arguments
-///
-/// * `graph` - The graph object containing all nodes and relations
-/// * `data_type` - The type of the data as a string (e.g., "Node" or "Relation")
-/// * `name` - The name of the DataTypeNode
-/// * `columns` - Optional list of columns to update in the DataTypeNode
-/// * `column_types` - Optional mapping of column names to their data types
 pub fn update_or_retrieve_schema(
     graph: &mut DiGraph<Node, Relation>,
     data_type: &str,
@@ -31,19 +22,20 @@ pub fn update_or_retrieve_schema(
     match schema_node {
         Some(idx) => {
             if let Some(new_types) = types {
-                let mut curr_attrs = if let Node::DataTypeNode { attributes, .. } = &mut graph[idx] {
-                    attributes.clone()
+                let (curr_attrs, curr_calcs) = if let Node::DataTypeNode { attributes, calculations, .. } = &mut graph[idx] {
+                    (attributes.clone(), calculations.clone())
                 } else {
-                    HashMap::new()
+                    (HashMap::new(), None)
                 };
                 
                 // Merge new types with existing
-                curr_attrs.extend(new_types);
+                let mut updated_attrs = curr_attrs.clone();
+                updated_attrs.extend(new_types);
                 
                 // Replace entire node to ensure update is atomic
-                graph[idx] = Node::new_data_type(data_type, name, curr_attrs.clone());
+                graph[idx] = Node::new_data_type(data_type, name, updated_attrs.clone(), curr_calcs);
                 
-                Ok(curr_attrs)
+                Ok(updated_attrs)
             } else if let Node::DataTypeNode { attributes, .. } = &graph[idx] {
                 Ok(attributes.clone())
             } else {
@@ -52,7 +44,7 @@ pub fn update_or_retrieve_schema(
         },
         None => {
             let attributes = types.unwrap_or_default();
-            let node = Node::new_data_type(data_type, name, attributes.clone());
+            let node = Node::new_data_type(data_type, name, attributes.clone(), None);
             graph.add_node(node);
             Ok(attributes)
         }
@@ -74,18 +66,32 @@ pub fn get_node_schemas(
                     .or_default()
                     .push(&graph[node_idx]);
             }
-            Node::DataTypeNode { data_type, name, attributes } if data_type == "Node" => {
+            Node::DataTypeNode { data_type, name, attributes, calculations, .. } if data_type == "Node" => {
+                // Convert attributes to AttributeMetadata
+                let attr_metadata = attributes.iter()
+                    .map(|(k, v)| (k.clone(), AttributeMetadata {
+                        data_type: v.clone(),
+                        nullable: false,
+                        unique_values: None,
+                    }))
+                    .collect();
+
+                // Convert calculations to AttributeMetadata if they exist
+                let calc_metadata = calculations.as_ref().map(|calcs| {
+                    calcs.iter()
+                        .map(|(k, v)| (k.clone(), AttributeMetadata {
+                            data_type: v.clone(),
+                            nullable: true,  // Calculations are always nullable
+                            unique_values: None,
+                        }))
+                        .collect()
+                });
+
                 schemas.insert(name.clone(), NodeTypeStats {
                     title: "String".to_string(),
                     graph_id: "String".to_string(),
-                    attributes: attributes
-                        .iter()
-                        .map(|(k, v)| (k.clone(), AttributeMetadata {
-                            data_type: v.clone(),
-                            nullable: false,
-                            unique_values: None,
-                        }))
-                        .collect(),
+                    attributes: attr_metadata,
+                    calculations: calc_metadata,
                     occurrences: 0,
                     relationships: RelationshipMetadata {
                         incoming_types: HashSet::new(),
@@ -104,22 +110,45 @@ pub fn get_node_schemas(
             stats.occurrences = nodes.len();
 
             let mut null_tracking: HashMap<String, bool> = HashMap::new();
+            let mut calc_null_tracking: HashMap<String, bool> = HashMap::new();
+
             for node in nodes {
-                if let Node::StandardNode { attributes, .. } = node {
+                if let Node::StandardNode { attributes, calculations, .. } = node {
+                    // Track nulls in attributes
                     for (attr_name, attr_value) in attributes {
                         if attr_value.is_null() {
                             null_tracking.insert(attr_name.clone(), true);
                         }
                     }
+
+                    // Track nulls in calculations if they exist
+                    if let Some(calcs) = calculations {
+                        for (calc_name, calc_value) in calcs {
+                            if calc_value.is_null() {
+                                calc_null_tracking.insert(calc_name.clone(), true);
+                            }
+                        }
+                    }
                 }
             }
 
+            // Update attribute nullability
             for (attr_name, is_null) in null_tracking {
                 if let Some(attr_metadata) = stats.attributes.get_mut(&attr_name) {
                     attr_metadata.nullable = is_null;
                 }
             }
 
+            // Update calculation nullability
+            if let Some(ref mut calcs) = stats.calculations {
+                for (calc_name, is_null) in calc_null_tracking {
+                    if let Some(calc_metadata) = calcs.get_mut(&calc_name) {
+                        calc_metadata.nullable = is_null;
+                    }
+                }
+            }
+
+            // Process relationships
             for node_idx in graph.node_indices() {
                 if let Node::StandardNode { node_type: nt, .. } = &graph[node_idx] {
                     if nt == &node_type {
@@ -145,8 +174,6 @@ pub fn get_node_schemas(
     Ok(schemas)
 }
 
-/// Gets the complete schema information for the graph
-/// Currently returns node schemas, with relation schemas to be implemented
 pub fn get_schema(
     py: Python,
     graph: &DiGraph<Node, Relation>,
@@ -177,6 +204,23 @@ pub fn get_schema(
             attr_dict.set_item(attr_name, meta_dict)?;
         }
         stats_dict.set_item("attributes", attr_dict)?;
+
+        // Convert calculations if they exist
+        if let Some(calculations) = stats.calculations {
+            let calc_dict = PyDict::new(py);
+            for (calc_name, calc_meta) in calculations {
+                let meta_dict = PyDict::new(py);
+                meta_dict.set_item("data_type", calc_meta.data_type)?;
+                meta_dict.set_item("nullable", calc_meta.nullable)?;
+                if let Some(unique_values) = calc_meta.unique_values {
+                    meta_dict.set_item("unique_values", unique_values)?;
+                }
+                calc_dict.set_item(calc_name, meta_dict)?;
+            }
+            stats_dict.set_item("calculations", calc_dict)?;
+        } else {
+            stats_dict.set_item("calculations", PyDict::new(py))?;
+        }
         
         // Convert relationships
         let rel_dict = PyDict::new(py);
@@ -189,7 +233,6 @@ pub fn get_schema(
     }
     
     schema_dict.set_item("nodes", node_dict)?;
-    // Placeholder for relations schema (to be implemented)
     schema_dict.set_item("relations", PyDict::new(py))?;
     
     Ok(schema_dict.into())

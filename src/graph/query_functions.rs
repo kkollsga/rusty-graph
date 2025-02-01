@@ -38,7 +38,7 @@ pub fn filter_nodes(
     }
 
     for idx in nodes_to_check {
-        if let Some(Node::StandardNode { node_type, unique_id, attributes, title }) = graph.node_weight(idx) {
+        if let Some(Node::StandardNode { node_type, unique_id, attributes, calculations, title }) = graph.node_weight(idx) {
             let mut matches = true;
 
             // Check each filter attribute
@@ -47,7 +47,12 @@ pub fn filter_nodes(
                     "type" | "node_type" => Some(AttributeValue::String(node_type.clone())),
                     "title" => title.clone().map(AttributeValue::String),
                     "unique_id" => Some(AttributeValue::Int(*unique_id)),
-                    _ => attributes.get(key).cloned(),
+                    _ => {
+                        // First check attributes, then calculations if not found
+                        attributes.get(key).cloned().or_else(|| {
+                            calculations.as_ref().and_then(|calcs| calcs.get(key).cloned())
+                        })
+                    }
                 };
 
                 if let Some(node_value) = node_value {
@@ -92,7 +97,6 @@ pub fn filter_nodes(
     Ok(result)
 }
 
-// Helper function to match operators
 fn matches_operator(comparison: &Ordering, op: &str) -> bool {
     match op {
         "==" | "=" => *comparison == Ordering::Equal,
@@ -159,12 +163,22 @@ pub fn get_simplified_relationships(
 
     for idx in indices {
         let node_idx = NodeIndex::new(idx);
-        if let Some(Node::StandardNode { node_type, title, .. }) = graph.node_weight(node_idx) {
+        if let Some(Node::StandardNode { node_type, title, calculations, .. }) = graph.node_weight(node_idx) {
             let mut node_data = HashMap::new();
             
             // Add base node info
             node_data.insert("type".to_string(), node_type.clone().into_py(py));
             node_data.insert("title".to_string(), title.clone().unwrap_or_default().into_py(py));
+            
+            // Add calculations if they exist
+            if let Some(calcs) = calculations {
+                let py_calcs: HashMap<String, PyObject> = calcs.iter()
+                    .map(|(k, v)| Ok((k.clone(), v.to_python_object(py, None)?)))
+                    .collect::<PyResult<_>>()?;
+                if !py_calcs.is_empty() {
+                    node_data.insert("calculations".to_string(), py_calcs.into_py(py));
+                }
+            }
             
             // Process incoming relationships
             let incoming: Vec<HashMap<String, String>> = graph.edges_directed(node_idx, Direction::Incoming)
