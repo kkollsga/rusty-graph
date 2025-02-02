@@ -219,6 +219,57 @@ impl KnowledgeGraph {
         Py::new(py, self.clone())
     }
 
+    pub fn print_context(&self, py: Python) -> PyResult<String> {
+        let context = self.get_context()?;
+        let mut output = String::new();
+        
+        if context.levels.is_empty() {
+            output.push_str("Empty traversal context\n");
+            return Ok(output);
+        }
+
+        for (level_idx, level) in context.levels.iter().enumerate() {
+            output.push_str(&format!("Level {}: {} nodes\n", level_idx, level.nodes.len()));
+            
+            // Print relationship type if present
+            if let Some(rel_type) = &level.relationship_type {
+                output.push_str(&format!("  Relationship type: {}\n", rel_type));
+            }
+            
+            // Print node details
+            output.push_str("  Nodes: [");
+            output.push_str(&level.nodes.iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(", "));
+            output.push_str("]\n");
+            
+            // Print relationships if present and not empty
+            if !level.node_relationships.is_empty() {
+                output.push_str("  Relationships:\n");
+                for (source, targets) in &level.node_relationships {
+                    if !targets.is_empty() {
+                        output.push_str(&format!("    {} -> [", source));
+                        output.push_str(&targets.iter()
+                            .map(|t| t.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", "));
+                        output.push_str("]\n");
+                    }
+                }
+            }
+            
+            output.push_str("\n");
+        }
+
+        // Print results if present
+        if let Some(results) = &context.results {
+            output.push_str("Results present: Yes\n");
+        }
+
+        Ok(output)
+    }
+
     pub fn filter(&self, filter_dict: &PyDict) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
         let graph = self.get_graph()?;

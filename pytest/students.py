@@ -28,7 +28,7 @@ print("Counts: ", kg.type_filter("Class").count())
 print("Sorting: ", )
 print("\n\nTraversals\n--------------")
 print("Classes with no traversals: ", kg.type_filter("Class").get_title())
-print("Classes with one traversal: ", kg.type_filter("Class").traverse("ENROLLED_IN", filter={'graph_index':{"==":3}}).get_title())
+print("Classes with one traversal: ", kg.type_filter("Class").traverse("ENROLLED_IN").get_title())
 print("Classes with two traversals: ", kg.type_filter("Class").traverse("ENROLLED_IN").traverse("HAS_SUBJECT").get_title())
 
 print("\n\nCounts\n--------------")
@@ -43,3 +43,8 @@ print("Average scores: ", kg.type_filter("Class").traverse("ENROLLED_IN").traver
 print("\n\nSorting\n--------------")
 print("Class with the most student: ", kg.type_filter("Class").sort("Students", ascending=False).get_title())
 print("Filtered students: ", kg.type_filter("Class").traverse("ENROLLED_IN", sort={"title": {"order": True}}, max_traversals=1).get_title())
+
+kg=kg.reset()
+kg=kg.type_filter("Class")
+kg=kg.traverse("ENROLLED_IN").traverse("EVALUATED_STUDENT", skip_level=True).std("score")
+print("\n\nContext Print\n--------------\n\n",kg.print_context())
