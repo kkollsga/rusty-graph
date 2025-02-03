@@ -32,7 +32,6 @@ pub fn calculate_aggregate(
     }
 
     let last_level = context.levels.last().unwrap();
-
     if !last_level.node_relationships.is_empty() {
         let result = PyDict::new(py);
         
@@ -48,25 +47,50 @@ pub fn calculate_aggregate(
                     }
                 }
             }
-
             if values.is_empty() {
                 result.set_item(parent_idx.to_string(), py.None())?;
                 continue;
             }
 
             let aggregate_value = match operation {
-                "sum" => values.iter().sum::<f64>(),
-                "avg" => values.iter().sum::<f64>() / values.len() as f64,
-                "max" => values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
-                "min" => values.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
-                "median" => calculate_median(&values),
-                "mode" => calculate_mode(&values),
-                "std" => calculate_std(&values),
-                "var" => calculate_variance(&values),
-                "quantile" => calculate_quantile(&values, quantile.unwrap_or(0.5)),
+                "sum" => {
+                    let sum = values.iter().sum::<f64>();
+                    sum
+                },
+                "avg" => {
+                    let avg = values.iter().sum::<f64>() / values.len() as f64;
+                    avg
+                },
+                "max" => {
+                    let max = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                    max
+                },
+                "min" => {
+                    let min = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                    min
+                },
+                "median" => {
+                    let median = calculate_median(&values);
+                    median
+                },
+                "mode" => {
+                    let mode = calculate_mode(&values);
+                    mode
+                },
+                "std" => {
+                    let std = calculate_std(&values);
+                    std
+                },
+                "var" => {
+                    let var = calculate_variance(&values);
+                    var
+                },
+                "quantile" => {
+                    let q = calculate_quantile(&values, quantile.unwrap_or(0.5));
+                    q
+                },
                 _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid operation")),
             };
-
             result.set_item(parent_idx.to_string(), aggregate_value)?;
         }
         Ok(result.into())
@@ -145,7 +169,9 @@ fn calculate_variance(values: &[f64]) -> f64 {
 }
 
 fn calculate_std(values: &[f64]) -> f64 {
-    calculate_variance(values).sqrt()
+    let variance = calculate_variance(values);
+    let std = variance.sqrt();
+    std
 }
 
 fn calculate_quantile(values: &[f64], q: f64) -> f64 {

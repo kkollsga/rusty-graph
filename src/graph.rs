@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyDict};
 use pyo3::PyResult;
+use serde_json::Value as JsonValue;
 use pyo3::exceptions::{PyIOError, PyValueError};
 use petgraph::graph::DiGraph;
 use std::collections::HashMap;
@@ -45,6 +46,10 @@ impl KnowledgeGraph {
         }
     }
 
+    fn get_context_value(&self) -> PyResult<TraversalContext> {
+        self.get_context().map(|guard| (*guard).clone())
+    }
+
     fn get_graph(&self) -> PyResult<std::sync::RwLockReadGuard<DiGraph<Node, Relation>>> {
         self.graph.read()
             .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire read lock on graph"))
@@ -55,17 +60,14 @@ impl KnowledgeGraph {
             .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock on graph"))
     }
 
-    fn get_context(&self) -> PyResult<TraversalContext> {
+    fn get_context(&self) -> PyResult<std::sync::RwLockReadGuard<TraversalContext>> {
         self.traversal_context.read()
-            .map(|guard| (*guard).clone())
-            .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire read lock"))
+            .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire read lock on traversal context"))
     }
 
-    fn update_context(&self, new_context: TraversalContext) -> PyResult<()> {
-        let mut guard = self.traversal_context.write()
-            .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
-        *guard = new_context;
-        Ok(())
+    fn get_context_mut(&self) -> PyResult<std::sync::RwLockWriteGuard<TraversalContext>> {
+        self.traversal_context.write()
+            .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock on traversal context"))
     }
 
     fn get_context_nodes(&self) -> PyResult<Vec<usize>> {
@@ -76,6 +78,14 @@ impl KnowledgeGraph {
         } else {
             context.current_nodes()
         })
+    }
+
+    fn update_context(&self, new_context: TraversalContext) -> PyResult<()> {
+        let mut context = self.traversal_context.write().map_err(|_| {
+            PyValueError::new_err("Failed to acquire write lock on traversal context")
+        })?;
+        *context = new_context;
+        Ok(())
     }
 
     fn process_input_data(input: &PyAny) -> PyResult<DataInput> {
@@ -215,11 +225,18 @@ impl KnowledgeGraph {
 
     pub fn reset(&self) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
-        self.update_context(TraversalContext::new_base())?;
+        let mut context = self.get_context_mut()?;
+        
+        let mut params = HashMap::new();
+        params.insert("function".to_string(), JsonValue::String("reset".to_string()));
+        
+        context.levels.clear();  // Fix: Access levels directly
+        context.add_level(Vec::new(), Some(vec![params]), true);
+        
         Py::new(py, self.clone())
     }
 
-    pub fn print_context(&self, py: Python) -> PyResult<String> {
+    pub fn print_context(&self, _py: Python) -> PyResult<String> {
         let context = self.get_context()?;
         let mut output = String::new();
         
@@ -227,13 +244,20 @@ impl KnowledgeGraph {
             output.push_str("Empty traversal context\n");
             return Ok(output);
         }
-
+    
         for (level_idx, level) in context.levels.iter().enumerate() {
             output.push_str(&format!("Level {}: {} nodes\n", level_idx, level.nodes.len()));
             
-            // Print relationship type if present
-            if let Some(rel_type) = &level.relationship_type {
-                output.push_str(&format!("  Relationship type: {}\n", rel_type));
+            // Print selection parameters with new lines and indentation
+            if let Some(params) = &level.selection_params {
+                output.push_str("  Selection parameters: \n");
+                let param_strings: Vec<String> = params.iter()
+                    .map(|param_map| {
+                        format!("    {}", serde_json::to_string(param_map).unwrap_or_default())
+                    })
+                    .collect();
+                output.push_str(&param_strings.join(",\n"));
+                output.push_str("\n");
             }
             
             // Print node details
@@ -261,24 +285,38 @@ impl KnowledgeGraph {
             
             output.push_str("\n");
         }
-
+    
         // Print results if present
-        if let Some(results) = &context.results {
+        if let Some(_results) = &context.results {
             output.push_str("Results present: Yes\n");
         }
-
+    
         Ok(output)
     }
 
     pub fn filter(&self, filter_dict: &PyDict) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
         let graph = self.get_graph()?;
-        let filtered_nodes = query_functions::filter_nodes(&graph, None, filter_dict)?;
-        let mut context = TraversalContext::new_base();
-        context.add_level(filtered_nodes, None, None);
-        self.update_context(context)?;
+        
+        // Drop the read guard after getting what we need
+        let filtered_nodes = {
+            let context = self.get_context()?;
+            query_functions::filter_nodes(&graph, None, filter_dict)?
+        };
+        
+        let mut params = HashMap::new();
+        params.insert("function".to_string(), JsonValue::String("filter".to_string()));
+        params.insert("filter".to_string(), pydict_to_json(filter_dict)?);
+        
+        // Create new context as an owned value
+        let mut new_context = TraversalContext::new_base();
+        new_context.add_level(filtered_nodes, Some(vec![params]), true);
+        
+        // Update using the owned context
+        self.update_context(new_context)?;
+        
         Py::new(py, self.clone())
-    }
+    }    
     
     pub fn type_filter(&self, node_types: &PyAny) -> PyResult<Py<Self>> {
         let py = unsafe { Python::assume_gil_acquired() };
@@ -298,31 +336,49 @@ impl KnowledgeGraph {
         filter_dict.set_item("node_type", type_condition)?;
         let graph = self.get_graph()?;
         let filtered_nodes = query_functions::filter_nodes(&graph, None, &filter_dict)?;
+        
+        let mut params = HashMap::new();
+        params.insert("function".to_string(), JsonValue::String("type_filter".to_string()));
+        params.insert("node_types".to_string(), pydict_to_json(&type_condition)?);
+        
         let mut context = TraversalContext::new_base();
-        context.add_level(filtered_nodes, None, None);
+        context.add_level(filtered_nodes, Some(vec![params]), true);
         self.update_context(context)?;
         Py::new(py, self.clone())
     }
 
     pub fn select_nodes(&self, node_indices: Vec<usize>) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
+        
+        let mut params = HashMap::new();
+        params.insert("function".to_string(), JsonValue::String("select_nodes".to_string()));
+        params.insert("node_indices".to_string(), JsonValue::Array(
+            node_indices.iter().map(|&idx| JsonValue::Number(idx.into())).collect()
+        ));
+        
         let mut context = TraversalContext::new_base();
-        context.add_level(node_indices, None, None);
+        context.add_level(node_indices, Some(vec![params]), true);
         self.update_context(context)?;
         Py::new(py, self.clone())
     }
+    
 
     pub fn traverse(
-        &self, 
-        rel_type: String, 
-        filter: Option<&PyDict>, 
-        direction: Option<String>, 
-        sort: Option<&PyDict>, 
+        &self,
+        rel_type: String,
+        filter: Option<&PyDict>,
+        direction: Option<String>,
+        sort: Option<&PyDict>,
         max_traversals: Option<usize>,
         skip_level: Option<bool>,
-    ) -> PyResult<Py<Self>> {
+     ) -> PyResult<Py<Self>> {
         let py = unsafe { Python::assume_gil_acquired() };
-        let current_context = self.get_context()?;
+        
+        // Get initial context and graph safely
+        let current_context = {
+            let ctx = self.get_context()?;
+            (*ctx).clone()
+        };
         let graph = self.get_graph()?;
         
         let start_nodes = current_context.current_nodes();
@@ -330,21 +386,51 @@ impl KnowledgeGraph {
         if start_nodes.is_empty() {
             return Py::new(py, self.clone());
         }
-    
-        let relationships = traverse_relationships(&graph, &start_nodes, rel_type.clone(), direction, filter, sort, max_traversals)?;
-    
+     
+        // Get the relationships for the traversal
+        let relationships = traverse_relationships(&graph, &start_nodes, rel_type.clone(), direction.clone(), filter, sort, max_traversals)?;
+     
         let all_target_nodes: Vec<usize> = relationships.values()
             .flat_map(|targets| targets.iter().copied())
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
+     
+        // Build the parameters for the traversal
+        let mut params = HashMap::new();
+        params.insert("function".to_string(), JsonValue::String("traverse".to_string()));
+        params.insert("rel_type".to_string(), JsonValue::String(rel_type));
         
-        let mut new_context = if skip_level.unwrap_or(false) {
-            let level_0 = &current_context.levels[0].nodes.clone();
-            let level_1_rels = &current_context.levels[1].node_relationships.clone();
+        if let Some(ref d) = direction { 
+            params.insert("direction".to_string(), JsonValue::String(d.clone())); 
+        }
+        if let Some(f) = filter { 
+            params.insert("filter".to_string(), pydict_to_json(f)?);
+        }
+        if let Some(s) = sort { 
+            params.insert("sort".to_string(), pydict_to_json(s)?);
+        }
+        if let Some(m) = max_traversals { 
+            params.insert("max_traversals".to_string(), JsonValue::Number(m.into())); 
+        }
+        
+        let new_context = if skip_level.unwrap_or(false) {
+            // Safety check for skip-level
+            if current_context.levels.len() < 2 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Cannot skip level with less than 2 levels of traversal"
+                ));
+            }
+    
+            // Preserve the initial context level
+            let mut new_context = TraversalContext::new_base();
+            new_context.levels.push(current_context.levels[0].clone());
             
+            let level_0 = &current_context.levels[0].nodes;
+            let level_1_rels = &current_context.levels[1].node_relationships;
+            
+            // Create the translated relationships
             let mut translated_relationships = HashMap::new();
-            
             for &class_id in level_0 {
                 let mut evaluated_students = Vec::new();
                 if let Some(students) = level_1_rels.get(&class_id) {
@@ -358,31 +444,43 @@ impl KnowledgeGraph {
                 evaluated_students.dedup();
                 translated_relationships.insert(class_id, evaluated_students);
             }
-            
-            let mut new_single_context = TraversalContext::new_base();
-            new_single_context.add_level(level_0.clone(), None, None);
-            new_single_context.add_level(all_target_nodes.clone(), None, Some(rel_type.clone()));
-            new_single_context.add_relationships(translated_relationships);
-            new_single_context
-        } else {
-            current_context.clone()
-        };
+     
+            params.insert("skip_level".to_string(), JsonValue::Bool(true));
     
-        if !skip_level.unwrap_or(false) {
-            new_context.add_level(all_target_nodes, None, Some(rel_type));
-            new_context.add_relationships(relationships);
-        }
+            // Combine previous and new parameters
+            let mut combined_params = current_context.levels.get(1)
+                .and_then(|level| level.selection_params.clone())
+                .unwrap_or_default();
+            combined_params.push(params);
+    
+            // Add the final level with preserved history and combined parameters
+            new_context.add_level(all_target_nodes, Some(combined_params), false);
+            new_context.add_relationships(translated_relationships);
+            new_context
+        } else {
+            let mut next_context = current_context;
+            next_context.add_level(all_target_nodes, Some(vec![params]), false);
+            next_context.add_relationships(relationships);
+            next_context
+        };
         
         self.update_context(new_context)?;
+        
         Py::new(py, self.clone())
     }
 
     pub fn sort(&self, sort_attribute: &str, ascending: Option<bool>) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
-        let mut context = self.get_context()?;
         let graph = self.get_graph()?;
         
-        if let Some(last_level) = context.levels.last_mut() {
+        // Create new context from existing one
+        let mut new_context = {
+            let context = self.get_context()?;
+            (*context).clone()
+        };
+    
+        
+        if let Some(last_level) = new_context.levels.last_mut() {
             let sorted_nodes = query_functions::sort_nodes(&graph, last_level.nodes.clone(), |&a, &b| {
                 let compare_values = |idx: usize| {
                     let node = graph.node_weight(petgraph::graph::NodeIndex::new(idx));
@@ -421,7 +519,7 @@ impl KnowledgeGraph {
             last_level.nodes = sorted_nodes;
         }
         
-        self.update_context(context)?;
+        self.update_context(new_context)?;
         Py::new(py, self.clone())
     }
 
@@ -497,44 +595,52 @@ impl KnowledgeGraph {
 
     pub fn get_attributes(&self, _py: Python, max_results: Option<usize>, attributes: Option<Vec<String>>) -> PyResult<PyObject> {
         let graph = self.get_graph()?;
-        process_attributes_levels(&graph, &self.get_context()?, attributes, max_results)
+        let context = self.get_context_value()?;
+        process_attributes_levels(&graph, &context, attributes, max_results)
     }
 
     pub fn get_calculations(&self, _py: Python, calculation_names: Option<Vec<String>>, max_results: Option<usize>) -> PyResult<PyObject> {
         let graph = self.get_graph()?;
-        process_calculation_levels(&graph, &self.get_context()?, calculation_names, max_results)
+        let context = self.get_context_value()?;
+        process_calculation_levels(&graph, &context, calculation_names, max_results)
     }
 
     pub fn get_id(&self, max_results: Option<usize>) -> PyResult<PyObject> {
         let graph = self.get_graph()?;
-        process_traversal_levels(&graph, &self.get_context()?, "unique_id", max_results)
+        let context = self.get_context_value()?;
+        process_traversal_levels(&graph, &context, "unique_id", max_results)
     }
 
     pub fn get_title(&self, max_results: Option<usize>) -> PyResult<PyObject> {
         let graph = self.get_graph()?;
-        process_traversal_levels(&graph, &self.get_context()?, "title", max_results)
+        let context = self.get_context_value()?;
+        process_traversal_levels(&graph, &context, "title", max_results)
     }
 
     pub fn get_index(&self, max_results: Option<usize>) -> PyResult<PyObject> {
         let graph = self.get_graph()?;
-        process_traversal_levels(&graph, &self.get_context()?, "graph_index", max_results)
+        let context = self.get_context_value()?;
+        process_traversal_levels(&graph, &context, "graph_index", max_results)
     }
 
     pub fn count(&self) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
-        let context = self.get_context()?;
-        let counts = count_traversal_levels(&context, None)?;
         
-        Python::with_gil(|py| -> PyResult<()> {
+        // Scope the read lock to ensure it's released
+        let counts = {
+            let context = self.get_context()?;
+            count_traversal_levels(&context, None)?
+        };
+        // Update results with a separate write lock
+        {
             let mut guard = self.traversal_context.write()
                 .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
             guard.results = Some(counts.into_py(py));
-            Ok(())
-        })?;
-        
-        Py::new(py, self.clone())
+        }  // Write lock is explicitly dropped here
+        let result = Py::new(py, self.clone());
+        result
     }
-
+    
     pub fn median(&self, attribute: String, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
         let context = self.get_context()?;
@@ -557,11 +663,21 @@ impl KnowledgeGraph {
 
     pub fn std(&self, attribute: String, max_results: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
-        let context = self.get_context()?;
-        let graph = self.get_graph()?;
-        let result = calculate_aggregate(&graph, &context, &attribute, "std", None, max_results)?;
         
-        self.update_results(result)?;
+        // Scope the locks to ensure they're released
+        let result = {
+            let context = self.get_context()?;
+            let graph = self.get_graph()?;
+            calculate_aggregate(&graph, &context, &attribute, "std", None, max_results)?
+        };  // context and graph locks are released here
+        
+        // Explicitly update results in its own scope
+        {
+            let mut guard = self.traversal_context.write()
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
+            guard.results = Some(result.into_py(py));
+        }  // write lock is released here
+        
         Py::new(py, self.clone())
     }
 
@@ -682,7 +798,9 @@ impl KnowledgeGraph {
     fn update_results(&self, result: PyObject) -> PyResult<()> {
         Python::with_gil(|py| -> PyResult<()> {
             let mut guard = self.traversal_context.write()
-                .map_err(|_| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock"))?;
+                .map_err(|_| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to acquire write lock")
+                })?;
             guard.results = Some(result.into_py(py));
             Ok(())
         })
@@ -732,4 +850,33 @@ impl KnowledgeGraph {
         let graph = self.get_graph()?;
         get_schema::get_schema(py, &graph)
     }
+}
+
+fn pydict_to_json(dict: &PyDict) -> PyResult<JsonValue> {
+    let mut map = serde_json::Map::new();
+    for (key, value) in dict.iter() {
+        let key_str = key.extract::<String>()?;
+        let json_value = match value.get_type().name()? {
+            "str" => JsonValue::String(value.extract()?),
+            "int" => JsonValue::Number(value.extract::<i64>()?.into()),
+            "float" => {
+                let f: f64 = value.extract()?;
+                serde_json::Number::from_f64(f)
+                    .map(JsonValue::Number)
+                    .unwrap_or(JsonValue::Null)
+            },
+            "bool" => JsonValue::Bool(value.extract()?),
+            "list" => {
+                let py_list: Vec<String> = value.extract()?;
+                JsonValue::Array(py_list.into_iter().map(JsonValue::String).collect())
+            },
+            "dict" => {
+                let inner_dict = value.downcast::<PyDict>()?;
+                pydict_to_json(inner_dict)?
+            },
+            _ => JsonValue::Null
+        };
+        map.insert(key_str, json_value);
+    }
+    Ok(JsonValue::Object(map))
 }

@@ -4,6 +4,7 @@ use petgraph::visit::EdgeRef;
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use std::collections::{HashMap, HashSet};
+use serde_json::Value as JsonValue;
 use pyo3::types::PyDict;
 
 use crate::schema::{Node, Relation};
@@ -16,7 +17,7 @@ pub struct TraversalLevel {
     #[allow(dead_code)]
     pub parent_node: Option<usize>,
     #[allow(dead_code)]
-    pub relationship_type: Option<String>,
+    pub selection_params: Option<Vec<HashMap<String, JsonValue>>>,  // Changed to support array of dicts
     pub node_relationships: HashMap<usize, Vec<usize>>, // Maps parent nodes to their child nodes
 }
 
@@ -36,34 +37,54 @@ impl TraversalContext {
 
     pub fn new_with_nodes(nodes: Vec<usize>) -> Self {
         let mut context = Self::new_base();
-        context.add_level(nodes, None, None);
+        context.add_level(nodes, None, false);  // Remove the extra None argument
         context
     }
 
-    pub fn add_level(&mut self, nodes: Vec<usize>, parent: Option<usize>, rel_type: Option<String>) {
+    pub fn add_level(
+        &mut self,
+        nodes: Vec<usize>,
+        selection_params: Option<Vec<HashMap<String, JsonValue>>>,
+        new_level: bool,
+    ) {
+        let level = if new_level {
+            0
+        } else {
+            self.levels.last().map_or(0, |_| self.levels.len())
+        };
+
+        // Clear subsequent levels if this is a new traversal sequence
+        if new_level {
+            self.levels.clear();
+        }
+
+        let parent_node = if level == 0 {
+            None
+        } else {
+            self.levels.last().and_then(|l| l.nodes.first()).copied()
+        };
+
         let node_relationships = HashMap::new();
         self.levels.push(TraversalLevel {
             nodes,
-            parent_node: parent,
-            relationship_type: rel_type,
+            parent_node,
+            selection_params,
             node_relationships,
         });
     }
 
     pub fn add_relationships(&mut self, relationships: HashMap<usize, Vec<usize>>) {
         if let Some(last_level) = self.levels.last_mut() {
-            // First collect all unique target nodes
-            let all_nodes: HashSet<usize> = relationships
-                .iter()
-                .flat_map(|(_source, targets)| targets)
-                .copied()
-                .collect();
-                
-            // Move relationships into the level
+            // Only update nodes if they're empty
+            if last_level.nodes.is_empty() {
+                let all_nodes: HashSet<usize> = relationships
+                    .iter() // Use iter() instead of consuming relationships
+                    .flat_map(|(_source, targets)| targets)
+                    .copied()
+                    .collect();
+                last_level.nodes = all_nodes.into_iter().collect();
+            }
             last_level.node_relationships = relationships;
-            
-            // Update nodes with the collected targets
-            last_level.nodes = all_nodes.into_iter().collect();
         }
     }
 
@@ -85,10 +106,15 @@ pub fn traverse_relationships(
     direction: Option<String>,
     filter: Option<&PyDict>,
     sort: Option<&PyDict>,
-    max_traversals: Option<usize>,  // New parameter
+    max_traversals: Option<usize>,
 ) -> PyResult<HashMap<usize, Vec<usize>>> {
-    
-    let check_both = direction.is_none() || direction.as_deref() == Some("both");
+    // Define which directions to check based on input
+    let directions_to_check = match direction.as_deref() {
+        Some("incoming") => vec![Direction::Incoming],
+        Some("outgoing") => vec![Direction::Outgoing],
+        Some(d) => return Err(PyValueError::new_err(format!("Invalid direction: {}", d))),
+        None => vec![Direction::Incoming, Direction::Outgoing],
+    };
     
     let mut relationships = HashMap::new();
     
@@ -96,8 +122,8 @@ pub fn traverse_relationships(
         let node_index = NodeIndex::new(node_idx);
         let mut node_traversals = Vec::new();
         
-        // Helper closure to collect target nodes from edges in a given direction
-        let mut collect_targets = |dir: Direction| {
+        // Check each specified direction
+        for &dir in &directions_to_check {
             let edges = graph.edges_directed(node_index, dir);
             for edge in edges {
                 if edge.weight().relation_type == rel_type {
@@ -110,19 +136,6 @@ pub fn traverse_relationships(
                         node_traversals.push(target_idx);
                     }
                 }
-            }
-        };
-
-        // Process edges based on direction
-        if check_both {
-            collect_targets(Direction::Incoming);
-            collect_targets(Direction::Outgoing);
-        } else {
-            match direction.as_deref() {
-                Some("incoming") => collect_targets(Direction::Incoming),
-                Some("outgoing") => collect_targets(Direction::Outgoing),
-                Some(d) => return Err(PyValueError::new_err(format!("Invalid direction: {}", d))),
-                None => unreachable!(), // This case is handled by check_both
             }
         }
         
@@ -201,6 +214,15 @@ pub fn traverse_relationships(
             relationships.insert(node_idx, node_traversals);
         }
     }
+    
+    // Validate relationships before returning
+    if relationships.is_empty() && !start_nodes.is_empty() {
+        relationships = start_nodes
+            .iter()
+            .map(|&node| (node, Vec::new()))
+            .collect();
+    }
+    
     Ok(relationships)
 }
 
@@ -392,7 +414,6 @@ pub fn count_traversal_levels(
         }
         return Ok(count.into_py(py));
     }
-
     let result = PyDict::new(py);
 
     // Process root nodes
@@ -420,6 +441,5 @@ pub fn count_traversal_levels(
             result.set_item(root_idx.to_string(), second_level)?;
         }
     }
-
     Ok(result.into())
 }
