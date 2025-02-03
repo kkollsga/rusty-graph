@@ -250,36 +250,3 @@ fn extract_datetime_formats(column_types_map: &mut HashMap<String, String>, defa
 
     datetime_formats
 }
-
-pub fn update_node_attribute(
-    graph: &mut DiGraph<Node, Relation>,
-    node_index: usize,
-    attribute_name: &str,
-    value: AttributeValue,
-) -> PyResult<()> {
-    // First update the node
-    if let Node::StandardNode { node_type, attributes, .. } = &mut graph[NodeIndex::new(node_index)] {
-        // Store node type for schema update
-        let node_type = node_type.clone();
-        
-        // Update or add the attribute
-        attributes.insert(attribute_name.to_string(), value.clone());
-
-        // Update schema
-        let _schema = update_or_retrieve_schema(
-            graph,
-            "Node",
-            &node_type,
-            Some(HashMap::from([(
-                attribute_name.to_string(),
-                match value {
-                    AttributeValue::Int(_) => "Int".to_string(),
-                    AttributeValue::Float(_) => "Float".to_string(),
-                    AttributeValue::String(_) => "String".to_string(),
-                    AttributeValue::DateTime(_) => "DateTime".to_string(),
-                }
-            )]))
-        )?;
-    }
-    Ok(())
-}

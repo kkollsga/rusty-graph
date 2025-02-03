@@ -248,7 +248,6 @@ impl KnowledgeGraph {
         for (level_idx, level) in context.levels.iter().enumerate() {
             output.push_str(&format!("Level {}: {} nodes\n", level_idx, level.nodes.len()));
             
-            // Print selection parameters with new lines and indentation
             if let Some(params) = &level.selection_params {
                 output.push_str("  Selection parameters: \n");
                 let param_strings: Vec<String> = params.iter()
@@ -260,7 +259,6 @@ impl KnowledgeGraph {
                 output.push_str("\n");
             }
             
-            // Print node details
             output.push_str("  Nodes: [");
             output.push_str(&level.nodes.iter()
                 .map(|n| n.to_string())
@@ -268,7 +266,6 @@ impl KnowledgeGraph {
                 .join(", "));
             output.push_str("]\n");
             
-            // Print relationships if present and not empty
             if !level.node_relationships.is_empty() {
                 output.push_str("  Relationships:\n");
                 for (source, targets) in &level.node_relationships {
@@ -286,9 +283,18 @@ impl KnowledgeGraph {
             output.push_str("\n");
         }
     
-        // Print results if present
-        if let Some(_results) = &context.results {
-            output.push_str("Results present: Yes\n");
+        if let Some(results) = &context.results {
+            output.push_str("Results:\n  "); // Combined "Results:" with newline and indent
+            Python::with_gil(|py| {
+                output.push_str(&match results.as_ref(py) {
+                    x if x.str().is_ok() => x.str()?.extract::<String>()?,
+                    x if x.downcast::<PyDict>().is_ok() => format!("{:?}", x.downcast::<PyDict>()?),
+                    x if x.downcast::<PyList>().is_ok() => format!("{:?}", x.downcast::<PyList>()?),
+                    _ => "[Complex result type]".to_string()
+                });
+                Ok::<_, PyErr>(())
+            })?;
+            output.push_str("\n");
         }
     
         Ok(output)
@@ -298,11 +304,7 @@ impl KnowledgeGraph {
         let py = unsafe { Python::assume_gil_acquired() };
         let graph = self.get_graph()?;
         
-        // Drop the read guard after getting what we need
-        let filtered_nodes = {
-            let context = self.get_context()?;
-            query_functions::filter_nodes(&graph, None, filter_dict)?
-        };
+        let filtered_nodes = query_functions::filter_nodes(&graph, None, filter_dict)?;
         
         let mut params = HashMap::new();
         params.insert("function".to_string(), JsonValue::String("filter".to_string()));
@@ -316,7 +318,7 @@ impl KnowledgeGraph {
         self.update_context(new_context)?;
         
         Py::new(py, self.clone())
-    }    
+    }
     
     pub fn type_filter(&self, node_types: &PyAny) -> PyResult<Py<Self>> {
         let py = unsafe { Python::assume_gil_acquired() };
