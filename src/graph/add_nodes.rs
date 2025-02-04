@@ -82,10 +82,34 @@ pub fn add_nodes(
     node_title_field: Option<String>,
     conflict_handling: Option<String>,
     column_types: Option<&PyDict>,
+    attribute_columns: Option<Vec<String>>, // New parameter
 ) -> PyResult<Vec<usize>> {
     let conflict_handling = conflict_handling.unwrap_or_else(|| "update".to_string());
     let mut indices = Vec::new();
     let default_datetime_format = "%Y-%m-%d %H:%M:%S".to_string();
+
+    // Validate attribute_columns if provided
+    let attribute_columns = if let Some(attr_cols) = attribute_columns {
+        // Convert to lowercase for case-insensitive comparison
+        let available_columns: Vec<String> = columns.iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+        
+        // Filter and validate attribute columns
+        let valid_cols: Vec<String> = attr_cols.into_iter()
+            .filter(|col| available_columns.contains(&col.to_lowercase()))
+            .collect();
+            
+        if valid_cols.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "No valid columns found in attribute_columns"
+            ));
+        }
+        
+        Some(valid_cols)
+    } else {
+        None
+    };
 
     // Infer types from first row if no column_types provided
     let mut inferred_types = HashMap::new();
@@ -159,6 +183,13 @@ pub fn add_nodes(
                             None
                         }
                     };
+                    continue;
+                }
+            }
+
+            // Check if column should be processed as attribute
+            if let Some(ref attr_cols) = attribute_columns {
+                if !attr_cols.iter().any(|col| col.eq_ignore_ascii_case(column_name)) {
                     continue;
                 }
             }

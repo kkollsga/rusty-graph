@@ -139,14 +139,27 @@ impl KnowledgeGraph {
         node_type: String,
         unique_id: &PyAny,
         attributes: Option<HashMap<String, AttributeValue>>,
-        node_title: Option<String>
+        node_title: Option<String>,
+        attribute_columns: Option<Vec<String>>, // New parameter
     ) -> PyResult<Option<usize>> {
+        // For add_node, we can filter the attributes if attribute_columns is provided
+        let filtered_attributes = match (attributes, attribute_columns) {
+            (Some(attrs), Some(cols)) => {
+                let filtered: HashMap<String, AttributeValue> = attrs.into_iter()
+                    .filter(|(key, _)| cols.iter().any(|col| col.eq_ignore_ascii_case(key)))
+                    .collect();
+                Some(filtered)
+            },
+            (attrs, None) => attrs,
+            (None, _) => None,
+        };
+
         if let Ok(id) = unique_id.extract::<i32>() {
-            Ok(Some(self.add_node_impl(node_type, id, attributes, node_title)))
+            Ok(Some(self.add_node_impl(node_type, id, filtered_attributes, node_title)))
         } else if let Ok(id) = unique_id.extract::<i64>() {
-            Ok(Some(self.add_node_impl(node_type, id as i32, attributes, node_title)))
+            Ok(Some(self.add_node_impl(node_type, id as i32, filtered_attributes, node_title)))
         } else if let Ok(id) = unique_id.extract::<f64>() {
-            Ok(Some(self.add_node_impl(node_type, id as i32, attributes, node_title)))
+            Ok(Some(self.add_node_impl(node_type, id as i32, filtered_attributes, node_title)))
         } else {
             Ok(None)
         }
@@ -173,6 +186,7 @@ impl KnowledgeGraph {
         node_title_field: Option<String>,
         conflict_handling: Option<String>,
         column_types: Option<&PyDict>,
+        attribute_columns: Option<Vec<String>>, // New parameter
     ) -> PyResult<Vec<usize>> {
         let input = Self::process_input_data(data)?;
         let mut graph = self.get_graph_mut()?;
@@ -186,6 +200,7 @@ impl KnowledgeGraph {
             node_title_field,
             conflict_handling,
             column_types,
+            attribute_columns,  // Pass the new parameter
         )
     }
     
