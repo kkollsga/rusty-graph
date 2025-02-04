@@ -320,15 +320,32 @@ impl KnowledgeGraph {
         Ok(output)
     }
 
-    pub fn filter(&self, filter_dict: &PyDict) -> PyResult<Py<KnowledgeGraph>> {
+    pub fn filter(&self, filter_dict: &PyDict, max_nodes: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
         let graph = self.get_graph()?;
         
-        let filtered_nodes = query_functions::filter_nodes(&graph, None, filter_dict)?;
+        // Validate max_nodes if provided
+        if let Some(limit) = max_nodes {
+            if limit == 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "max_nodes must be positive"
+                ));
+            }
+        }
+        
+        let mut filtered_nodes = query_functions::filter_nodes(&graph, None, filter_dict)?;
+        
+        // Apply max_nodes limit if specified
+        if let Some(limit) = max_nodes {
+            filtered_nodes.truncate(limit);
+        }
         
         let mut params = HashMap::new();
         params.insert("function".to_string(), JsonValue::String("filter".to_string()));
         params.insert("filter".to_string(), pydict_to_json(filter_dict)?);
+        if let Some(limit) = max_nodes {
+            params.insert("max_nodes".to_string(), JsonValue::Number(limit.into()));
+        }
         
         // Create new context as an owned value
         let mut new_context = TraversalContext::new_base();
@@ -340,8 +357,18 @@ impl KnowledgeGraph {
         Py::new(py, self.clone())
     }
     
-    pub fn type_filter(&self, node_types: &PyAny) -> PyResult<Py<Self>> {
+    pub fn type_filter(&self, node_types: &PyAny, max_nodes: Option<usize>) -> PyResult<Py<Self>> {
         let py = unsafe { Python::assume_gil_acquired() };
+        
+        // Validate max_nodes if provided
+        if let Some(limit) = max_nodes {
+            if limit == 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "max_nodes must be positive"
+                ));
+            }
+        }
+        
         let filter_dict = PyDict::new(py);
         let type_condition = PyDict::new(py);
         
@@ -357,11 +384,19 @@ impl KnowledgeGraph {
         
         filter_dict.set_item("node_type", type_condition)?;
         let graph = self.get_graph()?;
-        let filtered_nodes = query_functions::filter_nodes(&graph, None, &filter_dict)?;
+        let mut filtered_nodes = query_functions::filter_nodes(&graph, None, &filter_dict)?;
+        
+        // Apply max_nodes limit if specified
+        if let Some(limit) = max_nodes {
+            filtered_nodes.truncate(limit);
+        }
         
         let mut params = HashMap::new();
         params.insert("function".to_string(), JsonValue::String("type_filter".to_string()));
         params.insert("node_types".to_string(), pydict_to_json(&type_condition)?);
+        if let Some(limit) = max_nodes {
+            params.insert("max_nodes".to_string(), JsonValue::Number(limit.into()));
+        }
         
         let mut context = TraversalContext::new_base();
         context.add_level(filtered_nodes, Some(vec![params]), true);
