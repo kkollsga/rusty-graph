@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::schema::{Node, Relation};
 use crate::data_types::AttributeValue;
-use crate::graph::traversal_functions::{TraversalContext, traverse_relationships, process_traversal_levels, process_attributes_levels, count_traversal_levels};
+use crate::graph::traversal_functions::{TraversalContext, traverse_relationships, process_traversal_levels, process_node_levels, count_traversal_levels};
 use crate::graph::calculation_functions::{calculate_aggregate, store_calculation_values, process_calculation_levels};
 
 mod types;
@@ -615,10 +615,18 @@ impl KnowledgeGraph {
         Py::new(py, self.clone())
     }
 
-    pub fn get_attributes(&self, _py: Python, max_results: Option<usize>, attributes: Option<Vec<String>>) -> PyResult<PyObject> {
+    pub fn get_nodes(
+        &self,
+        _py: Python,
+        max_results: Option<usize>,
+        attributes: Option<bool>,
+        calculations: Option<bool>,
+        connections: Option<bool>,
+        only_return: Option<Vec<String>>,
+    ) -> PyResult<PyObject> {
         let graph = self.get_graph()?;
         let context = self.get_context_value()?;
-        process_attributes_levels(&graph, &context, attributes, max_results)
+        process_node_levels(&graph, &context, attributes.unwrap_or(true), calculations.unwrap_or(true), connections.unwrap_or(true), only_return.as_deref(), max_results)
     }
 
     pub fn get_calculations(&self, _py: Python, calculation_names: Option<Vec<String>>, max_results: Option<usize>) -> PyResult<PyObject> {
@@ -627,13 +635,13 @@ impl KnowledgeGraph {
         process_calculation_levels(&graph, &context, calculation_names, max_results)
     }
 
-    pub fn get_id(&self, max_results: Option<usize>) -> PyResult<PyObject> {
+    pub fn get_ids(&self, max_results: Option<usize>) -> PyResult<PyObject> {
         let graph = self.get_graph()?;
         let context = self.get_context_value()?;
         process_traversal_levels(&graph, &context, "unique_id", max_results)
     }
 
-    pub fn get_title(&self, max_results: Option<usize>) -> PyResult<PyObject> {
+    pub fn get_titles(&self, max_results: Option<usize>) -> PyResult<PyObject> {
         let graph = self.get_graph()?;
         let context = self.get_context_value()?;
         process_traversal_levels(&graph, &context, "title", max_results)

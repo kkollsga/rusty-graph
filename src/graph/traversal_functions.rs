@@ -226,84 +226,6 @@ pub fn traverse_relationships(
     Ok(relationships)
 }
 
-pub fn process_attributes_levels(
-    graph: &DiGraph<Node, Relation>,
-    context: &TraversalContext,
-    attributes: Option<Vec<String>>,
-    max_results: Option<usize>,
-) -> PyResult<PyObject> {
-    let py = unsafe { Python::assume_gil_acquired() };
-
-    // Get nodes from context, or return empty list if no context
-    let mut nodes = if context.levels.is_empty() {
-        Vec::new()
-    } else {
-        context.levels[0].nodes.clone()
-    };
-
-    // Apply max_results if specified
-    if let Some(limit) = max_results {
-        if limit == 0 {
-            return Err(PyValueError::new_err("max_results must be positive"));
-        }
-        nodes.truncate(limit);
-    }
-
-    let mut result = Vec::new();
-    
-    for &root_idx in &nodes {
-        if let Some(node) = graph.node_weight(NodeIndex::new(root_idx)) {
-            if let Ok(mut root_data) = node.to_node_data(root_idx, py, attributes.as_deref()) {
-                // Add traversal data only if we have more levels AND relationships exist
-                if context.levels.len() > 1 && 
-                   context.levels[1].node_relationships.contains_key(&root_idx) &&
-                   !context.levels[1].node_relationships[&root_idx].is_empty() {
-                    
-                    let mut children = Vec::new();
-                    
-                    if let Some(child_nodes) = context.levels[1].node_relationships.get(&root_idx) {
-                        for &child_idx in child_nodes {
-                            if let Some(child_node) = graph.node_weight(NodeIndex::new(child_idx)) {
-                                if let Ok(mut child_data) = child_node.to_node_data(child_idx, py, attributes.as_deref()) {
-                                    // Add grandchildren only if they exist
-                                    if context.levels.len() > 2 && 
-                                       context.levels[2].node_relationships.contains_key(&child_idx) &&
-                                       !context.levels[2].node_relationships[&child_idx].is_empty() {
-                                        
-                                        let mut grandchildren = Vec::new();
-                                        if let Some(grandchild_nodes) = context.levels[2].node_relationships.get(&child_idx) {
-                                            for &grandchild_idx in grandchild_nodes {
-                                                if let Some(grandchild_node) = graph.node_weight(NodeIndex::new(grandchild_idx)) {
-                                                    if let Ok(grandchild_data) = grandchild_node.to_node_data(grandchild_idx, py, attributes.as_deref()) {
-                                                        grandchildren.push(grandchild_data);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        
-                                        if !grandchildren.is_empty() {
-                                            child_data.traversals = Some(grandchildren);
-                                        }
-                                    }
-                                    children.push(child_data);
-                                }
-                            }
-                        }
-                        
-                        if !children.is_empty() {
-                            root_data.traversals = Some(children);
-                        }
-                    }
-                }
-                
-                result.push(Node::node_data_to_py(&root_data, py)?);
-            }
-        }
-    }
-
-    Ok(result.into_py(py))
-}
-
 pub fn process_traversal_levels(
     graph: &DiGraph<Node, Relation>,
     context: &TraversalContext,
@@ -442,4 +364,211 @@ pub fn count_traversal_levels(
         }
     }
     Ok(result.into())
+}
+
+pub fn process_node_levels(
+    graph: &DiGraph<Node, Relation>,
+    context: &TraversalContext,
+    include_attributes: bool,
+    include_calculations: bool,
+    include_connections: bool,
+    only_return: Option<&[String]>,
+    max_results: Option<usize>,
+) -> PyResult<PyObject> {
+    let py = unsafe { Python::assume_gil_acquired() };
+
+    // Get nodes from context, or return empty list if no context
+    let mut nodes = if context.levels.is_empty() {
+        Vec::new()
+    } else {
+        context.levels[0].nodes.clone()
+    };
+
+    // Apply max_results if specified
+    if let Some(limit) = max_results {
+        if limit == 0 {
+            return Err(PyValueError::new_err("max_results must be positive"));
+        }
+        nodes.truncate(limit);
+    }
+
+    let mut result = Vec::new();
+    
+    for &root_idx in &nodes {
+        if let Some(node) = graph.node_weight(NodeIndex::new(root_idx)) {
+            let mut node_data = HashMap::new();
+            
+            // Add base fields
+            if let Node::StandardNode { node_type, unique_id, title, .. } = node {
+                node_data.insert("node_type".to_string(), node_type.clone().into_py(py));
+                node_data.insert("unique_id".to_string(), (*unique_id).into_py(py));
+                if let Some(t) = title {
+                    node_data.insert("title".to_string(), t.clone().into_py(py));
+                }
+            }
+
+            // Add attributes if requested
+            if include_attributes {
+                if let Node::StandardNode { attributes, .. } = node {
+                    let mut py_attrs: HashMap<String, PyObject> = HashMap::new();
+                    for (k, v) in attributes {  // Direct iteration since attributes is not Optional
+                        match v.to_python_object(py, None) {
+                            Ok(py_value) => {
+                                py_attrs.insert(k.clone(), py_value);
+                            },
+                            Err(e) => {
+                                eprintln!("Warning: Failed to convert attribute {}: {}", k, e);
+                                continue;
+                            }
+                        }
+                    }
+                    if !py_attrs.is_empty() {
+                        node_data.insert("attributes".to_string(), py_attrs.into_py(py));
+                    }
+                }
+            }
+
+            // Add calculations if requested
+            if include_calculations {
+                if let Node::StandardNode { calculations, .. } = node {
+                    if let Some(calcs) = calculations {  // Need Option handling for calculations
+                        let mut py_calcs: HashMap<String, PyObject> = HashMap::new();
+                        for (k, v) in calcs {
+                            match v.to_python_object(py, None) {
+                                Ok(py_value) => {
+                                    py_calcs.insert(k.clone(), py_value);
+                                },
+                                Err(e) => {
+                                    eprintln!("Warning: Failed to convert calculation {}: {}", k, e);
+                                    continue;
+                                }
+                            }
+                        }
+                        if !py_calcs.is_empty() {
+                            node_data.insert("calculations".to_string(), py_calcs.into_py(py));
+                        }
+                    }
+                }
+            }
+
+            // Add connections if requested
+            if include_connections {
+                let node_idx = NodeIndex::new(root_idx);
+                let mut incoming = Vec::new();
+                let mut outgoing = Vec::new();
+
+                // Process incoming edges
+                for edge_ref in graph.edges_directed(node_idx, Direction::Incoming) {
+                    if let Some(source_node) = graph.node_weight(edge_ref.source()) {
+                        let mut connection = HashMap::new();
+                        connection.insert("type".to_string(), edge_ref.weight().relation_type.clone());
+                        if let Node::StandardNode { title, unique_id, .. } = source_node {
+                            connection.insert("source_title".to_string(), title.clone().unwrap_or_default());
+                            connection.insert("source_id".to_string(), unique_id.to_string());
+                            connection.insert("source_idx".to_string(), edge_ref.source().index().to_string());
+                        }
+                        incoming.push(connection);
+                    }
+                }
+
+                // Process outgoing edges
+                for edge_ref in graph.edges_directed(node_idx, Direction::Outgoing) {
+                    if let Some(target_node) = graph.node_weight(edge_ref.target()) {
+                        let mut connection = HashMap::new();
+                        connection.insert("type".to_string(), edge_ref.weight().relation_type.clone());
+                        if let Node::StandardNode { title, unique_id, .. } = target_node {
+                            connection.insert("target_title".to_string(), title.clone().unwrap_or_default());
+                            connection.insert("target_id".to_string(), unique_id.to_string());
+                            connection.insert("target_idx".to_string(), edge_ref.target().index().to_string());
+                        }
+                        outgoing.push(connection);
+                    }
+                }
+
+                if !incoming.is_empty() {
+                    node_data.insert("incoming_connections".to_string(), incoming.into_py(py));
+                }
+                if !outgoing.is_empty() {
+                    node_data.insert("outgoing_connections".to_string(), outgoing.into_py(py));
+                }
+            }
+
+            // Handle traversal data
+            if context.levels.len() > 1 && 
+               context.levels[1].node_relationships.contains_key(&root_idx) &&
+               !context.levels[1].node_relationships[&root_idx].is_empty() {
+                
+                let mut traversal_data = Vec::new();
+                
+                if let Some(child_nodes) = context.levels[1].node_relationships.get(&root_idx) {
+                    for &child_idx in child_nodes {
+                        if let Some(child_node) = graph.node_weight(NodeIndex::new(child_idx)) {
+                            // Recursively process child nodes with same settings
+                            let mut child_context = TraversalContext::new_base();
+                            child_context.add_level(vec![child_idx], None, false);
+                            
+                            if let Ok(child_result) = process_node_levels(
+                                graph,
+                                &child_context,
+                                include_attributes,
+                                include_calculations,
+                                include_connections,
+                                None,
+                                None
+                            ) {
+                                if let Ok(child_list) = <Vec<PyObject>>::extract(child_result.as_ref(py)) {
+                                    if !child_list.is_empty() {
+                                        traversal_data.extend(child_list);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                if !traversal_data.is_empty() {
+                    node_data.insert("traversals".to_string(), traversal_data.into_py(py));
+                }
+            }
+
+            // Handle only_return if specified
+            if let Some(fields) = only_return {
+                let mut filtered_data = HashMap::new();
+                for field in fields {
+                    match node_data.get(field) {
+                        Some(value) => { filtered_data.insert(field.to_string(), value.clone()); },
+                        None => {
+                            // Check in attributes
+                            if let Some(attrs) = node_data.get("attributes") {
+                                if let Ok(attrs_dict) = attrs.extract::<&PyDict>(py) {
+                                    if let Ok(Some(value)) = attrs_dict.get_item(field) {
+                                        filtered_data.insert(field.to_string(), value.into_py(py));
+                                        continue;
+                                    }
+                                }
+                            }
+                            // Check in calculations
+                            if let Some(calcs) = node_data.get("calculations") {
+                                if let Ok(calcs_dict) = calcs.extract::<&PyDict>(py) {
+                                    if let Ok(Some(value)) = calcs_dict.get_item(field) {
+                                        filtered_data.insert(field.to_string(), value.into_py(py));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                result.push(filtered_data.into_py(py));
+            } else {
+                result.push(node_data.into_py(py));
+            }
+        }
+    }
+
+    // Return single object if only_return is specified and we have exactly one result
+    if only_return.is_some() && result.len() == 1 {
+        Ok(result[0].clone())
+    } else {
+        Ok(result.into_py(py))
+    }
 }

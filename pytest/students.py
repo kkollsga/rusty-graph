@@ -20,16 +20,16 @@ kg.add_relationships(subject_records, "HAS_SUBJECT", "Student", "student_id", "S
 kg.add_relationships(subject_records, "HAS_RECORD", "Subject", "subject_id", "Subject Record","subject_record_id")
 kg.add_relationships(subject_records, "EVALUATED_STUDENT", "Subject Record","subject_record_id", "Student", "student_id")
 
-print(kg.type_filter("Class").get_attributes())
+print(kg.type_filter("Class").get_nodes(only_return=["school_year"]))
 print("\nTraversal tests:")
-print("Classes with no traversals: ", kg.type_filter("Class").get_title())
+print("Classes with no traversals: ", kg.type_filter("Class").get_titles())
 print("Counts: ", kg.type_filter("Class").count())
 
 print("Sorting: ", )
 print("\n\nTraversals\n--------------")
-print("Classes with no traversals: ", kg.type_filter("Class").get_title())
-print("Classes with one traversal: ", kg.type_filter("Class").traverse("ENROLLED_IN").get_title())
-print("Classes with two traversals: ", kg.type_filter("Class").traverse("ENROLLED_IN").traverse("HAS_SUBJECT").get_title())
+print("Classes with no traversals: ", kg.type_filter("Class").get_titles())
+print("Classes with one traversal: ", kg.type_filter("Class").traverse("ENROLLED_IN").get_titles())
+print("Classes with two traversals: ", kg.type_filter("Class").traverse("ENROLLED_IN").traverse("HAS_SUBJECT").get_titles())
 
 print("\n\nCounts\n--------------")
 print("Results: ", kg.type_filter("Class").traverse("ENROLLED_IN").count().get_results())
@@ -37,12 +37,12 @@ print("Results not skipped: ", kg.type_filter("Class").traverse("ENROLLED_IN").t
 print("Results skip: ", kg.type_filter("Class").traverse("ENROLLED_IN").traverse("EVALUATED_STUDENT", skip_level=True).count().get_results())
 print("Student results: ", kg.type_filter("Class").traverse("ENROLLED_IN").count().get_results())
 kg=kg.type_filter("Class").traverse("ENROLLED_IN").count().store("Students")
-print("Classes: ", kg.type_filter("Class").get_attributes())
+print("Classes: ", kg.type_filter("Class").get_nodes(only_return=["title", "Students"]))
 print("Average scores: ", kg.type_filter("Class").traverse("ENROLLED_IN").traverse("EVALUATED_STUDENT", skip_level=True).std("score").get_results())
 
 print("\n\nSorting\n--------------")
-print("Class with the most student: ", kg.type_filter("Class").sort("Students", ascending=False).get_title())
-print("Filtered students: ", kg.type_filter("Class").traverse("ENROLLED_IN", sort={"title": {"order": True}}, max_traversals=1).get_title())
+print("Class with the most student: ", kg.type_filter("Class").sort("Students", ascending=False).get_titles())
+print("Filtered students: ", kg.type_filter("Class").traverse("ENROLLED_IN", sort={"title": {"order": True}}, max_traversals=1).get_titles())
 
 kg=kg.reset()
 kg=kg.type_filter("Class")
