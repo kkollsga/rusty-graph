@@ -526,30 +526,66 @@ impl KnowledgeGraph {
         Py::new(py, self.clone())
     }
 
+    // Add to impl KnowledgeGraph
+    fn extract_property_value(&self, node_idx: usize, property: &str) -> PyResult<Option<PyObject>> {
+        Python::with_gil(|py| {
+            let graph = self.get_graph()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+                
+            let node = graph.node_weight(petgraph::graph::NodeIndex::new(node_idx))
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Node not found"))?;
+            
+            match node {
+                Node::StandardNode { unique_id, title, attributes, calculations, .. } => {
+                    // Define precedence order for property lookup:
+                    let attr_value = match property {
+                        "unique_id" => Some(AttributeValue::Int(*unique_id)),
+                        "title" => title.clone().map(AttributeValue::String),
+                        _ => {
+                            // Check attributes first
+                            attributes.get(property)
+                                .cloned()
+                                .or_else(|| {
+                                    // Then check calculations
+                                    calculations
+                                        .as_ref()
+                                        .and_then(|calcs| calcs.get(property).cloned())
+                                })
+                        }
+                    };
+                    
+                    Ok(attr_value.map(|av| av.to_python_object(py, None)).transpose()?)
+                },
+                _ => Ok(None)
+            }
+        })
+    }
+    
     pub fn sort(&self, sort_attribute: &str, ascending: Option<bool>) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
         let graph = self.get_graph()?;
         
-        // Create new context from existing one
         let mut new_context = {
             let context = self.get_context()?;
             (*context).clone()
         };
     
-        
         if let Some(last_level) = new_context.levels.last_mut() {
             let sorted_nodes = query_functions::sort_nodes(&graph, last_level.nodes.clone(), |&a, &b| {
                 let compare_values = |idx: usize| {
                     let node = graph.node_weight(petgraph::graph::NodeIndex::new(idx));
                     
                     match node {
-                        Some(Node::StandardNode { attributes, .. }) => {
+                        Some(Node::StandardNode { unique_id, title, attributes, calculations, .. }) => {
                             match sort_attribute {
-                                "title" => node.and_then(|n| match n {
-                                    Node::StandardNode { title, .. } => title.clone().map(AttributeValue::String),
-                                    _ => None
-                                }),
-                                _ => attributes.get(sort_attribute).cloned()
+                                "unique_id" => Some(AttributeValue::Int(*unique_id)),
+                                "title" => title.clone().map(AttributeValue::String),
+                                _ => {
+                                    attributes.get(sort_attribute).cloned()
+                                        .or_else(|| calculations
+                                            .as_ref()
+                                            .and_then(|calcs| calcs.get(sort_attribute).cloned()))
+                                }
                             }
                         },
                         _ => None
@@ -601,7 +637,7 @@ impl KnowledgeGraph {
                 ))
             }
         }).collect::<PyResult<Vec<_>>>()?;
-
+    
         let nodes = self.get_context_nodes()?;
         let graph = self.get_graph()?;
         
@@ -611,34 +647,41 @@ impl KnowledgeGraph {
                     SortSetting::Attribute(attr) => (attr, true),
                     SortSetting::AttributeWithOrder(attr, asc) => (attr, *asc),
                 };
-
+    
                 let compare_values = |idx: usize| {
                     let node = graph.node_weight(petgraph::graph::NodeIndex::new(idx));
                     
                     match node {
-                        Some(Node::StandardNode { attributes, .. }) => {
+                        Some(Node::StandardNode { unique_id, title, attributes, calculations, .. }) => {
                             match sort_attribute.as_str() {
-                                "title" => node.and_then(|n| match n {
-                                    Node::StandardNode { title, .. } => title.clone().map(AttributeValue::String),
-                                    _ => None
-                                }),
-                                _ => attributes.get(sort_attribute).cloned()
+                                "unique_id" => Some(AttributeValue::Int(*unique_id)),
+                                "title" => title.clone().map(AttributeValue::String),
+                                _ => {
+                                    // Check attributes first
+                                    attributes.get(sort_attribute).cloned()
+                                        .or_else(|| {
+                                            // Then check calculations
+                                            calculations
+                                                .as_ref()
+                                                .and_then(|calcs| calcs.get(sort_attribute).cloned())
+                                        })
+                                }
                             }
                         },
                         _ => None
                     }
                 };
-
+    
                 let a_val = compare_values(a);
                 let b_val = compare_values(b);
-
+    
                 let ordering = match (a_val, b_val) {
                     (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
                     (Some(_), None) => std::cmp::Ordering::Less,
                     (None, Some(_)) => std::cmp::Ordering::Greater,
                     (None, None) => std::cmp::Ordering::Equal,
                 };
-
+    
                 if ordering != std::cmp::Ordering::Equal {
                     return if ascending { ordering } else { ordering.reverse() };
                 }
