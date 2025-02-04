@@ -48,12 +48,88 @@ pub fn add_relationships(
     target_title_field: Option<String>,
     attribute_columns: Option<Vec<String>>,
     conflict_handling: Option<String>,
-) -> PyResult<()> {  // Changed return type
+) -> PyResult<()> {
     let conflict_handling = conflict_handling.unwrap_or_else(|| "skip".to_string());
+    
+    // Convert available columns to lowercase for case-insensitive comparison
+    let available_columns: Vec<String> = columns.iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+
+    // Validate source_id_field
+    if !available_columns.contains(&source_id_field.to_lowercase()) {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            format!(
+                "Source ID column '{}' not found in data. Valid columns are: [{}]",
+                source_id_field,
+                columns.join(", ")
+            )
+        ));
+    }
+
+    // Validate target_id_field
+    if !available_columns.contains(&target_id_field.to_lowercase()) {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            format!(
+                "Target ID column '{}' not found in data. Valid columns are: [{}]",
+                target_id_field,
+                columns.join(", ")
+            )
+        ));
+    }
+
+    // Validate source_title_field if provided
+    if let Some(title_field) = &source_title_field {
+        if !available_columns.contains(&title_field.to_lowercase()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!(
+                    "Source title column '{}' not found in data. Valid columns are: [{}]",
+                    title_field,
+                    columns.join(", ")
+                )
+            ));
+        }
+    }
+
+    // Validate target_title_field if provided
+    if let Some(title_field) = &target_title_field {
+        if !available_columns.contains(&title_field.to_lowercase()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!(
+                    "Target title column '{}' not found in data. Valid columns are: [{}]",
+                    title_field,
+                    columns.join(", ")
+                )
+            ));
+        }
+    }
+
+    // Validate attribute_columns if provided
+    let attribute_columns = if let Some(attr_cols) = attribute_columns {
+        // Find invalid columns
+        let invalid_cols: Vec<String> = attr_cols.iter()
+            .filter(|col| !available_columns.contains(&col.to_lowercase()))
+            .cloned()
+            .collect();
+                
+        if !invalid_cols.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!(
+                    "{} not found in data. Valid columns are: [{}]",
+                    invalid_cols.join(", "),
+                    columns.join(", ")
+                )
+            ));
+        }
+        
+        attr_cols
+    } else {
+        Vec::new()
+    };
+
     let data_input = crate::graph::KnowledgeGraph::process_input_data(data)?;
     let mut source_node_lookup: HashMap<i32, petgraph::graph::NodeIndex> = HashMap::new();
     let mut target_node_lookup: HashMap<i32, petgraph::graph::NodeIndex> = HashMap::new();
-    let attribute_columns = attribute_columns.unwrap_or_default();
 
     // Validate attribute columns
     for col in &attribute_columns {

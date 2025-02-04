@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyDict};
-use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::graph::DiGraph;
 use std::collections::HashMap;
 use chrono::NaiveDateTime;
 use crate::graph::get_schema::update_or_retrieve_schema;
@@ -87,25 +87,54 @@ pub fn add_nodes(
     let conflict_handling = conflict_handling.unwrap_or_else(|| "update".to_string());
     let default_datetime_format = "%Y-%m-%d %H:%M:%S".to_string();
 
+    // Convert available columns to lowercase for case-insensitive comparison
+    let available_columns: Vec<String> = columns.iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+
+    // Validate unique_id_field
+    if !available_columns.contains(&unique_id_field.to_lowercase()) {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            format!(
+                "Unique ID column '{}' not found in data. Valid columns are: [{}]",
+                unique_id_field,
+                columns.join(", ")
+            )
+        ));
+    }
+
+    // Validate node_title_field if provided
+    if let Some(title_field) = &node_title_field {
+        if !available_columns.contains(&title_field.to_lowercase()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!(
+                    "Title column '{}' not found in data. Valid columns are: [{}]",
+                    title_field,
+                    columns.join(", ")
+                )
+            ));
+        }
+    }
+
     // Validate attribute_columns if provided
     let attribute_columns = if let Some(attr_cols) = attribute_columns {
-        // Convert to lowercase for case-insensitive comparison
-        let available_columns: Vec<String> = columns.iter()
-            .map(|s| s.to_lowercase())
+        // Find invalid columns
+        let invalid_cols: Vec<String> = attr_cols.iter()
+            .filter(|col| !available_columns.contains(&col.to_lowercase()))
+            .cloned()
             .collect();
-        
-        // Filter and validate attribute columns
-        let valid_cols: Vec<String> = attr_cols.into_iter()
-            .filter(|col| available_columns.contains(&col.to_lowercase()))
-            .collect();
-            
-        if valid_cols.is_empty() {
+                
+        if !invalid_cols.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "No valid columns found in attribute_columns"
+                format!(
+                    "{} not found in data. Valid columns are: [{}]",
+                    invalid_cols.join(", "),
+                    columns.join(", ")
+                )
             ));
         }
         
-        Some(valid_cols)
+        Some(attr_cols)
     } else {
         None
     };
