@@ -48,10 +48,9 @@ pub fn add_relationships(
     target_title_field: Option<String>,
     attribute_columns: Option<Vec<String>>,
     conflict_handling: Option<String>,
-) -> PyResult<Vec<(usize, usize)>> {
+) -> PyResult<()> {  // Changed return type
     let conflict_handling = conflict_handling.unwrap_or_else(|| "skip".to_string());
     let data_input = crate::graph::KnowledgeGraph::process_input_data(data)?;
-    let mut indices = Vec::new();
     let mut source_node_lookup: HashMap<i32, petgraph::graph::NodeIndex> = HashMap::new();
     let mut target_node_lookup: HashMap<i32, petgraph::graph::NodeIndex> = HashMap::new();
     let attribute_columns = attribute_columns.unwrap_or_default();
@@ -161,7 +160,6 @@ pub fn add_relationships(
                     if !graph.contains_edge(source_node_index, target_node_index) {
                         let relation = Relation::new(&relationship_type, Some(attributes));
                         let _edge = graph.add_edge(source_node_index, target_node_index, relation);
-                        indices.push((source_node_index.index(), target_node_index.index()));
                     }
                 },
                 "replace" => {
@@ -170,7 +168,6 @@ pub fn add_relationships(
                     }
                     let relation = Relation::new(&relationship_type, Some(attributes));
                     let _edge = graph.add_edge(source_node_index, target_node_index, relation);
-                    indices.push((source_node_index.index(), target_node_index.index()));
                 },
                 "update" => {
                     if let Some(edge) = graph.find_edge(source_node_index, target_node_index) {
@@ -181,11 +178,9 @@ pub fn add_relationships(
                                 existing_relation.attributes = Some(attributes);
                             }
                         }
-                        indices.push((source_node_index.index(), target_node_index.index()));
                     } else {
                         let relation = Relation::new(&relationship_type, Some(attributes));
                         let _edge = graph.add_edge(source_node_index, target_node_index, relation);
-                        indices.push((source_node_index.index(), target_node_index.index()));
                     }
                 },
                 _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -193,7 +188,7 @@ pub fn add_relationships(
                 )),
             }
         }
-        Ok(indices)
+        Ok(())
     })
 }
 

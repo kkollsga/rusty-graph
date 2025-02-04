@@ -140,9 +140,8 @@ impl KnowledgeGraph {
         unique_id: &PyAny,
         attributes: Option<HashMap<String, AttributeValue>>,
         node_title: Option<String>,
-        attribute_columns: Option<Vec<String>>, // New parameter
-    ) -> PyResult<Option<usize>> {
-        // For add_node, we can filter the attributes if attribute_columns is provided
+        attribute_columns: Option<Vec<String>>,
+    ) -> PyResult<()> {  // Changed return type
         let filtered_attributes = match (attributes, attribute_columns) {
             (Some(attrs), Some(cols)) => {
                 let filtered: HashMap<String, AttributeValue> = attrs.into_iter()
@@ -155,13 +154,16 @@ impl KnowledgeGraph {
         };
 
         if let Ok(id) = unique_id.extract::<i32>() {
-            Ok(Some(self.add_node_impl(node_type, id, filtered_attributes, node_title)))
+            self.add_node_impl(node_type, id, filtered_attributes, node_title);
+            Ok(())
         } else if let Ok(id) = unique_id.extract::<i64>() {
-            Ok(Some(self.add_node_impl(node_type, id as i32, filtered_attributes, node_title)))
+            self.add_node_impl(node_type, id as i32, filtered_attributes, node_title);
+            Ok(())
         } else if let Ok(id) = unique_id.extract::<f64>() {
-            Ok(Some(self.add_node_impl(node_type, id as i32, filtered_attributes, node_title)))
+            self.add_node_impl(node_type, id as i32, filtered_attributes, node_title);
+            Ok(())
         } else {
-            Ok(None)
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid unique_id type"))
         }
     }
     
@@ -171,11 +173,10 @@ impl KnowledgeGraph {
         unique_id: i32,
         attributes: Option<HashMap<String, AttributeValue>>,
         node_title: Option<String>
-    ) -> usize {
+    ) {  // Changed return type to ()
         let node = Node::new(&node_type, unique_id, attributes, node_title.as_deref());
         let mut graph = self.get_graph_mut().expect("Failed to acquire write lock");
-        let index = graph.add_node(node);
-        index.index()
+        graph.add_node(node);
     }
     
     pub fn add_nodes(
@@ -186,8 +187,8 @@ impl KnowledgeGraph {
         node_title_field: Option<String>,
         conflict_handling: Option<String>,
         column_types: Option<&PyDict>,
-        attribute_columns: Option<Vec<String>>, // New parameter
-    ) -> PyResult<Vec<usize>> {
+        attribute_columns: Option<Vec<String>>,
+    ) -> PyResult<()> {  // Changed return type
         let input = Self::process_input_data(data)?;
         let mut graph = self.get_graph_mut()?;
         
@@ -200,8 +201,10 @@ impl KnowledgeGraph {
             node_title_field,
             conflict_handling,
             column_types,
-            attribute_columns,  // Pass the new parameter
-        )
+            attribute_columns,
+        )?;  // Added ? to propagate error
+        
+        Ok(())
     }
     
     pub fn add_relationships(
@@ -216,7 +219,7 @@ impl KnowledgeGraph {
         target_title_field: Option<String>,
         attribute_columns: Option<Vec<String>>,
         conflict_handling: Option<String>,
-    ) -> PyResult<Vec<(usize, usize)>> {
+    ) -> PyResult<()> {  // Changed return type
         let source_id_field = source_id_field.extract::<String>()?;
         let target_id_field = target_id_field.extract::<String>()?;
         let input = Self::process_input_data(data)?;
@@ -235,7 +238,9 @@ impl KnowledgeGraph {
             target_title_field,
             attribute_columns,
             conflict_handling,
-        )
+        )?;  // Added ? to propagate error
+        
+        Ok(())
     }
 
     pub fn reset(&self) -> PyResult<Py<KnowledgeGraph>> {

@@ -82,10 +82,9 @@ pub fn add_nodes(
     node_title_field: Option<String>,
     conflict_handling: Option<String>,
     column_types: Option<&PyDict>,
-    attribute_columns: Option<Vec<String>>, // New parameter
-) -> PyResult<Vec<usize>> {
+    attribute_columns: Option<Vec<String>>,
+) -> PyResult<()> {
     let conflict_handling = conflict_handling.unwrap_or_else(|| "update".to_string());
-    let mut indices = Vec::new();
     let default_datetime_format = "%Y-%m-%d %H:%M:%S".to_string();
 
     // Validate attribute_columns if provided
@@ -242,11 +241,11 @@ pub fn add_nodes(
         let unique_id = match unique_id {
             Some(id) => id,
             None => {
-                continue 'row_loop;
+                continue;
             }
         };
 
-        let index = update_or_create_node(
+        update_or_create_node(
             graph,
             &node_type,
             unique_id,
@@ -254,11 +253,9 @@ pub fn add_nodes(
             Some(attributes),
             &conflict_handling,
         );
-
-        indices.push(index);
     }
 
-    Ok(indices)
+    Ok(())
 }
 
 fn extract_datetime_formats(column_types_map: &mut HashMap<String, String>, default_datetime_format: &str) -> HashMap<String, String> {
