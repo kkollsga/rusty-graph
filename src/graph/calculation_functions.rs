@@ -32,76 +32,68 @@ pub fn calculate_aggregate(
     }
 
     let last_level = context.levels.last().unwrap();
+    
+    // If we have relationships and they're not empty, calculate per parent
     if !last_level.node_relationships.is_empty() {
         let result = PyDict::new(py);
         
-        for (&parent_idx, children) in &last_level.node_relationships {
+        // Apply max_results to parent nodes if specified
+        let parent_nodes: Vec<_> = if let Some(limit) = max_results {
+            last_level.node_relationships.keys().take(limit).collect()
+        } else {
+            last_level.node_relationships.keys().collect()
+        };
+
+        for &parent_idx in parent_nodes {
             let mut values: Vec<f64> = Vec::new();
             
-            for &child_idx in children {
-                if let Some(Node::StandardNode { attributes, .. }) = graph.node_weight(NodeIndex::new(child_idx)) {
-                    if let Some(value) = attributes.get(attribute) {
-                        if let Some(num) = get_float_value(value) {
-                            values.push(num);
+            if let Some(children) = last_level.node_relationships.get(&parent_idx) {
+                for &child_idx in children {
+                    if let Some(Node::StandardNode { attributes, .. }) = graph.node_weight(NodeIndex::new(child_idx)) {
+                        if let Some(value) = attributes.get(attribute) {
+                            if let Some(num) = get_float_value(value) {
+                                values.push(num);
+                            }
                         }
                     }
                 }
             }
-            if values.is_empty() {
-                result.set_item(parent_idx.to_string(), py.None())?;
-                continue;
-            }
-
-            let aggregate_value = match operation {
-                "sum" => {
-                    let sum = values.iter().sum::<f64>();
-                    sum
-                },
-                "avg" => {
-                    let avg = values.iter().sum::<f64>() / values.len() as f64;
-                    avg
-                },
-                "max" => {
-                    let max = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-                    max
-                },
-                "min" => {
-                    let min = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                    min
-                },
-                "median" => {
-                    let median = calculate_median(&values);
-                    median
-                },
-                "mode" => {
-                    let mode = calculate_mode(&values);
-                    mode
-                },
-                "std" => {
-                    let std = calculate_std(&values);
-                    std
-                },
-                "var" => {
-                    let var = calculate_variance(&values);
-                    var
-                },
-                "quantile" => {
-                    let q = calculate_quantile(&values, quantile.unwrap_or(0.5));
-                    q
-                },
-                _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid operation")),
+            
+            let aggregate_value = if values.is_empty() {
+                py.None()
+            } else {
+                match operation {
+                    "sum" => values.iter().sum::<f64>().into_py(py),
+                    "avg" => (values.iter().sum::<f64>() / values.len() as f64).into_py(py),
+                    "max" => values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)).into_py(py),
+                    "min" => values.iter().fold(f64::INFINITY, |a, &b| a.min(b)).into_py(py),
+                    "median" => calculate_median(&values).into_py(py),
+                    "mode" => calculate_mode(&values).into_py(py),
+                    "std" => calculate_std(&values).into_py(py),
+                    "var" => calculate_variance(&values).into_py(py),
+                    "quantile" => calculate_quantile(&values, quantile.unwrap_or(0.5)).into_py(py),
+                    _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        format!("Invalid operation: {}", operation)
+                    )),
+                }
             };
+            
             result.set_item(parent_idx.to_string(), aggregate_value)?;
         }
         Ok(result.into())
     } else {
-        let mut values: Vec<f64> = Vec::new();
+        // Handle direct node calculations as before
         let nodes = if let Some(limit) = max_results {
-            last_level.nodes.iter().take(limit).copied().collect()
+            last_level.nodes.iter().take(limit).copied().collect::<Vec<_>>()
         } else {
             last_level.nodes.clone()
         };
 
+        if nodes.is_empty() {
+            return Ok(py.None());
+        }
+
+        let mut values: Vec<f64> = Vec::new();
         for node_idx in nodes {
             if let Some(Node::StandardNode { attributes, .. }) = graph.node_weight(NodeIndex::new(node_idx)) {
                 if let Some(value) = attributes.get(attribute) {
@@ -126,7 +118,9 @@ pub fn calculate_aggregate(
             "std" => calculate_std(&values),
             "var" => calculate_variance(&values),
             "quantile" => calculate_quantile(&values, quantile.unwrap_or(0.5)),
-            _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid operation")),
+            _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Invalid operation: {}", operation)
+            )),
         };
 
         Ok(result.into_py(py))
