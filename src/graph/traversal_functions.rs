@@ -108,7 +108,6 @@ pub fn traverse_relationships(
     sort: Option<&PyDict>,
     max_traversals: Option<usize>,
 ) -> PyResult<HashMap<usize, Vec<usize>>> {
-    // Define which directions to check based on input
     let directions_to_check = match direction.as_deref() {
         Some("incoming") => vec![Direction::Incoming],
         Some("outgoing") => vec![Direction::Outgoing],
@@ -117,12 +116,13 @@ pub fn traverse_relationships(
     };
     
     let mut relationships = HashMap::new();
+    let mut sorted_targets: Vec<usize> = Vec::new(); // Track sorted targets
     
+    // First collect all relationships
     for &node_idx in start_nodes {
         let node_index = NodeIndex::new(node_idx);
         let mut node_traversals = Vec::new();
         
-        // Check each specified direction
         for &dir in &directions_to_check {
             let edges = graph.edges_directed(node_index, dir);
             for edge in edges {
@@ -134,84 +134,94 @@ pub fn traverse_relationships(
                     
                     if !node_traversals.contains(&target_idx) {
                         node_traversals.push(target_idx);
+                        if !sorted_targets.contains(&target_idx) {
+                            sorted_targets.push(target_idx);
+                        }
                     }
                 }
             }
         }
         
-        // Apply filter to all collected nodes only if filter is provided and not empty
-        if let Some(filter_dict) = filter {
-            if !filter_dict.is_empty() {
-                let filtered_nodes = query_functions::filter_nodes(graph, Some(node_traversals), filter_dict)?;
-                node_traversals = filtered_nodes;
-            }
-        }
-
-        // Apply sorting if provided
-        if let Some(sort_dict) = sort {
-            if !sort_dict.is_empty() {
-                node_traversals = query_functions::sort_nodes(graph, node_traversals, |&a, &b| {
-                    for (key, value) in sort_dict.iter() {
-                        let key = match key.extract::<String>() {
-                            Ok(k) => k,
-                            Err(_) => continue,
-                        };
-                        
-                        // Handle both direct values and condition dictionaries
-                        let ascending = if let Ok(dict) = value.extract::<&PyDict>() {
-                            // Fixed extraction of order parameter
-                            match dict.get_item("order") {
-                                Ok(Some(v)) => v.extract::<bool>().unwrap_or(true),
-                                _ => true,
-                            }
-                        } else {
-                            true
-                        };
-
-                        let compare_values = |idx: usize| {
-                            let node = graph.node_weight(petgraph::graph::NodeIndex::new(idx));
-                            match node {
-                                Some(Node::StandardNode { attributes, .. }) => {
-                                    match key.as_str() {
-                                        "title" => node.and_then(|n| match n {
-                                            Node::StandardNode { title, .. } => title.clone().map(AttributeValue::String),
-                                            _ => None
-                                        }),
-                                        _ => attributes.get(&key).cloned()
-                                    }
-                                },
-                                _ => None
-                            }
-                        };
-
-                        let a_val = compare_values(a);
-                        let b_val = compare_values(b);
-
-                        let ordering = match (a_val, b_val) {
-                            (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
-                            (Some(_), None) => std::cmp::Ordering::Less,
-                            (None, Some(_)) => std::cmp::Ordering::Greater,
-                            (None, None) => std::cmp::Ordering::Equal,
-                        };
-
-                        if ordering != std::cmp::Ordering::Equal {
-                            return if ascending { ordering } else { ordering.reverse() };
-                        }
-                    }
-                    std::cmp::Ordering::Equal
-                });
-            }
-        }
-        
-        // Apply max_traversals limit if provided
-        if let Some(limit) = max_traversals {
-            if limit > 0 {  // Protect against zero limit
-                node_traversals.truncate(limit);
-            }
-        }
-        
         if !node_traversals.is_empty() {
             relationships.insert(node_idx, node_traversals);
+        }
+    }
+    
+    // Apply filter if provided
+    if let Some(filter_dict) = filter {
+        if !filter_dict.is_empty() {
+            sorted_targets = query_functions::filter_nodes(graph, Some(sorted_targets), filter_dict)?;
+            // Update relationships to only include filtered targets
+            for targets in relationships.values_mut() {
+                targets.retain(|&target| sorted_targets.contains(&target));
+            }
+        }
+    }
+
+    // Apply sorting if provided
+    if let Some(sort_dict) = sort {
+        if !sort_dict.is_empty() {
+            sorted_targets = query_functions::sort_nodes(graph, sorted_targets, |&a, &b| {
+                for (key, value) in sort_dict.iter() {
+                    let key = match key.extract::<String>() {
+                        Ok(k) => k,
+                        Err(_) => continue,
+                    };
+                    
+                    let ascending = if let Ok(dict) = value.extract::<&PyDict>() {
+                        match dict.get_item("order") {
+                            Ok(Some(v)) => v.extract::<bool>().unwrap_or(true),
+                            _ => true,
+                        }
+                    } else {
+                        true
+                    };
+
+                    let compare_values = |idx: usize| {
+                        let node = graph.node_weight(petgraph::graph::NodeIndex::new(idx));
+                        match node {
+                            Some(Node::StandardNode { unique_id, title, attributes, .. }) => {
+                                match key.as_str() {
+                                    "unique_id" => Some(AttributeValue::Int(*unique_id)),
+                                    "title" => title.clone().map(AttributeValue::String),
+                                    _ => attributes.get(&key).cloned()
+                                }
+                            },
+                            _ => None
+                        }
+                    };
+
+                    let a_val = compare_values(a);
+                    let b_val = compare_values(b);
+
+                    let ordering = match (a_val, b_val) {
+                        (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    };
+
+                    if ordering != std::cmp::Ordering::Equal {
+                        return if ascending { ordering } else { ordering.reverse() };
+                    }
+                }
+                std::cmp::Ordering::Equal
+            });
+            
+            // Update relationships to maintain sorted order
+            for targets in relationships.values_mut() {
+                targets.sort_by_key(|&target| sorted_targets.iter().position(|&x| x == target).unwrap_or(usize::MAX));
+            }
+        }
+    }
+    
+    // Apply max_traversals limit if provided
+    if let Some(limit) = max_traversals {
+        if limit > 0 {
+            sorted_targets.truncate(limit);
+            for targets in relationships.values_mut() {
+                targets.truncate(limit);
+            }
         }
     }
     
