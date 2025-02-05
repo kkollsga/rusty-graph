@@ -1,6 +1,6 @@
 [package]
 name = "rusty_graph"
-version = "0.1.53"
+version = "0.1.54"
 edition = "2021"
 
 [lib]

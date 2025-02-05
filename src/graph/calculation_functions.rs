@@ -27,63 +27,101 @@ pub fn calculate_aggregate(
 ) -> PyResult<PyObject> {
     let py = unsafe { Python::assume_gil_acquired() };
 
+    println!("Starting calculate_aggregate");
+    println!("Attribute: {}, Operation: {}", attribute, operation);
+
     if context.levels.is_empty() {
+        println!("Context levels empty, returning None");
         return Ok(py.None());
     }
 
     let last_level = context.levels.last().unwrap();
+    println!("Last level nodes count: {}", last_level.nodes.len());
+    println!("Last level relationships count: {}", last_level.node_relationships.len());
     
     // If we have relationships, calculate per parent's children
     if !last_level.node_relationships.is_empty() {
+        println!("Processing relationships path");
         let result = PyDict::new(py);
         
         let parent_nodes: Vec<_> = if let Some(limit) = max_results {
+            println!("Applying max_results limit: {}", limit);
             last_level.node_relationships.keys().take(limit).collect()
         } else {
             last_level.node_relationships.keys().collect()
         };
+        println!("Number of parent nodes to process: {}", parent_nodes.len());
 
         for &parent_idx in parent_nodes {
+            println!("\nProcessing parent node: {}", parent_idx);
             let mut values: Vec<f64> = Vec::new();
             
             if let Some(children) = last_level.node_relationships.get(&parent_idx) {
+                println!("Found {} children for parent {}", children.len(), parent_idx);
                 for &child_idx in children {
+                    println!("Processing child node: {}", child_idx);
                     if let Some(Node::StandardNode { attributes, .. }) = graph.node_weight(NodeIndex::new(child_idx)) {
+                        println!("Found attributes for child {}", child_idx);
                         if let Some(value) = attributes.get(attribute) {
+                            println!("Found attribute '{}' with value: {:?}", attribute, value);
                             if let Some(num) = get_float_value(value) {
+                                println!("Converted to float: {}", num);
                                 values.push(num);
+                            } else {
+                                println!("Could not convert value to float");
                             }
+                        } else {
+                            println!("Attribute '{}' not found in child {}", attribute, child_idx);
                         }
+                    } else {
+                        println!("Could not find node or node is not StandardNode: {}", child_idx);
                     }
                 }
             }
             
+            println!("Collected {} values for parent {}", values.len(), parent_idx);
             let aggregate_value = calculate_result(&values, operation, quantile)?;
-            result.set_item(parent_idx.to_string(), aggregate_value.into_py(py))?;
+            println!("Calculated result for parent {}: {:?}", parent_idx, aggregate_value);
+            result.set_item(parent_idx.to_string(), aggregate_value.map_or(py.None(), |v| v.into_py(py)))?;
         }
         
+        println!("Returning results dict for relationships");
         Ok(result.into())
     } else {
-        // Calculate directly on the nodes in the level
+        println!("Processing direct nodes path");
         let nodes = if let Some(limit) = max_results {
+            println!("Applying max_results limit: {}", limit);
             last_level.nodes.iter().take(limit).copied().collect::<Vec<_>>()
         } else {
             last_level.nodes.clone()
         };
+        println!("Processing {} nodes", nodes.len());
 
         let mut values: Vec<f64> = Vec::new();
         for node_idx in nodes {
+            println!("\nProcessing node: {}", node_idx);
             if let Some(Node::StandardNode { attributes, .. }) = graph.node_weight(NodeIndex::new(node_idx)) {
+                println!("Found attributes for node {}", node_idx);
                 if let Some(value) = attributes.get(attribute) {
+                    println!("Found attribute '{}' with value: {:?}", attribute, value);
                     if let Some(num) = get_float_value(value) {
+                        println!("Converted to float: {}", num);
                         values.push(num);
+                    } else {
+                        println!("Could not convert value to float");
                     }
+                } else {
+                    println!("Attribute '{}' not found in node {}", attribute, node_idx);
                 }
+            } else {
+                println!("Could not find node or node is not StandardNode: {}", node_idx);
             }
         }
 
+        println!("Collected {} values total", values.len());
         let result = calculate_result(&values, operation, quantile)?;
-        Ok(result.into_py(py))
+        println!("Final result: {:?}", result);
+        Ok(result.map_or(py.None(), |v| v.into_py(py)))
     }
 }
 
