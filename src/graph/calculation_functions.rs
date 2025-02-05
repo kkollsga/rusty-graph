@@ -33,11 +33,10 @@ pub fn calculate_aggregate(
 
     let last_level = context.levels.last().unwrap();
     
-    // If we have relationships and they're not empty, calculate per parent
+    // If we have relationships, calculate per parent's children
     if !last_level.node_relationships.is_empty() {
         let result = PyDict::new(py);
         
-        // Apply max_results to parent nodes if specified
         let parent_nodes: Vec<_> = if let Some(limit) = max_results {
             last_level.node_relationships.keys().take(limit).collect()
         } else {
@@ -59,39 +58,18 @@ pub fn calculate_aggregate(
                 }
             }
             
-            let aggregate_value = if values.is_empty() {
-                py.None()
-            } else {
-                match operation {
-                    "sum" => values.iter().sum::<f64>().into_py(py),
-                    "avg" => (values.iter().sum::<f64>() / values.len() as f64).into_py(py),
-                    "max" => values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)).into_py(py),
-                    "min" => values.iter().fold(f64::INFINITY, |a, &b| a.min(b)).into_py(py),
-                    "median" => calculate_median(&values).into_py(py),
-                    "mode" => calculate_mode(&values).into_py(py),
-                    "std" => calculate_std(&values).into_py(py),
-                    "var" => calculate_variance(&values).into_py(py),
-                    "quantile" => calculate_quantile(&values, quantile.unwrap_or(0.5)).into_py(py),
-                    _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        format!("Invalid operation: {}", operation)
-                    )),
-                }
-            };
-            
-            result.set_item(parent_idx.to_string(), aggregate_value)?;
+            let aggregate_value = calculate_result(&values, operation, quantile)?;
+            result.set_item(parent_idx.to_string(), aggregate_value.into_py(py))?;
         }
+        
         Ok(result.into())
     } else {
-        // Handle direct node calculations as before
+        // Calculate directly on the nodes in the level
         let nodes = if let Some(limit) = max_results {
             last_level.nodes.iter().take(limit).copied().collect::<Vec<_>>()
         } else {
             last_level.nodes.clone()
         };
-
-        if nodes.is_empty() {
-            return Ok(py.None());
-        }
 
         let mut values: Vec<f64> = Vec::new();
         for node_idx in nodes {
@@ -104,27 +82,41 @@ pub fn calculate_aggregate(
             }
         }
 
-        if values.is_empty() {
-            return Ok(py.None());
-        }
-
-        let result = match operation {
-            "sum" => values.iter().sum::<f64>(),
-            "avg" => values.iter().sum::<f64>() / values.len() as f64,
-            "max" => values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
-            "min" => values.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
-            "median" => calculate_median(&values),
-            "mode" => calculate_mode(&values),
-            "std" => calculate_std(&values),
-            "var" => calculate_variance(&values),
-            "quantile" => calculate_quantile(&values, quantile.unwrap_or(0.5)),
-            _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Invalid operation: {}", operation)
-            )),
-        };
-
+        let result = calculate_result(&values, operation, quantile)?;
         Ok(result.into_py(py))
     }
+}
+
+// Helper function to calculate the result based on operation
+fn calculate_result(values: &[f64], operation: &str, quantile: Option<f64>) -> PyResult<Option<f64>> {
+    if values.is_empty() {
+        return Ok(None);
+    }
+
+    let result = match operation {
+        "sum" => Some(values.iter().sum()),
+        "avg" => Some(values.iter().sum::<f64>() / values.len() as f64),
+        "max" => Some(values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))),
+        "min" => Some(values.iter().fold(f64::INFINITY, |a, &b| a.min(b))),
+        "median" => Some(calculate_median(values)),
+        "mode" => Some(calculate_mode(values)),
+        "std" => Some(calculate_std(values)),
+        "var" => Some(calculate_variance(values)),
+        "quantile" => {
+            let q = quantile.unwrap_or(0.5);
+            if q < 0.0 || q > 1.0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Quantile must be between 0 and 1"
+                ));
+            }
+            Some(calculate_quantile(values, q))
+        },
+        _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            format!("Invalid operation: {}", operation)
+        )),
+    };
+
+    Ok(result)
 }
 
 fn calculate_median(values: &[f64]) -> f64 {
