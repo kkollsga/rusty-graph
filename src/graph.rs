@@ -730,7 +730,7 @@ impl KnowledgeGraph {
         process_traversal_levels(&graph, &context, "title", max_results)
     }
 
-    pub fn get_index(&self, max_results: Option<usize>) -> PyResult<PyObject> {
+    pub fn get_idx(&self, max_results: Option<usize>) -> PyResult<PyObject> {
         let graph = self.get_graph()?;
         let context = self.get_context_value()?;
         process_traversal_levels(&graph, &context, "graph_index", max_results)

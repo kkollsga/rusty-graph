@@ -290,7 +290,7 @@ pub fn process_traversal_levels(
             if context.levels.len() == 2 {
                 let mut children = Vec::new();
                 if let Some(child_nodes) = context.levels[1].node_relationships.get(&root_idx) {
-                    for &child_idx in child_nodes {
+                    for &child_idx in child_nodes.iter().take(max_results.unwrap_or(usize::MAX)) {
                         if let Some(child_value) = get_value(child_idx) {
                             children.push(child_value);
                         }
@@ -304,10 +304,9 @@ pub fn process_traversal_levels(
                 if let Some(child_nodes) = context.levels[1].node_relationships.get(&root_idx) {
                     for &child_idx in child_nodes {
                         if let Some(child_value) = get_value(child_idx) {
-                            // Always create a list for the final level
                             let mut final_level = Vec::new();
                             if let Some(grandchild_nodes) = context.levels[2].node_relationships.get(&child_idx) {
-                                for &grandchild_idx in grandchild_nodes {
+                                for &grandchild_idx in grandchild_nodes.iter().take(max_results.unwrap_or(usize::MAX)) {
                                     if let Some(grandchild_value) = get_value(grandchild_idx) {
                                         final_level.push(grandchild_value);
                                     }
@@ -394,12 +393,14 @@ pub fn process_node_levels(
         context.levels[0].nodes.clone()
     };
 
-    // Apply max_results if specified
+    // Apply max_results if specified and we're at the root level
     if let Some(limit) = max_results {
         if limit == 0 {
             return Err(PyValueError::new_err("max_results must be positive"));
         }
-        nodes.truncate(limit);
+        if context.levels.len() == 1 {
+            nodes.truncate(limit);
+        }
     }
 
     let mut result = Vec::new();
@@ -511,7 +512,8 @@ pub fn process_node_levels(
                 let mut traversal_data = Vec::new();
                 
                 if let Some(child_nodes) = context.levels[1].node_relationships.get(&root_idx) {
-                    for &child_idx in child_nodes {
+                    // Apply max_results limit per parent for child nodes
+                    for &child_idx in child_nodes.iter().take(max_results.unwrap_or(usize::MAX)) {
                         if let Some(child_node) = graph.node_weight(NodeIndex::new(child_idx)) {
                             // Recursively process child nodes with same settings
                             let mut child_context = TraversalContext::new_base();
@@ -524,7 +526,7 @@ pub fn process_node_levels(
                                 include_calculations,
                                 include_connections,
                                 None,
-                                None
+                                None  // Don't pass max_results to avoid double-limiting
                             ) {
                                 if let Ok(child_list) = <Vec<PyObject>>::extract(child_result.as_ref(py)) {
                                     if !child_list.is_empty() {
