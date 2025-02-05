@@ -319,7 +319,75 @@ impl KnowledgeGraph {
     
         Ok(output)
     }
+    #[doc = "Filter the knowledge graph by node attributes and return a new graph containing only matching nodes.
 
+The filter operation allows for complex querying of nodes based on their attributes, calculations,
+and metadata using comparison operators. Multiple conditions can be applied to the same attribute.
+
+Parameters
+----------
+filter_dict : dict
+    A dictionary specifying the filter conditions. Each key represents an attribute to filter on,
+    and the value can be either:
+    - A direct value for equality comparison
+    - A dictionary of operators and values for complex comparisons
+    
+    Available attributes:
+    - 'type' or 'node_type': Filter by node type
+    - 'title': Filter by node title
+    - 'unique_id': Filter by node ID
+    - Any custom attribute or calculation name
+    
+    Supported operators:
+    - '==': Equal to
+    - '!=': Not equal to
+    - '>': Greater than
+    - '>=': Greater than or equal to
+    - '<': Less than
+    - '<=': Less than or equal to
+    - 'in': Value is in list
+    
+max_nodes : int, optional
+    Maximum number of nodes to return. Must be positive if specified.
+    
+Returns
+-------
+KnowledgeGraph
+    A new knowledge graph containing only the nodes that match the filter criteria.
+    
+Examples
+--------
+# Filter by a single attribute with direct value (equality comparison)
+>>> graph.filter({'type': 'Person'})
+
+# Filter by multiple attributes with direct values
+>>> graph.filter({
+...     'type': 'Person',
+...     'age': 30,
+...     'city': 'New York'
+... })
+
+# Complex filtering with operators
+>>> graph.filter({
+...     'age': {'>=': 18, '<': 65},
+...     'salary': {'>': 50000},
+...     'department': {'in': ['Sales', 'Marketing']}
+... })
+
+# Limit the number of results
+>>> graph.filter({'type': 'Transaction'}, max_nodes=100)
+
+Raises
+------
+ValueError
+    If max_nodes is specified but not positive.
+
+Notes
+-----
+- When multiple conditions are specified for an attribute, they are combined with AND logic
+- When a list of values is provided with the 'in' operator, they are combined with OR logic
+- If a filter attribute doesn't exist for a node, that node is excluded from results
+- The filter operation creates a new graph context and doesn't modify the original graph"]
     pub fn filter(&self, filter_dict: &PyDict, max_nodes: Option<usize>) -> PyResult<Py<KnowledgeGraph>> {
         let py = unsafe { Python::assume_gil_acquired() };
         let graph = self.get_graph()?;
