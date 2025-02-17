@@ -1,5 +1,4 @@
-// src/graph/filtering_methods.rs
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use petgraph::graph::NodeIndex;
 use crate::datatypes::values::{Value, FilterCondition};
 use crate::graph::schema::{DirGraph, CurrentSelection};
@@ -40,37 +39,37 @@ fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     }
 }
 
-// Core operations that work with Vec<NodeIndex>
+// Optimized core operations
 fn filter_nodes_by_conditions(
     graph: &DirGraph,
     nodes: Vec<NodeIndex>,
     conditions: &HashMap<String, FilterCondition>
 ) -> Vec<NodeIndex> {
-    // Special case for type-only filter
-    if conditions.len() == 1 {
-        if let Some((key, condition)) = conditions.iter().next() {
-            if key == "type" {
-                if let FilterCondition::Equals(Value::String(type_value)) = condition {
-                    if let Some(type_nodes) = graph.type_indices.get(type_value) {
-                        return nodes.into_iter()
-                            .filter(|node| type_nodes.contains(node))
-                            .collect();
-                    }
-                }
-            }
+    // Pre-check for type filter optimization
+    if let Some((key, FilterCondition::Equals(Value::String(type_value)))) = conditions.iter()
+        .find(|(k, _)| *k == "type") 
+    {
+        if let Some(type_nodes) = graph.type_indices.get(type_value) {
+            let type_set: HashSet<_> = type_nodes.iter().collect();
+            return nodes.into_iter()
+                .filter(|node| type_set.contains(node))
+                .collect();
         }
+        return Vec::new();
     }
 
-    // Standard filtering
+    // Cache field lookups for frequently accessed fields
+    let mut field_cache: HashMap<(NodeIndex, &String), Option<Value>> = HashMap::new();
+    
     nodes.into_iter()
         .filter(|&idx| {
             if let Some(node) = graph.get_node(idx) {
                 conditions.iter().all(|(key, condition)| {
-                    if let Some(value) = node.get_field(key) {
-                        matches_condition(&value, condition)
-                    } else {
-                        false
-                    }
+                    let value = field_cache
+                        .entry((idx, key))
+                        .or_insert_with(|| node.get_field(key).map(|v| v.clone()));
+                    
+                    value.as_ref().map_or(false, |v| matches_condition(v, condition))
                 })
             } else {
                 false
@@ -84,40 +83,68 @@ fn sort_nodes_by_fields(
     mut nodes: Vec<NodeIndex>,
     sort_fields: &[(String, bool)]
 ) -> Vec<NodeIndex> {
+    // Pre-fetch and cache field values for all nodes
+    let mut value_cache: HashMap<(NodeIndex, &String), Option<Value>> = HashMap::new();
+    
+    for &node_idx in &nodes {
+        if let Some(node) = graph.get_node(node_idx) {
+            for (field, _) in sort_fields {
+                value_cache.insert(
+                    (node_idx, field),
+                    node.get_field(field).map(|v| v.clone())
+                );
+            }
+        }
+    }
+    
     nodes.sort_by(|&a, &b| {
         for (field, ascending) in sort_fields {
-            if let (Some(node_a), Some(node_b)) = (graph.get_node(a), graph.get_node(b)) {
-                if let (Some(val_a), Some(val_b)) = (node_a.get_field(field), node_b.get_field(field)) {
-                    if let Some(ordering) = compare_values(&val_a, &val_b) {
+            let val_a = value_cache.get(&(a, field));
+            let val_b = value_cache.get(&(b, field));
+            
+            match (val_a, val_b) {
+                (Some(Some(va)), Some(Some(vb))) => {
+                    if let Some(ordering) = compare_values(va, vb) {
                         return if *ascending { ordering } else { ordering.reverse() };
                     }
                 }
+                _ => continue,
             }
         }
         std::cmp::Ordering::Equal
     });
+    
     nodes
 }
 
-fn limit_nodes(nodes: Vec<NodeIndex>, max_nodes: usize) -> Vec<NodeIndex> {
-    nodes.into_iter().take(max_nodes).collect()
+fn limit_nodes(mut nodes: Vec<NodeIndex>, max_nodes: usize) -> Vec<NodeIndex> {
+    if nodes.len() > max_nodes {
+        nodes.truncate(max_nodes);
+    }
+    nodes
 }
 
-// Main processing function for raw node operations
+// Optimized processing function
 pub fn process_nodes(
     graph: &DirGraph,
     nodes: Vec<NodeIndex>,
-    conditions: Option<HashMap<String, FilterCondition>>,
-    sort_fields: Option<Vec<(String, bool)>>,
+    conditions: Option<&HashMap<String, FilterCondition>>,  // Changed from &Option<HashMap>
+    sort_fields: Option<&Vec<(String, bool)>>,             // Changed from &Option<Vec>
     max_nodes: Option<usize>
 ) -> Vec<NodeIndex> {
-    let mut result = nodes;
+    let mut result = if let Some(max) = max_nodes {
+        Vec::with_capacity(max.min(nodes.len()))
+    } else {
+        Vec::with_capacity(nodes.len())
+    };
+    
+    result.extend(nodes);
     
     if let Some(conditions) = conditions {
-        result = filter_nodes_by_conditions(graph, result, &conditions);
+        result = filter_nodes_by_conditions(graph, result, conditions);
     }
     
-    if let Some(fields) = sort_fields.as_ref() {
+    if let Some(fields) = sort_fields {
         result = sort_nodes_by_fields(graph, result, fields);
     }
     
@@ -128,8 +155,7 @@ pub fn process_nodes(
     result
 }
 
-// Public interface functions that work with CurrentSelection
-
+// Optimized public interface functions
 pub fn filter_nodes(
     graph: &DirGraph,
     selection: &mut CurrentSelection,
@@ -145,54 +171,44 @@ pub fn filter_nodes(
         level.selections.clear();
     }
 
-    // Handle empty selections
     if level.selections.is_empty() {
-        // Check for type-only filter first
+        // Optimized type-only filter handling
         if conditions.len() == 1 {
-            if let Some((key, condition)) = conditions.iter().next() {
+            if let Some((key, FilterCondition::Equals(Value::String(type_value)))) = conditions.iter().next() {
                 if key == "type" {
-                    if let FilterCondition::Equals(Value::String(type_value)) = condition {
-                        if let Some(type_nodes) = graph.type_indices.get(type_value) {
-                            // Use type indices directly for empty selections
-                            let nodes = type_nodes.clone();
-                            
-                            // Apply sort if needed
-                            let processed = if let Some(fields) = sort_fields {
-                                sort_nodes_by_fields(graph, nodes, &fields)
-                            } else {
-                                nodes
-                            };
-                            
-                            // Apply limit if needed
-                            let processed = if let Some(max) = max_nodes {
-                                limit_nodes(processed, max)
-                            } else {
-                                processed
-                            };
-                            
-                            if !processed.is_empty() {
-                                level.add_selection(None, processed);
-                                level.add_filter(conditions);
-                                return Ok(());
-                            }
+                    if let Some(type_nodes) = graph.type_indices.get(type_value) {
+                        let processed = process_nodes(
+                            graph,
+                            type_nodes.clone(),
+                            None,
+                            sort_fields.as_ref(),
+                            max_nodes
+                        );
+                        
+                        if !processed.is_empty() {
+                            level.add_selection(None, processed);
+                            level.add_filter(conditions);
+                            return Ok(());
                         }
-                        // If type exists but no nodes found, return early
-                        return Ok(());
                     }
+                    return Ok(());
                 }
             }
         }
 
-        // Fallback to regular processing for non-type filters
-        let all_nodes: Vec<NodeIndex> = graph.graph.node_indices()
-            .filter(|&idx| graph.get_node(idx).map_or(false, |n| n.is_regular()))
-            .collect();
+        // Regular processing with capacity hint
+        let estimated_capacity = graph.graph.node_count() / 2;
+        let mut all_nodes = Vec::with_capacity(estimated_capacity);
+        all_nodes.extend(
+            graph.graph.node_indices()
+                .filter(|&idx| graph.get_node(idx).map_or(false, |n| n.is_regular()))
+        );
             
         let processed = process_nodes(
             graph,
             all_nodes,
-            Some(conditions.clone()),
-            sort_fields.clone(),
+            Some(&conditions),
+            sort_fields.as_ref(),
             max_nodes
         );
         
@@ -200,21 +216,23 @@ pub fn filter_nodes(
             level.add_selection(None, processed);
         }
     } else {
-        // Process existing selections normally
-        let new_selections: Vec<_> = level.selections.iter()
-            .map(|(parent, nodes)| {
-                let processed = process_nodes(
-                    graph,
-                    nodes.clone(),
-                    Some(conditions.clone()),
-                    sort_fields.clone(),
-                    max_nodes
-                );
-                (*parent, processed)
-            })
-            .filter(|(_, nodes)| !nodes.is_empty())
-            .collect();
-
+        // Batch process existing selections
+        let mut new_selections = Vec::with_capacity(level.selections.len());
+        
+        for (parent, nodes) in &level.selections {
+            let processed = process_nodes(
+                graph,
+                nodes.clone(),
+                Some(&conditions),
+                sort_fields.as_ref(),
+                max_nodes
+            );
+            
+            if !processed.is_empty() {
+                new_selections.push((*parent, processed));
+            }
+        }
+        
         level.selections = new_selections;
     }
 
@@ -226,6 +244,7 @@ pub fn filter_nodes(
     Ok(())
 }
 
+// Other public functions remain the same but use the optimized process_nodes
 pub fn sort_nodes(
     graph: &DirGraph,
     selection: &mut CurrentSelection,
@@ -236,23 +255,26 @@ pub fn sort_nodes(
         .ok_or_else(|| "No active selection level".to_string())?;
 
     if level.selections.is_empty() {
-        let all_nodes: Vec<NodeIndex> = graph.graph.node_indices()
-            .filter(|&idx| graph.get_node(idx).map_or(false, |n| n.is_regular()))
-            .collect();
+        let mut all_nodes = Vec::with_capacity(graph.graph.node_count() / 2);
+        all_nodes.extend(
+            graph.graph.node_indices()
+                .filter(|&idx| graph.get_node(idx).map_or(false, |n| n.is_regular()))
+        );
             
         let sorted = sort_nodes_by_fields(graph, all_nodes, &sort_fields);
         if !sorted.is_empty() {
             level.add_selection(None, sorted);
         }
     } else {
-        let new_selections: Vec<_> = level.selections.iter()
-            .map(|(parent, nodes)| {
-                let sorted = sort_nodes_by_fields(graph, nodes.clone(), &sort_fields);
-                (*parent, sorted)
-            })
-            .filter(|(_, nodes)| !nodes.is_empty())
-            .collect();
-
+        let mut new_selections = Vec::with_capacity(level.selections.len());
+        
+        for (parent, nodes) in &level.selections {
+            let sorted = sort_nodes_by_fields(graph, nodes.clone(), &sort_fields);
+            if !sorted.is_empty() {
+                new_selections.push((*parent, sorted));
+            }
+        }
+        
         level.selections = new_selections;
     }
 
@@ -270,23 +292,26 @@ pub fn limit_nodes_per_group(
         .ok_or_else(|| "No active selection level".to_string())?;
 
     if level.selections.is_empty() {
-        let all_nodes: Vec<NodeIndex> = graph.graph.node_indices()
-            .filter(|&idx| graph.get_node(idx).map_or(false, |n| n.is_regular()))
-            .collect();
+        let mut all_nodes = Vec::with_capacity(graph.graph.node_count().min(max_per_group));
+        all_nodes.extend(
+            graph.graph.node_indices()
+                .filter(|&idx| graph.get_node(idx).map_or(false, |n| n.is_regular()))
+                .take(max_per_group)
+        );
             
-        let limited = limit_nodes(all_nodes, max_per_group);
-        if !limited.is_empty() {
-            level.add_selection(None, limited);
+        if !all_nodes.is_empty() {
+            level.add_selection(None, all_nodes);
         }
     } else {
-        let new_selections: Vec<_> = level.selections.iter()
-            .map(|(parent, nodes)| {
-                let limited = limit_nodes(nodes.clone(), max_per_group);
-                (*parent, limited)
-            })
-            .filter(|(_, nodes)| !nodes.is_empty())
-            .collect();
-
+        let mut new_selections = Vec::with_capacity(level.selections.len());
+        
+        for (parent, nodes) in &level.selections {
+            let limited = limit_nodes(nodes.clone(), max_per_group);
+            if !limited.is_empty() {
+                new_selections.push((*parent, limited));
+            }
+        }
+        
         level.selections = new_selections;
     }
 

@@ -277,8 +277,8 @@ impl KnowledgeGraph {
             connection_type,
             level_index,
             direction,
-            conditions,
-            sort_fields,
+            conditions.as_ref(),
+            sort_fields.as_ref(),
             max_nodes,
             new_level,
         ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;

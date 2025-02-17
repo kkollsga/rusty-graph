@@ -14,7 +14,7 @@ Users can download the .whl file directly from the repository and install it usi
 ```sh
 pip install https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.2.1-cp312-cp312-win_amd64.whl?raw=true
 # or upgrade an already installed library
-pip install --upgrade https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.2.1-cp312-cp312-win_amd64l?raw=true
+pip install --upgrade https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.2.1-cp312-cp312-win_amd64.whl?raw=true
 ```
 
 
