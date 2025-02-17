@@ -1,3 +1,4 @@
+// src/graph/maintain_graph.rs
 use std::collections::{HashMap, HashSet};
 use crate::graph::schema::{DirGraph, NodeData};
 use crate::graph::lookups::{TypeLookup, CombinedTypeLookup};
@@ -8,9 +9,7 @@ fn check_data_validity(df_data: &DataFrame, unique_id_field: &str, title_field: 
     if !df_data.verify_column_type(unique_id_field, &ColumnType::UniqueId) {
         return Err(format!("Unique ID field '{}' must be a UniqueId type", unique_id_field));
     }
-    if !df_data.verify_column(title_field) {
-        return Err(format!("Title field '{}' not found", title_field));
-    }
+    // Remove title field verification since we now accept null titles
     Ok(())
 }
 
@@ -34,7 +33,7 @@ pub fn add_nodes(
     let title_field = node_title_field.unwrap_or_else(|| unique_id_field.clone());
     check_data_validity(&df_data, &unique_id_field, &title_field)?;
 
-    // --- PRE-PROCESS SCHEMA ---
+    // Schema processing remains the same...
     let schema_lookup = TypeLookup::new(&graph.graph, "SchemaNode".to_string())?;
     let schema_title = Value::String(node_type.clone());
     let schema_node_idx = schema_lookup.check_title(&schema_title);
@@ -45,6 +44,7 @@ pub fn add_nodes(
         .map(|(k, v)| (k, Value::String(v)))
         .collect();
 
+    // Schema node handling remains the same...
     match schema_node_idx {
         Some(idx) => {
             if let Some(NodeData::Schema { properties, .. }) = graph.get_node_mut(idx) {
@@ -75,11 +75,22 @@ pub fn add_nodes(
 
     let column_names = df_data.get_column_names();
     let mut batch = BatchProcessor::new(df_data.row_count());
+    let mut skipped_count = 0;
 
     // Process rows
     for row_idx in 0..df_data.row_count() {
-        let id = df_data.get_value_by_index(row_idx, id_idx)
-            .unwrap_or(Value::Null);
+        let id = match df_data.get_value_by_index(row_idx, id_idx) {
+            Some(Value::Null) => {
+                skipped_count += 1;
+                continue;
+            }
+            Some(id) => id,
+            None => {
+                skipped_count += 1;
+                continue;
+            }
+        };
+
         let title = df_data.get_value_by_index(row_idx, title_idx)
             .unwrap_or(Value::Null);
 
@@ -101,8 +112,8 @@ pub fn add_nodes(
 
     // Execute remaining actions
     let (stats, metrics) = batch.execute(graph)?;
-    println!("Processed {} creates and {} updates in {} batches ({}s)",
-             stats.creates, stats.updates, metrics.batch_count, metrics.processing_time);
+    println!("Processed {} creates and {} updates in {} batches ({}s), skipped {} rows with null IDs",
+             stats.creates, stats.updates, metrics.batch_count, metrics.processing_time, skipped_count);
 
     Ok(())
 }
@@ -128,17 +139,6 @@ pub fn add_connections(
         return Err(format!("Target ID field '{}' must be a UniqueId type", target_id_field));
     }
 
-    if let Some(source_title) = &source_title_field {
-        if !df_data.verify_column(source_title) {
-            return Err(format!("Source title field '{}' not found", source_title));
-        }
-    }
-    if let Some(target_title) = &target_title_field {
-        if !df_data.verify_column(target_title) {
-            return Err(format!("Target title field '{}' not found", target_title));
-        }
-    }
-
     let source_id_idx = df_data.get_column_index(&source_id_field)
         .ok_or_else(|| format!("Source ID column '{}' not found", source_id_field))?;
     let target_id_idx = df_data.get_column_index(&target_id_field)
@@ -151,12 +151,32 @@ pub fn add_connections(
 
     let lookup = CombinedTypeLookup::new(&graph.graph, source_type.clone(), target_type.clone())?;
     let mut batch = ConnectionBatchProcessor::new(df_data.row_count());
+    let mut skipped_count = 0;
 
     for row_idx in 0..df_data.row_count() {
-        let source_id = df_data.get_value_by_index(row_idx, source_id_idx)
-            .ok_or_else(|| format!("Missing source ID at row {}", row_idx))?;
-        let target_id = df_data.get_value_by_index(row_idx, target_id_idx)
-            .ok_or_else(|| format!("Missing target ID at row {}", row_idx))?;
+        let source_id = match df_data.get_value_by_index(row_idx, source_id_idx) {
+            Some(Value::Null) => {
+                skipped_count += 1;
+                continue;
+            }
+            Some(id) => id,
+            None => {
+                skipped_count += 1;
+                continue;
+            }
+        };
+
+        let target_id = match df_data.get_value_by_index(row_idx, target_id_idx) {
+            Some(Value::Null) => {
+                skipped_count += 1;
+                continue;
+            }
+            Some(id) => id,
+            None => {
+                skipped_count += 1;
+                continue;
+            }
+        };
 
         if let (Some(source_idx), Some(target_idx)) = (
             lookup.check_source(&source_id),
@@ -186,9 +206,9 @@ pub fn add_connections(
     )?;
 
     let (stats, metrics) = batch.execute(graph, connection_type)?;
-    println!("Created {} connections with {} property types in {} batches ({}s)", 
+    println!("Created {} connections with {} property types in {} batches ({}s), skipped {} rows with null IDs", 
              stats.connections_created, stats.properties_tracked, 
-             metrics.batch_count, metrics.processing_time);
+             metrics.batch_count, metrics.processing_time, skipped_count);
 
     Ok(())
 }
