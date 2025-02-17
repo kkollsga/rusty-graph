@@ -1,7 +1,7 @@
 /target
 /data
 /.github
-/pytest
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -28,6 +28,7 @@ var/
 include/
 man/
 venv/
+pytest/
 *.egg-info/
 .installed.cfg
 *.egg
