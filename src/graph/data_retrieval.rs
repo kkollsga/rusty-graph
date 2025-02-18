@@ -1,6 +1,5 @@
-// src/graph/data_retrieval.rs
 use crate::datatypes::values::Value;
-use crate::graph::schema::{DirGraph, CurrentSelection, NodeInfo, NodeData};  // Added NodeData
+use crate::graph::schema::{DirGraph, CurrentSelection, NodeInfo, NodeData};
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
 use petgraph::visit::EdgeRef;
@@ -14,6 +13,17 @@ pub struct LevelNodes {
     pub nodes: Vec<NodeInfo>,
 }
 
+#[derive(Debug)]
+pub struct LevelValues {
+    pub parent_title: String,
+    pub values: Vec<Vec<Value>>,
+}
+
+#[derive(Debug)]
+pub struct UniqueValues {
+    pub parent_title: String,
+    pub values: Vec<Value>,
+}
 
 pub fn get_nodes(
     graph: &DirGraph,
@@ -46,7 +56,6 @@ pub fn get_nodes(
         return Vec::new();
     }
     
-    // Original selection-based logic
     let level_idx = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
     let mut result = Vec::new();
     
@@ -62,7 +71,7 @@ pub fn get_nodes(
                 }
             }
             
-            // Always create a LevelNodes entry for the parent, even if nodes is empty
+            // Always create an entry for the parent, even if nodes is empty
             let (parent_title, parent_id, parent_type) = match parent {
                 Some(p) => {
                     if let Some(node) = graph.get_node(*p) {
@@ -98,13 +107,6 @@ pub fn get_nodes(
     result
 }
 
-
-#[derive(Debug)]
-pub struct LevelValues {
-    pub parent_title: String,
-    pub values: Vec<Vec<Value>>,  // Modified to store multiple values per node
-}
-
 pub fn get_property_values(
     graph: &DirGraph,
     selection: &CurrentSelection,
@@ -116,27 +118,17 @@ pub fn get_property_values(
     let mut result = Vec::new();
     
     if let Some(level) = selection.get_level(level_idx) {
-        // Handle direct lookup if indices provided
-        let nodes = if let Some(idx) = indices {
-            // Convert indices to NodeIndex, filtering out invalid ones
-            idx.iter()
-                .filter_map(|&i| NodeIndex::new(i).into())
-                .collect::<Vec<_>>()
-        } else {
-            level.get_all_nodes()
-        };
-
-        // If using direct indices, create a single level
-        let groups = if indices.is_some() {
-            vec![(None, nodes)]
-        } else {
-            level.iter_groups()
-                .map(|(p, c)| (p.clone(), c.clone()))
-                .collect()
-        };
-
-        for (parent, children) in groups {
-            let values: Vec<Vec<Value>> = children.iter()
+        for (parent, children) in level.iter_groups() {
+            let filtered_children: Vec<NodeIndex> = match indices {
+                Some(idx) => children.iter()
+                    .filter(|&c| idx.contains(&c.index()))
+                    .cloned()
+                    .collect(),
+                None => children.clone(),
+            };
+            
+            // Always create values vector, even if empty
+            let values: Vec<Vec<Value>> = filtered_children.iter()
                 .map(|&idx| {
                     properties.iter()
                         .map(|&prop| {
@@ -149,43 +141,32 @@ pub fn get_property_values(
                 })
                 .collect();
                 
-            if !values.is_empty() {
-                let parent_title = if indices.is_some() {
-                    "Direct Lookup".to_string()
-                } else {
-                    match parent {
-                        Some(p) => {
-                            if let Some(node) = graph.get_node(p) {
-                                if let Some(Value::String(title)) = node.get_field("title") {
-                                    title
-                                } else {
-                                    "Unknown".to_string()
-                                }
-                            } else {
-                                "Unknown".to_string()
-                            }
-                        },
-                        None => "Root".to_string(),
+            // Get parent title even if there are no children
+            let parent_title = match parent {
+                Some(p) => {
+                    if let Some(node) = graph.get_node(*p) {
+                        if let Some(Value::String(title)) = node.get_field("title") {
+                            title
+                        } else {
+                            "Unknown".to_string()
+                        }
+                    } else {
+                        "Unknown".to_string()
                     }
-                };
-                
-                result.push(LevelValues {
-                    parent_title,
-                    values,
-                });
-            }
+                },
+                None => "Root".to_string(),
+            };
+            
+            // Always add to result, even with empty values
+            result.push(LevelValues {
+                parent_title,
+                values,
+            });
         }
     }
     result
 }
 
-#[derive(Debug)]
-pub struct UniqueValues {
-    pub parent_title: String,
-    pub values: Vec<Value>,  // Single vec of unique values
-}
-
-// Add these new functions
 pub fn get_unique_values(
     graph: &DirGraph,
     selection: &CurrentSelection,
@@ -198,30 +179,21 @@ pub fn get_unique_values(
     let mut result = Vec::new();
     
     if let Some(level) = selection.get_level(level_idx) {
-        // Handle direct lookup if indices provided
-        let nodes = if let Some(idx) = indices {
-            // Convert indices to NodeIndex, filtering out invalid ones
-            idx.iter()
-                .filter_map(|&i| NodeIndex::new(i).into())
-                .collect::<Vec<_>>()
-        } else {
-            level.get_all_nodes()
-        };
-
         if group_by_parent {
-            // If using direct indices, create a single level
-            let groups = if indices.is_some() {
-                vec![(None, nodes)]
-            } else {
-                level.iter_groups()
-                    .map(|(p, c)| (p.clone(), c.clone()))
-                    .collect()
-            };
-
-            for (parent, children) in groups {
+            // Process each parent-child group separately
+            for (parent, children) in level.iter_groups() {
+                let filtered_children: Vec<NodeIndex> = match indices {
+                    Some(idx) => children.iter()
+                        .filter(|&c| idx.contains(&c.index()))
+                        .cloned()
+                        .collect(),
+                    None => children.clone(),
+                };
+                
                 let mut unique_values = std::collections::HashSet::new();
                 
-                for &idx in &children {
+                // Collect unique values for this parent's children
+                for &idx in &filtered_children {
                     if let Some(node) = graph.get_node(idx) {
                         if let Some(value) = node.get_field(property) {
                             unique_values.insert(value.clone());
@@ -229,52 +201,57 @@ pub fn get_unique_values(
                     }
                 }
                 
-                if !unique_values.is_empty() {
-                    let parent_title = if indices.is_some() {
-                        "Direct Lookup".to_string()
-                    } else {
-                        match parent {
-                            Some(p) => {
-                                if let Some(node) = graph.get_node(p) {
-                                    if let Some(Value::String(title)) = node.get_field("title") {
-                                        title
-                                    } else {
-                                        "Unknown".to_string()
-                                    }
-                                } else {
-                                    "Unknown".to_string()
-                                }
-                            },
-                            None => "Root".to_string(),
+                // Always include parent in result, even if no unique values
+                let parent_title = match parent {
+                    Some(p) => {
+                        if let Some(node) = graph.get_node(*p) {
+                            if let Some(Value::String(title)) = node.get_field("title") {
+                                title
+                            } else {
+                                "Unknown".to_string()
+                            }
+                        } else {
+                            "Unknown".to_string()
                         }
-                    };
-                    
-                    result.push(UniqueValues {
-                        parent_title,
-                        values: unique_values.into_iter().collect(),
-                    });
-                }
+                    },
+                    None => "Root".to_string(),
+                };
+                
+                result.push(UniqueValues {
+                    parent_title,
+                    values: unique_values.into_iter().collect(),
+                });
             }
         } else {
-            // Process all nodes together
+            // Process all children together
             let mut all_unique_values = std::collections::HashSet::new();
             
-            for &idx in &nodes {
-                if let Some(node) = graph.get_node(idx) {
-                    if let Some(value) = node.get_field(property) {
-                        all_unique_values.insert(value.clone());
+            for (_, children) in level.iter_groups() {
+                let filtered_children: Vec<NodeIndex> = match indices {
+                    Some(idx) => children.iter()
+                        .filter(|&c| idx.contains(&c.index()))
+                        .cloned()
+                        .collect(),
+                    None => children.clone(),
+                };
+                
+                for &idx in &filtered_children {
+                    if let Some(node) = graph.get_node(idx) {
+                        if let Some(value) = node.get_field(property) {
+                            all_unique_values.insert(value.clone());
+                        }
                     }
                 }
             }
             
-            if !all_unique_values.is_empty() {
-                result.push(UniqueValues {
-                    parent_title: "All".to_string(),
-                    values: all_unique_values.into_iter().collect(),
-                });
-            }
+            // Always add result even if no unique values found
+            result.push(UniqueValues {
+                parent_title: "All".to_string(),
+                values: all_unique_values.into_iter().collect(),
+            });
         }
     }
+    
     result
 }
 
@@ -375,42 +352,41 @@ pub fn get_connections(
                 }
             }
 
-            if !level_connections.is_empty() {
-                let (parent_title, parent_id, parent_type) = if indices.is_some() {
-                    ("Direct Lookup".to_string(), None, None)
-                } else {
-                    match parent {
-                        Some(p) => {
-                            if let Some(node) = graph.get_node(p) {
-                                (
-                                    node.get_field("title")
-                                        .and_then(|v| match v {
-                                            Value::String(s) => Some(s),
-                                            _ => None
-                                        })
-                                        .unwrap_or_else(|| "Unknown".to_string()),
-                                    node.get_field("id"),
-                                    match node {
-                                        NodeData::Regular { node_type, .. } => Some(node_type.clone()),
+            // Always add the parent level to result, even if no connections found
+            let (parent_title, parent_id, parent_type) = if indices.is_some() {
+                ("Direct Lookup".to_string(), None, None)
+            } else {
+                match parent {
+                    Some(p) => {
+                        if let Some(node) = graph.get_node(p) {
+                            (
+                                node.get_field("title")
+                                    .and_then(|v| match v {
+                                        Value::String(s) => Some(s),
                                         _ => None
-                                    }
-                                )
-                            } else {
-                                ("Unknown".to_string(), None, None)
-                            }
-                        },
-                        None => ("Root".to_string(), None, None),
-                    }
-                };
+                                    })
+                                    .unwrap_or_else(|| "Unknown".to_string()),
+                                node.get_field("id"),
+                                match node {
+                                    NodeData::Regular { node_type, .. } => Some(node_type.clone()),
+                                    _ => None
+                                }
+                            )
+                        } else {
+                            ("Unknown".to_string(), None, None)
+                        }
+                    },
+                    None => ("Root".to_string(), None, None),
+                }
+            };
 
-                result.push(LevelConnections {
-                    parent_title,
-                    parent_id,
-                    parent_idx: parent.map(|p| p),
-                    parent_type,
-                    connections: level_connections,
-                });
-            }
+            result.push(LevelConnections {
+                parent_title,
+                parent_id,
+                parent_idx: parent.map(|p| p),
+                parent_type,
+                connections: level_connections,
+            });
         }
     }
     result
