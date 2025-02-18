@@ -118,10 +118,7 @@ impl DirGraph {
             type_indices: HashMap::new(),
         }
     }
-    pub fn register_node_type(&mut self, node_type: String, idx: NodeIndex) {
-        self.type_indices.entry(node_type).or_default().push(idx);
-    }
-
+    
     pub fn get_node(&self, index: NodeIndex) -> Option<&NodeData> {
         self.graph.node_weight(index)
     }

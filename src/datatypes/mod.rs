@@ -5,4 +5,3 @@ pub mod type_conversions;
 
 pub use values::Value;
 pub use values::DataFrame;
-pub use values::ColumnType;

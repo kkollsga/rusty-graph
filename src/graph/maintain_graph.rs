@@ -3,9 +3,9 @@ use std::collections::{HashMap, HashSet};
 use crate::graph::schema::{DirGraph, NodeData};
 use crate::graph::lookups::{TypeLookup, CombinedTypeLookup};
 use crate::graph::batch_operations::{BatchProcessor, ConnectionBatchProcessor, NodeAction};
-use crate::datatypes::{Value, DataFrame, ColumnType};
+use crate::datatypes::{Value, DataFrame};
 
-fn check_data_validity(df_data: &DataFrame, unique_id_field: &str, title_field: &str) -> Result<(), String> {
+fn check_data_validity(df_data: &DataFrame, unique_id_field: &str) -> Result<(), String> {
     // Remove strict UniqueId type verification to allow nulls
     if !df_data.verify_column(unique_id_field) {
         return Err(format!("Column '{}' not found", unique_id_field));
@@ -31,7 +31,7 @@ pub fn add_nodes(
     _conflict_handling: Option<String>,
 ) -> Result<(), String> {
     let title_field = node_title_field.unwrap_or_else(|| unique_id_field.clone());
-    check_data_validity(&df_data, &unique_id_field, &title_field)?;
+    check_data_validity(&df_data, &unique_id_field)?;
 
     // Rest of the schema processing remains the same...
     let schema_lookup = TypeLookup::new(&graph.graph, "SchemaNode".to_string())?;

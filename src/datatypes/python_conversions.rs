@@ -7,7 +7,7 @@ use super::values::{DataFrame, ColumnType, ColumnData, Value, FilterCondition};
 use super::type_conversions::{to_u32, to_i64, to_f64, to_datetime, to_bool};
 use crate::graph::schema::NodeInfo;
 use crate::graph::statistics_methods::PropertyStats;
-use crate::graph::data_retrieval::{LevelNodes, LevelValues};
+use crate::graph::data_retrieval::{LevelNodes, LevelValues, ConnectionInfo, NodeConnections};
 
 pub fn pydict_to_filter_conditions(dict: &Bound<'_, PyDict>) -> PyResult<HashMap<String, FilterCondition>> {
     dict.iter()
@@ -71,7 +71,7 @@ fn parse_in_condition(val: &Bound<'_, PyAny>) -> PyResult<FilterCondition> {
     }
 }
 
-fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType, is_unique_id: bool, name: &str) -> PyResult<ColumnData> {
+fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyResult<ColumnData> {
     let length = series.len()?;
 
     match col_type {
@@ -167,7 +167,7 @@ pub fn pandas_to_dataframe(
                 }
             };
 
-            let data = convert_pandas_series(&series, col_type.clone(), unique_id_fields.contains(col_name), col_name)?;
+            let data = convert_pandas_series(&series, col_type.clone())?;
             df_out.add_column(col_name.clone(), col_type, data)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         }
@@ -458,7 +458,7 @@ pub fn level_values_to_pydict(py: Python, level_values: &[LevelValues]) -> PyRes
                 let tuple_values: Vec<PyObject> = vec_values.iter()
                     .map(|v| value_to_py(py, v))
                     .collect::<PyResult<_>>()?;
-                Ok(PyTuple::new(py, &tuple_values).into())
+                Ok(PyTuple::new_bound(py, &tuple_values).into())
             })
             .collect::<PyResult<_>>()?;
             
@@ -483,4 +483,38 @@ pub fn level_single_values_to_pydict(py: Python, level_values: &[LevelValues]) -
     }
     
     Ok(result.into())
+}
+
+pub fn connection_info_to_pydict(py: Python, conn: &ConnectionInfo) -> PyResult<PyObject> {
+    let dict = PyDict::new_bound(py);
+    dict.set_item("connection_type", conn.connection_type.clone())?;
+    dict.set_item("target_id", conn.target_id.to_object(py))?;
+    dict.set_item("target_title", conn.target_title.to_object(py))?;
+    dict.set_item("properties", conn.properties.to_object(py))?;
+    Ok(dict.to_object(py))
+}
+
+pub fn node_connections_to_pydict(py: Python, connections: &[NodeConnections]) -> PyResult<PyObject> {
+    let result = PyDict::new_bound(py);
+    
+    for node_conn in connections {
+        let node_dict = PyDict::new_bound(py);
+        
+        let incoming: Vec<PyObject> = node_conn.incoming.iter()
+            .map(|conn| connection_info_to_pydict(py, conn))
+            .collect::<PyResult<_>>()?;
+            
+        let outgoing: Vec<PyObject> = node_conn.outgoing.iter()
+            .map(|conn| connection_info_to_pydict(py, conn))
+            .collect::<PyResult<_>>()?;
+            
+        node_dict.set_item("node_id", node_conn.node_id.to_object(py))?;
+        node_dict.set_item("node_type", node_conn.node_type.clone())?;
+        node_dict.set_item("incoming", incoming)?;
+        node_dict.set_item("outgoing", outgoing)?;
+        
+        result.set_item(node_conn.node_title.clone(), node_dict)?;
+    }
+    
+    Ok(result.to_object(py))
 }

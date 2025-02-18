@@ -201,12 +201,6 @@ impl DataFrame {
         self.column_indices.get(name).copied()
     }
  
-    pub fn verify_column_type(&self, col_name: &str, expected_type: &ColumnType) -> bool {
-        self.column_indices.get(col_name)
-            .and_then(|&idx| self.columns.get(idx))
-            .map_or(false, |col| &col.col_type == expected_type)
-    }
- 
     pub fn verify_column(&self, name: &str) -> bool {
         self.column_indices.contains_key(name)
     }

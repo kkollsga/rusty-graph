@@ -46,7 +46,7 @@ fn filter_nodes_by_conditions(
     conditions: &HashMap<String, FilterCondition>
 ) -> Vec<NodeIndex> {
     // Pre-check for type filter optimization
-    if let Some((key, FilterCondition::Equals(Value::String(type_value)))) = conditions.iter()
+    if let Some((_key, FilterCondition::Equals(Value::String(type_value)))) = conditions.iter()
         .find(|(k, _)| *k == "type") 
     {
         if let Some(type_nodes) = graph.type_indices.get(type_value) {

@@ -11,7 +11,8 @@ use crate::datatypes::python_conversions::{
     pydict_to_filter_conditions,
     level_nodes_to_pydict,
     level_values_to_pydict,
-    level_single_values_to_pydict
+    level_single_values_to_pydict,
+    node_connections_to_pydict
 };
 use crate::datatypes::values::{Value, FilterCondition};
 use crate::graph::io_operations::save_to_file;
@@ -184,8 +185,7 @@ impl KnowledgeGraph {
         &self, 
         indices: Option<Vec<usize>>, 
         parent_key: Option<&str>,
-        parent_info: Option<bool>,
-        level_index: Option<usize>
+        parent_info: Option<bool>
     ) -> PyResult<PyObject> {
         let nodes = data_retrieval::get_nodes(
             &self.inner, 
@@ -219,6 +219,16 @@ impl KnowledgeGraph {
         Python::with_gil(|py| level_values_to_pydict(py, &values))
     }
 
+    fn get_connections(&self, indices: Option<Vec<usize>>) -> PyResult<PyObject> {
+        let connections = data_retrieval::get_connections(
+            &self.inner,
+            &self.selection,
+            None,
+            indices.as_deref()
+        );
+        Python::with_gil(|py| node_connections_to_pydict(py, &connections))
+    }
+
     fn get_unique_values(
         &self,
         property: String,
@@ -236,12 +246,12 @@ impl KnowledgeGraph {
         );
         
         Python::with_gil(|py| {
-            let result = PyDict::new(py);
+            let result = PyDict::new_bound(py);
             for unique_values in values {
                 let py_values: Vec<PyObject> = unique_values.values.into_iter()
                     .map(|v| v.to_object(py))
                     .collect();
-                result.set_item(unique_values.parent_title, PyList::new(py, &py_values))?;
+                result.set_item(unique_values.parent_title, PyList::new_bound(py, &py_values))?;
             }
             Ok(result.to_object(py))
         })

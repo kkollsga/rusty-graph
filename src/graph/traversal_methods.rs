@@ -2,9 +2,8 @@ use std::collections::{HashSet, HashMap};
 use std::iter::FromIterator;
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
-use petgraph::graph::NodeIndex;
 use crate::graph::schema::{DirGraph, CurrentSelection, SelectionOperation};
-use crate::datatypes::values::{Value, FilterCondition};
+use crate::datatypes::values::FilterCondition;
 use crate::graph::filtering_methods;
 
 pub fn make_traversal(
