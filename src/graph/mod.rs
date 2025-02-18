@@ -12,7 +12,7 @@ use crate::datatypes::python_conversions::{
     level_nodes_to_pydict,
     level_values_to_pydict,
     level_single_values_to_pydict,
-    node_connections_to_pydict
+    level_connections_to_pydict
 };
 use crate::datatypes::values::{Value, FilterCondition};
 use crate::graph::io_operations::save_to_file;
@@ -219,14 +219,18 @@ impl KnowledgeGraph {
         Python::with_gil(|py| level_values_to_pydict(py, &values))
     }
 
-    fn get_connections(&self, indices: Option<Vec<usize>>) -> PyResult<PyObject> {
+    fn get_connections(
+        &self,
+        indices: Option<Vec<usize>>,
+        parent_info: Option<bool>
+    ) -> PyResult<PyObject> {
         let connections = data_retrieval::get_connections(
             &self.inner,
             &self.selection,
             None,
             indices.as_deref()
         );
-        Python::with_gil(|py| node_connections_to_pydict(py, &connections))
+        Python::with_gil(|py| level_connections_to_pydict(py, &connections, parent_info))
     }
 
     fn get_unique_values(

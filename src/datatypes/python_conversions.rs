@@ -7,7 +7,7 @@ use super::values::{DataFrame, ColumnType, ColumnData, Value, FilterCondition};
 use super::type_conversions::{to_u32, to_i64, to_f64, to_datetime, to_bool};
 use crate::graph::schema::NodeInfo;
 use crate::graph::statistics_methods::PropertyStats;
-use crate::graph::data_retrieval::{LevelNodes, LevelValues, ConnectionInfo, NodeConnections};
+use crate::graph::data_retrieval::{LevelNodes, LevelValues, LevelConnections};
 
 pub fn pydict_to_filter_conditions(dict: &Bound<'_, PyDict>) -> PyResult<HashMap<String, FilterCondition>> {
     dict.iter()
@@ -417,7 +417,7 @@ pub fn level_nodes_to_pydict(
         // Create dictionary value based on parent_info parameter
         let value = if parent_info.unwrap_or(false) && group.parent_idx.is_some() {
             // Include full parent node info as dictionary with children
-            let mut parent_dict = PyDict::new_bound(py);
+            let parent_dict = PyDict::new_bound(py);
             
             // Add parent node information
             if let Some(ref id) = group.parent_id {
@@ -485,35 +485,66 @@ pub fn level_single_values_to_pydict(py: Python, level_values: &[LevelValues]) -
     Ok(result.into())
 }
 
-pub fn connection_info_to_pydict(py: Python, conn: &ConnectionInfo) -> PyResult<PyObject> {
-    let dict = PyDict::new_bound(py);
-    dict.set_item("connection_type", conn.connection_type.clone())?;
-    dict.set_item("target_id", conn.target_id.to_object(py))?;
-    dict.set_item("target_title", conn.target_title.to_object(py))?;
-    dict.set_item("properties", conn.properties.to_object(py))?;
-    Ok(dict.to_object(py))
-}
-
-pub fn node_connections_to_pydict(py: Python, connections: &[NodeConnections]) -> PyResult<PyObject> {
+pub fn level_connections_to_pydict(
+    py: Python,
+    connections: &[LevelConnections],
+    parent_info: Option<bool>
+) -> PyResult<PyObject> {
     let result = PyDict::new_bound(py);
     
-    for node_conn in connections {
-        let node_dict = PyDict::new_bound(py);
+    for level in connections {
+        let group_dict = PyDict::new_bound(py);
         
-        let incoming: Vec<PyObject> = node_conn.incoming.iter()
-            .map(|conn| connection_info_to_pydict(py, conn))
-            .collect::<PyResult<_>>()?;
-            
-        let outgoing: Vec<PyObject> = node_conn.outgoing.iter()
-            .map(|conn| connection_info_to_pydict(py, conn))
-            .collect::<PyResult<_>>()?;
-            
-        node_dict.set_item("node_id", node_conn.node_id.to_object(py))?;
-        node_dict.set_item("node_type", node_conn.node_type.clone())?;
-        node_dict.set_item("incoming", incoming)?;
-        node_dict.set_item("outgoing", outgoing)?;
+        if parent_info.unwrap_or(false) {
+            if let Some(parent_id) = &level.parent_id {
+                group_dict.set_item("parent_id", parent_id.to_object(py))?;
+            }
+            if let Some(parent_type) = &level.parent_type {
+                group_dict.set_item("parent_type", parent_type)?;
+            }
+            if let Some(parent_idx) = &level.parent_idx {
+                group_dict.set_item("parent_idx", parent_idx.index())?;
+            }
+        }
         
-        result.set_item(node_conn.node_title.clone(), node_dict)?;
+        let connections_dict = PyDict::new_bound(py);
+        for conn in &level.connections {
+            let node_dict = PyDict::new_bound(py);
+            
+            // Convert incoming connections
+            let incoming: Vec<PyObject> = conn.incoming.iter()
+                .map(|(conn_type, id, title, props)| {
+                    let dict = PyDict::new_bound(py);
+                    dict.set_item("connection_type", conn_type)?;
+                    dict.set_item("id", id.to_object(py))?;
+                    dict.set_item("title", title.to_object(py))?;
+                    dict.set_item("properties", props)?;
+                    Ok(dict.to_object(py))
+                })
+                .collect::<PyResult<_>>()?;
+            
+            // Convert outgoing connections
+            let outgoing: Vec<PyObject> = conn.outgoing.iter()
+                .map(|(conn_type, id, title, props)| {
+                    let dict = PyDict::new_bound(py);
+                    dict.set_item("connection_type", conn_type)?;
+                    dict.set_item("id", id.to_object(py))?;
+                    dict.set_item("title", title.to_object(py))?;
+                    dict.set_item("properties", props)?;
+                    Ok(dict.to_object(py))
+                })
+                .collect::<PyResult<_>>()?;
+            
+            node_dict.set_item("node_id", conn.node_id.to_object(py))?;
+            node_dict.set_item("node_type", &conn.node_type)?;
+            node_dict.set_item("incoming", incoming)?;
+            node_dict.set_item("outgoing", outgoing)?;
+            
+            connections_dict.set_item(&conn.node_title, node_dict)?;
+        }
+        group_dict.set_item("connections", connections_dict)?;
+        
+        result.set_item(&level.parent_title, group_dict)?;
     }
     
     Ok(result.to_object(py))

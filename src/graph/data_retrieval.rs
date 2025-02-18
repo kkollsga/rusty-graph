@@ -272,19 +272,20 @@ pub fn get_unique_values(
 
 #[derive(Debug)]
 pub struct ConnectionInfo {
-    pub connection_type: String,
-    pub target_id: Value,
-    pub target_title: Value,
-    pub properties: HashMap<String, Value>,
+    pub node_id: Value,
+    pub node_title: String,
+    pub node_type: String,
+    pub incoming: Vec<(String, Value, Value, HashMap<String, Value>)>, // (type, id, title, props)
+    pub outgoing: Vec<(String, Value, Value, HashMap<String, Value>)>, // (type, id, title, props)
 }
 
 #[derive(Debug)]
-pub struct NodeConnections {
-    pub node_title: String,
-    pub node_id: Value,
-    pub node_type: String,
-    pub incoming: Vec<ConnectionInfo>,
-    pub outgoing: Vec<ConnectionInfo>,
+pub struct LevelConnections {
+    pub parent_title: String,
+    pub parent_id: Option<Value>,
+    pub parent_idx: Option<NodeIndex>,
+    pub parent_type: Option<String>,
+    pub connections: Vec<ConnectionInfo>,
 }
 
 pub fn get_connections(
@@ -292,63 +293,115 @@ pub fn get_connections(
     selection: &CurrentSelection,
     level_index: Option<usize>,
     indices: Option<&[usize]>
-) -> Vec<NodeConnections> {
+) -> Vec<LevelConnections> {
     let level_idx = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
     let mut result = Vec::new();
     
     if let Some(level) = selection.get_level(level_idx) {
-        let nodes = match indices {
-            Some(idx) => idx.iter()
+        // Handle direct lookup if indices provided
+        let nodes = if let Some(idx) = indices {
+            idx.iter()
                 .filter_map(|&i| NodeIndex::new(i).into())
-                .collect::<Vec<_>>(),
-            None => level.get_all_nodes(),
+                .collect::<Vec<_>>()
+        } else {
+            level.get_all_nodes()
         };
 
-        for node_idx in nodes {
-            if let Some(NodeData::Regular { id, title, node_type, .. }) = graph.get_node(node_idx) {
-                let title_str = match title {
-                    Value::String(ref s) => s.clone(),
-                    _ => "Unknown".to_string(),
+        // If using direct indices, create a single level
+        let groups = if indices.is_some() {
+            vec![(None, nodes)]
+        } else {
+            level.iter_groups()
+                .map(|(p, c)| (p.clone(), c.clone()))
+                .collect()
+        };
+
+        for (parent, children) in groups {
+            let mut level_connections = Vec::new();
+            
+            for node_idx in children {
+                if let Some(NodeData::Regular { id, title, node_type, .. }) = graph.get_node(node_idx) {
+                    let title_str = match title {
+                        Value::String(ref s) => s.clone(),
+                        _ => "Unknown".to_string(),
+                    };
+
+                    let mut incoming = Vec::new();
+                    let mut outgoing = Vec::new();
+
+                    // Collect incoming connections
+                    for edge_ref in graph.graph.edges_directed(node_idx, petgraph::Direction::Incoming) {
+                        if let Some(source_node) = graph.get_node(edge_ref.source()) {
+                            let edge_data = edge_ref.weight();
+                            incoming.push((
+                                edge_data.connection_type.clone(),
+                                source_node.get_field("id").unwrap_or(Value::Null),
+                                source_node.get_field("title").unwrap_or(Value::Null),
+                                edge_data.properties.clone(),
+                            ));
+                        }
+                    }
+
+                    // Collect outgoing connections
+                    for edge_ref in graph.graph.edges_directed(node_idx, petgraph::Direction::Outgoing) {
+                        if let Some(target_node) = graph.get_node(edge_ref.target()) {
+                            let edge_data = edge_ref.weight();
+                            outgoing.push((
+                                edge_data.connection_type.clone(),
+                                target_node.get_field("id").unwrap_or(Value::Null),
+                                target_node.get_field("title").unwrap_or(Value::Null),
+                                edge_data.properties.clone(),
+                            ));
+                        }
+                    }
+
+                    if !incoming.is_empty() || !outgoing.is_empty() {
+                        level_connections.push(ConnectionInfo {
+                            node_id: id.clone(),
+                            node_title: title_str,
+                            node_type: node_type.clone(),
+                            incoming,
+                            outgoing,
+                        });
+                    }
+                }
+            }
+
+            if !level_connections.is_empty() {
+                let (parent_title, parent_id, parent_type) = if indices.is_some() {
+                    ("Direct Lookup".to_string(), None, None)
+                } else {
+                    match parent {
+                        Some(p) => {
+                            if let Some(node) = graph.get_node(p) {
+                                (
+                                    node.get_field("title")
+                                        .and_then(|v| match v {
+                                            Value::String(s) => Some(s),
+                                            _ => None
+                                        })
+                                        .unwrap_or_else(|| "Unknown".to_string()),
+                                    node.get_field("id"),
+                                    match node {
+                                        NodeData::Regular { node_type, .. } => Some(node_type.clone()),
+                                        _ => None
+                                    }
+                                )
+                            } else {
+                                ("Unknown".to_string(), None, None)
+                            }
+                        },
+                        None => ("Root".to_string(), None, None),
+                    }
                 };
 
-                let mut incoming = Vec::new();
-                let mut outgoing = Vec::new();
-
-                // Get incoming edges
-                for edge_ref in graph.graph.edges_directed(node_idx, petgraph::Direction::Incoming) {
-                    if let Some(source_node) = graph.get_node(edge_ref.source()) {
-                        let edge_data = edge_ref.weight();
-                        incoming.push(ConnectionInfo {
-                            connection_type: edge_data.connection_type.clone(),
-                            target_id: source_node.get_field("id").unwrap_or(Value::Null),
-                            target_title: source_node.get_field("title").unwrap_or(Value::Null),
-                            properties: edge_data.properties.clone(),
-                        });
-                    }
-                }
-
-                // Get outgoing edges
-                for edge_ref in graph.graph.edges_directed(node_idx, petgraph::Direction::Outgoing) {
-                    if let Some(target_node) = graph.get_node(edge_ref.target()) {
-                        let edge_data = edge_ref.weight();
-                        outgoing.push(ConnectionInfo {
-                            connection_type: edge_data.connection_type.clone(),
-                            target_id: target_node.get_field("id").unwrap_or(Value::Null),
-                            target_title: target_node.get_field("title").unwrap_or(Value::Null),
-                            properties: edge_data.properties.clone(),
-                        });
-                    }
-                }
-
-                if !incoming.is_empty() || !outgoing.is_empty() {
-                    result.push(NodeConnections {
-                        node_title: title_str,
-                        node_id: id.clone(),
-                        node_type: node_type.clone(),
-                        incoming,
-                        outgoing,
-                    });
-                }
+                result.push(LevelConnections {
+                    parent_title,
+                    parent_id,
+                    parent_idx: parent.map(|p| p),
+                    parent_type,
+                    connections: level_connections,
+                });
             }
         }
     }
