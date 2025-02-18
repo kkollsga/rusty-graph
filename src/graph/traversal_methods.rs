@@ -123,7 +123,6 @@ pub fn make_traversal(
             }
 
             if !found_targets {
-                println!("No targets found for node {} with connection type {}", source_node.index(), connection_type);
                 // Add empty selection for parent with no targets
                 level.add_selection(Some(parent_node), Vec::new());
             }
@@ -151,7 +150,7 @@ pub fn make_traversal(
         }
     }
 
-    // Check if we did any traversal attempts at all
+    // Check if we have any selections (including empty ones)
     if processed_parents.is_empty() {
         if create_new_level {
             selection.clear();
