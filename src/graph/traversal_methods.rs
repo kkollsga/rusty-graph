@@ -1,6 +1,7 @@
 use std::collections::{HashSet, HashMap};
 use std::iter::FromIterator;
 use petgraph::visit::EdgeRef;
+use petgraph::graph::NodeIndex;
 use petgraph::Direction;
 use crate::graph::schema::{DirGraph, CurrentSelection, SelectionOperation};
 use crate::datatypes::values::FilterCondition;
@@ -27,28 +28,38 @@ pub fn make_traversal(
         selection.get_level_count().saturating_sub(1)
     );
     
-    // Get source level and collect all necessary data from it
     let create_new_level = new_level.unwrap_or(true);
-    let (source_nodes, parent_mapping) = {
+
+    // Collect all necessary data from source level before any modifications
+    let (parents, source_nodes_map) = {
         let source_level = selection.get_level(source_level_index)
             .ok_or_else(|| "No valid source level found for traversal".to_string())?;
-        
-        let nodes = source_level.get_all_nodes();
-        
-        let mapping = if !create_new_level {
-            source_level.selections.iter()
-                .flat_map(|(parent, children)| 
-                    children.iter().map(|child| (*child, *parent)))
+
+        let parents: Vec<NodeIndex> = if create_new_level {
+            source_level.get_all_nodes()
+        } else {
+            source_level.selections.keys()
+                .filter_map(|k| *k)
+                .collect()
+        };
+
+        let source_nodes_map: HashMap<NodeIndex, Vec<NodeIndex>> = if create_new_level {
+            parents.iter()
+                .map(|&parent| (parent, vec![parent]))
                 .collect()
         } else {
-            HashMap::new()
+            source_level.selections.iter()
+                .filter_map(|(parent, children)| {
+                    parent.map(|p| (p, children.clone()))
+                })
+                .collect()
         };
-        
-        (nodes, mapping)
+
+        (parents, source_nodes_map)
     };
 
     // Early empty check
-    if source_nodes.is_empty() {
+    if parents.is_empty() {
         return Err("No source nodes available for traversal".to_string());
     }
 
@@ -87,52 +98,44 @@ pub fn make_traversal(
     };
     level.operations = vec![operation];
 
-    let mut processed_parents = HashSet::new();
-    let mut all_targets = HashMap::new();
+    let mut all_targets: HashMap<NodeIndex, HashSet<NodeIndex>> = HashMap::new();
     let mut seen_targets = HashSet::new();
+    let empty_vec = Vec::new();
 
-    // Process each source node and collect all targets
-    for &source_node in &source_nodes {
-        let parent = if create_new_level {
-            Some(source_node)
-        } else {
-            parent_mapping.get(&source_node).copied().flatten()
-        };
-
-        if let Some(parent_node) = parent {
-            processed_parents.insert(parent_node);
-            let mut found_targets = false;
-            
+    // Process each parent and their source nodes
+    for &parent in &parents {
+        let source_nodes = source_nodes_map.get(&parent).unwrap_or(&empty_vec);
+        
+        for &source_node in source_nodes {
             for dir in &directions {
                 let matching_edges = graph.graph.edges_directed(source_node, *dir)
                     .filter(|edge| edge.weight().connection_type == connection_type);
 
                 for edge in matching_edges {
-                    found_targets = true;
                     let target = match dir {
                         Direction::Outgoing => edge.target(),
                         Direction::Incoming => edge.source(),
                     };
                     
                     if seen_targets.insert(target) {
-                        all_targets.entry(parent_node)
+                        all_targets.entry(parent)
                             .or_insert_with(HashSet::new)
                             .insert(target);
                     }
                 }
             }
+        }
 
-            if !found_targets {
-                // Add empty selection for parent with no targets
-                level.add_selection(Some(parent_node), Vec::new());
-            }
+        // Always add a selection for the parent, even if empty
+        if !all_targets.contains_key(&parent) {
+            level.add_selection(Some(parent), Vec::new());
         }
     }
 
-    // Process non-empty parent-child relationships
-    if !all_targets.is_empty() {
-        for (parent, targets) in all_targets {
-            let target_vec = Vec::from_iter(targets);
+    // Process all collected targets
+    for &parent in &parents {
+        if let Some(targets) = all_targets.get(&parent) {
+            let target_vec = Vec::from_iter(targets.iter().cloned());
             let processed_nodes = filtering_methods::process_nodes(
                 graph,
                 target_vec,
@@ -140,22 +143,8 @@ pub fn make_traversal(
                 sort_fields,
                 max_nodes
             );
-
-            if !processed_nodes.is_empty() {
-                level.add_selection(Some(parent), processed_nodes);
-            } else {
-                // Add empty selection when no children pass filters
-                level.add_selection(Some(parent), Vec::new());
-            }
+            level.add_selection(Some(parent), processed_nodes);
         }
-    }
-
-    // Check if we have any selections (including empty ones)
-    if processed_parents.is_empty() {
-        if create_new_level {
-            selection.clear();
-        }
-        return Err(format!("No valid source nodes found for traversal with connection type: {}", connection_type));
     }
 
     Ok(())

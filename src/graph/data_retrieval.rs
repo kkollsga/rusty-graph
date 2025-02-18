@@ -62,38 +62,37 @@ pub fn get_nodes(
                 }
             }
             
-            if !nodes.is_empty() {
-                let (parent_title, parent_id, parent_type) = match parent {
-                    Some(p) => {
-                        if let Some(node) = graph.get_node(*p) {
-                            (
-                                node.get_field("title")
-                                    .and_then(|v| match v {
-                                        Value::String(s) => Some(s),
-                                        _ => None
-                                    })
-                                    .unwrap_or_else(|| "Unknown".to_string()),
-                                node.get_field("id"),
-                                match node {
-                                    NodeData::Regular { node_type, .. } => Some(node_type.clone()),
+            // Always create a LevelNodes entry for the parent, even if nodes is empty
+            let (parent_title, parent_id, parent_type) = match parent {
+                Some(p) => {
+                    if let Some(node) = graph.get_node(*p) {
+                        (
+                            node.get_field("title")
+                                .and_then(|v| match v {
+                                    Value::String(s) => Some(s),
                                     _ => None
-                                }
-                            )
-                        } else {
-                            ("Unknown".to_string(), None, None)
-                        }
-                    },
-                    None => ("Root".to_string(), None, None),
-                };
-                
-                result.push(LevelNodes {
-                    parent_title,
-                    parent_id,
-                    parent_idx: parent.map(|p| p),
-                    parent_type,
-                    nodes,
-                });
-            }
+                                })
+                                .unwrap_or_else(|| "Unknown".to_string()),
+                            node.get_field("id"),
+                            match node {
+                                NodeData::Regular { node_type, .. } => Some(node_type.clone()),
+                                _ => None
+                            }
+                        )
+                    } else {
+                        ("Unknown".to_string(), None, None)
+                    }
+                },
+                None => ("Root".to_string(), None, None),
+            };
+            
+            result.push(LevelNodes {
+                parent_title,
+                parent_id,
+                parent_idx: parent.map(|p| p),
+                parent_type,
+                nodes,
+            });
         }
     }
     result

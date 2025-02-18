@@ -25,14 +25,14 @@ pub enum SelectionOperation {
 
 #[derive(Clone, Debug)]
 pub struct SelectionLevel {
-    pub selections: Vec<(Option<NodeIndex>, Vec<NodeIndex>)>, // (parent_idx, selected_children)
+    pub selections: HashMap<Option<NodeIndex>, Vec<NodeIndex>>, // parent_idx -> selected_children
     pub operations: Vec<SelectionOperation>,
 }
 
 impl SelectionLevel {
     pub fn new() -> Self {
         SelectionLevel {
-            selections: Vec::new(),
+            selections: HashMap::new(),
             operations: Vec::new(),
         }
     }
@@ -46,12 +46,22 @@ impl SelectionLevel {
     }
 
     pub fn add_selection(&mut self, parent: Option<NodeIndex>, children: Vec<NodeIndex>) {
-        self.selections.push((parent, children));
+        self.selections.insert(parent, children);
     }
 
     pub fn get_all_nodes(&self) -> Vec<NodeIndex> {
-        self.selections.iter()
-            .flat_map(|(_, children)| children.clone())
+        self.selections.values()
+            .flat_map(|children| children.iter().cloned())
+            .collect()
+    }
+
+    pub fn get_children(&self, parent: NodeIndex) -> Option<&Vec<NodeIndex>> {
+        self.selections.get(&Some(parent))
+    }
+
+    pub fn get_parent_nodes(&self) -> Vec<NodeIndex> {
+        self.selections.keys()
+            .filter_map(|opt_idx| *opt_idx)
             .collect()
     }
 
@@ -59,7 +69,7 @@ impl SelectionLevel {
         self.selections.is_empty()
     }
 
-    pub fn iter_groups(&self) -> impl Iterator<Item = &(Option<NodeIndex>, Vec<NodeIndex>)> {
+    pub fn iter_groups(&self) -> impl Iterator<Item = (&Option<NodeIndex>, &Vec<NodeIndex>)> {
         self.selections.iter()
     }
 }
@@ -118,7 +128,7 @@ impl DirGraph {
             type_indices: HashMap::new(),
         }
     }
-    
+
     pub fn has_connection_type(&self, connection_type: &str) -> bool {
         // Look for a SchemaNode that represents this connection type
         self.graph.node_weights().any(|node| {
