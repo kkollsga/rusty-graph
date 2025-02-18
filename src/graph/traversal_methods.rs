@@ -21,6 +21,7 @@ pub fn make_traversal(
     if !graph.has_connection_type(&connection_type) {
         return Err(format!("Connection type '{}' does not exist in graph", connection_type));
     }
+
     // First get the source level index
     let source_level_index = level_index.unwrap_or_else(|| 
         selection.get_level_count().saturating_sub(1)
@@ -86,8 +87,8 @@ pub fn make_traversal(
     };
     level.operations = vec![operation];
 
-    // Batch collection of target nodes
-    let mut all_targets = HashMap::new(); // parent -> HashSet<target>
+    let mut processed_parents = HashSet::new();
+    let mut all_targets = HashMap::new();
     let mut seen_targets = HashSet::new();
 
     // Process each source node and collect all targets
@@ -99,6 +100,7 @@ pub fn make_traversal(
         };
 
         if let Some(parent_node) = parent {
+            processed_parents.insert(parent_node);
             let mut found_targets = false;
             
             for dir in &directions {
@@ -119,33 +121,42 @@ pub fn make_traversal(
                     }
                 }
             }
+
+            if !found_targets {
+                println!("No targets found for node {} with connection type {}", source_node.index(), connection_type);
+                // Add empty selection for parent with no targets
+                level.add_selection(Some(parent_node), Vec::new());
+            }
         }
     }
 
-    // Process all collected targets at once
+    // Process non-empty parent-child relationships
     if !all_targets.is_empty() {
         for (parent, targets) in all_targets {
             let target_vec = Vec::from_iter(targets);
             let processed_nodes = filtering_methods::process_nodes(
                 graph,
                 target_vec,
-                filter_conditions,      // Already Option<&HashMap>
-                sort_fields,           // Already Option<&Vec>
+                filter_conditions,
+                sort_fields,
                 max_nodes
             );
-    
+
             if !processed_nodes.is_empty() {
                 level.add_selection(Some(parent), processed_nodes);
+            } else {
+                // Add empty selection when no children pass filters
+                level.add_selection(Some(parent), Vec::new());
             }
         }
     }
 
-    // Check if any traversals were found
-    if level.is_empty() {
+    // Check if we did any traversal attempts at all
+    if processed_parents.is_empty() {
         if create_new_level {
             selection.clear();
         }
-        return Err(format!("No valid traversals found for connection type: {}", connection_type));
+        return Err(format!("No valid source nodes found for traversal with connection type: {}", connection_type));
     }
 
     Ok(())
