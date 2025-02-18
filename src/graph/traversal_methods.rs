@@ -17,6 +17,10 @@ pub fn make_traversal(
     max_nodes: Option<usize>,
     new_level: Option<bool>,
 ) -> Result<(), String> {
+    // Validate connection type exists
+    if !graph.has_connection_type(&connection_type) {
+        return Err(format!("Connection type '{}' does not exist in graph", connection_type));
+    }
     // First get the source level index
     let source_level_index = level_index.unwrap_or_else(|| 
         selection.get_level_count().saturating_sub(1)
@@ -95,11 +99,14 @@ pub fn make_traversal(
         };
 
         if let Some(parent_node) = parent {
+            let mut found_targets = false;
+            
             for dir in &directions {
                 let matching_edges = graph.graph.edges_directed(source_node, *dir)
                     .filter(|edge| edge.weight().connection_type == connection_type);
 
                 for edge in matching_edges {
+                    found_targets = true;
                     let target = match dir {
                         Direction::Outgoing => edge.target(),
                         Direction::Incoming => edge.source(),
@@ -110,12 +117,6 @@ pub fn make_traversal(
                             .or_insert_with(HashSet::new)
                             .insert(target);
                     }
-                }
-
-                // If we found nodes in this direction and no specific direction was requested,
-                // we can skip checking the other direction
-                if !all_targets.is_empty() && direction.is_none() {
-                    break;
                 }
             }
         }

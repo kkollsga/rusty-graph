@@ -119,6 +119,19 @@ impl DirGraph {
         }
     }
     
+    pub fn has_connection_type(&self, connection_type: &str) -> bool {
+        // Look for a SchemaNode that represents this connection type
+        self.graph.node_weights().any(|node| {
+            match node {
+                NodeData::Schema { node_type, title, .. } => {
+                    node_type == "SchemaNode" && 
+                    matches!(title, Value::String(t) if t == connection_type)
+                },
+                _ => false
+            }
+        })
+    }
+    
     pub fn get_node(&self, index: NodeIndex) -> Option<&NodeData> {
         self.graph.node_weight(index)
     }
