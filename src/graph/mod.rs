@@ -300,6 +300,11 @@ impl KnowledgeGraph {
         Ok(new_graph)
     }
 
+    fn selection_to_new_connections(&mut self, connection_type: String) -> PyResult<usize> {
+        maintain_graph::selection_to_new_connections(&mut self.inner, &self.selection, connection_type)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+    }
+    
     fn calculate_stats(
         &self,
         property: &str,

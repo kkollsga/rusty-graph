@@ -1,6 +1,6 @@
 // src/graph/maintain_graph.rs
 use std::collections::{HashMap, HashSet};
-use crate::graph::schema::{DirGraph, NodeData};
+use crate::graph::schema::{DirGraph, NodeData, CurrentSelection};
 use crate::graph::lookups::{TypeLookup, CombinedTypeLookup};
 use crate::graph::batch_operations::{BatchProcessor, ConnectionBatchProcessor, NodeAction};
 use crate::datatypes::{Value, DataFrame};
@@ -283,4 +283,70 @@ fn update_schema_node(
     }
 
     Ok(())
+}
+
+pub fn selection_to_new_connections(
+    graph: &mut DirGraph,
+    selection: &CurrentSelection,
+    connection_type: String,
+) -> Result<usize, String> {
+    let current_level = selection.get_level_count().saturating_sub(1);
+    let level = match selection.get_level(current_level) {
+        Some(level) if !level.is_empty() => level,
+        _ => return Ok(0), // Return early if no selections
+    };
+
+    let mut batch = ConnectionBatchProcessor::new(level.get_all_nodes().len());
+    let mut skipped = 0;
+    
+    // Track source and target types for schema update
+    let mut source_type = None;
+    let mut target_type = None;
+
+    // Process each parent-child relationship
+    for (parent_opt, children) in level.iter_groups() {
+        if let Some(parent) = parent_opt {
+            // Get source type from first parent if we haven't yet
+            if source_type.is_none() {
+                if let Some(NodeData::Regular { node_type, .. }) = graph.get_node(*parent) {
+                    source_type = Some(node_type.clone());
+                }
+            }
+
+            for &child in children {
+                // Get target type from first child if we haven't yet
+                if target_type.is_none() {
+                    if let Some(NodeData::Regular { node_type, .. }) = graph.get_node(child) {
+                        target_type = Some(node_type.clone());
+                    }
+                }
+
+                if let Err(e) = batch.add_connection(
+                    *parent,
+                    child,
+                    HashMap::new(),
+                    graph,
+                    &connection_type,
+                ) {
+                    skipped += 1;
+                    println!("Warning: Failed to create connection: {}", e);
+                    continue;
+                }
+            }
+        }
+    }
+
+    // Update schema with the new connection type if we have both types
+    if let (Some(source), Some(target)) = (source_type, target_type) {
+        update_schema_node(
+            graph,
+            &connection_type,
+            &source,
+            &target,
+            batch.get_schema_properties(),
+        )?;
+    }
+
+    let (stats, _) = batch.execute(graph, connection_type)?;
+    Ok(stats.connections_created)
 }
