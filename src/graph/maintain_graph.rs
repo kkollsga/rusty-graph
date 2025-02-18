@@ -6,10 +6,10 @@ use crate::graph::batch_operations::{BatchProcessor, ConnectionBatchProcessor, N
 use crate::datatypes::{Value, DataFrame, ColumnType};
 
 fn check_data_validity(df_data: &DataFrame, unique_id_field: &str, title_field: &str) -> Result<(), String> {
-    if !df_data.verify_column_type(unique_id_field, &ColumnType::UniqueId) {
-        return Err(format!("Unique ID field '{}' must be a UniqueId type", unique_id_field));
+    // Remove strict UniqueId type verification to allow nulls
+    if !df_data.verify_column(unique_id_field) {
+        return Err(format!("Column '{}' not found", unique_id_field));
     }
-    // Remove title field verification since we now accept null titles
     Ok(())
 }
 
@@ -33,7 +33,7 @@ pub fn add_nodes(
     let title_field = node_title_field.unwrap_or_else(|| unique_id_field.clone());
     check_data_validity(&df_data, &unique_id_field, &title_field)?;
 
-    // Schema processing remains the same...
+    // Rest of the schema processing remains the same...
     let schema_lookup = TypeLookup::new(&graph.graph, "SchemaNode".to_string())?;
     let schema_title = Value::String(node_type.clone());
     let schema_node_idx = schema_lookup.check_title(&schema_title);
@@ -131,12 +131,12 @@ pub fn add_connections(
     columns: Option<Vec<String>>,
     _conflict_handling: Option<String>,
 ) -> Result<(), String> {
-    // Validate input columns
-    if !df_data.verify_column_type(&source_id_field, &ColumnType::UniqueId) {
-        return Err(format!("Source ID field '{}' must be a UniqueId type", source_id_field));
+    // Remove strict UniqueId type verification
+    if !df_data.verify_column(&source_id_field) {
+        return Err(format!("Source ID column '{}' not found", source_id_field));
     }
-    if !df_data.verify_column_type(&target_id_field, &ColumnType::UniqueId) {
-        return Err(format!("Target ID field '{}' must be a UniqueId type", target_id_field));
+    if !df_data.verify_column(&target_id_field) {
+        return Err(format!("Target ID column '{}' not found", target_id_field));
     }
 
     let source_id_idx = df_data.get_column_index(&source_id_field)
@@ -144,6 +144,7 @@ pub fn add_connections(
     let target_id_idx = df_data.get_column_index(&target_id_field)
         .ok_or_else(|| format!("Target ID column '{}' not found", target_id_field))?;
 
+    // Rest of the connection setup remains the same...
     let source_title_idx = source_title_field
         .and_then(|field| df_data.get_column_index(&field));
     let target_title_idx = target_title_field
@@ -194,6 +195,9 @@ pub fn add_connections(
                 }
             }
             batch.add_connection(source_idx, target_idx, properties, graph, &connection_type)?;
+        } else {
+            skipped_count += 1;
+            continue;
         }
     }
 

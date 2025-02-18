@@ -79,16 +79,12 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType, is_uni
             let mut vec = Vec::with_capacity(length);
             for i in 0..length {
                 let value = series.get_item(i)?;
-                match to_u32(&value) {
-                    Some(v) => vec.push(Some(v)),
-                    None if is_unique_id => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        format!("Null value not allowed in unique ID column {}", name)
-                    )),
-                    None => vec.push(None),
-                }
+                // Simply push None for null values, regardless of whether it's a unique ID
+                vec.push(to_u32(&value));
             }
             Ok(ColumnData::UniqueId(vec))
         },
+        // Rest of the match arms remain the same...
         ColumnType::Int64 => {
             let mut vec = Vec::with_capacity(length);
             for i in 0..length {
