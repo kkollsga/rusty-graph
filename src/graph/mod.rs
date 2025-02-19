@@ -300,9 +300,20 @@ impl KnowledgeGraph {
         Ok(new_graph)
     }
 
-    fn selection_to_new_connections(&mut self, connection_type: String) -> PyResult<usize> {
+    fn selection_to_new_connections(
+        &mut self,
+        connection_type: String,
+        keep_selection: Option<bool>,
+    ) -> PyResult<Self> {
         maintain_graph::selection_to_new_connections(&mut self.inner, &self.selection, connection_type)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        
+        // Clear selection unless explicitly kept
+        if !keep_selection.unwrap_or(false) {
+            self.selection.clear();
+        }
+        
+        Ok(self.clone())
     }
     
     fn calculate_stats(

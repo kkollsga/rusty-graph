@@ -251,6 +251,7 @@ fn update_node_titles(
     Ok(())
 }
 
+// In maintain_graph.rs
 fn update_schema_node(
     graph: &mut DirGraph,
     connection_type: &str,
@@ -258,33 +259,76 @@ fn update_schema_node(
     target_type: &str,
     properties: &HashSet<String>,
 ) -> Result<(), String> {
+    // Validate types first, before any mutable borrows
+    if !graph.has_node_type(source_type) {
+        return Err(format!("Source type '{}' does not exist in graph", source_type));
+    }
+    if !graph.has_node_type(target_type) {
+        return Err(format!("Target type '{}' does not exist in graph", target_type));
+    }
+
     let schema_title = Value::String(connection_type.to_string());
     let schema_lookup = TypeLookup::new(&graph.graph, "SchemaNode".to_string())?;
 
-    if schema_lookup.check_title(&schema_title).is_none() {
-        let mut schema_properties: HashMap<String, Value> = properties
-            .iter()
-            .map(|prop| (prop.clone(), Value::String("Unknown".to_string())))
-            .collect();
+    match schema_lookup.check_title(&schema_title) {
+        Some(idx) => {
+            // Update existing schema node
+            if let Some(NodeData::Schema { properties: schema_props, .. }) = graph.get_node_mut(idx) {
+                // Add new properties
+                let mut properties_added = false;
+                for prop in properties {
+                    if !schema_props.contains_key(prop) {
+                        schema_props.insert(prop.clone(), Value::String("Unknown".to_string()));
+                        properties_added = true;
+                    }
+                }
 
-        schema_properties.insert("source_type".to_string(), Value::String(source_type.to_string()));
-        schema_properties.insert("target_type".to_string(), Value::String(target_type.to_string()));
+                // Update type information
+                let source_changed = schema_props.get("source_type") != Some(&Value::String(source_type.to_string()));
+                let target_changed = schema_props.get("target_type") != Some(&Value::String(target_type.to_string()));
+                
+                schema_props.insert("source_type".to_string(), Value::String(source_type.to_string()));
+                schema_props.insert("target_type".to_string(), Value::String(target_type.to_string()));
 
-        let schema_node_data = NodeData::Schema {
-            id: Value::String(connection_type.to_string()),
-            title: schema_title,
-            node_type: "SchemaNode".to_string(),
-            properties: schema_properties,
-        };
-        graph.graph.add_node(schema_node_data);
+                // Log significant changes
+                if properties_added {
+                    println!("Updated schema for '{}': added new properties", connection_type);
+                }
+                if source_changed || target_changed {
+                    println!("Updated schema for '{}': modified type relationship {}->{}",
+                        connection_type, source_type, target_type);
+                }
+            } else {
+                return Err(format!("Invalid schema node found for connection type '{}'", connection_type));
+            }
+        }
+        None => {
+            // Create new schema node (existing code)
+            let mut schema_properties: HashMap<String, Value> = properties
+                .iter()
+                .map(|prop| (prop.clone(), Value::String("Unknown".to_string())))
+                .collect();
 
-        println!("New SchemaConnection created for '{}' ({}->{})",
-            connection_type, source_type, target_type);
+            schema_properties.insert("source_type".to_string(), Value::String(source_type.to_string()));
+            schema_properties.insert("target_type".to_string(), Value::String(target_type.to_string()));
+
+            let schema_node_data = NodeData::Schema {
+                id: Value::String(connection_type.to_string()),
+                title: schema_title,
+                node_type: "SchemaNode".to_string(),
+                properties: schema_properties,
+            };
+            graph.graph.add_node(schema_node_data);
+
+            println!("New SchemaConnection created for '{}' ({}->{})",
+                connection_type, source_type, target_type);
+        }
     }
 
     Ok(())
 }
 
+// In maintain_graph.rs
 pub fn selection_to_new_connections(
     graph: &mut DirGraph,
     selection: &CurrentSelection,
@@ -299,14 +343,12 @@ pub fn selection_to_new_connections(
     let mut batch = ConnectionBatchProcessor::new(level.get_all_nodes().len());
     let mut skipped = 0;
     
-    // Track source and target types for schema update
     let mut source_type = None;
     let mut target_type = None;
 
     // Process each parent-child relationship
     for (parent_opt, children) in level.iter_groups() {
         if let Some(parent) = parent_opt {
-            // Get source type from first parent if we haven't yet
             if source_type.is_none() {
                 if let Some(NodeData::Regular { node_type, .. }) = graph.get_node(*parent) {
                     source_type = Some(node_type.clone());
@@ -314,7 +356,6 @@ pub fn selection_to_new_connections(
             }
 
             for &child in children {
-                // Get target type from first child if we haven't yet
                 if target_type.is_none() {
                     if let Some(NodeData::Regular { node_type, .. }) = graph.get_node(child) {
                         target_type = Some(node_type.clone());
@@ -347,6 +388,7 @@ pub fn selection_to_new_connections(
         )?;
     }
 
+    // Execute the batch to actually create the connections!
     let (stats, _) = batch.execute(graph, connection_type)?;
     Ok(stats.connections_created)
 }

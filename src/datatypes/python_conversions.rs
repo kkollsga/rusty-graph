@@ -510,35 +510,60 @@ pub fn level_connections_to_pydict(
         let connections_dict = PyDict::new_bound(py);
         for conn in &level.connections {
             let node_dict = PyDict::new_bound(py);
-            
-            // Convert incoming connections
-            let incoming: Vec<PyObject> = conn.incoming.iter()
-                .map(|(conn_type, id, title, props)| {
-                    let dict = PyDict::new_bound(py);
-                    dict.set_item("connection_type", conn_type)?;
-                    dict.set_item("id", id.to_object(py))?;
-                    dict.set_item("title", title.to_object(py))?;
-                    dict.set_item("properties", props)?;
-                    Ok(dict.to_object(py))
-                })
-                .collect::<PyResult<_>>()?;
-            
-            // Convert outgoing connections
-            let outgoing: Vec<PyObject> = conn.outgoing.iter()
-                .map(|(conn_type, id, title, props)| {
-                    let dict = PyDict::new_bound(py);
-                    dict.set_item("connection_type", conn_type)?;
-                    dict.set_item("id", id.to_object(py))?;
-                    dict.set_item("title", title.to_object(py))?;
-                    dict.set_item("properties", props)?;
-                    Ok(dict.to_object(py))
-                })
-                .collect::<PyResult<_>>()?;
-            
             node_dict.set_item("node_id", conn.node_id.to_object(py))?;
             node_dict.set_item("node_type", &conn.node_type)?;
-            node_dict.set_item("incoming", incoming)?;
-            node_dict.set_item("outgoing", outgoing)?;
+            
+            // Process incoming connections
+            let incoming_dict = PyDict::new_bound(py);
+            for (conn_type, id, title, props) in &conn.incoming {
+                // Get or create dictionary for this connection type
+                if !incoming_dict.contains(conn_type)? {
+                    incoming_dict.set_item(conn_type, PyDict::new_bound(py))?;
+                }
+                
+                // Use let bindings to keep the PyAny alive
+                let conn_type_item = incoming_dict.get_item(conn_type)?;
+                let conn_type_any = conn_type_item.unwrap();
+                let conn_type_dict = conn_type_any.downcast::<PyDict>()?;
+                
+                // Create node info dictionary
+                let node_info = PyDict::new_bound(py);
+                node_info.set_item("node_id", id.to_object(py))?;
+                node_info.set_item("properties", props)?;
+                
+                // Add to connection type dictionary using title as key
+                match title {
+                    Value::String(t) => conn_type_dict.set_item(t, node_info)?,
+                    _ => conn_type_dict.set_item("Unknown", node_info)?,
+                }
+            }
+            node_dict.set_item("incoming", incoming_dict)?;
+            
+            // Process outgoing connections
+            let outgoing_dict = PyDict::new_bound(py);
+            for (conn_type, id, title, props) in &conn.outgoing {
+                // Get or create dictionary for this connection type
+                if !outgoing_dict.contains(conn_type)? {
+                    outgoing_dict.set_item(conn_type, PyDict::new_bound(py))?;
+                }
+                
+                // Use let bindings to keep the PyAny alive
+                let conn_type_item = outgoing_dict.get_item(conn_type)?;
+                let conn_type_any = conn_type_item.unwrap();
+                let conn_type_dict = conn_type_any.downcast::<PyDict>()?;
+                
+                // Create node info dictionary
+                let node_info = PyDict::new_bound(py);
+                node_info.set_item("node_id", id.to_object(py))?;
+                node_info.set_item("properties", props)?;
+                
+                // Add to connection type dictionary using title as key
+                match title {
+                    Value::String(t) => conn_type_dict.set_item(t, node_info)?,
+                    _ => conn_type_dict.set_item("Unknown", node_info)?,
+                }
+            }
+            node_dict.set_item("outgoing", outgoing_dict)?;
             
             connections_dict.set_item(&conn.node_title, node_dict)?;
         }

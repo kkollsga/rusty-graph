@@ -141,6 +141,21 @@ impl DirGraph {
             }
         })
     }
+
+    pub fn has_node_type(&self, node_type: &str) -> bool {
+        // Check if we have any nodes of this type in our type indices
+        self.type_indices.contains_key(node_type) ||
+        // Also check for SchemaNodes that might represent this type
+        self.graph.node_weights().any(|node| {
+            match node {
+                NodeData::Schema { node_type: nt, title, .. } => {
+                    nt == "SchemaNode" && 
+                    matches!(title, Value::String(t) if t == node_type)
+                },
+                _ => false
+            }
+        })
+    }
     
     pub fn get_node(&self, index: NodeIndex) -> Option<&NodeData> {
         self.graph.node_weight(index)
