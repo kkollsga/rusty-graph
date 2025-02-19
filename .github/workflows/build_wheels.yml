@@ -49,7 +49,7 @@ jobs:
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git add wheels/*.whl
           git commit -m 'Add built wheels to wheels folder'
-          git push
+          git push origin HEAD:${GITHUB_REF##*/}
 
       - name: Upload wheels to GitHub as artifact
         uses: actions/upload-artifact@v4
