@@ -43,7 +43,15 @@ jobs:
       - name: List build directory
         run: Get-ChildItem -Recurse wheels
 
-      - name: Upload wheels to GitHub
+      - name: Commit and push wheels to repo
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add wheels/*.whl
+          git commit -m 'Add built wheels to wheels folder'
+          git push
+
+      - name: Upload wheels to GitHub as artifact
         uses: actions/upload-artifact@v4
         with:
           name: wheels
