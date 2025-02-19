@@ -3,7 +3,7 @@ name: Build Python Wheels
 on:
   push:
     tags:
-      - 'v*.*.*'  # Triggers on version tags like v1.0.0
+      - 'v*.*.*'  # Triggers on version tags like v1.0.0s
 
 jobs:
   build:
