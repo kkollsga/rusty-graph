@@ -47,9 +47,10 @@ jobs:
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git checkout -B ${GITHUB_REF_NAME}
           git add wheels/*.whl
           git commit -m 'Add built wheels to wheels folder'
-          git push origin HEAD:${GITHUB_REF##*/}
+          git push origin ${GITHUB_REF_NAME}
 
       - name: Upload wheels to GitHub as artifact
         uses: actions/upload-artifact@v4
