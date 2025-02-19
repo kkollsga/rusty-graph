@@ -3,7 +3,7 @@ name: Build Python Wheels
 on:
   push:
     tags:
-      - 'v*.*.*'  # Triggers on version tags like v1.0.0s
+      - 'v*.*.*'  # Triggers on version tags like v1.0.0
 
 jobs:
   build:
@@ -11,7 +11,7 @@ jobs:
     strategy:
       matrix:
         python-version: ['3.12']
-        platform: [x86_64, aarch64]
+        platform: [x86_64]
         target: [manylinux2014]
 
     steps:
