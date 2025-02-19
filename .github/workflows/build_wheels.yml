@@ -37,7 +37,7 @@ jobs:
         env:
           CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
         run: |
-          if not exist wheels mkdir wheels
+          if (!(Test-Path -Path "wheels")) { New-Item -ItemType Directory -Path "wheels" }
           maturin build --release --out wheels
 
       - name: List build directory
