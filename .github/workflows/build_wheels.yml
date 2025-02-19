@@ -40,6 +40,9 @@ jobs:
           mkdir -p wheels
           maturin build --release --out wheels
 
+      - name: List build directory
+        run: dir /s wheels
+
       - name: Upload wheels to GitHub
         uses: actions/upload-artifact@v4
         with:
