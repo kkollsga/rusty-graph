@@ -33,10 +33,12 @@ jobs:
         run: pip install maturin
 
       - name: Build wheels with Maturin
-        run: maturin build --release --manylinux ${{ matrix.target }} --target ${{ matrix.platform }}
+        run: |
+          mkdir -p wheels
+          maturin build --release --manylinux ${{ matrix.target }} --target ${{ matrix.platform }} --out wheels
 
       - name: Upload wheels to GitHub
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: wheels
-          path: target/wheels/*.whl
+          path: wheels/*.whl
