@@ -1,4 +1,4 @@
-name: Build Python Wheels
+name: Build Python Wheels for Windows
 
 on:
   push:
@@ -7,12 +7,12 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     strategy:
       matrix:
         python-version: ['3.12']
         platform: [x86_64]
-        target: [manylinux2014]
+        target: [x86_64-pc-windows-msvc]
 
     steps:
       - name: Checkout code
@@ -28,14 +28,17 @@ jobs:
         with:
           toolchain: stable
           override: true
+          target: ${{ matrix.target }}
 
       - name: Install Maturin
         run: pip install maturin
 
       - name: Build wheels with Maturin
+        env:
+          CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
         run: |
           mkdir -p wheels
-          maturin build --release --manylinux ${{ matrix.target }} --target ${{ matrix.platform }} --out wheels
+          maturin build --release --out wheels
 
       - name: Upload wheels to GitHub
         uses: actions/upload-artifact@v4
