@@ -41,7 +41,7 @@ jobs:
           maturin build --release --out wheels
 
       - name: List build directory
-        run: dir /s wheels
+        run: Get-ChildItem -Recurse wheels
 
       - name: Upload wheels to GitHub
         uses: actions/upload-artifact@v4
