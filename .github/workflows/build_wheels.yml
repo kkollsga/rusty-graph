@@ -1,0 +1,42 @@
+name: Build Python Wheels
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Triggers on version tags like v1.0.0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.12']
+        platform: [x86_64, aarch64]
+        target: [manylinux2014]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Install Maturin
+        run: pip install maturin
+
+      - name: Build wheels with Maturin
+        run: maturin build --release --manylinux ${{ matrix.target }} --target ${{ matrix.platform }}
+
+      - name: Upload wheels to GitHub
+        uses: actions/upload-artifact@v3
+        with:
+          name: wheels
+          path: target/wheels/*.whl
