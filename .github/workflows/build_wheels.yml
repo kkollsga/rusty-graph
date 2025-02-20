@@ -8,7 +8,7 @@ jobs:
   build:
     runs-on: windows-latest
     permissions:
-      contents: write  # This is important to allow pushing to the repository
+      contents: write
     strategy:
       matrix:
         python-version: ['3.12']
@@ -18,7 +18,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0  # This ensures we have the full git history
+          token: ${{ secrets.GITHUB_TOKEN }}  # Add this to ensure we have write permissions
       
       - name: Set up Python 3.12
         uses: actions/setup-python@v4
@@ -45,30 +45,15 @@ jobs:
       - name: List build directory
         run: Get-ChildItem -Recurse wheels
       
-      - name: Configure Git
+      - name: Commit and push wheels
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-      
-      - name: Commit and push wheels
-        run: |
-          # Get the current branch name
-          $branch = git rev-parse --abbrev-ref HEAD
-          
-          # Create wheels directory if it doesn't exist (at repo root)
-          if (!(Test-Path -Path "wheels")) {
-            New-Item -ItemType Directory -Path "wheels"
-          }
-          
-          # Copy new wheel file to wheels directory
-          Copy-Item -Path "wheels/*.whl" -Destination "wheels/" -Force
-          
-          # Stage, commit, and push
           git add wheels/*.whl
-          git commit -m "Update wheels for latest Cargo.toml changes" || echo "No changes to commit"
-          git push origin $branch
+          git commit -m "Update wheels from Cargo.toml changes" || echo "No changes to commit"
+          git push origin HEAD:${{ github.ref }}
         shell: pwsh
-      
+
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v4
         with:
