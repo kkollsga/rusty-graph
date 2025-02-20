@@ -12,7 +12,9 @@ use crate::datatypes::python_conversions::{
     level_nodes_to_pydict,
     level_values_to_pydict,
     level_single_values_to_pydict,
-    level_connections_to_pydict
+    level_connections_to_pydict,
+    convert_stat_results_for_python,
+    parse_stat_method
 };
 use crate::datatypes::values::{Value, FilterCondition};
 use crate::graph::io_operations::save_to_file;
@@ -27,6 +29,7 @@ pub mod debugging;
 pub mod batch_operations;
 pub mod schema;
 pub mod data_retrieval;
+pub mod node_calculations;
 
 use schema::{DirGraph, CurrentSelection};
 
@@ -326,6 +329,23 @@ impl KnowledgeGraph {
         let pairs = statistics_methods::get_parent_child_pairs(&self.selection, level_index);
         let stats = statistics_methods::calculate_property_stats(&self.inner, &pairs, property);
         convert_stats_for_python(stats)
+    }
+
+    fn calculate_node_value(
+        &self,
+        property: &str,
+        method: &str,
+        level_index: Option<usize>,
+    ) -> PyResult<PyObject> {
+        let stat_method = parse_stat_method(method)?;
+        let results = node_calculations::calculate_node_statistic(
+            &self.inner,
+            &self.selection,
+            property,
+            stat_method,
+            level_index,
+        );
+        convert_stat_results_for_python(results)
     }
 
     fn get_schema(&self) -> PyResult<String> {

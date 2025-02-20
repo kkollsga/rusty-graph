@@ -5,6 +5,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 use std::collections::HashMap;
 use super::values::{DataFrame, ColumnType, ColumnData, Value, FilterCondition};
 use super::type_conversions::{to_u32, to_i64, to_f64, to_datetime, to_bool};
+use crate::graph::node_calculations::{StatResult, StatMethod};
 use crate::graph::schema::NodeInfo;
 use crate::graph::statistics_methods::PropertyStats;
 use crate::graph::data_retrieval::{LevelNodes, LevelValues, LevelConnections};
@@ -571,4 +572,44 @@ pub fn level_connections_to_pydict(
     }
     
     Ok(result.to_object(py))
+}
+
+pub fn convert_stat_results_for_python(results: Vec<StatResult>) -> PyResult<PyObject> {
+    Python::with_gil(|py| {
+        let dict = PyDict::new_bound(py);
+        
+        for result in results {
+            let key = match result.parent_idx {
+                Some(_) => "parent",  // We don't access graph here, just use a generic key
+                None => "root",
+            }.to_string();
+
+            let value = convert_stat_value(py, &result);
+            dict.set_item(key, value)?;
+        }
+        
+        Ok(dict.into())
+    })
+}
+
+fn convert_stat_value(py: Python, result: &StatResult) -> PyObject {
+    match (result.value, &result.error) {
+        (Some(v), None) => v.to_object(py),
+        (None, Some(err)) => err.to_object(py),
+        (None, None) => py.None(),
+        (Some(_), Some(_)) => unreachable!(),
+    }
+}
+
+pub fn parse_stat_method(method: &str) -> PyResult<StatMethod> {
+    match method.to_lowercase().as_str() {
+        "sum" => Ok(StatMethod::Sum),
+        "average" | "avg" | "mean" => Ok(StatMethod::Average),
+        "min" | "minimum" => Ok(StatMethod::Min),
+        "max" | "maximum" => Ok(StatMethod::Max),
+        "count" => Ok(StatMethod::Count),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            format!("Unsupported statistical method: {}", method)
+        )),
+    }
 }
