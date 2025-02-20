@@ -37,14 +37,6 @@ impl SelectionLevel {
         }
     }
 
-    pub fn add_filter(&mut self, conditions: HashMap<String, FilterCondition>) {
-        self.operations.push(SelectionOperation::Filter(conditions));
-    }
-
-    pub fn add_sort(&mut self, sort_fields: Vec<(String, bool)>) {
-        self.operations.push(SelectionOperation::Sort(sort_fields));
-    }
-
     pub fn add_selection(&mut self, parent: Option<NodeIndex>, children: Vec<NodeIndex>) {
         self.selections.insert(parent, children);
     }
@@ -52,16 +44,6 @@ impl SelectionLevel {
     pub fn get_all_nodes(&self) -> Vec<NodeIndex> {
         self.selections.values()
             .flat_map(|children| children.iter().cloned())
-            .collect()
-    }
-
-    pub fn get_children(&self, parent: NodeIndex) -> Option<&Vec<NodeIndex>> {
-        self.selections.get(&Some(parent))
-    }
-
-    pub fn get_parent_nodes(&self) -> Vec<NodeIndex> {
-        self.selections.keys()
-            .filter_map(|opt_idx| *opt_idx)
             .collect()
     }
 

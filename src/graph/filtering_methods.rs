@@ -119,13 +119,6 @@ fn sort_nodes_by_fields(
     nodes
 }
 
-fn limit_nodes(mut nodes: Vec<NodeIndex>, max_nodes: usize) -> Vec<NodeIndex> {
-    if nodes.len() > max_nodes {
-        nodes.truncate(max_nodes);
-    }
-    nodes
-}
-
 // Optimized processing function
 pub fn process_nodes(
     graph: &DirGraph,

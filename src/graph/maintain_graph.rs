@@ -328,16 +328,15 @@ fn update_schema_node(
     Ok(())
 }
 
-// In maintain_graph.rs
 pub fn selection_to_new_connections(
     graph: &mut DirGraph,
     selection: &CurrentSelection,
     connection_type: String,
-) -> Result<usize, String> {
+) -> Result<(usize, usize), String> {  // Changed return type to include skipped count
     let current_level = selection.get_level_count().saturating_sub(1);
     let level = match selection.get_level(current_level) {
         Some(level) if !level.is_empty() => level,
-        _ => return Ok(0), // Return early if no selections
+        _ => return Ok((0, 0)), // Return early if no selections
     };
 
     let mut batch = ConnectionBatchProcessor::new(level.get_all_nodes().len());
@@ -389,6 +388,8 @@ pub fn selection_to_new_connections(
     }
 
     // Execute the batch to actually create the connections!
-    let (stats, _) = batch.execute(graph, connection_type)?;
-    Ok(stats.connections_created)
+    let (stats, metrics) = batch.execute(graph, connection_type)?;
+    println!("Created {} connections in {} batches ({}s), skipped {} invalid connections",
+             stats.connections_created, metrics.batch_count, metrics.processing_time, skipped);
+    Ok((stats.connections_created, skipped))
 }
