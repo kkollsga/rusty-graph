@@ -1,58 +1,75 @@
 name: Build Python Wheels for Windows
-
 on:
   push:
-    tags:
-      - 'v*.*.*'  # Triggers on version tags like v1.0.0
+    paths:
+      - 'Cargo.toml'
 
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write  # This is important to allow pushing to the repository
     strategy:
       matrix:
         python-version: ['3.12']
         platform: [x86_64]
         target: [x86_64-pc-windows-msvc]
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-
+        with:
+          fetch-depth: 0  # This ensures we have the full git history
+      
       - name: Set up Python 3.12
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
-
+      
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           override: true
           target: ${{ matrix.target }}
-
+      
       - name: Install Maturin
         run: pip install maturin
-
+      
       - name: Build wheels with Maturin
         env:
           CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
         run: |
           if (!(Test-Path -Path "wheels")) { New-Item -ItemType Directory -Path "wheels" }
           maturin build --release --out wheels
-
+      
       - name: List build directory
         run: Get-ChildItem -Recurse wheels
-
-      - name: Commit and push wheels to repo
+      
+      - name: Configure Git
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git checkout -B ${GITHUB_REF_NAME}
+      
+      - name: Commit and push wheels
+        run: |
+          # Get the current branch name
+          $branch = git rev-parse --abbrev-ref HEAD
+          
+          # Create wheels directory if it doesn't exist (at repo root)
+          if (!(Test-Path -Path "wheels")) {
+            New-Item -ItemType Directory -Path "wheels"
+          }
+          
+          # Copy new wheel file to wheels directory
+          Copy-Item -Path "wheels/*.whl" -Destination "wheels/" -Force
+          
+          # Stage, commit, and push
           git add wheels/*.whl
-          git commit -m 'Add built wheels to wheels folder'
-          git push origin ${GITHUB_REF_NAME}
-
-      - name: Upload wheels to GitHub as artifact
+          git commit -m "Update wheels for latest Cargo.toml changes" || echo "No changes to commit"
+          git push origin $branch
+        shell: pwsh
+      
+      - name: Upload wheels as artifact
         uses: actions/upload-artifact@v4
         with:
           name: wheels
