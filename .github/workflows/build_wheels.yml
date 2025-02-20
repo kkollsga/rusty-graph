@@ -34,26 +34,21 @@ jobs:
       - name: Install Maturin
         run: pip install maturin
       
-      - name: Build wheels with Maturin
-        env:
-          CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
-        run: |
-          if (!(Test-Path -Path "wheels")) { New-Item -ItemType Directory -Path "wheels" }
-          maturin build --release --out wheels
-      
-      - name: List build directory
-        run: Get-ChildItem -Recurse wheels
-      
-      - name: Commit and push wheels
+      - name: Clean and rebuild wheels
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git rm -r --cached wheels/*.whl || echo "No existing wheels to remove"
-          git commit -m "Remove existing wheels" || echo "No wheels to remove"
+          git rm -r --cached wheels/*.whl || echo "No wheels in git index"
+          Remove-Item -Path "wheels/*.whl" -Force || echo "No wheels in directory"
+          if (!(Test-Path -Path "wheels")) { New-Item -ItemType Directory -Path "wheels" }
+          maturin build --release --out wheels
           git add wheels/*.whl
           git commit -m "Update wheels from Cargo.toml changes" || echo "No changes to commit"
           git push origin HEAD:${{ github.ref }}
         shell: pwsh
+      
+      - name: List build directory
+        run: Get-ChildItem -Recurse wheels
         
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v4
