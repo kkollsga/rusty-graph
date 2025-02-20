@@ -516,23 +516,21 @@ pub fn level_connections_to_pydict(
             // Process incoming connections
             let incoming_dict = PyDict::new_bound(py);
             for (conn_type, id, title, conn_props, node_props) in &conn.incoming {
-                // Get or create dictionary for this connection type
                 if !incoming_dict.contains(conn_type)? {
                     incoming_dict.set_item(conn_type, PyDict::new_bound(py))?;
                 }
                 
-                // Use let bindings to keep the PyAny alive
                 let conn_type_item = incoming_dict.get_item(conn_type)?;
                 let conn_type_any = conn_type_item.unwrap();
                 let conn_type_dict = conn_type_any.downcast::<PyDict>()?;
                 
-                // Create node info dictionary
                 let node_info = PyDict::new_bound(py);
                 node_info.set_item("node_id", id.to_object(py))?;
                 node_info.set_item("connection_properties", conn_props)?;
-                node_info.set_item("node_properties", node_props)?;
+                if let Some(props) = node_props {
+                    node_info.set_item("node_properties", props)?;
+                }
                 
-                // Add to connection type dictionary using title as key
                 match title {
                     Value::String(t) => conn_type_dict.set_item(t, node_info)?,
                     _ => conn_type_dict.set_item("Unknown", node_info)?,
@@ -543,23 +541,21 @@ pub fn level_connections_to_pydict(
             // Process outgoing connections
             let outgoing_dict = PyDict::new_bound(py);
             for (conn_type, id, title, conn_props, node_props) in &conn.outgoing {
-                // Get or create dictionary for this connection type
                 if !outgoing_dict.contains(conn_type)? {
                     outgoing_dict.set_item(conn_type, PyDict::new_bound(py))?;
                 }
                 
-                // Use let bindings to keep the PyAny alive
                 let conn_type_item = outgoing_dict.get_item(conn_type)?;
                 let conn_type_any = conn_type_item.unwrap();
                 let conn_type_dict = conn_type_any.downcast::<PyDict>()?;
                 
-                // Create node info dictionary
                 let node_info = PyDict::new_bound(py);
                 node_info.set_item("node_id", id.to_object(py))?;
                 node_info.set_item("connection_properties", conn_props)?;
-                node_info.set_item("node_properties", node_props)?;
+                if let Some(props) = node_props {
+                    node_info.set_item("node_properties", props)?;
+                }
                 
-                // Add to connection type dictionary using title as key
                 match title {
                     Value::String(t) => conn_type_dict.set_item(t, node_info)?,
                     _ => conn_type_dict.set_item("Unknown", node_info)?,

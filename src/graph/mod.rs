@@ -222,13 +222,15 @@ impl KnowledgeGraph {
     fn get_connections(
         &self,
         indices: Option<Vec<usize>>,
-        parent_info: Option<bool>
+        parent_info: Option<bool>,
+        include_node_properties: Option<bool>, // New parameter
     ) -> PyResult<PyObject> {
         let connections = data_retrieval::get_connections(
             &self.inner,
             &self.selection,
             None,
-            indices.as_deref()
+            indices.as_deref(),
+            include_node_properties.unwrap_or(true), // Default to true
         );
         Python::with_gil(|py| level_connections_to_pydict(py, &connections, parent_info))
     }
