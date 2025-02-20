@@ -515,7 +515,7 @@ pub fn level_connections_to_pydict(
             
             // Process incoming connections
             let incoming_dict = PyDict::new_bound(py);
-            for (conn_type, id, title, props) in &conn.incoming {
+            for (conn_type, id, title, conn_props, node_props) in &conn.incoming {
                 // Get or create dictionary for this connection type
                 if !incoming_dict.contains(conn_type)? {
                     incoming_dict.set_item(conn_type, PyDict::new_bound(py))?;
@@ -529,7 +529,8 @@ pub fn level_connections_to_pydict(
                 // Create node info dictionary
                 let node_info = PyDict::new_bound(py);
                 node_info.set_item("node_id", id.to_object(py))?;
-                node_info.set_item("properties", props)?;
+                node_info.set_item("connection_properties", conn_props)?;
+                node_info.set_item("node_properties", node_props)?;
                 
                 // Add to connection type dictionary using title as key
                 match title {
@@ -541,7 +542,7 @@ pub fn level_connections_to_pydict(
             
             // Process outgoing connections
             let outgoing_dict = PyDict::new_bound(py);
-            for (conn_type, id, title, props) in &conn.outgoing {
+            for (conn_type, id, title, conn_props, node_props) in &conn.outgoing {
                 // Get or create dictionary for this connection type
                 if !outgoing_dict.contains(conn_type)? {
                     outgoing_dict.set_item(conn_type, PyDict::new_bound(py))?;
@@ -555,7 +556,8 @@ pub fn level_connections_to_pydict(
                 // Create node info dictionary
                 let node_info = PyDict::new_bound(py);
                 node_info.set_item("node_id", id.to_object(py))?;
-                node_info.set_item("properties", props)?;
+                node_info.set_item("connection_properties", conn_props)?;
+                node_info.set_item("node_properties", node_props)?;
                 
                 // Add to connection type dictionary using title as key
                 match title {

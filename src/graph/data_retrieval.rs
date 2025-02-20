@@ -261,8 +261,8 @@ pub struct ConnectionInfo {
     pub node_id: Value,
     pub node_title: String,
     pub node_type: String,
-    pub incoming: Vec<(String, Value, Value, HashMap<String, Value>)>, // (type, id, title, props)
-    pub outgoing: Vec<(String, Value, Value, HashMap<String, Value>)>, // (type, id, title, props)
+    pub incoming: Vec<(String, Value, Value, HashMap<String, Value>, HashMap<String, Value>)>, // (type, id, title, connection_props, node_props)
+    pub outgoing: Vec<(String, Value, Value, HashMap<String, Value>, HashMap<String, Value>)>, // (type, id, title, connection_props, node_props)
 }
 
 #[derive(Debug)]
@@ -319,11 +319,16 @@ pub fn get_connections(
                     for edge_ref in graph.graph.edges_directed(node_idx, petgraph::Direction::Incoming) {
                         if let Some(source_node) = graph.get_node(edge_ref.source()) {
                             let edge_data = edge_ref.weight();
+                            let node_props = match source_node {
+                                NodeData::Regular { properties, .. } => properties.clone(),
+                                _ => HashMap::new(),
+                            };
                             incoming.push((
                                 edge_data.connection_type.clone(),
                                 source_node.get_field("id").unwrap_or(Value::Null),
                                 source_node.get_field("title").unwrap_or(Value::Null),
                                 edge_data.properties.clone(),
+                                node_props,
                             ));
                         }
                     }
@@ -332,11 +337,16 @@ pub fn get_connections(
                     for edge_ref in graph.graph.edges_directed(node_idx, petgraph::Direction::Outgoing) {
                         if let Some(target_node) = graph.get_node(edge_ref.target()) {
                             let edge_data = edge_ref.weight();
+                            let node_props = match target_node {
+                                NodeData::Regular { properties, .. } => properties.clone(),
+                                _ => HashMap::new(),
+                            };
                             outgoing.push((
                                 edge_data.connection_type.clone(),
                                 target_node.get_field("id").unwrap_or(Value::Null),
                                 target_node.get_field("title").unwrap_or(Value::Null),
                                 edge_data.properties.clone(),
+                                node_props,
                             ));
                         }
                     }
