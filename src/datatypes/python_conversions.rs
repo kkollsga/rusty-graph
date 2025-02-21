@@ -579,11 +579,9 @@ pub fn convert_stat_results_for_python(results: Vec<StatResult>) -> PyResult<PyO
         let dict = PyDict::new_bound(py);
         
         for result in results {
-            let key = match result.parent_idx {
-                Some(_) => "parent",  // We don't access graph here, just use a generic key
-                None => "root",
-            }.to_string();
-
+            let key = result.parent_title.as_ref()
+                .map(String::as_str)
+                .unwrap_or("unassigned");
             let value = convert_stat_value(py, &result);
             dict.set_item(key, value)?;
         }

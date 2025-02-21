@@ -1,8 +1,8 @@
+// src/graph/node_calculations.rs
 use std::fmt;
 use crate::graph::schema::{DirGraph, CurrentSelection, NodeData};
 use crate::datatypes::values::Value;
 use crate::graph::statistics_methods::get_parent_child_pairs;
-use petgraph::graph::NodeIndex;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StatMethod {
@@ -27,7 +27,7 @@ impl fmt::Display for StatMethod {
 
 #[derive(Debug)]
 pub struct StatResult {
-    pub parent_idx: Option<NodeIndex>,
+    pub parent_title: Option<String>,  // New field
     pub value: Option<f64>,
     pub error: Option<String>,
 }
@@ -45,7 +45,13 @@ pub fn calculate_node_statistic(
         .map(|pair| {
             let mut values = Vec::new();
             
-            // Collect valid numeric values from children
+            // Get parent title using get_field with proper Value handling
+            let parent_title = pair.parent
+                .and_then(|idx| graph.get_node(idx))
+                .and_then(|n| n.get_field("title"))
+                .and_then(|v| v.as_string());  // Using Value's as_string() method
+            
+            // Rest of function remains unchanged...
             for &node_idx in &pair.children {
                 if let Some(node) = graph.get_node(node_idx) {
                     if let Some(value) = try_get_numeric_value(node, property) {
@@ -54,7 +60,6 @@ pub fn calculate_node_statistic(
                 }
             }
             
-            // Calculate the requested statistic
             let result = match method {
                 StatMethod::Sum => {
                     if values.is_empty() {
@@ -82,7 +87,7 @@ pub fn calculate_node_statistic(
             };
 
             StatResult {
-                parent_idx: pair.parent,
+                parent_title,
                 value: result,
                 error: if values.is_empty() && method != StatMethod::Count {
                     Some(format!("No valid numeric values found for property '{}'", property))
@@ -106,4 +111,19 @@ fn try_get_numeric_value(node: &NodeData, property: &str) -> Option<f64> {
             })
         }
     }
+}
+
+pub fn count_nodes_in_level(
+    selection: &CurrentSelection,
+    level_index: Option<usize>,
+) -> usize {
+    let effective_index = match level_index {
+        Some(idx) => idx,
+        None => selection.get_level_count().saturating_sub(1)
+    };
+
+    let level = selection.get_level(effective_index)
+        .expect("Level should exist");  // Safe due to saturating_sub
+    
+    level.get_all_nodes().len()
 }

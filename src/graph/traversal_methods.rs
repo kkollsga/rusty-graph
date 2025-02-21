@@ -1,3 +1,4 @@
+// src/graph/traversal_methods.rs
 use std::collections::{HashSet, HashMap};
 use std::iter::FromIterator;
 use petgraph::visit::EdgeRef;
@@ -13,8 +14,8 @@ pub fn make_traversal(
     connection_type: String,
     level_index: Option<usize>,
     direction: Option<String>,
-    filter_conditions: Option<&HashMap<String, FilterCondition>>,
-    sort_fields: Option<&Vec<(String, bool)>>,
+    filter_target: Option<&HashMap<String, FilterCondition>>,
+    sort_target: Option<&Vec<(String, bool)>>,
     max_nodes: Option<usize>,
     new_level: Option<bool>,
 ) -> Result<(), String> {
@@ -87,7 +88,9 @@ pub fn make_traversal(
         .ok_or_else(|| "Failed to access target selection level".to_string())?;
 
     if !create_new_level {
-        level.selections.clear();
+        for parent in &parents {
+            level.selections.entry(Some(*parent)).or_default().clear();
+        }
     }
 
     // Set up operation
@@ -136,13 +139,19 @@ pub fn make_traversal(
     for &parent in &parents {
         if let Some(targets) = all_targets.get(&parent) {
             let target_vec = Vec::from_iter(targets.iter().cloned());
-            let processed_nodes = filtering_methods::process_nodes(
+            let mut processed_nodes = filtering_methods::process_nodes(
                 graph,
                 target_vec,
-                filter_conditions,
-                sort_fields,
-                max_nodes
+                filter_target,
+                sort_target,
+                None  // Don't pass max_nodes here since we handle it per parent
             );
+            
+            // Apply max_nodes limit per parent group
+            if let Some(max) = max_nodes {
+                processed_nodes.truncate(max);
+            }
+            
             level.add_selection(Some(parent), processed_nodes);
         }
     }

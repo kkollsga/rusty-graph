@@ -1,21 +1,8 @@
-// src/graph/mod.rs
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::Bound;
 use std::collections::HashMap;
-use crate::datatypes::python_conversions::{
-    convert_stats_for_python, 
-    pandas_to_dataframe, 
-    ensure_columns, 
-    parse_sort_fields, 
-    pydict_to_filter_conditions,
-    level_nodes_to_pydict,
-    level_values_to_pydict,
-    level_single_values_to_pydict,
-    level_connections_to_pydict,
-    convert_stat_results_for_python,
-    parse_stat_method
-};
+use crate::datatypes::{py_in, py_out};
 use crate::datatypes::values::{Value, FilterCondition};
 use crate::graph::io_operations::save_to_file;
 
@@ -60,10 +47,10 @@ impl KnowledgeGraph {
         conflict_handling: Option<String>,
         _column_types: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let modified_columns: Option<Vec<String>> = ensure_columns(
+        let modified_columns: Option<Vec<String>> = py_in::ensure_columns(
             columns, &unique_id_field, &node_title_field
         )?;
-        let df_result = pandas_to_dataframe(
+        let df_result = py_in::pandas_to_dataframe(
             data, &[unique_id_field.clone()], modified_columns.as_deref(),
         )?;
         maintain_graph::add_nodes(
@@ -96,7 +83,7 @@ impl KnowledgeGraph {
             None => None,
         };
 
-        let df_result = pandas_to_dataframe(
+        let df_result = py_in::pandas_to_dataframe(
             data,
             &[source_id_field.clone(), target_id_field.clone()],
             cols.as_deref(),
@@ -131,10 +118,9 @@ impl KnowledgeGraph {
         conditions.insert("type".to_string(), FilterCondition::Equals(Value::String(node_type)));
         
         let sort_fields = if let Some(spec) = sort_spec {
-            // Handle both string and PyAny cases
             match spec.extract::<String>() {
-                Ok(field) => Some(vec![(field, true)]),  // Default to ascending
-                Err(_) => Some(parse_sort_fields(spec, None)?)
+                Ok(field) => Some(vec![(field, true)]),
+                Err(_) => Some(py_in::parse_sort_fields(spec, None)?)
             }
         } else {
             None
@@ -152,9 +138,9 @@ impl KnowledgeGraph {
 
     fn filter(&mut self, conditions: &Bound<'_, PyDict>, sort_spec: Option<&Bound<'_, PyAny>>, max_nodes: Option<usize>) -> PyResult<Self> {
         let mut new_graph = self.clone();
-        let filter_conditions = pydict_to_filter_conditions(conditions)?;
+        let filter_conditions = py_in::pydict_to_filter_conditions(conditions)?;
         let sort_fields = match sort_spec {
-            Some(spec) => Some(parse_sort_fields(spec, None)?),
+            Some(spec) => Some(py_in::parse_sort_fields(spec, None)?),
             None => None,
         };
         
@@ -166,7 +152,7 @@ impl KnowledgeGraph {
 
     fn sort(&mut self, sort_spec: &Bound<'_, PyAny>, ascending: Option<bool>) -> PyResult<Self> {
         let mut new_graph = self.clone();
-        let sort_fields = parse_sort_fields(sort_spec, ascending)?;
+        let sort_fields = py_in::parse_sort_fields(sort_spec, ascending)?;
         
         filtering_methods::sort_nodes(&new_graph.inner, &mut new_graph.selection, sort_fields)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
@@ -196,7 +182,7 @@ impl KnowledgeGraph {
             None,
             indices.as_deref()
         );
-        Python::with_gil(|py| level_nodes_to_pydict(py, &nodes, parent_key, parent_info))
+        Python::with_gil(|py| py_out::level_nodes_to_pydict(py, &nodes, parent_key, parent_info))
     }
     
     fn get_titles(&self, indices: Option<Vec<usize>>) -> PyResult<PyObject> {
@@ -207,7 +193,7 @@ impl KnowledgeGraph {
             &["title"],
             indices.as_deref()
         );
-        Python::with_gil(|py| level_single_values_to_pydict(py, &values))
+        Python::with_gil(|py| py_out::level_single_values_to_pydict(py, &values))
     }
     
     fn get_properties(&self, properties: Vec<String>, indices: Option<Vec<usize>>) -> PyResult<PyObject> {
@@ -219,23 +205,23 @@ impl KnowledgeGraph {
             &property_refs,
             indices.as_deref()
         );
-        Python::with_gil(|py| level_values_to_pydict(py, &values))
+        Python::with_gil(|py| py_out::level_values_to_pydict(py, &values))
     }
 
     fn get_connections(
         &self,
         indices: Option<Vec<usize>>,
         parent_info: Option<bool>,
-        include_node_properties: Option<bool>, // New parameter
+        include_node_properties: Option<bool>,
     ) -> PyResult<PyObject> {
         let connections = data_retrieval::get_connections(
             &self.inner,
             &self.selection,
             None,
             indices.as_deref(),
-            include_node_properties.unwrap_or(true), // Default to true
+            include_node_properties.unwrap_or(true),
         );
-        Python::with_gil(|py| level_connections_to_pydict(py, &connections, parent_info))
+        Python::with_gil(|py| py_out::level_connections_to_pydict(py, &connections, parent_info))
     }
 
     fn get_unique_values(
@@ -271,21 +257,21 @@ impl KnowledgeGraph {
         connection_type: String,
         level_index: Option<usize>,
         direction: Option<String>,
-        filter_conditions: Option<&Bound<'_, PyDict>>,
-        sort_spec: Option<&Bound<'_, PyAny>>,
+        filter_target: Option<&Bound<'_, PyDict>>,
+        sort_target: Option<&Bound<'_, PyAny>>,
         max_nodes: Option<usize>,
         new_level: Option<bool>,
     ) -> PyResult<Self> {
         let mut new_graph = self.clone();
         
-        let conditions = if let Some(cond) = filter_conditions {
-            Some(pydict_to_filter_conditions(cond)?)
+        let conditions = if let Some(cond) = filter_target {
+            Some(py_in::pydict_to_filter_conditions(cond)?)
         } else {
             None
         };
         
-        let sort_fields = if let Some(spec) = sort_spec {
-            Some(parse_sort_fields(spec, None)?)
+        let sort_fields = if let Some(spec) = sort_target {
+            Some(py_in::parse_sort_fields(spec, None)?)
         } else {
             None
         };
@@ -313,7 +299,6 @@ impl KnowledgeGraph {
         maintain_graph::selection_to_new_connections(&mut self.inner, &self.selection, connection_type)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         
-        // Clear selection unless explicitly kept
         if !keep_selection.unwrap_or(false) {
             self.selection.clear();
         }
@@ -328,7 +313,7 @@ impl KnowledgeGraph {
     ) -> PyResult<PyObject> {
         let pairs = statistics_methods::get_parent_child_pairs(&self.selection, level_index);
         let stats = statistics_methods::calculate_property_stats(&self.inner, &pairs, property);
-        convert_stats_for_python(stats)
+        py_out::convert_stats_for_python(stats)
     }
 
     fn calculate_node_value(
@@ -337,7 +322,7 @@ impl KnowledgeGraph {
         method: &str,
         level_index: Option<usize>,
     ) -> PyResult<PyObject> {
-        let stat_method = parse_stat_method(method)?;
+        let stat_method = py_in::parse_stat_method(method)?;
         let results = node_calculations::calculate_node_statistic(
             &self.inner,
             &self.selection,
@@ -345,7 +330,12 @@ impl KnowledgeGraph {
             stat_method,
             level_index,
         );
-        convert_stat_results_for_python(results)
+        py_out::convert_stat_results_for_python(results)
+    }
+
+    fn count(&self, level_index: Option<usize>) -> PyResult<usize> {
+        let count = node_calculations::count_nodes_in_level(&self.selection, level_index);
+        Ok(count)
     }
 
     fn get_schema(&self) -> PyResult<String> {
@@ -357,7 +347,7 @@ impl KnowledgeGraph {
         Ok(debugging::get_selection_string(&self.inner, &self.selection))
     }
 
-    fn clear_selection(&mut self) -> PyResult<()> {
+    fn clear(&mut self) -> PyResult<()> {
         self.selection.clear();
         Ok(())
     }
