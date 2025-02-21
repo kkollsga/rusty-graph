@@ -1,4 +1,3 @@
-// src/graph/traversal_methods.rs
 use std::collections::{HashSet, HashMap};
 use std::iter::FromIterator;
 use petgraph::visit::EdgeRef;
@@ -7,6 +6,30 @@ use petgraph::Direction;
 use crate::graph::schema::{DirGraph, CurrentSelection, SelectionOperation};
 use crate::datatypes::values::FilterCondition;
 use crate::graph::filtering_methods;
+
+fn get_connected_targets(
+    graph: &DirGraph,
+    source_node: NodeIndex,
+    directions: &[Direction],
+    connection_type: &str,
+    targets: &[NodeIndex],
+) -> Vec<NodeIndex> {
+    targets.iter()
+        .filter(|&&target| {
+            directions.iter().any(|dir| {
+                graph.graph.edges_directed(source_node, *dir)
+                    .any(|edge| {
+                        edge.weight().connection_type == connection_type &&
+                        (match dir {
+                            Direction::Outgoing => edge.target(),
+                            Direction::Incoming => edge.source(),
+                        }) == target
+                    })
+            })
+        })
+        .cloned()
+        .collect()
+}
 
 pub fn make_traversal(
     graph: &DirGraph,
@@ -139,20 +162,56 @@ pub fn make_traversal(
     for &parent in &parents {
         if let Some(targets) = all_targets.get(&parent) {
             let target_vec = Vec::from_iter(targets.iter().cloned());
-            let mut processed_nodes = filtering_methods::process_nodes(
-                graph,
-                target_vec,
-                filter_target,
-                sort_target,
-                None  // Don't pass max_nodes here since we handle it per parent
-            );
             
-            // Apply max_nodes limit per parent group
-            if let Some(max) = max_nodes {
-                processed_nodes.truncate(max);
+            if create_new_level {
+                // Process all nodes together for new levels
+                let mut processed_nodes = filtering_methods::process_nodes(
+                    graph,
+                    target_vec,
+                    filter_target,
+                    sort_target,
+                    None
+                );
+                
+                if let Some(max) = max_nodes {
+                    processed_nodes.truncate(max);
+                }
+                
+                level.add_selection(Some(parent), processed_nodes);
+            } else {
+                // Process per source node for existing levels
+                let source_nodes = source_nodes_map.get(&parent).unwrap_or(&empty_vec);
+                let mut final_nodes = Vec::new();
+                
+                for &source_node in source_nodes {
+                    let source_targets = get_connected_targets(
+                        graph,
+                        source_node,
+                        &directions,
+                        &connection_type,
+                        &target_vec
+                    );
+                    
+                    let processed_nodes = filtering_methods::process_nodes(
+                        graph,
+                        source_targets,
+                        filter_target,
+                        sort_target,
+                        max_nodes  // Apply max_nodes per source node
+                    );
+                    
+                    final_nodes.extend(processed_nodes);
+                }
+                
+                level.add_selection(Some(parent), final_nodes);
             }
-            
-            level.add_selection(Some(parent), processed_nodes);
+        } else if !create_new_level {
+            // Preserve existing selection if no new targets
+            level.add_selection(Some(parent), 
+                level.selections.get(&Some(parent))
+                    .map(|existing| existing.clone())
+                    .unwrap_or_default()
+            );
         }
     }
 
