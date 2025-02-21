@@ -14,6 +14,7 @@ pub mod statistics_methods;
 pub mod io_operations;
 pub mod lookups;
 pub mod debugging;
+pub mod custom_equation;
 pub mod batch_operations;
 pub mod schema;
 pub mod data_retrieval;

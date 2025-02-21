@@ -6,6 +6,7 @@ use crate::graph::node_calculations::StatResult;
 use crate::graph::schema::NodeInfo;
 use crate::graph::statistics_methods::PropertyStats;
 use crate::graph::data_retrieval::{LevelNodes, LevelValues, LevelConnections, UniqueValues};
+use crate::graph::custom_equation::EquationResult;
 
 pub fn nodeinfo_to_pydict(py: Python, node: &NodeInfo) -> PyResult<PyObject> {
     let dict = PyDict::new_bound(py);
@@ -331,4 +332,27 @@ pub fn level_unique_values_to_pydict(py: Python, values: &[UniqueValues]) -> PyR
         result.set_item(&unique_values.parent_title, PyList::new_bound(py, &py_values))?;
     }
     Ok(result.to_object(py))
+}
+
+pub fn convert_equation_results_for_python(results: Vec<EquationResult>) -> PyResult<PyObject> {
+    Python::with_gil(|py| {
+        let dict = PyDict::new_bound(py);
+        
+        for result in results {
+            let key = result.parent_title.as_ref()
+                .map(String::as_str)
+                .unwrap_or("unassigned");
+            
+            let value = match (result.value, &result.error) {
+                (Some(v), None) => v.to_object(py),
+                (None, Some(err)) => err.to_object(py),
+                (None, None) => py.None(),
+                (Some(_), Some(_)) => unreachable!(),
+            };
+            
+            dict.set_item(key, value)?;
+        }
+        
+        Ok(dict.into())
+    })
 }
