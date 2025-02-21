@@ -1,5 +1,5 @@
-// src/grap/data_retrieval.rs
-use crate::datatypes::values::Value;
+// src/graph/data_retrieval.rs
+use crate::datatypes::values::{Value, format_value};
 use crate::graph::schema::{DirGraph, CurrentSelection, NodeInfo, NodeData};
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
@@ -18,12 +18,6 @@ pub struct LevelNodes {
 pub struct LevelValues {
     pub parent_title: String,
     pub values: Vec<Vec<Value>>,
-}
-
-#[derive(Debug)]
-pub struct UniqueValues {
-    pub parent_title: String,
-    pub values: Vec<Value>,
 }
 
 pub fn get_nodes(
@@ -168,6 +162,13 @@ pub fn get_property_values(
     result
 }
 
+#[derive(Debug)]
+pub struct UniqueValues {
+    pub parent_title: String,
+    pub parent_idx: Option<NodeIndex>,
+    pub values: Vec<Value>,
+}
+
 pub fn get_unique_values(
     graph: &DirGraph,
     selection: &CurrentSelection,
@@ -181,7 +182,6 @@ pub fn get_unique_values(
     
     if let Some(level) = selection.get_level(level_idx) {
         if group_by_parent {
-            // Process each parent-child group separately
             for (parent, children) in level.iter_groups() {
                 let filtered_children: Vec<NodeIndex> = match indices {
                     Some(idx) => children.iter()
@@ -193,7 +193,6 @@ pub fn get_unique_values(
                 
                 let mut unique_values = std::collections::HashSet::new();
                 
-                // Collect unique values for this parent's children
                 for &idx in &filtered_children {
                     if let Some(node) = graph.get_node(idx) {
                         if let Some(value) = node.get_field(property) {
@@ -202,7 +201,6 @@ pub fn get_unique_values(
                     }
                 }
                 
-                // Always include parent in result, even if no unique values
                 let parent_title = match parent {
                     Some(p) => {
                         if let Some(node) = graph.get_node(*p) {
@@ -220,11 +218,11 @@ pub fn get_unique_values(
                 
                 result.push(UniqueValues {
                     parent_title,
+                    parent_idx: parent.map(|p| p),
                     values: unique_values.into_iter().collect(),
                 });
             }
         } else {
-            // Process all children together
             let mut all_unique_values = std::collections::HashSet::new();
             
             for (_, children) in level.iter_groups() {
@@ -245,15 +243,41 @@ pub fn get_unique_values(
                 }
             }
             
-            // Always add result even if no unique values found
             result.push(UniqueValues {
                 parent_title: "All".to_string(),
+                parent_idx: None,
                 values: all_unique_values.into_iter().collect(),
             });
         }
     }
     
     result
+}
+
+pub fn format_unique_values_for_storage(
+    values: &[UniqueValues],
+    max_length: Option<usize>
+) -> Vec<(Option<NodeIndex>, Value)> {
+    values.iter()
+        .map(|unique_values| {
+            let mut value_list: Vec<String> = unique_values.values.iter()
+                .map(|v| format_value(v))
+                .collect::<Vec<String>>();
+            
+            value_list.sort();
+            value_list.dedup();
+            
+            if let Some(max_len) = max_length {
+                if value_list.len() > max_len {
+                    println!("Warning: Truncating value list from {} to {} items for parent: {}", 
+                           value_list.len(), max_len, unique_values.parent_title);
+                    value_list.truncate(max_len);
+                }
+            }
+            
+            (unique_values.parent_idx, Value::String(value_list.join(",")))
+        })
+        .collect()
 }
 
 #[derive(Debug)]

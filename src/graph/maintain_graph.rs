@@ -396,7 +396,7 @@ pub fn selection_to_new_connections(
 
 pub fn update_node_properties(
     graph: &mut DirGraph,
-    nodes: &[(Option<petgraph::graph::NodeIndex>, f64)],
+    nodes: &[(Option<petgraph::graph::NodeIndex>, Value)],
     property_name: &str,
 ) -> Result<(), String> {
     let mut updates = 0;
@@ -407,10 +407,7 @@ pub fn update_node_properties(
             if let Some(node) = graph.get_node_mut(*node_idx) {
                 match node {
                     NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-                        properties.insert(
-                            property_name.to_string(),
-                            Value::Float64(*value)
-                        );
+                        properties.insert(property_name.to_string(), value.clone());
                         updates += 1;
                     }
                 }

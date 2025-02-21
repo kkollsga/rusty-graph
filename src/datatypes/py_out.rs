@@ -1,10 +1,11 @@
+// src/datatypes/py_out.rs
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use super::values::Value;
 use crate::graph::node_calculations::StatResult;
 use crate::graph::schema::NodeInfo;
 use crate::graph::statistics_methods::PropertyStats;
-use crate::graph::data_retrieval::{LevelNodes, LevelValues, LevelConnections};
+use crate::graph::data_retrieval::{LevelNodes, LevelValues, LevelConnections, UniqueValues};
 
 pub fn nodeinfo_to_pydict(py: Python, node: &NodeInfo) -> PyResult<PyObject> {
     let dict = PyDict::new_bound(py);
@@ -319,4 +320,15 @@ fn convert_stat_value(py: Python, result: &StatResult) -> PyObject {
         (None, None) => py.None(),
         (Some(_), Some(_)) => unreachable!(),
     }
+}
+
+pub fn level_unique_values_to_pydict(py: Python, values: &[UniqueValues]) -> PyResult<PyObject> {
+    let result = PyDict::new_bound(py);
+    for unique_values in values {
+        let py_values: Vec<PyObject> = unique_values.values.iter()
+            .map(|v| v.to_object(py))
+            .collect();
+        result.set_item(&unique_values.parent_title, PyList::new_bound(py, &py_values))?;
+    }
+    Ok(result.to_object(py))
 }

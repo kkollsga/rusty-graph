@@ -1,3 +1,4 @@
+// src/graph/mod.rs
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::Bound;
@@ -224,12 +225,15 @@ impl KnowledgeGraph {
         Python::with_gil(|py| py_out::level_connections_to_pydict(py, &connections, parent_info))
     }
 
-    fn get_unique_values(
-        &self,
+    fn unique_values(
+        &mut self,
         property: String,
         group_by_parent: Option<bool>,
         level_index: Option<usize>,
-        indices: Option<Vec<usize>>
+        indices: Option<Vec<usize>>,
+        store_as: Option<&str>,
+        max_length: Option<usize>,
+        keep_selection: Option<bool>,
     ) -> PyResult<PyObject> {
         let values = data_retrieval::get_unique_values(
             &self.inner,
@@ -240,16 +244,20 @@ impl KnowledgeGraph {
             indices.as_deref()
         );
         
-        Python::with_gil(|py| {
-            let result = PyDict::new_bound(py);
-            for unique_values in values {
-                let py_values: Vec<PyObject> = unique_values.values.into_iter()
-                    .map(|v| v.to_object(py))
-                    .collect();
-                result.set_item(unique_values.parent_title, PyList::new_bound(py, &py_values))?;
+        if let Some(target_property) = store_as {
+            let nodes = data_retrieval::format_unique_values_for_storage(&values, max_length);
+
+            maintain_graph::update_node_properties(&mut self.inner, &nodes, target_property)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+            if !keep_selection.unwrap_or(false) {
+                self.selection.clear();
             }
-            Ok(result.to_object(py))
-        })
+
+            Python::with_gil(|py| Ok(self.clone().into_py(py)))
+        } else {
+            Python::with_gil(|py| py_out::level_unique_values_to_pydict(py, &values))
+        }
     }
     
     fn traverse(
@@ -333,10 +341,9 @@ impl KnowledgeGraph {
             level_index,
         );
     
-        // Store results if requested
         if let Some(target_property) = store_as {
-            let nodes: Vec<(Option<petgraph::graph::NodeIndex>, f64)> = results.iter()
-                .map(|result| (result.parent_idx, result.value.unwrap_or(0.0)))
+            let nodes: Vec<(Option<petgraph::graph::NodeIndex>, Value)> = results.iter()
+                .map(|result| (result.parent_idx, Value::Float64(result.value.unwrap_or(0.0))))
                 .collect();
     
             maintain_graph::update_node_properties(&mut self.inner, &nodes, target_property)

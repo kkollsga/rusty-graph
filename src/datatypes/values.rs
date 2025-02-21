@@ -315,7 +315,7 @@ impl std::fmt::Display for DataFrame {
     }
 }
 
-fn format_value(value: &Value) -> String {
+pub fn format_value(value: &Value) -> String {
     match value {
         Value::UniqueId(v) => format!("{}", v),
         Value::Int64(v) => format!("{}", v),

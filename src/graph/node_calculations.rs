@@ -90,11 +90,7 @@ pub fn calculate_node_statistic(
                 parent_idx: pair.parent,  // Now we include the parent index directly
                 parent_title,
                 value: result,
-                error: if values.is_empty() && method != StatMethod::Count {
-                    Some(format!("No valid numeric values found for property '{}'", property))
-                } else {
-                    None
-                },
+                error: None,
             }
         })
         .collect()
