@@ -27,7 +27,8 @@ impl fmt::Display for StatMethod {
 
 #[derive(Debug)]
 pub struct StatResult {
-    pub parent_title: Option<String>,  // New field
+    pub parent_idx: Option<petgraph::graph::NodeIndex>,  // Added field
+    pub parent_title: Option<String>,
     pub value: Option<f64>,
     pub error: Option<String>,
 }
@@ -49,9 +50,8 @@ pub fn calculate_node_statistic(
             let parent_title = pair.parent
                 .and_then(|idx| graph.get_node(idx))
                 .and_then(|n| n.get_field("title"))
-                .and_then(|v| v.as_string());  // Using Value's as_string() method
+                .and_then(|v| v.as_string());
             
-            // Rest of function remains unchanged...
             for &node_idx in &pair.children {
                 if let Some(node) = graph.get_node(node_idx) {
                     if let Some(value) = try_get_numeric_value(node, property) {
@@ -87,6 +87,7 @@ pub fn calculate_node_statistic(
             };
 
             StatResult {
+                parent_idx: pair.parent,  // Now we include the parent index directly
                 parent_title,
                 value: result,
                 error: if values.is_empty() && method != StatMethod::Count {

@@ -306,7 +306,7 @@ impl KnowledgeGraph {
         Ok(self.clone())
     }
     
-    fn calculate_stats(
+    fn statistics(
         &self,
         property: &str,
         level_index: Option<usize>,
@@ -316,11 +316,13 @@ impl KnowledgeGraph {
         py_out::convert_stats_for_python(stats)
     }
 
-    fn calculate_node_value(
-        &self,
+    fn calculate(
+        &mut self,
         property: &str,
         method: &str,
         level_index: Option<usize>,
+        store_as: Option<&str>,
+        keep_selection: Option<bool>,
     ) -> PyResult<PyObject> {
         let stat_method = py_in::parse_stat_method(method)?;
         let results = node_calculations::calculate_node_statistic(
@@ -330,7 +332,24 @@ impl KnowledgeGraph {
             stat_method,
             level_index,
         );
-        py_out::convert_stat_results_for_python(results)
+    
+        // Store results if requested
+        if let Some(target_property) = store_as {
+            let nodes: Vec<(Option<petgraph::graph::NodeIndex>, f64)> = results.iter()
+                .map(|result| (result.parent_idx, result.value.unwrap_or(0.0)))
+                .collect();
+    
+            maintain_graph::update_node_properties(&mut self.inner, &nodes, target_property)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+    
+            if !keep_selection.unwrap_or(false) {
+                self.selection.clear();
+            }
+    
+            Python::with_gil(|py| Ok(self.clone().into_py(py)))
+        } else {
+            py_out::convert_stat_results_for_python(results)
+        }
     }
 
     fn count(&self, level_index: Option<usize>) -> PyResult<usize> {

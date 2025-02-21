@@ -393,3 +393,39 @@ pub fn selection_to_new_connections(
              stats.connections_created, metrics.batch_count, metrics.processing_time, skipped);
     Ok((stats.connections_created, skipped))
 }
+
+pub fn update_node_properties(
+    graph: &mut DirGraph,
+    nodes: &[(Option<petgraph::graph::NodeIndex>, f64)],
+    property_name: &str,
+) -> Result<(), String> {
+    let mut updates = 0;
+    let mut skipped = 0;
+
+    for (node_idx_opt, value) in nodes {
+        if let Some(node_idx) = node_idx_opt {
+            if let Some(node) = graph.get_node_mut(*node_idx) {
+                match node {
+                    NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
+                        properties.insert(
+                            property_name.to_string(),
+                            Value::Float64(*value)
+                        );
+                        updates += 1;
+                    }
+                }
+            } else {
+                skipped += 1;
+            }
+        } else {
+            skipped += 1;
+        }
+    }
+
+    if updates > 0 {
+        println!("Updated {} nodes with property '{}', skipped {} invalid nodes",
+                 updates, property_name, skipped);
+    }
+
+    Ok(())
+}

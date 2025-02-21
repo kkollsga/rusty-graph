@@ -6,6 +6,7 @@ use super::values::{DataFrame, ColumnType, ColumnData, Value, FilterCondition};
 use super::type_conversions::{to_u32, to_i64, to_f64, to_datetime, to_bool};
 use crate::graph::node_calculations::StatMethod;
 
+
 pub fn pydict_to_filter_conditions(dict: &Bound<'_, PyDict>) -> PyResult<HashMap<String, FilterCondition>> {
     dict.iter()
         .map(|(k, v)| {
@@ -197,39 +198,48 @@ pub fn parse_sort_fields(
     sort_spec: &Bound<'_, PyAny>, 
     ascending: Option<bool>
 ) -> PyResult<Vec<(String, bool)>> {
+    // Handle single field with explicit direction
     if let Some(asc) = ascending {
-        return match sort_spec.extract::<String>() {
-            Ok(field) => Ok(vec![(field, asc)]),
-            Err(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "When providing direction, sort_spec must be a string"
-            ))
-        };
+        let field = sort_spec.extract::<String>()?;
+        return Ok(vec![(field, asc)]);
     }
     
-    parse_complex_sort_spec(sort_spec)
-}
-
-pub fn parse_complex_sort_spec(sort_spec: &Bound<'_, PyAny>) -> PyResult<Vec<(String, bool)>> {
+    // Handle single string
     if let Ok(field) = sort_spec.extract::<String>() {
         return Ok(vec![(field, true)]);
     }
     
+    // Handle single tuple
     if let Ok((field, ascending)) = sort_spec.extract::<(String, bool)>() {
         return Ok(vec![(field, ascending)]);
     }
     
+    // Handle list of sort specifications
     let sort_list = sort_spec.downcast::<PyList>()?;
-    let sort_fields: Vec<(String, bool)> = sort_list.iter()
-        .map(|item| item.extract::<(String, bool)>())
-        .collect::<PyResult<_>>()?;
-    
-    if sort_fields.is_empty() {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Sort specification cannot be empty"
-        ));
+    if sort_list.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Sort specification cannot be empty"));
     }
-    
-    Ok(sort_fields)
+
+    // Process each item in the list
+    sort_list.iter()
+        .map(|item| {
+            if let Ok(field) = item.extract::<String>() {
+                Ok((field, true))
+            } else if let Ok((field, ascending)) = item.extract::<(String, bool)>() {
+                Ok((field, ascending))
+            } else if let Ok(list) = item.downcast::<PyList>() {
+                if list.len() != 2 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("List specification must have exactly 2 elements"));
+                }
+                Ok((
+                    list.get_item(0)?.extract::<String>()?,
+                    list.get_item(1)?.extract::<bool>()?
+                ))
+            } else {
+                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid sort specification"))
+            }
+        })
+        .collect()
 }
 
 pub fn py_value_to_value(value: &Bound<'_, PyAny>) -> PyResult<Value> {
