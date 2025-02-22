@@ -1,6 +1,5 @@
 // src/graph/custom_equation.rs
 
-use super::node_calculations::StatResult;
 use super::statistics_methods::get_parent_child_pairs;
 use super::equation_parser::{Parser, Evaluator, Expr};
 use super::maintain_graph;
@@ -12,6 +11,14 @@ use std::collections::HashMap;
 pub enum EvaluationResult {
     Stored(()),
     Computed(Vec<StatResult>)
+}
+
+#[derive(Debug)]
+pub struct StatResult {
+    pub parent_idx: Option<petgraph::graph::NodeIndex>,  // Added field
+    pub parent_title: Option<String>,
+    pub value: Option<f64>,
+    pub error: Option<String>,
 }
 
 pub fn process_equation(
@@ -103,27 +110,13 @@ pub fn evaluate_equation(
     
     pairs.iter()
         .flat_map(|pair| {
-            // Get parent information
-            let parent_title = match pair.parent {
-                Some(idx) => {
-                    if let Some(node) = graph.get_node(idx) {
-                        Some(node.get_field("title")
-                            .and_then(|v| v.as_string())
-                            .unwrap_or_else(|| format!("Node_{}", idx.index())))
-                    } else {
-                        Some("Unknown".to_string())
-                    }
-                },
-                None => Some("Root".to_string()),
-            };            
-
             // Convert node data to objects for evaluation
-            let child_nodes: Vec<(NodeData, HashMap<String, f64>)> = pair.children.iter()
+            let child_nodes: Vec<(NodeIndex, NodeData, HashMap<String, f64>)> = pair.children.iter()
                 .filter_map(|&node_idx| {
                     graph.get_node(node_idx)
                         .and_then(|node| {
                             convert_node_to_object(node)
-                                .map(|obj| (node.clone(), obj))
+                                .map(|obj| (node_idx, node.clone(), obj))
                         })
                 })
                 .collect();
@@ -131,17 +124,22 @@ pub fn evaluate_equation(
             if child_nodes.is_empty() {
                 return vec![StatResult {
                     parent_idx: pair.parent,
-                    parent_title: parent_title.clone(),
+                    parent_title: Some("No valid nodes".to_string()),
                     value: None,
-                    error: Some(format!("No valid nodes found for evaluation in group {}", 
-                        parent_title.as_ref().map(String::as_str).unwrap_or("unassigned"))),
+                    error: Some("No valid nodes found for evaluation".to_string()),
                 }];
             }
 
             if is_aggregation {
                 // For aggregation, compute one result per parent
+                let parent_title = pair.parent.and_then(|idx| {
+                    graph.get_node(idx)
+                        .and_then(|node| node.get_field("title"))
+                        .and_then(|v| v.as_string())
+                });
+
                 let objects: Vec<HashMap<String, f64>> = child_nodes.into_iter()
-                    .map(|(_, obj)| obj)
+                    .map(|(_, _, obj)| obj)
                     .collect();
 
                 vec![match Evaluator::evaluate(&parsed_expr, &objects) {
@@ -161,21 +159,20 @@ pub fn evaluate_equation(
             } else {
                 // For direct calculations, compute one result per child
                 child_nodes.into_iter()
-                    .map(|(node, obj)| {
-                        let child_title = node.get_field("title")
-                            .and_then(|v| v.as_string())
-                            .unwrap_or_else(|| "Unknown".to_string());
+                    .map(|(_, node, obj)| {  // Changed from (node_idx, node, obj)
+                        let title = node.get_field("title")
+                            .and_then(|v| v.as_string());
 
                         match Evaluator::evaluate(&parsed_expr, &[obj]) {
                             Ok(value) => StatResult {
-                                parent_idx: pair.parent,
-                                parent_title: Some(child_title),
+                                parent_idx: None,  // For direct calculations, we don't use parent
+                                parent_title: title,
                                 value: Some(value),
                                 error: None,
                             },
                             Err(err) => StatResult {
-                                parent_idx: pair.parent,
-                                parent_title: Some(child_title),
+                                parent_idx: None,
+                                parent_title: title,
                                 value: None,
                                 error: Some(err),
                             },
@@ -222,4 +219,19 @@ fn convert_node_to_object(node: &NodeData) -> Option<HashMap<String, f64>> {
     } else {
         Some(object)
     }
+}
+
+pub fn count_nodes_in_level(
+    selection: &CurrentSelection,
+    level_index: Option<usize>,
+) -> usize {
+    let effective_index = match level_index {
+        Some(idx) => idx,
+        None => selection.get_level_count().saturating_sub(1)
+    };
+
+    let level = selection.get_level(effective_index)
+        .expect("Level should exist");  // Safe due to saturating_sub
+    
+    level.get_all_nodes().len()
 }

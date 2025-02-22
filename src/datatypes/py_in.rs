@@ -4,7 +4,6 @@ use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
 use super::values::{DataFrame, ColumnType, ColumnData, Value, FilterCondition};
 use super::type_conversions::{to_u32, to_i64, to_f64, to_datetime, to_bool};
-use crate::graph::node_calculations::StatMethod;
 
 
 pub fn pydict_to_filter_conditions(dict: &Bound<'_, PyDict>) -> PyResult<HashMap<String, FilterCondition>> {
@@ -261,18 +260,5 @@ pub fn py_value_to_value(value: &Bound<'_, PyAny>) -> PyResult<Value> {
         Ok(Value::UniqueId(u))
     } else {
         Ok(Value::Null)
-    }
-}
-
-pub fn parse_stat_method(method: &str) -> PyResult<StatMethod> {
-    match method.to_lowercase().as_str() {
-        "sum" => Ok(StatMethod::Sum),
-        "average" | "avg" | "mean" => Ok(StatMethod::Average),
-        "min" | "minimum" => Ok(StatMethod::Min),
-        "max" | "maximum" => Ok(StatMethod::Max),
-        "count" => Ok(StatMethod::Count),
-        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("Unsupported statistical method: {}", method)
-        )),
     }
 }

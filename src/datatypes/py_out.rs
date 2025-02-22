@@ -2,7 +2,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use super::values::Value;
-use crate::graph::node_calculations::StatResult;
+use crate::graph::calculations::StatResult;
 use crate::graph::schema::NodeInfo;
 use crate::graph::statistics_methods::PropertyStats;
 use crate::graph::data_retrieval::{LevelNodes, LevelValues, LevelConnections, UniqueValues};
@@ -295,31 +295,6 @@ pub fn level_connections_to_pydict(
     }
     
     Ok(result.to_object(py))
-}
-
-pub fn convert_stat_results_for_python(results: Vec<StatResult>) -> PyResult<PyObject> {
-    Python::with_gil(|py| {
-        let dict = PyDict::new_bound(py);
-        
-        for result in results {
-            let key = result.parent_title.as_ref()
-                .map(String::as_str)
-                .unwrap_or("unassigned");
-            let value = convert_stat_value(py, &result);
-            dict.set_item(key, value)?;
-        }
-        
-        Ok(dict.into())
-    })
-}
-
-fn convert_stat_value(py: Python, result: &StatResult) -> PyObject {
-    match (result.value, &result.error) {
-        (Some(v), None) => v.to_object(py),
-        (None, Some(err)) => err.to_object(py),
-        (None, None) => py.None(),
-        (Some(_), Some(_)) => unreachable!(),
-    }
 }
 
 pub fn level_unique_values_to_pydict(py: Python, values: &[UniqueValues]) -> PyResult<PyObject> {

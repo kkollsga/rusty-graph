@@ -14,12 +14,11 @@ pub mod statistics_methods;
 pub mod io_operations;
 pub mod lookups;
 pub mod debugging;
-pub mod custom_equation;
+pub mod calculations;
 pub mod equation_parser;
 pub mod batch_operations;
 pub mod schema;
 pub mod data_retrieval;
-pub mod node_calculations;
 
 use schema::{DirGraph, CurrentSelection};
 
@@ -328,47 +327,12 @@ impl KnowledgeGraph {
 
     fn calculate(
         &mut self,
-        property: &str,
-        method: &str,
-        level_index: Option<usize>,
-        store_as: Option<&str>,
-        keep_selection: Option<bool>,
-    ) -> PyResult<PyObject> {
-        let stat_method = py_in::parse_stat_method(method)?;
-        let results = node_calculations::calculate_node_statistic(
-            &self.inner,
-            &self.selection,
-            property,
-            stat_method,
-            level_index,
-        );
-    
-        if let Some(target_property) = store_as {
-            let nodes: Vec<(Option<petgraph::graph::NodeIndex>, Value)> = results.iter()
-                .map(|result| (result.parent_idx, Value::Float64(result.value.unwrap_or(0.0))))
-                .collect();
-    
-            maintain_graph::update_node_properties(&mut self.inner, &nodes, target_property)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-    
-            if !keep_selection.unwrap_or(false) {
-                self.selection.clear();
-            }
-    
-            Python::with_gil(|py| Ok(self.clone().into_py(py)))
-        } else {
-            py_out::convert_stat_results_for_python(results)
-        }
-    }
-
-    fn equation(
-        &mut self,
         expression: &str,
         level_index: Option<usize>,
         store_as: Option<&str>,
         keep_selection: Option<bool>,
     ) -> PyResult<PyObject> {
-        let result = custom_equation::process_equation(
+        let result = calculations::process_equation(
             &mut self.inner,
             &self.selection,
             expression,
@@ -381,17 +345,17 @@ impl KnowledgeGraph {
         }
     
         match result {
-            custom_equation::EvaluationResult::Stored(()) => {
+            calculations::EvaluationResult::Stored(()) => {
                 Python::with_gil(|py| Ok(self.clone().into_py(py)))
             },
-            custom_equation::EvaluationResult::Computed(results) => {
+            calculations::EvaluationResult::Computed(results) => {
                 py_out::convert_computation_results_for_python(results)
             }
         }
     }
 
     fn count(&self, level_index: Option<usize>) -> PyResult<usize> {
-        let count = node_calculations::count_nodes_in_level(&self.selection, level_index);
+        let count = calculations::count_nodes_in_level(&self.selection, level_index);
         Ok(count)
     }
 
