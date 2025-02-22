@@ -4,6 +4,7 @@ use crate::graph::schema::{DirGraph, NodeData, CurrentSelection};
 use crate::graph::lookups::{TypeLookup, CombinedTypeLookup};
 use crate::graph::batch_operations::{BatchProcessor, ConnectionBatchProcessor, NodeAction};
 use crate::datatypes::{Value, DataFrame};
+use petgraph::graph::NodeIndex;
 
 fn check_data_validity(df_data: &DataFrame, unique_id_field: &str) -> Result<(), String> {
     // Remove strict UniqueId type verification to allow nulls
@@ -219,8 +220,8 @@ pub fn add_connections(
 
 fn update_node_titles(
     graph: &mut DirGraph,
-    source_idx: petgraph::graph::NodeIndex,
-    target_idx: petgraph::graph::NodeIndex,
+    source_idx: NodeIndex,
+    target_idx: NodeIndex,
     row_idx: usize,
     source_title_idx: Option<usize>,
     target_title_idx: Option<usize>,
@@ -396,33 +397,45 @@ pub fn selection_to_new_connections(
 
 pub fn update_node_properties(
     graph: &mut DirGraph,
-    nodes: &[(Option<petgraph::graph::NodeIndex>, Value)],
-    property_name: &str,
+    nodes: &[(Option<NodeIndex>, Value)],
+    property: &str,
 ) -> Result<(), String> {
-    let mut updates = 0;
-    let mut skipped = 0;
-
-    for (node_idx_opt, value) in nodes {
-        if let Some(node_idx) = node_idx_opt {
-            if let Some(node) = graph.get_node_mut(*node_idx) {
+    for (node_idx, value) in nodes {
+        if let Some(idx) = node_idx {
+            if let Some(node) = graph.get_node_mut(*idx) {
                 match node {
-                    NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-                        properties.insert(property_name.to_string(), value.clone());
-                        updates += 1;
+                    NodeData::Regular { properties, .. } => {
+                        properties.insert(property.to_string(), value.clone());
+                    },
+                    NodeData::Schema { .. } => {
+                        return Err("Cannot update properties on schema nodes".to_string());
                     }
                 }
-            } else {
-                skipped += 1;
             }
-        } else {
-            skipped += 1;
         }
     }
+    Ok(())
+}
 
-    if updates > 0 {
-        println!("Updated {} nodes with property '{}', skipped {} invalid nodes",
-                 updates, property_name, skipped);
+pub fn update_selected_node_properties(
+    graph: &mut DirGraph,
+    selection: &CurrentSelection,
+    level_index: Option<usize>,
+    property: &str,
+    value: Value,
+) -> Result<(), String> {
+    let level_idx = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
+    if let Some(level) = selection.get_level(level_idx) {
+        for node_idx in level.get_all_nodes() {
+            if let Some(node) = graph.get_node_mut(node_idx) {
+                match node {
+                    NodeData::Regular { properties, .. } => {
+                        properties.insert(property.to_string(), value.clone());
+                    },
+                    NodeData::Schema { .. } => continue,
+                }
+            }
+        }
     }
-
     Ok(())
 }

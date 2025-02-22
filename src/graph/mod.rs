@@ -369,28 +369,25 @@ impl KnowledgeGraph {
         store_as: Option<&str>,
         keep_selection: Option<bool>,
     ) -> PyResult<PyObject> {
-        let results = custom_equation::evaluate_equation(
-            &self.inner,
+        let result = custom_equation::process_equation(
+            &mut self.inner,
             &self.selection,
             expression,
             level_index,
-        );
-
-        if let Some(target_property) = store_as {
-            let nodes: Vec<(Option<NodeIndex>, Value)> = results.iter()
-                .map(|result| (result.parent_idx, Value::Float64(result.value.unwrap_or(0.0))))
-                .collect();
-
-            maintain_graph::update_node_properties(&mut self.inner, &nodes, target_property)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-
-            if !keep_selection.unwrap_or(false) {
-                self.selection.clear();
+            store_as,
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+    
+        if !keep_selection.unwrap_or(false) {
+            self.selection.clear();
+        }
+    
+        match result {
+            custom_equation::EvaluationResult::Stored(()) => {
+                Python::with_gil(|py| Ok(self.clone().into_py(py)))
+            },
+            custom_equation::EvaluationResult::Computed(results) => {
+                py_out::convert_computation_results_for_python(results)
             }
-
-            Python::with_gil(|py| Ok(self.clone().into_py(py)))
-        } else {
-            py_out::convert_computation_results_for_python(results)
         }
     }
 
