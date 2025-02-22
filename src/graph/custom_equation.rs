@@ -1,149 +1,91 @@
-use rhai::{Engine, Scope, Dynamic};
-use crate::graph::schema::{DirGraph, CurrentSelection, NodeData};
+// src/graph/custom_equation.rs
+
+use super::node_calculations::StatResult;
+use super::statistics_methods::get_parent_child_pairs;
+use super::equation_parser::{Parser, Evaluator};
 use crate::datatypes::values::Value;
+use crate::graph::schema::{DirGraph, CurrentSelection, NodeData};
 use std::collections::HashMap;
-use petgraph::graph::NodeIndex;
 
-/// Result structure for equation evaluations, following similar pattern to StatResult
-pub struct EquationResult {
-    pub parent_title: Option<String>,
-    pub parent_idx: Option<NodeIndex>,
-    pub value: Option<f64>,
-    pub error: Option<String>,
-}
-
-/// Evaluates a custom equation for each group in the current selection
-/// 
-/// # Arguments
-/// * `graph` - The directed graph containing all nodes and their properties
-/// * `selection` - Current selection state containing levels and groups
-/// * `expression` - The equation to evaluate (using Rhai syntax)
-/// * `level_index` - Optional specific level to evaluate, defaults to last level
-/// 
-/// # Returns
-/// Vector of EquationResult containing evaluation results for each group
 pub fn evaluate_equation(
     graph: &DirGraph,
     selection: &CurrentSelection,
     expression: &str,
     level_index: Option<usize>,
-) -> Vec<EquationResult> {
-    let level_idx = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
-    let mut results = Vec::new();
+) -> Vec<StatResult> {
+    // Parse the expression once at the start
+    let parsed_expr = match Parser::parse_expression(expression) {
+        Ok(expr) => expr,
+        Err(err) => {
+            return vec![StatResult {
+                parent_idx: None,
+                parent_title: None,
+                value: None,
+                error: Some(format!("Failed to parse expression: {}", err)),
+            }];
+        }
+    };
 
-    if let Some(level) = selection.get_level(level_idx) {
-        let mut engine = Engine::new();
-        setup_engine(&mut engine);
+    let pairs = get_parent_child_pairs(selection, level_index);
+    
+    pairs.iter()
+        .map(|pair| {
+            let mut result = StatResult {
+                parent_idx: pair.parent,
+                parent_title: pair.parent
+                    .and_then(|idx| graph.get_node(idx))
+                    .and_then(|n| n.get_field("title"))
+                    .and_then(|v| v.as_string()),
+                value: None,
+                error: None,
+            };
 
-        for (parent, children) in level.iter_groups() {
-            let mut scope = Scope::new();
-            let property_arrays = collect_property_arrays(graph, children);
-            
-            // Register arrays in scope
-            for (key, values) in property_arrays {
-                scope.push(key, Dynamic::from(values));
+            // Convert node data to objects for evaluation
+            let objects: Vec<HashMap<String, f64>> = pair.children.iter()
+                .filter_map(|&node_idx| {
+                    graph.get_node(node_idx)
+                        .and_then(convert_node_to_object)
+                })
+                .collect();
+
+            if objects.is_empty() {
+                result.error = Some("No valid nodes found for evaluation".to_string());
+                return result;
             }
 
-            let parent_title = match parent {
-                Some(p) => {
-                    if let Some(node) = graph.get_node(*p) {
-                        node.get_field("title")
-                            .and_then(|v| match v {
-                                Value::String(s) => Some(s),
-                                _ => None
-                            })
-                    } else {
-                        None
-                    }
-                },
-                None => Some("Root".to_string()),
-            };
+            // Evaluate expression using parsed AST
+            match Evaluator::evaluate(&parsed_expr, &objects) {
+                Ok(value) => result.value = Some(value),
+                Err(err) => result.error = Some(err),
+            }
 
-            // Evaluate expression
-            let result = match engine.eval_with_scope::<f64>(&mut scope, expression) {
-                Ok(value) => EquationResult {
-                    parent_idx: parent.map(|p| p),
-                    parent_title,
-                    value: Some(value),
-                    error: None,
-                },
-                Err(e) => EquationResult {
-                    parent_idx: parent.map(|p| p),
-                    parent_title,
-                    value: None,
-                    error: Some(e.to_string()),
-                },
-            };
-
-            results.push(result);
-        }
-    }
-
-    results
+            result
+        })
+        .collect()
 }
 
-/// Sets up the Rhai engine with common functions needed for calculations
-fn setup_engine(engine: &mut Engine) {
-    // Basic aggregation functions
-    engine.register_fn("sum", |arr: Vec<f64>| arr.iter().sum::<f64>());
-    engine.register_fn("avg", |arr: Vec<f64>| {
-        if arr.is_empty() { 0.0 } else { arr.iter().sum::<f64>() / arr.len() as f64 }
-    });
-    engine.register_fn("max", |arr: Vec<f64>| {
-        arr.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))
-    });
-    engine.register_fn("min", |arr: Vec<f64>| {
-        arr.iter().fold(f64::INFINITY, |a, &b| a.min(b))
-    });
-    engine.register_fn("count", |arr: Vec<f64>| arr.len() as f64);
-
-    // Statistical functions
-    engine.register_fn("variance", |arr: Vec<f64>| {
-        if arr.len() < 2 { return 0.0; }
-        let n = arr.len() as f64;
-        let mean = arr.iter().sum::<f64>() / n;
-        arr.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)
-    });
+fn convert_node_to_object(node: &NodeData) -> Option<HashMap<String, f64>> {
+    let mut object = HashMap::new();
     
-    engine.register_fn("std", |arr: Vec<f64>| {
-        if arr.len() < 2 { return 0.0; }
-        let n = arr.len() as f64;
-        let mean = arr.iter().sum::<f64>() / n;
-        (arr.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt()
-    });
-
-    // Helper functions
-    engine.register_fn("abs", |x: f64| x.abs());
-    engine.register_fn("sqrt", |x: f64| x.sqrt());
-    engine.register_fn("pow", |x: f64, y: f64| x.powf(y));
-    engine.register_fn("round", |x: f64| x.round());
-}
-
-/// Collects property values from nodes into arrays for calculations
-/// 
-/// # Arguments
-/// * `graph` - The graph containing the nodes
-/// * `nodes` - List of node indices to collect properties from
-/// 
-/// # Returns
-/// HashMap mapping property names to vectors of their values
-fn collect_property_arrays(graph: &DirGraph, nodes: &[NodeIndex]) -> HashMap<String, Vec<f64>> {
-    let mut property_arrays: HashMap<String, Vec<f64>> = HashMap::new();
-    
-    for &node_idx in nodes {
-        if let Some(node) = graph.get_node(node_idx) {
-            if let NodeData::Regular { properties, .. } = node {
-                for (key, value) in properties {
-                    let entry = property_arrays.entry(key.clone()).or_default();
-                    match value {
-                        Value::Float64(f) => entry.push(*f),  // Added dereferencing
-                        Value::Int64(i) => entry.push(*i as f64),
-                        _ => continue,
-                    }
+    match node {
+        NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
+            for (key, value) in properties {
+                if let Some(num_value) = match value {
+                    Value::Int64(i) => Some(*i as f64),
+                    Value::Float64(f) => Some(*f),
+                    Value::UniqueId(u) => Some(*u as f64),
+                    Value::String(s) => s.parse::<f64>().ok(),
+                    _ => None,
+                } {
+                    object.insert(key.clone(), num_value);
                 }
             }
         }
     }
-
-    property_arrays
+    
+    if object.is_empty() {
+        None
+    } else {
+        Some(object)
+    }
 }

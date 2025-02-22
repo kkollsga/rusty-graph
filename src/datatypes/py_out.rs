@@ -6,7 +6,6 @@ use crate::graph::node_calculations::StatResult;
 use crate::graph::schema::NodeInfo;
 use crate::graph::statistics_methods::PropertyStats;
 use crate::graph::data_retrieval::{LevelNodes, LevelValues, LevelConnections, UniqueValues};
-use crate::graph::custom_equation::EquationResult;
 
 pub fn nodeinfo_to_pydict(py: Python, node: &NodeInfo) -> PyResult<PyObject> {
     let dict = PyDict::new_bound(py);
@@ -334,7 +333,7 @@ pub fn level_unique_values_to_pydict(py: Python, values: &[UniqueValues]) -> PyR
     Ok(result.to_object(py))
 }
 
-pub fn convert_equation_results_for_python(results: Vec<EquationResult>) -> PyResult<PyObject> {
+pub fn convert_computation_results_for_python(results: Vec<StatResult>) -> PyResult<PyObject> {
     Python::with_gil(|py| {
         let dict = PyDict::new_bound(py);
         

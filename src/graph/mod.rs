@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use crate::datatypes::{py_in, py_out};
 use crate::datatypes::values::{Value, FilterCondition};
 use crate::graph::io_operations::save_to_file;
+use petgraph::graph::NodeIndex;
 
 pub mod maintain_graph;
 pub mod filtering_methods;
@@ -15,6 +16,7 @@ pub mod io_operations;
 pub mod lookups;
 pub mod debugging;
 pub mod custom_equation;
+pub mod equation_parser;
 pub mod batch_operations;
 pub mod schema;
 pub mod data_retrieval;
@@ -357,6 +359,38 @@ impl KnowledgeGraph {
             Python::with_gil(|py| Ok(self.clone().into_py(py)))
         } else {
             py_out::convert_stat_results_for_python(results)
+        }
+    }
+
+    fn equation(
+        &mut self,
+        expression: &str,
+        level_index: Option<usize>,
+        store_as: Option<&str>,
+        keep_selection: Option<bool>,
+    ) -> PyResult<PyObject> {
+        let results = custom_equation::evaluate_equation(
+            &self.inner,
+            &self.selection,
+            expression,
+            level_index,
+        );
+
+        if let Some(target_property) = store_as {
+            let nodes: Vec<(Option<NodeIndex>, Value)> = results.iter()
+                .map(|result| (result.parent_idx, Value::Float64(result.value.unwrap_or(0.0))))
+                .collect();
+
+            maintain_graph::update_node_properties(&mut self.inner, &nodes, target_property)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+            if !keep_selection.unwrap_or(false) {
+                self.selection.clear();
+            }
+
+            Python::with_gil(|py| Ok(self.clone().into_py(py)))
+        } else {
+            py_out::convert_computation_results_for_python(results)
         }
     }
 
