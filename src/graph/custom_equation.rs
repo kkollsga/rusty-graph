@@ -104,19 +104,18 @@ pub fn evaluate_equation(
     pairs.iter()
         .flat_map(|pair| {
             // Get parent information
-            let (parent_title, parent_node) = match pair.parent {
+            let parent_title = match pair.parent {
                 Some(idx) => {
                     if let Some(node) = graph.get_node(idx) {
-                        let title = node.get_field("title")
+                        Some(node.get_field("title")
                             .and_then(|v| v.as_string())
-                            .unwrap_or_else(|| format!("Node_{}", idx.index()));
-                        (Some(title), Some(node))
+                            .unwrap_or_else(|| format!("Node_{}", idx.index())))
                     } else {
-                        (None, None)
+                        Some("Unknown".to_string())
                     }
                 },
-                None => (None, None),
-            };
+                None => Some("Root".to_string()),
+            };            
 
             // Convert node data to objects for evaluation
             let child_nodes: Vec<(NodeData, HashMap<String, f64>)> = pair.children.iter()
@@ -135,7 +134,7 @@ pub fn evaluate_equation(
                     parent_title: parent_title.clone(),
                     value: None,
                     error: Some(format!("No valid nodes found for evaluation in group {}", 
-                        parent_title.as_deref().unwrap_or("unassigned"))),
+                        parent_title.as_ref().map(String::as_str).unwrap_or("unassigned"))),
                 }];
             }
 

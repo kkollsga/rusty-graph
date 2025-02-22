@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use crate::datatypes::{py_in, py_out};
 use crate::datatypes::values::{Value, FilterCondition};
 use crate::graph::io_operations::save_to_file;
-use petgraph::graph::NodeIndex;
 
 pub mod maintain_graph;
 pub mod filtering_methods;
