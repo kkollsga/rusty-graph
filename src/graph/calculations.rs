@@ -1,4 +1,4 @@
-// src/graph/custom_equation.rs
+// src/graph/calculations.rs
 
 use super::statistics_methods::get_parent_child_pairs;
 use super::equation_parser::{Parser, Evaluator, Expr};
@@ -91,7 +91,6 @@ pub fn evaluate_equation(
     expression: &str,
     level_index: Option<usize>,
 ) -> Vec<StatResult> {
-    // Parse the expression once at the start
     let parsed_expr = match Parser::parse_expression(expression) {
         Ok(expr) => expr,
         Err(err) => {
@@ -103,35 +102,33 @@ pub fn evaluate_equation(
             }];
         }
     };
+    println!("Parsed expression: {:?}", parsed_expr);
 
-    // Check if this is an aggregation expression
     let is_aggregation = has_aggregation(&parsed_expr);
-    let pairs = get_parent_child_pairs(selection, level_index);
-    
-    pairs.iter()
-        .flat_map(|pair| {
-            // Convert node data to objects for evaluation
-            let child_nodes: Vec<(NodeIndex, NodeData, HashMap<String, f64>)> = pair.children.iter()
-                .filter_map(|&node_idx| {
-                    graph.get_node(node_idx)
-                        .and_then(|node| {
-                            convert_node_to_object(node)
-                                .map(|obj| (node_idx, node.clone(), obj))
-                        })
-                })
-                .collect();
 
-            if child_nodes.is_empty() {
-                return vec![StatResult {
-                    parent_idx: pair.parent,
-                    parent_title: Some("No valid nodes".to_string()),
-                    value: None,
-                    error: Some("No valid nodes found for evaluation".to_string()),
-                }];
-            }
+    if is_aggregation {
+        // Use parent-child pairs for aggregation
+        let pairs = get_parent_child_pairs(selection, level_index);
+        
+        pairs.iter()
+            .flat_map(|pair| {
+                let child_nodes: Vec<(NodeIndex, NodeData, HashMap<String, f64>)> = pair.children.iter()
+                    .map(|&node_idx| {
+                        graph.get_node(node_idx)
+                            .map(|node| (node_idx, node.clone(), convert_node_to_object(node).unwrap_or_default()))
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap_or_default();
 
-            if is_aggregation {
-                // For aggregation, compute one result per parent
+                if child_nodes.is_empty() {
+                    return vec![StatResult {
+                        parent_idx: pair.parent,
+                        parent_title: Some("No valid nodes".to_string()),
+                        value: None,
+                        error: Some("No valid nodes found for evaluation".to_string()),
+                    }];
+                }
+
                 let parent_title = pair.parent.and_then(|idx| {
                     graph.get_node(idx)
                         .and_then(|node| node.get_field("title"))
@@ -156,32 +153,45 @@ pub fn evaluate_equation(
                         error: Some(err),
                     },
                 }]
-            } else {
-                // For direct calculations, compute one result per child
-                child_nodes.into_iter()
-                    .map(|(_, node, obj)| {  // Changed from (node_idx, node, obj)
-                        let title = node.get_field("title")
-                            .and_then(|v| v.as_string());
+            })
+            .collect()
+    } else {
+        // For non-aggregation, work directly with nodes in the current level
+        let effective_index = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
+        let level = match selection.get_level(effective_index) {
+            Some(l) => l,
+            None => return vec![],
+        };
 
-                        match Evaluator::evaluate(&parsed_expr, &[obj]) {
-                            Ok(value) => StatResult {
-                                parent_idx: None,  // For direct calculations, we don't use parent
+        let nodes = level.get_all_nodes();
+
+        nodes.iter()
+            .filter_map(|&node_idx| {
+                graph.get_node(node_idx).map(|node| {
+                    let title = node.get_field("title")
+                        .and_then(|v| v.as_string());
+                    let obj = convert_node_to_object(node).unwrap_or_default();
+
+                    match Evaluator::evaluate(&parsed_expr, &[obj]) {
+                        Ok(value) => {
+                            StatResult {
+                                parent_idx: None,
                                 parent_title: title,
                                 value: Some(value),
                                 error: None,
-                            },
-                            Err(err) => StatResult {
-                                parent_idx: None,
-                                parent_title: title,
-                                value: None,
-                                error: Some(err),
-                            },
-                        }
-                    })
-                    .collect()
-            }
-        })
-        .collect()
+                            }
+                        },
+                        Err(err) => StatResult {
+                            parent_idx: None,
+                            parent_title: title,
+                            value: None,
+                            error: Some(err),
+                        },
+                    }
+                })
+            })
+            .collect()
+    }
 }
 
 fn has_aggregation(expr: &Expr) -> bool {

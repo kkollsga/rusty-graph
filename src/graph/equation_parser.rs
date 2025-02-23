@@ -256,7 +256,24 @@ impl Evaluator {
                         .fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
                 })
             }
-            _ => Self::evaluate_single(expr, &objects[0]),
+            // Changed this section for non-aggregation expressions
+            _ => {
+                if objects.len() == 1 {
+                    Self::evaluate_single(expr, &objects[0])
+                } else {
+                    // For multiple objects, evaluate the expression for each object
+                    let values: Vec<f64> = objects.iter()
+                        .map(|obj| Self::evaluate_single(expr, obj))
+                        .collect::<Result<Vec<f64>, String>>()?;
+                    
+                    if values.is_empty() {
+                        Err("No objects to evaluate".to_string())
+                    } else {
+                        // For non-aggregation, return the first result
+                        Ok(values[0])
+                    }
+                }
+            }
         }
     }
 

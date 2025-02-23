@@ -312,19 +312,21 @@ pub fn convert_computation_results_for_python(results: Vec<StatResult>) -> PyRes
     Python::with_gil(|py| {
         let dict = PyDict::new_bound(py);
         
+        // Convert and insert each result within the GIL scope
         for result in results {
-            let key = result.parent_title.as_ref()
-                .map(String::as_str)
-                .unwrap_or("unassigned");
-            
-            let value = match (result.value, &result.error) {
-                (Some(v), None) => v.to_object(py),
-                (None, Some(err)) => err.to_object(py),
-                (None, None) => py.None(),
-                (Some(_), Some(_)) => unreachable!(),
-            };
-            
-            dict.set_item(key, value)?;
+            if let Some(value) = result.value {
+                let key = result.parent_title.unwrap_or_else(|| "node".to_string());
+                dict.set_item(key, value)?;
+            } else if let Some(error) = result.error {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(error));
+            }
+        }
+        
+        // If we just have a single value under 'node', return the float directly
+        if dict.len() == 1 {
+            if let Some(value) = dict.get_item("node")? {
+                return Ok(value.into());
+            }
         }
         
         Ok(dict.into())
