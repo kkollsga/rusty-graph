@@ -15,7 +15,8 @@ pub enum EvaluationResult {
 
 #[derive(Debug)]
 pub struct StatResult {
-    pub parent_idx: Option<petgraph::graph::NodeIndex>,  // Added field
+    pub node_idx: Option<NodeIndex>,     // Add direct node reference
+    pub parent_idx: Option<NodeIndex>,   // Keep parent for aggregations
     pub parent_title: Option<String>,
     pub value: Option<f64>,
     pub error: Option<String>,
@@ -29,60 +30,23 @@ pub fn process_equation(
     store_as: Option<&str>,
 ) -> Result<EvaluationResult, String> {
     let results = evaluate_equation(graph, selection, expression, level_index);
-
+    
     if let Some(target_property) = store_as {
-        // Check if this is an aggregation expression
-        let is_aggregation = results.first()
-            .map(|r| r.parent_idx.is_some() && r.value.is_some() && r.error.is_none())
-            .unwrap_or(false);
-
-        if is_aggregation {
-            store_parent_results(graph, &results, target_property)?;
-        } else {
-            store_child_results(graph, selection, level_index, &results, target_property)?;
-        }
+        let nodes: Vec<(Option<NodeIndex>, Value)> = results.iter()
+            .filter_map(|result| {
+                result.value.map(|v| {
+                    // For individual nodes, use node_idx, for aggregations use parent_idx
+                    let idx = result.node_idx.or(result.parent_idx);
+                    (idx, Value::Float64(v))
+                })
+            })
+            .collect();
+            
+        maintain_graph::update_node_properties(graph, &nodes, target_property)?;
         Ok(EvaluationResult::Stored(()))
     } else {
         Ok(EvaluationResult::Computed(results))
     }
-}
-
-fn store_parent_results(
-    graph: &mut DirGraph,
-    results: &[StatResult],
-    property: &str,
-) -> Result<(), String> {
-    let nodes: Vec<(Option<NodeIndex>, Value)> = results.iter()
-        .filter_map(|result| {
-            result.value.map(|v| (
-                result.parent_idx,
-                Value::Float64(v)
-            ))
-        })
-        .collect();
-
-    maintain_graph::update_node_properties(graph, &nodes, property)
-}
-
-fn store_child_results(
-    graph: &mut DirGraph,
-    selection: &CurrentSelection,
-    level_index: Option<usize>,
-    results: &[StatResult],
-    property: &str,
-) -> Result<(), String> {
-    for result in results {
-        if let Some(value) = result.value {
-            maintain_graph::update_selected_node_properties(
-                graph,
-                selection,
-                level_index,
-                property,
-                Value::Float64(value)
-            )?;
-        }
-    }
-    Ok(())
 }
 
 pub fn evaluate_equation(
@@ -95,6 +59,7 @@ pub fn evaluate_equation(
         Ok(expr) => expr,
         Err(err) => {
             return vec![StatResult {
+                node_idx: None,
                 parent_idx: None,
                 parent_title: None,
                 value: None,
@@ -102,7 +67,6 @@ pub fn evaluate_equation(
             }];
         }
     };
-    println!("Parsed expression: {:?}", parsed_expr);
 
     let is_aggregation = has_aggregation(&parsed_expr);
 
@@ -122,6 +86,7 @@ pub fn evaluate_equation(
 
                 if child_nodes.is_empty() {
                     return vec![StatResult {
+                        node_idx: None,
                         parent_idx: pair.parent,
                         parent_title: Some("No valid nodes".to_string()),
                         value: None,
@@ -141,12 +106,14 @@ pub fn evaluate_equation(
 
                 vec![match Evaluator::evaluate(&parsed_expr, &objects) {
                     Ok(value) => StatResult {
+                        node_idx: None,
                         parent_idx: pair.parent,
                         parent_title,
                         value: Some(value),
                         error: None,
                     },
                     Err(err) => StatResult {
+                        node_idx: None,
                         parent_idx: pair.parent,
                         parent_title,
                         value: None,
@@ -175,6 +142,7 @@ pub fn evaluate_equation(
                     match Evaluator::evaluate(&parsed_expr, &[obj]) {
                         Ok(value) => {
                             StatResult {
+                                node_idx: Some(node_idx),  // Include the node_idx for direct updates
                                 parent_idx: None,
                                 parent_title: title,
                                 value: Some(value),
@@ -182,6 +150,7 @@ pub fn evaluate_equation(
                             }
                         },
                         Err(err) => StatResult {
+                            node_idx: Some(node_idx),  // Include the node_idx even for errors
                             parent_idx: None,
                             parent_title: title,
                             value: None,

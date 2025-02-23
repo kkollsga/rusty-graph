@@ -24,7 +24,8 @@ pub fn get_nodes(
     graph: &DirGraph,
     selection: &CurrentSelection,
     level_index: Option<usize>,
-    indices: Option<&[usize]>
+    indices: Option<&[usize]>,
+    max_nodes: Option<usize>
 ) -> Vec<LevelNodes> {
     // If specific indices are provided, do direct lookup
     if let Some(idx) = indices {
@@ -34,6 +35,11 @@ pub fn get_nodes(
                 if let Some(node) = graph.get_node(node_idx) {
                     if let Some(node_info) = node.to_node_info() {
                         direct_nodes.push(node_info);
+                        if let Some(max) = max_nodes {
+                            if direct_nodes.len() >= max {
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -62,6 +68,11 @@ pub fn get_nodes(
                 if let Some(node) = graph.get_node(child_idx) {
                     if let Some(node_info) = node.to_node_info() {
                         nodes.push(node_info);
+                        if let Some(max) = max_nodes {
+                            if nodes.len() >= max {
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -107,7 +118,8 @@ pub fn get_property_values(
     selection: &CurrentSelection,
     level_index: Option<usize>,
     properties: &[&str],
-    indices: Option<&[usize]>
+    indices: Option<&[usize]>,
+    max_nodes: Option<usize>
 ) -> Vec<LevelValues> {
     let level_idx = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
     let mut result = Vec::new();
@@ -117,9 +129,13 @@ pub fn get_property_values(
             let filtered_children: Vec<NodeIndex> = match indices {
                 Some(idx) => children.iter()
                     .filter(|&c| idx.contains(&c.index()))
+                    .take(max_nodes.unwrap_or(usize::MAX))
                     .cloned()
                     .collect(),
-                None => children.clone(),
+                None => children.iter()
+                    .take(max_nodes.unwrap_or(usize::MAX))
+                    .cloned()
+                    .collect(),
             };
             
             // Always create values vector, even if empty

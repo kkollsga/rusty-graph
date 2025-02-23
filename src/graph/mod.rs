@@ -173,39 +173,43 @@ impl KnowledgeGraph {
     }
 
     fn get_nodes(
-        &self, 
+        &self,
+        max_nodes: Option<usize>,
         indices: Option<Vec<usize>>, 
-        parent_key: Option<&str>,
+        parent_type: Option<&str>,
         parent_info: Option<bool>
     ) -> PyResult<PyObject> {
         let nodes = data_retrieval::get_nodes(
             &self.inner, 
             &self.selection, 
             None,
-            indices.as_deref()
+            indices.as_deref(),
+            max_nodes
         );
-        Python::with_gil(|py| py_out::level_nodes_to_pydict(py, &nodes, parent_key, parent_info))
+        Python::with_gil(|py| py_out::level_nodes_to_pydict(py, &nodes, parent_type, parent_info))
     }
     
-    fn get_titles(&self, indices: Option<Vec<usize>>) -> PyResult<PyObject> {
+    fn get_titles(&self, max_nodes: Option<usize>, indices: Option<Vec<usize>>) -> PyResult<PyObject> {
         let values = data_retrieval::get_property_values(
             &self.inner,
             &self.selection,
             None,
             &["title"],
-            indices.as_deref()
+            indices.as_deref(),
+            max_nodes
         );
         Python::with_gil(|py| py_out::level_single_values_to_pydict(py, &values))
     }
     
-    fn get_properties(&self, properties: Vec<String>, indices: Option<Vec<usize>>) -> PyResult<PyObject> {
+    fn get_properties(&self, properties: Vec<String>, max_nodes: Option<usize>, indices: Option<Vec<usize>>) -> PyResult<PyObject> {
         let property_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
         let values = data_retrieval::get_property_values(
             &self.inner,
             &self.selection,
             None,
             &property_refs,
-            indices.as_deref()
+            indices.as_deref(),
+            max_nodes
         );
         Python::with_gil(|py| py_out::level_values_to_pydict(py, &values))
     }
@@ -340,15 +344,16 @@ impl KnowledgeGraph {
             store_as,
         ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
     
-        if !keep_selection.unwrap_or(false) {
-            self.selection.clear();
-        }
-    
         match result {
             calculations::EvaluationResult::Stored(()) => {
+                // Only clear selection if we stored values and keep_selection is false
+                if !keep_selection.unwrap_or(false) {
+                    self.selection.clear();
+                }
                 Python::with_gil(|py| Ok(self.clone().into_py(py)))
             },
             calculations::EvaluationResult::Computed(results) => {
+                // Don't clear selection for computed results that weren't stored
                 py_out::convert_computation_results_for_python(results)
             }
         }

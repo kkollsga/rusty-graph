@@ -34,7 +34,6 @@ pub fn add_nodes(
     let title_field = node_title_field.unwrap_or_else(|| unique_id_field.clone());
     check_data_validity(&df_data, &unique_id_field)?;
 
-    // Rest of the schema processing remains the same...
     let schema_lookup = TypeLookup::new(&graph.graph, "SchemaNode".to_string())?;
     let schema_title = Value::String(node_type.clone());
     let schema_node_idx = schema_lookup.check_title(&schema_title);
@@ -45,7 +44,6 @@ pub fn add_nodes(
         .map(|(k, v)| (k, Value::String(v)))
         .collect();
 
-    // Schema node handling remains the same...
     match schema_node_idx {
         Some(idx) => {
             if let Some(NodeData::Schema { properties, .. }) = graph.get_node_mut(idx) {
@@ -64,7 +62,6 @@ pub fn add_nodes(
                 properties: df_schema_properties,
             };
             graph.graph.add_node(schema_node_data);
-            println!("New SchemaNode created for node type '{}'.", node_type);
         }
     }
 
@@ -78,7 +75,6 @@ pub fn add_nodes(
     let mut batch = BatchProcessor::new(df_data.row_count());
     let mut skipped_count = 0;
 
-    // Process rows
     for row_idx in 0..df_data.row_count() {
         let id = match df_data.get_value_by_index(row_idx, id_idx) {
             Some(Value::Null) => {
@@ -111,11 +107,7 @@ pub fn add_nodes(
         batch.add_action(action, graph)?;
     }
 
-    // Execute remaining actions
-    let (stats, metrics) = batch.execute(graph)?;
-    println!("Processed {} creates and {} updates in {} batches ({}s), skipped {} rows with null IDs",
-             stats.creates, stats.updates, metrics.batch_count, metrics.processing_time, skipped_count);
-
+    batch.execute(graph)?;
     Ok(())
 }
 
@@ -132,7 +124,6 @@ pub fn add_connections(
     columns: Option<Vec<String>>,
     _conflict_handling: Option<String>,
 ) -> Result<(), String> {
-    // Remove strict UniqueId type verification
     if !df_data.verify_column(&source_id_field) {
         return Err(format!("Source ID column '{}' not found", source_id_field));
     }
@@ -145,7 +136,6 @@ pub fn add_connections(
     let target_id_idx = df_data.get_column_index(&target_id_field)
         .ok_or_else(|| format!("Target ID column '{}' not found", target_id_field))?;
 
-    // Rest of the connection setup remains the same...
     let source_title_idx = source_title_field
         .and_then(|field| df_data.get_column_index(&field));
     let target_title_idx = target_title_field
@@ -210,11 +200,7 @@ pub fn add_connections(
         batch.get_schema_properties(),
     )?;
 
-    let (stats, metrics) = batch.execute(graph, connection_type)?;
-    println!("Created {} connections with {} property types in {} batches ({}s), skipped {} rows with null IDs", 
-             stats.connections_created, stats.properties_tracked, 
-             metrics.batch_count, metrics.processing_time, skipped_count);
-
+    batch.execute(graph, connection_type)?;
     Ok(())
 }
 
@@ -252,7 +238,6 @@ fn update_node_titles(
     Ok(())
 }
 
-// In maintain_graph.rs
 fn update_schema_node(
     graph: &mut DirGraph,
     connection_type: &str,
@@ -260,7 +245,6 @@ fn update_schema_node(
     target_type: &str,
     properties: &HashSet<String>,
 ) -> Result<(), String> {
-    // Validate types first, before any mutable borrows
     if !graph.has_node_type(source_type) {
         return Err(format!("Source type '{}' does not exist in graph", source_type));
     }
@@ -273,38 +257,19 @@ fn update_schema_node(
 
     match schema_lookup.check_title(&schema_title) {
         Some(idx) => {
-            // Update existing schema node
             if let Some(NodeData::Schema { properties: schema_props, .. }) = graph.get_node_mut(idx) {
-                // Add new properties
-                let mut properties_added = false;
                 for prop in properties {
                     if !schema_props.contains_key(prop) {
                         schema_props.insert(prop.clone(), Value::String("Unknown".to_string()));
-                        properties_added = true;
                     }
                 }
-
-                // Update type information
-                let source_changed = schema_props.get("source_type") != Some(&Value::String(source_type.to_string()));
-                let target_changed = schema_props.get("target_type") != Some(&Value::String(target_type.to_string()));
-                
                 schema_props.insert("source_type".to_string(), Value::String(source_type.to_string()));
                 schema_props.insert("target_type".to_string(), Value::String(target_type.to_string()));
-
-                // Log significant changes
-                if properties_added {
-                    println!("Updated schema for '{}': added new properties", connection_type);
-                }
-                if source_changed || target_changed {
-                    println!("Updated schema for '{}': modified type relationship {}->{}",
-                        connection_type, source_type, target_type);
-                }
             } else {
                 return Err(format!("Invalid schema node found for connection type '{}'", connection_type));
             }
         }
         None => {
-            // Create new schema node (existing code)
             let mut schema_properties: HashMap<String, Value> = properties
                 .iter()
                 .map(|prop| (prop.clone(), Value::String("Unknown".to_string())))
@@ -320,12 +285,8 @@ fn update_schema_node(
                 properties: schema_properties,
             };
             graph.graph.add_node(schema_node_data);
-
-            println!("New SchemaConnection created for '{}' ({}->{})",
-                connection_type, source_type, target_type);
         }
     }
-
     Ok(())
 }
 
@@ -333,20 +294,18 @@ pub fn selection_to_new_connections(
     graph: &mut DirGraph,
     selection: &CurrentSelection,
     connection_type: String,
-) -> Result<(usize, usize), String> {  // Changed return type to include skipped count
+) -> Result<(usize, usize), String> {
     let current_level = selection.get_level_count().saturating_sub(1);
     let level = match selection.get_level(current_level) {
         Some(level) if !level.is_empty() => level,
-        _ => return Ok((0, 0)), // Return early if no selections
+        _ => return Ok((0, 0)),
     };
 
     let mut batch = ConnectionBatchProcessor::new(level.get_all_nodes().len());
     let mut skipped = 0;
-    
     let mut source_type = None;
     let mut target_type = None;
 
-    // Process each parent-child relationship
     for (parent_opt, children) in level.iter_groups() {
         if let Some(parent) = parent_opt {
             if source_type.is_none() {
@@ -362,7 +321,7 @@ pub fn selection_to_new_connections(
                     }
                 }
 
-                if let Err(e) = batch.add_connection(
+                if let Err(_) = batch.add_connection(
                     *parent,
                     child,
                     HashMap::new(),
@@ -370,14 +329,12 @@ pub fn selection_to_new_connections(
                     &connection_type,
                 ) {
                     skipped += 1;
-                    println!("Warning: Failed to create connection: {}", e);
                     continue;
                 }
             }
         }
     }
 
-    // Update schema with the new connection type if we have both types
     if let (Some(source), Some(target)) = (source_type, target_type) {
         update_schema_node(
             graph,
@@ -388,10 +345,7 @@ pub fn selection_to_new_connections(
         )?;
     }
 
-    // Execute the batch to actually create the connections!
-    let (stats, metrics) = batch.execute(graph, connection_type)?;
-    println!("Created {} connections in {} batches ({}s), skipped {} invalid connections",
-             stats.connections_created, metrics.batch_count, metrics.processing_time, skipped);
+    let (stats, _) = batch.execute(graph, connection_type)?;
     Ok((stats.connections_created, skipped))
 }
 
@@ -400,39 +354,21 @@ pub fn update_node_properties(
     nodes: &[(Option<NodeIndex>, Value)],
     property: &str,
 ) -> Result<(), String> {
+    let mut seen_nodes = HashSet::new();
+    
+    // Process all node updates in a single pass
     for (node_idx, value) in nodes {
+        // Direct node updates
         if let Some(idx) = node_idx {
             if let Some(node) = graph.get_node_mut(*idx) {
                 match node {
                     NodeData::Regular { properties, .. } => {
                         properties.insert(property.to_string(), value.clone());
+                        seen_nodes.insert(*idx);
                     },
                     NodeData::Schema { .. } => {
                         return Err("Cannot update properties on schema nodes".to_string());
                     }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-pub fn update_selected_node_properties(
-    graph: &mut DirGraph,
-    selection: &CurrentSelection,
-    level_index: Option<usize>,
-    property: &str,
-    value: Value,
-) -> Result<(), String> {
-    let level_idx = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
-    if let Some(level) = selection.get_level(level_idx) {
-        for node_idx in level.get_all_nodes() {
-            if let Some(node) = graph.get_node_mut(node_idx) {
-                match node {
-                    NodeData::Regular { properties, .. } => {
-                        properties.insert(property.to_string(), value.clone());
-                    },
-                    NodeData::Schema { .. } => continue,
                 }
             }
         }
