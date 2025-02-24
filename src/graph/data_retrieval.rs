@@ -277,7 +277,24 @@ pub fn format_unique_values_for_storage(
     values.iter()
         .map(|unique_values| {
             let mut value_list: Vec<String> = unique_values.values.iter()
-                .map(|v| format_value(v))
+                .map(|v| {
+                    // Get formatted value
+                    let formatted = format_value(v);
+                    
+                    // Remove quotes from strings (if present)
+                    match v {
+                        Value::String(_) => {
+                            // The format_value function wraps strings in quotes
+                            // We need to remove the opening and closing quotes
+                            if formatted.starts_with('"') && formatted.ends_with('"') {
+                                formatted[1..formatted.len()-1].to_string()
+                            } else {
+                                formatted
+                            }
+                        },
+                        _ => formatted
+                    }
+                })
                 .collect::<Vec<String>>();
             
             value_list.sort();
@@ -291,7 +308,8 @@ pub fn format_unique_values_for_storage(
                 }
             }
             
-            (unique_values.parent_idx, Value::String(value_list.join(",")))
+            // Join with comma and space
+            (unique_values.parent_idx, Value::String(value_list.join(", ")))
         })
         .collect()
 }
