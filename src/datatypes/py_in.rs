@@ -1,3 +1,4 @@
+// src/datatypes/py_in.rs
 use pyo3::prelude::*;
 use pyo3::Bound;
 use pyo3::types::{PyDict, PyList};
@@ -80,14 +81,16 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
         ColumnType::Int64 => {
             let mut vec = Vec::with_capacity(length);
             for i in 0..length {
-                vec.push(to_i64(&series.get_item(i)?));
+                let value = series.get_item(i)?;
+                vec.push(to_i64(&value));
             }
             Ok(ColumnData::Int64(vec))
         },
         ColumnType::Float64 => {
             let mut vec = Vec::with_capacity(length);
             for i in 0..length {
-                vec.push(to_f64(&series.get_item(i)?));
+                let value = series.get_item(i)?;
+                vec.push(to_f64(&value));
             }
             Ok(ColumnData::Float64(vec))
         },
@@ -106,7 +109,8 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
         ColumnType::Boolean => {
             let mut vec = Vec::with_capacity(length);
             for i in 0..length {
-                vec.push(to_bool(&series.get_item(i)?));
+                let value = series.get_item(i)?;
+                vec.push(to_bool(&value));
             }
             Ok(ColumnData::Boolean(vec))
         },

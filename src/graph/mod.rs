@@ -359,9 +359,43 @@ impl KnowledgeGraph {
         }
     }
 
-    fn count(&self, level_index: Option<usize>) -> PyResult<usize> {
-        let count = calculations::count_nodes_in_level(&self.selection, level_index);
-        Ok(count)
+    fn count(
+        &mut self,
+        level_index: Option<usize>,
+        group_by_parent: Option<bool>,
+        store_as: Option<&str>,
+        keep_selection: Option<bool>,
+    ) -> PyResult<PyObject> {
+        // Default to grouping by parent if we have a nested structure
+        let has_multiple_levels = self.selection.get_level_count() > 1;
+        // Use the provided group_by_parent if given, otherwise default based on structure
+        let use_grouping = group_by_parent.unwrap_or(has_multiple_levels);
+        
+        if let Some(target_property) = store_as {
+            // Store count results as node properties
+            calculations::store_count_results(
+                &mut self.inner,
+                &self.selection,
+                level_index,
+                use_grouping,
+                target_property
+            ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            
+            // Clear selection if requested
+            if !keep_selection.unwrap_or(false) {
+                self.selection.clear();
+            }
+            
+            Python::with_gil(|py| Ok(self.clone().into_py(py)))
+        } else if use_grouping {
+            // Return counts grouped by parent
+            let counts = calculations::count_nodes_by_parent(&self.inner, &self.selection, level_index);
+            py_out::convert_computation_results_for_python(counts)
+        } else {
+            // Simple flat count
+            let count = calculations::count_nodes_in_level(&self.selection, level_index);
+            Python::with_gil(|py| Ok(count.into_py(py)))
+        }
     }
 
     fn get_schema(&self) -> PyResult<String> {

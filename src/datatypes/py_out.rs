@@ -314,21 +314,33 @@ pub fn convert_computation_results_for_python(results: Vec<StatResult>) -> PyRes
         
         // Convert and insert each result within the GIL scope
         for result in results {
-            if let Some(value) = result.value {
-                let key = result.parent_title.unwrap_or_else(|| "node".to_string());
-                dict.set_item(key, value)?;
-            } else if let Some(error) = result.error {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(error));
+            let key = result.parent_title.unwrap_or_else(|| "node".to_string());
+            
+            match result.error_msg {
+                Some(error) => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(error));
+                },
+                None => {
+                    // For non-error cases, handle the value
+                    match result.value {
+                        Value::Null => continue,  // Skip null values
+                        Value::Int64(i) => dict.set_item(key, i)?,
+                        Value::Float64(f) => dict.set_item(key, f)?,
+                        Value::UniqueId(u) => dict.set_item(key, u)?,
+                        // Other types should have been converted to numeric during evaluation
+                        _ => continue,
+                    }
+                }
             }
         }
-        
-        // If we just have a single value under 'node', return the float directly
+
+        // If we just have a single value under 'node', return the value directly
         if dict.len() == 1 {
             if let Some(value) = dict.get_item("node")? {
                 return Ok(value.into());
             }
         }
-        
+
         Ok(dict.into())
     })
 }

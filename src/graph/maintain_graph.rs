@@ -94,8 +94,11 @@ pub fn add_nodes(
         let mut properties = HashMap::with_capacity(column_names.len());
         for col_name in &column_names {
             if col_name != &unique_id_field && col_name != &title_field {
+                // Always add the value, even if it's None/Null
                 if let Some(value) = df_data.get_value(row_idx, col_name) {
                     properties.insert(col_name.clone(), value);
+                } else {
+                    properties.insert(col_name.clone(), Value::Null);
                 }
             }
         }
@@ -147,49 +150,45 @@ pub fn add_connections(
 
     for row_idx in 0..df_data.row_count() {
         let source_id = match df_data.get_value_by_index(row_idx, source_id_idx) {
-            Some(Value::Null) => {
+            Some(Value::Null) | None => {
                 skipped_count += 1;
                 continue;
             }
             Some(id) => id,
-            None => {
-                skipped_count += 1;
-                continue;
-            }
         };
 
         let target_id = match df_data.get_value_by_index(row_idx, target_id_idx) {
-            Some(Value::Null) => {
+            Some(Value::Null) | None => {
                 skipped_count += 1;
                 continue;
             }
             Some(id) => id,
-            None => {
+        };
+
+        let (source_idx, target_idx) = match (lookup.check_source(&source_id), lookup.check_target(&target_id)) {
+            (Some(src_idx), Some(tgt_idx)) => (src_idx, tgt_idx),
+            _ => {
                 skipped_count += 1;
                 continue;
             }
         };
 
-        if let (Some(source_idx), Some(target_idx)) = (
-            lookup.check_source(&source_id),
-            lookup.check_target(&target_id)
-        ) {
-            update_node_titles(graph, source_idx, target_idx, row_idx, 
-                             source_title_idx, target_title_idx, &df_data)?;
+        update_node_titles(graph, source_idx, target_idx, row_idx, 
+                         source_title_idx, target_title_idx, &df_data)?;
 
-            let mut properties = HashMap::with_capacity(columns.as_ref().map_or(0, |c| c.len()));
-            if let Some(cols) = &columns {
-                for col_name in cols {
-                    if let Some(value) = df_data.get_value(row_idx, col_name) {
-                        properties.insert(col_name.clone(), value);
-                    }
+        let mut properties = HashMap::with_capacity(columns.as_ref().map_or(0, |c| c.len()));
+        if let Some(cols) = &columns {
+            for col_name in cols {
+                // Always include the property, even if it's None/Null
+                if let Some(value) = df_data.get_value(row_idx, col_name) {
+                    properties.insert(col_name.clone(), value);
+                } else {
+                    properties.insert(col_name.clone(), Value::Null);
                 }
             }
-            batch.add_connection(source_idx, target_idx, properties, graph, &connection_type)?;
-        } else {
-            skipped_count += 1;
-            continue;
         }
+
+        batch.add_connection(source_idx, target_idx, properties, graph, &connection_type)?;
     }
 
     update_schema_node(
