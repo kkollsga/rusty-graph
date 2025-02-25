@@ -1,4 +1,7 @@
-# Rusty Graph
+# Rusty Graph Python Library
+
+A high-performance graph database library with Python bindings written in Rust.
+
 Rusty Graph is a Rust-based project that aims to empower the generation of high-performance knowledge graphs within Python environments. Specifically designed for aggregating and merging data from SQL databases, Rusty Graph facilitates the seamless transition of relational database information into structured knowledge graphs. By leveraging Rust's efficiency and Python's flexibility, Rusty Graph offers an optimal solution for data scientists and developers looking to harness the power of knowledge graphs in their data-driven applications.
 
 ## Key Features
@@ -17,128 +20,269 @@ pip install https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph
 pip install --upgrade https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.2.13-cp312-cp312-win_amd64.whl?raw=true
 ```
 
+# Rusty Graph Python Library
 
-## Clone and Install
-To integrate Rusty Graph into your Python project, ensure you have Rust and Cargo installed on your system. Follow these steps:
+A high-performance graph database library with Python bindings written in Rust.
 
-1. **Install Rust:**
-Visit the official Rust website for instructions on installing Rust and Cargo.
+## Table of Contents
 
-2. **Clone Rusty Graph:**
-Clone the Rusty Graph repository into your desired project directory:
-```sh
-git clone https://github.com/kkollsga/rusty_graph.git
+- [Installation](#installation)
+- [Basic Usage](#basic-usage)
+- [Working with Nodes](#working-with-nodes)
+- [Creating Connections](#creating-connections)
+- [Filtering and Querying](#filtering-and-querying)
+- [Traversing the Graph](#traversing-the-graph)
+- [Statistics and Calculations](#statistics-and-calculations)
+- [Saving and Loading](#saving-and-loading)
+- [Performance Tips](#performance-tips)
+
+## Installation
+
+```bash
+pip install rusty-graph
 ```
 
-3. **Build with Maturin:**
-Within the rusty_graph directory, use maturin to build the project and make it accessible from Python:
-
-```sh
-cd rusty_graph
-maturin develop
-```
-
-## Usage
-
-### Getting Started
-Start using Rusty Graph in your Python code to build and manipulate knowledge graphs:
+## Basic Usage
 
 ```python
 import rusty_graph
 import pandas as pd
 
-nodes_data = pd.DataFrame({
-    "unique_id": ["1", "2"],
-    "name": ["Node A", "Node B"],
-    "design": ["Type X", "Type Y"]
+# Create a new knowledge graph
+graph = rusty_graph.KnowledgeGraph()
+
+# Create some data using pandas
+users_df = pd.DataFrame({
+    'user_id': [1001, 1002, 1003],
+    'name': ['Alice', 'Bob', 'Charlie'],
+    'age': [28, 35, 42]
 })
-# Initialize a new KnowledgeGraph instance
-kg = rusty_graph.KnowledgeGraph()
 
-# Add nodes and relationships from SQL data
-kg.add_nodes(
-    data=nodes_data.astype(str).to_numpy().tolist(),  # Convert DataFrame to list of lists
-    columns=list(nodes_data.columns),  # Use DataFrame column names
-    node_type="MyNodeType",  # Type of node (example: Artist)
-    unique_id_field="unique_id", # Column name of unique identifier
-    node_title_field="name", # node title
-    conflict_handling="update"  # Conflict handling: "update", "replace", or "skip"
+# Add nodes to the graph
+graph.add_nodes(
+    data=users_df,
+    node_type='User',
+    unique_id_field='user_id', 
+    node_title_field='name'
 )
 
-# Query the knowledge graph
-matching_nodes = kg.get_nodes(node_type=None, filters=[{"unique_id": "1"}])
-print(matching_nodes)
+# View graph schema
+print(graph.get_schema())
 ```
 
-### Advanced Usage with pandas and SQL
-Rusty Graph allows for the efficient transformation of SQL database data into a knowledge graph. By leveraging pandas' SQL functionality, you can query your SQL database directly and use the resulting DataFrame with Rusty Graph. Here's an example that demonstrates this process:
+## Working with Nodes
+
+### Adding Nodes
 
 ```python
-import rusty_graph
-import pandas as pd
-from sqlalchemy import create_engine
+# Add products to graph
+products_df = pd.DataFrame({
+    'product_id': [101, 102, 103],
+    'title': ['Laptop', 'Phone', 'Tablet'],
+    'price': [999.99, 699.99, 349.99],
+    'stock': [45, 120, 30]
+})
 
-# Create a database engine
-engine = create_engine('sqlite:///your_database.db')  # Adjust for your database
-
-# Execute SQL query and load data into a pandas DataFrame
-df = pd.read_sql_query("SELECT unique_id, attribute1, attribute2 FROM your_table", engine)
-
-# Initialize Rusty Graph
-kg = rusty_graph.KnowledgeGraph()
-
-# Add nodes to the knowledge graph from DataFrame
-kg.add_nodes(
-    data=df.astype(str).to_numpy().tolist(),  # Data from DataFrame as list of lists
-    columns=list(df.columns),  # Column names
-    node_type="NodeType",  # Type of node (example: Artist)
-    unique_id_field="unique_id",  # Column name of unique identifier
-    node_title_field="title", # node title
-    conflict_handling="update"  # Conflict handling: "update", "replace", or "skip"
+graph.add_nodes(
+    data=products_df,
+    node_type='Product',
+    unique_id_field='product_id',
+    node_title_field='title',
+    # Optional: specify which columns to include
+    columns=['product_id', 'title', 'price', 'stock', 'category'],
+    # Optional: how to handle conflicts with existing nodes
+    conflict_handling='update'  # Options: 'update', 'replace', 'skip', 'preserve'
 )
-
-# Execute another SQL query for relationship data
-relationship_df = pd.read_sql_query("SELECT source_id, target_id, relation_attribute FROM relationships_table", engine)
-
-# Add relationships to the knowledge graph
-kg.add_relationships(
-    data=relationship_df.astype(str).to_numpy().tolist(),  # Data from DataFrame
-    columns=list(relationship_df.columns),  # Column names
-    relationship_type="RELATIONSHIP_TYPE",  # Name for the relationship type
-    source_type="SourceNodeType",  # Source node type
-    source_id_field="source_id",  # Column name of source node unique identifier
-    source_title_field= "source_title", # Source title
-    target_type="TargetNodeType",  # Target node type
-    target_id_field="target_id",  # Column name of target node unique identifier
-    target_title_field= "target_title", # Source title
-    conflict_handling="update"  # Conflict handling: "update", "replace", or "skip"
-)
-kg.save_to_file("KG.bin")
-# Retrieve node data by unique identifier
-matching_nodes = kg.get_nodes(node_type=None, filters=[{"title": "specific_title_name"}])
-print(matching_nodes)
 ```
 
-### Traverse Graph and return node properties
+### Retrieving Nodes
+
 ```python
-import rusty_graph
-kg = rusty_graph.KnowledgeGraph()
-# Get all relationships found in selected nodes
-kg.load_from_file("KG.bin")
-unique_relationships = kg.get_relationships(matching_nodes)
-print(unique_relationships)
+# Get all products
+products = graph.type_filter('Product')
 
-# Traverse graph, and return matching nodes
-outgoing_nodes = kg.traverse_outgoing(matching_nodes, 'MADE_DISCOVERY')
-incoming_nodes = kg.traverse_incoming(matching_nodes, 'DRILLED_BY')
+# Get node information
+product_nodes = products.get_nodes()
+print(product_nodes)
 
-# Get values
-print(kg.get_node_attributes(outgoing_nodes, ['title']))
+# Get specific properties
+prices = products.get_properties(['price', 'stock'])
+print(prices)
+
+# Get only titles
+titles = products.get_titles()
+print(titles)
 ```
 
-## Contributing
-We welcome contributions to Rusty Graph! If you have suggestions, bug reports, or would like to contribute code, please open an issue or a pull request on our GitHub repository.
+## Creating Connections
 
-## License
-Rusty Graph is released under the MIT License. You are free to use, modify, and distribute it under the terms of this license.
+```python
+# Purchase data
+purchases_df = pd.DataFrame({
+    'user_id': [1001, 1001, 1002],
+    'product_id': [101, 103, 102],
+    'date': ['2023-01-15', '2023-02-10', '2023-01-20'],
+    'quantity': [1, 2, 1]
+})
 
+# Create connections
+graph.add_connections(
+    data=purchases_df,
+    connection_type='PURCHASED',
+    source_type='User',
+    source_id_field='user_id',
+    target_type='Product',
+    target_id_field='product_id',
+    # Optional additional fields to include
+    columns=['date', 'quantity']
+)
+
+# Create connections from currently selected nodes
+users = graph.type_filter('User')
+products = graph.type_filter('Product')
+# This would connect all users to all products with a 'VIEWED' connection
+users.selection_to_new_connections(connection_type='VIEWED')
+```
+
+## Filtering and Querying
+
+### Basic Filtering
+
+```python
+# Filter by exact match
+expensive_products = graph.type_filter('Product').filter({'price': 999.99})
+
+# Filter using operators
+affordable_products = graph.type_filter('Product').filter({
+    'price': {'<': 500.0}
+})
+
+# Multiple conditions
+popular_affordable = graph.type_filter('Product').filter({
+    'price': {'<': 500.0},
+    'stock': {'>': 50}
+})
+
+# In operator
+selected_products = graph.type_filter('Product').filter({
+    'product_id': {'in': [101, 103]}
+})
+```
+
+### Sorting Results
+
+```python
+# Sort by a single field (ascending by default)
+sorted_products = graph.type_filter('Product').sort('price')
+
+# Sort explicitly by direction
+expensive_first = graph.type_filter('Product').sort('price', ascending=False)
+
+# Sort by multiple fields
+sorted_complex = graph.type_filter('Product').sort([
+    ('stock', False),  # Highest stock first
+    ('price', True)    # Then by price, lowest first
+])
+```
+
+### Limiting Results
+
+```python
+# Get at most 5 nodes per group
+limited_products = graph.type_filter('Product').max_nodes(5)
+```
+
+## Traversing the Graph
+
+```python
+# Find products purchased by a specific user
+alice = graph.type_filter('User').filter({'name': 'Alice'})
+alice_products = alice.traverse(
+    connection_type='PURCHASED',
+    direction='outgoing'
+)
+
+# Access the resulting products
+alice_product_data = alice_products.get_nodes()
+
+# Filter the traversal target nodes
+expensive_purchases = alice.traverse(
+    connection_type='PURCHASED',
+    filter_target={'price': {'>=': 500.0}},
+    sort_target='price',
+    max_nodes=10
+)
+
+# Get connection information
+connection_data = alice.get_connections(include_node_properties=True)
+```
+
+## Statistics and Calculations
+
+### Basic Statistics
+
+```python
+# Get statistics for a property
+price_stats = graph.type_filter('Product').statistics('price')
+print(price_stats)
+
+# Calculate unique values
+unique_categories = graph.type_filter('Product').unique_values(
+    property='category',
+    # Store result in node property
+    store_as='category_list',
+    max_length=10
+)
+```
+
+### Custom Calculations
+
+```python
+# Simple calculation: tax inclusive price
+with_tax = graph.type_filter('Product').calculate(
+    expression='price * 1.1',
+    store_as='price_with_tax'
+)
+
+# Aggregate calculations per group
+user_spending = graph.type_filter('User').traverse('PURCHASED').calculate(
+    expression='sum(price * quantity)',
+    store_as='total_spent'
+)
+
+# Count operations
+products_per_user = graph.type_filter('User').traverse('PURCHASED').count(
+    store_as='product_count',
+    group_by_parent=True
+)
+```
+
+## Saving and Loading
+
+```python
+# Save graph to file
+graph.save("my_graph.bin")
+
+# Load graph from file
+loaded_graph = rusty_graph.load("my_graph.bin")
+```
+
+## Performance Tips
+
+1. **Batch Operations**: Add nodes and connections in batches rather than individually.
+
+2. **Specify Columns**: When adding nodes or connections, explicitly specify which columns to include to reduce memory usage.
+
+3. **Use Indexing**: Filter on node type first before applying other filters.
+
+4. **Avoid Overloading**: Keep node property count reasonable; too many properties per node will increase memory usage.
+
+5. **Conflict Handling**: Choose the appropriate conflict handling strategy:
+   - Use `'update'` to merge new properties with existing ones
+   - Use `'replace'` for a complete overwrite
+   - Use `'skip'` to avoid any changes to existing nodes
+   - Use `'preserve'` to only add missing properties
+
+6. **Connection Direction**: Specify direction in traversals when possible to improve performance.
+
+7. **Limit Results**: Use `max_nodes()` to limit result size when working with large datasets.

@@ -1,4 +1,4 @@
-// src/graph/debug.rs
+// src/graph/debugging.rs
 use crate::datatypes::values::Value;
 use crate::graph::schema::{DirGraph, NodeData, SelectionOperation, CurrentSelection};
 
