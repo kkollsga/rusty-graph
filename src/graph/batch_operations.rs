@@ -29,8 +29,9 @@ pub struct BatchMetrics {
 pub enum NodeAction {
     Update {
         node_idx: NodeIndex,
-        title: Value,
+        title: Option<Value>,  // Changed to Option to indicate if title should be updated
         properties: HashMap<String, Value>,
+        conflict_mode: ConflictHandling,  // Added conflict mode
     },
     Create {
         node_type: String,
@@ -38,6 +39,20 @@ pub enum NodeAction {
         title: Value,
         properties: HashMap<String, Value>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ConflictHandling {
+    Replace,     // Replace all properties and title (current behavior)
+    Skip,        // Don't update existing nodes
+    Update,      // Update properties and title if provided
+    Preserve,    // Update but prefer existing values
+}
+
+impl Default for ConflictHandling {
+    fn default() -> Self {
+        ConflictHandling::Update  // New default behavior
+    }
 }
 
 #[derive(Debug)]
@@ -51,9 +66,11 @@ struct NodeCreation {
 #[derive(Debug)]
 struct NodeUpdate {
     node_idx: NodeIndex,
-    title: Value,
+    title: Option<Value>,  // Changed to Option
     properties: HashMap<String, Value>,
+    conflict_mode: ConflictHandling,
 }
+
 
 #[derive(Debug, Default)]
 pub struct BatchStats {
@@ -104,11 +121,12 @@ impl BatchProcessor {
                     properties,
                 });
             },
-            NodeAction::Update { node_idx, title, properties } => {
+            NodeAction::Update { node_idx, title, properties, conflict_mode } => {
                 self.updates.push(NodeUpdate {
                     node_idx,
                     title,
                     properties,
+                    conflict_mode,  // Add this field
                 });
             }
         }
@@ -147,8 +165,41 @@ impl BatchProcessor {
                 match node {
                     NodeData::Regular { title, properties, .. } |
                     NodeData::Schema { title, properties, .. } => {
-                        *title = update.title;
-                        *properties = update.properties;
+                        match update.conflict_mode {
+                            ConflictHandling::Skip => {
+                                // Skip this node entirely
+                                continue;
+                            },
+                            ConflictHandling::Replace => {
+                                // Current behavior - complete replacement
+                                if let Some(new_title) = update.title {
+                                    *title = new_title;
+                                }
+                                *properties = update.properties;
+                            },
+                            ConflictHandling::Update => {
+                                // Update only if provided
+                                if let Some(new_title) = update.title {
+                                    *title = new_title;
+                                }
+                                // Merge properties with preference to new values
+                                for (k, v) in update.properties {
+                                    properties.insert(k, v);
+                                }
+                            },
+                            ConflictHandling::Preserve => {
+                                // Update only if provided, but preserve existing values
+                                if let Some(new_title) = update.title {
+                                    if title == &Value::Null {
+                                        *title = new_title;
+                                    }
+                                }
+                                // Merge properties with preference to existing values
+                                for (k, v) in update.properties {
+                                    properties.entry(k).or_insert(v);
+                                }
+                            }
+                        }
                         stats.updates += 1;
                     }
                 }

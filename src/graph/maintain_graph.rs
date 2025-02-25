@@ -2,10 +2,9 @@
 use std::collections::{HashMap, HashSet};
 use crate::graph::schema::{DirGraph, NodeData, CurrentSelection};
 use crate::graph::lookups::{TypeLookup, CombinedTypeLookup};
-use crate::graph::batch_operations::{BatchProcessor, ConnectionBatchProcessor, NodeAction};
+use crate::graph::batch_operations::{BatchProcessor, ConflictHandling, ConnectionBatchProcessor, NodeAction};
 use crate::datatypes::{Value, DataFrame};
 use petgraph::graph::NodeIndex;
-
 fn check_data_validity(df_data: &DataFrame, unique_id_field: &str) -> Result<(), String> {
     // Remove strict UniqueId type verification to allow nulls
     if !df_data.verify_column(unique_id_field) {
@@ -29,8 +28,18 @@ pub fn add_nodes(
     node_type: String,
     unique_id_field: String,
     node_title_field: Option<String>,
-    _conflict_handling: Option<String>,
+    conflict_handling: Option<String>,
 ) -> Result<(), String> {
+    // Parse conflict handling option
+    let conflict_mode = match conflict_handling.as_deref() {
+        Some("replace") => ConflictHandling::Replace,
+        Some("skip") => ConflictHandling::Skip,
+        Some("preserve") => ConflictHandling::Preserve,
+        Some("update") | None => ConflictHandling::Update, // Default
+        Some(other) => return Err(format!("Unknown conflict handling mode: {}", other)),
+    };
+    
+    let should_update_title = node_title_field.is_some();
     let title_field = node_title_field.unwrap_or_else(|| unique_id_field.clone());
     check_data_validity(&df_data, &unique_id_field)?;
 
@@ -104,8 +113,27 @@ pub fn add_nodes(
         }
 
         let action = match type_lookup.check_uid(&id) {
-            Some(node_idx) => NodeAction::Update { node_idx, title, properties },
-            None => NodeAction::Create { node_type: node_type.clone(), id, title, properties },
+            Some(node_idx) => {
+                // Determine if we should update the title
+                let title_update = if should_update_title {
+                    Some(title)
+                } else {
+                    None
+                };
+                
+                NodeAction::Update { 
+                    node_idx, 
+                    title: title_update,
+                    properties, 
+                    conflict_mode 
+                }
+            },
+            None => NodeAction::Create { 
+                node_type: node_type.clone(), 
+                id, 
+                title, 
+                properties 
+            },
         };
         batch.add_action(action, graph)?;
     }
@@ -354,6 +382,7 @@ pub fn update_node_properties(
     property: &str,
 ) -> Result<(), String> {
     let mut seen_nodes = HashSet::new();
+    let mut node_type_to_sample_value: HashMap<String, Value> = HashMap::new();
     
     // Process all node updates in a single pass
     for (node_idx, value) in nodes {
@@ -361,9 +390,14 @@ pub fn update_node_properties(
         if let Some(idx) = node_idx {
             if let Some(node) = graph.get_node_mut(*idx) {
                 match node {
-                    NodeData::Regular { properties, .. } => {
+                    NodeData::Regular { properties, node_type, .. } => {
                         properties.insert(property.to_string(), value.clone());
                         seen_nodes.insert(*idx);
+                        
+                        // Track the first sample value for each node type
+                        if !node_type_to_sample_value.contains_key(node_type) {
+                            node_type_to_sample_value.insert(node_type.clone(), value.clone());
+                        }
                     },
                     NodeData::Schema { .. } => {
                         return Err("Cannot update properties on schema nodes".to_string());
@@ -372,5 +406,55 @@ pub fn update_node_properties(
             }
         }
     }
+    
+    // Update schema for each node type that had properties updated
+    for (node_type, sample_value) in node_type_to_sample_value {
+        // Get a lookup for schema nodes
+        let schema_lookup = match TypeLookup::new(&graph.graph, "SchemaNode".to_string()) {
+            Ok(lookup) => lookup,
+            Err(_) => continue, // Skip if we can't get a lookup
+        };
+        
+        let schema_title = Value::String(node_type.clone());
+        let property_type = determine_property_type(&sample_value);
+        
+        match schema_lookup.check_title(&schema_title) {
+            Some(idx) => {
+                // Update existing schema node
+                if let Some(NodeData::Schema { properties, .. }) = graph.get_node_mut(idx) {
+                    if !properties.contains_key(property) {
+                        properties.insert(property.to_string(), Value::String(property_type));
+                    }
+                }
+            }
+            None => {
+                // Create a new schema node for this type
+                let mut schema_props = HashMap::new();
+                schema_props.insert(property.to_string(), Value::String(property_type));
+                
+                let schema_node_data = NodeData::Schema {
+                    id: Value::String(node_type.clone()),
+                    title: schema_title,
+                    node_type: "SchemaNode".to_string(),
+                    properties: schema_props,
+                };
+                graph.graph.add_node(schema_node_data);
+            }
+        }
+    }
+    
     Ok(())
+}
+
+// Helper function to determine property type from a Value
+fn determine_property_type(value: &Value) -> String {
+    match value {
+        Value::Int64(_) => "Int64".to_string(),
+        Value::Float64(_) => "Float64".to_string(),
+        Value::String(_) => "String".to_string(),
+        Value::UniqueId(_) => "UniqueId".to_string(),
+        Value::Boolean(_) => "Boolean".to_string(),
+        Value::DateTime(_) => "DateTime".to_string(),
+        Value::Null => "Unknown".to_string(),
+    }
 }
