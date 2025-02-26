@@ -2,7 +2,7 @@
 name = "rusty_graph"
 version = "0.3.1"
 edition = "2021"
-authors = ["Kristian dF Kollsgård <kkollgsg@gmail.com>"]
+authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 description = "A high-performance graph database library with Python bindings written in Rust."
 readme = "README.md"
 repository = "https://github.com/kkollsga/rusty_graph"

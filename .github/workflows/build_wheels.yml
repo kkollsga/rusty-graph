@@ -3,8 +3,6 @@ on:
   push:
     paths:
       - 'Cargo.toml'
-    tags:
-      - 'v*'  # Run workflow on version tags
   workflow_dispatch:  # Allow manual triggering
 
 jobs:
