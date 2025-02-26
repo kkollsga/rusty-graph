@@ -65,7 +65,7 @@ jobs:
     name: Publish to PyPI
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')  # Only publish on version tags
+    # Removed the tag condition - will run on any Cargo.toml change
     
     steps:
       - name: Download all artifacts
@@ -84,7 +84,7 @@ jobs:
           user: __token__
           password: ${{ secrets.PYPI_API_TOKEN }}
           skip_existing: true
-          # Comment out the next line for production
+          # Uncomment to test on TestPyPI first
           # repository_url: https://test.pypi.org/legacy/
           
       - name: Create GitHub Release
@@ -92,3 +92,4 @@ jobs:
         with:
           files: dist/*.whl
           generate_release_notes: true
+          tag_name: auto-release-${{ github.sha }}
