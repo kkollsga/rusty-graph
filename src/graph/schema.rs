@@ -21,6 +21,7 @@ pub enum SelectionOperation {
         direction: Option<String>,
         max_nodes: Option<usize>,
     },
+    Custom(String),  // For operations that don't fit other categories
 }
 
 #[derive(Clone, Debug)]

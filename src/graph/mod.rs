@@ -152,6 +152,32 @@ impl KnowledgeGraph {
         Ok(new_graph)
     }
 
+    fn filter_orphans(
+        &mut self,
+        include_orphans: Option<bool>,
+        sort_spec: Option<&Bound<'_, PyAny>>,
+        max_nodes: Option<usize>
+    ) -> PyResult<Self> {
+        let mut new_graph = self.clone();
+        let include = include_orphans.unwrap_or(true);
+        
+        let sort_fields = if let Some(spec) = sort_spec {
+            Some(py_in::parse_sort_fields(spec, None)?)
+        } else {
+            None
+        };
+        
+        filtering_methods::filter_orphan_nodes(
+            &new_graph.inner,
+            &mut new_graph.selection,
+            include,
+            sort_fields.as_ref(),
+            max_nodes
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        
+        Ok(new_graph)
+    }
+
     fn sort(&mut self, sort_spec: &Bound<'_, PyAny>, ascending: Option<bool>) -> PyResult<Self> {
         let mut new_graph = self.clone();
         let sort_fields = py_in::parse_sort_fields(sort_spec, ascending)?;

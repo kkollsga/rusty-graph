@@ -136,10 +136,16 @@ pub fn get_selection_string(
                         output.push_str("        Traverse: ");
                         output.push_str(&traverse_parts.join(", "));
                         output.push('\n');
+                    },
+                    SelectionOperation::Custom(description) => {
+                        output.push_str("        Custom: ");
+                        output.push_str(description);
+                        output.push('\n');
                     }
                 }
             }
         }
+
 
         // Print selection structure
         output.push_str("    Selections:\n");

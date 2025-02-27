@@ -313,3 +313,77 @@ pub fn limit_nodes_per_group(
 
     Ok(())
 }
+
+pub fn filter_orphan_nodes(
+    graph: &DirGraph,
+    selection: &mut CurrentSelection,
+    include_orphans: bool,  // true to include orphans, false to exclude them
+    sort_fields: Option<&Vec<(String, bool)>>,
+    max_nodes: Option<usize>
+) -> Result<(), String> {
+    let current_index = selection.get_level_count().saturating_sub(1);
+    let level = selection.get_level_mut(current_index)
+        .ok_or_else(|| "No active selection level".to_string())?;
+
+    // Function to check if a node is an orphan (no connections)
+    let is_orphan = |node_idx: NodeIndex| {
+        // Check both incoming and outgoing edges
+        graph.graph.neighbors_directed(node_idx, petgraph::Direction::Outgoing).count() == 0 &&
+        graph.graph.neighbors_directed(node_idx, petgraph::Direction::Incoming).count() == 0
+    };
+
+    if level.selections.is_empty() {
+        // Start with all regular nodes
+        let nodes = graph.graph.node_indices()
+            .filter(|&idx| graph.get_node(idx).map_or(false, |n| n.is_regular()))
+            .filter(|&idx| include_orphans == is_orphan(idx))
+            .collect::<Vec<_>>();
+            
+        // Apply sorting and max limit
+        let processed = process_nodes(
+            graph,
+            nodes,
+            None,
+            sort_fields,
+            max_nodes
+        );
+        
+        if !processed.is_empty() {
+            level.add_selection(None, processed);
+        }
+    } else {
+        // Process existing selections
+        let mut new_selections = HashMap::new();
+        
+        for (parent, children) in level.selections.iter() {
+            // Filter children based on orphan status
+            let filtered = children.iter()
+                .filter(|&&idx| include_orphans == is_orphan(idx))
+                .cloned()
+                .collect::<Vec<_>>();
+            
+            // Apply sorting and max limit
+            let processed = process_nodes(
+                graph,
+                filtered,
+                None,
+                sort_fields,
+                max_nodes
+            );
+            
+            if !processed.is_empty() {
+                new_selections.insert(*parent, processed);
+            }
+        }
+        
+        level.selections = new_selections;
+    }
+
+    // Record the operation in the selection history
+    level.operations.push(SelectionOperation::Custom(format!("filter_orphans(include={})", include_orphans)));
+    if let Some(fields) = sort_fields {
+        level.operations.push(SelectionOperation::Sort(fields.clone()));
+    }
+
+    Ok(())
+}

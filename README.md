@@ -2,31 +2,10 @@
 
 A high-performance graph database library with Python bindings written in Rust.
 
-Rusty Graph is a Rust-based project that aims to empower the generation of high-performance knowledge graphs within Python environments. Specifically designed for aggregating and merging data from SQL databases, Rusty Graph facilitates the seamless transition of relational database information into structured knowledge graphs. By leveraging Rust's efficiency and Python's flexibility, Rusty Graph offers an optimal solution for data scientists and developers looking to harness the power of knowledge graphs in their data-driven applications.
-
-## Key Features
-- **Efficient Data Integration:** Easily import and merge data from SQL databases to construct knowledge graphs, optimizing for performance and scalability.
-- **High-Performance Operations:** Utilize Rust's performance capabilities to handle graph operations, making Rusty Graph ideal for working with large-scale data.
-- **Python Compatibility:** Directly integrate Rusty Graph into Python projects, allowing for a smooth workflow within Python-based data analysis and machine learning pipelines.
-- **Flexible Graph Manipulation:** Create, modify, and query knowledge graphs with a rich set of features, catering to complex data structures and relationships.
-
-## Direct Download and Install
-Users can download the .whl file directly from the repository and install it using pip. 
-- *Note that the release is only compatible with Python 3.12 on win_amd64.*
-- *The library is still in alpha, so the functionality is very limited.*
-```sh
-pip install https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.2.13-cp312-cp312-win_amd64.whl?raw=true
-# or upgrade an already installed library
-pip install --upgrade https://github.com/kkollsga/rusty_graph/blob/main/wheels/rusty_graph-0.2.13-cp312-cp312-win_amd64.whl?raw=true
-```
-
-# Rusty Graph Python Library
-
-A high-performance graph database library with Python bindings written in Rust.
-
 ## Table of Contents
 
 - [Installation](#installation)
+- [Introduction](#introduction)
 - [Basic Usage](#basic-usage)
 - [Working with Nodes](#working-with-nodes)
 - [Creating Connections](#creating-connections)
@@ -41,6 +20,16 @@ A high-performance graph database library with Python bindings written in Rust.
 ```bash
 pip install rusty-graph
 ```
+
+## Introduction
+
+Rusty Graph is a Rust-based project that aims to empower the generation of high-performance knowledge graphs within Python environments. Specifically designed for aggregating and merging data from SQL databases, Rusty Graph facilitates the seamless transition of relational database information into structured knowledge graphs. By leveraging Rust's efficiency and Python's flexibility, Rusty Graph offers an optimal solution for data scientists and developers looking to harness the power of knowledge graphs in their data-driven applications.
+
+## Key Features
+- **Efficient Data Integration:** Easily import and merge data from SQL databases to construct knowledge graphs, optimizing for performance and scalability.
+- **High-Performance Operations:** Utilize Rust's performance capabilities to handle graph operations, making Rusty Graph ideal for working with large-scale data.
+- **Python Compatibility:** Directly integrate Rusty Graph into Python projects, allowing for a smooth workflow within Python-based data analysis and machine learning pipelines.
+- **Flexible Graph Manipulation:** Create, modify, and query knowledge graphs with a rich set of features, catering to complex data structures and relationships.
 
 ## Basic Usage
 
@@ -167,6 +156,28 @@ popular_affordable = graph.type_filter('Product').filter({
 selected_products = graph.type_filter('Product').filter({
     'product_id': {'in': [101, 103]}
 })
+```
+
+### Filtering Orphan Nodes
+
+Orphan nodes are nodes that have no connections (no incoming or outgoing edges). You can filter to include or exclude orphan nodes:
+
+```python
+# Get only orphan nodes
+orphans = graph.filter_orphans(include_orphans=True)
+
+# Get only nodes that have at least one connection
+connected = graph.filter_orphans(include_orphans=False)
+
+# Filter orphans with sorting and limits
+recent_orphans = graph.filter_orphans(
+    include_orphans=True, 
+    sort_spec='created_date', 
+    max_nodes=100
+)
+
+# Chain with other operations
+product_orphans = graph.type_filter('Product').filter_orphans(include_orphans=True)
 ```
 
 ### Sorting Results
