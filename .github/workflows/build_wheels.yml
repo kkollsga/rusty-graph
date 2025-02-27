@@ -3,8 +3,7 @@ on:
   push:
     paths:
       - 'Cargo.toml'
-  workflow_dispatch:  # Allow manual triggering
-
+  workflow_dispatch: # Allow manual triggering
 jobs:
   build:
     name: Build wheels on ${{ matrix.os }}
@@ -23,50 +22,42 @@ jobs:
             target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
-          
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           override: true
           target: ${{ matrix.target }}
-          
       - name: Install Maturin
         run: pip install maturin
-        
       - name: Build wheels
         run: |
           if (!(Test-Path -Path "wheels")) { New-Item -ItemType Directory -Path "wheels" }
           maturin build --release --target ${{ matrix.target }} --out wheels
         shell: pwsh
-        
       - name: List build directory
         run: Get-ChildItem -Recurse wheels
         shell: pwsh
-        
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.python-version }}
           path: wheels/*.whl
-          
   publish:
     name: Publish to PyPI
     needs: build
     runs-on: ubuntu-latest
-    # Removed the tag condition - will run on any Cargo.toml change
-    
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -74,10 +65,8 @@ jobs:
           pattern: wheels-*
           path: dist
           merge-multiple: true
-          
       - name: Display structure of downloaded files
         run: find dist -type f
-        
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
@@ -86,10 +75,10 @@ jobs:
           skip_existing: true
           # Uncomment to test on TestPyPI first
           # repository_url: https://test.pypi.org/legacy/
-          
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           files: dist/*.whl
           generate_release_notes: true
           tag_name: auto-release-${{ github.sha }}
+          token: ${{ secrets.RELEASE_TOKEN }}
