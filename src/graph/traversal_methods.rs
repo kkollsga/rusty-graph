@@ -220,11 +220,17 @@ pub fn make_traversal(
     Ok(())
 }
 
+pub struct ChildPropertyGroup {
+    pub parent_idx: NodeIndex,
+    pub parent_title: String,
+    pub values: Vec<String>
+}
+
 pub fn get_children_properties(
     graph: &DirGraph,
     selection: &CurrentSelection,
     property: &str
-) -> Vec<(NodeIndex, Vec<String>)> {
+) -> Vec<ChildPropertyGroup> {
     let mut result = Vec::new();
     
     // Get the current level index
@@ -234,6 +240,16 @@ pub fn get_children_properties(
     if let Some(level) = selection.get_level(level_index) {
         for (&parent_opt, children) in &level.selections {
             if let Some(parent) = parent_opt {
+                // Get parent title
+                let parent_title = if let Some(node) = graph.get_node(parent) {
+                    match node.get_field("title") {
+                        Some(Value::String(s)) => s.clone(),
+                        _ => format!("node_{}", parent.index())
+                    }
+                } else {
+                    format!("node_{}", parent.index())
+                };
+                
                 // For each parent, collect property values from children
                 let mut values_list = Vec::new();
                 
@@ -254,7 +270,11 @@ pub fn get_children_properties(
                     }
                 }
                 
-                result.push((parent, values_list));
+                result.push(ChildPropertyGroup {
+                    parent_idx: parent,
+                    parent_title,
+                    values: values_list
+                });
             }
         }
     }
@@ -262,14 +282,14 @@ pub fn get_children_properties(
     result
 }
 
-pub fn format_children_properties_for_storage(
-    property_lists: &[(NodeIndex, Vec<String>)],
+pub fn format_for_storage(
+    property_groups: &[ChildPropertyGroup],
     max_length: Option<usize>
 ) -> Vec<(Option<NodeIndex>, Value)> {
-    property_lists.iter()
-        .map(|(parent, values)| {
+    property_groups.iter()
+        .map(|group| {
             // Join into a comma-separated list
-            let list_value = values.join(", ");
+            let list_value = group.values.join(", ");
             
             // Truncate if a max length is specified
             let final_value = if let Some(max) = max_length {
@@ -282,7 +302,32 @@ pub fn format_children_properties_for_storage(
                 list_value
             };
             
-            (Some(*parent), Value::String(final_value))
+            (Some(group.parent_idx), Value::String(final_value))
+        })
+        .collect()
+}
+
+pub fn format_for_dictionary(
+    property_groups: &[ChildPropertyGroup],
+    max_length: Option<usize>
+) -> Vec<(String, String)> {
+    property_groups.iter()
+        .map(|group| {
+            // Join into a comma-separated list
+            let list_value = group.values.join(", ");
+            
+            // Truncate if a max length is specified
+            let final_value = if let Some(max) = max_length {
+                if list_value.len() > max {
+                    format!("{}...", &list_value[..max.saturating_sub(3)])
+                } else {
+                    list_value
+                }
+            } else {
+                list_value
+            };
+            
+            (group.parent_title.clone(), final_value)
         })
         .collect()
 }

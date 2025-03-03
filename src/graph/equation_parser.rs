@@ -255,20 +255,69 @@ impl Evaluator {
     pub fn evaluate(expr: &Expr, objects: &[HashMap<String, Value>]) -> Result<Value, String> {
         match expr {
             Expr::Aggregate(agg_type, inner) => {
+                // Track results and errors for debugging
+                let mut total_objects = 0;
+                let mut successful_evals = 0;
+                let mut null_results = 0;
+                let mut error_messages = Vec::new();
+                
                 let values: Vec<f64> = objects.iter()
-                    .filter_map(|obj| Self::evaluate_single(inner, obj).ok())
-                    .filter_map(|v| match v {
-                        Value::Float64(f) => Some(f),
-                        Value::Int64(i) => Some(i as f64),
-                        Value::UniqueId(u) => Some(u as f64),
-                        _ => None
+                    .map(|obj| {
+                        total_objects += 1;
+                        match Self::evaluate_single(inner, obj) {
+                            Ok(value) => {
+                                match value {
+                                    Value::Float64(f) => {
+                                        successful_evals += 1;
+                                        Some(f)
+                                    },
+                                    Value::Int64(i) => {
+                                        successful_evals += 1;
+                                        Some(i as f64)
+                                    },
+                                    Value::UniqueId(u) => {
+                                        successful_evals += 1;
+                                        Some(u as f64)
+                                    },
+                                    Value::Null => {
+                                        null_results += 1;
+                                        None
+                                    },
+                                    _ => None
+                                }
+                            },
+                            Err(msg) => {
+                                error_messages.push(msg);
+                                None
+                            }
+                        }
                     })
+                    .filter_map(|x| x)
                     .collect();
+                
+                // Debug output to help diagnose issues
+                if total_objects > 0 && successful_evals == 0 {
+                    if !error_messages.is_empty() {
+                        // Print just a few error messages to avoid flooding the output
+                        let sample_errors: Vec<_> = error_messages.iter()
+                            .take(3)
+                            .collect();
+                        println!("Warning: All evaluations failed. Sample errors: {:?}", sample_errors);
+                    }
+                    
+                    if null_results > 0 {
+                        println!("Warning: Got {} null results out of {} objects", null_results, total_objects);
+                    }
+                    
+                    // Return Null instead of trying to do calculations with empty values
+                    return Ok(Value::Null);
+                }
                 
                 if values.is_empty() {
                     return Ok(Value::Null);
                 }
-
+    
+                // Rest of the aggregation code remains the same
                 let result = match agg_type {
                     AggregateType::Sum => values.iter().sum(),
                     AggregateType::Mean => values.iter().sum::<f64>() / values.len() as f64,
@@ -286,7 +335,8 @@ impl Evaluator {
                 };
                 
                 Ok(Value::Float64(result))
-            }
+            },
+            // The rest of the code remains unchanged
             _ => {
                 if objects.len() == 1 {
                     Self::evaluate_single(expr, &objects[0])

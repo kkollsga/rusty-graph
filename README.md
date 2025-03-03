@@ -10,6 +10,10 @@ A high-performance graph database library with Python bindings written in Rust.
 - [Working with Nodes](#working-with-nodes)
 - [Creating Connections](#creating-connections)
 - [Filtering and Querying](#filtering-and-querying)
+  - [Basic Filtering](#basic-filtering)
+  - [Filtering Orphan Nodes](#filtering-orphan-nodes)
+  - [Sorting Results](#sorting-results)
+  - [Limiting Results](#limiting-results)
 - [Traversing the Graph](#traversing-the-graph)
 - [Statistics and Calculations](#statistics-and-calculations)
 - [Saving and Loading](#saving-and-loading)
@@ -19,6 +23,8 @@ A high-performance graph database library with Python bindings written in Rust.
 
 ```bash
 pip install rusty-graph
+# upgrade
+pip install rusty-graph --upgrade
 ```
 
 ## Introduction
@@ -182,18 +188,83 @@ product_orphans = graph.type_filter('Product').filter_orphans(include_orphans=Tr
 
 ### Sorting Results
 
+Rusty Graph offers flexible options for sorting nodes based on their properties. The `sort_spec` parameter can be used in various methods including `type_filter()`, `filter()`, `filter_orphans()`, `traverse()`, and the standalone `sort()` method.
+
+#### Sort Specification Format Options
+
+1. **Single field string**: Sorts by the specified field in ascending order.
+   ```python
+   # Sort products by price (lowest to highest)
+   sorted_products = graph.type_filter('Product').sort('price')
+   
+   # Can also be used in other methods
+   cheap_products = graph.type_filter('Product').filter(
+       {'stock': {'>': 10}}, 
+       sort_spec='price'
+   )
+   ```
+
+2. **Field with direction**: Explicitly specify ascending or descending order.
+   ```python
+   # Sort products by price (highest to lowest)
+   expensive_first = graph.type_filter('Product').sort('price', ascending=False)
+   ```
+
+3. **List of tuples**: For multi-field sorting with different directions.
+   ```python
+   # First sort by stock (descending), then by price (ascending)
+   # This prioritizes high-stock items, and for items with equal stock,
+   # shows the cheapest ones first
+   complex_sort = graph.type_filter('Product').sort([
+       ('stock', False),  # False = descending order
+       ('price', True)    # True = ascending order
+   ])
+   ```
+
+4. **Dictionary with field and direction**: Alternative format for single field sorting.
+   ```python
+   # Sort by rating in descending order
+   top_rated = graph.type_filter('Product').filter(
+       {}, 
+       sort_spec={'field': 'rating', 'ascending': False}
+   )
+   ```
+
+#### Using Sort Specifications in Different Methods
+
+Sort specifications work consistently across methods:
+
 ```python
-# Sort by a single field (ascending by default)
-sorted_products = graph.type_filter('Product').sort('price')
+# In type_filter
+latest_users = graph.type_filter('User', sort_spec='creation_date', max_nodes=10)
 
-# Sort explicitly by direction
-expensive_first = graph.type_filter('Product').sort('price', ascending=False)
+# In filter
+new_expensive = graph.type_filter('Product').filter(
+    {'price': {'>': 500.0}},
+    sort_spec=[('creation_date', False), ('price', True)]
+)
 
-# Sort by multiple fields
-sorted_complex = graph.type_filter('Product').sort([
-    ('stock', False),  # Highest stock first
-    ('price', True)    # Then by price, lowest first
-])
+# In traversal
+alice_recent_purchases = graph.type_filter('User').filter({'name': 'Alice'}).traverse(
+    connection_type='PURCHASED',
+    sort_target='date',
+    max_nodes=5
+)
+
+# In filter_orphans
+recent_orphans = graph.filter_orphans(
+    include_orphans=True,
+    sort_spec='last_modified',
+    max_nodes=20
+)
+
+# In children_properties_to_list
+expensive_products = graph.type_filter('User').traverse('PURCHASED').children_properties_to_list(
+    property='title',
+    sort_spec='price',  # Sort children by price before creating the list
+    max_nodes=3,
+    store_as='top_expensive_purchases'
+)
 ```
 
 ### Limiting Results
@@ -246,6 +317,7 @@ unique_categories = graph.type_filter('Product').unique_values(
 )
 
 # Convert children properties to a comma-separated list in parent nodes
+# Option 1: Store results in parent nodes
 users_with_products = graph.type_filter('User').traverse('PURCHASED').children_properties_to_list(
     property='title',  # Default is 'title' if not specified
     filter={'price': {'<': 500.0}},  # Optional filtering of children
@@ -255,6 +327,14 @@ users_with_products = graph.type_filter('User').traverse('PURCHASED').children_p
     max_length=100,  # Optional maximum string length (adds "..." if truncated)
     keep_selection=False  # Whether to keep the current selection
 )
+
+# Option 2: Get results as a dictionary without storing them
+product_names = graph.type_filter('User').traverse('PURCHASED').children_properties_to_list(
+    property='title',
+    sort_spec='price',
+    max_nodes=5
+)
+print(product_names)  # Returns {'User1': 'Product1, Product2', 'User2': 'Product3, Product4, Product5'}
 ```
 
 ### Custom Calculations

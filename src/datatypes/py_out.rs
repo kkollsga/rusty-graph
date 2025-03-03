@@ -313,34 +313,62 @@ pub fn convert_computation_results_for_python(results: Vec<StatResult>) -> PyRes
         let dict = PyDict::new_bound(py);
         
         // Convert and insert each result within the GIL scope
-        for result in results {
-            let key = result.parent_title.unwrap_or_else(|| "node".to_string());
-            
-            match result.error_msg {
-                Some(error) => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(error));
-                },
+        for (i, result) in results.iter().enumerate() {
+            // Get a key from parent_title or generate one
+            let key = match &result.parent_title {
+                Some(title) => title.clone(),
                 None => {
-                    // For non-error cases, handle the value
-                    match result.value {
-                        Value::Null => continue,  // Skip null values
-                        Value::Int64(i) => dict.set_item(key, i)?,
-                        Value::Float64(f) => dict.set_item(key, f)?,
-                        Value::UniqueId(u) => dict.set_item(key, u)?,
-                        // Other types should have been converted to numeric during evaluation
-                        _ => continue,
+                    if let Some(idx) = result.parent_idx {
+                        format!("node_{}", idx.index())
+                    } else {
+                        format!("result_{}", i)
+                    }
+                }
+            };
+            
+            // Insert the value or null for errors
+            if let Some(_) = &result.error_msg {
+                // Add null for error cases
+                dict.set_item(&key, py.None())?;
+            } else {
+                // Process successful results
+                match &result.value {
+                    Value::Int64(i) => {
+                        dict.set_item(&key, i)?;
+                    },
+                    Value::Float64(f) => {
+                        dict.set_item(&key, f)?;
+                    },
+                    Value::UniqueId(u) => {
+                        dict.set_item(&key, u)?;
+                    },
+                    Value::Null => {
+                        // Add explicit null value
+                        dict.set_item(&key, py.None())?;
+                    },
+                    _ => {
+                        // Add null for unsupported types
+                        dict.set_item(&key, py.None())?;
                     }
                 }
             }
         }
-
-        // If we just have a single value under 'node', return the value directly
-        if dict.len() == 1 {
-            if let Some(value) = dict.get_item("node")? {
-                return Ok(value.into());
-            }
+        
+        // Check if we have any results at all
+        if dict.len() == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("No results found"));
         }
-
+        
         Ok(dict.into())
     })
+}
+
+pub fn string_pairs_to_pydict(py: Python, pairs: &[(String, String)]) -> PyResult<PyObject> {
+    let result = PyDict::new_bound(py);
+    
+    for (key, value) in pairs {
+        result.set_item(key, value)?;
+    }
+    
+    Ok(result.into())
 }

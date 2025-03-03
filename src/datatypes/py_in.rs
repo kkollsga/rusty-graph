@@ -175,22 +175,31 @@ pub fn pandas_to_dataframe(
 
 pub fn ensure_columns(
     columns: Option<&Bound<'_, PyList>>,
-    unique_id_field: &str,
-    node_title_field: &Option<String>,
+    mandatory_fields: &[&str],
+    optional_fields: &[&Option<String>],
 ) -> PyResult<Option<Vec<String>>> {
     match columns {
         Some(cols) => {
             let mut cols_vec: Vec<String> = cols.iter()
                 .map(|item| item.extract::<String>())
                 .collect::<PyResult<_>>()?;
-            if !cols_vec.contains(&unique_id_field.to_string()) {
-                cols_vec.push(unique_id_field.to_string());
-            }
-            if let Some(title_field) = node_title_field {
-                if !cols_vec.contains(title_field) {
-                    cols_vec.push(title_field.clone());
+            
+            // Add all mandatory fields
+            for field in mandatory_fields {
+                if !cols_vec.contains(&field.to_string()) {
+                    cols_vec.push(field.to_string());
                 }
             }
+            
+            // Add all optional fields if they exist
+            for opt_field in optional_fields {
+                if let Some(field) = opt_field {
+                    if !cols_vec.contains(field) {
+                        cols_vec.push(field.clone());
+                    }
+                }
+            }
+            
             Ok(Some(cols_vec))
         },
         None => Ok(None),

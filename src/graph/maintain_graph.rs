@@ -152,8 +152,7 @@ pub fn add_connections(
     target_id_field: String,
     source_title_field: Option<String>,
     target_title_field: Option<String>,
-    columns: Option<Vec<String>>,
-    _conflict_handling: Option<String>,
+    conflict_handling: Option<String>,
 ) -> Result<(), String> {
     if !df_data.verify_column(&source_id_field) {
         return Err(format!("Source ID column '{}' not found", source_id_field));
@@ -167,10 +166,11 @@ pub fn add_connections(
     let target_id_idx = df_data.get_column_index(&target_id_field)
         .ok_or_else(|| format!("Target ID column '{}' not found", target_id_field))?;
 
-    let source_title_idx = source_title_field
-        .and_then(|field| df_data.get_column_index(&field));
-    let target_title_idx = target_title_field
-        .and_then(|field| df_data.get_column_index(&field));
+    // Use as_ref() to borrow rather than move
+    let source_title_idx = source_title_field.as_ref()
+        .and_then(|field| df_data.get_column_index(field));
+    let target_title_idx = target_title_field.as_ref()
+        .and_then(|field| df_data.get_column_index(field));
 
     let lookup = CombinedTypeLookup::new(&graph.graph, source_type.clone(), target_type.clone())?;
     let mut batch = ConnectionBatchProcessor::new(df_data.row_count());
@@ -204,11 +204,18 @@ pub fn add_connections(
         update_node_titles(graph, source_idx, target_idx, row_idx, 
                          source_title_idx, target_title_idx, &df_data)?;
 
-        let mut properties = HashMap::with_capacity(columns.as_ref().map_or(0, |c| c.len()));
-        if let Some(cols) = &columns {
-            for col_name in cols {
+        let mut properties = HashMap::with_capacity(df_data.get_column_names().len());
+        // Get all columns that aren't the ID or title fields
+        for col_name in df_data.get_column_names() {
+            // Check if this is an ID or title field
+            let is_id_field = *col_name == source_id_field || *col_name == target_id_field;
+            let is_source_title = source_title_field.as_ref().map_or(false, |field| *col_name == *field);
+            let is_target_title = target_title_field.as_ref().map_or(false, |field| *col_name == *field);
+            
+            // Only add properties for columns that aren't ID or title fields
+            if !is_id_field && !is_source_title && !is_target_title {
                 // Always include the property, even if it's None/Null
-                if let Some(value) = df_data.get_value(row_idx, col_name) {
+                if let Some(value) = df_data.get_value(row_idx, &col_name) {
                     properties.insert(col_name.clone(), value);
                 } else {
                     properties.insert(col_name.clone(), Value::Null);

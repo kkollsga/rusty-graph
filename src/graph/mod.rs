@@ -50,7 +50,9 @@ impl KnowledgeGraph {
         _column_types: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         let modified_columns: Option<Vec<String>> = py_in::ensure_columns(
-            columns, &unique_id_field, &node_title_field
+            columns, 
+            &[&unique_id_field], 
+            &[&node_title_field]
         )?;
         let df_result = py_in::pandas_to_dataframe(
             data, &[unique_id_field.clone()], modified_columns.as_deref(),
@@ -80,17 +82,18 @@ impl KnowledgeGraph {
         columns: Option<&Bound<'_, PyList>>,
         conflict_handling: Option<String>,
     ) -> PyResult<()> {
-        let cols: Option<Vec<String>> = match columns {
-            Some(py_list) => Some(py_list.iter().map(|item| item.extract::<String>().unwrap()).collect()),
-            None => None,
-        };
-
+        let modified_columns: Option<Vec<String>> = py_in::ensure_columns(
+            columns, 
+            &[&source_id_field, &target_id_field], 
+            &[&source_title_field, &target_title_field]
+        )?;
+        
         let df_result = py_in::pandas_to_dataframe(
             data,
             &[source_id_field.clone(), target_id_field.clone()],
-            cols.as_deref(),
+            modified_columns.as_deref(),
         )?;
-
+    
         maintain_graph::add_connections(
             &mut self.inner,
             df_result,
@@ -101,10 +104,9 @@ impl KnowledgeGraph {
             target_id_field,
             source_title_field,
             target_title_field,
-            cols,
             conflict_handling,
         ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-
+    
         self.selection.clear();
         Ok(())
     }
@@ -355,7 +357,7 @@ impl KnowledgeGraph {
         store_as: Option<&str>,
         max_length: Option<usize>,
         keep_selection: Option<bool>,
-    ) -> PyResult<Self> {
+    ) -> PyResult<PyObject> {
         let property_name = property.unwrap_or("title");
         
         // Apply filtering and sorting if needed
@@ -399,30 +401,42 @@ impl KnowledgeGraph {
             ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         }
         
-        // Generate the property lists
-        let children_props = traversal_methods::get_children_properties(
+        // Generate the property lists with titles already included
+        let property_groups = traversal_methods::get_children_properties(
             &filtered_graph.inner,
             &filtered_graph.selection,
             property_name
         );
         
+        // If store_as is not provided, return the properties as a dictionary
+        if store_as.is_none() {
+            // Format for dictionary display
+            let dict_pairs = traversal_methods::format_for_dictionary(
+                &property_groups,
+                max_length
+            );
+            
+            return Python::with_gil(|py| {
+                py_out::string_pairs_to_pydict(py, &dict_pairs)
+            });
+        }
+        
         // Format for storage
-        let nodes = traversal_methods::format_children_properties_for_storage(
-            &children_props,
+        let nodes = traversal_methods::format_for_storage(
+            &property_groups,
             max_length
         );
         
-        // Only update parent properties if store_as is provided
-        if let Some(target_property) = store_as {
-            maintain_graph::update_node_properties(&mut self.inner, &nodes, target_property)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-            
-            if !keep_selection.unwrap_or(false) {
-                self.selection.clear();
-            }
+        // Update parent properties
+        maintain_graph::update_node_properties(&mut self.inner, &nodes, store_as.unwrap())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        
+        if !keep_selection.unwrap_or(false) {
+            self.selection.clear();
         }
         
-        Ok(self.clone())
+        // Return the updated graph
+        Python::with_gil(|py| Ok(self.clone().into_py(py)))
     }
 
     fn statistics(

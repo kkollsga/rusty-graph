@@ -37,54 +37,61 @@ pub fn process_equation(
     let is_aggregation = has_aggregation(&parsed_expr);
     let results = evaluate_equation(graph, selection, expression, level_index);
     
-    if let Some(target_property) = store_as {
-        // Determine where to store results based on whether there's aggregation
-        let effective_level_index = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
-        
-        // Prepare a Vec to hold valid nodes for update
-        let mut nodes_to_update: Vec<(Option<NodeIndex>, Value)> = Vec::new();
-        
-        if is_aggregation {
-            // For aggregation - get actual parent nodes from the selection
-            for result in &results {
-                if let Some(parent_idx) = result.parent_idx {
-                    // Verify the parent node exists in the graph
-                    if graph.get_node(parent_idx).is_some() {
-                        nodes_to_update.push((Some(parent_idx), result.value.clone()));
-                    }
-                }
-            }
-        } else {
-            // For non-aggregation - get actual child nodes from the selection
-            if let Some(level) = selection.get_level(effective_level_index) {
-                // Get all node indices directly from the current level
-                for node_idx in level.get_all_nodes() {
-                    // Fixed: Removed the & pattern, as node_idx is already the value we want
-                    // Find the corresponding result for this node
-                    if let Some(result) = results.iter().find(|r| r.node_idx == Some(node_idx)) {
-                        // Verify node exists in the graph
-                        if graph.get_node(node_idx).is_some() {
-                            nodes_to_update.push((Some(node_idx), result.value.clone()));
-                        }
-                    }
-                }
-            }
+    // If we don't need to store results, just return them directly
+    if store_as.is_none() {
+        if results.is_empty() {
+            return Err("No results from calculation".to_string());
         }
         
-        // Check if we found any valid nodes to update
-        if nodes_to_update.is_empty() {
-            return Err(format!(
-                "No valid nodes found to store '{}'. Selection level: {}, Aggregation: {}", 
-                target_property, effective_level_index, is_aggregation
-            ));
-        }
-        
-        // Update the node properties with verified node indices
-        maintain_graph::update_node_properties(graph, &nodes_to_update, target_property)?;
-        Ok(EvaluationResult::Stored(()))
-    } else {
-        Ok(EvaluationResult::Computed(results))
+        return Ok(EvaluationResult::Computed(results));
     }
+    
+    // Only proceed with node updating logic if we need to store results
+    let target_property = store_as.unwrap();
+    
+    // Determine where to store results based on whether there's aggregation
+    let effective_level_index = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
+    
+    // Prepare a Vec to hold valid nodes for update
+    let mut nodes_to_update: Vec<(Option<NodeIndex>, Value)> = Vec::new();
+    
+    if is_aggregation {
+        // For aggregation - get actual parent nodes from the selection
+        for result in &results {
+            if let Some(parent_idx) = result.parent_idx {
+                // Verify the parent node exists in the graph
+                if graph.get_node(parent_idx).is_some() {
+                    nodes_to_update.push((Some(parent_idx), result.value.clone()));
+                }
+            }
+        }
+    } else {
+        // For non-aggregation - get actual child nodes from the selection
+        if let Some(level) = selection.get_level(effective_level_index) {
+            // Get all node indices directly from the current level
+            for node_idx in level.get_all_nodes() {
+                // Find the corresponding result for this node
+                if let Some(result) = results.iter().find(|r| r.node_idx == Some(node_idx)) {
+                    // Verify node exists in the graph
+                    if graph.get_node(node_idx).is_some() {
+                        nodes_to_update.push((Some(node_idx), result.value.clone()));
+                    }
+                }
+            }
+        }
+    }
+    
+    // Check if we found any valid nodes to update
+    if nodes_to_update.is_empty() {
+        return Err(format!(
+            "No valid nodes found to store '{}'. Selection level: {}, Aggregation: {}", 
+            target_property, effective_level_index, is_aggregation
+        ));
+    }
+    
+    // Update the node properties with verified node indices
+    maintain_graph::update_node_properties(graph, &nodes_to_update, target_property)?;
+    Ok(EvaluationResult::Stored(()))
 }
 
 pub fn evaluate_equation(
@@ -234,17 +241,28 @@ fn convert_node_to_object(node: &NodeData) -> HashMap<String, Value> {
     
     match node {
         NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
+            // Process all properties
             for (key, value) in properties {
                 match value {
-                    Value::Int64(_) | Value::Float64(_) | Value::UniqueId(_) | Value::Null => {
+                    Value::Int64(_) | Value::Float64(_) | Value::UniqueId(_) => {
                         object.insert(key.clone(), value.clone());
                     }
+                    Value::Null => {
+                        object.insert(key.clone(), Value::Null);
+                    }
                     Value::String(s) => {
+                        // Try to parse as number
                         if let Ok(num) = s.parse::<f64>() {
                             object.insert(key.clone(), Value::Float64(num));
+                        } else {
+                            // Include the string value too
+                            object.insert(key.clone(), value.clone());
                         }
                     }
-                    _ => {}
+                    _ => {
+                        // Include all other value types
+                        object.insert(key.clone(), value.clone());
+                    }
                 }
             }
         }
