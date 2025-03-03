@@ -244,6 +244,17 @@ unique_categories = graph.type_filter('Product').unique_values(
     store_as='category_list',
     max_length=10
 )
+
+# Convert children properties to a comma-separated list in parent nodes
+users_with_products = graph.type_filter('User').traverse('PURCHASED').children_properties_to_list(
+    property='title',  # Default is 'title' if not specified
+    filter={'price': {'<': 500.0}},  # Optional filtering of children
+    sort_spec='price',  # Optional sorting of children
+    max_nodes=5,  # Optional limit of children per parent
+    store_as='purchased_products',  # Property name to store the list in parent
+    max_length=100,  # Optional maximum string length (adds "..." if truncated)
+    keep_selection=False  # Whether to keep the current selection
+)
 ```
 
 ### Custom Calculations

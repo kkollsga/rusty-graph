@@ -345,6 +345,86 @@ impl KnowledgeGraph {
         Ok(self.clone())
     }
     
+    #[pyo3(signature = (property=None, filter=None, sort_spec=None, max_nodes=None, store_as=None, max_length=None, keep_selection=None))]
+    fn children_properties_to_list(
+        &mut self,
+        property: Option<&str>,
+        filter: Option<&Bound<'_, PyDict>>,
+        sort_spec: Option<&Bound<'_, PyAny>>,
+        max_nodes: Option<usize>,
+        store_as: Option<&str>,
+        max_length: Option<usize>,
+        keep_selection: Option<bool>,
+    ) -> PyResult<Self> {
+        let property_name = property.unwrap_or("title");
+        
+        // Apply filtering and sorting if needed
+        let mut filtered_graph = self.clone();
+        
+        if let Some(filter_dict) = filter {
+            let conditions = py_in::pydict_to_filter_conditions(filter_dict)?;
+            let sort_fields = match sort_spec {
+                Some(spec) => Some(py_in::parse_sort_fields(spec, None)?),
+                None => None,
+            };
+            
+            filtering_methods::filter_nodes(
+                &filtered_graph.inner, 
+                &mut filtered_graph.selection, 
+                conditions, 
+                sort_fields, 
+                max_nodes
+            ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        } else if let Some(spec) = sort_spec {
+            let sort_fields = py_in::parse_sort_fields(spec, None)?;
+            
+            filtering_methods::sort_nodes(
+                &filtered_graph.inner, 
+                &mut filtered_graph.selection, 
+                sort_fields
+            ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            
+            if let Some(max) = max_nodes {
+                filtering_methods::limit_nodes_per_group(
+                    &filtered_graph.inner, 
+                    &mut filtered_graph.selection, 
+                    max
+                ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            }
+        } else if let Some(max) = max_nodes {
+            filtering_methods::limit_nodes_per_group(
+                &filtered_graph.inner, 
+                &mut filtered_graph.selection, 
+                max
+            ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        }
+        
+        // Generate the property lists
+        let children_props = traversal_methods::get_children_properties(
+            &filtered_graph.inner,
+            &filtered_graph.selection,
+            property_name
+        );
+        
+        // Format for storage
+        let nodes = traversal_methods::format_children_properties_for_storage(
+            &children_props,
+            max_length
+        );
+        
+        // Only update parent properties if store_as is provided
+        if let Some(target_property) = store_as {
+            maintain_graph::update_node_properties(&mut self.inner, &nodes, target_property)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            
+            if !keep_selection.unwrap_or(false) {
+                self.selection.clear();
+            }
+        }
+        
+        Ok(self.clone())
+    }
+
     fn statistics(
         &self,
         property: &str,

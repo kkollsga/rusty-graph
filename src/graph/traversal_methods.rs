@@ -7,6 +7,7 @@ use petgraph::Direction;
 use crate::graph::schema::{DirGraph, CurrentSelection, SelectionOperation};
 use crate::datatypes::values::FilterCondition;
 use crate::graph::filtering_methods;
+use crate::datatypes::values::Value;
 
 fn get_connected_targets(
     graph: &DirGraph,
@@ -217,4 +218,71 @@ pub fn make_traversal(
     }
 
     Ok(())
+}
+
+pub fn get_children_properties(
+    graph: &DirGraph,
+    selection: &CurrentSelection,
+    property: &str
+) -> Vec<(NodeIndex, Vec<String>)> {
+    let mut result = Vec::new();
+    
+    // Get the current level index
+    let level_index = selection.get_level_count().saturating_sub(1);
+    
+    // Get all parents with their children
+    if let Some(level) = selection.get_level(level_index) {
+        for (&parent_opt, children) in &level.selections {
+            if let Some(parent) = parent_opt {
+                // For each parent, collect property values from children
+                let mut values_list = Vec::new();
+                
+                for &child_idx in children {
+                    if let Some(node) = graph.get_node(child_idx) {
+                        let value = match node.get_field(property) {
+                            Some(Value::String(s)) => s.clone(),
+                            Some(Value::Int64(i)) => i.to_string(),
+                            Some(Value::Float64(f)) => f.to_string(),
+                            Some(Value::Boolean(b)) => b.to_string(),
+                            Some(Value::UniqueId(u)) => u.to_string(),
+                            Some(Value::DateTime(d)) => d.format("%Y-%m-%d").to_string(),
+                            Some(Value::Null) => "null".to_string(),
+                            None => continue,
+                        };
+                        
+                        values_list.push(value);
+                    }
+                }
+                
+                result.push((parent, values_list));
+            }
+        }
+    }
+    
+    result
+}
+
+pub fn format_children_properties_for_storage(
+    property_lists: &[(NodeIndex, Vec<String>)],
+    max_length: Option<usize>
+) -> Vec<(Option<NodeIndex>, Value)> {
+    property_lists.iter()
+        .map(|(parent, values)| {
+            // Join into a comma-separated list
+            let list_value = values.join(", ");
+            
+            // Truncate if a max length is specified
+            let final_value = if let Some(max) = max_length {
+                if list_value.len() > max {
+                    format!("{}...", &list_value[..max.saturating_sub(3)])
+                } else {
+                    list_value
+                }
+            } else {
+                list_value
+            };
+            
+            (Some(*parent), Value::String(final_value))
+        })
+        .collect()
 }
