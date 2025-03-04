@@ -295,7 +295,8 @@ impl Evaluator {
                     .filter_map(|x| x)
                     .collect();
                 
-                // Debug output to help diagnose issues
+                // If we have no valid evaluations but have objects, return 0 for sum operations
+                // instead of null - this makes sums more intuitive when fields are missing
                 if total_objects > 0 && successful_evals == 0 {
                     if !error_messages.is_empty() {
                         // Print just a few error messages to avoid flooding the output
@@ -309,15 +310,22 @@ impl Evaluator {
                         println!("Warning: Got {} null results out of {} objects", null_results, total_objects);
                     }
                     
-                    // Return Null instead of trying to do calculations with empty values
-                    return Ok(Value::Null);
+                    // For sum, return 0 when all values are null or errors
+                    // For other aggregates, return null
+                    return match agg_type {
+                        AggregateType::Sum => Ok(Value::Float64(0.0)),
+                        _ => Ok(Value::Null),
+                    };
                 }
                 
                 if values.is_empty() {
-                    return Ok(Value::Null);
+                    return match agg_type {
+                        AggregateType::Sum => Ok(Value::Float64(0.0)),
+                        _ => Ok(Value::Null),
+                    };
                 }
-    
-                // Rest of the aggregation code remains the same
+        
+                // Rest of the aggregation code
                 let result = match agg_type {
                     AggregateType::Sum => values.iter().sum(),
                     AggregateType::Mean => values.iter().sum::<f64>() / values.len() as f64,
@@ -336,7 +344,7 @@ impl Evaluator {
                 
                 Ok(Value::Float64(result))
             },
-            // The rest of the code remains unchanged
+            // The rest of the code for non-aggregate expressions
             _ => {
                 if objects.len() == 1 {
                     Self::evaluate_single(expr, &objects[0])
@@ -350,9 +358,10 @@ impl Evaluator {
     fn evaluate_single(expr: &Expr, object: &HashMap<String, Value>) -> Result<Value, String> {
         match expr {
             Expr::Number(n) => Ok(Value::Float64(*n)),
-            Expr::Variable(name) => object.get(name)
-                .cloned()
-                .ok_or_else(|| format!("Variable {} not found", name)),
+            Expr::Variable(name) => {
+                // Return null instead of error for missing variables
+                Ok(object.get(name).cloned().unwrap_or(Value::Null))
+            },
             Expr::Add(left, right) => {
                 match (Self::evaluate_single(left, object)?, Self::evaluate_single(right, object)?) {
                     (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a + b)),
@@ -360,7 +369,14 @@ impl Evaluator {
                     (Value::Int64(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 + b)),
                     (Value::Float64(a), Value::Int64(b)) => Ok(Value::Float64(a + b as f64)),
                     (Value::UniqueId(a), Value::UniqueId(b)) => Ok(Value::UniqueId(a + b)),
-                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    (Value::Null, Value::Null) => Ok(Value::Null),
+                    // Treat null as zero in additions for more lenient calculations
+                    (Value::Null, Value::Int64(b)) => Ok(Value::Int64(b)),
+                    (Value::Int64(a), Value::Null) => Ok(Value::Int64(a)),
+                    (Value::Null, Value::Float64(b)) => Ok(Value::Float64(b)),
+                    (Value::Float64(a), Value::Null) => Ok(Value::Float64(a)),
+                    (Value::Null, Value::UniqueId(b)) => Ok(Value::UniqueId(b)),
+                    (Value::UniqueId(a), Value::Null) => Ok(Value::UniqueId(a)),
                     (a, b) => Err(format!("Cannot add values: {:?} and {:?}", a, b))
                 }
             },
@@ -371,7 +387,12 @@ impl Evaluator {
                     (Value::Int64(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 - b)),
                     (Value::Float64(a), Value::Int64(b)) => Ok(Value::Float64(a - b as f64)),
                     (Value::UniqueId(a), Value::UniqueId(b)) => Ok(Value::UniqueId(a - b)),
-                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    (Value::Null, Value::Null) => Ok(Value::Null),
+                    // Treat null specially in subtractions
+                    (Value::Null, _) => Ok(Value::Null), // null - anything = null
+                    (Value::Int64(a), Value::Null) => Ok(Value::Int64(a)), // a - null = a
+                    (Value::Float64(a), Value::Null) => Ok(Value::Float64(a)),
+                    (Value::UniqueId(a), Value::Null) => Ok(Value::UniqueId(a)),
                     (a, b) => Err(format!("Cannot subtract values: {:?} and {:?}", a, b))
                 }
             },
@@ -382,7 +403,7 @@ impl Evaluator {
                     (Value::Int64(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 * b)),
                     (Value::Float64(a), Value::Int64(b)) => Ok(Value::Float64(a * b as f64)),
                     (Value::UniqueId(a), Value::UniqueId(b)) => Ok(Value::UniqueId(a * b)),
-                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null), // null * anything = null
                     (a, b) => Err(format!("Cannot multiply values: {:?} and {:?}", a, b))
                 }
             },
@@ -396,7 +417,7 @@ impl Evaluator {
                     (Value::Int64(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 / b)),
                     (Value::Float64(a), Value::Int64(b)) => Ok(Value::Float64(a / b as f64)),
                     (Value::UniqueId(a), Value::UniqueId(b)) => Ok(Value::Float64(a as f64 / b as f64)),
-                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null), // null / anything = null
                     (a, b) => Err(format!("Cannot divide values: {:?} and {:?}", a, b))
                 }
             },

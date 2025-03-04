@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use crate::datatypes::{py_in, py_out};
 use crate::datatypes::values::{Value, FilterCondition};
 use crate::graph::io_operations::save_to_file;
+use crate::graph::calculations::StatResult;
 
 pub mod maintain_graph;
 pub mod filtering_methods;
@@ -456,25 +457,59 @@ impl KnowledgeGraph {
         store_as: Option<&str>,
         keep_selection: Option<bool>,
     ) -> PyResult<PyObject> {
-        let result = calculations::process_equation(
+        // Process the expression
+        let process_result = calculations::process_equation(
             &mut self.inner,
             &self.selection,
             expression,
             level_index,
             store_as,
-        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        );
+        
+        // Handle regular errors with descriptive messages
+        let evaluation_result = match process_result {
+            Ok(eval_result) => eval_result,
+            Err(e) => {
+                let error_msg = format!("Error evaluating expression '{}': {}", expression, e);
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(error_msg));
+            }
+        };
     
-        match result {
+        // Process the result normally if no errors occurred
+        match evaluation_result {
             calculations::EvaluationResult::Stored(()) => {
-                // Only clear selection if we stored values and keep_selection is false
                 if !keep_selection.unwrap_or(false) {
                     self.selection.clear();
                 }
                 Python::with_gil(|py| Ok(self.clone().into_py(py)))
             },
             calculations::EvaluationResult::Computed(results) => {
-                // Don't clear selection for computed results that weren't stored
-                py_out::convert_computation_results_for_python(results)
+                // Only check for errors if all results have errors
+                let error_count = results.iter().filter(|r| r.error_msg.is_some()).count();
+                if error_count == results.len() && !results.is_empty() {
+                    if let Some(first_error) = results.iter().find(|r| r.error_msg.is_some()) {
+                        if let Some(error_text) = &first_error.error_msg {
+                            // Convert computation errors to Python exceptions
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                format!("Error in calculation '{}': {}", expression, error_text)
+                            ));
+                        }
+                    }
+                }
+                
+                // Filter out results with errors before passing to Python
+                let valid_results: Vec<StatResult> = results.into_iter()
+                    .filter(|r| r.error_msg.is_none())
+                    .collect();
+                
+                // Only proceed if we have at least one valid result
+                if valid_results.is_empty() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        format!("No valid results found for expression '{}'", expression)
+                    ));
+                }
+                
+                py_out::convert_computation_results_for_python(valid_results)
             }
         }
     }

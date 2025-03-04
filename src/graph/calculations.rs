@@ -31,11 +31,11 @@ pub fn process_equation(
     // Parse the expression first
     let parsed_expr = match Parser::parse_expression(expression) {
         Ok(expr) => expr,
-        Err(err) => return Err(format!("Failed to parse expression: {}", err)),
+        Err(err) => return Err(format!("Failed to parse expression: {}. Check for syntax errors or case sensitivity in function names (use 'sum', not 'SUM').", err)),
     };
     
     let is_aggregation = has_aggregation(&parsed_expr);
-    let results = evaluate_equation(graph, selection, expression, level_index);
+    let results = evaluate_equation(graph, selection, &parsed_expr, level_index);
     
     // If we don't need to store results, just return them directly
     if store_as.is_none() {
@@ -68,11 +68,16 @@ pub fn process_equation(
     } else {
         // For non-aggregation - get actual child nodes from the selection
         if let Some(level) = selection.get_level(effective_level_index) {
+            // Create HashMap from node indices to results
+            let result_map: HashMap<NodeIndex, &StatResult> = results.iter()
+                .filter_map(|r| r.node_idx.map(|idx| (idx, r)))
+                .collect();
+            
             // Get all node indices directly from the current level
             for node_idx in level.get_all_nodes() {
-                // Find the corresponding result for this node
-                if let Some(result) = results.iter().find(|r| r.node_idx == Some(node_idx)) {
-                    // Verify node exists in the graph
+                // Direct HashMap lookup instead of linear search
+                if let Some(&result) = result_map.get(&node_idx) {
+                    // Verify node exists in the graph - IMPORTANT: Must check here
                     if graph.get_node(node_idx).is_some() {
                         nodes_to_update.push((Some(node_idx), result.value.clone()));
                     }
@@ -94,29 +99,28 @@ pub fn process_equation(
     Ok(EvaluationResult::Stored(()))
 }
 
+
+// Modified evaluate_equation to take a parsed expression directly
 pub fn evaluate_equation(
     graph: &DirGraph,
     selection: &CurrentSelection,
-    expression: &str,
+    parsed_expr: &Expr,
     level_index: Option<usize>,
 ) -> Vec<StatResult> {
-    let parsed_expr = match Parser::parse_expression(expression) {
-        Ok(expr) => expr,
-        Err(err) => {
-            return vec![StatResult {
-                node_idx: None,
-                parent_idx: None,
-                parent_title: None,
-                value: Value::Null,
-                error_msg: Some(format!("Failed to parse expression: {}", err)),
-            }];
-        }
-    };
-
-    let is_aggregation = has_aggregation(&parsed_expr);
+    let is_aggregation = has_aggregation(parsed_expr);
 
     if is_aggregation {
         let pairs = get_parent_child_pairs(selection, level_index);
+        
+        // IMPROVEMENT #2: Cache parent titles to avoid redundant lookups
+        let parent_titles: HashMap<NodeIndex, Option<String>> = pairs.iter()
+            .filter_map(|pair| pair.parent.map(|idx| (
+                idx, 
+                graph.get_node(idx)
+                    .and_then(|node| node.get_field("title"))
+                    .and_then(|v| v.as_string())
+            )))
+            .collect();
         
         pairs.iter()
             .map(|pair| {
@@ -131,11 +135,8 @@ pub fn evaluate_equation(
                     return StatResult {
                         node_idx: None,
                         parent_idx: pair.parent,
-                        parent_title: pair.parent.and_then(|idx| {
-                            graph.get_node(idx)
-                                .and_then(|node| node.get_field("title"))
-                                .and_then(|v| v.as_string())
-                        }),
+                        // Use cached parent title instead of looking it up again
+                        parent_title: pair.parent.and_then(|idx| parent_titles.get(&idx).cloned().flatten()),
                         value: Value::Null,
                         error_msg: Some("No valid nodes found".to_string()),
                     };
@@ -145,26 +146,20 @@ pub fn evaluate_equation(
                     .map(|(_, _, obj)| obj)
                     .collect();
 
-                match Evaluator::evaluate(&parsed_expr, &objects) {
+                match Evaluator::evaluate(parsed_expr, &objects) {
                     Ok(value) => StatResult {
                         node_idx: None,
                         parent_idx: pair.parent,
-                        parent_title: pair.parent.and_then(|idx| {
-                            graph.get_node(idx)
-                                .and_then(|node| node.get_field("title"))
-                                .and_then(|v| v.as_string())
-                        }),
+                        // Use cached parent title
+                        parent_title: pair.parent.and_then(|idx| parent_titles.get(&idx).cloned().flatten()),
                         value,
                         error_msg: None,
                     },
                     Err(err) => StatResult {
                         node_idx: None,
                         parent_idx: pair.parent,
-                        parent_title: pair.parent.and_then(|idx| {
-                            graph.get_node(idx)
-                                .and_then(|node| node.get_field("title"))
-                                .and_then(|v| v.as_string())
-                        }),
+                        // Use cached parent title
+                        parent_title: pair.parent.and_then(|idx| parent_titles.get(&idx).cloned().flatten()),
                         value: Value::Null,
                         error_msg: Some(err),
                     },
@@ -188,10 +183,7 @@ pub fn evaluate_equation(
                             .and_then(|v| v.as_string());
                         let obj = convert_node_to_object(node);
                 
-                        // Clone obj for the error case
-                        let obj_for_error = obj.clone();
-                        
-                        match Evaluator::evaluate(&parsed_expr, &[obj]) {
+                        match Evaluator::evaluate(parsed_expr, &[obj]) {
                             Ok(value) => StatResult {
                                 node_idx: Some(node_idx),
                                 parent_idx: None,
@@ -200,8 +192,6 @@ pub fn evaluate_equation(
                                 error_msg: None,
                             },
                             Err(err) => {
-                                println!("Error evaluating node {}: {}", node_idx.index(), err);
-                                println!("Node properties: {:?}", obj_for_error);
                                 StatResult {
                                     node_idx: Some(node_idx),
                                     parent_idx: None,
@@ -355,6 +345,6 @@ pub fn store_count_results(
         ));
     }
     
-    // Update the node properties with verified node indices
+    // Use the optimized batch update (which no longer checks existence)
     maintain_graph::update_node_properties(graph, &nodes_to_update, target_property)
 }

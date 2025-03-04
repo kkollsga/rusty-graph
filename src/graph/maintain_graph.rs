@@ -383,25 +383,45 @@ pub fn selection_to_new_connections(
     Ok((stats.connections_created, skipped))
 }
 
+// src/graph/maintain_graph.rs - update_node_properties function with fixed borrowing
+
 pub fn update_node_properties(
     graph: &mut DirGraph,
     nodes: &[(Option<NodeIndex>, Value)],
     property: &str,
 ) -> Result<(), String> {
+    // Skip empty updates
+    if nodes.is_empty() {
+        return Ok(());
+    }
+    
+    // Track which nodes we've seen and node types for schema updates
     let mut seen_nodes = HashSet::new();
     let mut node_type_to_sample_value: HashMap<String, Value> = HashMap::new();
     
-    // Process all node updates in a single pass
+    // First pass: collect all node updates we need to make (immutable borrow only)
+    let mut update_actions = Vec::new();
+    
     for (node_idx, value) in nodes {
-        // Direct node updates
         if let Some(idx) = node_idx {
-            if let Some(node) = graph.get_node_mut(*idx) {
+            // Get node information for processing
+            if let Some(node) = graph.get_node(*idx) {
                 match node {
-                    NodeData::Regular { properties, node_type, .. } => {
+                    NodeData::Regular { node_type, .. } => {
+                        // Create property map with just the target property
+                        let mut properties = HashMap::new();
                         properties.insert(property.to_string(), value.clone());
-                        seen_nodes.insert(*idx);
                         
-                        // Track the first sample value for each node type
+                        // Store the update action for later processing
+                        update_actions.push(NodeAction::Update {
+                            node_idx: *idx,
+                            title: None,  // Don't update title
+                            properties,
+                            conflict_mode: ConflictHandling::Update,  // Update specific property
+                        });
+                        
+                        // Track this node and its type/value for schema updates
+                        seen_nodes.insert(*idx);
                         if !node_type_to_sample_value.contains_key(node_type) {
                             node_type_to_sample_value.insert(node_type.clone(), value.clone());
                         }
@@ -414,7 +434,32 @@ pub fn update_node_properties(
         }
     }
     
-    // Update schema for each node type that had properties updated
+    // Only proceed if we have nodes to update
+    if update_actions.is_empty() {
+        return Ok(());
+    }
+    
+    // Second pass: apply all updates (mutable borrow)
+    let mut processor = BatchProcessor::new(update_actions.len());
+    
+    for action in update_actions {
+        processor.add_action(action, graph)?;
+    }
+    
+    // Execute the batch update
+    let (stats, metrics) = processor.execute(graph)?;
+    
+    #[cfg(debug_assertions)]
+    {
+        eprintln!(
+            "Batch property update: {} nodes updated for '{}' in {:.3}ms", 
+            stats.updates, 
+            property,
+            metrics.processing_time * 1000.0
+        );
+    }
+    
+    // Update schema nodes for each node type that had properties updated
     for (node_type, sample_value) in node_type_to_sample_value {
         // Get a lookup for schema nodes
         let schema_lookup = match TypeLookup::new(&graph.graph, "SchemaNode".to_string()) {
