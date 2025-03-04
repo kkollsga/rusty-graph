@@ -1,6 +1,7 @@
 // src/graph/io_operations.rs
 use std::fs::File;
 use std::io::{self, BufWriter, BufReader};
+use std::sync::Arc;
 use bincode;
 use crate::graph::schema::{DirGraph, CurrentSelection};
 use crate::graph::KnowledgeGraph;
@@ -20,7 +21,7 @@ pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     
     Ok(KnowledgeGraph {
-        inner: dir_graph,
+        inner: Arc::new(dir_graph),  // Wrap in Arc
         selection: CurrentSelection::new(),
     })
 }

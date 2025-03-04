@@ -1,11 +1,10 @@
-// src/graph/filtering_methods.rs
 use std::collections::{HashMap, HashSet};
 use petgraph::graph::NodeIndex;
 use crate::datatypes::values::{Value, FilterCondition};
 use crate::graph::schema::{DirGraph, CurrentSelection, SelectionOperation};
 
 
-fn matches_condition(value: &Value, condition: &FilterCondition) -> bool {
+pub fn matches_condition(value: &Value, condition: &FilterCondition) -> bool {
     match condition {
         FilterCondition::Equals(target) => value == target,
         FilterCondition::NotEquals(target) => value != target,
@@ -23,7 +22,7 @@ fn matches_condition(value: &Value, condition: &FilterCondition) -> bool {
     }
 }
 
-fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+pub fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     match (a, b) {
         (Value::Null, Value::Null) => Some(std::cmp::Ordering::Equal),
         (Value::Null, _) => Some(std::cmp::Ordering::Less),
@@ -47,21 +46,25 @@ fn filter_nodes_by_conditions(
     nodes: Vec<NodeIndex>,
     conditions: &HashMap<String, FilterCondition>
 ) -> Vec<NodeIndex> {
-    // Pre-check for type filter optimization
-    if let Some((_key, FilterCondition::Equals(Value::String(type_value)))) = conditions.iter()
-        .find(|(k, _)| *k == "type") 
-    {
-        if let Some(type_nodes) = graph.type_indices.get(type_value) {
-            let type_set: HashSet<_> = type_nodes.iter().collect();
-            return nodes.into_iter()
-                .filter(|node| type_set.contains(node))
-                .collect();
+    // Special case for type filter which we can optimize
+    if conditions.len() == 1 {
+        if let Some((key, FilterCondition::Equals(Value::String(type_value)))) = conditions.iter().next() {
+            if key == "type" {
+                if let Some(type_nodes) = graph.type_indices.get(type_value) {
+                    // Use HashSet for O(1) lookups
+                    let type_set: HashSet<_> = type_nodes.iter().collect();
+                    return nodes.into_iter()
+                        .filter(|node| type_set.contains(node))
+                        .collect();
+                }
+                return Vec::new();
+            }
         }
-        return Vec::new();
     }
 
     // Cache field lookups for frequently accessed fields
-    let mut field_cache: HashMap<(NodeIndex, &String), Option<Value>> = HashMap::new();
+    let estimated_cache_size = nodes.len() * conditions.len();
+    let mut field_cache: HashMap<(NodeIndex, &String), Option<Value>> = HashMap::with_capacity(estimated_cache_size);
     
     nodes.into_iter()
         .filter(|&idx| {

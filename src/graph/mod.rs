@@ -1,8 +1,8 @@
-// src/graph/mod.rs
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::Bound;
 use std::collections::HashMap;
+use std::sync::Arc;
 use crate::datatypes::{py_in, py_out};
 use crate::datatypes::values::{Value, FilterCondition};
 use crate::graph::io_operations::save_to_file;
@@ -24,10 +24,18 @@ pub mod data_retrieval;
 use schema::{DirGraph, CurrentSelection};
 
 #[pyclass]
-#[derive(Clone)]
 pub struct KnowledgeGraph {
-    inner: DirGraph,
+    inner: Arc<DirGraph>,
     selection: CurrentSelection,
+}
+
+impl Clone for KnowledgeGraph {
+    fn clone(&self) -> Self {
+        KnowledgeGraph {
+            inner: Arc::clone(&self.inner),
+            selection: self.selection.clone(),
+        }
+    }
 }
 
 #[pymethods]
@@ -35,7 +43,7 @@ impl KnowledgeGraph {
     #[new]
     fn new() -> Self {
         KnowledgeGraph {
-            inner: DirGraph::new(),
+            inner: Arc::new(DirGraph::new()),
             selection: CurrentSelection::new(),
         }
     }
@@ -58,14 +66,21 @@ impl KnowledgeGraph {
         let df_result = py_in::pandas_to_dataframe(
             data, &[unique_id_field.clone()], modified_columns.as_deref(),
         )?;
+
+        // Create a new mutable copy of the graph for modification
+        let mut graph = (*self.inner).clone();
+        
         maintain_graph::add_nodes(
-            &mut self.inner,
+            &mut graph,
             df_result,
             node_type,
             unique_id_field,
             node_title_field,
             conflict_handling,
         ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        // Replace the Arc with the new graph
+        self.inner = Arc::new(graph);
         self.selection.clear();
         Ok(())
     }
@@ -95,8 +110,11 @@ impl KnowledgeGraph {
             modified_columns.as_deref(),
         )?;
     
+        // Create a new mutable copy of the graph
+        let mut graph = (*self.inner).clone();
+        
         maintain_graph::add_connections(
-            &mut self.inner,
+            &mut graph,
             df_result,
             connection_type,
             source_type,
@@ -108,6 +126,8 @@ impl KnowledgeGraph {
             conflict_handling,
         ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
     
+        // Replace the Arc with the new graph
+        self.inner = Arc::new(graph);
         self.selection.clear();
         Ok(())
     }
@@ -118,7 +138,7 @@ impl KnowledgeGraph {
         sort_spec: Option<&Bound<'_, PyAny>>,
         max_nodes: Option<usize>
     ) -> PyResult<Self> {
-        let mut new_graph = self.clone();
+        let mut new_kg = self.clone();
         let mut conditions = HashMap::new();
         conditions.insert("type".to_string(), FilterCondition::Equals(Value::String(node_type)));
         
@@ -130,29 +150,30 @@ impl KnowledgeGraph {
         } else {
             None
         };
+        
         filtering_methods::filter_nodes(
-            &new_graph.inner, 
-            &mut new_graph.selection, 
+            &self.inner, 
+            &mut new_kg.selection, 
             conditions, 
             sort_fields, 
             max_nodes
         ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         
-        Ok(new_graph)
+        Ok(new_kg)
     }
 
     fn filter(&mut self, conditions: &Bound<'_, PyDict>, sort_spec: Option<&Bound<'_, PyAny>>, max_nodes: Option<usize>) -> PyResult<Self> {
-        let mut new_graph = self.clone();
+        let mut new_kg = self.clone();
         let filter_conditions = py_in::pydict_to_filter_conditions(conditions)?;
         let sort_fields = match sort_spec {
             Some(spec) => Some(py_in::parse_sort_fields(spec, None)?),
             None => None,
         };
         
-        filtering_methods::filter_nodes(&new_graph.inner, &mut new_graph.selection, filter_conditions, sort_fields, max_nodes)
+        filtering_methods::filter_nodes(&self.inner, &mut new_kg.selection, filter_conditions, sort_fields, max_nodes)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         
-        Ok(new_graph)
+        Ok(new_kg)
     }
 
     fn filter_orphans(
@@ -161,7 +182,7 @@ impl KnowledgeGraph {
         sort_spec: Option<&Bound<'_, PyAny>>,
         max_nodes: Option<usize>
     ) -> PyResult<Self> {
-        let mut new_graph = self.clone();
+        let mut new_kg = self.clone();
         let include = include_orphans.unwrap_or(true);
         
         let sort_fields = if let Some(spec) = sort_spec {
@@ -171,34 +192,34 @@ impl KnowledgeGraph {
         };
         
         filtering_methods::filter_orphan_nodes(
-            &new_graph.inner,
-            &mut new_graph.selection,
+            &self.inner,
+            &mut new_kg.selection,
             include,
             sort_fields.as_ref(),
             max_nodes
         ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         
-        Ok(new_graph)
+        Ok(new_kg)
     }
 
     fn sort(&mut self, sort_spec: &Bound<'_, PyAny>, ascending: Option<bool>) -> PyResult<Self> {
-        let mut new_graph = self.clone();
+        let mut new_kg = self.clone();
         let sort_fields = py_in::parse_sort_fields(sort_spec, ascending)?;
         
-        filtering_methods::sort_nodes(&new_graph.inner, &mut new_graph.selection, sort_fields)
+        filtering_methods::sort_nodes(&self.inner, &mut new_kg.selection, sort_fields)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-        Ok(new_graph)
+        Ok(new_kg)
     }
 
     fn max_nodes(&mut self, max_per_group: usize) -> PyResult<Self> {
-        let mut new_graph = self.clone();
+        let mut new_kg = self.clone();
         filtering_methods::limit_nodes_per_group(
-            &new_graph.inner,
-            &mut new_graph.selection,
+            &self.inner,
+            &mut new_kg.selection,
             max_per_group
         ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         
-        Ok(new_graph)
+        Ok(new_kg)
     }
 
     fn get_nodes(
@@ -281,9 +302,15 @@ impl KnowledgeGraph {
         if let Some(target_property) = store_as {
             let nodes = data_retrieval::format_unique_values_for_storage(&values, max_length);
 
-            maintain_graph::update_node_properties(&mut self.inner, &nodes, target_property)
+            // Create a mutable copy for modification
+            let mut graph = (*self.inner).clone();
+            
+            maintain_graph::update_node_properties(&mut graph, &nodes, target_property)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
 
+            // Replace the Arc with the updated graph
+            self.inner = Arc::new(graph);
+            
             if !keep_selection.unwrap_or(false) {
                 self.selection.clear();
             }
@@ -304,7 +331,7 @@ impl KnowledgeGraph {
         max_nodes: Option<usize>,
         new_level: Option<bool>,
     ) -> PyResult<Self> {
-        let mut new_graph = self.clone();
+        let mut new_kg = self.clone();
         
         let conditions = if let Some(cond) = filter_target {
             Some(py_in::pydict_to_filter_conditions(cond)?)
@@ -319,8 +346,8 @@ impl KnowledgeGraph {
         };
     
         traversal_methods::make_traversal(
-            &new_graph.inner,
-            &mut new_graph.selection,
+            &self.inner,
+            &mut new_kg.selection,
             connection_type,
             level_index,
             direction,
@@ -330,7 +357,7 @@ impl KnowledgeGraph {
             new_level,
         ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         
-        Ok(new_graph)
+        Ok(new_kg)
     }
 
     fn selection_to_new_connections(
@@ -338,14 +365,23 @@ impl KnowledgeGraph {
         connection_type: String,
         keep_selection: Option<bool>,
     ) -> PyResult<Self> {
-        maintain_graph::selection_to_new_connections(&mut self.inner, &self.selection, connection_type)
+        // Create a mutable copy of the graph
+        let mut graph = (*self.inner).clone();
+        
+        maintain_graph::selection_to_new_connections(&mut graph, &self.selection, connection_type)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         
-        if !keep_selection.unwrap_or(false) {
-            self.selection.clear();
-        }
+        // Create new graph with the updated data
+        let mut new_kg = KnowledgeGraph {
+            inner: Arc::new(graph),
+            selection: if keep_selection.unwrap_or(false) {
+                self.selection.clone()
+            } else {
+                CurrentSelection::new()
+            },
+        };
         
-        Ok(self.clone())
+        Ok(new_kg)
     }
     
     #[pyo3(signature = (property=None, filter=None, sort_spec=None, max_nodes=None, store_as=None, max_length=None, keep_selection=None))]
@@ -362,7 +398,7 @@ impl KnowledgeGraph {
         let property_name = property.unwrap_or("title");
         
         // Apply filtering and sorting if needed
-        let mut filtered_graph = self.clone();
+        let mut filtered_kg = self.clone();
         
         if let Some(filter_dict) = filter {
             let conditions = py_in::pydict_to_filter_conditions(filter_dict)?;
@@ -372,8 +408,8 @@ impl KnowledgeGraph {
             };
             
             filtering_methods::filter_nodes(
-                &filtered_graph.inner, 
-                &mut filtered_graph.selection, 
+                &self.inner, 
+                &mut filtered_kg.selection, 
                 conditions, 
                 sort_fields, 
                 max_nodes
@@ -382,30 +418,30 @@ impl KnowledgeGraph {
             let sort_fields = py_in::parse_sort_fields(spec, None)?;
             
             filtering_methods::sort_nodes(
-                &filtered_graph.inner, 
-                &mut filtered_graph.selection, 
+                &self.inner, 
+                &mut filtered_kg.selection, 
                 sort_fields
             ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
             
             if let Some(max) = max_nodes {
                 filtering_methods::limit_nodes_per_group(
-                    &filtered_graph.inner, 
-                    &mut filtered_graph.selection, 
+                    &self.inner, 
+                    &mut filtered_kg.selection, 
                     max
                 ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
             }
         } else if let Some(max) = max_nodes {
             filtering_methods::limit_nodes_per_group(
-                &filtered_graph.inner, 
-                &mut filtered_graph.selection, 
+                &self.inner, 
+                &mut filtered_kg.selection, 
                 max
             ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         }
         
         // Generate the property lists with titles already included
         let property_groups = traversal_methods::get_children_properties(
-            &filtered_graph.inner,
-            &filtered_graph.selection,
+            &filtered_kg.inner,
+            &filtered_kg.selection,
             property_name
         );
         
@@ -428,16 +464,25 @@ impl KnowledgeGraph {
             max_length
         );
         
+        // Create a mutable copy of the graph
+        let mut graph = (*self.inner).clone();
+        
         // Update parent properties
-        maintain_graph::update_node_properties(&mut self.inner, &nodes, store_as.unwrap())
+        maintain_graph::update_node_properties(&mut graph, &nodes, store_as.unwrap())
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         
-        if !keep_selection.unwrap_or(false) {
-            self.selection.clear();
-        }
+        // Create a new graph with the updated data
+        let mut new_kg = KnowledgeGraph {
+            inner: Arc::new(graph),
+            selection: if keep_selection.unwrap_or(false) {
+                self.selection.clone()
+            } else {
+                CurrentSelection::new()
+            },
+        };
         
         // Return the updated graph
-        Python::with_gil(|py| Ok(self.clone().into_py(py)))
+        Python::with_gil(|py| Ok(new_kg.into_py(py)))
     }
 
     fn statistics(
@@ -457,59 +502,88 @@ impl KnowledgeGraph {
         store_as: Option<&str>,
         keep_selection: Option<bool>,
     ) -> PyResult<PyObject> {
-        // Process the expression
-        let process_result = calculations::process_equation(
-            &mut self.inner,
-            &self.selection,
-            expression,
-            level_index,
-            store_as,
-        );
-        
-        // Handle regular errors with descriptive messages
-        let evaluation_result = match process_result {
-            Ok(eval_result) => eval_result,
-            Err(e) => {
-                let error_msg = format!("Error evaluating expression '{}': {}", expression, e);
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(error_msg));
-            }
-        };
-    
-        // Process the result normally if no errors occurred
-        match evaluation_result {
-            calculations::EvaluationResult::Stored(()) => {
-                if !keep_selection.unwrap_or(false) {
-                    self.selection.clear();
+        // If we're storing results, we'll need a mutable graph
+        if let Some(target_property) = store_as {
+            // Create a mutable copy
+            let mut graph = (*self.inner).clone();
+            
+            // Process the expression
+            let process_result = calculations::process_equation(
+                &mut graph,
+                &self.selection,
+                expression,
+                level_index,
+                Some(target_property),
+            );
+            
+            // Handle errors
+            match process_result {
+                Ok(calculations::EvaluationResult::Stored(())) => {
+                    // Create a new graph with the updated data
+                    let mut new_kg = KnowledgeGraph {
+                        inner: Arc::new(graph),
+                        selection: if keep_selection.unwrap_or(false) {
+                            self.selection.clone()
+                        } else {
+                            CurrentSelection::new()
+                        },
+                    };
+                    
+                    Python::with_gil(|py| Ok(new_kg.into_py(py)))
+                },
+                Ok(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Unexpected result type when storing calculation result"
+                )),
+                Err(e) => {
+                    let error_msg = format!("Error evaluating expression '{}': {}", expression, e);
+                    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(error_msg))
                 }
-                Python::with_gil(|py| Ok(self.clone().into_py(py)))
-            },
-            calculations::EvaluationResult::Computed(results) => {
-                // Only check for errors if all results have errors
-                let error_count = results.iter().filter(|r| r.error_msg.is_some()).count();
-                if error_count == results.len() && !results.is_empty() {
-                    if let Some(first_error) = results.iter().find(|r| r.error_msg.is_some()) {
-                        if let Some(error_text) = &first_error.error_msg {
-                            // Convert computation errors to Python exceptions
-                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                format!("Error in calculation '{}': {}", expression, error_text)
-                            ));
+            }
+        } else {
+            // Just computing without storing - no need to modify graph
+            let process_result = calculations::process_equation(
+                &mut (*self.inner).clone(), // Create a temporary clone just for calculation
+                &self.selection,
+                expression,
+                level_index,
+                None,
+            );
+            
+            // Handle regular errors with descriptive messages
+            match process_result {
+                Ok(calculations::EvaluationResult::Computed(results)) => {
+                    // Check for errors
+                    let error_count = results.iter().filter(|r| r.error_msg.is_some()).count();
+                    if error_count == results.len() && !results.is_empty() {
+                        if let Some(first_error) = results.iter().find(|r| r.error_msg.is_some()) {
+                            if let Some(error_text) = &first_error.error_msg {
+                                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                    format!("Error in calculation '{}': {}", expression, error_text)
+                                ));
+                            }
                         }
                     }
+                    
+                    // Filter out results with errors
+                    let valid_results: Vec<StatResult> = results.into_iter()
+                        .filter(|r| r.error_msg.is_none())
+                        .collect();
+                    
+                    if valid_results.is_empty() {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            format!("No valid results found for expression '{}'", expression)
+                        ));
+                    }
+                    
+                    py_out::convert_computation_results_for_python(valid_results)
+                },
+                Ok(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Unexpected result type when computing"
+                )),
+                Err(e) => {
+                    let error_msg = format!("Error evaluating expression '{}': {}", expression, e);
+                    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(error_msg))
                 }
-                
-                // Filter out results with errors before passing to Python
-                let valid_results: Vec<StatResult> = results.into_iter()
-                    .filter(|r| r.error_msg.is_none())
-                    .collect();
-                
-                // Only proceed if we have at least one valid result
-                if valid_results.is_empty() {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        format!("No valid results found for expression '{}'", expression)
-                    ));
-                }
-                
-                py_out::convert_computation_results_for_python(valid_results)
             }
         }
     }
@@ -527,21 +601,29 @@ impl KnowledgeGraph {
         let use_grouping = group_by_parent.unwrap_or(has_multiple_levels);
         
         if let Some(target_property) = store_as {
+            // Create a mutable copy for modification
+            let mut graph = (*self.inner).clone();
+            
             // Store count results as node properties
             calculations::store_count_results(
-                &mut self.inner,
+                &mut graph,
                 &self.selection,
                 level_index,
                 use_grouping,
                 target_property
             ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
             
-            // Clear selection if requested
-            if !keep_selection.unwrap_or(false) {
-                self.selection.clear();
-            }
+            // Create a new graph with the updated data
+            let mut new_kg = KnowledgeGraph {
+                inner: Arc::new(graph),
+                selection: if keep_selection.unwrap_or(false) {
+                    self.selection.clone()
+                } else {
+                    CurrentSelection::new()
+                },
+            };
             
-            Python::with_gil(|py| Ok(self.clone().into_py(py)))
+            Python::with_gil(|py| Ok(new_kg.into_py(py)))
         } else if use_grouping {
             // Return counts grouped by parent
             let counts = calculations::count_nodes_by_parent(&self.inner, &self.selection, level_index);

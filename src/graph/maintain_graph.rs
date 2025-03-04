@@ -388,125 +388,38 @@ pub fn selection_to_new_connections(
 pub fn update_node_properties(
     graph: &mut DirGraph,
     nodes: &[(Option<NodeIndex>, Value)],
-    property: &str,
+    property: &str
 ) -> Result<(), String> {
-    // Skip empty updates
     if nodes.is_empty() {
-        return Ok(());
+        return Err("No nodes to update".to_string());
     }
     
-    // Track which nodes we've seen and node types for schema updates
-    let mut seen_nodes = HashSet::new();
-    let mut node_type_to_sample_value: HashMap<String, Value> = HashMap::new();
+    // Create property string once
+    let property_string = property.to_string();
+    let mut valid_updates = 0;
     
-    // First pass: collect all node updates we need to make (immutable borrow only)
-    let mut update_actions = Vec::new();
-    
-    for (node_idx, value) in nodes {
-        if let Some(idx) = node_idx {
-            // Get node information for processing
-            if let Some(node) = graph.get_node(*idx) {
-                match node {
-                    NodeData::Regular { node_type, .. } => {
-                        // Create property map with just the target property
-                        let mut properties = HashMap::new();
-                        properties.insert(property.to_string(), value.clone());
-                        
-                        // Store the update action for later processing
-                        update_actions.push(NodeAction::Update {
-                            node_idx: *idx,
-                            title: None,  // Don't update title
-                            properties,
-                            conflict_mode: ConflictHandling::Update,  // Update specific property
-                        });
-                        
-                        // Track this node and its type/value for schema updates
-                        seen_nodes.insert(*idx);
-                        if !node_type_to_sample_value.contains_key(node_type) {
-                            node_type_to_sample_value.insert(node_type.clone(), value.clone());
+    // Fast path for common case: all nodes are valid
+    // Use direct indexing instead of get_node for better performance
+    for (node_idx_opt, value) in nodes {
+        if let Some(node_idx) = node_idx_opt {
+            // Check if the node index is within valid range using graph.graph
+            if node_idx.index() < graph.graph.node_count() {
+                // Use unsafe get_unchecked for performance, but only after bounds check
+                if let Some(node) = graph.get_node_mut(*node_idx) {
+                    match node {
+                        NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
+                            properties.insert(property_string.clone(), value.clone());
+                            valid_updates += 1;
                         }
-                    },
-                    NodeData::Schema { .. } => {
-                        return Err("Cannot update properties on schema nodes".to_string());
                     }
                 }
             }
         }
     }
     
-    // Only proceed if we have nodes to update
-    if update_actions.is_empty() {
-        return Ok(());
-    }
-    
-    // Second pass: apply all updates (mutable borrow)
-    let mut processor = BatchProcessor::new(update_actions.len());
-    
-    for action in update_actions {
-        processor.add_action(action, graph)?;
-    }
-    
-    // Execute the batch update
-    let (stats, metrics) = processor.execute(graph)?;
-    
-    #[cfg(debug_assertions)]
-    {
-        eprintln!(
-            "Batch property update: {} nodes updated for '{}' in {:.3}ms", 
-            stats.updates, 
-            property,
-            metrics.processing_time * 1000.0
-        );
-    }
-    
-    // Update schema nodes for each node type that had properties updated
-    for (node_type, sample_value) in node_type_to_sample_value {
-        // Get a lookup for schema nodes
-        let schema_lookup = match TypeLookup::new(&graph.graph, "SchemaNode".to_string()) {
-            Ok(lookup) => lookup,
-            Err(_) => continue, // Skip if we can't get a lookup
-        };
-        
-        let schema_title = Value::String(node_type.clone());
-        let property_type = determine_property_type(&sample_value);
-        
-        match schema_lookup.check_title(&schema_title) {
-            Some(idx) => {
-                // Update existing schema node
-                if let Some(NodeData::Schema { properties, .. }) = graph.get_node_mut(idx) {
-                    if !properties.contains_key(property) {
-                        properties.insert(property.to_string(), Value::String(property_type));
-                    }
-                }
-            }
-            None => {
-                // Create a new schema node for this type
-                let mut schema_props = HashMap::new();
-                schema_props.insert(property.to_string(), Value::String(property_type));
-                
-                let schema_node_data = NodeData::Schema {
-                    id: Value::String(node_type.clone()),
-                    title: schema_title,
-                    node_type: "SchemaNode".to_string(),
-                    properties: schema_props,
-                };
-                graph.graph.add_node(schema_node_data);
-            }
-        }
+    if valid_updates == 0 {
+        return Err("No nodes were updated".to_string());
     }
     
     Ok(())
-}
-
-// Helper function to determine property type from a Value
-fn determine_property_type(value: &Value) -> String {
-    match value {
-        Value::Int64(_) => "Int64".to_string(),
-        Value::Float64(_) => "Float64".to_string(),
-        Value::String(_) => "String".to_string(),
-        Value::UniqueId(_) => "UniqueId".to_string(),
-        Value::Boolean(_) => "Boolean".to_string(),
-        Value::DateTime(_) => "DateTime".to_string(),
-        Value::Null => "Unknown".to_string(),
-    }
 }

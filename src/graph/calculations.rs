@@ -1,4 +1,3 @@
-// src/graph/calculations.rs
 use super::statistics_methods::get_parent_child_pairs;
 use super::equation_parser::{Parser, Evaluator, Expr};
 use super::maintain_graph;
@@ -35,6 +34,8 @@ pub fn process_equation(
     };
     
     let is_aggregation = has_aggregation(&parsed_expr);
+    
+    // When performing evaluation, we can use an immutable reference to graph
     let results = evaluate_equation(graph, selection, &parsed_expr, level_index);
     
     // If we don't need to store results, just return them directly
@@ -101,6 +102,7 @@ pub fn process_equation(
 
 
 // Modified evaluate_equation to take a parsed expression directly
+// Now takes an immutable reference to graph since it only needs to read
 pub fn evaluate_equation(
     graph: &DirGraph,
     selection: &CurrentSelection,
