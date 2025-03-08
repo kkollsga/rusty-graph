@@ -1,8 +1,10 @@
+// src/graph/mod.rs
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::Bound;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::mem;
 use crate::datatypes::{py_in, py_out};
 use crate::datatypes::values::{Value, FilterCondition};
 use crate::graph::io_operations::save_to_file;
@@ -67,8 +69,21 @@ impl KnowledgeGraph {
             data, &[unique_id_field.clone()], modified_columns.as_deref(),
         )?;
 
-        // Create a new mutable copy of the graph for modification
-        let mut graph = (*self.inner).clone();
+        // Optimization: Only clone if there are other references to this graph
+        let mut graph = if Arc::strong_count(&self.inner) == 1 {
+            // We're the only owner, we can modify in place by extracting
+            match Arc::try_unwrap(mem::replace(&mut self.inner, Arc::new(DirGraph::new()))) {
+                Ok(graph) => graph,
+                Err(arc) => {
+                    // This shouldn't happen, but recover if it does
+                    self.inner = arc;
+                    (*self.inner).clone()
+                }
+            }
+        } else {
+            // Multiple references exist, need to clone
+            (*self.inner).clone()
+        };
         
         maintain_graph::add_nodes(
             &mut graph,
@@ -110,8 +125,21 @@ impl KnowledgeGraph {
             modified_columns.as_deref(),
         )?;
     
-        // Create a new mutable copy of the graph
-        let mut graph = (*self.inner).clone();
+        // Optimization: Only clone if there are other references to this graph
+        let mut graph = if Arc::strong_count(&self.inner) == 1 {
+            // We're the only owner, we can modify in place by extracting
+            match Arc::try_unwrap(mem::replace(&mut self.inner, Arc::new(DirGraph::new()))) {
+                Ok(graph) => graph,
+                Err(arc) => {
+                    // This shouldn't happen, but recover if it does
+                    self.inner = arc;
+                    (*self.inner).clone()
+                }
+            }
+        } else {
+            // Multiple references exist, need to clone
+            (*self.inner).clone()
+        };
         
         maintain_graph::add_connections(
             &mut graph,
@@ -135,14 +163,14 @@ impl KnowledgeGraph {
     fn type_filter(
         &mut self, 
         node_type: String,
-        sort_spec: Option<&Bound<'_, PyAny>>,
+        sort: Option<&Bound<'_, PyAny>>,
         max_nodes: Option<usize>
     ) -> PyResult<Self> {
         let mut new_kg = self.clone();
         let mut conditions = HashMap::new();
         conditions.insert("type".to_string(), FilterCondition::Equals(Value::String(node_type)));
         
-        let sort_fields = if let Some(spec) = sort_spec {
+        let sort_fields = if let Some(spec) = sort {
             match spec.extract::<String>() {
                 Ok(field) => Some(vec![(field, true)]),
                 Err(_) => Some(py_in::parse_sort_fields(spec, None)?)
@@ -162,10 +190,10 @@ impl KnowledgeGraph {
         Ok(new_kg)
     }
 
-    fn filter(&mut self, conditions: &Bound<'_, PyDict>, sort_spec: Option<&Bound<'_, PyAny>>, max_nodes: Option<usize>) -> PyResult<Self> {
+    fn filter(&mut self, conditions: &Bound<'_, PyDict>, sort: Option<&Bound<'_, PyAny>>, max_nodes: Option<usize>) -> PyResult<Self> {
         let mut new_kg = self.clone();
         let filter_conditions = py_in::pydict_to_filter_conditions(conditions)?;
-        let sort_fields = match sort_spec {
+        let sort_fields = match sort {
             Some(spec) => Some(py_in::parse_sort_fields(spec, None)?),
             None => None,
         };
@@ -179,13 +207,13 @@ impl KnowledgeGraph {
     fn filter_orphans(
         &mut self,
         include_orphans: Option<bool>,
-        sort_spec: Option<&Bound<'_, PyAny>>,
+        sort: Option<&Bound<'_, PyAny>>,
         max_nodes: Option<usize>
     ) -> PyResult<Self> {
         let mut new_kg = self.clone();
         let include = include_orphans.unwrap_or(true);
         
-        let sort_fields = if let Some(spec) = sort_spec {
+        let sort_fields = if let Some(spec) = sort {
             Some(py_in::parse_sort_fields(spec, None)?)
         } else {
             None
@@ -202,9 +230,9 @@ impl KnowledgeGraph {
         Ok(new_kg)
     }
 
-    fn sort(&mut self, sort_spec: &Bound<'_, PyAny>, ascending: Option<bool>) -> PyResult<Self> {
+    fn sort(&mut self, sort: &Bound<'_, PyAny>, ascending: Option<bool>) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        let sort_fields = py_in::parse_sort_fields(sort_spec, ascending)?;
+        let sort_fields = py_in::parse_sort_fields(sort, ascending)?;
         
         filtering_methods::sort_nodes(&self.inner, &mut new_kg.selection, sort_fields)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
@@ -302,8 +330,21 @@ impl KnowledgeGraph {
         if let Some(target_property) = store_as {
             let nodes = data_retrieval::format_unique_values_for_storage(&values, max_length);
 
-            // Create a mutable copy for modification
-            let mut graph = (*self.inner).clone();
+            // Optimization: Only clone if there are other references to this graph
+            let mut graph = if Arc::strong_count(&self.inner) == 1 {
+                // We're the only owner, we can modify in place by extracting
+                match Arc::try_unwrap(mem::replace(&mut self.inner, Arc::new(DirGraph::new()))) {
+                    Ok(graph) => graph,
+                    Err(arc) => {
+                        // This shouldn't happen, but recover if it does
+                        self.inner = arc;
+                        (*self.inner).clone()
+                    }
+                }
+            } else {
+                // Multiple references exist, need to clone
+                (*self.inner).clone()
+            };
             
             maintain_graph::update_node_properties(&mut graph, &nodes, target_property)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
@@ -365,8 +406,21 @@ impl KnowledgeGraph {
         connection_type: String,
         keep_selection: Option<bool>,
     ) -> PyResult<Self> {
-        // Create a mutable copy of the graph
-        let mut graph = (*self.inner).clone();
+        // Optimization: Only clone if there are other references to this graph
+        let mut graph = if Arc::strong_count(&self.inner) == 1 {
+            // We're the only owner, we can modify in place by extracting
+            match Arc::try_unwrap(mem::replace(&mut self.inner, Arc::new(DirGraph::new()))) {
+                Ok(graph) => graph,
+                Err(arc) => {
+                    // This shouldn't happen, but recover if it does
+                    self.inner = arc;
+                    (*self.inner).clone()
+                }
+            }
+        } else {
+            // Multiple references exist, need to clone
+            (*self.inner).clone()
+        };
         
         maintain_graph::selection_to_new_connections(&mut graph, &self.selection, connection_type)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
@@ -384,12 +438,12 @@ impl KnowledgeGraph {
         Ok(new_kg)
     }
     
-    #[pyo3(signature = (property=None, filter=None, sort_spec=None, max_nodes=None, store_as=None, max_length=None, keep_selection=None))]
+    #[pyo3(signature = (property=None, filter=None, sort=None, max_nodes=None, store_as=None, max_length=None, keep_selection=None))]
     fn children_properties_to_list(
         &mut self,
         property: Option<&str>,
         filter: Option<&Bound<'_, PyDict>>,
-        sort_spec: Option<&Bound<'_, PyAny>>,
+        sort: Option<&Bound<'_, PyAny>>,
         max_nodes: Option<usize>,
         store_as: Option<&str>,
         max_length: Option<usize>,
@@ -402,7 +456,7 @@ impl KnowledgeGraph {
         
         if let Some(filter_dict) = filter {
             let conditions = py_in::pydict_to_filter_conditions(filter_dict)?;
-            let sort_fields = match sort_spec {
+            let sort_fields = match sort {
                 Some(spec) => Some(py_in::parse_sort_fields(spec, None)?),
                 None => None,
             };
@@ -414,7 +468,7 @@ impl KnowledgeGraph {
                 sort_fields, 
                 max_nodes
             ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-        } else if let Some(spec) = sort_spec {
+        } else if let Some(spec) = sort {
             let sort_fields = py_in::parse_sort_fields(spec, None)?;
             
             filtering_methods::sort_nodes(
@@ -464,8 +518,21 @@ impl KnowledgeGraph {
             max_length
         );
         
-        // Create a mutable copy of the graph
-        let mut graph = (*self.inner).clone();
+        // Optimization: Only clone if there are other references to this graph
+        let mut graph = if Arc::strong_count(&self.inner) == 1 {
+            // We're the only owner, we can modify in place by extracting
+            match Arc::try_unwrap(mem::replace(&mut self.inner, Arc::new(DirGraph::new()))) {
+                Ok(graph) => graph,
+                Err(arc) => {
+                    // This shouldn't happen, but recover if it does
+                    self.inner = arc;
+                    (*self.inner).clone()
+                }
+            }
+        } else {
+            // Multiple references exist, need to clone
+            (*self.inner).clone()
+        };
         
         // Update parent properties
         maintain_graph::update_node_properties(&mut graph, &nodes, store_as.unwrap())
@@ -504,8 +571,21 @@ impl KnowledgeGraph {
     ) -> PyResult<PyObject> {
         // If we're storing results, we'll need a mutable graph
         if let Some(target_property) = store_as {
-            // Create a mutable copy
-            let mut graph = (*self.inner).clone();
+            // Optimization: Only clone if there are other references to this graph
+            let mut graph = if Arc::strong_count(&self.inner) == 1 {
+                // We're the only owner, we can modify in place by extracting
+                match Arc::try_unwrap(mem::replace(&mut self.inner, Arc::new(DirGraph::new()))) {
+                    Ok(graph) => graph,
+                    Err(arc) => {
+                        // This shouldn't happen, but recover if it does
+                        self.inner = arc;
+                        (*self.inner).clone()
+                    }
+                }
+            } else {
+                // Multiple references exist, need to clone
+                (*self.inner).clone()
+            };
             
             // Process the expression
             let process_result = calculations::process_equation(
@@ -516,12 +596,15 @@ impl KnowledgeGraph {
                 Some(target_property),
             );
             
+            // Create updated Arc with the new graph
+            self.inner = Arc::new(graph);
+            
             // Handle errors
             match process_result {
                 Ok(calculations::EvaluationResult::Stored(())) => {
                     // Create a new graph with the updated data
                     let mut new_kg = KnowledgeGraph {
-                        inner: Arc::new(graph),
+                        inner: Arc::clone(&self.inner),
                         selection: if keep_selection.unwrap_or(false) {
                             self.selection.clone()
                         } else {
@@ -601,8 +684,21 @@ impl KnowledgeGraph {
         let use_grouping = group_by_parent.unwrap_or(has_multiple_levels);
         
         if let Some(target_property) = store_as {
-            // Create a mutable copy for modification
-            let mut graph = (*self.inner).clone();
+            // Optimization: Only clone if there are other references to this graph
+            let mut graph = if Arc::strong_count(&self.inner) == 1 {
+                // We're the only owner, we can modify in place by extracting
+                match Arc::try_unwrap(mem::replace(&mut self.inner, Arc::new(DirGraph::new()))) {
+                    Ok(graph) => graph,
+                    Err(arc) => {
+                        // This shouldn't happen, but recover if it does
+                        self.inner = arc;
+                        (*self.inner).clone()
+                    }
+                }
+            } else {
+                // Multiple references exist, need to clone
+                (*self.inner).clone()
+            };
             
             // Store count results as node properties
             calculations::store_count_results(
@@ -613,9 +709,12 @@ impl KnowledgeGraph {
                 target_property
             ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
             
+            // Replace the Arc with updated graph
+            self.inner = Arc::new(graph);
+            
             // Create a new graph with the updated data
             let mut new_kg = KnowledgeGraph {
-                inner: Arc::new(graph),
+                inner: Arc::clone(&self.inner),
                 selection: if keep_selection.unwrap_or(false) {
                     self.selection.clone()
                 } else {
