@@ -52,18 +52,6 @@ impl TypeLookup {
     pub fn check_title(&self, title: &Value) -> Option<NodeIndex> {
         self.title_to_index.get(title).copied()
     }
-
-    pub fn get_all_indices(&self) -> Vec<NodeIndex> {
-        self.uid_to_index.values().copied().collect()
-    }
-    
-    pub fn get_node_count(&self) -> usize {
-        self.uid_to_index.len()
-    }
-    
-    pub fn get_node_type(&self) -> &str {
-        &self.node_type
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

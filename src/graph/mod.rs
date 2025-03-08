@@ -40,6 +40,24 @@ impl Clone for KnowledgeGraph {
     }
 }
 
+/// Helper function to extract graph from Arc if possible or clone it
+fn extract_or_clone_graph(arc: &mut Arc<DirGraph>) -> DirGraph {
+    if Arc::strong_count(arc) == 1 {
+        // We're the only owner, we can modify in place by extracting
+        match Arc::try_unwrap(mem::replace(arc, Arc::new(DirGraph::new()))) {
+            Ok(graph) => graph,
+            Err(original_arc) => {
+                // This shouldn't happen, but recover if it does
+                *arc = original_arc;
+                (**arc).clone()
+            }
+        }
+    } else {
+        // Multiple references exist, need to clone
+        (**arc).clone()
+    }
+}
+
 #[pymethods]
 impl KnowledgeGraph {
     #[new]
@@ -69,21 +87,8 @@ impl KnowledgeGraph {
             data, &[unique_id_field.clone()], modified_columns.as_deref(),
         )?;
 
-        // Optimization: Only clone if there are other references to this graph
-        let mut graph = if Arc::strong_count(&self.inner) == 1 {
-            // We're the only owner, we can modify in place by extracting
-            match Arc::try_unwrap(mem::replace(&mut self.inner, Arc::new(DirGraph::new()))) {
-                Ok(graph) => graph,
-                Err(arc) => {
-                    // This shouldn't happen, but recover if it does
-                    self.inner = arc;
-                    (*self.inner).clone()
-                }
-            }
-        } else {
-            // Multiple references exist, need to clone
-            (*self.inner).clone()
-        };
+        // Extract graph or clone it if needed
+        let mut graph = extract_or_clone_graph(&mut self.inner);
         
         maintain_graph::add_nodes(
             &mut graph,
@@ -125,21 +130,8 @@ impl KnowledgeGraph {
             modified_columns.as_deref(),
         )?;
     
-        // Optimization: Only clone if there are other references to this graph
-        let mut graph = if Arc::strong_count(&self.inner) == 1 {
-            // We're the only owner, we can modify in place by extracting
-            match Arc::try_unwrap(mem::replace(&mut self.inner, Arc::new(DirGraph::new()))) {
-                Ok(graph) => graph,
-                Err(arc) => {
-                    // This shouldn't happen, but recover if it does
-                    self.inner = arc;
-                    (*self.inner).clone()
-                }
-            }
-        } else {
-            // Multiple references exist, need to clone
-            (*self.inner).clone()
-        };
+        // Extract graph or clone it if needed
+        let mut graph = extract_or_clone_graph(&mut self.inner);
         
         maintain_graph::add_connections(
             &mut graph,
@@ -330,21 +322,8 @@ impl KnowledgeGraph {
         if let Some(target_property) = store_as {
             let nodes = data_retrieval::format_unique_values_for_storage(&values, max_length);
 
-            // Optimization: Only clone if there are other references to this graph
-            let mut graph = if Arc::strong_count(&self.inner) == 1 {
-                // We're the only owner, we can modify in place by extracting
-                match Arc::try_unwrap(mem::replace(&mut self.inner, Arc::new(DirGraph::new()))) {
-                    Ok(graph) => graph,
-                    Err(arc) => {
-                        // This shouldn't happen, but recover if it does
-                        self.inner = arc;
-                        (*self.inner).clone()
-                    }
-                }
-            } else {
-                // Multiple references exist, need to clone
-                (*self.inner).clone()
-            };
+            // Extract graph or clone it if needed
+            let mut graph = extract_or_clone_graph(&mut self.inner);
             
             maintain_graph::update_node_properties(&mut graph, &nodes, target_property)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
@@ -406,27 +385,14 @@ impl KnowledgeGraph {
         connection_type: String,
         keep_selection: Option<bool>,
     ) -> PyResult<Self> {
-        // Optimization: Only clone if there are other references to this graph
-        let mut graph = if Arc::strong_count(&self.inner) == 1 {
-            // We're the only owner, we can modify in place by extracting
-            match Arc::try_unwrap(mem::replace(&mut self.inner, Arc::new(DirGraph::new()))) {
-                Ok(graph) => graph,
-                Err(arc) => {
-                    // This shouldn't happen, but recover if it does
-                    self.inner = arc;
-                    (*self.inner).clone()
-                }
-            }
-        } else {
-            // Multiple references exist, need to clone
-            (*self.inner).clone()
-        };
+        // Extract graph or clone it if needed
+        let mut graph = extract_or_clone_graph(&mut self.inner);
         
         maintain_graph::selection_to_new_connections(&mut graph, &self.selection, connection_type)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         
         // Create new graph with the updated data
-        let mut new_kg = KnowledgeGraph {
+        let new_kg = KnowledgeGraph {
             inner: Arc::new(graph),
             selection: if keep_selection.unwrap_or(false) {
                 self.selection.clone()
@@ -518,28 +484,15 @@ impl KnowledgeGraph {
             max_length
         );
         
-        // Optimization: Only clone if there are other references to this graph
-        let mut graph = if Arc::strong_count(&self.inner) == 1 {
-            // We're the only owner, we can modify in place by extracting
-            match Arc::try_unwrap(mem::replace(&mut self.inner, Arc::new(DirGraph::new()))) {
-                Ok(graph) => graph,
-                Err(arc) => {
-                    // This shouldn't happen, but recover if it does
-                    self.inner = arc;
-                    (*self.inner).clone()
-                }
-            }
-        } else {
-            // Multiple references exist, need to clone
-            (*self.inner).clone()
-        };
+        // Extract graph or clone it if needed
+        let mut graph = extract_or_clone_graph(&mut self.inner);
         
         // Update parent properties
         maintain_graph::update_node_properties(&mut graph, &nodes, store_as.unwrap())
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         
         // Create a new graph with the updated data
-        let mut new_kg = KnowledgeGraph {
+        let new_kg = KnowledgeGraph {
             inner: Arc::new(graph),
             selection: if keep_selection.unwrap_or(false) {
                 self.selection.clone()
@@ -571,21 +524,8 @@ impl KnowledgeGraph {
     ) -> PyResult<PyObject> {
         // If we're storing results, we'll need a mutable graph
         if let Some(target_property) = store_as {
-            // Optimization: Only clone if there are other references to this graph
-            let mut graph = if Arc::strong_count(&self.inner) == 1 {
-                // We're the only owner, we can modify in place by extracting
-                match Arc::try_unwrap(mem::replace(&mut self.inner, Arc::new(DirGraph::new()))) {
-                    Ok(graph) => graph,
-                    Err(arc) => {
-                        // This shouldn't happen, but recover if it does
-                        self.inner = arc;
-                        (*self.inner).clone()
-                    }
-                }
-            } else {
-                // Multiple references exist, need to clone
-                (*self.inner).clone()
-            };
+            // Extract graph or clone it if needed
+            let mut graph = extract_or_clone_graph(&mut self.inner);
             
             // Process the expression
             let process_result = calculations::process_equation(
@@ -603,7 +543,7 @@ impl KnowledgeGraph {
             match process_result {
                 Ok(calculations::EvaluationResult::Stored(())) => {
                     // Create a new graph with the updated data
-                    let mut new_kg = KnowledgeGraph {
+                    let new_kg = KnowledgeGraph {
                         inner: Arc::clone(&self.inner),
                         selection: if keep_selection.unwrap_or(false) {
                             self.selection.clone()
@@ -684,21 +624,8 @@ impl KnowledgeGraph {
         let use_grouping = group_by_parent.unwrap_or(has_multiple_levels);
         
         if let Some(target_property) = store_as {
-            // Optimization: Only clone if there are other references to this graph
-            let mut graph = if Arc::strong_count(&self.inner) == 1 {
-                // We're the only owner, we can modify in place by extracting
-                match Arc::try_unwrap(mem::replace(&mut self.inner, Arc::new(DirGraph::new()))) {
-                    Ok(graph) => graph,
-                    Err(arc) => {
-                        // This shouldn't happen, but recover if it does
-                        self.inner = arc;
-                        (*self.inner).clone()
-                    }
-                }
-            } else {
-                // Multiple references exist, need to clone
-                (*self.inner).clone()
-            };
+            // Extract graph or clone it if needed
+            let mut graph = extract_or_clone_graph(&mut self.inner);
             
             // Store count results as node properties
             calculations::store_count_results(
@@ -713,7 +640,7 @@ impl KnowledgeGraph {
             self.inner = Arc::new(graph);
             
             // Create a new graph with the updated data
-            let mut new_kg = KnowledgeGraph {
+            let new_kg = KnowledgeGraph {
                 inner: Arc::clone(&self.inner),
                 selection: if keep_selection.unwrap_or(false) {
                     self.selection.clone()

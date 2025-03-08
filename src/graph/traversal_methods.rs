@@ -1,6 +1,5 @@
 // src/graph/traversal_methods.rs
 use std::collections::{HashSet, HashMap};
-use std::iter::FromIterator;
 use petgraph::visit::EdgeRef;
 use petgraph::graph::NodeIndex;
 use petgraph::Direction;
@@ -8,30 +7,6 @@ use crate::graph::schema::{DirGraph, CurrentSelection, SelectionOperation};
 use crate::datatypes::values::FilterCondition;
 use crate::graph::filtering_methods;
 use crate::datatypes::values::Value;
-
-fn get_connected_targets(
-    graph: &DirGraph,
-    source_node: NodeIndex,
-    directions: &[Direction],
-    connection_type: &str,
-    targets: &[NodeIndex],
-) -> Vec<NodeIndex> {
-    targets.iter()
-        .filter(|&&target| {
-            directions.iter().any(|dir| {
-                graph.graph.edges_directed(source_node, *dir)
-                    .any(|edge| {
-                        edge.weight().connection_type == connection_type &&
-                        (match dir {
-                            Direction::Outgoing => edge.target(),
-                            Direction::Incoming => edge.source(),
-                        }) == target
-                    })
-            })
-        })
-        .cloned()
-        .collect()
-}
 
 pub fn make_traversal(
     graph: &DirGraph,
@@ -56,38 +31,36 @@ pub fn make_traversal(
     
     let create_new_level = new_level.unwrap_or(true);
 
-    // Collect all necessary data from source level before any modifications
-    let (parents, source_nodes_map) = {
-        let source_level = selection.get_level(source_level_index)
-            .ok_or_else(|| "No valid source level found for traversal".to_string())?;
+    // Get source level
+    let source_level = selection.get_level(source_level_index)
+        .ok_or_else(|| "No valid source level found for traversal".to_string())?;
 
-        let parents: Vec<NodeIndex> = if create_new_level {
-            source_level.get_all_nodes()
-        } else {
-            source_level.selections.keys()
-                .filter_map(|k| *k)
-                .collect()
-        };
-
-        let source_nodes_map: HashMap<NodeIndex, Vec<NodeIndex>> = if create_new_level {
-            parents.iter()
-                .map(|&parent| (parent, vec![parent]))
-                .collect()
-        } else {
-            source_level.selections.iter()
-                .filter_map(|(parent, children)| {
-                    parent.map(|p| (p, children.clone()))
-                })
-                .collect()
-        };
-
-        (parents, source_nodes_map)
+    // Collect all necessary data from source level
+    let parents: Vec<NodeIndex> = if create_new_level {
+        source_level.get_all_nodes()
+    } else {
+        source_level.selections.keys()
+            .filter_map(|k| *k)
+            .collect()
     };
 
     // Early empty check
     if parents.is_empty() {
         return Err("No source nodes available for traversal".to_string());
     }
+
+    // Create a mapping of parent nodes to their source nodes
+    let source_nodes_map: HashMap<NodeIndex, Vec<NodeIndex>> = if create_new_level {
+        parents.iter()
+            .map(|&parent| (parent, vec![parent]))
+            .collect()
+    } else {
+        source_level.selections.iter()
+            .filter_map(|(parent, children)| {
+                parent.map(|p| (p, children.clone()))
+            })
+            .collect()
+    };
 
     // Now we can safely modify the selection
     if create_new_level {
@@ -112,12 +85,6 @@ pub fn make_traversal(
     let level = selection.get_level_mut(target_level_index)
         .ok_or_else(|| "Failed to access target selection level".to_string())?;
 
-    if !create_new_level {
-        for parent in &parents {
-            level.selections.entry(Some(*parent)).or_default().clear();
-        }
-    }
-
     // Set up operation
     let operation = SelectionOperation::Traverse {
         connection_type: connection_type.clone(),
@@ -126,95 +93,57 @@ pub fn make_traversal(
     };
     level.operations = vec![operation];
 
-    let mut all_targets: HashMap<NodeIndex, HashSet<NodeIndex>> = HashMap::new();
-    let mut seen_targets = HashSet::new();
-    let empty_vec = Vec::new();
+    // Define an empty vector to use when no source nodes exist
+    let empty_vec: Vec<NodeIndex> = Vec::new();
 
-    // Process each parent and their source nodes
+    // Process each parent node once
     for &parent in &parents {
+        // Use a reference to an existing empty vector to avoid temporary lifetime issues
         let source_nodes = source_nodes_map.get(&parent).unwrap_or(&empty_vec);
         
+        if !create_new_level {
+            // Clear existing selection for this parent
+            level.selections.entry(Some(parent)).or_default().clear();
+        }
+        
+        // Collect all targets for this parent in one pass
+        let mut targets = HashSet::new();
+        
+        // Optimize direction handling by collecting all nodes at once
         for &source_node in source_nodes {
-            for dir in &directions {
-                let matching_edges = graph.graph.edges_directed(source_node, *dir)
-                    .filter(|edge| edge.weight().connection_type == connection_type);
-
-                for edge in matching_edges {
-                    let target = match dir {
-                        Direction::Outgoing => edge.target(),
-                        Direction::Incoming => edge.source(),
-                    };
-                    
-                    if seen_targets.insert(target) {
-                        all_targets.entry(parent)
-                            .or_insert_with(HashSet::new)
-                            .insert(target);
-                    }
-                }
+            // Process outgoing edges if needed
+            if directions.contains(&Direction::Outgoing) {
+                graph.graph.edges_directed(source_node, Direction::Outgoing)
+                    .filter(|edge| edge.weight().connection_type == connection_type)
+                    .for_each(|edge| {
+                        targets.insert(edge.target());
+                    });
             }
-        }
-
-        // Always add a selection for the parent, even if empty
-        if !all_targets.contains_key(&parent) {
-            level.add_selection(Some(parent), Vec::new());
-        }
-    }
-
-    // Process all collected targets
-    for &parent in &parents {
-        if let Some(targets) = all_targets.get(&parent) {
-            let target_vec = Vec::from_iter(targets.iter().cloned());
             
-            if create_new_level {
-                // Process all nodes together for new levels
-                let mut processed_nodes = filtering_methods::process_nodes(
-                    graph,
-                    target_vec,
-                    filter_target,
-                    sort_target,
-                    None
-                );
-                
-                if let Some(max) = max_nodes {
-                    processed_nodes.truncate(max);
-                }
-                
-                level.add_selection(Some(parent), processed_nodes);
-            } else {
-                // Process per source node for existing levels
-                let source_nodes = source_nodes_map.get(&parent).unwrap_or(&empty_vec);
-                let mut final_nodes = Vec::new();
-                
-                for &source_node in source_nodes {
-                    let source_targets = get_connected_targets(
-                        graph,
-                        source_node,
-                        &directions,
-                        &connection_type,
-                        &target_vec
-                    );
-                    
-                    let processed_nodes = filtering_methods::process_nodes(
-                        graph,
-                        source_targets,
-                        filter_target,
-                        sort_target,
-                        max_nodes  // Apply max_nodes per source node
-                    );
-                    
-                    final_nodes.extend(processed_nodes);
-                }
-                
-                level.add_selection(Some(parent), final_nodes);
+            // Process incoming edges if needed
+            if directions.contains(&Direction::Incoming) {
+                graph.graph.edges_directed(source_node, Direction::Incoming)
+                    .filter(|edge| edge.weight().connection_type == connection_type)
+                    .for_each(|edge| {
+                        targets.insert(edge.source());
+                    });
             }
-        } else if !create_new_level {
-            // Preserve existing selection if no new targets
-            level.add_selection(Some(parent), 
-                level.selections.get(&Some(parent))
-                    .map(|existing| existing.clone())
-                    .unwrap_or_default()
-            );
         }
+        
+        // Convert to Vec for processing
+        let target_vec: Vec<NodeIndex> = targets.into_iter().collect();
+        
+        // Apply filtering and sorting in one pass
+        let processed_nodes = filtering_methods::process_nodes(
+            graph,
+            target_vec,
+            filter_target,
+            sort_target,
+            max_nodes
+        );
+        
+        // Add the processed nodes to the selection
+        level.add_selection(Some(parent), processed_nodes);
     }
 
     Ok(())
