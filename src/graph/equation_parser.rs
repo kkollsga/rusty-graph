@@ -13,6 +13,29 @@ pub enum Expr {
     Aggregate(AggregateType, Box<Expr>),
 }
 
+impl Expr {
+    pub fn extract_variables(&self) -> Vec<String> {
+        let mut variables = Vec::new();
+        self.collect_variables(&mut variables);
+        variables.sort();
+        variables.dedup();
+        variables
+    }
+
+    fn collect_variables(&self, variables: &mut Vec<String>) {
+        match self {
+            Expr::Variable(name) => variables.push(name.clone()),
+            Expr::Add(left, right) | Expr::Subtract(left, right) | 
+            Expr::Multiply(left, right) | Expr::Divide(left, right) => {
+                left.collect_variables(variables);
+                right.collect_variables(variables);
+            },
+            Expr::Aggregate(_, inner) => inner.collect_variables(variables),
+            Expr::Number(_) => {}, // Number doesn't contain variables
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AggregateType {
     Sum,
@@ -306,9 +329,7 @@ impl Evaluator {
                         println!("Warning: All evaluations failed. Sample errors: {:?}", sample_errors);
                     }
                     
-                    if null_results > 0 {
-                        println!("Warning: Got {} null results out of {} objects", null_results, total_objects);
-                    }
+                    // REMOVED: The null results warning that was printed here
                     
                     // For sum, return 0 when all values are null or errors
                     // For other aggregates, return null

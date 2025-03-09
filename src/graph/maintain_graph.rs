@@ -396,28 +396,106 @@ pub fn update_node_properties(
     
     // Create property string once
     let property_string = property.to_string();
-    let mut valid_updates = 0;
     
-    // Fast path for common case: all nodes are valid
-    // Use direct indexing instead of get_node for better performance
+    // Step 1: Collect information about node types and check if schema update is needed
+    let mut node_types = HashMap::new();
+    let mut first_value_type = None;
+    
     for (node_idx_opt, value) in nodes {
         if let Some(node_idx) = node_idx_opt {
-            // Check if the node index is within valid range using graph.graph
-            if node_idx.index() < graph.graph.node_count() {
-                // Use unsafe get_unchecked for performance, but only after bounds check
-                if let Some(node) = graph.get_node_mut(*node_idx) {
-                    match node {
-                        NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-                            properties.insert(property_string.clone(), value.clone());
-                            valid_updates += 1;
+            if let Some(node) = graph.get_node(*node_idx) {
+                match node {
+                    NodeData::Regular { node_type, .. } => {
+                        // Track node type and count for each node
+                        *node_types.entry(node_type.clone()).or_insert(0) += 1;
+                        
+                        // Capture type of first value for schema
+                        if first_value_type.is_none() {
+                            first_value_type = Some(match value {
+                                Value::Int64(_) => "Int64",
+                                Value::Float64(_) => "Float64",
+                                Value::String(_) => "String",
+                                Value::UniqueId(_) => "UniqueId",
+                                _ => "Unknown",
+                            });
                         }
                     }
+                    _ => {} // Skip schema nodes
                 }
             }
         }
     }
     
-    if valid_updates == 0 {
+    // Step 2: Update schema nodes for each node type
+    let schema_lookup = match TypeLookup::new(&graph.graph, "SchemaNode".to_string()) {
+        Ok(lookup) => lookup,
+        Err(e) => return Err(format!("Failed to access schema nodes: {}", e)),
+    };
+    
+    for (node_type, _count) in node_types.iter() {
+        let schema_title = Value::String(node_type.clone());
+        
+        match schema_lookup.check_title(&schema_title) {
+            Some(schema_idx) => {
+                // Schema exists, update it
+                if let Some(NodeData::Schema { properties, .. }) = graph.get_node_mut(schema_idx) {
+                    if !properties.contains_key(&property_string) {
+                        let type_value = first_value_type
+                            .map(|t| Value::String(t.to_string()))
+                            .unwrap_or_else(|| Value::String("Calculated".to_string()));
+                        
+                        properties.insert(property_string.clone(), type_value);
+                    }
+                }
+            },
+            None => {
+                // Schema doesn't exist, create it
+                let mut properties = HashMap::new();
+                let type_value = first_value_type
+                    .map(|t| Value::String(t.to_string()))
+                    .unwrap_or_else(|| Value::String("Calculated".to_string()));
+                
+                properties.insert(property_string.clone(), type_value);
+                
+                let schema_node_data = NodeData::Schema {
+                    id: Value::String(node_type.clone()),
+                    title: schema_title,
+                    node_type: "SchemaNode".to_string(),
+                    properties,
+                };
+                graph.graph.add_node(schema_node_data);
+            }
+        }
+    }
+    
+    // Step 3: Prepare batch updates for nodes
+    let batch_size = nodes.len();
+    let mut batch = BatchProcessor::new(batch_size);
+    
+    for (node_idx_opt, value) in nodes {
+        if let Some(node_idx) = node_idx_opt {
+            // Only add valid nodes to batch
+            if node_idx.index() < graph.graph.node_count() {
+                let mut properties = HashMap::new();
+                properties.insert(property_string.clone(), value.clone());
+                
+                // Create update action
+                let action = NodeAction::Update {
+                    node_idx: *node_idx,
+                    title: None, // Don't update title
+                    properties,
+                    conflict_mode: ConflictHandling::Update,
+                };
+                
+                batch.add_action(action, graph)?;
+            }
+        }
+    }
+    
+    // Step 4: Execute batch update
+    let (stats, _) = batch.execute(graph)?;
+    
+    if stats.updates == 0 {
         return Err("No nodes were updated".to_string());
     }
     

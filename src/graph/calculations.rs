@@ -1,6 +1,8 @@
+// src/graph/calculations.rs
 use super::statistics_methods::get_parent_child_pairs;
 use super::equation_parser::{Parser, Evaluator, Expr};
 use super::maintain_graph;
+use super::lookups::TypeLookup;
 use crate::datatypes::values::Value;
 use crate::graph::schema::{DirGraph, CurrentSelection, NodeData};
 use petgraph::graph::NodeIndex;
@@ -32,6 +34,47 @@ pub fn process_equation(
         Ok(expr) => expr,
         Err(err) => return Err(format!("Failed to parse expression: {}. Check for syntax errors or case sensitivity in function names (use 'sum', not 'SUM').", err)),
     };
+    
+    // Extract variables from the expression
+    let variables = parsed_expr.extract_variables();
+    
+    // Get effective level index
+    let effective_level_index = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
+    
+    // If we have a selection, validate variables against schema
+    if let Some(level) = selection.get_level(effective_level_index) {
+        if !level.is_empty() {
+            // Get a sample node to determine node type
+            if let Some(nodes) = level.get_all_nodes().first() {
+                if let Some(node) = graph.get_node(*nodes) {
+                    match node {
+                        NodeData::Regular { node_type, .. } => {
+                            // Check if schema node exists for this type
+                            let schema_lookup = match TypeLookup::new(&graph.graph, "SchemaNode".to_string()) {
+                                Ok(lookup) => lookup,
+                                Err(_) => return Err("Could not access schema information".to_string()),
+                            };
+                            
+                            let schema_title = Value::String(node_type.clone());
+                            
+                            if let Some(schema_idx) = schema_lookup.check_title(&schema_title) {
+                                if let Some(NodeData::Schema { properties, .. }) = graph.get_node(schema_idx) {
+                                    // Validate each variable against schema properties
+                                    // Don't check reserved field names like 'id', 'title', 'type'
+                                    for var in &variables {
+                                        if var != "id" && var != "title" && var != "type" && !properties.contains_key(var) {
+                                            return Err(format!("Property '{}' does not exist on '{}' nodes", var, node_type));
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        _ => {}, // Skip schema nodes
+                    }
+                }
+            }
+        }
+    }
     
     let is_aggregation = has_aggregation(&parsed_expr);
     
