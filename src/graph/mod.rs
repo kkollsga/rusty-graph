@@ -76,17 +76,38 @@ impl KnowledgeGraph {
         node_title_field: Option<String>,
         columns: Option<&Bound<'_, PyList>>,
         conflict_handling: Option<String>,
-        _column_types: Option<&Bound<'_, PyDict>>,
+        skip_columns: Option<&Bound<'_, PyList>>,
+        column_types: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let modified_columns: Option<Vec<String>> = py_in::ensure_columns(
-            columns, 
-            &[&unique_id_field], 
-            &[&node_title_field]
+        // Get all columns from the dataframe
+        let df_cols = data.getattr("columns")?;
+        let all_columns: Vec<String> = df_cols.extract()?;
+        
+        // Create default columns array
+        let mut default_cols = vec![unique_id_field.as_str()];
+        if let Some(ref title_field) = node_title_field {
+            default_cols.push(title_field);
+        }
+        
+        // Use enforce_columns=false for add_nodes
+        let enforce_columns = Some(false);
+        
+        // Get the filtered columns
+        let column_list = py_in::ensure_columns(
+            &all_columns,
+            &default_cols,
+            columns,
+            skip_columns,
+            enforce_columns,
         )?;
+    
         let df_result = py_in::pandas_to_dataframe(
-            data, &[unique_id_field.clone()], modified_columns.as_deref(),
+            data, 
+            &[unique_id_field.clone()], 
+            &column_list,
+            column_types,
         )?;
-
+    
         // Extract graph or clone it if needed
         let mut graph = extract_or_clone_graph(&mut self.inner);
         
@@ -98,7 +119,7 @@ impl KnowledgeGraph {
             node_title_field,
             conflict_handling,
         ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-
+    
         // Replace the Arc with the new graph
         self.inner = Arc::new(graph);
         self.selection.clear();
@@ -116,18 +137,40 @@ impl KnowledgeGraph {
         source_title_field: Option<String>,
         target_title_field: Option<String>,
         columns: Option<&Bound<'_, PyList>>,
+        skip_columns: Option<&Bound<'_, PyList>>,
         conflict_handling: Option<String>,
+        column_types: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let modified_columns: Option<Vec<String>> = py_in::ensure_columns(
-            columns, 
-            &[&source_id_field, &target_id_field], 
-            &[&source_title_field, &target_title_field]
+        // Get all columns from the dataframe
+        let df_cols = data.getattr("columns")?;
+        let all_columns: Vec<String> = df_cols.extract()?;
+        
+        // Create default columns array
+        let mut default_cols = vec![source_id_field.as_str(), target_id_field.as_str()];
+        if let Some(ref src_title) = source_title_field {
+            default_cols.push(src_title);
+        }
+        if let Some(ref tgt_title) = target_title_field {
+            default_cols.push(tgt_title);
+        }
+        
+        // Use enforce_columns=true for add_connections
+        let enforce_columns = Some(true);
+        
+        // Get the filtered columns
+        let column_list = py_in::ensure_columns(
+            &all_columns,
+            &default_cols,
+            columns,
+            skip_columns,
+            enforce_columns,
         )?;
         
         let df_result = py_in::pandas_to_dataframe(
             data,
             &[source_id_field.clone(), target_id_field.clone()],
-            modified_columns.as_deref(),
+            &column_list,
+            column_types,
         )?;
     
         // Extract graph or clone it if needed

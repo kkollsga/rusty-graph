@@ -128,39 +128,55 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
 pub fn pandas_to_dataframe(
     df: &Bound<'_, PyAny>,
     unique_id_fields: &[String],
-    columns: Option<&[String]>,
+    column_names: &[String],
+    column_types: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<DataFrame> {
     let df_columns = df.getattr("columns")?;
-    let column_names: Vec<String> = df_columns.extract()?;
-
-    let filtered_column_names = match columns {
-        Some(cols) => {
-            column_names.into_iter().filter(|col_name| cols.contains(col_name)).collect()
-        },
-        None => column_names,
-    };
+    let all_column_names: Vec<String> = df_columns.extract()?;
 
     let mut df_out = DataFrame::new(Vec::new());
 
     Python::with_gil(|_py| {
-        for col_name in &filtered_column_names {
-            let series = df.getattr(col_name.as_str())?;
-            let dtype = series.getattr("dtype")?;
-            let type_str = dtype.str()?.to_string();
+        for col_name in column_names {
+            // Skip if column doesn't exist in the dataframe
+            if !all_column_names.contains(col_name) {
+                continue;
+            }
 
-            let col_type = if unique_id_fields.contains(col_name) {
+            let series = df.getattr(col_name.as_str())?;
+            
+            // Determine column type - check custom type mapping first
+            let col_type = if let Some(type_dict) = column_types {
+                // Get item returns Result<Option<...>, ...> so we need to handle both
+                let maybe_type_value = type_dict.get_item(col_name)?;
+                
+                if let Some(type_value) = maybe_type_value {
+                    // Extract type string from the dictionary
+                    let type_str = type_value.extract::<String>()?;
+                    
+                    // Parse the requested type
+                    match type_str.to_lowercase().as_str() {
+                        "uniqueid" | "unique_id" | "id" => ColumnType::UniqueId,
+                        "int" | "int64" | "integer" => ColumnType::Int64,
+                        "float" | "float64" | "double" => ColumnType::Float64,
+                        "str" | "string" | "text" => ColumnType::String,
+                        "bool" | "boolean" => ColumnType::Boolean,
+                        "date" | "datetime" | "timestamp" => ColumnType::DateTime,
+                        _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            format!("Unsupported column type '{}' specified for column '{}'", type_str, col_name)
+                        )),
+                    }
+                } else if unique_id_fields.contains(col_name) {
+                    ColumnType::UniqueId
+                } else {
+                    // Fall back to auto-detection if not in custom mapping
+                    determine_column_type(&series, col_name)?
+                }
+            } else if unique_id_fields.contains(col_name) {
                 ColumnType::UniqueId
             } else {
-                match type_str.as_str() {
-                    "int64" | "int32" | "int16" | "int8" => ColumnType::Int64,
-                    "float64" | "float32" => ColumnType::Float64,
-                    "bool" | "boolean" => ColumnType::Boolean,
-                    s if s.starts_with("datetime64") => ColumnType::DateTime,
-                    "object" | "string" => ColumnType::String,
-                    _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        format!("Unsupported column type {} for column {}", type_str, col_name)
-                    )),
-                }
+                // No custom mapping provided, use auto-detection
+                determine_column_type(&series, col_name)?
             };
 
             let data = convert_pandas_series(&series, col_type.clone())?;
@@ -173,36 +189,81 @@ pub fn pandas_to_dataframe(
     Ok(df_out)
 }
 
+// Helper function to determine column type from pandas series
+fn determine_column_type(series: &Bound<'_, PyAny>, col_name: &str) -> PyResult<ColumnType> {
+    let dtype = series.getattr("dtype")?;
+    let type_str = dtype.str()?.to_string();
+    
+    match type_str.as_str() {
+        "int64" | "int32" | "int16" | "int8" => Ok(ColumnType::Int64),
+        "float64" | "float32" => Ok(ColumnType::Float64),
+        "bool" | "boolean" => Ok(ColumnType::Boolean),
+        s if s.starts_with("datetime64") => Ok(ColumnType::DateTime),
+        "object" | "string" => Ok(ColumnType::String),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            format!("Unsupported column type {} for column {}", type_str, col_name)
+        )),
+    }
+}
+
 pub fn ensure_columns(
-    columns: Option<&Bound<'_, PyList>>,
-    mandatory_fields: &[&str],
-    optional_fields: &[&Option<String>],
-) -> PyResult<Option<Vec<String>>> {
-    match columns {
-        Some(cols) => {
-            let mut cols_vec: Vec<String> = cols.iter()
-                .map(|item| item.extract::<String>())
-                .collect::<PyResult<_>>()?;
-            
-            // Add all mandatory fields
-            for field in mandatory_fields {
-                if !cols_vec.contains(&field.to_string()) {
-                    cols_vec.push(field.to_string());
-                }
+    df_columns: &[String],
+    default_columns: &[&str],
+    columns_to_include: Option<&Bound<'_, PyList>>,
+    columns_to_skip: Option<&Bound<'_, PyList>>,
+    enforce_columns: Option<bool>,
+) -> PyResult<Vec<String>> {
+    // Process columns_to_skip if present
+    let skip_cols = match columns_to_skip {
+        Some(list) => list.iter()
+            .map(|item| item.extract::<String>())
+            .collect::<PyResult<Vec<String>>>()?,
+        None => Vec::new(),
+    };
+
+    // Process user-specified columns if present
+    if let Some(include_list) = columns_to_include {
+        let mut result: Vec<String> = include_list.iter()
+            .map(|item| item.extract::<String>())
+            .collect::<PyResult<_>>()?;
+        
+        // Always add default columns
+        for &field in default_columns {
+            if !result.contains(&field.to_string()) && !skip_cols.contains(&field.to_string()) {
+                result.push(field.to_string());
             }
-            
-            // Add all optional fields if they exist
-            for opt_field in optional_fields {
-                if let Some(field) = opt_field {
-                    if !cols_vec.contains(field) {
-                        cols_vec.push(field.clone());
-                    }
-                }
+        }
+        
+        // Filter out any skipped columns
+        result.retain(|col| !skip_cols.contains(col));
+        
+        Ok(result)
+    } else if enforce_columns.unwrap_or(false) {
+        // If enforce_columns is true and no columns specified, use only default columns
+        let mut result = Vec::new();
+        
+        for &field in default_columns {
+            if !skip_cols.contains(&field.to_string()) {
+                result.push(field.to_string());
             }
-            
-            Ok(Some(cols_vec))
-        },
-        None => Ok(None),
+        }
+        
+        Ok(result)
+    } else {
+        // Use all dataframe columns except skipped ones
+        let mut result = df_columns.iter()
+            .filter(|col| !skip_cols.contains(col))
+            .cloned()
+            .collect::<Vec<String>>();
+        
+        // Ensure default columns are included
+        for &field in default_columns {
+            if !result.contains(&field.to_string()) && !skip_cols.contains(&field.to_string()) {
+                result.push(field.to_string());
+            }
+        }
+        
+        Ok(result)
     }
 }
 
