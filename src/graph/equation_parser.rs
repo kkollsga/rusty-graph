@@ -45,6 +45,25 @@ pub enum AggregateType {
     Max,
 }
 
+impl AggregateType {
+    // Helper function to get all supported aggregate function names
+    pub fn get_supported_names() -> Vec<&'static str> {
+        vec!["sum", "mean", "avg", "std", "min", "max"]
+    }
+    
+    // Helper function to convert from string
+    pub fn from_string(name: &str) -> Option<Self> {
+        match name.to_lowercase().as_str() {
+            "sum" => Some(AggregateType::Sum),
+            "mean" | "avg" | "average" => Some(AggregateType::Mean),
+            "std" => Some(AggregateType::Std),
+            "min" => Some(AggregateType::Min),
+            "max" => Some(AggregateType::Max),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Number(f64),
@@ -116,13 +135,12 @@ impl Parser {
                             break;
                         }
                     }
-                    match ident.as_str() {
-                        "sum" => tokens.push(Token::Aggregate(AggregateType::Sum)),
-                        "mean" | "avg" => tokens.push(Token::Aggregate(AggregateType::Mean)),
-                        "std" => tokens.push(Token::Aggregate(AggregateType::Std)),
-                        "min" => tokens.push(Token::Aggregate(AggregateType::Min)),
-                        "max" => tokens.push(Token::Aggregate(AggregateType::Max)),
-                        _ => tokens.push(Token::Identifier(ident)),
+                    
+                    // Check if the identifier is an aggregate function
+                    if let Some(agg_type) = AggregateType::from_string(&ident) {
+                        tokens.push(Token::Aggregate(agg_type));
+                    } else {
+                        tokens.push(Token::Identifier(ident));
                     }
                 }
                 '+' => {
@@ -328,8 +346,6 @@ impl Evaluator {
                             .collect();
                         println!("Warning: All evaluations failed. Sample errors: {:?}", sample_errors);
                     }
-                    
-                    // REMOVED: The null results warning that was printed here
                     
                     // For sum, return 0 when all values are null or errors
                     // For other aggregates, return null

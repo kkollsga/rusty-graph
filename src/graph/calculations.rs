@@ -1,6 +1,6 @@
 // src/graph/calculations.rs
 use super::statistics_methods::get_parent_child_pairs;
-use super::equation_parser::{Parser, Evaluator, Expr};
+use super::equation_parser::{Parser, Evaluator, Expr, AggregateType};
 use super::maintain_graph;
 use super::lookups::TypeLookup;
 use crate::datatypes::values::Value;
@@ -29,17 +29,65 @@ pub fn process_equation(
     level_index: Option<usize>,
     store_as: Option<&str>,
 ) -> Result<EvaluationResult, String> {
+    // Check for unknown aggregate function names
+    if let Some(unknown_func) = extract_unknown_aggregate_function(expression) {
+        let supported = AggregateType::get_supported_names().join(", ");
+        return Err(format!(
+            "Unknown aggregate function '{}'. Supported functions are: {}",
+            unknown_func, supported
+        ));
+    }
+    
     // Parse the expression first
     let parsed_expr = match Parser::parse_expression(expression) {
         Ok(expr) => expr,
-        Err(err) => return Err(format!("Failed to parse expression: {}. Check for syntax errors or case sensitivity in function names (use 'sum', not 'SUM').", err)),
+        Err(err) => {
+            // Try to provide more context for why the parsing failed
+            if expression.is_empty() {
+                return Err("Expression cannot be empty.".to_string());
+            }
+            
+            if expression.contains("(") && !expression.contains(")") {
+                return Err("Missing closing parenthesis in expression.".to_string());
+            }
+            
+            if !expression.contains("(") && expression.contains(")") {
+                return Err("Unexpected closing parenthesis in expression.".to_string());
+            }
+            
+            // Check if expression might be a function call without parentheses
+            if !expression.contains("(") && is_likely_aggregate_name(expression) {
+                return Err(format!(
+                    "Function '{}' requires parentheses. Try '{}(property)' instead.", 
+                    expression, expression
+                ));
+            }
+            
+            return Err(format!("Failed to parse expression: {}. Check for syntax errors or case sensitivity in function names (use 'sum', not 'SUM').", err));
+        },
     };
     
     // Extract variables from the expression
     let variables = parsed_expr.extract_variables();
     
-    // Get effective level index
+    // Check if selection is valid or empty
+    if selection.get_level_count() == 0 {
+        return Err("No nodes selected. Please apply filters or traversals before calculating.".to_string());
+    }
+    
+    // Additional check to see if the current level has any nodes
     let effective_level_index = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
+    if let Some(level) = selection.get_level(effective_level_index) {
+        if level.get_all_nodes().is_empty() {
+            return Err(format!(
+                "No nodes found at level {}. Make sure your filters and traversals return data.", 
+                effective_level_index
+            ));
+        }
+    } else {
+        return Err(format!("Invalid level index: {}. Selection only has {} levels.", 
+            effective_level_index, selection.get_level_count()));
+    }
     
     // If we have a selection, validate variables against schema
     if let Some(level) = selection.get_level(effective_level_index) {
@@ -63,7 +111,11 @@ pub fn process_equation(
                                     // Don't check reserved field names like 'id', 'title', 'type'
                                     for var in &variables {
                                         if var != "id" && var != "title" && var != "type" && !properties.contains_key(var) {
-                                            return Err(format!("Property '{}' does not exist on '{}' nodes", var, node_type));
+                                            return Err(format!(
+                                                "Property '{}' does not exist on '{}' nodes. Available properties: {}", 
+                                                var, node_type, 
+                                                properties.keys().cloned().collect::<Vec<String>>().join(", ")
+                                            ));
                                         }
                                     }
                                 }
@@ -84,7 +136,7 @@ pub fn process_equation(
     // If we don't need to store results, just return them directly
     if store_as.is_none() {
         if results.is_empty() {
-            return Err("No results from calculation".to_string());
+            return Err("No results from calculation. Check that your selection contains data.".to_string());
         }
         
         return Ok(EvaluationResult::Computed(results));
@@ -143,6 +195,45 @@ pub fn process_equation(
     Ok(EvaluationResult::Stored(()))
 }
 
+// Helper function to extract potentially unknown aggregate function name from expression
+fn extract_unknown_aggregate_function(expression: &str) -> Option<String> {
+    // Simple heuristic: if expression contains word(property) pattern but word is not a known aggregate
+    let lowercase_expr = expression.to_lowercase();
+    
+    // Check for common patterns like "func(arg)" where func is not recognized
+    let parts: Vec<&str> = lowercase_expr.split('(').collect();
+    if parts.len() > 1 {
+        let func_part = parts[0].trim();
+        
+        // Skip known functions
+        if !is_known_aggregate(func_part) {
+            // Check that it looks like a function name (alphanumeric)
+            if func_part.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                return Some(func_part.to_string());
+            }
+        }
+    }
+    
+    None
+}
+
+// Check if a name is a supported aggregate function
+fn is_known_aggregate(name: &str) -> bool {
+    AggregateType::from_string(name).is_some()
+}
+
+// Check if a string looks like it might be intended as an aggregate function name
+fn is_likely_aggregate_name(name: &str) -> bool {
+    let name = name.trim().to_lowercase();
+    
+    // Common aggregate function names people might try to use
+    let common_aggregates = [
+        "sum", "avg", "average", "mean", "median", "min", "max", "count", 
+        "std", "stdev", "stddev", "var", "variance"
+    ];
+    
+    common_aggregates.contains(&name.as_str())
+}
 
 // Modified evaluate_equation to take a parsed expression directly
 // Now takes an immutable reference to graph since it only needs to read
