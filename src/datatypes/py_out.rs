@@ -13,11 +13,10 @@ pub fn nodeinfo_to_pydict(py: Python, node: &NodeInfo) -> PyResult<PyObject> {
     dict.set_item("title", node.title.to_object(py))?;
     dict.set_item("type", node.node_type.to_object(py))?;
 
-    let props = PyDict::new_bound(py);
+    // Always merge properties directly into the main dictionary
     for (k, v) in &node.properties {
-        props.set_item(k, value_to_py(py, v)?)?;
+        dict.set_item(k, value_to_py(py, v)?)?;
     }
-    dict.set_item("properties", props)?;
 
     Ok(dict.into())
 }
@@ -99,8 +98,44 @@ pub fn level_nodes_to_pydict(
     py: Python,
     level_nodes: &[LevelNodes],
     parent_key: Option<&str>,
-    parent_info: Option<bool>
+    parent_info: Option<bool>,
+    flatten_single_parent: Option<bool>
 ) -> PyResult<PyObject> {
+    // Default to true if not specified
+    let should_flatten = flatten_single_parent.unwrap_or(true);
+    
+    // If there's only one parent and flatten_single_parent is true, return just the nodes
+    if should_flatten && level_nodes.len() == 1 {
+        let group = &level_nodes[0];
+        
+        if parent_info.unwrap_or(false) && group.parent_idx.is_some() {
+            // When parent info is requested, still return a dict but with a simpler structure
+            let parent_dict = PyDict::new_bound(py);
+            
+            if let Some(ref id) = group.parent_id {
+                parent_dict.set_item("id", value_to_py(py, id)?)?;
+            }
+            parent_dict.set_item("title", &group.parent_title)?;
+            if let Some(ref type_str) = group.parent_type {
+                parent_dict.set_item("type", type_str)?;
+            }
+            
+            let nodes: Vec<PyObject> = group.nodes.iter()
+                .map(|node| nodeinfo_to_pydict(py, node))
+                .collect::<PyResult<_>>()?;
+            parent_dict.set_item("nodes", nodes)?;
+            
+            return Ok(parent_dict.into());
+        } else {
+            // Just return the list of nodes
+            let nodes: Vec<PyObject> = group.nodes.iter()
+                .map(|node| nodeinfo_to_pydict(py, node))
+                .collect::<PyResult<_>>()?;
+            return Ok(nodes.into_py(py));
+        }
+    }
+
+    // Original behavior for multiple parents
     let result = PyDict::new_bound(py);
     let mut seen_keys = std::collections::HashMap::new();
     
@@ -214,8 +249,92 @@ pub fn level_single_values_to_pydict(py: Python, level_values: &[LevelValues]) -
 pub fn level_connections_to_pydict(
     py: Python,
     connections: &[LevelConnections],
-    parent_info: Option<bool>
+    parent_info: Option<bool>,
+    flatten_single_parent: Option<bool>
 ) -> PyResult<PyObject> {
+    // Default to true if not specified
+    let should_flatten = flatten_single_parent.unwrap_or(true);
+    
+    // If there's only one parent and flatten_single_parent is true, return just the connections
+    if should_flatten && connections.len() == 1 {
+        let level = &connections[0];
+        let connections_dict = PyDict::new_bound(py);
+        
+        // Add parent info if requested
+        if parent_info.unwrap_or(false) {
+            if let Some(parent_id) = &level.parent_id {
+                connections_dict.set_item("parent_id", parent_id.to_object(py))?;
+            }
+            if let Some(parent_type) = &level.parent_type {
+                connections_dict.set_item("parent_type", parent_type)?;
+            }
+            if let Some(parent_idx) = &level.parent_idx {
+                connections_dict.set_item("parent_idx", parent_idx.index())?;
+            }
+            connections_dict.set_item("parent_title", &level.parent_title)?;
+        }
+        
+        // Add all connections directly to the main dictionary
+        for conn in &level.connections {
+            let node_dict = PyDict::new_bound(py);
+            node_dict.set_item("node_id", conn.node_id.to_object(py))?;
+            node_dict.set_item("node_type", &conn.node_type)?;
+            
+            let incoming_dict = PyDict::new_bound(py);
+            for (conn_type, id, title, conn_props, node_props) in &conn.incoming {
+                if !incoming_dict.contains(conn_type)? {
+                    incoming_dict.set_item(conn_type, PyDict::new_bound(py))?;
+                }
+                
+                let conn_type_item = incoming_dict.get_item(conn_type)?;
+                let conn_type_any = conn_type_item.unwrap();
+                let conn_type_dict = conn_type_any.downcast::<PyDict>()?;
+                
+                let node_info = PyDict::new_bound(py);
+                node_info.set_item("node_id", id.to_object(py))?;
+                node_info.set_item("connection_properties", conn_props)?;
+                if let Some(props) = node_props {
+                    node_info.set_item("node_properties", props)?;
+                }
+                
+                match title {
+                    Value::String(t) => conn_type_dict.set_item(t, node_info)?,
+                    _ => conn_type_dict.set_item("Unknown", node_info)?,
+                }
+            }
+            node_dict.set_item("incoming", incoming_dict)?;
+            
+            let outgoing_dict = PyDict::new_bound(py);
+            for (conn_type, id, title, conn_props, node_props) in &conn.outgoing {
+                if !outgoing_dict.contains(conn_type)? {
+                    outgoing_dict.set_item(conn_type, PyDict::new_bound(py))?;
+                }
+                
+                let conn_type_item = outgoing_dict.get_item(conn_type)?;
+                let conn_type_any = conn_type_item.unwrap();
+                let conn_type_dict = conn_type_any.downcast::<PyDict>()?;
+                
+                let node_info = PyDict::new_bound(py);
+                node_info.set_item("node_id", id.to_object(py))?;
+                node_info.set_item("connection_properties", conn_props)?;
+                if let Some(props) = node_props {
+                    node_info.set_item("node_properties", props)?;
+                }
+                
+                match title {
+                    Value::String(t) => conn_type_dict.set_item(t, node_info)?,
+                    _ => conn_type_dict.set_item("Unknown", node_info)?,
+                }
+            }
+            node_dict.set_item("outgoing", outgoing_dict)?;
+            
+            connections_dict.set_item(&conn.node_title, node_dict)?;
+        }
+        
+        return Ok(connections_dict.to_object(py));
+    }
+
+    // Original behavior for multiple parents
     let result = PyDict::new_bound(py);
     
     for level in connections {

@@ -285,12 +285,15 @@ impl KnowledgeGraph {
         Ok(new_kg)
     }
 
+    #[pyo3(signature = (max_nodes=None, indices=None, parent_type=None, parent_info=None, 
+                         flatten_single_parent=true))]
     fn get_nodes(
         &self,
         max_nodes: Option<usize>,
         indices: Option<Vec<usize>>, 
         parent_type: Option<&str>,
-        parent_info: Option<bool>
+        parent_info: Option<bool>,
+        flatten_single_parent: Option<bool>
     ) -> PyResult<PyObject> {
         let nodes = data_retrieval::get_nodes(
             &self.inner, 
@@ -299,7 +302,37 @@ impl KnowledgeGraph {
             indices.as_deref(),
             max_nodes
         );
-        Python::with_gil(|py| py_out::level_nodes_to_pydict(py, &nodes, parent_type, parent_info))
+        Python::with_gil(|py| py_out::level_nodes_to_pydict(
+            py, 
+            &nodes, 
+            parent_type, 
+            parent_info, 
+            flatten_single_parent
+        ))
+    }
+    
+    #[pyo3(signature = (indices=None, parent_info=None, include_node_properties=None, 
+                        flatten_single_parent=true))]
+    fn get_connections(
+        &self,
+        indices: Option<Vec<usize>>,
+        parent_info: Option<bool>,
+        include_node_properties: Option<bool>,
+        flatten_single_parent: Option<bool>,
+    ) -> PyResult<PyObject> {
+        let connections = data_retrieval::get_connections(
+            &self.inner,
+            &self.selection,
+            None,
+            indices.as_deref(),
+            include_node_properties.unwrap_or(true),
+        );
+        Python::with_gil(|py| py_out::level_connections_to_pydict(
+            py, 
+            &connections, 
+            parent_info,
+            flatten_single_parent
+        ))
     }
     
     fn get_titles(&self, max_nodes: Option<usize>, indices: Option<Vec<usize>>) -> PyResult<PyObject> {
@@ -325,22 +358,6 @@ impl KnowledgeGraph {
             max_nodes
         );
         Python::with_gil(|py| py_out::level_values_to_pydict(py, &values))
-    }
-
-    fn get_connections(
-        &self,
-        indices: Option<Vec<usize>>,
-        parent_info: Option<bool>,
-        include_node_properties: Option<bool>,
-    ) -> PyResult<PyObject> {
-        let connections = data_retrieval::get_connections(
-            &self.inner,
-            &self.selection,
-            None,
-            indices.as_deref(),
-            include_node_properties.unwrap_or(true),
-        );
-        Python::with_gil(|py| py_out::level_connections_to_pydict(py, &connections, parent_info))
     }
 
     fn unique_values(

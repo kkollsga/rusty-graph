@@ -60,6 +60,7 @@ pub struct CombinedTypeLookup {
     target_uid_to_index: HashMap<Value, NodeIndex>,
     source_type: String,
     target_type: String,
+    same_type: bool,  // Flag to indicate if source and target types are the same
 }
 
 impl CombinedTypeLookup {
@@ -68,25 +69,24 @@ impl CombinedTypeLookup {
             return Err("Node types cannot be empty".to_string());
         }
 
+        // Check if source and target types are the same
+        let same_type = source_type == target_type;
+        
         let mut source_uid_to_index = HashMap::new();
-        let mut target_uid_to_index = HashMap::new();
+        let target_uid_to_index: HashMap<Value, NodeIndex>;
 
+        // First pass: populate source_uid_to_index
         for idx in graph.node_indices() {
             if let Some(node_data) = graph.node_weight(idx) {
                 match node_data {
                     NodeData::Regular { node_type, id, .. } => {
                         if node_type == &source_type {
                             source_uid_to_index.insert(id.clone(), idx);
-                        } else if node_type == &target_type {
-                            target_uid_to_index.insert(id.clone(), idx);
                         }
                     },
                     NodeData::Schema { node_type, title, .. } if node_type == "SchemaNode" => {
                         if source_type == "SchemaNode" {
                             source_uid_to_index.insert(title.clone(), idx);
-                        }
-                        if target_type == "SchemaNode" {
-                            target_uid_to_index.insert(title.clone(), idx);
                         }
                     },
                     _ => {}
@@ -94,11 +94,38 @@ impl CombinedTypeLookup {
             }
         }
 
+        // Performance optimization: If types are the same, reuse the source map
+        if same_type {
+            target_uid_to_index = source_uid_to_index.clone();
+        } else {
+            // Different types - create a separate target map
+            let mut target_map = HashMap::new();
+            for idx in graph.node_indices() {
+                if let Some(node_data) = graph.node_weight(idx) {
+                    match node_data {
+                        NodeData::Regular { node_type, id, .. } => {
+                            if node_type == &target_type {
+                                target_map.insert(id.clone(), idx);
+                            }
+                        },
+                        NodeData::Schema { node_type, title, .. } if node_type == "SchemaNode" => {
+                            if target_type == "SchemaNode" {
+                                target_map.insert(title.clone(), idx);
+                            }
+                        },
+                        _ => {}
+                    }
+                }
+            }
+            target_uid_to_index = target_map;
+        }
+
         Ok(CombinedTypeLookup {
             source_uid_to_index,
             target_uid_to_index,
             source_type,
             target_type,
+            same_type,
         })
     }
 
