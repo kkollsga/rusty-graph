@@ -264,6 +264,7 @@ pub struct ConnectionBatchProcessor {
     capacity: usize,
     batch_type: BatchType,
     metrics: BatchMetrics,
+    conflict_mode: ConflictHandling, // Add conflict handling mode
 }
 
 impl ConnectionBatchProcessor {
@@ -280,7 +281,13 @@ impl ConnectionBatchProcessor {
             capacity,
             batch_type,
             metrics: BatchMetrics::default(),
+            conflict_mode: ConflictHandling::Update, // Default to Update
         }
+    }
+    
+    // Add setter for conflict mode
+    pub fn set_conflict_mode(&mut self, mode: ConflictHandling) {
+        self.conflict_mode = mode;
     }
 
     pub fn add_connection(
@@ -291,6 +298,14 @@ impl ConnectionBatchProcessor {
         graph: &mut DirGraph,
         connection_type: &str,
     ) -> Result<(), String> {
+        // Check if the edge already exists
+        let existing_edge = graph.graph.find_edge(source_idx, target_idx);
+        
+        // If edge exists and conflict mode is Skip, don't add it
+        if existing_edge.is_some() && self.conflict_mode == ConflictHandling::Skip {
+            return Ok(());
+        }
+        
         // Track property names for schema
         for key in properties.keys() {
             self.schema_properties.insert(key.clone());
@@ -320,11 +335,51 @@ impl ConnectionBatchProcessor {
         let start = Instant::now();
         let mut stats = ConnectionBatchStats::default();
 
-        // Create edges in current chunk
+        // Create or update edges in current chunk
         for conn in self.connections.drain(..) {
-            let edge_data = EdgeData::new(connection_type.to_string(), conn.properties);
-            graph.graph.add_edge(conn.source_idx, conn.target_idx, edge_data);
-            stats.connections_created += 1;
+            // Check if the edge already exists
+            if let Some(edge_idx) = graph.graph.find_edge(conn.source_idx, conn.target_idx) {
+                match self.conflict_mode {
+                    ConflictHandling::Skip => {
+                        // Skip this edge (should already be filtered in add_connection)
+                        continue;
+                    },
+                    ConflictHandling::Replace => {
+                        // Remove the existing edge and create a new one
+                        graph.graph.remove_edge(edge_idx);
+                        let edge_data = EdgeData::new(connection_type.to_string(), conn.properties);
+                        graph.graph.add_edge(conn.source_idx, conn.target_idx, edge_data);
+                        stats.connections_created += 1;
+                    },
+                    ConflictHandling::Update => {
+                        // Update existing edge properties
+                        if let Some(EdgeData { properties: edge_props, .. }) = 
+                              graph.graph.edge_weight_mut(edge_idx) {
+                            // Merge properties, preferring new values
+                            for (k, v) in conn.properties {
+                                edge_props.insert(k, v);
+                            }
+                            stats.connections_created += 1;
+                        }
+                    },
+                    ConflictHandling::Preserve => {
+                        // Update but preserve existing values
+                        if let Some(EdgeData { properties: edge_props, .. }) = 
+                              graph.graph.edge_weight_mut(edge_idx) {
+                            // Merge properties, preferring existing values
+                            for (k, v) in conn.properties {
+                                edge_props.entry(k).or_insert(v);
+                            }
+                            stats.connections_created += 1;
+                        }
+                    }
+                }
+            } else {
+                // Create new edge
+                let edge_data = EdgeData::new(connection_type.to_string(), conn.properties);
+                graph.graph.add_edge(conn.source_idx, conn.target_idx, edge_data);
+                stats.connections_created += 1;
+            }
         }
 
         // Update metrics

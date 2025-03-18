@@ -9,6 +9,8 @@ use crate::datatypes::{py_in, py_out};
 use crate::datatypes::values::{Value, FilterCondition};
 use crate::graph::io_operations::save_to_file;
 use crate::graph::calculations::StatResult;
+use crate::graph::reporting::{OperationReports, OperationReport};
+
 
 pub mod maintain_graph;
 pub mod filtering_methods;
@@ -22,6 +24,7 @@ pub mod equation_parser;
 pub mod batch_operations;
 pub mod schema;
 pub mod data_retrieval;
+pub mod reporting;
 
 use schema::{DirGraph, CurrentSelection};
 
@@ -29,14 +32,23 @@ use schema::{DirGraph, CurrentSelection};
 pub struct KnowledgeGraph {
     inner: Arc<DirGraph>,
     selection: CurrentSelection,
+    reports: OperationReports,  // Add reports field
 }
+
 
 impl Clone for KnowledgeGraph {
     fn clone(&self) -> Self {
         KnowledgeGraph {
             inner: Arc::clone(&self.inner),
             selection: self.selection.clone(),
+            reports: self.reports.clone(),  // Clone reports as well
         }
+    }
+}
+
+impl KnowledgeGraph {
+    fn add_report(&mut self, report: OperationReport) -> usize {
+        self.reports.add_report(report)
     }
 }
 
@@ -65,6 +77,7 @@ impl KnowledgeGraph {
         KnowledgeGraph {
             inner: Arc::new(DirGraph::new()),
             selection: CurrentSelection::new(),
+            reports: OperationReports::new(),  // Initialize reports
         }
     }
 
@@ -78,7 +91,7 @@ impl KnowledgeGraph {
         conflict_handling: Option<String>,
         skip_columns: Option<&Bound<'_, PyList>>,
         column_types: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<()> {
+    ) -> PyResult<PyObject> {
         // Get all columns from the dataframe
         let df_cols = data.getattr("columns")?;
         let all_columns: Vec<String> = df_cols.extract()?;
@@ -111,7 +124,8 @@ impl KnowledgeGraph {
         // Extract graph or clone it if needed
         let mut graph = extract_or_clone_graph(&mut self.inner);
         
-        maintain_graph::add_nodes(
+        // Call the maintain_graph function
+        let result = maintain_graph::add_nodes(
             &mut graph,
             df_result,
             node_type,
@@ -119,11 +133,34 @@ impl KnowledgeGraph {
             node_title_field,
             conflict_handling,
         ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-    
+        
         // Replace the Arc with the new graph
         self.inner = Arc::new(graph);
         self.selection.clear();
-        Ok(())
+        
+        // Store the report
+        self.add_report(OperationReport::NodeOperation(result.clone()));
+        
+        // Convert the report to a Python dictionary
+        Python::with_gil(|py| {
+            let report_dict = PyDict::new_bound(py);
+            report_dict.set_item("operation", &result.operation_type)?;
+            report_dict.set_item("timestamp", result.timestamp.to_rfc3339())?;
+            report_dict.set_item("nodes_created", result.nodes_created)?;
+            report_dict.set_item("nodes_updated", result.nodes_updated)?;
+            report_dict.set_item("nodes_skipped", result.nodes_skipped)?;
+            report_dict.set_item("processing_time_ms", result.processing_time_ms)?;
+            
+            // Add errors array if there are any
+            if !result.errors.is_empty() {
+                report_dict.set_item("errors", &result.errors)?;
+                report_dict.set_item("has_errors", true)?;
+            } else {
+                report_dict.set_item("has_errors", false)?;
+            }
+            
+            Ok(report_dict.into())
+        })
     }
 
     fn add_connections(
@@ -140,7 +177,7 @@ impl KnowledgeGraph {
         skip_columns: Option<&Bound<'_, PyList>>,
         conflict_handling: Option<String>,
         column_types: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<()> {
+    ) -> PyResult<PyObject> {
         // Get all columns from the dataframe
         let df_cols = data.getattr("columns")?;
         let all_columns: Vec<String> = df_cols.extract()?;
@@ -176,7 +213,7 @@ impl KnowledgeGraph {
         // Extract graph or clone it if needed
         let mut graph = extract_or_clone_graph(&mut self.inner);
         
-        maintain_graph::add_connections(
+        let result = maintain_graph::add_connections(
             &mut graph,
             df_result,
             connection_type,
@@ -192,7 +229,30 @@ impl KnowledgeGraph {
         // Replace the Arc with the new graph
         self.inner = Arc::new(graph);
         self.selection.clear();
-        Ok(())
+        
+        // Store the report
+        self.add_report(OperationReport::ConnectionOperation(result.clone()));
+        
+        // Convert the report to a Python dictionary
+        Python::with_gil(|py| {
+            let report_dict = PyDict::new_bound(py);
+            report_dict.set_item("operation", &result.operation_type)?;
+            report_dict.set_item("timestamp", result.timestamp.to_rfc3339())?;
+            report_dict.set_item("connections_created", result.connections_created)?;
+            report_dict.set_item("connections_skipped", result.connections_skipped)?;
+            report_dict.set_item("property_fields_tracked", result.property_fields_tracked)?;
+            report_dict.set_item("processing_time_ms", result.processing_time_ms)?;
+            
+            // Add errors array if there are any
+            if !result.errors.is_empty() {
+                report_dict.set_item("errors", &result.errors)?;
+                report_dict.set_item("has_errors", true)?;
+            } else {
+                report_dict.set_item("has_errors", false)?;
+            }
+            
+            Ok(report_dict.into())
+        })
     }
 
     fn type_filter(
@@ -444,23 +504,33 @@ impl KnowledgeGraph {
         &mut self,
         connection_type: String,
         keep_selection: Option<bool>,
+        conflict_handling: Option<String>,
     ) -> PyResult<Self> {
         // Extract graph or clone it if needed
         let mut graph = extract_or_clone_graph(&mut self.inner);
         
-        maintain_graph::selection_to_new_connections(&mut graph, &self.selection, connection_type)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        let result = maintain_graph::selection_to_new_connections(
+            &mut graph, 
+            &self.selection, 
+            connection_type,
+            conflict_handling,
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         
         // Create new graph with the updated data
-        let new_kg = KnowledgeGraph {
+        let mut new_kg = KnowledgeGraph {
             inner: Arc::new(graph),
             selection: if keep_selection.unwrap_or(false) {
                 self.selection.clone()
             } else {
                 CurrentSelection::new()
             },
+            reports: self.reports.clone(), // Copy over existing reports
         };
         
+        // Store the report in the new graph
+        new_kg.add_report(OperationReport::ConnectionOperation(result));
+        
+        // Just return the new KnowledgeGraph
         Ok(new_kg)
     }
     
@@ -548,20 +618,24 @@ impl KnowledgeGraph {
         let mut graph = extract_or_clone_graph(&mut self.inner);
         
         // Update parent properties
-        maintain_graph::update_node_properties(&mut graph, &nodes, store_as.unwrap())
+        let result = maintain_graph::update_node_properties(&mut graph, &nodes, store_as.unwrap())
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         
         // Create a new graph with the updated data
-        let new_kg = KnowledgeGraph {
+        let mut new_kg = KnowledgeGraph {
             inner: Arc::new(graph),
             selection: if keep_selection.unwrap_or(false) {
                 self.selection.clone()
             } else {
                 CurrentSelection::new()
             },
+            reports: self.reports.clone(),
         };
         
-        // Return the updated graph
+        // Store the report
+        new_kg.add_report(OperationReport::NodeOperation(result));
+        
+        // Return the updated graph (no report in return value)
         Python::with_gil(|py| Ok(new_kg.into_py(py)))
     }
 
@@ -596,21 +670,22 @@ impl KnowledgeGraph {
                 Some(target_property),
             );
             
-            // Create updated Arc with the new graph
-            self.inner = Arc::new(graph);
-            
             // Handle errors
             match process_result {
-                Ok(calculations::EvaluationResult::Stored(())) => {
+                Ok(calculations::EvaluationResult::Stored(report)) => {
                     // Create a new graph with the updated data
-                    let new_kg = KnowledgeGraph {
-                        inner: Arc::clone(&self.inner),
+                    let mut new_kg = KnowledgeGraph {
+                        inner: Arc::new(graph),
                         selection: if keep_selection.unwrap_or(false) {
                             self.selection.clone()
                         } else {
                             CurrentSelection::new()
                         },
+                        reports: self.reports.clone(), // Copy existing reports
                     };
+                    
+                    // Store the calculation report
+                    new_kg.add_report(OperationReport::CalculationOperation(report));
                     
                     Python::with_gil(|py| Ok(new_kg.into_py(py)))
                 },
@@ -687,27 +762,34 @@ impl KnowledgeGraph {
             // Extract graph or clone it if needed
             let mut graph = extract_or_clone_graph(&mut self.inner);
             
-            // Store count results as node properties
-            calculations::store_count_results(
+            // Store count results as node properties and get report
+            let result = match calculations::store_count_results(
                 &mut graph,
                 &self.selection,
                 level_index,
                 use_grouping,
                 target_property
-            ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            ) {
+                Ok(report) => report,
+                Err(e) => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(e)),
+            };
             
             // Replace the Arc with updated graph
             self.inner = Arc::new(graph);
             
             // Create a new graph with the updated data
-            let new_kg = KnowledgeGraph {
+            let mut new_kg = KnowledgeGraph {
                 inner: Arc::clone(&self.inner),
                 selection: if keep_selection.unwrap_or(false) {
                     self.selection.clone()
                 } else {
                     CurrentSelection::new()
                 },
+                reports: self.reports.clone(), // Copy existing reports
             };
+            
+            // Add the report
+            new_kg.add_report(OperationReport::CalculationOperation(result));
             
             Python::with_gil(|py| Ok(new_kg.into_py(py)))
         } else if use_grouping {
@@ -738,5 +820,156 @@ impl KnowledgeGraph {
     fn save(&self, path: &str) -> PyResult<()> {
         save_to_file(&self.inner, path)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))
+    }
+
+    /// Get the most recent operation report as a Python dictionary
+    fn get_last_report(&self) -> PyResult<PyObject> {
+        Python::with_gil(|py| {
+            if let Some(report) = self.reports.get_last_report() {
+                match report {
+                    OperationReport::NodeOperation(node_report) => {
+                        let report_dict = PyDict::new_bound(py);
+                        report_dict.set_item("operation", &node_report.operation_type)?;
+                        report_dict.set_item("timestamp", node_report.timestamp.to_rfc3339())?;
+                        report_dict.set_item("nodes_created", node_report.nodes_created)?;
+                        report_dict.set_item("nodes_updated", node_report.nodes_updated)?;
+                        report_dict.set_item("nodes_skipped", node_report.nodes_skipped)?;
+                        report_dict.set_item("processing_time_ms", node_report.processing_time_ms)?;
+                        
+                        // Add errors array if there are any
+                        if !node_report.errors.is_empty() {
+                            report_dict.set_item("errors", &node_report.errors)?;
+                            report_dict.set_item("has_errors", true)?;
+                        } else {
+                            report_dict.set_item("has_errors", false)?;
+                        }
+                        
+                        Ok(report_dict.into())
+                    },
+                    OperationReport::ConnectionOperation(conn_report) => {
+                        let report_dict = PyDict::new_bound(py);
+                        report_dict.set_item("operation", &conn_report.operation_type)?;
+                        report_dict.set_item("timestamp", conn_report.timestamp.to_rfc3339())?;
+                        report_dict.set_item("connections_created", conn_report.connections_created)?;
+                        report_dict.set_item("connections_skipped", conn_report.connections_skipped)?;
+                        report_dict.set_item("property_fields_tracked", conn_report.property_fields_tracked)?;
+                        report_dict.set_item("processing_time_ms", conn_report.processing_time_ms)?;
+                        
+                        // Add errors array if there are any
+                        if !conn_report.errors.is_empty() {
+                            report_dict.set_item("errors", &conn_report.errors)?;
+                            report_dict.set_item("has_errors", true)?;
+                        } else {
+                            report_dict.set_item("has_errors", false)?;
+                        }
+                        
+                        Ok(report_dict.into())
+                    },
+                    OperationReport::CalculationOperation(calc_report) => {
+                        let report_dict = PyDict::new_bound(py);
+                        report_dict.set_item("operation", &calc_report.operation_type)?;
+                        report_dict.set_item("timestamp", calc_report.timestamp.to_rfc3339())?;
+                        report_dict.set_item("expression", &calc_report.expression)?;
+                        report_dict.set_item("nodes_processed", calc_report.nodes_processed)?;
+                        report_dict.set_item("nodes_updated", calc_report.nodes_updated)?;
+                        report_dict.set_item("nodes_with_errors", calc_report.nodes_with_errors)?;
+                        report_dict.set_item("processing_time_ms", calc_report.processing_time_ms)?;
+                        report_dict.set_item("is_aggregation", calc_report.is_aggregation)?;
+                        
+                        // Add errors array if there are any
+                        if !calc_report.errors.is_empty() {
+                            report_dict.set_item("errors", &calc_report.errors)?;
+                            report_dict.set_item("has_errors", true)?;
+                        } else {
+                            report_dict.set_item("has_errors", false)?;
+                        }
+                        
+                        Ok(report_dict.into())
+                    }
+                }
+            } else {
+                let empty_dict = PyDict::new_bound(py);
+                Ok(empty_dict.into())
+            }
+        })
+    }
+
+    /// Get the last operation index (a sequential ID of operations performed)
+    fn get_operation_index(&self) -> usize {
+        self.reports.get_last_operation_index()
+    }
+
+    /// Get all report history as a list of dictionaries
+    fn get_report_history(&self) -> PyResult<PyObject> {
+        Python::with_gil(|py| {
+            // Create an empty list with PyList::empty_bound
+            let report_list = PyList::empty_bound(py);
+            
+            for report in self.reports.get_all_reports() {
+                let report_dict = match report {
+                    OperationReport::NodeOperation(node_report) => {
+                        let dict = PyDict::new_bound(py);
+                        dict.set_item("operation", &node_report.operation_type)?;
+                        dict.set_item("timestamp", node_report.timestamp.to_rfc3339())?;
+                        dict.set_item("nodes_created", node_report.nodes_created)?;
+                        dict.set_item("nodes_updated", node_report.nodes_updated)?;
+                        dict.set_item("nodes_skipped", node_report.nodes_skipped)?;
+                        dict.set_item("processing_time_ms", node_report.processing_time_ms)?;
+                        
+                        // Add errors array if there are any
+                        if !node_report.errors.is_empty() {
+                            dict.set_item("errors", &node_report.errors)?;
+                            dict.set_item("has_errors", true)?;
+                        } else {
+                            dict.set_item("has_errors", false)?;
+                        }
+                        
+                        dict
+                    },
+                    OperationReport::ConnectionOperation(conn_report) => {
+                        let dict = PyDict::new_bound(py);
+                        dict.set_item("operation", &conn_report.operation_type)?;
+                        dict.set_item("timestamp", conn_report.timestamp.to_rfc3339())?;
+                        dict.set_item("connections_created", conn_report.connections_created)?;
+                        dict.set_item("connections_skipped", conn_report.connections_skipped)?;
+                        dict.set_item("property_fields_tracked", conn_report.property_fields_tracked)?;
+                        dict.set_item("processing_time_ms", conn_report.processing_time_ms)?;
+                        
+                        // Add errors array if there are any
+                        if !conn_report.errors.is_empty() {
+                            dict.set_item("errors", &conn_report.errors)?;
+                            dict.set_item("has_errors", true)?;
+                        } else {
+                            dict.set_item("has_errors", false)?;
+                        }
+                        
+                        dict
+                    },
+                    OperationReport::CalculationOperation(calc_report) => {
+                        let dict = PyDict::new_bound(py);
+                        dict.set_item("operation", &calc_report.operation_type)?;
+                        dict.set_item("timestamp", calc_report.timestamp.to_rfc3339())?;
+                        dict.set_item("expression", &calc_report.expression)?;
+                        dict.set_item("nodes_processed", calc_report.nodes_processed)?;
+                        dict.set_item("nodes_updated", calc_report.nodes_updated)?;
+                        dict.set_item("nodes_with_errors", calc_report.nodes_with_errors)?;
+                        dict.set_item("processing_time_ms", calc_report.processing_time_ms)?;
+                        dict.set_item("is_aggregation", calc_report.is_aggregation)?;
+                        
+                        // Add errors array if there are any
+                        if !calc_report.errors.is_empty() {
+                            dict.set_item("errors", &calc_report.errors)?;
+                            dict.set_item("has_errors", true)?;
+                        } else {
+                            dict.set_item("has_errors", false)?;
+                        }
+                        
+                        dict
+                    }
+                };
+                report_list.append(report_dict)?;
+            }
+            Ok(report_list.into())
+        })
     }
 }

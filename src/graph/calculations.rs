@@ -5,11 +5,13 @@ use super::maintain_graph;
 use super::lookups::TypeLookup;
 use crate::datatypes::values::Value;
 use crate::graph::schema::{DirGraph, CurrentSelection, NodeData};
+use crate::graph::reporting::CalculationOperationReport; // Remove unused OperationReport import
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
+use std::time::Instant; // For timing operations
 
 pub enum EvaluationResult {
-    Stored(()),
+    Stored(CalculationOperationReport),
     Computed(Vec<StatResult>)
 }
 
@@ -19,7 +21,7 @@ pub struct StatResult {
     pub parent_idx: Option<NodeIndex>,
     pub parent_title: Option<String>,
     pub value: Value,
-    pub error_msg: Option<String>,  // Added error field
+    pub error_msg: Option<String>,
 }
 
 pub fn process_equation(
@@ -29,13 +31,21 @@ pub fn process_equation(
     level_index: Option<usize>,
     store_as: Option<&str>,
 ) -> Result<EvaluationResult, String> {
+    // Start tracking time for reporting
+    let start_time = Instant::now();
+    
+    // Track errors
+    let mut errors = Vec::new();
+    
     // Check for unknown aggregate function names
     if let Some(unknown_func) = extract_unknown_aggregate_function(expression) {
         let supported = AggregateType::get_supported_names().join(", ");
-        return Err(format!(
+        let error_msg = format!(
             "Unknown aggregate function '{}'. Supported functions are: {}",
             unknown_func, supported
-        ));
+        );
+        errors.push(error_msg.clone());
+        return Err(error_msg);
     }
     
     // Parse the expression first
@@ -43,27 +53,23 @@ pub fn process_equation(
         Ok(expr) => expr,
         Err(err) => {
             // Try to provide more context for why the parsing failed
-            if expression.is_empty() {
-                return Err("Expression cannot be empty.".to_string());
-            }
-            
-            if expression.contains("(") && !expression.contains(")") {
-                return Err("Missing closing parenthesis in expression.".to_string());
-            }
-            
-            if !expression.contains("(") && expression.contains(")") {
-                return Err("Unexpected closing parenthesis in expression.".to_string());
-            }
-            
-            // Check if expression might be a function call without parentheses
-            if !expression.contains("(") && is_likely_aggregate_name(expression) {
-                return Err(format!(
+            let error_msg = if expression.is_empty() {
+                "Expression cannot be empty.".to_string()
+            } else if expression.contains("(") && !expression.contains(")") {
+                "Missing closing parenthesis in expression.".to_string()
+            } else if !expression.contains("(") && expression.contains(")") {
+                "Unexpected closing parenthesis in expression.".to_string()
+            } else if !expression.contains("(") && is_likely_aggregate_name(expression) {
+                format!(
                     "Function '{}' requires parentheses. Try '{}(property)' instead.", 
                     expression, expression
-                ));
-            }
+                )
+            } else {
+                format!("Failed to parse expression: {}. Check for syntax errors or case sensitivity in function names (use 'sum', not 'SUM').", err)
+            };
             
-            return Err(format!("Failed to parse expression: {}. Check for syntax errors or case sensitivity in function names (use 'sum', not 'SUM').", err));
+            errors.push(error_msg.clone());
+            return Err(error_msg);
         },
     };
     
@@ -72,23 +78,32 @@ pub fn process_equation(
     
     // Check if selection is valid or empty
     if selection.get_level_count() == 0 {
-        return Err("No nodes selected. Please apply filters or traversals before calculating.".to_string());
+        let error_msg = "No nodes selected. Please apply filters or traversals before calculating.".to_string();
+        errors.push(error_msg.clone());
+        return Err(error_msg);
     }
     
     // Additional check to see if the current level has any nodes
     let effective_level_index = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
+    let nodes_processed;
     if let Some(level) = selection.get_level(effective_level_index) {
         if level.get_all_nodes().is_empty() {
-            return Err(format!(
+            let error_msg = format!(
                 "No nodes found at level {}. Make sure your filters and traversals return data.", 
                 effective_level_index
-            ));
+            );
+            errors.push(error_msg.clone());
+            return Err(error_msg);
         }
+        
+        // Define nodes_processed at first usage
+        nodes_processed = level.get_all_nodes().len();
     } else {
-        return Err(format!("Invalid level index: {}. Selection only has {} levels.", 
-            effective_level_index, selection.get_level_count()));
+        let error_msg = format!("Invalid level index: {}. Selection only has {} levels.", 
+            effective_level_index, selection.get_level_count());
+        errors.push(error_msg.clone());
+        return Err(error_msg);
     }
-    
     // If we have a selection, validate variables against schema
     if let Some(level) = selection.get_level(effective_level_index) {
         if !level.is_empty() {
@@ -100,7 +115,11 @@ pub fn process_equation(
                             // Check if schema node exists for this type
                             let schema_lookup = match TypeLookup::new(&graph.graph, "SchemaNode".to_string()) {
                                 Ok(lookup) => lookup,
-                                Err(_) => return Err("Could not access schema information".to_string()),
+                                Err(_) => {
+                                    let error_msg = "Could not access schema information".to_string();
+                                    errors.push(error_msg.clone());
+                                    return Err(error_msg);
+                                },
                             };
                             
                             let schema_title = Value::String(node_type.clone());
@@ -111,11 +130,13 @@ pub fn process_equation(
                                     // Don't check reserved field names like 'id', 'title', 'type'
                                     for var in &variables {
                                         if var != "id" && var != "title" && var != "type" && !properties.contains_key(var) {
-                                            return Err(format!(
+                                            let available = properties.keys().cloned().collect::<Vec<String>>().join(", ");
+                                            let error_msg = format!(
                                                 "Property '{}' does not exist on '{}' nodes. Available properties: {}", 
-                                                var, node_type, 
-                                                properties.keys().cloned().collect::<Vec<String>>().join(", ")
-                                            ));
+                                                var, node_type, available
+                                            );
+                                            errors.push(error_msg.clone());
+                                            return Err(error_msg);
                                         }
                                     }
                                 }
@@ -133,10 +154,27 @@ pub fn process_equation(
     // When performing evaluation, we can use an immutable reference to graph
     let results = evaluate_equation(graph, selection, &parsed_expr, level_index);
     
+    // Count nodes with errors for reporting
+    let nodes_with_errors = results.iter().filter(|r| r.error_msg.is_some()).count();
+    
+    // Collect evaluation errors
+    for result in &results {
+        if let Some(error_msg) = &result.error_msg {
+            let node_info = if let Some(title) = &result.parent_title {
+                format!("Node '{}': ", title)
+            } else {
+                "".to_string()
+            };
+            errors.push(format!("{}Evaluation error: {}", node_info, error_msg));
+        }
+    }
+    
     // If we don't need to store results, just return them directly
     if store_as.is_none() {
         if results.is_empty() {
-            return Err("No results from calculation. Check that your selection contains data.".to_string());
+            let error_msg = "No results from calculation. Check that your selection contains data.".to_string();
+            errors.push(error_msg.clone());
+            return Err(error_msg);
         }
         
         return Ok(EvaluationResult::Computed(results));
@@ -191,8 +229,31 @@ pub fn process_equation(
     }
     
     // Update the node properties with verified node indices
-    maintain_graph::update_node_properties(graph, &nodes_to_update, target_property)?;
-    Ok(EvaluationResult::Stored(()))
+    let update_result = maintain_graph::update_node_properties(graph, &nodes_to_update, target_property)?;
+    
+    // Update nodes_updated from the result (now used)
+    let nodes_updated = update_result.nodes_updated;
+    
+    // Calculate elapsed time for report
+    let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+    
+    // Create the report - using all counters to avoid unused assignment warnings
+    let mut report = CalculationOperationReport::new(
+        "process_equation".to_string(),
+        expression.to_string(),
+        nodes_processed,
+        nodes_updated,
+        nodes_with_errors,
+        elapsed_ms,
+        is_aggregation
+    );
+    
+    // Add errors if we found any
+    if !errors.is_empty() {
+        report = report.with_errors(errors);
+    }
+    
+    Ok(EvaluationResult::Stored(report))
 }
 
 // Helper function to extract potentially unknown aggregate function name from expression
@@ -442,18 +503,28 @@ pub fn store_count_results(
     level_index: Option<usize>,
     group_by_parent: bool,
     target_property: &str,
-) -> Result<(), String> {
+) -> Result<CalculationOperationReport, String> {
+    // Track start time for reporting
+    let start_time = std::time::Instant::now();
+    
+    // Track errors
+    let mut errors = Vec::new();
+    
     let mut nodes_to_update: Vec<(Option<NodeIndex>, Value)> = Vec::new();
     
+    let nodes_processed;
     if group_by_parent {
         // For grouped counting, store count for each parent
         let counts = count_nodes_by_parent(graph, selection, level_index);
+        nodes_processed = counts.len();
         
         for result in &counts {
             if let Some(parent_idx) = result.parent_idx {
                 // Verify the parent node exists in the graph
                 if graph.get_node(parent_idx).is_some() {
                     nodes_to_update.push((Some(parent_idx), result.value.clone()));
+                } else {
+                    errors.push(format!("Parent node index {:?} not found in graph", parent_idx));
                 }
             }
         }
@@ -463,24 +534,65 @@ pub fn store_count_results(
         let effective_index = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
         
         if let Some(level) = selection.get_level(effective_index) {
+            let all_nodes = level.get_all_nodes();
+            nodes_processed = all_nodes.len();
+            
             // Apply the count to each node in the level
-            for node_idx in level.get_all_nodes() {
+            for node_idx in all_nodes {
                 if graph.get_node(node_idx).is_some() {
                     nodes_to_update.push((Some(node_idx), Value::Int64(count as i64)));
+                } else {
+                    errors.push(format!("Node index {:?} not found in graph", node_idx));
                 }
             }
         } else {
-            return Err(format!("No valid level found at index {}", effective_index));
+            let error_msg = format!("No valid level found at index {}", effective_index);
+            errors.push(error_msg.clone());
+            return Err(error_msg);
         }
     }
     
     // Check if we found any valid nodes to update
     if nodes_to_update.is_empty() {
-        return Err(format!(
+        let error_msg = format!(
             "No valid nodes found to store '{}' count values.", target_property
-        ));
+        );
+        errors.push(error_msg.clone());
+        return Err(error_msg);
     }
     
-    // Use the optimized batch update (which no longer checks existence)
-    maintain_graph::update_node_properties(graph, &nodes_to_update, target_property)
+    // Use the optimized batch update (which now returns a NodeOperationReport)
+    let update_result = match maintain_graph::update_node_properties(graph, &nodes_to_update, target_property) {
+        Ok(result) => result,
+        Err(e) => {
+            errors.push(format!("Failed to update node properties: {}", e));
+            return Err(format!("Failed to update node properties: {}", e));
+        }
+    };
+    
+    // Add any errors from the update operation
+    for error in &update_result.errors {
+        errors.push(error.clone());
+    }
+    
+    // Calculate elapsed time
+    let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+    
+    // Create the calculation report
+    let mut report = CalculationOperationReport::new(
+        "count".to_string(),
+        format!("count({})", if level_index.is_some() { format!("level {}", level_index.unwrap()) } else { "current level".to_string() }),
+        nodes_processed,
+        update_result.nodes_updated,
+        update_result.nodes_skipped,
+        elapsed_ms,
+        group_by_parent
+    );
+    
+    // Add errors if we found any
+    if !errors.is_empty() {
+        report = report.with_errors(errors);
+    }
+    
+    Ok(report)
 }
