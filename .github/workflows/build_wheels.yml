@@ -4,9 +4,26 @@ on:
     paths:
       - 'Cargo.toml'
   workflow_dispatch: # Allow manual triggering
+
 jobs:
+  version:
+    name: Extract version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: Extract version from Cargo.toml
+        id: get_version
+        run: |
+          VERSION=$(grep -m 1 "version" Cargo.toml | cut -d '"' -f 2)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Package version: $VERSION"
+  
   build:
     name: Build wheels on ${{ matrix.os }}
+    needs: version
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -39,13 +56,6 @@ jobs:
           target: ${{ matrix.target }}
       - name: Install Maturin
         run: pip install maturin
-      - name: Extract version from Cargo.toml
-        id: get_version
-        run: |
-          $version = (Select-String -Path "Cargo.toml" -Pattern '^\s*version\s*=\s*"([^"]+)"').Matches.Groups[1].Value
-          echo "VERSION=$version" >> $env:GITHUB_ENV
-          echo "Package version: $version"
-        shell: pwsh
       - name: Build wheels
         run: |
           if (!(Test-Path -Path "wheels")) { New-Item -ItemType Directory -Path "wheels" }
@@ -59,21 +69,14 @@ jobs:
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.python-version }}
           path: wheels/*.whl
+
   publish:
     name: Publish to PyPI
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      - name: Extract version from Cargo.toml
-        id: get_version
-        run: |
-          VERSION=$(grep -m 1 "version" Cargo.toml | cut -d '"' -f 2)
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "Package version: $VERSION"
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -87,7 +90,7 @@ jobs:
         with:
           user: __token__
           password: ${{ secrets.PYPI_API_TOKEN }}
-          skip_existing: true
+          skip-existing: true
           # Uncomment to test on TestPyPI first
           # repository_url: https://test.pypi.org/legacy/
       - name: Create GitHub Release
@@ -95,5 +98,5 @@ jobs:
         with:
           files: dist/*.whl
           generate_release_notes: true
-          tag_name: v${{ env.VERSION }}
+          tag_name: v${{ needs.version.outputs.version }}
           token: ${{ secrets.RELEASE_TOKEN }}
