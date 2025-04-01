@@ -39,6 +39,13 @@ jobs:
           target: ${{ matrix.target }}
       - name: Install Maturin
         run: pip install maturin
+      - name: Extract version from Cargo.toml
+        id: get_version
+        run: |
+          $version = (Select-String -Path "Cargo.toml" -Pattern '^\s*version\s*=\s*"([^"]+)"').Matches.Groups[1].Value
+          echo "VERSION=$version" >> $env:GITHUB_ENV
+          echo "Package version: $version"
+        shell: pwsh
       - name: Build wheels
         run: |
           if (!(Test-Path -Path "wheels")) { New-Item -ItemType Directory -Path "wheels" }
@@ -59,6 +66,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: Extract version from Cargo.toml
+        id: get_version
+        run: |
+          VERSION=$(grep -m 1 "version" Cargo.toml | cut -d '"' -f 2)
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Package version: $VERSION"
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -80,5 +95,5 @@ jobs:
         with:
           files: dist/*.whl
           generate_release_notes: true
-          tag_name: auto-release-${{ github.sha }}
+          tag_name: v${{ env.VERSION }}
           token: ${{ secrets.RELEASE_TOKEN }}
