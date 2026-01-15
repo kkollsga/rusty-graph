@@ -1,6 +1,6 @@
 [package]
 name = "rusty_graph"
-version = "0.3.18"
+version = "0.3.19"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 description = "A high-performance graph database with Python bindings written in Rust."

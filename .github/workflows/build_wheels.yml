@@ -22,7 +22,7 @@ jobs:
           echo "Package version: $VERSION"
 
   build:
-    name: Build wheels on ${{ matrix.os }}
+    name: Build wheels - ${{ matrix.os }} - ${{ matrix.target }} - py${{ matrix.python-version }}
     needs: version
     runs-on: ${{ matrix.os }}
     permissions:
@@ -30,13 +30,43 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, macos-13, macos-latest]
         python-version: ['3.9', '3.10', '3.11', '3.12']
+        exclude:
+          # We'll use include to specify the correct target for each os
+          - os: macos-13
+          - os: macos-latest
         include:
+          # macOS Intel (x86_64) - macos-13 has Intel runners
+          - os: macos-13
+            target: x86_64-apple-darwin
+            python-version: '3.9'
+          - os: macos-13
+            target: x86_64-apple-darwin
+            python-version: '3.10'
+          - os: macos-13
+            target: x86_64-apple-darwin
+            python-version: '3.11'
+          - os: macos-13
+            target: x86_64-apple-darwin
+            python-version: '3.12'
+          # macOS Apple Silicon (arm64) - macos-latest is arm64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            python-version: '3.9'
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            python-version: '3.10'
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            python-version: '3.11'
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            python-version: '3.12'
+          # Windows
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-          - os: macos-latest
-            target: x86_64-apple-darwin
+          # Linux
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
     steps:
@@ -65,7 +95,7 @@ jobs:
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}-${{ matrix.python-version }}
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.python-version }}
           path: wheels/*.whl
 
   publish:
