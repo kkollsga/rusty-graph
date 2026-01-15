@@ -141,6 +141,9 @@ impl CurrentSelection {
     }
 }
 
+/// Key for property indexes: (node_type, property_name)
+pub type IndexKey = (String, String);
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DirGraph {
     pub(crate) graph: Graph,
@@ -148,6 +151,9 @@ pub struct DirGraph {
     /// Optional schema definition for validation
     #[serde(default)]
     pub(crate) schema_definition: Option<SchemaDefinition>,
+    /// Property indexes for fast lookups: (node_type, property) -> value -> [node_indices]
+    #[serde(default)]
+    pub(crate) property_indices: HashMap<IndexKey, HashMap<Value, Vec<NodeIndex>>>,
 }
 
 impl DirGraph {
@@ -156,6 +162,7 @@ impl DirGraph {
             graph: Graph::new(),
             type_indices: HashMap::new(),
             schema_definition: None,
+            property_indices: HashMap::new(),
         }
     }
 
@@ -217,6 +224,81 @@ impl DirGraph {
     pub fn _get_connection_mut(&mut self, index: EdgeIndex) -> Option<&mut EdgeData> {
         self.graph.edge_weight_mut(index)
     }
+
+    // ========================================================================
+    // Index Management Methods
+    // ========================================================================
+
+    /// Create an index on a property for a specific node type.
+    /// Returns the number of entries indexed.
+    pub fn create_index(&mut self, node_type: &str, property: &str) -> usize {
+        let key = (node_type.to_string(), property.to_string());
+
+        // Build the index
+        let mut index: HashMap<Value, Vec<NodeIndex>> = HashMap::new();
+
+        if let Some(node_indices) = self.type_indices.get(node_type) {
+            for &idx in node_indices {
+                if let Some(NodeData::Regular { properties, .. }) = self.graph.node_weight(idx) {
+                    if let Some(value) = properties.get(property) {
+                        index.entry(value.clone()).or_default().push(idx);
+                    }
+                }
+            }
+        }
+
+        let count = index.len();
+        self.property_indices.insert(key, index);
+        count
+    }
+
+    /// Drop an index on a property for a specific node type.
+    /// Returns true if the index existed and was removed.
+    pub fn drop_index(&mut self, node_type: &str, property: &str) -> bool {
+        let key = (node_type.to_string(), property.to_string());
+        self.property_indices.remove(&key).is_some()
+    }
+
+    /// Check if an index exists for a given node type and property.
+    pub fn has_index(&self, node_type: &str, property: &str) -> bool {
+        let key = (node_type.to_string(), property.to_string());
+        self.property_indices.contains_key(&key)
+    }
+
+    /// Get all existing indexes as a list of (node_type, property) tuples.
+    pub fn list_indexes(&self) -> Vec<(String, String)> {
+        self.property_indices.keys().cloned().collect()
+    }
+
+    /// Look up nodes by property value using an index.
+    /// Returns None if no index exists, otherwise returns matching node indices.
+    pub fn lookup_by_index(&self, node_type: &str, property: &str, value: &Value) -> Option<Vec<NodeIndex>> {
+        let key = (node_type.to_string(), property.to_string());
+        self.property_indices.get(&key)
+            .and_then(|idx| idx.get(value))
+            .cloned()
+    }
+
+    /// Get statistics about an index.
+    pub fn get_index_stats(&self, node_type: &str, property: &str) -> Option<IndexStats> {
+        let key = (node_type.to_string(), property.to_string());
+        self.property_indices.get(&key).map(|idx| {
+            let total_entries: usize = idx.values().map(|v| v.len()).sum();
+            IndexStats {
+                unique_values: idx.len(),
+                total_entries,
+                avg_entries_per_value: if idx.is_empty() { 0.0 } else { total_entries as f64 / idx.len() as f64 },
+            }
+        })
+    }
+}
+
+/// Statistics about a property index
+#[derive(Debug, Clone)]
+pub struct IndexStats {
+    pub unique_values: usize,
+    pub total_entries: usize,
+    pub avg_entries_per_value: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

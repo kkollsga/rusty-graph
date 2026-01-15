@@ -100,6 +100,50 @@ fn filter_nodes_by_conditions(
         }
     }
 
+    // Try to use property indexes for equality conditions (O(1) lookup)
+    // Find nodes by their node_type first, then check for indexed properties
+    let node_types: HashSet<String> = nodes.iter()
+        .filter_map(|&idx| {
+            graph.get_node(idx).and_then(|n| {
+                if let crate::graph::schema::NodeData::Regular { node_type, .. } = n {
+                    Some(node_type.clone())
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+
+    // Check if any equality condition has an index we can use
+    for (property, condition) in conditions {
+        if let FilterCondition::Equals(target_value) = condition {
+            // Check if any of our node types has an index on this property
+            for node_type in &node_types {
+                if let Some(matching_nodes) = graph.lookup_by_index(node_type, property, target_value) {
+                    // Found an index! Use it to narrow down candidates
+                    let indexed_set: HashSet<_> = matching_nodes.iter().copied().collect();
+                    let original_set: HashSet<_> = nodes.iter().copied().collect();
+
+                    // Intersection of indexed results with input nodes
+                    let candidates: Vec<_> = indexed_set.intersection(&original_set).copied().collect();
+
+                    // If there are remaining conditions, filter further
+                    let remaining_conditions: HashMap<_, _> = conditions.iter()
+                        .filter(|(k, _)| *k != property)
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+
+                    if remaining_conditions.is_empty() {
+                        return candidates;
+                    } else {
+                        // Recursively filter with remaining conditions
+                        return filter_nodes_by_conditions(graph, candidates, &remaining_conditions);
+                    }
+                }
+            }
+        }
+    }
+
     // Cache field lookups for frequently accessed fields
     let estimated_cache_size = nodes.len() * conditions.len();
     let mut field_cache: HashMap<(NodeIndex, &str), Option<Value>> = HashMap::with_capacity(estimated_cache_size);

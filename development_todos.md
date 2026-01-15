@@ -11,12 +11,12 @@
 | 5 | Temporal Query Support | [x] | Low | 1 |
 | 6 | Connection Property Aggregation | [x] | Medium | 3 |
 | 7 | Batch Property Updates | [x] | Low | 1 |
-| 8 | Path Finding & Graph Algorithms | [ ] | Medium | 3 |
+| 8 | Path Finding & Graph Algorithms | [x] | Medium | 3 |
 | 9 | Schema Definition & Validation | [x] | Medium | 4 |
-| 10 | Subgraph Extraction | [ ] | Medium | 3 |
+| 10 | Subgraph Extraction | [x] | Medium | 3 |
 | 11 | Multi-Hop Pattern Matching | [ ] | High | 4 |
-| 12 | Export to Visualization Formats | [ ] | Medium | 3 |
-| 13 | Index Management | [ ] | Medium | 4 |
+| 12 | Export to Visualization Formats | [x] | Medium | 3 |
+| 13 | Index Management | [x] | Medium | 4 |
 | 14 | Query Explain/Optimization | [x] | Low | 2 |
 | 15 | Spatial/Geometry Operations | [ ] | High | 4 |
 
@@ -1462,3 +1462,192 @@ graph.clear_schema()
 - Validation is opt-in and on-demand (O(n) scan)
 
 **Tests:** `pytest/test_schema_validation.py`
+
+### Feature 8: Path Finding & Graph Algorithms - COMPLETE
+
+**API:**
+
+```python
+# Find shortest path between two nodes
+path = graph.shortest_path(
+    source_type='Prospect', source_id=12345,
+    target_type='Field', target_id=67890
+)
+# Returns: {'path': [node_info_dicts], 'connections': ['CONN_TYPE', ...], 'length': 3}
+
+# Find all paths up to N hops
+paths = graph.all_paths(
+    source_type='Person', source_id='alice',
+    target_type='Person', target_id='bob',
+    max_hops=5
+)
+# Returns: [{'path': [...], 'connections': [...], 'length': 2}, ...]
+
+# Get connected components
+components = graph.connected_components(weak=True)  # Weakly connected (default)
+components = graph.connected_components(weak=False)  # Strongly connected
+
+# Check if two nodes are connected
+connected = graph.are_connected(
+    source_type='A', source_id=1,
+    target_type='B', target_id=2
+)
+# Returns: True/False
+
+# Get degrees for selected nodes
+degrees = graph.type_filter('Person').get_degrees()
+# Returns: {'Alice': 5, 'Bob': 3, ...}
+```
+
+**Implementation Notes:**
+
+- Created `graph_algorithms.rs` module with path finding algorithms
+- Uses BFS for shortest path (undirected, more appropriate for knowledge graphs)
+- Uses DFS for all_paths with max_hops limit
+- Uses Kosaraju's algorithm (via petgraph) for strongly connected components
+- Custom weakly connected components implementation using BFS
+- Pre-allocates HashMaps/HashSets with capacity estimates for performance
+
+**Tests:** `pytest/test_graph_algorithms.py`
+
+### Feature 10: Subgraph Extraction - COMPLETE
+
+**API:**
+
+```python
+# Expand selection by N hops (BFS expansion)
+expanded = graph.type_filter('Field').filter({'name': 'EKOFISK'}).expand(hops=2)
+# Includes all nodes within 2 hops of selected nodes
+
+# Extract selected nodes into independent subgraph
+subgraph = (
+    graph.type_filter('Field')
+    .filter({'region': 'North Sea'})
+    .expand(hops=2)
+    .to_subgraph()
+)
+# Returns new KnowledgeGraph with only selected nodes and their connecting edges
+
+# Preview subgraph stats before extraction
+stats = graph.type_filter('Central').expand(hops=3).subgraph_stats()
+# Returns: {
+#     'node_count': 150,
+#     'edge_count': 320,
+#     'node_types': {'Field': 10, 'Well': 50, ...},
+#     'connection_types': {'HAS_WELL': 100, ...}
+# }
+
+# Save subgraph for later use
+subgraph.save('north_sea_region.bin')
+```
+
+**Implementation Notes:**
+
+- Created `subgraph.rs` module with `expand_selection()` and `extract_subgraph()` functions
+- `expand()` uses BFS to include all nodes within N hops (undirected)
+- `to_subgraph()` creates independent graph copy with only selected nodes and connecting edges
+- `subgraph_stats()` previews extraction without creating the subgraph
+- Preserves node properties, edge properties, and schema definition
+- Pre-allocates HashMaps with capacity for performance
+- Supports `explain()` to show EXPAND operation in query plan
+
+**Tests:** `pytest/test_subgraph_extraction.py`
+
+### Feature 12: Export to Visualization Formats - COMPLETE
+
+**API:**
+
+```python
+# Export to GraphML (Gephi, yEd, Cytoscape)
+graph.export('output.graphml')
+graph.export('output.graphml', format='graphml')
+
+# Export to D3.js JSON format
+graph.export('visualization.json', format='d3')
+
+# Export to GEXF (Gephi native format)
+graph.export('network.gexf', format='gexf')
+
+# Export to CSV (creates _nodes.csv and _edges.csv files)
+graph.export('data.csv', format='csv')
+
+# Export selection only
+subgraph = graph.type_filter('Field').expand(hops=2)
+subgraph.export('fields.json', format='d3')
+
+# Export to string (for web APIs)
+json_str = graph.export_string('d3')
+graphml_str = graph.export_string('graphml', selection_only=False)
+```
+
+**Supported Formats:**
+
+- **graphml** - XML format supported by Gephi, yEd, Cytoscape
+- **gexf** - Gephi native format with attribute support
+- **d3** / **json** - D3.js force-directed graph compatible JSON
+- **csv** - Simple CSV format (nodes and edges in separate files)
+
+**Implementation Notes:**
+
+- Created `export.rs` module with format-specific functions
+- `to_graphml()` - Full GraphML 1.0 specification with node/edge attributes
+- `to_d3_json()` - D3.js compatible with nodes[] and links[] arrays
+- `to_gexf()` - GEXF 1.2 format with attribute definitions
+- `to_csv()` - Simple CSV export for spreadsheet import
+- All formats filter out Schema metadata nodes (only exports Regular data nodes)
+- Format is auto-detected from file extension if not specified
+- `export_string()` method for in-memory export (web APIs)
+- Pre-allocates string buffers for performance
+
+**Tests:** `pytest/test_export.py`
+
+### Feature 13: Index Management - COMPLETE
+
+**API:**
+
+```python
+# Create an index on a property for faster equality lookups
+result = graph.create_index('Prospect', 'geoprovince')
+# Returns: {'node_type': 'Prospect', 'property': 'geoprovince', 'created': True, 'unique_values': 15}
+
+# Check if an index exists
+has_idx = graph.has_index('Prospect', 'geoprovince')  # True/False
+
+# List all indexes
+indexes = graph.list_indexes()
+# Returns: [{'node_type': 'Prospect', 'property': 'geoprovince'}, ...]
+
+# Get index statistics
+stats = graph.index_stats('Prospect', 'geoprovince')
+# Returns: {'node_type': 'Prospect', 'property': 'geoprovince',
+#           'unique_values': 15, 'total_entries': 6775, 'avg_entries_per_value': 451.67}
+
+# Drop an index
+dropped = graph.drop_index('Prospect', 'geoprovince')  # True if existed
+
+# Rebuild all indexes (after bulk data changes)
+count = graph.rebuild_indexes()  # Returns number of indexes rebuilt
+
+# Filtering automatically uses indexes for equality conditions
+graph.create_index('Item', 'category')
+result = graph.type_filter('Item').filter({'category': 'A'})  # Uses index for O(1) lookup
+```
+
+**Performance Benefits:**
+
+- Equality lookups (`filter({'field': 'value'})`) go from O(n) to O(1)
+- Index creation is O(n) one-time cost per index
+- Memory overhead is O(n) per index (stores node references grouped by value)
+- Indexes are transparently used during filtering - no API changes needed
+- Multi-condition filters use index for first equality condition, then filter remaining
+
+**Implementation Notes:**
+
+- Added `property_indices: HashMap<IndexKey, HashMap<Value, Vec<NodeIndex>>>` to `DirGraph`
+- Index methods added to `DirGraph`: `create_index()`, `drop_index()`, `has_index()`, `list_indexes()`, `lookup_by_index()`, `get_index_stats()`
+- `IndexStats` struct holds unique values, total entries, and average entries per value
+- `filter_nodes_by_conditions()` in `filtering_methods.rs` checks for indexes on equality conditions
+- Indexes are persisted via serde when graph is saved/loaded
+- Python methods exposed: `create_index()`, `drop_index()`, `has_index()`, `list_indexes()`, `index_stats()`, `rebuild_indexes()`
+
+**Tests:** `pytest/test_index_management.py`

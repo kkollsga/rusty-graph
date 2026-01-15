@@ -13,14 +13,14 @@ jobs:
       version: ${{ steps.get_version.outputs.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Extract version from Cargo.toml
         id: get_version
         run: |
           VERSION=$(grep -m 1 "version" Cargo.toml | cut -d '"' -f 2)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Package version: $VERSION"
-  
+
   build:
     name: Build wheels on ${{ matrix.os }}
     needs: version
@@ -31,7 +31,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
-        python-version: ['3.8', '3.9', '3.10', '3.11', '3.12']
+        python-version: ['3.9', '3.10', '3.11', '3.12']
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -41,19 +41,17 @@ jobs:
             target: x86_64-unknown-linux-gnu
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
-          target: ${{ matrix.target }}
+          targets: ${{ matrix.target }}
       - name: Install Maturin
         run: pip install maturin
       - name: Build wheels
@@ -76,6 +74,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write  # Required for Trusted Publishing
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -88,15 +87,15 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          user: __token__
-          password: ${{ secrets.PYPI_API_TOKEN }}
           skip-existing: true
-          # Uncomment to test on TestPyPI first
-          # repository_url: https://test.pypi.org/legacy/
+          # Using Trusted Publishing - no password needed
+          # Make sure to configure Trusted Publisher on PyPI:
+          # https://pypi.org/manage/project/rusty-graph/settings/publishing/
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: dist/*.whl
           generate_release_notes: true
           tag_name: v${{ needs.version.outputs.version }}
-          token: ${{ secrets.RELEASE_TOKEN }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

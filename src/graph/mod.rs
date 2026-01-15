@@ -29,6 +29,7 @@ pub mod set_operations;
 pub mod schema_validation;
 pub mod graph_algorithms;
 pub mod subgraph;
+pub mod export;
 
 use schema::{DirGraph, CurrentSelection, PlanStep, SchemaDefinition, NodeSchemaDefinition, ConnectionSchemaDefinition};
 
@@ -1944,5 +1945,291 @@ impl KnowledgeGraph {
         result_dict.set_item("connection_types", conn_types_dict)?;
 
         Ok(result_dict.into())
+    }
+
+    // ========================================================================
+    // Export Methods
+    // ========================================================================
+
+    /// Export the graph or current selection to a file in the specified format.
+    ///
+    /// Supported formats:
+    /// - "graphml" - GraphML XML format (Gephi, yEd, Cytoscape)
+    /// - "gexf" - GEXF XML format (Gephi native)
+    /// - "d3" or "json" - D3.js compatible JSON format
+    /// - "csv" - CSV format (creates two files: path_nodes.csv and path_edges.csv)
+    ///
+    /// Args:
+    ///     path: Output file path
+    ///     format: Export format (default: inferred from file extension)
+    ///     selection_only: If True, export only selected nodes (default: True if selection exists)
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Export entire graph to GraphML
+    ///     graph.export('output.graphml')
+    ///
+    ///     # Export selection to D3 format
+    ///     graph.type_filter('Field').expand(hops=2).export('fields.json', format='d3')
+    ///
+    ///     # Export to GEXF for Gephi
+    ///     graph.export('network.gexf', format='gexf')
+    ///     ```
+    #[pyo3(signature = (path, format=None, selection_only=None))]
+    fn export(
+        &self,
+        path: &str,
+        format: Option<&str>,
+        selection_only: Option<bool>,
+    ) -> PyResult<()> {
+        // Infer format from extension if not specified
+        let fmt = format.unwrap_or_else(|| {
+            if path.ends_with(".graphml") {
+                "graphml"
+            } else if path.ends_with(".gexf") {
+                "gexf"
+            } else if path.ends_with(".json") {
+                "d3"
+            } else if path.ends_with(".csv") {
+                "csv"
+            } else {
+                "graphml" // Default
+            }
+        });
+
+        // Determine if we should use selection
+        let use_selection = selection_only.unwrap_or(self.selection.get_level_count() > 0);
+        let selection = if use_selection {
+            Some(&self.selection)
+        } else {
+            None
+        };
+
+        match fmt {
+            "graphml" => {
+                let content = export::to_graphml(&self.inner, selection)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                std::fs::write(path, content)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
+            }
+            "gexf" => {
+                let content = export::to_gexf(&self.inner, selection)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                std::fs::write(path, content)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
+            }
+            "d3" | "json" => {
+                let content = export::to_d3_json(&self.inner, selection)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                std::fs::write(path, content)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
+            }
+            "csv" => {
+                let (nodes_csv, edges_csv) = export::to_csv(&self.inner, selection)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+                // Write nodes file
+                let nodes_path = path.replace(".csv", "_nodes.csv");
+                std::fs::write(&nodes_path, nodes_csv)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
+
+                // Write edges file
+                let edges_path = path.replace(".csv", "_edges.csv");
+                std::fs::write(&edges_path, edges_csv)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
+            }
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("Unknown export format: '{}'. Supported: graphml, gexf, d3, json, csv", fmt)
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Export to a string instead of a file.
+    ///
+    /// Useful for web APIs or further processing.
+    ///
+    /// Args:
+    ///     format: Export format (graphml, gexf, d3, json)
+    ///     selection_only: If True, export only selected nodes
+    ///
+    /// Returns:
+    ///     The exported data as a string
+    #[pyo3(signature = (format, selection_only=None))]
+    fn export_string(
+        &self,
+        format: &str,
+        selection_only: Option<bool>,
+    ) -> PyResult<String> {
+        let use_selection = selection_only.unwrap_or(self.selection.get_level_count() > 0);
+        let selection = if use_selection {
+            Some(&self.selection)
+        } else {
+            None
+        };
+
+        match format {
+            "graphml" => {
+                export::to_graphml(&self.inner, selection)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+            }
+            "gexf" => {
+                export::to_gexf(&self.inner, selection)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+            }
+            "d3" | "json" => {
+                export::to_d3_json(&self.inner, selection)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+            }
+            _ => {
+                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("Unknown export format: '{}'. Supported: graphml, gexf, d3, json", format)
+                ))
+            }
+        }
+    }
+
+    // ========================================================================
+    // Index Management Methods
+    // ========================================================================
+
+    /// Create an index on a property for a specific node type.
+    ///
+    /// Indexes dramatically speed up equality filters on the indexed property.
+    /// Once created, the index is automatically used by filter() operations.
+    ///
+    /// Args:
+    ///     node_type: The type of nodes to index
+    ///     property: The property name to index
+    ///
+    /// Returns:
+    ///     Dictionary with 'unique_values' count and success status
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Create an index for faster lookups
+    ///     graph.create_index('Prospect', 'geoprovince')
+    ///
+    ///     # Now this filter will use the index (O(1) instead of O(n))
+    ///     graph.type_filter('Prospect').filter({'geoprovince': 'North Sea'})
+    ///     ```
+    fn create_index(&mut self, py: Python<'_>, node_type: &str, property: &str) -> PyResult<PyObject> {
+        let mut graph = extract_or_clone_graph(&mut self.inner);
+        let unique_values = graph.create_index(node_type, property);
+        self.inner = Arc::new(graph);
+
+        let result_dict = PyDict::new_bound(py);
+        result_dict.set_item("node_type", node_type)?;
+        result_dict.set_item("property", property)?;
+        result_dict.set_item("unique_values", unique_values)?;
+        result_dict.set_item("created", true)?;
+
+        Ok(result_dict.into())
+    }
+
+    /// Drop (remove) an index.
+    ///
+    /// Args:
+    ///     node_type: The type of nodes
+    ///     property: The property name
+    ///
+    /// Returns:
+    ///     True if index existed and was removed, False otherwise
+    fn drop_index(&mut self, node_type: &str, property: &str) -> PyResult<bool> {
+        let mut graph = extract_or_clone_graph(&mut self.inner);
+        let removed = graph.drop_index(node_type, property);
+        self.inner = Arc::new(graph);
+        Ok(removed)
+    }
+
+    /// List all existing indexes.
+    ///
+    /// Returns:
+    ///     List of dictionaries with 'node_type' and 'property' keys
+    ///
+    /// Example:
+    ///     ```python
+    ///     indexes = graph.list_indexes()
+    ///     for idx in indexes:
+    ///         print(f"{idx['node_type']}.{idx['property']}")
+    ///     ```
+    fn list_indexes(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let indexes = self.inner.list_indexes();
+
+        let result_list = pyo3::types::PyList::empty_bound(py);
+        for (node_type, property) in indexes {
+            let idx_dict = PyDict::new_bound(py);
+            idx_dict.set_item("node_type", node_type)?;
+            idx_dict.set_item("property", property)?;
+            result_list.append(idx_dict)?;
+        }
+
+        Ok(result_list.into())
+    }
+
+    /// Check if an index exists.
+    ///
+    /// Args:
+    ///     node_type: The type of nodes
+    ///     property: The property name
+    ///
+    /// Returns:
+    ///     True if index exists, False otherwise
+    fn has_index(&self, node_type: &str, property: &str) -> bool {
+        self.inner.has_index(node_type, property)
+    }
+
+    /// Get statistics about an index.
+    ///
+    /// Args:
+    ///     node_type: The type of nodes
+    ///     property: The property name
+    ///
+    /// Returns:
+    ///     Dictionary with index statistics, or None if index doesn't exist
+    ///
+    /// Example:
+    ///     ```python
+    ///     stats = graph.index_stats('Prospect', 'geoprovince')
+    ///     print(f"Unique values: {stats['unique_values']}")
+    ///     print(f"Total entries: {stats['total_entries']}")
+    ///     ```
+    fn index_stats(&self, py: Python<'_>, node_type: &str, property: &str) -> PyResult<PyObject> {
+        match self.inner.get_index_stats(node_type, property) {
+            Some(stats) => {
+                let result_dict = PyDict::new_bound(py);
+                result_dict.set_item("node_type", node_type)?;
+                result_dict.set_item("property", property)?;
+                result_dict.set_item("unique_values", stats.unique_values)?;
+                result_dict.set_item("total_entries", stats.total_entries)?;
+                result_dict.set_item("avg_entries_per_value", stats.avg_entries_per_value)?;
+                Ok(result_dict.into())
+            }
+            None => Ok(py.None())
+        }
+    }
+
+    /// Rebuild all indexes.
+    ///
+    /// Call this after batch updates to ensure indexes are current.
+    ///
+    /// Returns:
+    ///     Number of indexes rebuilt
+    fn rebuild_indexes(&mut self) -> PyResult<usize> {
+        let mut graph = extract_or_clone_graph(&mut self.inner);
+
+        // Get list of current indexes
+        let index_keys: Vec<_> = graph.property_indices.keys().cloned().collect();
+
+        // Rebuild each index
+        for (node_type, property) in &index_keys {
+            graph.create_index(node_type, property);
+        }
+
+        self.inner = Arc::new(graph);
+        Ok(index_keys.len())
     }
 }
