@@ -314,18 +314,6 @@ fn value_to_f64(value: &Value) -> Option<f64> {
     }
 }
 
-/// Create a bounding box geometry from coordinates
-pub fn create_bbox_wkt(min_lat: f64, max_lat: f64, min_lon: f64, max_lon: f64) -> String {
-    format!(
-        "POLYGON(({} {}, {} {}, {} {}, {} {}, {} {}))",
-        min_lon, min_lat,
-        max_lon, min_lat,
-        max_lon, max_lat,
-        min_lon, max_lat,
-        min_lon, min_lat
-    )
-}
-
 /// Calculate the centroid of nodes in a selection
 pub fn calculate_centroid(
     graph: &DirGraph,
@@ -440,14 +428,6 @@ mod tests {
     fn test_parse_wkt_invalid() {
         let result = parse_wkt("INVALID(abc)");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_create_bbox_wkt() {
-        let wkt = create_bbox_wkt(58.0, 62.0, 1.0, 5.0);
-        assert!(wkt.contains("POLYGON"));
-        assert!(wkt.contains("58"));
-        assert!(wkt.contains("62"));
     }
 
     #[test]

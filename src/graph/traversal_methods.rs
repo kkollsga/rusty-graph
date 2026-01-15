@@ -24,6 +24,7 @@ fn edge_matches_conditions(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn make_traversal(
     graph: &DirGraph,
     selection: &mut CurrentSelection,

@@ -271,7 +271,5 @@ pub fn node_degree(graph: &DirGraph, node: NodeIndex) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    // Tests would require setting up a graph, which we'll do in Python tests
+    // Tests are implemented in Python (pytest/test_comprehensive_integration.py)
 }

@@ -186,6 +186,7 @@ pub fn add_nodes(
     Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn add_connections(
     graph: &mut DirGraph,
     df_data: DataFrame,
@@ -253,8 +254,8 @@ pub fn add_connections(
         .into_iter()
         .filter(|col_name| {
             let is_id_field = *col_name == source_id_field || *col_name == target_id_field;
-            let is_source_title = source_title_field.as_ref().map_or(false, |field| *col_name == *field);
-            let is_target_title = target_title_field.as_ref().map_or(false, |field| *col_name == *field);
+            let is_source_title = source_title_field.as_ref().is_some_and(|field| *col_name == *field);
+            let is_target_title = target_title_field.as_ref().is_some_and(|field| *col_name == *field);
             !is_id_field && !is_source_title && !is_target_title
         })
         .collect();

@@ -18,6 +18,13 @@ A high-performance graph database library with Python bindings written in Rust.
   - [Limiting Results](#limiting-results)
 - [Traversing the Graph](#traversing-the-graph)
 - [Set Operations on Selections](#set-operations-on-selections)
+- [Path Finding and Graph Algorithms](#path-finding-and-graph-algorithms)
+- [Pattern Matching](#pattern-matching)
+- [Subgraph Extraction](#subgraph-extraction)
+- [Spatial and Geometry Operations](#spatial-and-geometry-operations)
+- [Schema Definition and Validation](#schema-definition-and-validation)
+- [Index Management](#index-management)
+- [Export Formats](#export-formats)
 - [Statistics and Calculations](#statistics-and-calculations)
 - [Saving and Loading](#saving-and-loading)
 - [Operation Reports](#operation-reports)
@@ -36,10 +43,15 @@ pip install rusty-graph --upgrade
 Rusty Graph is a Rust-based project that aims to empower the generation of high-performance knowledge graphs within Python environments. Specifically designed for aggregating and merging data from SQL databases, Rusty Graph facilitates the seamless transition of relational database information into structured knowledge graphs. By leveraging Rust's efficiency and Python's flexibility, Rusty Graph offers an optimal solution for data scientists and developers looking to harness the power of knowledge graphs in their data-driven applications.
 
 ## Key Features
+
 - **Efficient Data Integration:** Easily import and merge data from SQL databases to construct knowledge graphs, optimizing for performance and scalability.
 - **High-Performance Operations:** Utilize Rust's performance capabilities to handle graph operations, making Rusty Graph ideal for working with large-scale data.
 - **Python Compatibility:** Directly integrate Rusty Graph into Python projects, allowing for a smooth workflow within Python-based data analysis and machine learning pipelines.
 - **Flexible Graph Manipulation:** Create, modify, and query knowledge graphs with a rich set of features, catering to complex data structures and relationships.
+- **Graph Algorithms:** Built-in shortest path, all paths, and connected components algorithms powered by petgraph.
+- **Pattern Matching:** Cypher-like query syntax for expressive multi-hop graph traversals.
+- **Spatial Operations:** Geographic queries including bounding box, distance (Haversine), and WKT geometry intersection.
+- **Export Formats:** Export to GraphML, GEXF, D3 JSON, and CSV for visualization and interoperability.
 
 ## Basic Usage
 
@@ -548,6 +560,323 @@ b_inter_c = selection_b.intersection(selection_c)
 result = selection_a.difference(b_inter_c)
 ```
 
+## Path Finding and Graph Algorithms
+
+Rusty Graph provides efficient implementations of common graph algorithms powered by petgraph.
+
+### Shortest Path
+
+Find the shortest path between two nodes:
+
+```python
+# Find shortest path between two nodes
+path = graph.shortest_path(
+    source_type='Person',
+    source_id=1,
+    target_type='Person',
+    target_id=100,
+    max_hops=10  # Optional limit
+)
+
+# Path is a list of node dictionaries
+for node in path:
+    print(f"{node['node_type']}: {node['title']}")
+```
+
+### All Paths
+
+Find all paths between nodes up to a maximum number of hops:
+
+```python
+# Find all paths up to 4 hops
+paths = graph.all_paths(
+    source_type='Play',
+    source_id=1,
+    target_type='Wellbore',
+    max_hops=4
+)
+
+# Returns a list of paths, each path is a list of nodes
+print(f"Found {len(paths)} paths")
+for i, path in enumerate(paths):
+    print(f"Path {i+1}: {' -> '.join(n['title'] for n in path)}")
+```
+
+### Connected Components
+
+Identify connected components in the graph:
+
+```python
+# Get all connected components
+components = graph.connected_components()
+
+# Returns a list of components, each component is a list of node IDs
+print(f"Found {len(components)} connected components")
+for i, component in enumerate(components):
+    print(f"Component {i+1}: {len(component)} nodes")
+```
+
+## Pattern Matching
+
+Query the graph using Cypher-like pattern syntax for expressive multi-hop queries:
+
+```python
+# Simple pattern: Find plays with prospects that became discoveries
+results = graph.match_pattern(
+    '(p:Play)-[:HAS_PROSPECT]->(pr:Prospect)-[:BECAME_DISCOVERY]->(d:Discovery)'
+)
+
+# Access matched variables
+for match in results:
+    print(f"Play: {match['p']['title']}")
+    print(f"Prospect: {match['pr']['title']}")
+    print(f"Discovery: {match['d']['title']}")
+
+# Pattern with property conditions
+results = graph.match_pattern(
+    '(u:User)-[:PURCHASED]->(p:Product {category: "Electronics"})'
+)
+
+# Limit results for performance on large graphs
+results = graph.match_pattern(
+    '(a:Person)-[:KNOWS]->(b:Person)',
+    max_matches=100
+)
+```
+
+**Supported pattern syntax:**
+
+- Node patterns: `(variable:NodeType)` or `(variable:NodeType {property: "value"})`
+- Relationship patterns: `-[:CONNECTION_TYPE]->`
+- Multiple hops: Chain patterns like `(a)-[:REL1]->(b)-[:REL2]->(c)`
+
+## Subgraph Extraction
+
+Extract a portion of the graph for isolated analysis or export:
+
+```python
+# Start with a selection and expand to include neighbors
+subgraph = (
+    graph.type_filter('Company')
+    .filter({'name': 'Acme Corp'})
+    .expand(hops=2)  # Include all nodes within 2 hops
+    .to_subgraph()   # Create independent subgraph
+)
+
+# The subgraph is a fully functional KnowledgeGraph
+print(f"Subgraph has {subgraph.node_count()} nodes")
+
+# Save the subgraph
+subgraph.save('acme_network.bin')
+
+# Export to visualization format
+subgraph.export('acme_network.graphml', format='graphml')
+```
+
+### Expand Method
+
+The `expand()` method uses breadth-first search to include neighboring nodes:
+
+```python
+# Expand selection by 1 hop (immediate neighbors)
+expanded = graph.type_filter('Person').filter({'name': 'Alice'}).expand(hops=1)
+
+# Expand by 3 hops for broader context
+broad_context = selection.expand(hops=3)
+```
+
+## Spatial and Geometry Operations
+
+Query nodes based on geographic location and geometry. Useful for GIS applications and location-based analysis.
+
+### Bounding Box Queries
+
+Find nodes within a rectangular geographic area:
+
+```python
+# Find discoveries within a bounding box
+north_sea_discoveries = graph.type_filter('Discovery').within_bounds(
+    lat_field='latitude',
+    lon_field='longitude',
+    min_lat=58.0,
+    max_lat=62.0,
+    min_lon=1.0,
+    max_lon=5.0
+)
+```
+
+### Distance Queries (Haversine)
+
+Find nodes within a radius of a point using great-circle distance:
+
+```python
+# Find wellbores within 50km of a location
+nearby_wellbores = graph.type_filter('Wellbore').near_point_km(
+    lat_field='latitude',
+    lon_field='longitude',
+    center_lat=60.5,
+    center_lon=3.2,
+    radius_km=50.0
+)
+```
+
+### WKT Geometry Intersection
+
+Find nodes whose geometry intersects with a WKT polygon:
+
+```python
+# Define a polygon in WKT format
+search_area = 'POLYGON((1 58, 5 58, 5 62, 1 62, 1 58))'
+
+# Find fields that intersect the polygon
+fields_in_area = graph.type_filter('Field').intersects(
+    geometry_field='wkt_geometry',
+    wkt=search_area
+)
+```
+
+## Schema Definition and Validation
+
+Define expected structure and validate your graph data:
+
+### Defining a Schema
+
+```python
+# Define schema for node types and connections
+graph.define_schema({
+    'nodes': {
+        'Prospect': {
+            'required': ['npdid_prospect', 'prospect_name'],
+            'optional': ['prospect_status', 'prospect_geoprovince'],
+            'types': {
+                'npdid_prospect': 'integer',
+                'prospect_name': 'string',
+                'prospect_ns_dec': 'float'
+            }
+        },
+        'ProspectEstimate': {
+            'required': ['estimate_id'],
+            'types': {
+                'estimate_id': 'integer',
+                'value': 'float'
+            }
+        }
+    },
+    'connections': {
+        'HAS_ESTIMATE': {
+            'source': 'Prospect',
+            'target': 'ProspectEstimate'
+        }
+    }
+})
+```
+
+### Validating Against Schema
+
+```python
+# Validate the graph against the defined schema
+errors = graph.validate_schema()
+
+if errors:
+    print("Validation errors found:")
+    for error in errors:
+        print(f"  - {error}")
+else:
+    print("Graph validates successfully!")
+```
+
+### Getting Current Schema
+
+```python
+# View the current schema (auto-generated from data)
+schema = graph.get_schema()
+print(schema)
+```
+
+## Index Management
+
+Create indexes for faster filtering on frequently queried properties:
+
+### Creating Indexes
+
+```python
+# Create an index on a property
+graph.create_index('Prospect', 'prospect_geoprovince')
+
+# Indexed properties get O(1) lookup for equality filters
+# This query will be much faster with an index:
+north_prospects = graph.type_filter('Prospect').filter({
+    'prospect_geoprovince': 'North Sea'
+})
+```
+
+### Listing and Dropping Indexes
+
+```python
+# List all indexes
+indexes = graph.list_indexes()
+for idx in indexes:
+    print(f"Index on {idx['node_type']}.{idx['property']}")
+
+# Drop an index
+graph.drop_index('Prospect', 'prospect_geoprovince')
+```
+
+**Performance Note:** Benchmarks show ~3.3x speedup for equality filters on indexed properties. Create indexes on properties you frequently filter by exact value.
+
+## Export Formats
+
+Export your graph to various formats for visualization and interoperability:
+
+### Export to File
+
+```python
+# GraphML format (compatible with Gephi, yEd, etc.)
+graph.export('my_graph.graphml', format='graphml')
+
+# GEXF format (Gephi native format)
+graph.export('my_graph.gexf', format='gexf')
+
+# D3.js JSON format (for web visualization)
+graph.export('my_graph.json', format='d3')
+
+# CSV format (nodes and edges as CSV)
+graph.export('my_graph.csv', format='csv')
+```
+
+### Export to String
+
+Get export data as a string for programmatic use:
+
+```python
+# Get GraphML as string
+graphml_string = graph.export_string(format='graphml')
+
+# Get D3 JSON as string
+d3_json = graph.export_string(format='d3')
+
+# Export only current selection
+selected_json = graph.type_filter('Person').export_string(
+    format='d3',
+    selection_only=True
+)
+```
+
+### Export Subgraphs
+
+Combine with subgraph extraction for partial exports:
+
+```python
+# Export just a portion of the graph
+subgraph = (
+    graph.type_filter('Company')
+    .filter({'region': 'Europe'})
+    .expand(hops=2)
+    .to_subgraph()
+)
+subgraph.export('europe_companies.graphml', format='graphml')
+```
+
 ## Statistics and Calculations
 
 ### Basic Statistics
@@ -735,3 +1064,7 @@ for report in history:
 6. **Connection Direction**: Specify direction in traversals when possible to improve performance.
 
 7. **Limit Results**: Use `max_nodes()` to limit result size when working with large datasets.
+
+8. **Create Indexes**: Use `create_index()` on frequently filtered properties for ~3.3x speedup on equality filters.
+
+9. **Use Pattern Matching Limits**: When using `match_pattern()`, set `max_matches` to avoid scanning the entire graph.
