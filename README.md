@@ -574,8 +574,7 @@ path = graph.shortest_path(
     source_type='Person',
     source_id=1,
     target_type='Person',
-    target_id=100,
-    max_hops=10  # Optional limit
+    target_id=100
 )
 
 # Path is a list of node dictionaries
@@ -593,6 +592,7 @@ paths = graph.all_paths(
     source_type='Play',
     source_id=1,
     target_type='Wellbore',
+    target_id=100,
     max_hops=4
 )
 
@@ -712,11 +712,11 @@ Find nodes within a radius of a point using great-circle distance:
 ```python
 # Find wellbores within 50km of a location
 nearby_wellbores = graph.type_filter('Wellbore').near_point_km(
-    lat_field='latitude',
-    lon_field='longitude',
     center_lat=60.5,
     center_lon=3.2,
-    radius_km=50.0
+    max_distance_km=50.0,
+    lat_field='latitude',
+    lon_field='longitude'
 )
 ```
 

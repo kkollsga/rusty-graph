@@ -23,6 +23,13 @@ pub fn matches_condition(value: &Value, condition: &FilterCondition) -> bool {
                 Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal))
         },
         FilterCondition::In(targets) => targets.contains(value),
+        FilterCondition::Between(min, max) => {
+            // Inclusive range: min <= value <= max
+            matches!(compare_values(value, min),
+                Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal))
+            && matches!(compare_values(value, max),
+                Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal))
+        },
         FilterCondition::IsNull => matches!(value, Value::Null),
         FilterCondition::IsNotNull => !matches!(value, Value::Null),
     }

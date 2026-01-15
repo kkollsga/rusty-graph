@@ -15,6 +15,7 @@ pub enum FilterCondition {
     LessThan(Value),
     LessThanEquals(Value),
     In(Vec<Value>),
+    Between(Value, Value),  // Inclusive range [min, max]
     IsNull,
     IsNotNull,
 }

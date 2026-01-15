@@ -46,10 +46,30 @@ fn parse_operator_condition(op: &str, val: &Bound<'_, PyAny>) -> PyResult<Filter
         "<" => Ok(FilterCondition::LessThan(py_value_to_value(val)?)),
         "<=" => Ok(FilterCondition::LessThanEquals(py_value_to_value(val)?)),
         "in" => parse_in_condition(val),
+        "between" => parse_between_condition(val),
         "is_null" => Ok(FilterCondition::IsNull),
         "is_not_null" => Ok(FilterCondition::IsNotNull),
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             format!("Unsupported operator: {}", op)
+        )),
+    }
+}
+
+fn parse_between_condition(val: &Bound<'_, PyAny>) -> PyResult<FilterCondition> {
+    match val.downcast::<PyList>() {
+        Ok(list) => {
+            let items: Vec<_> = list.iter().collect();
+            if items.len() != 2 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "'between' operator requires a list of exactly 2 values [min, max]"
+                ));
+            }
+            let min = py_value_to_value(&items[0])?;
+            let max = py_value_to_value(&items[1])?;
+            Ok(FilterCondition::Between(min, max))
+        },
+        Err(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "'between' operator requires a list of [min, max] values"
         )),
     }
 }
