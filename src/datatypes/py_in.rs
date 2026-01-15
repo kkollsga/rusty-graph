@@ -165,7 +165,13 @@ pub fn pandas_to_dataframe(
                 continue;
             }
 
-            let series = df.getattr(col_name.as_str())?;
+            // Use bracket notation df[col_name] instead of df.col_name to avoid
+            // conflicts with DataFrame attributes like 'shape', 'index', 'columns', etc.
+            let series = df.get_item(col_name).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("Failed to access column '{}': {}. If using a reserved name like 'shape', 'index', or 'columns', please rename your column.", col_name, e)
+                )
+            })?;
             
             // Determine column type - check custom type mapping first
             let col_type = if let Some(type_dict) = column_types {
@@ -213,9 +219,18 @@ pub fn pandas_to_dataframe(
 
 // Helper function to determine column type from pandas series
 fn determine_column_type(series: &Bound<'_, PyAny>, col_name: &str) -> PyResult<ColumnType> {
-    let dtype = series.getattr("dtype")?;
+    let dtype = series.getattr("dtype").map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            format!(
+                "Could not determine type for column '{}'. The data may not be a valid pandas Series. \
+                If your column is named 'shape', 'index', 'columns', 'values', or 'dtype', \
+                please rename it as these conflict with pandas DataFrame attributes.",
+                col_name
+            )
+        )
+    })?;
     let type_str = dtype.str()?.to_string();
-    
+
     match type_str.as_str() {
         "int64" | "int32" | "int16" | "int8" => Ok(ColumnType::Int64),
         "float64" | "float32" => Ok(ColumnType::Float64),
@@ -223,7 +238,7 @@ fn determine_column_type(series: &Bound<'_, PyAny>, col_name: &str) -> PyResult<
         s if s.starts_with("datetime64") => Ok(ColumnType::DateTime),
         "object" | "string" => Ok(ColumnType::String),
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("Unsupported column type {} for column {}", type_str, col_name)
+            format!("Unsupported column type '{}' for column '{}'. Supported types: int, float, bool, datetime, string/object.", type_str, col_name)
         )),
     }
 }

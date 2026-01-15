@@ -10,7 +10,12 @@ use petgraph::graph::NodeIndex;
 fn check_data_validity(df_data: &DataFrame, unique_id_field: &str) -> Result<(), String> {
     // Remove strict UniqueId type verification to allow nulls
     if !df_data.verify_column(unique_id_field) {
-        return Err(format!("Column '{}' not found", unique_id_field));
+        let available_cols: Vec<_> = df_data.get_column_names();
+        return Err(format!(
+            "Column '{}' not found in DataFrame. Available columns: [{}]",
+            unique_id_field,
+            available_cols.join(", ")
+        ));
     }
     Ok(())
 }
@@ -38,7 +43,10 @@ pub fn add_nodes(
         Some("skip") => ConflictHandling::Skip,
         Some("preserve") => ConflictHandling::Preserve,
         Some("update") | None => ConflictHandling::Update, // Default
-        Some(other) => return Err(format!("Unknown conflict handling mode: {}", other)),
+        Some(other) => return Err(format!(
+            "Unknown conflict handling mode: '{}'. Valid options: 'update' (default), 'replace', 'skip', 'preserve'",
+            other
+        )),
     };
     
     let should_update_title = node_title_field.is_some();
@@ -205,17 +213,29 @@ pub fn add_connections(
         Some("skip") => ConflictHandling::Skip,
         Some("preserve") => ConflictHandling::Preserve,
         Some("update") | None => ConflictHandling::Update, // Default
-        Some(other) => return Err(format!("Unknown conflict handling mode: {}", other)),
+        Some(other) => return Err(format!(
+            "Unknown conflict handling mode: '{}'. Valid options: 'update' (default), 'replace', 'skip', 'preserve'",
+            other
+        )),
     };
 
     // Track errors
     let mut errors = Vec::new();
 
+    let available_cols: Vec<_> = df_data.get_column_names();
     if !df_data.verify_column(&source_id_field) {
-        return Err(format!("Source ID column '{}' not found", source_id_field));
+        return Err(format!(
+            "Source ID column '{}' not found in DataFrame. Available columns: [{}]",
+            source_id_field,
+            available_cols.join(", ")
+        ));
     }
     if !df_data.verify_column(&target_id_field) {
-        return Err(format!("Target ID column '{}' not found", target_id_field));
+        return Err(format!(
+            "Target ID column '{}' not found in DataFrame. Available columns: [{}]",
+            target_id_field,
+            available_cols.join(", ")
+        ));
     }
 
     // Check if source and target types exist
@@ -456,7 +476,10 @@ pub fn selection_to_new_connections(
         Some("skip") => ConflictHandling::Skip,
         Some("preserve") => ConflictHandling::Preserve,
         Some("update") | None => ConflictHandling::Update, // Default
-        Some(other) => return Err(format!("Unknown conflict handling mode: {}", other)),
+        Some(other) => return Err(format!(
+            "Unknown conflict handling mode: '{}'. Valid options: 'update' (default), 'replace', 'skip', 'preserve'",
+            other
+        )),
     };
 
     // Track errors

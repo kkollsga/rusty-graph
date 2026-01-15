@@ -287,7 +287,11 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     _ => tokens.push(Token::Identifier(ident)),
                 }
             }
-            _ => return Err(format!("Unexpected character: '{}'", ch)),
+            _ => return Err(format!(
+                "Unexpected character '{}' in pattern. Valid pattern syntax: (node)-[:EDGE]->(node). \
+                Use () for nodes, [] for edges, : for types, {{}} for properties.",
+                ch
+            )),
         }
     }
 
@@ -321,8 +325,38 @@ impl Parser {
     fn expect(&mut self, expected: &Token) -> Result<(), String> {
         match self.advance() {
             Some(token) if token == expected => Ok(()),
-            Some(token) => Err(format!("Expected {:?}, got {:?}", expected, token)),
-            None => Err(format!("Expected {:?}, got end of input", expected)),
+            Some(token) => Err(format!(
+                "Syntax error: expected '{}', but found '{}'. Check your pattern syntax.",
+                Self::token_to_display(expected),
+                Self::token_to_display(token)
+            )),
+            None => Err(format!(
+                "Syntax error: expected '{}', but reached end of pattern. Pattern may be incomplete.",
+                Self::token_to_display(expected)
+            )),
+        }
+    }
+
+    fn token_to_display(token: &Token) -> &'static str {
+        match token {
+            Token::LParen => "(",
+            Token::RParen => ")",
+            Token::LBracket => "[",
+            Token::RBracket => "]",
+            Token::LBrace => "{",
+            Token::RBrace => "}",
+            Token::Colon => ":",
+            Token::Comma => ",",
+            Token::Dash => "-",
+            Token::GreaterThan => ">",
+            Token::LessThan => "<",
+            Token::Star => "*",
+            Token::DotDot => "..",
+            Token::Identifier(_) => "identifier",
+            Token::StringLit(_) => "string",
+            Token::IntLit(_) => "number",
+            Token::FloatLit(_) => "decimal",
+            Token::BoolLit(_) => "boolean",
         }
     }
 
@@ -367,7 +401,7 @@ impl Parser {
                 if let Some(Token::Identifier(name)) = self.advance().cloned() {
                     node_type = Some(name);
                 } else {
-                    return Err("Expected type name after ':'".to_string());
+                    return Err("Expected node type name after ':'. Example: (:Person) or (n:Person)".to_string());
                 }
             }
             Some(Token::Identifier(_)) => {
@@ -381,7 +415,7 @@ impl Parser {
                     if let Some(Token::Identifier(name)) = self.advance().cloned() {
                         node_type = Some(name);
                     } else {
-                        return Err("Expected type name after ':'".to_string());
+                        return Err("Expected node type name after ':'. Example: (:Person) or (n:Person)".to_string());
                     }
                 }
             }
@@ -439,7 +473,7 @@ impl Parser {
                 if let Some(Token::Identifier(name)) = self.advance().cloned() {
                     connection_type = Some(name);
                 } else {
-                    return Err("Expected connection type after ':'".to_string());
+                    return Err("Expected connection/edge type after ':'. Example: -[:KNOWS]-> or -[e:WORKS_AT]->".to_string());
                 }
             }
             Some(Token::Identifier(_)) => {
@@ -453,7 +487,7 @@ impl Parser {
                     if let Some(Token::Identifier(name)) = self.advance().cloned() {
                         connection_type = Some(name);
                     } else {
-                        return Err("Expected connection type after ':'".to_string());
+                        return Err("Expected connection/edge type after ':'. Example: -[:KNOWS]-> or -[e:WORKS_AT]->".to_string());
                     }
                 }
             }
@@ -484,7 +518,7 @@ impl Parser {
             self.advance(); // consume >
             if incoming_start {
                 // <-[]-> is invalid
-                return Err("Invalid edge pattern: cannot have both < and >".to_string());
+                return Err("Invalid edge pattern: cannot have both '<' and '>' arrows. Use -[]-> for outgoing, <-[]- for incoming, or -[]- for both directions.".to_string());
             }
             direction = EdgeDirection::Outgoing;
         } else if !incoming_start {
@@ -515,7 +549,7 @@ impl Parser {
                 let min = if let Some(Token::IntLit(n)) = self.advance().cloned() {
                     n as usize
                 } else {
-                    return Err("Expected integer after *".to_string());
+                    return Err("Expected integer after '*' for variable-length path. Examples: *2, *1..3, *..5, *1..".to_string());
                 };
 
                 // Check for range
@@ -526,7 +560,7 @@ impl Parser {
                         let max = if let Some(Token::IntLit(n)) = self.advance().cloned() {
                             n as usize
                         } else {
-                            return Err("Expected integer after ..".to_string());
+                            return Err("Expected max hop count after '..'. Examples: *1..3 (1 to 3 hops), *2.. (2 or more hops)".to_string());
                         };
                         Ok((min, max))
                     } else {
@@ -544,7 +578,7 @@ impl Parser {
                 let max = if let Some(Token::IntLit(n)) = self.advance().cloned() {
                     n as usize
                 } else {
-                    return Err("Expected integer after *..".to_string());
+                    return Err("Expected max hop count after '*..'. Example: *..3 means up to 3 hops".to_string());
                 };
                 Ok((1, max))
             }
@@ -571,7 +605,7 @@ impl Parser {
                     let key = if let Some(Token::Identifier(k)) = self.advance().cloned() {
                         k
                     } else {
-                        return Err("Expected property key".to_string());
+                        return Err("Expected property key in properties block. Example: {name: 'Alice', age: 30}".to_string());
                     };
 
                     self.expect(&Token::Colon)?;
@@ -584,7 +618,7 @@ impl Parser {
                         self.advance();
                     }
                 }
-                _ => return Err("Expected property key or '}'".to_string()),
+                _ => return Err("Expected property key or '}' to close properties block. Example: {name: 'Alice'}".to_string()),
             }
         }
 
@@ -633,7 +667,7 @@ impl<'a> PatternExecutor<'a> {
         // Start with the first node pattern
         let first_node = match &pattern.elements[0] {
             PatternElement::Node(np) => np,
-            _ => return Err("Pattern must start with a node".to_string()),
+            _ => return Err("Pattern must start with a node in parentheses. Example: (n:Person) or ()".to_string()),
         };
 
         // Find all nodes matching the first pattern
@@ -672,17 +706,17 @@ impl<'a> PatternExecutor<'a> {
 
             let edge_pattern = match &pattern.elements[i] {
                 PatternElement::Edge(ep) => ep,
-                _ => return Err("Expected edge pattern".to_string()),
+                _ => return Err("Expected edge pattern after node. Use -[:TYPE]-> for outgoing, <-[:TYPE]- for incoming.".to_string()),
             };
 
             i += 1;
             if i >= pattern.elements.len() {
-                return Err("Edge pattern must be followed by node pattern".to_string());
+                return Err("Edge pattern must be followed by a node pattern. Example: ()-[:KNOWS]->(n:Person)".to_string());
             }
 
             let node_pattern = match &pattern.elements[i] {
                 PatternElement::Node(np) => np,
-                _ => return Err("Expected node pattern after edge".to_string()),
+                _ => return Err("Expected node pattern after edge. Complete the pattern with a node: ()-[:EDGE]->(node)".to_string()),
             };
 
             // Expand each current match

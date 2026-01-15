@@ -3083,4 +3083,36 @@ impl KnowledgeGraph {
             None => Ok(py.None())
         }
     }
+
+    /// Calculate the centroid (center point) of a WKT geometry string.
+    ///
+    /// Parses a WKT geometry (POLYGON, POINT, LINESTRING, etc.) and returns
+    /// its centroid coordinates.
+    ///
+    /// Args:
+    ///     wkt_string: A WKT geometry string (e.g., 'POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))')
+    ///
+    /// Returns:
+    ///     Dictionary with 'latitude' (y) and 'longitude' (x) of the centroid,
+    ///     or None if the geometry could not be parsed
+    ///
+    /// Example:
+    ///     ```python
+    ///     centroid = graph.wkt_centroid('POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))')
+    ///     print(f"Center: {centroid['latitude']}, {centroid['longitude']}")
+    ///     # Output: Center: 0.5, 0.5
+    ///     ```
+    fn wkt_centroid(&self, py: Python<'_>, wkt_string: &str) -> PyResult<PyObject> {
+        match spatial::wkt_centroid(wkt_string) {
+            Ok((lat, lon)) => {
+                let result = PyDict::new_bound(py);
+                result.set_item("latitude", lat)?;
+                result.set_item("longitude", lon)?;
+                Ok(result.into())
+            }
+            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Failed to calculate centroid: {}", e)
+            ))
+        }
+    }
 }

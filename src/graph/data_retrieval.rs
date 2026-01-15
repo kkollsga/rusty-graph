@@ -57,13 +57,55 @@ pub fn get_nodes(
         return Vec::new();
     }
     
+    // Check if selection is effectively empty (no nodes selected)
+    // Note: CurrentSelection always has at least one level, so we check if the level is empty
+    let selection_is_empty = if selection.get_level_count() > 0 {
+        let level_idx = selection.get_level_count().saturating_sub(1);
+        selection.get_level(level_idx)
+            .map(|l| l.get_all_nodes().is_empty())
+            .unwrap_or(true)
+    } else {
+        true
+    };
+
+    // If selection is empty, return all regular nodes in the graph
+    if selection_is_empty {
+        let mut all_nodes = Vec::new();
+        for node_idx in graph.graph.node_indices() {
+            if let Some(node) = graph.get_node(node_idx) {
+                // Only include Regular nodes, not Schema nodes
+                if let NodeData::Regular { .. } = node {
+                    if let Some(node_info) = node.to_node_info() {
+                        all_nodes.push(node_info);
+                        if let Some(max) = max_nodes {
+                            if all_nodes.len() >= max {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !all_nodes.is_empty() {
+            return vec![LevelNodes {
+                parent_title: "Root".to_string(),
+                parent_id: None,
+                parent_idx: None,
+                parent_type: None,
+                nodes: all_nodes,
+            }];
+        }
+        return Vec::new();
+    }
+
     let level_idx = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
     let mut result = Vec::new();
-    
+
     if let Some(level) = selection.get_level(level_idx) {
         for (parent, children) in level.iter_groups() {
             let mut nodes = Vec::new();
-            
+
             for &child_idx in children {
                 if let Some(node) = graph.get_node(child_idx) {
                     if let Some(node_info) = node.to_node_info() {
@@ -76,7 +118,7 @@ pub fn get_nodes(
                     }
                 }
             }
-            
+
             // Always create an entry for the parent, even if nodes is empty
             let (parent_title, parent_id, parent_type) = match parent {
                 Some(p) => {
@@ -100,7 +142,7 @@ pub fn get_nodes(
                 },
                 None => ("Root".to_string(), None, None),
             };
-            
+
             result.push(LevelNodes {
                 parent_title,
                 parent_id,
