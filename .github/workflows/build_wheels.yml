@@ -30,45 +30,64 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-13, macos-latest]
+        os: [windows-latest, ubuntu-latest]
         python-version: ['3.9', '3.10', '3.11', '3.12']
-        exclude:
-          # We'll use include to specify the correct target for each os
-          - os: macos-13
-          - os: macos-latest
+        target: ['']
         include:
-          # macOS Intel (x86_64) - macos-13 has Intel runners
-          - os: macos-13
-            target: x86_64-apple-darwin
-            python-version: '3.9'
-          - os: macos-13
-            target: x86_64-apple-darwin
-            python-version: '3.10'
-          - os: macos-13
-            target: x86_64-apple-darwin
-            python-version: '3.11'
-          - os: macos-13
-            target: x86_64-apple-darwin
-            python-version: '3.12'
-          # macOS Apple Silicon (arm64) - macos-latest is arm64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            python-version: '3.9'
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            python-version: '3.10'
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            python-version: '3.11'
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            python-version: '3.12'
           # Windows
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            python-version: '3.9'
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            python-version: '3.10'
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            python-version: '3.11'
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            python-version: '3.12'
           # Linux
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            python-version: '3.9'
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            python-version: '3.10'
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            python-version: '3.11'
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            python-version: '3.12'
+          # macOS Intel (x86_64) - using macos-15-intel runner
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            python-version: '3.9'
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            python-version: '3.10'
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            python-version: '3.11'
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            python-version: '3.12'
+          # macOS Apple Silicon (arm64)
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            python-version: '3.9'
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            python-version: '3.10'
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            python-version: '3.11'
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            python-version: '3.12'
+        exclude:
+          - target: ''
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
