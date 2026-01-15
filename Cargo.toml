@@ -1,6 +1,6 @@
 [package]
 name = "rusty_graph"
-version = "0.3.16"
+version = "0.3.17"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 description = "A high-performance graph database with Python bindings written in Rust."
@@ -19,3 +19,5 @@ serde =  {version = "1.0.217", features = ["derive"]}
 serde_json = "1.0.138"
 bincode = "1.3.3"
 chrono = { version = "0.4.39", features = ["serde"] }
+geo = "0.28"
+wkt = "0.10"

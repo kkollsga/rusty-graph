@@ -5,6 +5,7 @@
 /.claude/
 /.pytest_cache/
 /data/
+/dev-documentation/
 
 # Ignore Rust build artifacts (keep wheels for distribution)
 /target/

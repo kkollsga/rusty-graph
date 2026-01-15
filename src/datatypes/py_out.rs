@@ -484,10 +484,61 @@ pub fn convert_computation_results_for_python(results: Vec<StatResult>) -> PyRes
 
 pub fn string_pairs_to_pydict(py: Python, pairs: &[(String, String)]) -> PyResult<PyObject> {
     let result = PyDict::new_bound(py);
-    
+
     for (key, value) in pairs {
         result.set_item(key, value)?;
     }
-    
+
+    Ok(result.into())
+}
+
+/// Convert pattern matching results to a Python list of dictionaries
+pub fn pattern_matches_to_pylist(
+    py: Python,
+    matches: &[crate::graph::pattern_matching::PatternMatch],
+) -> PyResult<PyObject> {
+    use crate::graph::pattern_matching::MatchBinding;
+
+    let result = PyList::empty_bound(py);
+
+    for pattern_match in matches {
+        let match_dict = PyDict::new_bound(py);
+
+        for (var_name, binding) in &pattern_match.bindings {
+            let binding_dict = PyDict::new_bound(py);
+
+            match binding {
+                MatchBinding::Node { node_type, title, id, properties, .. } => {
+                    binding_dict.set_item("type", node_type)?;
+                    binding_dict.set_item("title", title)?;
+                    binding_dict.set_item("id", value_to_py(py, id)?)?;
+
+                    // Add properties
+                    let props_dict = PyDict::new_bound(py);
+                    for (key, value) in properties {
+                        props_dict.set_item(key, value_to_py(py, value)?)?;
+                    }
+                    binding_dict.set_item("properties", props_dict)?;
+                }
+                MatchBinding::Edge { connection_type, properties, source, target } => {
+                    binding_dict.set_item("connection_type", connection_type)?;
+                    binding_dict.set_item("source_idx", source.index())?;
+                    binding_dict.set_item("target_idx", target.index())?;
+
+                    // Add properties
+                    let props_dict = PyDict::new_bound(py);
+                    for (key, value) in properties {
+                        props_dict.set_item(key, value_to_py(py, value)?)?;
+                    }
+                    binding_dict.set_item("properties", props_dict)?;
+                }
+            }
+
+            match_dict.set_item(var_name, binding_dict)?;
+        }
+
+        result.append(match_dict)?;
+    }
+
     Ok(result.into())
 }

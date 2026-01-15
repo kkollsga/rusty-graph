@@ -30,6 +30,8 @@ pub mod schema_validation;
 pub mod graph_algorithms;
 pub mod subgraph;
 pub mod export;
+pub mod pattern_matching;
+pub mod spatial;
 
 use schema::{DirGraph, CurrentSelection, PlanStep, SchemaDefinition, NodeSchemaDefinition, ConnectionSchemaDefinition};
 
@@ -2231,5 +2233,395 @@ impl KnowledgeGraph {
 
         self.inner = Arc::new(graph);
         Ok(index_keys.len())
+    }
+
+    // ========================================================================
+    // Pattern Matching Methods
+    // ========================================================================
+
+    /// Match a Cypher-like pattern against the graph.
+    ///
+    /// Supports patterns like:
+    /// - Simple node: `(p:Person)`
+    /// - Single hop: `(p:Person)-[:KNOWS]->(f:Person)`
+    /// - Multi-hop: `(p:Play)-[:HAS_PROSPECT]->(pr:Prospect)-[:BECAME_DISCOVERY]->(d:Discovery)`
+    /// - Property filters: `(p:Person {name: "Alice"})`
+    /// - Edge filters: `(a)-[:KNOWS {since: 2020}]->(b)`
+    /// - Bidirectional: `(a)-[:KNOWS]-(b)` (matches both directions)
+    /// - Incoming: `(a)<-[:KNOWS]-(b)` (matches edges from b to a)
+    ///
+    /// Syntax:
+    /// - Node: `(variable:Type {property: value})`
+    /// - Edge: `-[:TYPE {property: value}]->` or `<-[:TYPE]-` or `-[:TYPE]-`
+    /// - Variable and type are optional: `()`, `(:Type)`, `(var)`
+    ///
+    /// Args:
+    ///     pattern: The Cypher-like pattern string
+    ///     max_matches: Maximum number of matches to return (default: unlimited)
+    ///
+    /// Returns:
+    ///     A list of match dictionaries. Each match contains bindings for
+    ///     named variables in the pattern. Node bindings have 'type', 'title',
+    ///     'id', and 'properties'. Edge bindings have 'source', 'target',
+    ///     'connection_type', and 'properties'.
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Find all plays with their prospects
+    ///     matches = graph.match_pattern('(p:Play)-[:HAS_PROSPECT]->(pr:Prospect)')
+    ///     for m in matches:
+    ///         print(f"Play: {m['p']['title']}, Prospect: {m['pr']['title']}")
+    ///
+    ///     # Find discoveries from specific prospects
+    ///     matches = graph.match_pattern(
+    ///         '(pr:Prospect {status: "Active"})-[:BECAME_DISCOVERY]->(d:Discovery)'
+    ///     )
+    ///
+    ///     # Limit results
+    ///     top_10 = graph.match_pattern('(p:Person)-[:KNOWS]->(f:Person)', max_matches=10)
+    ///     ```
+    #[pyo3(signature = (pattern, max_matches=None))]
+    fn match_pattern(&self, py: Python<'_>, pattern: &str, max_matches: Option<usize>) -> PyResult<PyObject> {
+        // Parse the pattern
+        let parsed = pattern_matching::parse_pattern(pattern)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Pattern syntax error: {}", e)
+            ))?;
+
+        // Execute the pattern
+        let executor = pattern_matching::PatternExecutor::new(&self.inner, max_matches);
+        let matches = executor.execute(&parsed)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                format!("Pattern execution error: {}", e)
+            ))?;
+
+        // Convert matches to Python
+        py_out::pattern_matches_to_pylist(py, &matches)
+    }
+
+    // ========================================================================
+    // Spatial/Geometry Methods
+    // ========================================================================
+
+    /// Filter nodes within a geographic bounding box.
+    ///
+    /// Filters nodes from the current selection that have latitude/longitude
+    /// coordinates falling within the specified bounding box.
+    ///
+    /// Args:
+    ///     min_lat: Minimum latitude (south bound)
+    ///     max_lat: Maximum latitude (north bound)
+    ///     min_lon: Minimum longitude (west bound)
+    ///     max_lon: Maximum longitude (east bound)
+    ///     lat_field: Name of the latitude property (default: 'latitude')
+    ///     lon_field: Name of the longitude property (default: 'longitude')
+    ///
+    /// Returns:
+    ///     A new KnowledgeGraph with only nodes within the bounding box
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Filter discoveries in the North Sea area
+    ///     north_sea = graph.type_filter('Discovery').within_bounds(
+    ///         min_lat=56.0, max_lat=62.0,
+    ///         min_lon=0.0, max_lon=8.0
+    ///     )
+    ///     ```
+    #[pyo3(signature = (min_lat, max_lat, min_lon, max_lon, lat_field=None, lon_field=None))]
+    fn within_bounds(
+        &mut self,
+        min_lat: f64,
+        max_lat: f64,
+        min_lon: f64,
+        max_lon: f64,
+        lat_field: Option<&str>,
+        lon_field: Option<&str>,
+    ) -> PyResult<Self> {
+        let lat_field = lat_field.unwrap_or("latitude");
+        let lon_field = lon_field.unwrap_or("longitude");
+
+        let matching_nodes = spatial::within_bounds(
+            &self.inner,
+            &self.selection,
+            lat_field,
+            lon_field,
+            min_lat,
+            max_lat,
+            min_lon,
+            max_lon,
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        // Create new selection with matching nodes
+        let mut new_kg = self.clone();
+        new_kg.selection.clear();  // clear() already adds a fresh level
+        if let Some(level) = new_kg.selection.get_level_mut(0) {
+            level.add_selection(None, matching_nodes.clone());
+        }
+
+        // Record plan step
+        new_kg.selection.add_plan_step(
+            PlanStep::new("WITHIN_BOUNDS", None, matching_nodes.len())
+                .with_actual_rows(matching_nodes.len())
+        );
+
+        Ok(new_kg)
+    }
+
+    /// Filter nodes within a certain distance of a point.
+    ///
+    /// Filters nodes from the current selection that are within the specified
+    /// distance (in degrees) from the center point.
+    ///
+    /// Note: Distance is calculated using Euclidean distance in degrees,
+    /// which is an approximation. For rough estimates:
+    /// - 1 degree latitude ≈ 111 km
+    /// - 1 degree longitude ≈ 111 km * cos(latitude)
+    ///
+    /// Args:
+    ///     center_lat: Center point latitude
+    ///     center_lon: Center point longitude
+    ///     max_distance: Maximum distance in degrees
+    ///     lat_field: Name of the latitude property (default: 'latitude')
+    ///     lon_field: Name of the longitude property (default: 'longitude')
+    ///
+    /// Returns:
+    ///     A new KnowledgeGraph with only nodes within the distance
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Find discoveries near a point (within ~50km)
+    ///     nearby = graph.type_filter('Discovery').near_point(
+    ///         center_lat=60.0, center_lon=4.0,
+    ///         max_distance=0.5  # ~50km
+    ///     )
+    ///     ```
+    #[pyo3(signature = (center_lat, center_lon, max_distance, lat_field=None, lon_field=None))]
+    fn near_point(
+        &mut self,
+        center_lat: f64,
+        center_lon: f64,
+        max_distance: f64,
+        lat_field: Option<&str>,
+        lon_field: Option<&str>,
+    ) -> PyResult<Self> {
+        let lat_field = lat_field.unwrap_or("latitude");
+        let lon_field = lon_field.unwrap_or("longitude");
+
+        let matching_nodes = spatial::near_point(
+            &self.inner,
+            &self.selection,
+            lat_field,
+            lon_field,
+            center_lat,
+            center_lon,
+            max_distance,
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        // Create new selection with matching nodes
+        let mut new_kg = self.clone();
+        new_kg.selection.clear();  // clear() already adds a fresh level
+        if let Some(level) = new_kg.selection.get_level_mut(0) {
+            level.add_selection(None, matching_nodes.clone());
+        }
+
+        // Record plan step
+        new_kg.selection.add_plan_step(
+            PlanStep::new("NEAR_POINT", None, matching_nodes.len())
+                .with_actual_rows(matching_nodes.len())
+        );
+
+        Ok(new_kg)
+    }
+
+    /// Filter nodes within a certain distance of a point (in kilometers).
+    ///
+    /// Uses the Haversine formula to calculate accurate great-circle distances
+    /// on the Earth's surface. This is more accurate than `near_point()` which
+    /// uses Euclidean distance in degrees.
+    ///
+    /// Args:
+    ///     center_lat: Center point latitude
+    ///     center_lon: Center point longitude
+    ///     max_distance_km: Maximum distance in kilometers
+    ///     lat_field: Name of the latitude property (default: 'latitude')
+    ///     lon_field: Name of the longitude property (default: 'longitude')
+    ///
+    /// Returns:
+    ///     A new KnowledgeGraph with only nodes within the distance
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Find discoveries within 50km of a point
+    ///     nearby = graph.type_filter('Discovery').near_point_km(
+    ///         center_lat=60.0, center_lon=5.0,
+    ///         max_distance_km=50.0
+    ///     )
+    ///     ```
+    #[pyo3(signature = (center_lat, center_lon, max_distance_km, lat_field=None, lon_field=None))]
+    fn near_point_km(
+        &mut self,
+        center_lat: f64,
+        center_lon: f64,
+        max_distance_km: f64,
+        lat_field: Option<&str>,
+        lon_field: Option<&str>,
+    ) -> PyResult<Self> {
+        let lat_field = lat_field.unwrap_or("latitude");
+        let lon_field = lon_field.unwrap_or("longitude");
+
+        let matching_nodes = spatial::near_point_km(
+            &self.inner,
+            &self.selection,
+            lat_field,
+            lon_field,
+            center_lat,
+            center_lon,
+            max_distance_km,
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        // Create new selection with matching nodes
+        let mut new_kg = self.clone();
+        new_kg.selection.clear();  // clear() already adds a fresh level
+        if let Some(level) = new_kg.selection.get_level_mut(0) {
+            level.add_selection(None, matching_nodes.clone());
+        }
+
+        // Record plan step
+        new_kg.selection.add_plan_step(
+            PlanStep::new("NEAR_POINT_KM", None, matching_nodes.len())
+                .with_actual_rows(matching_nodes.len())
+        );
+
+        Ok(new_kg)
+    }
+
+    /// Filter nodes whose geometry intersects with a WKT geometry.
+    ///
+    /// Filters nodes that have a geometry property (stored as WKT string)
+    /// that intersects with the provided query geometry.
+    ///
+    /// Args:
+    ///     query_wkt: WKT string of the query geometry
+    ///     geometry_field: Name of the geometry property (default: 'geometry')
+    ///
+    /// Returns:
+    ///     A new KnowledgeGraph with only intersecting nodes
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Find blocks intersecting with a polygon
+    ///     intersecting = graph.type_filter('Block').intersects_geometry(
+    ///         'POLYGON((2 58, 4 58, 4 60, 2 60, 2 58))'
+    ///     )
+    ///     ```
+    #[pyo3(signature = (query_wkt, geometry_field=None))]
+    fn intersects_geometry(
+        &mut self,
+        query_wkt: &str,
+        geometry_field: Option<&str>,
+    ) -> PyResult<Self> {
+        let geometry_field = geometry_field.unwrap_or("geometry");
+
+        let matching_nodes = spatial::intersects_geometry(
+            &self.inner,
+            &self.selection,
+            geometry_field,
+            query_wkt,
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        // Create new selection with matching nodes
+        let mut new_kg = self.clone();
+        new_kg.selection.clear();  // clear() already adds a fresh level
+        if let Some(level) = new_kg.selection.get_level_mut(0) {
+            level.add_selection(None, matching_nodes.clone());
+        }
+
+        // Record plan step
+        new_kg.selection.add_plan_step(
+            PlanStep::new("INTERSECTS_GEOMETRY", None, matching_nodes.len())
+                .with_actual_rows(matching_nodes.len())
+        );
+
+        Ok(new_kg)
+    }
+
+    /// Get the geographic bounds of nodes in the current selection.
+    ///
+    /// Returns the minimum and maximum latitude/longitude of all nodes
+    /// in the current selection.
+    ///
+    /// Args:
+    ///     lat_field: Name of the latitude property (default: 'latitude')
+    ///     lon_field: Name of the longitude property (default: 'longitude')
+    ///
+    /// Returns:
+    ///     Dictionary with 'min_lat', 'max_lat', 'min_lon', 'max_lon',
+    ///     or None if no valid coordinates found
+    ///
+    /// Example:
+    ///     ```python
+    ///     bounds = graph.type_filter('Discovery').get_bounds()
+    ///     print(f"Latitude: {bounds['min_lat']} to {bounds['max_lat']}")
+    ///     ```
+    #[pyo3(signature = (lat_field=None, lon_field=None))]
+    fn get_bounds(
+        &self,
+        py: Python<'_>,
+        lat_field: Option<&str>,
+        lon_field: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let lat_field = lat_field.unwrap_or("latitude");
+        let lon_field = lon_field.unwrap_or("longitude");
+
+        match spatial::get_bounds(&self.inner, &self.selection, lat_field, lon_field) {
+            Some((min_lat, max_lat, min_lon, max_lon)) => {
+                let result = PyDict::new_bound(py);
+                result.set_item("min_lat", min_lat)?;
+                result.set_item("max_lat", max_lat)?;
+                result.set_item("min_lon", min_lon)?;
+                result.set_item("max_lon", max_lon)?;
+                Ok(result.into())
+            }
+            None => Ok(py.None())
+        }
+    }
+
+    /// Get the centroid (center point) of nodes in the current selection.
+    ///
+    /// Calculates the average latitude and longitude of all nodes
+    /// in the current selection.
+    ///
+    /// Args:
+    ///     lat_field: Name of the latitude property (default: 'latitude')
+    ///     lon_field: Name of the longitude property (default: 'longitude')
+    ///
+    /// Returns:
+    ///     Dictionary with 'latitude' and 'longitude',
+    ///     or None if no valid coordinates found
+    ///
+    /// Example:
+    ///     ```python
+    ///     center = graph.type_filter('Discovery').get_centroid()
+    ///     print(f"Center: {center['latitude']}, {center['longitude']}")
+    ///     ```
+    #[pyo3(signature = (lat_field=None, lon_field=None))]
+    fn get_centroid(
+        &self,
+        py: Python<'_>,
+        lat_field: Option<&str>,
+        lon_field: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let lat_field = lat_field.unwrap_or("latitude");
+        let lon_field = lon_field.unwrap_or("longitude");
+
+        match spatial::calculate_centroid(&self.inner, &self.selection, lat_field, lon_field) {
+            Some((lat, lon)) => {
+                let result = PyDict::new_bound(py);
+                result.set_item("latitude", lat)?;
+                result.set_item("longitude", lon)?;
+                Ok(result.into())
+            }
+            None => Ok(py.None())
+        }
     }
 }
