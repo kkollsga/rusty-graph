@@ -141,8 +141,15 @@ impl CurrentSelection {
     }
 }
 
-/// Key for property indexes: (node_type, property_name)
+/// Key for single-property indexes: (node_type, property_name)
 pub type IndexKey = (String, String);
+
+/// Key for composite indexes: (node_type, property_names)
+pub type CompositeIndexKey = (String, Vec<String>);
+
+/// Composite value key: tuple of values for multi-field lookup
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CompositeValue(pub Vec<Value>);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DirGraph {
@@ -151,9 +158,12 @@ pub struct DirGraph {
     /// Optional schema definition for validation
     #[serde(default)]
     pub(crate) schema_definition: Option<SchemaDefinition>,
-    /// Property indexes for fast lookups: (node_type, property) -> value -> [node_indices]
+    /// Single-property indexes for fast lookups: (node_type, property) -> value -> [node_indices]
     #[serde(default)]
     pub(crate) property_indices: HashMap<IndexKey, HashMap<Value, Vec<NodeIndex>>>,
+    /// Composite indexes for multi-field queries: (node_type, [properties]) -> composite_value -> [node_indices]
+    #[serde(default)]
+    pub(crate) composite_indices: HashMap<CompositeIndexKey, HashMap<CompositeValue, Vec<NodeIndex>>>,
 }
 
 impl DirGraph {
@@ -163,6 +173,7 @@ impl DirGraph {
             type_indices: HashMap::new(),
             schema_definition: None,
             property_indices: HashMap::new(),
+            composite_indices: HashMap::new(),
         }
     }
 
@@ -290,6 +301,130 @@ impl DirGraph {
                 avg_entries_per_value: if idx.is_empty() { 0.0 } else { total_entries as f64 / idx.len() as f64 },
             }
         })
+    }
+
+    // ========================================================================
+    // Composite Index Methods
+    // ========================================================================
+
+    /// Create a composite index on multiple properties for a specific node type.
+    /// Composite indexes enable efficient lookups on multiple fields at once.
+    ///
+    /// Returns the number of unique value combinations indexed.
+    ///
+    /// Example: create_composite_index("Person", &["city", "age"]) allows efficient
+    /// queries like filter({'city': 'Oslo', 'age': 30}).
+    pub fn create_composite_index(&mut self, node_type: &str, properties: &[&str]) -> usize {
+        let key = (
+            node_type.to_string(),
+            properties.iter().map(|s| s.to_string()).collect(),
+        );
+
+        // Build the composite index
+        let mut index: HashMap<CompositeValue, Vec<NodeIndex>> = HashMap::new();
+
+        if let Some(node_indices) = self.type_indices.get(node_type) {
+            for &idx in node_indices {
+                if let Some(NodeData::Regular { properties: props, .. }) = self.graph.node_weight(idx) {
+                    // Extract values for all properties in order
+                    let values: Vec<Value> = properties.iter()
+                        .map(|p| props.get(*p).cloned().unwrap_or(Value::Null))
+                        .collect();
+
+                    // Only index if at least one value is non-null
+                    if values.iter().any(|v| !matches!(v, Value::Null)) {
+                        index.entry(CompositeValue(values)).or_default().push(idx);
+                    }
+                }
+            }
+        }
+
+        let count = index.len();
+        self.composite_indices.insert(key, index);
+        count
+    }
+
+    /// Drop a composite index.
+    /// Returns true if the index existed and was removed.
+    pub fn drop_composite_index(&mut self, node_type: &str, properties: &[String]) -> bool {
+        let key = (node_type.to_string(), properties.to_vec());
+        self.composite_indices.remove(&key).is_some()
+    }
+
+    /// Check if a composite index exists.
+    pub fn has_composite_index(&self, node_type: &str, properties: &[String]) -> bool {
+        let key = (node_type.to_string(), properties.to_vec());
+        self.composite_indices.contains_key(&key)
+    }
+
+    /// Get all existing composite indexes.
+    pub fn list_composite_indexes(&self) -> Vec<(String, Vec<String>)> {
+        self.composite_indices.keys().cloned().collect()
+    }
+
+    /// Look up nodes by composite values using a composite index.
+    /// Properties must match the order used when creating the index.
+    pub fn lookup_by_composite_index(
+        &self,
+        node_type: &str,
+        properties: &[String],
+        values: &[Value],
+    ) -> Option<Vec<NodeIndex>> {
+        let key = (node_type.to_string(), properties.to_vec());
+        let composite_value = CompositeValue(values.to_vec());
+
+        self.composite_indices.get(&key)
+            .and_then(|idx| idx.get(&composite_value))
+            .cloned()
+    }
+
+    /// Get statistics about a composite index.
+    pub fn get_composite_index_stats(
+        &self,
+        node_type: &str,
+        properties: &[String],
+    ) -> Option<IndexStats> {
+        let key = (node_type.to_string(), properties.to_vec());
+        self.composite_indices.get(&key).map(|idx| {
+            let total_entries: usize = idx.values().map(|v| v.len()).sum();
+            IndexStats {
+                unique_values: idx.len(),
+                total_entries,
+                avg_entries_per_value: if idx.is_empty() { 0.0 } else { total_entries as f64 / idx.len() as f64 },
+            }
+        })
+    }
+
+    /// Find a composite index that can be used for a given set of filter properties.
+    /// Returns the index key and whether all filter properties are covered.
+    pub fn find_matching_composite_index(
+        &self,
+        node_type: &str,
+        filter_properties: &[String],
+    ) -> Option<(CompositeIndexKey, bool)> {
+        // Sort filter properties for comparison
+        let mut sorted_filter: Vec<String> = filter_properties.to_vec();
+        sorted_filter.sort();
+
+        for (key, _) in &self.composite_indices {
+            if key.0 == node_type {
+                let mut sorted_index: Vec<String> = key.1.clone();
+                sorted_index.sort();
+
+                // Check if index properties are a subset of or equal to filter properties
+                // For exact match, the index must cover exactly the filter fields
+                if sorted_index == sorted_filter {
+                    return Some((key.clone(), true)); // Exact match
+                }
+
+                // Check if index is a prefix of filter (can be used for partial filtering)
+                if sorted_filter.starts_with(&sorted_index) ||
+                   sorted_index.iter().all(|p| sorted_filter.contains(p)) {
+                    return Some((key.clone(), false)); // Partial match
+                }
+            }
+        }
+        None
     }
 }
 

@@ -2,8 +2,8 @@
 // Provides spatial filtering and geometry operations on graph nodes
 
 use petgraph::graph::NodeIndex;
-use geo::{Rect, Contains, Intersects};
-use geo::geometry::{Geometry, Polygon, LineString};
+use geo::{Rect, Contains, Intersects, Centroid};
+use geo::geometry::{Geometry, Polygon, LineString, Point};
 use wkt::TryFromWkt;
 
 use crate::datatypes::values::Value;
@@ -206,6 +206,139 @@ pub fn near_point_km(
 pub fn parse_wkt(wkt_string: &str) -> Result<Geometry<f64>, String> {
     Geometry::try_from_wkt_str(wkt_string)
         .map_err(|e| format!("Invalid WKT: {:?}", e))
+}
+
+/// Extract centroid coordinates from a WKT geometry string
+///
+/// Returns (lat, lon) tuple where lat=y and lon=x (geographic convention)
+pub fn wkt_centroid(wkt_string: &str) -> Result<(f64, f64), String> {
+    let geometry = parse_wkt(wkt_string)?;
+
+    let centroid: Option<Point<f64>> = match &geometry {
+        Geometry::Point(p) => Some(*p),
+        Geometry::Polygon(p) => p.centroid(),
+        Geometry::MultiPolygon(mp) => mp.centroid(),
+        Geometry::LineString(ls) => ls.centroid(),
+        Geometry::MultiLineString(mls) => mls.centroid(),
+        Geometry::MultiPoint(mp) => mp.centroid(),
+        Geometry::Rect(r) => Some(r.centroid()),
+        _ => None,
+    };
+
+    match centroid {
+        Some(point) => Ok((point.y(), point.x())),  // lat=y, lon=x
+        None => Err("Could not calculate centroid for geometry".to_string()),
+    }
+}
+
+/// Filter nodes within distance of a point using WKT geometry centroids
+///
+/// Uses the Haversine formula to calculate accurate great-circle distances
+/// from geometry centroids to a query point.
+///
+/// # Arguments
+/// * `graph` - The graph to filter
+/// * `selection` - Current selection to filter from
+/// * `geometry_field` - Name of the field containing WKT geometry
+/// * `center_lat` - Center point latitude
+/// * `center_lon` - Center point longitude
+/// * `max_distance_km` - Maximum distance in kilometers
+pub fn near_point_km_from_geometry(
+    graph: &DirGraph,
+    selection: &CurrentSelection,
+    geometry_field: &str,
+    center_lat: f64,
+    center_lon: f64,
+    max_distance_km: f64,
+) -> Result<Vec<NodeIndex>, String> {
+    // Get nodes from current selection
+    let level_count = selection.get_level_count();
+    let nodes: Vec<NodeIndex> = if level_count > 0 {
+        selection.get_level(level_count - 1)
+            .map(|l| l.get_all_nodes())
+            .unwrap_or_default()
+    } else {
+        return Ok(Vec::new());
+    };
+
+    let mut matching_nodes = Vec::new();
+
+    for node_idx in nodes {
+        if let Some(node) = graph.graph.node_weight(node_idx) {
+            let wkt_value = match node {
+                NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
+                    properties.get(geometry_field)
+                }
+            };
+
+            if let Some(Value::String(wkt_str)) = wkt_value {
+                if let Ok((lat, lon)) = wkt_centroid(wkt_str) {
+                    let distance = haversine_distance(center_lat, center_lon, lat, lon);
+                    if distance <= max_distance_km {
+                        matching_nodes.push(node_idx);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(matching_nodes)
+}
+
+/// Filter nodes whose WKT polygon contains a query point
+///
+/// # Arguments
+/// * `graph` - The graph to filter
+/// * `selection` - Current selection to filter from
+/// * `geometry_field` - Name of the field containing WKT geometry
+/// * `lat` - Query point latitude
+/// * `lon` - Query point longitude
+pub fn contains_point(
+    graph: &DirGraph,
+    selection: &CurrentSelection,
+    geometry_field: &str,
+    lat: f64,
+    lon: f64,
+) -> Result<Vec<NodeIndex>, String> {
+    let query_point = Point::new(lon, lat);  // geo uses (x, y) = (lon, lat)
+
+    // Get nodes from current selection
+    let level_count = selection.get_level_count();
+    let nodes: Vec<NodeIndex> = if level_count > 0 {
+        selection.get_level(level_count - 1)
+            .map(|l| l.get_all_nodes())
+            .unwrap_or_default()
+    } else {
+        return Ok(Vec::new());
+    };
+
+    let mut matching_nodes = Vec::new();
+
+    for node_idx in nodes {
+        if let Some(node) = graph.graph.node_weight(node_idx) {
+            let wkt_value = match node {
+                NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
+                    properties.get(geometry_field)
+                }
+            };
+
+            if let Some(Value::String(wkt_str)) = wkt_value {
+                if let Ok(geometry) = parse_wkt(wkt_str) {
+                    let contains = match &geometry {
+                        Geometry::Polygon(p) => p.contains(&query_point),
+                        Geometry::MultiPolygon(mp) => mp.contains(&query_point),
+                        Geometry::Rect(r) => r.contains(&query_point),
+                        _ => false,
+                    };
+                    if contains {
+                        matching_nodes.push(node_idx);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(matching_nodes)
 }
 
 /// Filter nodes whose geometry intersects with a query geometry

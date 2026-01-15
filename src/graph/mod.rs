@@ -77,6 +77,31 @@ fn extract_or_clone_graph(arc: &mut Arc<DirGraph>) -> DirGraph {
     }
 }
 
+/// Helper to convert centrality results to Python list
+fn centrality_results_to_py(
+    py: Python<'_>,
+    graph: &DirGraph,
+    results: Vec<graph_algorithms::CentralityResult>,
+    top_k: Option<usize>,
+) -> PyResult<PyObject> {
+    let result_list = PyList::empty_bound(py);
+
+    let limit = top_k.unwrap_or(results.len());
+
+    for result in results.into_iter().take(limit) {
+        if let Some(info) = graph_algorithms::get_node_info(graph, result.node_idx) {
+            let node_dict = PyDict::new_bound(py);
+            node_dict.set_item("node_type", &info.node_type)?;
+            node_dict.set_item("title", &info.title)?;
+            node_dict.set_item("id", py_out::value_to_py(py, &info.id)?)?;
+            node_dict.set_item("score", result.score)?;
+            result_list.append(node_dict)?;
+        }
+    }
+
+    Ok(result_list.into())
+}
+
 #[pymethods]
 impl KnowledgeGraph {
     #[new]
@@ -473,7 +498,26 @@ impl KnowledgeGraph {
     /// Update properties on all currently selected nodes
     ///
     /// This allows batch updating of properties on nodes matching the current selection.
-    /// Returns a new KnowledgeGraph with the updated nodes.
+    /// Returns a dictionary containing:
+    ///   - 'graph': A new KnowledgeGraph with the updated nodes (original is unchanged)
+    ///   - 'nodes_updated': Number of nodes that were updated
+    ///   - 'report_index': Index of the operation report
+    ///
+    /// Example:
+    ///     ```python
+    ///     result = graph.type_filter('Discovery').filter({'year': {'>=': 2020}}).update({
+    ///         'is_recent': True
+    ///     })
+    ///     graph = result['graph']  # Use the returned graph with updates
+    ///     print(f"Updated {result['nodes_updated']} nodes")
+    ///     ```
+    ///
+    /// Args:
+    ///     properties: Dictionary of property names and values to set
+    ///     keep_selection: If True, preserve the current selection in the returned graph
+    ///
+    /// Returns:
+    ///     Dictionary with 'graph' (KnowledgeGraph), 'nodes_updated' (int), 'report_index' (int)
     #[pyo3(signature = (properties, keep_selection=None))]
     fn update(
         &mut self,
@@ -1840,6 +1884,157 @@ impl KnowledgeGraph {
     }
 
     // ========================================================================
+    // Centrality Algorithms
+    // ========================================================================
+
+    /// Calculate betweenness centrality for nodes in the graph.
+    ///
+    /// Betweenness centrality measures how often a node lies on the shortest path
+    /// between other pairs of nodes. Higher values indicate nodes that are more
+    /// important as "bridges" in the network.
+    ///
+    /// Args:
+    ///     normalized: If True, normalize scores to [0, 1] range (default: True)
+    ///     sample_size: Optional number of source nodes to sample for faster computation
+    ///                  on large graphs. If None, uses all nodes.
+    ///     top_k: Return only the top K nodes by centrality (default: all)
+    ///
+    /// Returns:
+    ///     A list of dicts with 'node_type', 'title', 'id', and 'score' keys,
+    ///     sorted by score descending.
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Find the most central nodes (bridges)
+    ///     central_nodes = graph.betweenness_centrality(top_k=10)
+    ///     for node in central_nodes:
+    ///         print(f"{node['title']}: {node['score']:.4f}")
+    ///     ```
+    #[pyo3(signature = (normalized=None, sample_size=None, top_k=None))]
+    fn betweenness_centrality(
+        &self,
+        py: Python<'_>,
+        normalized: Option<bool>,
+        sample_size: Option<usize>,
+        top_k: Option<usize>,
+    ) -> PyResult<PyObject> {
+        let normalized = normalized.unwrap_or(true);
+
+        let results = graph_algorithms::betweenness_centrality(
+            &self.inner,
+            normalized,
+            sample_size,
+        );
+
+        centrality_results_to_py(py, &self.inner, results, top_k)
+    }
+
+    /// Calculate PageRank centrality for nodes in the graph.
+    ///
+    /// PageRank measures the importance of nodes based on the structure of
+    /// incoming links. Originally developed by Google for ranking web pages.
+    ///
+    /// Args:
+    ///     damping_factor: Probability of following a link (default: 0.85)
+    ///     max_iterations: Maximum number of iterations (default: 100)
+    ///     tolerance: Convergence threshold (default: 1e-6)
+    ///     top_k: Return only the top K nodes by centrality (default: all)
+    ///
+    /// Returns:
+    ///     A list of dicts with 'node_type', 'title', 'id', and 'score' keys,
+    ///     sorted by score descending.
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Find the most important nodes by PageRank
+    ///     important_nodes = graph.pagerank(top_k=10)
+    ///     for node in important_nodes:
+    ///         print(f"{node['title']}: {node['score']:.6f}")
+    ///     ```
+    #[pyo3(signature = (damping_factor=None, max_iterations=None, tolerance=None, top_k=None))]
+    fn pagerank(
+        &self,
+        py: Python<'_>,
+        damping_factor: Option<f64>,
+        max_iterations: Option<usize>,
+        tolerance: Option<f64>,
+        top_k: Option<usize>,
+    ) -> PyResult<PyObject> {
+        let damping = damping_factor.unwrap_or(0.85);
+        let max_iter = max_iterations.unwrap_or(100);
+        let tol = tolerance.unwrap_or(1e-6);
+
+        let results = graph_algorithms::pagerank(&self.inner, damping, max_iter, tol);
+
+        centrality_results_to_py(py, &self.inner, results, top_k)
+    }
+
+    /// Calculate degree centrality for nodes in the graph.
+    ///
+    /// Degree centrality simply counts the number of connections each node has.
+    /// This is the simplest centrality measure but often effective.
+    ///
+    /// Args:
+    ///     normalized: If True, normalize by (n-1) for values in [0, 1] (default: True)
+    ///     top_k: Return only the top K nodes by centrality (default: all)
+    ///
+    /// Returns:
+    ///     A list of dicts with 'node_type', 'title', 'id', and 'score' keys,
+    ///     sorted by score descending.
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Find the most connected nodes
+    ///     connected_nodes = graph.degree_centrality(top_k=10)
+    ///     ```
+    #[pyo3(signature = (normalized=None, top_k=None))]
+    fn degree_centrality(
+        &self,
+        py: Python<'_>,
+        normalized: Option<bool>,
+        top_k: Option<usize>,
+    ) -> PyResult<PyObject> {
+        let normalized = normalized.unwrap_or(true);
+
+        let results = graph_algorithms::degree_centrality(&self.inner, normalized);
+
+        centrality_results_to_py(py, &self.inner, results, top_k)
+    }
+
+    /// Calculate closeness centrality for nodes in the graph.
+    ///
+    /// Closeness centrality measures how close a node is to all other nodes,
+    /// based on the sum of shortest path distances. Higher values mean the
+    /// node can reach other nodes more quickly.
+    ///
+    /// Args:
+    ///     normalized: If True, adjust for disconnected components (default: True)
+    ///     top_k: Return only the top K nodes by centrality (default: all)
+    ///
+    /// Returns:
+    ///     A list of dicts with 'node_type', 'title', 'id', and 'score' keys,
+    ///     sorted by score descending.
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Find nodes that are "closest" to all others
+    ///     close_nodes = graph.closeness_centrality(top_k=10)
+    ///     ```
+    #[pyo3(signature = (normalized=None, top_k=None))]
+    fn closeness_centrality(
+        &self,
+        py: Python<'_>,
+        normalized: Option<bool>,
+        top_k: Option<usize>,
+    ) -> PyResult<PyObject> {
+        let normalized = normalized.unwrap_or(true);
+
+        let results = graph_algorithms::closeness_centrality(&self.inner, normalized);
+
+        centrality_results_to_py(py, &self.inner, results, top_k)
+    }
+
+    // ========================================================================
     // Subgraph Extraction Methods
     // ========================================================================
 
@@ -2060,13 +2255,37 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     The exported data as a string
+    ///
+    /// Note:
+    ///     If selection_only is not specified:
+    ///     - If there's a non-empty selection, exports only selected nodes
+    ///     - If selection is empty, exports the entire graph
+    ///     Use selection_only=True to force selection export (may be empty)
+    ///     Use selection_only=False to always export the entire graph
     #[pyo3(signature = (format, selection_only=None))]
     fn export_string(
         &self,
         format: &str,
         selection_only: Option<bool>,
     ) -> PyResult<String> {
-        let use_selection = selection_only.unwrap_or(self.selection.get_level_count() > 0);
+        // Check if selection has actual nodes
+        let selection_has_nodes = if self.selection.get_level_count() > 0 {
+            let level_idx = self.selection.get_level_count().saturating_sub(1);
+            self.selection.get_level(level_idx)
+                .map(|l| !l.get_all_nodes().is_empty())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        // Default behavior: use selection only if it has nodes
+        // If selection_only is explicitly set, respect that
+        let use_selection = match selection_only {
+            Some(true) => true,  // User explicitly wants selection only
+            Some(false) => false, // User explicitly wants full graph
+            None => selection_has_nodes, // Auto: use selection if it has nodes
+        };
+
         let selection = if use_selection {
             Some(&self.selection)
         } else {
@@ -2233,6 +2452,133 @@ impl KnowledgeGraph {
 
         self.inner = Arc::new(graph);
         Ok(index_keys.len())
+    }
+
+    // ========================================================================
+    // Composite Index Methods
+    // ========================================================================
+
+    /// Create a composite index on multiple properties for efficient multi-field queries.
+    ///
+    /// Composite indexes are useful when you frequently filter on the same combination
+    /// of fields together. They provide O(1) lookup for exact matches on all indexed fields.
+    ///
+    /// Args:
+    ///     node_type: The type of nodes to index
+    ///     properties: A list of property names to include in the composite index
+    ///
+    /// Returns:
+    ///     Number of unique value combinations indexed
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Create an index for queries filtering on both 'geoprovince' and 'status'
+    ///     graph.create_composite_index('Prospect', ['geoprovince', 'status'])
+    ///
+    ///     # Now this filter is very fast:
+    ///     graph.type_filter('Prospect').filter({
+    ///         'geoprovince': 'N3',
+    ///         'status': 'Active'
+    ///     })
+    ///     ```
+    fn create_composite_index(
+        &mut self,
+        py: Python<'_>,
+        node_type: &str,
+        properties: Vec<String>,
+    ) -> PyResult<PyObject> {
+        let mut graph = extract_or_clone_graph(&mut self.inner);
+
+        // Convert to slice of &str
+        let props_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
+        let unique_values = graph.create_composite_index(node_type, &props_refs);
+
+        self.inner = Arc::new(graph);
+
+        // Return info dict
+        let result_dict = PyDict::new_bound(py);
+        result_dict.set_item("node_type", node_type)?;
+        result_dict.set_item("properties", properties)?;
+        result_dict.set_item("unique_combinations", unique_values)?;
+
+        Ok(result_dict.into())
+    }
+
+    /// Drop a composite index.
+    ///
+    /// Args:
+    ///     node_type: The type of nodes
+    ///     properties: The list of property names in the composite index
+    ///
+    /// Returns:
+    ///     True if index existed and was dropped, False otherwise
+    fn drop_composite_index(
+        &mut self,
+        node_type: &str,
+        properties: Vec<String>,
+    ) -> PyResult<bool> {
+        let mut graph = extract_or_clone_graph(&mut self.inner);
+        let removed = graph.drop_composite_index(node_type, &properties);
+        self.inner = Arc::new(graph);
+        Ok(removed)
+    }
+
+    /// List all composite indexes in the graph.
+    ///
+    /// Returns:
+    ///     A list of dicts with 'node_type' and 'properties' keys
+    fn list_composite_indexes(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let indexes = self.inner.list_composite_indexes();
+
+        let result_list = pyo3::types::PyList::empty_bound(py);
+        for (node_type, properties) in indexes {
+            let idx_dict = PyDict::new_bound(py);
+            idx_dict.set_item("node_type", node_type)?;
+            idx_dict.set_item("properties", properties)?;
+            result_list.append(idx_dict)?;
+        }
+
+        Ok(result_list.into())
+    }
+
+    /// Check if a composite index exists.
+    ///
+    /// Args:
+    ///     node_type: The type of nodes
+    ///     properties: The list of property names in the composite index
+    ///
+    /// Returns:
+    ///     True if index exists, False otherwise
+    fn has_composite_index(&self, node_type: &str, properties: Vec<String>) -> bool {
+        self.inner.has_composite_index(node_type, &properties)
+    }
+
+    /// Get statistics about a composite index.
+    ///
+    /// Args:
+    ///     node_type: The type of nodes
+    ///     properties: The list of property names in the composite index
+    ///
+    /// Returns:
+    ///     Dictionary with index statistics, or None if index doesn't exist
+    fn composite_index_stats(
+        &self,
+        py: Python<'_>,
+        node_type: &str,
+        properties: Vec<String>,
+    ) -> PyResult<PyObject> {
+        match self.inner.get_composite_index_stats(node_type, &properties) {
+            Some(stats) => {
+                let result_dict = PyDict::new_bound(py);
+                result_dict.set_item("node_type", node_type)?;
+                result_dict.set_item("properties", properties)?;
+                result_dict.set_item("unique_combinations", stats.unique_values)?;
+                result_dict.set_item("total_entries", stats.total_entries)?;
+                result_dict.set_item("avg_entries_per_combination", stats.avg_entries_per_value)?;
+                Ok(result_dict.into())
+            }
+            None => Ok(py.None())
+        }
     }
 
     // ========================================================================
@@ -2489,6 +2835,119 @@ impl KnowledgeGraph {
         // Record plan step
         new_kg.selection.add_plan_step(
             PlanStep::new("NEAR_POINT_KM", None, matching_nodes.len())
+                .with_actual_rows(matching_nodes.len())
+        );
+
+        Ok(new_kg)
+    }
+
+    /// Filter nodes within distance of a point using WKT geometry centroids.
+    ///
+    /// Uses the centroid of WKT geometries (polygons, etc.) to calculate distance.
+    /// This eliminates the need for external libraries like shapely when working
+    /// with polygon geometries.
+    ///
+    /// Args:
+    ///     center_lat: Center point latitude
+    ///     center_lon: Center point longitude
+    ///     max_distance_km: Maximum distance in kilometers
+    ///     geometry_field: Name of the WKT geometry property (default: 'geometry')
+    ///
+    /// Returns:
+    ///     A new KnowledgeGraph with only nodes whose geometry centroid is within distance
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Find prospects (with WKT polygons) within 50km of a point
+    ///     nearby = graph.type_filter('Prospect').near_point_km_from_wkt(
+    ///         center_lat=61.4, center_lon=4.0,
+    ///         max_distance_km=50.0,
+    ///         geometry_field='shape'
+    ///     )
+    ///     ```
+    #[pyo3(signature = (center_lat, center_lon, max_distance_km, geometry_field=None))]
+    fn near_point_km_from_wkt(
+        &mut self,
+        center_lat: f64,
+        center_lon: f64,
+        max_distance_km: f64,
+        geometry_field: Option<&str>,
+    ) -> PyResult<Self> {
+        let geometry_field = geometry_field.unwrap_or("geometry");
+
+        let matching_nodes = spatial::near_point_km_from_geometry(
+            &self.inner,
+            &self.selection,
+            geometry_field,
+            center_lat,
+            center_lon,
+            max_distance_km,
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        // Create new selection with matching nodes
+        let mut new_kg = self.clone();
+        new_kg.selection.clear();
+        if let Some(level) = new_kg.selection.get_level_mut(0) {
+            level.add_selection(None, matching_nodes.clone());
+        }
+
+        // Record plan step
+        new_kg.selection.add_plan_step(
+            PlanStep::new("NEAR_POINT_KM_WKT", None, matching_nodes.len())
+                .with_actual_rows(matching_nodes.len())
+        );
+
+        Ok(new_kg)
+    }
+
+    /// Filter nodes whose WKT polygon contains a query point.
+    ///
+    /// Useful for finding which geographic regions (stored as WKT polygons)
+    /// contain a specific point location.
+    ///
+    /// Args:
+    ///     lat: Query point latitude
+    ///     lon: Query point longitude
+    ///     geometry_field: Name of the WKT geometry property (default: 'geometry')
+    ///
+    /// Returns:
+    ///     A new KnowledgeGraph with only nodes whose geometry contains the point
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Find which blocks contain a specific location
+    ///     containing = graph.type_filter('Block').contains_point(
+    ///         lat=61.4, lon=4.0,
+    ///         geometry_field='boundary'
+    ///     )
+    ///     ```
+    #[pyo3(signature = (lat, lon, geometry_field=None))]
+    fn contains_point(
+        &mut self,
+        lat: f64,
+        lon: f64,
+        geometry_field: Option<&str>,
+    ) -> PyResult<Self> {
+        let geometry_field = geometry_field.unwrap_or("geometry");
+
+        let matching_nodes = spatial::contains_point(
+            &self.inner,
+            &self.selection,
+            geometry_field,
+            lat,
+            lon,
+        ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        // Create new selection with matching nodes
+        let mut new_kg = self.clone();
+        new_kg.selection.clear();
+        if let Some(level) = new_kg.selection.get_level_mut(0) {
+            level.add_selection(None, matching_nodes.clone());
+        }
+
+        // Record plan step
+        new_kg.selection.add_plan_step(
+            PlanStep::new("CONTAINS_POINT", None, matching_nodes.len())
                 .with_actual_rows(matching_nodes.len())
         );
 

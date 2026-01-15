@@ -532,6 +532,21 @@ pub fn pattern_matches_to_pylist(
                     }
                     binding_dict.set_item("properties", props_dict)?;
                 }
+                MatchBinding::VariableLengthPath { source, target, hops, path } => {
+                    binding_dict.set_item("source_idx", source.index())?;
+                    binding_dict.set_item("target_idx", target.index())?;
+                    binding_dict.set_item("hops", *hops)?;
+
+                    // Add path as list of (node_idx, connection_type) tuples
+                    let path_list = PyList::empty_bound(py);
+                    for (node_idx, conn_type) in path {
+                        let step_dict = PyDict::new_bound(py);
+                        step_dict.set_item("node_idx", node_idx.index())?;
+                        step_dict.set_item("connection_type", conn_type)?;
+                        path_list.append(step_dict)?;
+                    }
+                    binding_dict.set_item("path", path_list)?;
+                }
             }
 
             match_dict.set_item(var_name, binding_dict)?;

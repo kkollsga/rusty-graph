@@ -735,6 +735,38 @@ fields_in_area = graph.type_filter('Field').intersects(
 )
 ```
 
+### Proximity from WKT Centroids
+
+Find nodes within a radius of a reference point, using the centroid of WKT geometries for distance calculation. This eliminates the need for external dependencies like shapely:
+
+```python
+# Find fields within 100km of a location, using polygon centroids
+nearby_fields = graph.type_filter('Field').near_point_km_from_wkt(
+    center_lat=60.5,
+    center_lon=3.2,
+    max_distance_km=100.0,
+    geometry_field='wkt_geometry'  # Field containing WKT polygons
+)
+
+# The centroid is automatically extracted from WKT geometries
+# Supports: POLYGON, MULTIPOLYGON, LINESTRING, MULTILINESTRING, POINT, MULTIPOINT
+```
+
+### Point-in-Polygon Containment
+
+Find nodes whose WKT geometry contains a specific point:
+
+```python
+# Find which blocks contain a specific coordinate
+containing_blocks = graph.type_filter('Block').contains_point(
+    lat=60.5,
+    lon=3.2,
+    geometry_field='wkt_geometry'
+)
+
+# This is useful for determining which regions/areas a point falls within
+```
+
 ## Schema Definition and Validation
 
 Define expected structure and validate your graph data:

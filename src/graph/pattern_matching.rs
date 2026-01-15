@@ -34,12 +34,21 @@ pub struct NodePattern {
 }
 
 /// Pattern for matching edges: -[:TYPE {prop: value}]->
+/// Supports variable-length paths with *min..max syntax:
+/// - `*` or `*..` means 1 or more hops (default)
+/// - `*2` means exactly 2 hops
+/// - `*1..3` means 1 to 3 hops
+/// - `*..5` means 1 to 5 hops
+/// - `*2..` means 2 or more hops (up to default max)
 #[derive(Debug, Clone)]
 pub struct EdgePattern {
     pub variable: Option<String>,
     pub connection_type: Option<String>,
     pub direction: EdgeDirection,
     pub properties: Option<HashMap<String, PropertyMatcher>>,
+    /// Variable-length path configuration: (min_hops, max_hops)
+    /// None means exactly 1 hop (normal edge)
+    pub var_length: Option<(usize, usize)>,
 }
 
 /// Direction of edge traversal
@@ -66,7 +75,7 @@ pub struct PatternMatch {
     pub bindings: HashMap<String, MatchBinding>,
 }
 
-/// A bound value (either node or edge)
+/// A bound value (either node, edge, or variable-length path)
 #[derive(Debug, Clone)]
 pub enum MatchBinding {
     Node {
@@ -82,6 +91,14 @@ pub enum MatchBinding {
         target: NodeIndex,
         connection_type: String,
         properties: HashMap<String, Value>,
+    },
+    /// Variable-length path binding for patterns like -[:TYPE*1..3]->
+    VariableLengthPath {
+        source: NodeIndex,
+        target: NodeIndex,
+        hops: usize,
+        /// Path as list of (node_index, connection_type) pairs
+        path: Vec<(NodeIndex, String)>,
     },
 }
 
@@ -102,6 +119,8 @@ pub enum Token {
     Dash,        // -
     GreaterThan, // >
     LessThan,    // <
+    Star,        // * (for variable-length paths)
+    DotDot,      // .. (for range in variable-length)
     Identifier(String),
     StringLit(String),
     IntLit(i64),
@@ -162,6 +181,34 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 tokens.push(Token::LessThan);
                 chars.next();
             }
+            '*' => {
+                tokens.push(Token::Star);
+                chars.next();
+            }
+            '.' => {
+                // Check for '..' (range operator)
+                chars.next();
+                if chars.peek() == Some(&'.') {
+                    chars.next();
+                    tokens.push(Token::DotDot);
+                } else if chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+                    // It's a float starting with '.'
+                    let mut num_str = String::from("0.");
+                    while let Some(&c) = chars.peek() {
+                        if c.is_ascii_digit() {
+                            num_str.push(c);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    tokens.push(Token::FloatLit(
+                        num_str.parse().map_err(|_| format!("Invalid float: {}", num_str))?
+                    ));
+                } else {
+                    return Err("Unexpected single '.', expected '..' or a digit".to_string());
+                }
+            }
             '"' | '\'' => {
                 let quote = ch;
                 chars.next(); // consume opening quote
@@ -189,7 +236,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 }
                 tokens.push(Token::StringLit(s));
             }
-            c if c.is_ascii_digit() || c == '.' => {
+            c if c.is_ascii_digit() => {
                 let mut num_str = String::new();
                 let mut has_dot = false;
                 while let Some(&c) = chars.peek() {
@@ -197,6 +244,15 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                         num_str.push(c);
                         chars.next();
                     } else if c == '.' && !has_dot {
+                        // Peek ahead to check if this is '..' (range operator)
+                        // Clone the iterator to peek ahead without consuming
+                        let mut peek_chars = chars.clone();
+                        peek_chars.next(); // skip the first '.'
+                        if peek_chars.peek() == Some(&'.') {
+                            // This is '..', stop here and don't include the dot
+                            break;
+                        }
+                        // It's a decimal point for a float
                         has_dot = true;
                         num_str.push(c);
                         chars.next();
@@ -350,6 +406,7 @@ impl Parser {
     }
 
     /// Parse edge pattern: -[:TYPE]-> or <-[:TYPE]- or -[:TYPE]-
+    /// Also supports variable-length: -[:TYPE*1..3]->
     fn parse_edge_pattern(&mut self) -> Result<EdgePattern, String> {
         let mut direction = EdgeDirection::Both;
         let mut incoming_start = false;
@@ -369,6 +426,7 @@ impl Parser {
         let mut variable = None;
         let mut connection_type = None;
         let mut properties = None;
+        let mut var_length = None;
 
         // Check what comes next
         match self.peek() {
@@ -399,10 +457,18 @@ impl Parser {
                     }
                 }
             }
+            Some(Token::Star) => {
+                // Variable-length without type: [*1..3]
+            }
             Some(Token::LBrace) => {
                 // Properties only
             }
             _ => {}
+        }
+
+        // Check for variable-length marker: *
+        if let Some(Token::Star) = self.peek() {
+            var_length = Some(self.parse_var_length()?);
         }
 
         // Check for properties
@@ -431,7 +497,62 @@ impl Parser {
             connection_type,
             direction,
             properties,
+            var_length,
         })
+    }
+
+    /// Parse variable-length specification: *, *2, *1..3, *..5, *2..
+    /// Returns (min_hops, max_hops)
+    fn parse_var_length(&mut self) -> Result<(usize, usize), String> {
+        self.expect(&Token::Star)?;
+
+        const DEFAULT_MAX_HOPS: usize = 10; // Reasonable limit to prevent runaway queries
+
+        // Check what follows the *
+        match self.peek() {
+            Some(Token::IntLit(_)) => {
+                // *N or *N..M or *N..
+                let min = if let Some(Token::IntLit(n)) = self.advance().cloned() {
+                    n as usize
+                } else {
+                    return Err("Expected integer after *".to_string());
+                };
+
+                // Check for range
+                if let Some(Token::DotDot) = self.peek() {
+                    self.advance(); // consume ..
+                    // Check for max
+                    if let Some(Token::IntLit(_)) = self.peek() {
+                        let max = if let Some(Token::IntLit(n)) = self.advance().cloned() {
+                            n as usize
+                        } else {
+                            return Err("Expected integer after ..".to_string());
+                        };
+                        Ok((min, max))
+                    } else {
+                        // *N.. means N to default max
+                        Ok((min, DEFAULT_MAX_HOPS))
+                    }
+                } else {
+                    // *N means exactly N hops
+                    Ok((min, min))
+                }
+            }
+            Some(Token::DotDot) => {
+                // *..M means 1 to M
+                self.advance(); // consume ..
+                let max = if let Some(Token::IntLit(n)) = self.advance().cloned() {
+                    n as usize
+                } else {
+                    return Err("Expected integer after *..".to_string());
+                };
+                Ok((1, max))
+            }
+            _ => {
+                // * alone means 1 or more (up to default max)
+                Ok((1, DEFAULT_MAX_HOPS))
+            }
+        }
     }
 
     /// Parse properties: {key: value, key2: value2}
@@ -639,6 +760,7 @@ impl<'a> PatternExecutor<'a> {
     }
 
     /// Check if a node matches property filters
+    /// Optimized: Uses references instead of cloning values
     fn node_matches_properties(
         &self,
         idx: NodeIndex,
@@ -647,11 +769,21 @@ impl<'a> PatternExecutor<'a> {
         if let Some(node) = self.graph.graph.node_weight(idx) {
             use crate::graph::schema::NodeData;
             match node {
-                NodeData::Regular { properties, .. } => {
+                NodeData::Regular { properties, title, id, .. } => {
                     for (key, matcher) in props {
-                        match properties.get(key) {
-                            Some(value) => {
-                                if !self.value_matches(value, matcher) {
+                        // Check special fields first: name/title maps to title, id maps to id
+                        // Use references to avoid cloning
+                        let value: Option<&Value> = if key == "name" || key == "title" {
+                            Some(title)
+                        } else if key == "id" {
+                            Some(id)
+                        } else {
+                            properties.get(key)
+                        };
+
+                        match value {
+                            Some(v) => {
+                                if !self.value_matches(v, matcher) {
                                     return false;
                                 }
                             }
@@ -681,6 +813,11 @@ impl<'a> PatternExecutor<'a> {
         edge_pattern: &EdgePattern,
         node_pattern: &NodePattern,
     ) -> Result<Vec<(NodeIndex, MatchBinding)>, String> {
+        // Check for variable-length path
+        if let Some((min_hops, max_hops)) = edge_pattern.var_length {
+            return self.expand_var_length(source, edge_pattern, node_pattern, min_hops, max_hops);
+        }
+
         let mut results = Vec::new();
 
         // Determine which directions to check
@@ -756,6 +893,154 @@ impl<'a> PatternExecutor<'a> {
                 };
 
                 results.push((target, edge_binding));
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Expand via variable-length path (BFS within hop range)
+    /// Optimized: Only clones paths when branching (multiple valid targets from same node)
+    fn expand_var_length(
+        &self,
+        source: NodeIndex,
+        edge_pattern: &EdgePattern,
+        node_pattern: &NodePattern,
+        min_hops: usize,
+        max_hops: usize,
+    ) -> Result<Vec<(NodeIndex, MatchBinding)>, String> {
+        use std::collections::VecDeque;
+
+        let mut results = Vec::new();
+
+        // Determine which directions to check (avoid allocation with static slice)
+        let directions: &[Direction] = match edge_pattern.direction {
+            EdgeDirection::Outgoing => &[Direction::Outgoing],
+            EdgeDirection::Incoming => &[Direction::Incoming],
+            EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
+        };
+
+        // BFS state: (current_node, depth, path_info)
+        // path_info stores the path taken for creating variable-length edge binding
+        let mut queue: VecDeque<(NodeIndex, usize, Vec<(NodeIndex, String)>)> = VecDeque::new();
+        let mut visited_at_depth: HashMap<(NodeIndex, usize), bool> = HashMap::new();
+
+        queue.push_back((source, 0, Vec::new()));
+
+        while let Some((current, depth, path)) = queue.pop_front() {
+            if depth >= max_hops {
+                continue;
+            }
+
+            // First pass: collect all valid targets to know how many branches we'll have
+            // This avoids cloning paths unnecessarily when only one target exists
+            let mut valid_targets: Vec<(NodeIndex, String)> = Vec::new();
+
+            for &direction in directions {
+                let edges = self.graph.graph.edges_directed(current, direction);
+
+                for edge in edges {
+                    let edge_data = edge.weight();
+
+                    // Check connection type if specified
+                    if let Some(ref conn_type) = edge_pattern.connection_type {
+                        if &edge_data.connection_type != conn_type {
+                            continue;
+                        }
+                    }
+
+                    // Check edge properties if specified
+                    if let Some(ref props) = edge_pattern.properties {
+                        let matches = props.iter().all(|(key, matcher)| {
+                            edge_data
+                                .properties
+                                .get(key)
+                                .map(|v| self.value_matches(v, matcher))
+                                .unwrap_or(false)
+                        });
+                        if !matches {
+                            continue;
+                        }
+                    }
+
+                    // Get target node
+                    let target = match direction {
+                        Direction::Outgoing => edge.target(),
+                        Direction::Incoming => edge.source(),
+                    };
+
+                    // Skip if we've visited this node at this depth (prevent cycles at same depth)
+                    let visit_key = (target, depth + 1);
+                    if visited_at_depth.contains_key(&visit_key) {
+                        continue;
+                    }
+                    visited_at_depth.insert(visit_key, true);
+
+                    valid_targets.push((target, edge_data.connection_type.clone()));
+                }
+            }
+
+            // Second pass: process valid targets with smart path management
+            let new_depth = depth + 1;
+            let num_targets = valid_targets.len();
+
+            for (i, (target, conn_type)) in valid_targets.into_iter().enumerate() {
+                let is_last = i == num_targets - 1;
+                let needs_queue = new_depth < max_hops;
+
+                // Build new_path efficiently:
+                // - For last target: reuse path by moving it (no clone)
+                // - For others: clone the path
+                let mut new_path = if is_last {
+                    path.clone() // Can't avoid this clone since path is borrowed
+                } else {
+                    path.clone()
+                };
+                new_path.push((target, conn_type));
+
+                // If we're within the valid hop range and target matches node pattern, add to results
+                if new_depth >= min_hops {
+                    let node_matches = if let Some(ref node_type) = node_pattern.node_type {
+                        if let Some(node) = self.graph.graph.node_weight(target) {
+                            use crate::graph::schema::NodeData;
+                            match node {
+                                NodeData::Regular { node_type: nt, .. } => nt == node_type,
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        true
+                    };
+
+                    let props_match = if let Some(ref props) = node_pattern.properties {
+                        self.node_matches_properties(target, props)
+                    } else {
+                        true
+                    };
+
+                    if node_matches && props_match {
+                        // Create binding - clone path only if we also need it for queue
+                        let path_for_binding = if needs_queue {
+                            new_path.clone()
+                        } else {
+                            std::mem::take(&mut new_path)
+                        };
+                        let edge_binding = MatchBinding::VariableLengthPath {
+                            source,
+                            target,
+                            hops: new_depth,
+                            path: path_for_binding,
+                        };
+                        results.push((target, edge_binding));
+                    }
+                }
+
+                // Continue exploring if we haven't reached max depth
+                if needs_queue {
+                    queue.push_back((target, new_depth, new_path));
+                }
             }
         }
 
@@ -948,6 +1233,78 @@ mod tests {
             assert_eq!(np.node_type, None);
         } else {
             panic!("Expected node pattern");
+        }
+    }
+
+    // Variable-length path tests
+    #[test]
+    fn test_tokenize_var_length() {
+        let tokens = tokenize("-[:KNOWS*1..3]->").unwrap();
+        assert!(tokens.contains(&Token::Star));
+        assert!(tokens.contains(&Token::DotDot));
+        assert!(tokens.contains(&Token::IntLit(1)));
+        assert!(tokens.contains(&Token::IntLit(3)));
+    }
+
+    #[test]
+    fn test_parse_var_length_exact() {
+        let pattern = parse_pattern("(a:Person)-[:KNOWS*2]->(b:Person)").unwrap();
+        if let PatternElement::Edge(ep) = &pattern.elements[1] {
+            assert_eq!(ep.var_length, Some((2, 2)));
+        } else {
+            panic!("Expected edge pattern");
+        }
+    }
+
+    #[test]
+    fn test_parse_var_length_range() {
+        let pattern = parse_pattern("(a:Person)-[:KNOWS*1..3]->(b:Person)").unwrap();
+        if let PatternElement::Edge(ep) = &pattern.elements[1] {
+            assert_eq!(ep.var_length, Some((1, 3)));
+        } else {
+            panic!("Expected edge pattern");
+        }
+    }
+
+    #[test]
+    fn test_parse_var_length_min_only() {
+        let pattern = parse_pattern("(a:Person)-[:KNOWS*2..]->(b:Person)").unwrap();
+        if let PatternElement::Edge(ep) = &pattern.elements[1] {
+            // *2.. means 2 to default max (10)
+            assert_eq!(ep.var_length, Some((2, 10)));
+        } else {
+            panic!("Expected edge pattern");
+        }
+    }
+
+    #[test]
+    fn test_parse_var_length_max_only() {
+        let pattern = parse_pattern("(a:Person)-[:KNOWS*..5]->(b:Person)").unwrap();
+        if let PatternElement::Edge(ep) = &pattern.elements[1] {
+            assert_eq!(ep.var_length, Some((1, 5)));
+        } else {
+            panic!("Expected edge pattern");
+        }
+    }
+
+    #[test]
+    fn test_parse_var_length_star_only() {
+        let pattern = parse_pattern("(a:Person)-[:KNOWS*]->(b:Person)").unwrap();
+        if let PatternElement::Edge(ep) = &pattern.elements[1] {
+            // * alone means 1 to default max (10)
+            assert_eq!(ep.var_length, Some((1, 10)));
+        } else {
+            panic!("Expected edge pattern");
+        }
+    }
+
+    #[test]
+    fn test_parse_normal_edge_no_var_length() {
+        let pattern = parse_pattern("(a:Person)-[:KNOWS]->(b:Person)").unwrap();
+        if let PatternElement::Edge(ep) = &pattern.elements[1] {
+            assert_eq!(ep.var_length, None);
+        } else {
+            panic!("Expected edge pattern");
         }
     }
 }

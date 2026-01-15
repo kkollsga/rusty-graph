@@ -121,7 +121,64 @@ fn filter_nodes_by_conditions(
         })
         .collect();
 
-    // Check if any equality condition has an index we can use
+    // Collect equality conditions that could use a composite index
+    let equality_conditions: Vec<(&String, &crate::datatypes::values::Value)> = conditions.iter()
+        .filter_map(|(k, v)| {
+            if let FilterCondition::Equals(val) = v {
+                Some((k, val))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Try composite index first (if we have 2+ equality conditions)
+    if equality_conditions.len() >= 2 {
+        let eq_properties: Vec<String> = equality_conditions.iter().map(|(k, _)| (*k).clone()).collect();
+
+        for node_type in &node_types {
+            if let Some((index_key, is_exact)) = graph.find_matching_composite_index(node_type, &eq_properties) {
+                if is_exact {
+                    // Exact match - we can use the composite index directly
+                    // Build values in the same order as the index
+                    let index_properties = &index_key.1;
+                    let values: Vec<crate::datatypes::values::Value> = index_properties.iter()
+                        .map(|p| {
+                            equality_conditions.iter()
+                                .find(|(k, _)| *k == p)
+                                .map(|(_, v)| (*v).clone())
+                                .unwrap_or(crate::datatypes::values::Value::Null)
+                        })
+                        .collect();
+
+                    if let Some(matching_nodes) = graph.lookup_by_composite_index(node_type, index_properties, &values) {
+                        // Found composite index match!
+                        let indexed_set: HashSet<_> = matching_nodes.iter().copied().collect();
+                        let original_set: HashSet<_> = nodes.iter().copied().collect();
+
+                        // Intersection of indexed results with input nodes
+                        let candidates: Vec<_> = indexed_set.intersection(&original_set).copied().collect();
+
+                        // Filter remaining non-equality conditions
+                        let remaining_conditions: HashMap<_, _> = conditions.iter()
+                            .filter(|(k, v)| {
+                                !matches!(v, FilterCondition::Equals(_)) || !eq_properties.contains(k)
+                            })
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+
+                        if remaining_conditions.is_empty() {
+                            return candidates;
+                        } else {
+                            return filter_nodes_by_conditions(graph, candidates, &remaining_conditions);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall back to single-property index check
     for (property, condition) in conditions {
         if let FilterCondition::Equals(target_value) = condition {
             // Check if any of our node types has an index on this property
