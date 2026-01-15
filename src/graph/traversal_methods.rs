@@ -8,6 +8,22 @@ use crate::datatypes::values::FilterCondition;
 use crate::graph::filtering_methods;
 use crate::datatypes::values::Value;
 
+/// Check if edge properties match all given filter conditions
+fn edge_matches_conditions(
+    properties: &HashMap<String, Value>,
+    conditions: &HashMap<String, FilterCondition>
+) -> bool {
+    conditions.iter().all(|(field, condition)| {
+        match properties.get(field) {
+            Some(value) => filtering_methods::matches_condition(value, condition),
+            None => {
+                // Missing field is treated as null
+                matches!(condition, FilterCondition::IsNull)
+            }
+        }
+    })
+}
+
 pub fn make_traversal(
     graph: &DirGraph,
     selection: &mut CurrentSelection,
@@ -15,6 +31,7 @@ pub fn make_traversal(
     level_index: Option<usize>,
     direction: Option<String>,
     filter_target: Option<&HashMap<String, FilterCondition>>,
+    filter_connection: Option<&HashMap<String, FilterCondition>>,
     sort_target: Option<&Vec<(String, bool)>>,
     max_nodes: Option<usize>,
     new_level: Option<bool>,
@@ -115,15 +132,31 @@ pub fn make_traversal(
             if directions.contains(&Direction::Outgoing) {
                 graph.graph.edges_directed(source_node, Direction::Outgoing)
                     .filter(|edge| edge.weight().connection_type == connection_type)
+                    .filter(|edge| {
+                        // Apply connection property filter if specified
+                        if let Some(conn_filter) = filter_connection {
+                            edge_matches_conditions(&edge.weight().properties, conn_filter)
+                        } else {
+                            true
+                        }
+                    })
                     .for_each(|edge| {
                         targets.insert(edge.target());
                     });
             }
-            
+
             // Process incoming edges if needed
             if directions.contains(&Direction::Incoming) {
                 graph.graph.edges_directed(source_node, Direction::Incoming)
                     .filter(|edge| edge.weight().connection_type == connection_type)
+                    .filter(|edge| {
+                        // Apply connection property filter if specified
+                        if let Some(conn_filter) = filter_connection {
+                            edge_matches_conditions(&edge.weight().properties, conn_filter)
+                        } else {
+                            true
+                        }
+                    })
                     .for_each(|edge| {
                         targets.insert(edge.source());
                     });
@@ -211,27 +244,25 @@ pub fn get_children_properties(
     result
 }
 
+/// Helper to format a list of values with optional truncation
+fn format_property_list(values: &[String], max_length: Option<usize>) -> String {
+    let joined = values.join(", ");
+    match max_length {
+        Some(max) if joined.len() > max => {
+            format!("{}...", &joined[..max.saturating_sub(3)])
+        }
+        _ => joined,
+    }
+}
+
 pub fn format_for_storage(
     property_groups: &[ChildPropertyGroup],
     max_length: Option<usize>
 ) -> Vec<(Option<NodeIndex>, Value)> {
     property_groups.iter()
         .map(|group| {
-            // Join into a comma-separated list
-            let list_value = group.values.join(", ");
-            
-            // Truncate if a max length is specified
-            let final_value = if let Some(max) = max_length {
-                if list_value.len() > max {
-                    format!("{}...", &list_value[..max.saturating_sub(3)])
-                } else {
-                    list_value
-                }
-            } else {
-                list_value
-            };
-            
-            (Some(group.parent_idx), Value::String(final_value))
+            let formatted = format_property_list(&group.values, max_length);
+            (Some(group.parent_idx), Value::String(formatted))
         })
         .collect()
 }
@@ -242,21 +273,8 @@ pub fn format_for_dictionary(
 ) -> Vec<(String, String)> {
     property_groups.iter()
         .map(|group| {
-            // Join into a comma-separated list
-            let list_value = group.values.join(", ");
-            
-            // Truncate if a max length is specified
-            let final_value = if let Some(max) = max_length {
-                if list_value.len() > max {
-                    format!("{}...", &list_value[..max.saturating_sub(3)])
-                } else {
-                    list_value
-                }
-            } else {
-                list_value
-            };
-            
-            (group.parent_title.clone(), final_value)
+            let formatted = format_property_list(&group.values, max_length);
+            (group.parent_title.clone(), formatted)
         })
         .collect()
 }

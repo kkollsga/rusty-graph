@@ -43,14 +43,15 @@ pub enum AggregateType {
     Std,
     Min,
     Max,
+    Count,
 }
 
 impl AggregateType {
     // Helper function to get all supported aggregate function names
     pub fn get_supported_names() -> Vec<&'static str> {
-        vec!["sum", "mean", "avg", "std", "min", "max"]
+        vec!["sum", "mean", "avg", "std", "min", "max", "count"]
     }
-    
+
     // Helper function to convert from string
     pub fn from_string(name: &str) -> Option<Self> {
         match name.to_lowercase().as_str() {
@@ -59,6 +60,7 @@ impl AggregateType {
             "std" => Some(AggregateType::Std),
             "min" => Some(AggregateType::Min),
             "max" => Some(AggregateType::Max),
+            "count" => Some(AggregateType::Count),
             _ => None,
         }
     }
@@ -347,21 +349,21 @@ impl Evaluator {
                         println!("Warning: All evaluations failed. Sample errors: {:?}", sample_errors);
                     }
                     
-                    // For sum, return 0 when all values are null or errors
+                    // For sum and count, return 0 when all values are null or errors
                     // For other aggregates, return null
                     return match agg_type {
-                        AggregateType::Sum => Ok(Value::Float64(0.0)),
+                        AggregateType::Sum | AggregateType::Count => Ok(Value::Float64(0.0)),
                         _ => Ok(Value::Null),
                     };
                 }
-                
+
                 if values.is_empty() {
                     return match agg_type {
-                        AggregateType::Sum => Ok(Value::Float64(0.0)),
+                        AggregateType::Sum | AggregateType::Count => Ok(Value::Float64(0.0)),
                         _ => Ok(Value::Null),
                     };
                 }
-        
+
                 // Rest of the aggregation code
                 let result = match agg_type {
                     AggregateType::Sum => values.iter().sum(),
@@ -377,6 +379,7 @@ impl Evaluator {
                         .fold(f64::INFINITY, |a, &b| a.min(b)),
                     AggregateType::Max => values.iter()
                         .fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
+                    AggregateType::Count => values.len() as f64,
                 };
                 
                 Ok(Value::Float64(result))

@@ -1,5 +1,5 @@
 // src/graph/calculations.rs
-use super::statistics_methods::get_parent_child_pairs;
+use super::statistics_methods::{get_parent_child_pairs, ParentChildPair};
 use super::equation_parser::{Parser, Evaluator, Expr, AggregateType};
 use super::maintain_graph;
 use super::lookups::TypeLookup;
@@ -24,36 +24,50 @@ pub struct StatResult {
     pub error_msg: Option<String>,
 }
 
+/// Cache parent titles from pairs to avoid redundant graph lookups
+fn cache_parent_titles(
+    pairs: &[ParentChildPair],
+    graph: &DirGraph
+) -> HashMap<NodeIndex, Option<String>> {
+    pairs.iter()
+        .filter_map(|pair| pair.parent.map(|idx| (
+            idx,
+            graph.get_node(idx)
+                .and_then(|node| node.get_field("title"))
+                .and_then(|v| v.as_string())
+        )))
+        .collect()
+}
+
 pub fn process_equation(
     graph: &mut DirGraph,
     selection: &CurrentSelection,
     expression: &str,
     level_index: Option<usize>,
     store_as: Option<&str>,
+    aggregate_connections: Option<bool>,
 ) -> Result<EvaluationResult, String> {
     // Start tracking time for reporting
     let start_time = Instant::now();
     
-    // Track errors
+    // Track non-fatal errors that occur during processing
     let mut errors = Vec::new();
-    
+
     // Check for unknown aggregate function names
     if let Some(unknown_func) = extract_unknown_aggregate_function(expression) {
         let supported = AggregateType::get_supported_names().join(", ");
-        let error_msg = format!(
+        return Err(format!(
             "Unknown aggregate function '{}'. Supported functions are: {}",
             unknown_func, supported
-        );
-        errors.push(error_msg.clone());
-        return Err(error_msg);
+        ));
     }
-    
+
     // Parse the expression first
     let parsed_expr = match Parser::parse_expression(expression) {
         Ok(expr) => expr,
         Err(err) => {
             // Try to provide more context for why the parsing failed
-            let error_msg = if expression.is_empty() {
+            return Err(if expression.is_empty() {
                 "Expression cannot be empty.".to_string()
             } else if expression.contains("(") && !expression.contains(")") {
                 "Missing closing parenthesis in expression.".to_string()
@@ -61,88 +75,76 @@ pub fn process_equation(
                 "Unexpected closing parenthesis in expression.".to_string()
             } else if !expression.contains("(") && is_likely_aggregate_name(expression) {
                 format!(
-                    "Function '{}' requires parentheses. Try '{}(property)' instead.", 
+                    "Function '{}' requires parentheses. Try '{}(property)' instead.",
                     expression, expression
                 )
             } else {
                 format!("Failed to parse expression: {}. Check for syntax errors or case sensitivity in function names (use 'sum', not 'SUM').", err)
-            };
-            
-            errors.push(error_msg.clone());
-            return Err(error_msg);
+            });
         },
     };
-    
+
     // Extract variables from the expression
     let variables = parsed_expr.extract_variables();
-    
+
     // Check if selection is valid or empty
     if selection.get_level_count() == 0 {
-        let error_msg = "No nodes selected. Please apply filters or traversals before calculating.".to_string();
-        errors.push(error_msg.clone());
-        return Err(error_msg);
+        return Err("No nodes selected. Please apply filters or traversals before calculating.".to_string());
     }
-    
+
     // Additional check to see if the current level has any nodes
     let effective_level_index = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
     let nodes_processed;
     if let Some(level) = selection.get_level(effective_level_index) {
         if level.get_all_nodes().is_empty() {
-            let error_msg = format!(
-                "No nodes found at level {}. Make sure your filters and traversals return data.", 
+            return Err(format!(
+                "No nodes found at level {}. Make sure your filters and traversals return data.",
                 effective_level_index
-            );
-            errors.push(error_msg.clone());
-            return Err(error_msg);
+            ));
         }
-        
+
         // Define nodes_processed at first usage
         nodes_processed = level.get_all_nodes().len();
     } else {
-        let error_msg = format!("Invalid level index: {}. Selection only has {} levels.", 
-            effective_level_index, selection.get_level_count());
-        errors.push(error_msg.clone());
-        return Err(error_msg);
+        return Err(format!("Invalid level index: {}. Selection only has {} levels.",
+            effective_level_index, selection.get_level_count()));
     }
     // If we have a selection, validate variables against schema
-    if let Some(level) = selection.get_level(effective_level_index) {
-        if !level.is_empty() {
-            // Get a sample node to determine node type
-            if let Some(nodes) = level.get_all_nodes().first() {
-                if let Some(node) = graph.get_node(*nodes) {
-                    match node {
-                        NodeData::Regular { node_type, .. } => {
-                            // Check if schema node exists for this type
-                            let schema_lookup = match TypeLookup::new(&graph.graph, "SchemaNode".to_string()) {
-                                Ok(lookup) => lookup,
-                                Err(_) => {
-                                    let error_msg = "Could not access schema information".to_string();
-                                    errors.push(error_msg.clone());
-                                    return Err(error_msg);
-                                },
-                            };
-                            
-                            let schema_title = Value::String(node_type.clone());
-                            
-                            if let Some(schema_idx) = schema_lookup.check_title(&schema_title) {
-                                if let Some(NodeData::Schema { properties, .. }) = graph.get_node(schema_idx) {
-                                    // Validate each variable against schema properties
-                                    // Don't check reserved field names like 'id', 'title', 'type'
-                                    for var in &variables {
-                                        if var != "id" && var != "title" && var != "type" && !properties.contains_key(var) {
-                                            let available = properties.keys().cloned().collect::<Vec<String>>().join(", ");
-                                            let error_msg = format!(
-                                                "Property '{}' does not exist on '{}' nodes. Available properties: {}", 
-                                                var, node_type, available
-                                            );
-                                            errors.push(error_msg.clone());
-                                            return Err(error_msg);
+    // Skip validation for connection aggregation since properties are on edges, not nodes
+    if !aggregate_connections.unwrap_or(false) {
+        if let Some(level) = selection.get_level(effective_level_index) {
+            if !level.is_empty() {
+                // Get a sample node to determine node type
+                if let Some(nodes) = level.get_all_nodes().first() {
+                    if let Some(node) = graph.get_node(*nodes) {
+                        match node {
+                            NodeData::Regular { node_type, .. } => {
+                                // Check if schema node exists for this type
+                                let schema_lookup = match TypeLookup::new(&graph.graph, "SchemaNode".to_string()) {
+                                    Ok(lookup) => lookup,
+                                    Err(_) => return Err("Could not access schema information".to_string()),
+                                };
+
+                                let schema_title = Value::String(node_type.clone());
+
+                                if let Some(schema_idx) = schema_lookup.check_title(&schema_title) {
+                                    if let Some(NodeData::Schema { properties, .. }) = graph.get_node(schema_idx) {
+                                        // Validate each variable against schema properties
+                                        // Don't check reserved field names like 'id', 'title', 'type'
+                                        for var in &variables {
+                                            if var != "id" && var != "title" && var != "type" && !properties.contains_key(var) {
+                                                let available = properties.keys().cloned().collect::<Vec<String>>().join(", ");
+                                                return Err(format!(
+                                                    "Property '{}' does not exist on '{}' nodes. Available properties: {}",
+                                                    var, node_type, available
+                                                ));
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        },
-                        _ => {}, // Skip schema nodes
+                            },
+                            _ => {}, // Skip schema nodes
+                        }
                     }
                 }
             }
@@ -152,7 +154,11 @@ pub fn process_equation(
     let is_aggregation = has_aggregation(&parsed_expr);
     
     // When performing evaluation, we can use an immutable reference to graph
-    let results = evaluate_equation(graph, selection, &parsed_expr, level_index);
+    let results = if aggregate_connections.unwrap_or(false) {
+        evaluate_connection_equation(graph, selection, &parsed_expr, level_index)
+    } else {
+        evaluate_equation(graph, selection, &parsed_expr, level_index)
+    };
     
     // Count nodes with errors for reporting
     let nodes_with_errors = results.iter().filter(|r| r.error_msg.is_some()).count();
@@ -172,11 +178,9 @@ pub fn process_equation(
     // If we don't need to store results, just return them directly
     if store_as.is_none() {
         if results.is_empty() {
-            let error_msg = "No results from calculation. Check that your selection contains data.".to_string();
-            errors.push(error_msg.clone());
-            return Err(error_msg);
+            return Err("No results from calculation. Check that your selection contains data.".to_string());
         }
-        
+
         return Ok(EvaluationResult::Computed(results));
     }
     
@@ -308,27 +312,19 @@ pub fn evaluate_equation(
 
     if is_aggregation {
         let pairs = get_parent_child_pairs(selection, level_index);
-        
-        // IMPROVEMENT #2: Cache parent titles to avoid redundant lookups
-        let parent_titles: HashMap<NodeIndex, Option<String>> = pairs.iter()
-            .filter_map(|pair| pair.parent.map(|idx| (
-                idx, 
-                graph.get_node(idx)
-                    .and_then(|node| node.get_field("title"))
-                    .and_then(|v| v.as_string())
-            )))
-            .collect();
-        
+        let parent_titles = cache_parent_titles(&pairs, graph);
+
         pairs.iter()
             .map(|pair| {
-                let child_nodes: Vec<(NodeIndex, NodeData, HashMap<String, Value>)> = pair.children.iter()
+                // Collect property objects directly - no need to clone NodeData
+                let objects: Vec<HashMap<String, Value>> = pair.children.iter()
                     .filter_map(|&node_idx| {
                         graph.get_node(node_idx)
-                            .map(|node| (node_idx, node.clone(), convert_node_to_object(node)))
+                            .map(|node| convert_node_to_object(node))
                     })
                     .collect();
 
-                if child_nodes.is_empty() {
+                if objects.is_empty() {
                     return StatResult {
                         node_idx: None,
                         parent_idx: pair.parent,
@@ -338,10 +334,6 @@ pub fn evaluate_equation(
                         error_msg: Some("No valid nodes found".to_string()),
                     };
                 }
-
-                let objects: Vec<HashMap<String, Value>> = child_nodes.into_iter()
-                    .map(|(_, _, obj)| obj)
-                    .collect();
 
                 match Evaluator::evaluate(parsed_expr, &objects) {
                     Ok(value) => StatResult {
@@ -412,6 +404,90 @@ pub fn evaluate_equation(
     }
 }
 
+/// Evaluate an expression on connection (edge) properties instead of node properties.
+/// This is useful for aggregating properties stored on edges/connections.
+pub fn evaluate_connection_equation(
+    graph: &DirGraph,
+    selection: &CurrentSelection,
+    parsed_expr: &Expr,
+    level_index: Option<usize>,
+) -> Vec<StatResult> {
+    // Connection aggregation requires at least 2 levels (parent -> child relationship)
+    if selection.get_level_count() < 2 {
+        return vec![StatResult {
+            node_idx: None,
+            parent_idx: None,
+            parent_title: None,
+            value: Value::Null,
+            error_msg: Some("Connection aggregation requires a traversal (at least 2 selection levels)".to_string()),
+        }];
+    }
+
+    let pairs = get_parent_child_pairs(selection, level_index);
+    let parent_titles = cache_parent_titles(&pairs, graph);
+
+    pairs.iter()
+        .map(|pair| {
+            let parent_idx = match pair.parent {
+                Some(idx) => idx,
+                None => {
+                    return StatResult {
+                        node_idx: None,
+                        parent_idx: None,
+                        parent_title: None,
+                        value: Value::Null,
+                        error_msg: Some("No parent node for connection aggregation".to_string()),
+                    };
+                }
+            };
+
+            // Collect edge properties from edges connecting parent to children
+            // Use find_edge for O(1) lookup instead of O(n) linear search
+            let edge_objects: Vec<HashMap<String, Value>> = pair.children.iter()
+                .filter_map(|&child_idx| {
+                    // Try parent->child direction first, then child->parent
+                    let edge_idx = graph.graph.find_edge(parent_idx, child_idx)
+                        .or_else(|| graph.graph.find_edge(child_idx, parent_idx));
+
+                    edge_idx.and_then(|idx| graph.graph.edge_weight(idx)).map(|edge_data| {
+                        let mut props = edge_data.properties.clone();
+                        // Also include the connection_type as a property
+                        props.insert("connection_type".to_string(), Value::String(edge_data.connection_type.clone()));
+                        props
+                    })
+                })
+                .collect();
+
+            if edge_objects.is_empty() {
+                return StatResult {
+                    node_idx: None,
+                    parent_idx: Some(parent_idx),
+                    parent_title: parent_titles.get(&parent_idx).cloned().flatten(),
+                    value: Value::Null,
+                    error_msg: Some("No connections found between parent and children".to_string()),
+                };
+            }
+
+            match Evaluator::evaluate(parsed_expr, &edge_objects) {
+                Ok(value) => StatResult {
+                    node_idx: None,
+                    parent_idx: Some(parent_idx),
+                    parent_title: parent_titles.get(&parent_idx).cloned().flatten(),
+                    value,
+                    error_msg: None,
+                },
+                Err(err) => StatResult {
+                    node_idx: None,
+                    parent_idx: Some(parent_idx),
+                    parent_title: parent_titles.get(&parent_idx).cloned().flatten(),
+                    value: Value::Null,
+                    error_msg: Some(err),
+                },
+            }
+        })
+        .collect()
+}
+
 fn has_aggregation(expr: &Expr) -> bool {
     match expr {
         Expr::Aggregate(_, _) => true,
@@ -424,37 +500,36 @@ fn has_aggregation(expr: &Expr) -> bool {
 }
 
 fn convert_node_to_object(node: &NodeData) -> HashMap<String, Value> {
-    let mut object = HashMap::new();
-    
-    match node {
-        NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-            // Process all properties
-            for (key, value) in properties {
-                match value {
-                    Value::Int64(_) | Value::Float64(_) | Value::UniqueId(_) => {
-                        object.insert(key.clone(), value.clone());
-                    }
-                    Value::Null => {
-                        object.insert(key.clone(), Value::Null);
-                    }
-                    Value::String(s) => {
-                        // Try to parse as number
-                        if let Ok(num) = s.parse::<f64>() {
-                            object.insert(key.clone(), Value::Float64(num));
-                        } else {
-                            // Include the string value too
-                            object.insert(key.clone(), value.clone());
-                        }
-                    }
-                    _ => {
-                        // Include all other value types
-                        object.insert(key.clone(), value.clone());
-                    }
+    let properties = match node {
+        NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => properties,
+    };
+
+    // Pre-allocate HashMap with exact capacity to avoid reallocations
+    let mut object = HashMap::with_capacity(properties.len());
+
+    // Process all properties - avoid clone for simple Copy-like types
+    for (key, value) in properties {
+        let new_value = match value {
+            // Directly construct new values for simple numeric types (avoids Clone overhead)
+            Value::Int64(n) => Value::Int64(*n),
+            Value::Float64(n) => Value::Float64(*n),
+            Value::UniqueId(n) => Value::UniqueId(*n),
+            Value::Boolean(b) => Value::Boolean(*b),
+            Value::Null => Value::Null,
+            Value::String(s) => {
+                // Try to parse as number for calculations
+                if let Ok(num) = s.parse::<f64>() {
+                    Value::Float64(num)
+                } else {
+                    Value::String(s.clone())
                 }
             }
-        }
+            // DateTime and any future types need clone
+            _ => value.clone(),
+        };
+        object.insert(key.clone(), new_value);
     }
-    
+
     object
 }
 

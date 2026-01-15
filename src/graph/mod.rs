@@ -25,8 +25,12 @@ pub mod batch_operations;
 pub mod schema;
 pub mod data_retrieval;
 pub mod reporting;
+pub mod set_operations;
+pub mod schema_validation;
+pub mod graph_algorithms;
+pub mod subgraph;
 
-use schema::{DirGraph, CurrentSelection};
+use schema::{DirGraph, CurrentSelection, PlanStep, SchemaDefinition, NodeSchemaDefinition, ConnectionSchemaDefinition};
 
 #[pyclass]
 pub struct KnowledgeGraph {
@@ -256,15 +260,20 @@ impl KnowledgeGraph {
     }
 
     fn type_filter(
-        &mut self, 
+        &mut self,
         node_type: String,
         sort: Option<&Bound<'_, PyAny>>,
         max_nodes: Option<usize>
     ) -> PyResult<Self> {
         let mut new_kg = self.clone();
+
+        // Record plan step: estimate based on type index
+        let estimated = self.inner.type_indices.get(&node_type).map(|v| v.len()).unwrap_or(0);
+        new_kg.selection.clear_execution_plan(); // Start fresh plan
+
         let mut conditions = HashMap::new();
-        conditions.insert("type".to_string(), FilterCondition::Equals(Value::String(node_type)));
-        
+        conditions.insert("type".to_string(), FilterCondition::Equals(Value::String(node_type.clone())));
+
         let sort_fields = if let Some(spec) = sort {
             match spec.extract::<String>() {
                 Ok(field) => Some(vec![(field, true)]),
@@ -273,29 +282,48 @@ impl KnowledgeGraph {
         } else {
             None
         };
-        
+
         filtering_methods::filter_nodes(
-            &self.inner, 
-            &mut new_kg.selection, 
-            conditions, 
-            sort_fields, 
+            &self.inner,
+            &mut new_kg.selection,
+            conditions,
+            sort_fields,
             max_nodes
         ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-        
+
+        // Record actual result
+        let actual = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+        new_kg.selection.add_plan_step(
+            PlanStep::new("TYPE_FILTER", Some(&node_type), estimated).with_actual_rows(actual)
+        );
+
         Ok(new_kg)
     }
 
     fn filter(&mut self, conditions: &Bound<'_, PyDict>, sort: Option<&Bound<'_, PyAny>>, max_nodes: Option<usize>) -> PyResult<Self> {
         let mut new_kg = self.clone();
+
+        // Estimate based on current selection
+        let estimated = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+
         let filter_conditions = py_in::pydict_to_filter_conditions(conditions)?;
         let sort_fields = match sort {
             Some(spec) => Some(py_in::parse_sort_fields(spec, None)?),
             None => None,
         };
-        
+
         filtering_methods::filter_nodes(&self.inner, &mut new_kg.selection, filter_conditions, sort_fields, max_nodes)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-        
+
+        // Record actual result
+        let actual = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+        new_kg.selection.add_plan_step(
+            PlanStep::new("FILTER", None, estimated).with_actual_rows(actual)
+        );
+
         Ok(new_kg)
     }
 
@@ -341,11 +369,196 @@ impl KnowledgeGraph {
             &mut new_kg.selection,
             max_per_group
         ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-        
+
         Ok(new_kg)
     }
 
-    #[pyo3(signature = (max_nodes=None, indices=None, parent_type=None, parent_info=None, 
+    /// Filter nodes that are valid at a specific date
+    ///
+    /// This is a convenience method for temporal queries. It filters nodes where:
+    /// - date_from_field <= date <= date_to_field
+    ///
+    /// Default field names are 'date_from' and 'date_to' if not specified.
+    #[pyo3(signature = (date, date_from_field=None, date_to_field=None))]
+    fn valid_at(
+        &mut self,
+        date: &str,
+        date_from_field: Option<&str>,
+        date_to_field: Option<&str>,
+    ) -> PyResult<Self> {
+        let from_field = date_from_field.unwrap_or("date_from");
+        let to_field = date_to_field.unwrap_or("date_to");
+
+        let mut new_kg = self.clone();
+
+        // Estimate based on current selection
+        let estimated = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+
+        // Build compound filter: date_from <= date AND date_to >= date
+        let mut conditions = HashMap::new();
+        conditions.insert(
+            from_field.to_string(),
+            FilterCondition::LessThanEquals(Value::String(date.to_string()))
+        );
+        conditions.insert(
+            to_field.to_string(),
+            FilterCondition::GreaterThanEquals(Value::String(date.to_string()))
+        );
+
+        filtering_methods::filter_nodes(&self.inner, &mut new_kg.selection, conditions, None, None)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        // Record actual result
+        let actual = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+        new_kg.selection.add_plan_step(
+            PlanStep::new("VALID_AT", None, estimated).with_actual_rows(actual)
+        );
+
+        Ok(new_kg)
+    }
+
+    /// Filter nodes that are valid during a date range
+    ///
+    /// This filters nodes where their validity period overlaps with the given range:
+    /// - date_from_field <= end_date AND date_to_field >= start_date
+    ///
+    /// Default field names are 'date_from' and 'date_to' if not specified.
+    #[pyo3(signature = (start_date, end_date, date_from_field=None, date_to_field=None))]
+    fn valid_during(
+        &mut self,
+        start_date: &str,
+        end_date: &str,
+        date_from_field: Option<&str>,
+        date_to_field: Option<&str>,
+    ) -> PyResult<Self> {
+        let from_field = date_from_field.unwrap_or("date_from");
+        let to_field = date_to_field.unwrap_or("date_to");
+
+        let mut new_kg = self.clone();
+
+        // Estimate based on current selection
+        let estimated = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+
+        // Build compound filter for overlapping ranges:
+        // node.date_from <= end_date AND node.date_to >= start_date
+        let mut conditions = HashMap::new();
+        conditions.insert(
+            from_field.to_string(),
+            FilterCondition::LessThanEquals(Value::String(end_date.to_string()))
+        );
+        conditions.insert(
+            to_field.to_string(),
+            FilterCondition::GreaterThanEquals(Value::String(start_date.to_string()))
+        );
+
+        filtering_methods::filter_nodes(&self.inner, &mut new_kg.selection, conditions, None, None)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        // Record actual result
+        let actual = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+        new_kg.selection.add_plan_step(
+            PlanStep::new("VALID_DURING", None, estimated).with_actual_rows(actual)
+        );
+
+        Ok(new_kg)
+    }
+
+    /// Update properties on all currently selected nodes
+    ///
+    /// This allows batch updating of properties on nodes matching the current selection.
+    /// Returns a new KnowledgeGraph with the updated nodes.
+    #[pyo3(signature = (properties, keep_selection=None))]
+    fn update(
+        &mut self,
+        properties: &Bound<'_, PyDict>,
+        keep_selection: Option<bool>,
+    ) -> PyResult<PyObject> {
+        // Get the current level's nodes
+        let current_index = self.selection.get_level_count().saturating_sub(1);
+        let level = self.selection.get_level(current_index)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "No active selection level"
+            ))?;
+
+        let nodes = level.get_all_nodes();
+        if nodes.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "No nodes selected for update"
+            ));
+        }
+
+        // Extract graph for modification
+        let mut graph = extract_or_clone_graph(&mut self.inner);
+
+        // Track total updates
+        let mut total_updated = 0;
+        let mut errors = Vec::new();
+
+        // Update each property
+        for (key, value) in properties.iter() {
+            let property_name: String = key.extract()
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Property names must be strings"
+                ))?;
+
+            let property_value = py_in::py_value_to_value(&value)?;
+
+            // Build node-value pairs for this property
+            let node_values: Vec<(Option<petgraph::graph::NodeIndex>, Value)> = nodes.iter()
+                .map(|&idx| (Some(idx), property_value.clone()))
+                .collect();
+
+            // Update this property on all nodes
+            match maintain_graph::update_node_properties(&mut graph, &node_values, &property_name) {
+                Ok(report) => {
+                    total_updated += report.nodes_updated;
+                    errors.extend(report.errors);
+                }
+                Err(e) => {
+                    errors.push(format!("Error updating property '{}': {}", property_name, e));
+                }
+            }
+        }
+
+        // Create the result KnowledgeGraph
+        let mut new_kg = KnowledgeGraph {
+            inner: Arc::new(graph),
+            selection: if keep_selection.unwrap_or(false) {
+                self.selection.clone()
+            } else {
+                CurrentSelection::new()
+            },
+            reports: self.reports.clone(),
+        };
+
+        // Create and add a report
+        let report = reporting::NodeOperationReport {
+            operation_type: "update".to_string(),
+            timestamp: chrono::Utc::now(),
+            nodes_created: 0,
+            nodes_updated: total_updated,
+            nodes_skipped: 0,
+            processing_time_ms: 0.0, // Could track this if needed
+            errors,
+        };
+
+        let report_index = new_kg.add_report(OperationReport::NodeOperation(report));
+
+        // Return the new KnowledgeGraph and the report
+        Python::with_gil(|py| {
+            let dict = PyDict::new_bound(py);
+            dict.set_item("graph", new_kg.into_py(py))?;
+            dict.set_item("nodes_updated", total_updated)?;
+            dict.set_item("report_index", report_index)?;
+            Ok(dict.into())
+        })
+    }
+
+    #[pyo3(signature = (max_nodes=None, indices=None, parent_type=None, parent_info=None,
                          flatten_single_parent=true))]
     fn get_nodes(
         &self,
@@ -406,7 +619,28 @@ impl KnowledgeGraph {
         );
         Python::with_gil(|py| py_out::level_single_values_to_pydict(py, &values))
     }
-    
+
+    /// Returns a string representation of the query execution plan.
+    ///
+    /// Shows each operation in the query chain with estimated and actual row counts.
+    /// Example output: "TYPE_FILTER Prospect (6775 nodes) -> TRAVERSE HAS_ESTIMATE (10954 nodes)"
+    fn explain(&self) -> PyResult<String> {
+        let plan = self.selection.get_execution_plan();
+        if plan.is_empty() {
+            return Ok("No query operations recorded".to_string());
+        }
+
+        let steps: Vec<String> = plan.iter().map(|step| {
+            let type_info = step.node_type.as_ref()
+                .map(|t| format!(" {}", t))
+                .unwrap_or_default();
+            let rows = step.actual_rows.unwrap_or(step.estimated_rows);
+            format!("{}{} ({} nodes)", step.operation, type_info, rows)
+        }).collect();
+
+        Ok(steps.join(" -> "))
+    }
+
     fn get_properties(&self, properties: Vec<String>, max_nodes: Option<usize>, indices: Option<Vec<usize>>) -> PyResult<PyObject> {
         let property_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
         let values = data_retrieval::get_property_values(
@@ -467,36 +701,55 @@ impl KnowledgeGraph {
         level_index: Option<usize>,
         direction: Option<String>,
         filter_target: Option<&Bound<'_, PyDict>>,
+        filter_connection: Option<&Bound<'_, PyDict>>,
         sort_target: Option<&Bound<'_, PyAny>>,
         max_nodes: Option<usize>,
         new_level: Option<bool>,
     ) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        
+
+        // Estimate based on current selection (source nodes)
+        let estimated = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+
         let conditions = if let Some(cond) = filter_target {
             Some(py_in::pydict_to_filter_conditions(cond)?)
         } else {
             None
         };
-        
+
+        let conn_conditions = if let Some(cond) = filter_connection {
+            Some(py_in::pydict_to_filter_conditions(cond)?)
+        } else {
+            None
+        };
+
         let sort_fields = if let Some(spec) = sort_target {
             Some(py_in::parse_sort_fields(spec, None)?)
         } else {
             None
         };
-    
+
         traversal_methods::make_traversal(
             &self.inner,
             &mut new_kg.selection,
-            connection_type,
+            connection_type.clone(),
             level_index,
             direction,
             conditions.as_ref(),
+            conn_conditions.as_ref(),
             sort_fields.as_ref(),
             max_nodes,
             new_level,
         ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-        
+
+        // Record actual result
+        let actual = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+        new_kg.selection.add_plan_step(
+            PlanStep::new("TRAVERSE", Some(&connection_type), estimated).with_actual_rows(actual)
+        );
+
         Ok(new_kg)
     }
 
@@ -649,18 +902,20 @@ impl KnowledgeGraph {
         py_out::convert_stats_for_python(stats)
     }
 
+    #[pyo3(signature = (expression, level_index=None, store_as=None, keep_selection=None, aggregate_connections=None))]
     fn calculate(
         &mut self,
         expression: &str,
         level_index: Option<usize>,
         store_as: Option<&str>,
         keep_selection: Option<bool>,
+        aggregate_connections: Option<bool>,
     ) -> PyResult<PyObject> {
         // If we're storing results, we'll need a mutable graph
         if let Some(target_property) = store_as {
             // Extract graph or clone it if needed
             let mut graph = extract_or_clone_graph(&mut self.inner);
-            
+
             // Process the expression
             let process_result = calculations::process_equation(
                 &mut graph,
@@ -668,6 +923,7 @@ impl KnowledgeGraph {
                 expression,
                 level_index,
                 Some(target_property),
+                aggregate_connections,
             );
             
             // Handle errors
@@ -705,6 +961,7 @@ impl KnowledgeGraph {
                 expression,
                 level_index,
                 None,
+                aggregate_connections,
             );
             
             // Handle regular errors with descriptive messages
@@ -971,5 +1228,721 @@ impl KnowledgeGraph {
             }
             Ok(report_list.into())
         })
+    }
+
+    /// Perform union of two selections - combines all nodes from both selections
+    /// Returns a new KnowledgeGraph with the union of both selections
+    fn union(&self, other: &Self) -> PyResult<Self> {
+        let mut new_kg = self.clone();
+        set_operations::union_selections(&mut new_kg.selection, &other.selection)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        Ok(new_kg)
+    }
+
+    /// Perform intersection of two selections - keeps only nodes present in both
+    /// Returns a new KnowledgeGraph with only nodes that exist in both selections
+    fn intersection(&self, other: &Self) -> PyResult<Self> {
+        let mut new_kg = self.clone();
+        set_operations::intersection_selections(&mut new_kg.selection, &other.selection)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        Ok(new_kg)
+    }
+
+    /// Perform difference of two selections - keeps nodes in self but not in other
+    /// Returns a new KnowledgeGraph with nodes from self that are not in other
+    fn difference(&self, other: &Self) -> PyResult<Self> {
+        let mut new_kg = self.clone();
+        set_operations::difference_selections(&mut new_kg.selection, &other.selection)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        Ok(new_kg)
+    }
+
+    /// Perform symmetric difference of two selections - keeps nodes in either but not both
+    /// Returns a new KnowledgeGraph with nodes that are in exactly one of the selections
+    fn symmetric_difference(&self, other: &Self) -> PyResult<Self> {
+        let mut new_kg = self.clone();
+        set_operations::symmetric_difference_selections(&mut new_kg.selection, &other.selection)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        Ok(new_kg)
+    }
+
+    // ========================================================================
+    // Schema Definition & Validation Methods
+    // ========================================================================
+
+    /// Define the expected schema for the graph
+    ///
+    /// Args:
+    ///     schema_dict: A dictionary defining the schema with the following structure:
+    ///         {
+    ///             'nodes': {
+    ///                 'NodeType': {
+    ///                     'required': ['field1', 'field2'],  # Required fields
+    ///                     'optional': ['field3'],            # Optional fields (for documentation)
+    ///                     'types': {'field1': 'string', 'field2': 'integer'}  # Field types
+    ///                 }
+    ///             },
+    ///             'connections': {
+    ///                 'CONNECTION_TYPE': {
+    ///                     'source': 'SourceNodeType',
+    ///                     'target': 'TargetNodeType',
+    ///                     'cardinality': 'one-to-many',  # Optional
+    ///                     'required_properties': ['prop1'],  # Optional
+    ///                     'property_types': {'prop1': 'float'}  # Optional
+    ///                 }
+    ///             }
+    ///         }
+    ///
+    /// Returns:
+    ///     Self with schema defined
+    fn define_schema(&mut self, schema_dict: &Bound<'_, PyDict>) -> PyResult<Self> {
+        let mut schema = SchemaDefinition::new();
+
+        // Parse node schemas
+        if let Some(nodes_dict) = schema_dict.get_item("nodes")? {
+            if let Ok(nodes) = nodes_dict.downcast::<PyDict>() {
+                for (node_type_key, node_schema_val) in nodes.iter() {
+                    let node_type: String = node_type_key.extract()?;
+                    let node_schema_dict = node_schema_val.downcast::<PyDict>()
+                        .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                            format!("Schema for node type '{}' must be a dictionary", node_type)
+                        ))?;
+
+                    let mut node_schema = NodeSchemaDefinition::default();
+
+                    // Parse required fields
+                    if let Some(required) = node_schema_dict.get_item("required")? {
+                        node_schema.required_fields = required.extract::<Vec<String>>()?;
+                    }
+
+                    // Parse optional fields
+                    if let Some(optional) = node_schema_dict.get_item("optional")? {
+                        node_schema.optional_fields = optional.extract::<Vec<String>>()?;
+                    }
+
+                    // Parse field types
+                    if let Some(types) = node_schema_dict.get_item("types")? {
+                        let types_dict = types.downcast::<PyDict>()
+                            .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                                "types must be a dictionary"
+                            ))?;
+                        for (field, type_val) in types_dict.iter() {
+                            node_schema.field_types.insert(
+                                field.extract::<String>()?,
+                                type_val.extract::<String>()?
+                            );
+                        }
+                    }
+
+                    schema.add_node_schema(node_type, node_schema);
+                }
+            }
+        }
+
+        // Parse connection schemas
+        if let Some(connections_dict) = schema_dict.get_item("connections")? {
+            if let Ok(connections) = connections_dict.downcast::<PyDict>() {
+                for (conn_type_key, conn_schema_val) in connections.iter() {
+                    let conn_type: String = conn_type_key.extract()?;
+                    let conn_schema_dict = conn_schema_val.downcast::<PyDict>()
+                        .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                            format!("Schema for connection type '{}' must be a dictionary", conn_type)
+                        ))?;
+
+                    let source_type: String = conn_schema_dict
+                        .get_item("source")?
+                        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                            format!("Connection '{}' missing required 'source' field", conn_type)
+                        ))?
+                        .extract()?;
+
+                    let target_type: String = conn_schema_dict
+                        .get_item("target")?
+                        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                            format!("Connection '{}' missing required 'target' field", conn_type)
+                        ))?
+                        .extract()?;
+
+                    let mut conn_schema = ConnectionSchemaDefinition {
+                        source_type,
+                        target_type,
+                        cardinality: None,
+                        required_properties: Vec::new(),
+                        property_types: HashMap::new(),
+                    };
+
+                    // Parse optional cardinality
+                    if let Some(cardinality) = conn_schema_dict.get_item("cardinality")? {
+                        conn_schema.cardinality = Some(cardinality.extract::<String>()?);
+                    }
+
+                    // Parse required_properties
+                    if let Some(required_props) = conn_schema_dict.get_item("required_properties")? {
+                        conn_schema.required_properties = required_props.extract::<Vec<String>>()?;
+                    }
+
+                    // Parse property_types
+                    if let Some(prop_types) = conn_schema_dict.get_item("property_types")? {
+                        let types_dict = prop_types.downcast::<PyDict>()
+                            .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                                "property_types must be a dictionary"
+                            ))?;
+                        for (field, type_val) in types_dict.iter() {
+                            conn_schema.property_types.insert(
+                                field.extract::<String>()?,
+                                type_val.extract::<String>()?
+                            );
+                        }
+                    }
+
+                    schema.add_connection_schema(conn_type, conn_schema);
+                }
+            }
+        }
+
+        // Store the schema in the graph
+        let mut graph = extract_or_clone_graph(&mut self.inner);
+        graph.set_schema(schema);
+        self.inner = Arc::new(graph);
+
+        Ok(self.clone())
+    }
+
+    /// Validate the graph against the defined schema
+    ///
+    /// Args:
+    ///     strict: If True, reports node/connection types that exist in the graph
+    ///             but are not defined in the schema. Default is False.
+    ///
+    /// Returns:
+    ///     A list of validation error dictionaries. Empty list means validation passed.
+    ///     Each error dict contains:
+    ///         - 'error_type': Type of error (e.g., 'missing_required_field', 'type_mismatch')
+    ///         - 'message': Human-readable error message
+    ///         - Additional fields depending on error type
+    fn validate_schema(&self, py: Python<'_>, strict: Option<bool>) -> PyResult<PyObject> {
+        let schema = self.inner.get_schema()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "No schema defined. Call define_schema() first."
+            ))?;
+
+        let errors = schema_validation::validate_graph(
+            &self.inner,
+            schema,
+            strict.unwrap_or(false)
+        );
+
+        // Convert errors to Python list of dicts
+        let result = PyList::empty_bound(py);
+        for error in errors {
+            let error_dict = PyDict::new_bound(py);
+
+            match &error {
+                schema::ValidationError::MissingRequiredField { node_type, node_title, field } => {
+                    error_dict.set_item("error_type", "missing_required_field")?;
+                    error_dict.set_item("node_type", node_type)?;
+                    error_dict.set_item("node_title", node_title)?;
+                    error_dict.set_item("field", field)?;
+                }
+                schema::ValidationError::TypeMismatch { node_type, node_title, field, expected_type, actual_type } => {
+                    error_dict.set_item("error_type", "type_mismatch")?;
+                    error_dict.set_item("node_type", node_type)?;
+                    error_dict.set_item("node_title", node_title)?;
+                    error_dict.set_item("field", field)?;
+                    error_dict.set_item("expected_type", expected_type)?;
+                    error_dict.set_item("actual_type", actual_type)?;
+                }
+                schema::ValidationError::InvalidConnectionEndpoint { connection_type, expected_source, expected_target, actual_source, actual_target } => {
+                    error_dict.set_item("error_type", "invalid_connection_endpoint")?;
+                    error_dict.set_item("connection_type", connection_type)?;
+                    error_dict.set_item("expected_source", expected_source)?;
+                    error_dict.set_item("expected_target", expected_target)?;
+                    error_dict.set_item("actual_source", actual_source)?;
+                    error_dict.set_item("actual_target", actual_target)?;
+                }
+                schema::ValidationError::MissingConnectionProperty { connection_type, source_title, target_title, property } => {
+                    error_dict.set_item("error_type", "missing_connection_property")?;
+                    error_dict.set_item("connection_type", connection_type)?;
+                    error_dict.set_item("source_title", source_title)?;
+                    error_dict.set_item("target_title", target_title)?;
+                    error_dict.set_item("property", property)?;
+                }
+                schema::ValidationError::UndefinedNodeType { node_type, count } => {
+                    error_dict.set_item("error_type", "undefined_node_type")?;
+                    error_dict.set_item("node_type", node_type)?;
+                    error_dict.set_item("count", count)?;
+                }
+                schema::ValidationError::UndefinedConnectionType { connection_type, count } => {
+                    error_dict.set_item("error_type", "undefined_connection_type")?;
+                    error_dict.set_item("connection_type", connection_type)?;
+                    error_dict.set_item("count", count)?;
+                }
+            }
+
+            error_dict.set_item("message", error.to_string())?;
+            result.append(error_dict)?;
+        }
+
+        Ok(result.into())
+    }
+
+    /// Check if a schema has been defined for this graph
+    fn has_schema(&self) -> bool {
+        self.inner.get_schema().is_some()
+    }
+
+    /// Clear the schema definition from the graph
+    fn clear_schema(&mut self) -> PyResult<Self> {
+        let mut graph = extract_or_clone_graph(&mut self.inner);
+        graph.clear_schema();
+        self.inner = Arc::new(graph);
+        Ok(self.clone())
+    }
+
+    /// Get the current schema definition as a dictionary
+    fn get_schema_definition(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let schema = match self.inner.get_schema() {
+            Some(s) => s,
+            None => return Ok(py.None()),
+        };
+
+        let result = PyDict::new_bound(py);
+
+        // Convert node schemas
+        let nodes_dict = PyDict::new_bound(py);
+        for (node_type, node_schema) in &schema.node_schemas {
+            let schema_dict = PyDict::new_bound(py);
+            schema_dict.set_item("required", &node_schema.required_fields)?;
+            schema_dict.set_item("optional", &node_schema.optional_fields)?;
+
+            let types_dict = PyDict::new_bound(py);
+            for (field, field_type) in &node_schema.field_types {
+                types_dict.set_item(field, field_type)?;
+            }
+            schema_dict.set_item("types", types_dict)?;
+
+            nodes_dict.set_item(node_type, schema_dict)?;
+        }
+        result.set_item("nodes", nodes_dict)?;
+
+        // Convert connection schemas
+        let connections_dict = PyDict::new_bound(py);
+        for (conn_type, conn_schema) in &schema.connection_schemas {
+            let schema_dict = PyDict::new_bound(py);
+            schema_dict.set_item("source", &conn_schema.source_type)?;
+            schema_dict.set_item("target", &conn_schema.target_type)?;
+
+            if let Some(cardinality) = &conn_schema.cardinality {
+                schema_dict.set_item("cardinality", cardinality)?;
+            }
+
+            if !conn_schema.required_properties.is_empty() {
+                schema_dict.set_item("required_properties", &conn_schema.required_properties)?;
+            }
+
+            if !conn_schema.property_types.is_empty() {
+                let types_dict = PyDict::new_bound(py);
+                for (prop, prop_type) in &conn_schema.property_types {
+                    types_dict.set_item(prop, prop_type)?;
+                }
+                schema_dict.set_item("property_types", types_dict)?;
+            }
+
+            connections_dict.set_item(conn_type, schema_dict)?;
+        }
+        result.set_item("connections", connections_dict)?;
+
+        Ok(result.into())
+    }
+
+    // ========================================================================
+    // Graph Algorithms: Path Finding & Connectivity
+    // ========================================================================
+
+    /// Find the shortest path between two nodes.
+    ///
+    /// Args:
+    ///     source_type: The node type of the source node
+    ///     source_id: The unique ID of the source node
+    ///     target_type: The node type of the target node
+    ///     target_id: The unique ID of the target node
+    ///
+    /// Returns:
+    ///     A dictionary with:
+    ///         - 'path': List of node info dicts along the path
+    ///         - 'connections': List of connection types between nodes
+    ///         - 'length': Number of hops in the path
+    ///     Returns None if no path exists.
+    fn shortest_path(
+        &self,
+        py: Python<'_>,
+        source_type: &str,
+        source_id: &Bound<'_, PyAny>,
+        target_type: &str,
+        target_id: &Bound<'_, PyAny>,
+    ) -> PyResult<PyObject> {
+        // Look up source node
+        let source_lookup = lookups::TypeLookup::new(&self.inner.graph, source_type.to_string())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        let source_value = py_in::py_value_to_value(source_id)?;
+        let source_idx = source_lookup.check_uid(&source_value)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Source node with id {:?} not found in type '{}'", source_value, source_type)
+            ))?;
+
+        // Look up target node
+        let target_lookup = if target_type == source_type {
+            source_lookup
+        } else {
+            lookups::TypeLookup::new(&self.inner.graph, target_type.to_string())
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?
+        };
+
+        let target_value = py_in::py_value_to_value(target_id)?;
+        let target_idx = target_lookup.check_uid(&target_value)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Target node with id {:?} not found in type '{}'", target_value, target_type)
+            ))?;
+
+        // Find shortest path
+        let result = graph_algorithms::shortest_path(&self.inner, source_idx, target_idx);
+
+        match result {
+            Some(path_result) => {
+                let result_dict = PyDict::new_bound(py);
+
+                // Build path info list
+                let path_list = PyList::empty_bound(py);
+                for &node_idx in &path_result.path {
+                    if let Some(info) = graph_algorithms::get_node_info(&self.inner, node_idx) {
+                        let node_dict = PyDict::new_bound(py);
+                        node_dict.set_item("type", &info.node_type)?;
+                        node_dict.set_item("title", &info.title)?;
+                        node_dict.set_item("id", py_out::value_to_py(py, &info.id)?)?;
+                        path_list.append(node_dict)?;
+                    }
+                }
+                result_dict.set_item("path", path_list)?;
+
+                // Build connections list
+                let connections = graph_algorithms::get_path_connections(&self.inner, &path_result.path);
+                let conn_list = PyList::empty_bound(py);
+                for conn in connections {
+                    match conn {
+                        Some(c) => conn_list.append(&c)?,
+                        None => conn_list.append(py.None())?,
+                    }
+                }
+                result_dict.set_item("connections", conn_list)?;
+                result_dict.set_item("length", path_result.cost)?;
+
+                Ok(result_dict.into())
+            }
+            None => Ok(py.None()),
+        }
+    }
+
+    /// Find all paths between two nodes up to a maximum number of hops.
+    ///
+    /// Args:
+    ///     source_type: The node type of the source node
+    ///     source_id: The unique ID of the source node
+    ///     target_type: The node type of the target node
+    ///     target_id: The unique ID of the target node
+    ///     max_hops: Maximum path length to search (default: 5)
+    ///
+    /// Returns:
+    ///     A list of path dictionaries, each with 'path', 'connections', and 'length'
+    ///
+    /// Warning: This can be expensive for graphs with many paths!
+    fn all_paths(
+        &self,
+        py: Python<'_>,
+        source_type: &str,
+        source_id: &Bound<'_, PyAny>,
+        target_type: &str,
+        target_id: &Bound<'_, PyAny>,
+        max_hops: Option<usize>,
+    ) -> PyResult<PyObject> {
+        let max_hops = max_hops.unwrap_or(5);
+
+        // Look up source node
+        let source_lookup = lookups::TypeLookup::new(&self.inner.graph, source_type.to_string())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        let source_value = py_in::py_value_to_value(source_id)?;
+        let source_idx = source_lookup.check_uid(&source_value)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Source node with id {:?} not found in type '{}'", source_value, source_type)
+            ))?;
+
+        // Look up target node
+        let target_lookup = if target_type == source_type {
+            source_lookup
+        } else {
+            lookups::TypeLookup::new(&self.inner.graph, target_type.to_string())
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?
+        };
+
+        let target_value = py_in::py_value_to_value(target_id)?;
+        let target_idx = target_lookup.check_uid(&target_value)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Target node with id {:?} not found in type '{}'", target_value, target_type)
+            ))?;
+
+        // Find all paths
+        let paths = graph_algorithms::all_paths(&self.inner, source_idx, target_idx, max_hops);
+
+        // Convert to Python output
+        let result_list = PyList::empty_bound(py);
+        for path in paths {
+            let path_dict = PyDict::new_bound(py);
+
+            // Build path info list
+            let path_list = PyList::empty_bound(py);
+            for &node_idx in &path {
+                if let Some(info) = graph_algorithms::get_node_info(&self.inner, node_idx) {
+                    let node_dict = PyDict::new_bound(py);
+                    node_dict.set_item("type", &info.node_type)?;
+                    node_dict.set_item("title", &info.title)?;
+                    node_dict.set_item("id", py_out::value_to_py(py, &info.id)?)?;
+                    path_list.append(node_dict)?;
+                }
+            }
+            path_dict.set_item("path", path_list)?;
+
+            // Build connections list
+            let connections = graph_algorithms::get_path_connections(&self.inner, &path);
+            let conn_list = PyList::empty_bound(py);
+            for conn in connections {
+                match conn {
+                    Some(c) => conn_list.append(&c)?,
+                    None => conn_list.append(py.None())?,
+                }
+            }
+            path_dict.set_item("connections", conn_list)?;
+            path_dict.set_item("length", path.len().saturating_sub(1))?;
+
+            result_list.append(path_dict)?;
+        }
+
+        Ok(result_list.into())
+    }
+
+    /// Find all connected components in the graph.
+    ///
+    /// Args:
+    ///     weak: If True (default), find weakly connected components (treating graph as undirected).
+    ///           If False, find strongly connected components (respecting edge direction).
+    ///
+    /// Returns:
+    ///     A list of components, each component is a list of node info dicts.
+    ///     Components are sorted by size (largest first).
+    fn connected_components(&self, py: Python<'_>, weak: Option<bool>) -> PyResult<PyObject> {
+        let weak = weak.unwrap_or(true);
+
+        let components = if weak {
+            graph_algorithms::weakly_connected_components(&self.inner)
+        } else {
+            graph_algorithms::connected_components(&self.inner)
+        };
+
+        // Convert to Python output
+        let result_list = PyList::empty_bound(py);
+        for component in components {
+            let comp_list = PyList::empty_bound(py);
+            for &node_idx in &component {
+                if let Some(info) = graph_algorithms::get_node_info(&self.inner, node_idx) {
+                    let node_dict = PyDict::new_bound(py);
+                    node_dict.set_item("type", &info.node_type)?;
+                    node_dict.set_item("title", &info.title)?;
+                    node_dict.set_item("id", py_out::value_to_py(py, &info.id)?)?;
+                    comp_list.append(node_dict)?;
+                }
+            }
+            result_list.append(comp_list)?;
+        }
+
+        Ok(result_list.into())
+    }
+
+    /// Check if two nodes are connected (directly or indirectly).
+    ///
+    /// Args:
+    ///     source_type: The node type of the source node
+    ///     source_id: The unique ID of the source node
+    ///     target_type: The node type of the target node
+    ///     target_id: The unique ID of the target node
+    ///
+    /// Returns:
+    ///     True if the nodes are connected, False otherwise
+    fn are_connected(
+        &self,
+        source_type: &str,
+        source_id: &Bound<'_, PyAny>,
+        target_type: &str,
+        target_id: &Bound<'_, PyAny>,
+    ) -> PyResult<bool> {
+        // Look up source node
+        let source_lookup = lookups::TypeLookup::new(&self.inner.graph, source_type.to_string())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        let source_value = py_in::py_value_to_value(source_id)?;
+        let source_idx = source_lookup.check_uid(&source_value)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Source node with id {:?} not found in type '{}'", source_value, source_type)
+            ))?;
+
+        // Look up target node
+        let target_lookup = if target_type == source_type {
+            source_lookup
+        } else {
+            lookups::TypeLookup::new(&self.inner.graph, target_type.to_string())
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?
+        };
+
+        let target_value = py_in::py_value_to_value(target_id)?;
+        let target_idx = target_lookup.check_uid(&target_value)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Target node with id {:?} not found in type '{}'", target_value, target_type)
+            ))?;
+
+        Ok(graph_algorithms::are_connected(&self.inner, source_idx, target_idx))
+    }
+
+    /// Get the degree (number of connections) for nodes in the current selection.
+    ///
+    /// Returns:
+    ///     A dictionary mapping node titles to their degree counts
+    fn get_degrees(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let result_dict = PyDict::new_bound(py);
+
+        let level_count = self.selection.get_level_count();
+        if level_count == 0 {
+            return Ok(result_dict.into());
+        }
+
+        let level = self.selection.get_level(level_count - 1)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No selection level"))?;
+
+        for node_idx in level.get_all_nodes() {
+            if let Some(info) = graph_algorithms::get_node_info(&self.inner, node_idx) {
+                let degree = graph_algorithms::node_degree(&self.inner, node_idx);
+                result_dict.set_item(&info.title, degree)?;
+            }
+        }
+
+        Ok(result_dict.into())
+    }
+
+    // ========================================================================
+    // Subgraph Extraction Methods
+    // ========================================================================
+
+    /// Expand the current selection by N hops.
+    ///
+    /// This performs a breadth-first expansion from all currently selected nodes,
+    /// including all nodes within the specified number of hops. The expansion
+    /// considers edges in both directions (undirected).
+    ///
+    /// Args:
+    ///     hops: Number of hops to expand (default: 1)
+    ///
+    /// Returns:
+    ///     A new KnowledgeGraph with the expanded selection
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Start with a single field and expand to include connected nodes
+    ///     expanded = graph.type_filter('Field').filter({'name': 'EKOFISK'}).expand(hops=2)
+    ///     ```
+    fn expand(&mut self, hops: Option<usize>) -> PyResult<Self> {
+        let hops = hops.unwrap_or(1);
+        let mut new_kg = self.clone();
+
+        // Record plan step
+        let estimated = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+
+        subgraph::expand_selection(&self.inner, &mut new_kg.selection, hops)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        // Record actual result
+        let actual = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+        new_kg.selection.add_plan_step(
+            PlanStep::new("EXPAND", None, estimated).with_actual_rows(actual)
+        );
+
+        Ok(new_kg)
+    }
+
+    /// Extract the currently selected nodes into a new independent subgraph.
+    ///
+    /// Creates a new KnowledgeGraph containing only the nodes in the current
+    /// selection and all edges that connect those nodes. The new graph is
+    /// completely independent from the original.
+    ///
+    /// Returns:
+    ///     A new KnowledgeGraph containing only the selected nodes and their
+    ///     connecting edges
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Extract a subgraph of a specific region
+    ///     subgraph = (
+    ///         graph.type_filter('Field')
+    ///         .filter({'region': 'North Sea'})
+    ///         .expand(hops=2)
+    ///         .to_subgraph()
+    ///     )
+    ///     # Save the subgraph for later use
+    ///     subgraph.save('north_sea_region.bin')
+    ///     ```
+    fn to_subgraph(&self) -> PyResult<Self> {
+        let extracted = subgraph::extract_subgraph(&self.inner, &self.selection)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        Ok(KnowledgeGraph {
+            inner: Arc::new(extracted),
+            selection: CurrentSelection::new(),
+            reports: OperationReports::new(), // Fresh reports for new graph
+        })
+    }
+
+    /// Get statistics about the subgraph that would be extracted.
+    ///
+    /// Returns information about what would be included in a subgraph extraction
+    /// without actually creating the subgraph. Useful for understanding the
+    /// scope of an extraction before committing to it.
+    ///
+    /// Returns:
+    ///     A dictionary with:
+    ///         - 'node_count': Total number of nodes
+    ///         - 'edge_count': Total number of edges
+    ///         - 'node_types': Dict of node type -> count
+    ///         - 'connection_types': Dict of connection type -> count
+    fn subgraph_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let stats = subgraph::get_subgraph_stats(&self.inner, &self.selection)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        let result_dict = PyDict::new_bound(py);
+        result_dict.set_item("node_count", stats.node_count)?;
+        result_dict.set_item("edge_count", stats.edge_count)?;
+
+        let node_types_dict = PyDict::new_bound(py);
+        for (node_type, count) in &stats.node_types {
+            node_types_dict.set_item(node_type, count)?;
+        }
+        result_dict.set_item("node_types", node_types_dict)?;
+
+        let conn_types_dict = PyDict::new_bound(py);
+        for (conn_type, count) in &stats.connection_types {
+            conn_types_dict.set_item(conn_type, count)?;
+        }
+        result_dict.set_item("connection_types", conn_types_dict)?;
+
+        Ok(result_dict.into())
     }
 }

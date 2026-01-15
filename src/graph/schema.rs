@@ -44,7 +44,7 @@ impl SelectionLevel {
 
     pub fn get_all_nodes(&self) -> Vec<NodeIndex> {
         self.selections.values()
-            .flat_map(|children| children.iter().cloned())
+            .flat_map(|children| children.iter().copied())
             .collect()
     }
 
@@ -57,10 +57,36 @@ impl SelectionLevel {
     }
 }
 
+/// Represents a single step in the query execution plan
+#[derive(Clone, Debug)]
+pub struct PlanStep {
+    pub operation: String,
+    pub node_type: Option<String>,
+    pub estimated_rows: usize,
+    pub actual_rows: Option<usize>,
+}
+
+impl PlanStep {
+    pub fn new(operation: &str, node_type: Option<&str>, estimated_rows: usize) -> Self {
+        PlanStep {
+            operation: operation.to_string(),
+            node_type: node_type.map(|s| s.to_string()),
+            estimated_rows,
+            actual_rows: None,
+        }
+    }
+
+    pub fn with_actual_rows(mut self, actual: usize) -> Self {
+        self.actual_rows = Some(actual);
+        self
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct CurrentSelection {
     levels: Vec<SelectionLevel>,
     current_level: usize,
+    execution_plan: Vec<PlanStep>,
 }
 
 impl CurrentSelection {
@@ -68,6 +94,7 @@ impl CurrentSelection {
         let mut selection = CurrentSelection {
             levels: Vec::new(),
             current_level: 0,
+            execution_plan: Vec::new(),
         };
         selection.add_level(); // Always start with an initial level
         selection
@@ -82,7 +109,23 @@ impl CurrentSelection {
     pub fn clear(&mut self) {
         self.levels.clear();
         self.current_level = 0;
+        self.execution_plan.clear();
         self.add_level(); // Ensure we always have at least one level after clearing
+    }
+
+    /// Add a step to the execution plan
+    pub fn add_plan_step(&mut self, step: PlanStep) {
+        self.execution_plan.push(step);
+    }
+
+    /// Get the execution plan steps
+    pub fn get_execution_plan(&self) -> &[PlanStep] {
+        &self.execution_plan
+    }
+
+    /// Clear just the execution plan (for fresh queries)
+    pub fn clear_execution_plan(&mut self) {
+        self.execution_plan.clear();
     }
 
     pub fn get_level_count(&self) -> usize {
@@ -102,6 +145,9 @@ impl CurrentSelection {
 pub struct DirGraph {
     pub(crate) graph: Graph,
     pub(crate) type_indices: HashMap<String, Vec<NodeIndex>>,
+    /// Optional schema definition for validation
+    #[serde(default)]
+    pub(crate) schema_definition: Option<SchemaDefinition>,
 }
 
 impl DirGraph {
@@ -109,7 +155,23 @@ impl DirGraph {
         DirGraph {
             graph: Graph::new(),
             type_indices: HashMap::new(),
+            schema_definition: None,
         }
+    }
+
+    /// Set the schema definition for this graph
+    pub fn set_schema(&mut self, schema: SchemaDefinition) {
+        self.schema_definition = Some(schema);
+    }
+
+    /// Get the schema definition if one is set
+    pub fn get_schema(&self) -> Option<&SchemaDefinition> {
+        self.schema_definition.as_ref()
+    }
+
+    /// Clear the schema definition
+    pub fn clear_schema(&mut self) {
+        self.schema_definition = None;
     }
 
     pub fn has_connection_type(&self, connection_type: &str) -> bool {
@@ -229,3 +291,133 @@ impl EdgeData {
 }
 
 pub type Graph = DiGraph<NodeData, EdgeData>;
+
+// ============================================================================
+// Schema Definition & Validation Types
+// ============================================================================
+
+/// Defines the expected schema for a node type
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NodeSchemaDefinition {
+    /// Fields that must be present on all nodes of this type
+    pub required_fields: Vec<String>,
+    /// Fields that may be present (for documentation purposes)
+    pub optional_fields: Vec<String>,
+    /// Expected types for fields: "string", "integer", "float", "boolean", "datetime"
+    pub field_types: HashMap<String, String>,
+}
+
+/// Defines the expected schema for a connection type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionSchemaDefinition {
+    /// The source node type for this connection
+    pub source_type: String,
+    /// The target node type for this connection
+    pub target_type: String,
+    /// Optional cardinality constraint: "one-to-one", "one-to-many", "many-to-one", "many-to-many"
+    pub cardinality: Option<String>,
+    /// Required properties on the connection
+    pub required_properties: Vec<String>,
+    /// Expected types for connection properties
+    pub property_types: HashMap<String, String>,
+}
+
+/// Complete schema definition for the graph
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SchemaDefinition {
+    /// Schema definitions for each node type
+    pub node_schemas: HashMap<String, NodeSchemaDefinition>,
+    /// Schema definitions for each connection type
+    pub connection_schemas: HashMap<String, ConnectionSchemaDefinition>,
+}
+
+impl SchemaDefinition {
+    pub fn new() -> Self {
+        SchemaDefinition {
+            node_schemas: HashMap::new(),
+            connection_schemas: HashMap::new(),
+        }
+    }
+
+    /// Add a node type schema
+    pub fn add_node_schema(&mut self, node_type: String, schema: NodeSchemaDefinition) {
+        self.node_schemas.insert(node_type, schema);
+    }
+
+    /// Add a connection type schema
+    pub fn add_connection_schema(&mut self, connection_type: String, schema: ConnectionSchemaDefinition) {
+        self.connection_schemas.insert(connection_type, schema);
+    }
+}
+
+/// Represents a validation error found during schema validation
+#[derive(Debug, Clone)]
+pub enum ValidationError {
+    /// A required field is missing from a node
+    MissingRequiredField {
+        node_type: String,
+        node_title: String,
+        field: String,
+    },
+    /// A field has the wrong type
+    TypeMismatch {
+        node_type: String,
+        node_title: String,
+        field: String,
+        expected_type: String,
+        actual_type: String,
+    },
+    /// A connection has invalid source or target type
+    InvalidConnectionEndpoint {
+        connection_type: String,
+        expected_source: String,
+        expected_target: String,
+        actual_source: String,
+        actual_target: String,
+    },
+    /// A required property is missing from a connection
+    MissingConnectionProperty {
+        connection_type: String,
+        source_title: String,
+        target_title: String,
+        property: String,
+    },
+    /// A node type exists in the graph but not in the schema
+    UndefinedNodeType {
+        node_type: String,
+        count: usize,
+    },
+    /// A connection type exists in the graph but not in the schema
+    UndefinedConnectionType {
+        connection_type: String,
+        count: usize,
+    },
+}
+
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValidationError::MissingRequiredField { node_type, node_title, field } => {
+                write!(f, "Missing required field '{}' on {} node '{}'", field, node_type, node_title)
+            }
+            ValidationError::TypeMismatch { node_type, node_title, field, expected_type, actual_type } => {
+                write!(f, "Type mismatch on {} node '{}': field '{}' expected {}, got {}",
+                    node_type, node_title, field, expected_type, actual_type)
+            }
+            ValidationError::InvalidConnectionEndpoint { connection_type, expected_source, expected_target, actual_source, actual_target } => {
+                write!(f, "Invalid connection '{}': expected {}->{}  but found {}->{}",
+                    connection_type, expected_source, expected_target, actual_source, actual_target)
+            }
+            ValidationError::MissingConnectionProperty { connection_type, source_title, target_title, property } => {
+                write!(f, "Missing required property '{}' on {} connection from '{}' to '{}'",
+                    property, connection_type, source_title, target_title)
+            }
+            ValidationError::UndefinedNodeType { node_type, count } => {
+                write!(f, "Node type '{}' ({} nodes) exists in graph but not defined in schema", node_type, count)
+            }
+            ValidationError::UndefinedConnectionType { connection_type, count } => {
+                write!(f, "Connection type '{}' ({} connections) exists in graph but not defined in schema", connection_type, count)
+            }
+        }
+    }
+}

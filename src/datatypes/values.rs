@@ -15,6 +15,8 @@ pub enum FilterCondition {
     LessThan(Value),
     LessThanEquals(Value),
     In(Vec<Value>),
+    IsNull,
+    IsNotNull,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]

@@ -46,6 +46,8 @@ fn parse_operator_condition(op: &str, val: &Bound<'_, PyAny>) -> PyResult<Filter
         "<" => Ok(FilterCondition::LessThan(py_value_to_value(val)?)),
         "<=" => Ok(FilterCondition::LessThanEquals(py_value_to_value(val)?)),
         "in" => parse_in_condition(val),
+        "is_null" => Ok(FilterCondition::IsNull),
+        "is_not_null" => Ok(FilterCondition::IsNotNull),
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             format!("Unsupported operator: {}", op)
         )),
@@ -320,19 +322,30 @@ pub fn py_value_to_value(value: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::Null);
     }
 
-    if let Ok(s) = value.extract::<String>() {
-        Ok(Value::String(s))
-    } else if let Ok(f) = value.extract::<f64>() {
-        Ok(Value::Float64(f))
-    } else if let Ok(i) = value.extract::<i64>() {
-        Ok(Value::Int64(i))
-    } else if let Ok(i) = value.extract::<i32>() {
-        Ok(Value::Int64(i64::from(i)))
-    } else if let Ok(b) = value.extract::<bool>() {
-        Ok(Value::Boolean(b))
-    } else if let Ok(u) = value.extract::<u32>() {
-        Ok(Value::UniqueId(u))
-    } else {
-        Ok(Value::Null)
+    // Check bool FIRST - Python bool is a subclass of int, so must check before numeric
+    if value.is_instance_of::<pyo3::types::PyBool>() {
+        if let Ok(b) = value.extract::<bool>() {
+            return Ok(Value::Boolean(b));
+        }
     }
+
+    // Try numeric types before string (they fail fast without allocation)
+    if let Ok(i) = value.extract::<i64>() {
+        return Ok(Value::Int64(i));
+    }
+    if let Ok(f) = value.extract::<f64>() {
+        return Ok(Value::Float64(f));
+    }
+
+    // String extraction is expensive (allocates), so try last among common types
+    if let Ok(s) = value.extract::<String>() {
+        return Ok(Value::String(s));
+    }
+
+    // Fallback for other types
+    if let Ok(u) = value.extract::<u32>() {
+        return Ok(Value::UniqueId(u));
+    }
+
+    Ok(Value::Null)
 }

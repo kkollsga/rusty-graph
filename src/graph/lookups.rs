@@ -46,7 +46,28 @@ impl TypeLookup {
     }
 
     pub fn check_uid(&self, uid: &Value) -> Option<NodeIndex> {
-        self.uid_to_index.get(uid).copied()
+        // First try direct lookup
+        if let Some(idx) = self.uid_to_index.get(uid).copied() {
+            return Some(idx);
+        }
+
+        // Handle type mismatches between Int64 and UniqueId
+        // Python integers become Int64, but unique IDs are stored as UniqueId
+        match uid {
+            Value::Int64(i) => {
+                // Try as UniqueId if the value fits
+                if *i >= 0 && *i <= u32::MAX as i64 {
+                    self.uid_to_index.get(&Value::UniqueId(*i as u32)).copied()
+                } else {
+                    None
+                }
+            }
+            Value::UniqueId(u) => {
+                // Try as Int64
+                self.uid_to_index.get(&Value::Int64(*u as i64)).copied()
+            }
+            _ => None,
+        }
     }
 
     pub fn check_title(&self, title: &Value) -> Option<NodeIndex> {
@@ -57,10 +78,11 @@ impl TypeLookup {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CombinedTypeLookup {
     source_uid_to_index: HashMap<Value, NodeIndex>,
-    target_uid_to_index: HashMap<Value, NodeIndex>,
+    /// Only populated when source and target types differ (None when same_type is true)
+    target_uid_to_index: Option<HashMap<Value, NodeIndex>>,
     source_type: String,
     target_type: String,
-    same_type: bool,  // Flag to indicate if source and target types are the same
+    same_type: bool,
 }
 
 impl CombinedTypeLookup {
@@ -69,13 +91,15 @@ impl CombinedTypeLookup {
             return Err("Node types cannot be empty".to_string());
         }
 
-        // Check if source and target types are the same
         let same_type = source_type == target_type;
-        
         let mut source_uid_to_index = HashMap::new();
-        let target_uid_to_index: HashMap<Value, NodeIndex>;
+        let mut target_uid_to_index_map: Option<HashMap<Value, NodeIndex>> = if same_type {
+            None  // Don't allocate separate map when types are the same
+        } else {
+            Some(HashMap::new())
+        };
 
-        // First pass: populate source_uid_to_index
+        // Single pass through graph - collect both source and target if different types
         for idx in graph.node_indices() {
             if let Some(node_data) = graph.node_weight(idx) {
                 match node_data {
@@ -83,10 +107,21 @@ impl CombinedTypeLookup {
                         if node_type == &source_type {
                             source_uid_to_index.insert(id.clone(), idx);
                         }
+                        // Also collect target type in same pass (if different from source)
+                        if let Some(ref mut target_map) = target_uid_to_index_map {
+                            if node_type == &target_type {
+                                target_map.insert(id.clone(), idx);
+                            }
+                        }
                     },
                     NodeData::Schema { node_type, title, .. } if node_type == "SchemaNode" => {
                         if source_type == "SchemaNode" {
                             source_uid_to_index.insert(title.clone(), idx);
+                        }
+                        if let Some(ref mut target_map) = target_uid_to_index_map {
+                            if target_type == "SchemaNode" {
+                                target_map.insert(title.clone(), idx);
+                            }
                         }
                     },
                     _ => {}
@@ -94,35 +129,9 @@ impl CombinedTypeLookup {
             }
         }
 
-        // Performance optimization: If types are the same, reuse the source map
-        if same_type {
-            target_uid_to_index = source_uid_to_index.clone();
-        } else {
-            // Different types - create a separate target map
-            let mut target_map = HashMap::new();
-            for idx in graph.node_indices() {
-                if let Some(node_data) = graph.node_weight(idx) {
-                    match node_data {
-                        NodeData::Regular { node_type, id, .. } => {
-                            if node_type == &target_type {
-                                target_map.insert(id.clone(), idx);
-                            }
-                        },
-                        NodeData::Schema { node_type, title, .. } if node_type == "SchemaNode" => {
-                            if target_type == "SchemaNode" {
-                                target_map.insert(title.clone(), idx);
-                            }
-                        },
-                        _ => {}
-                    }
-                }
-            }
-            target_uid_to_index = target_map;
-        }
-
         Ok(CombinedTypeLookup {
             source_uid_to_index,
-            target_uid_to_index,
+            target_uid_to_index: target_uid_to_index_map,
             source_type,
             target_type,
             same_type,
@@ -130,11 +139,39 @@ impl CombinedTypeLookup {
     }
 
     pub fn check_source(&self, uid: &Value) -> Option<NodeIndex> {
-        self.source_uid_to_index.get(uid).copied()
+        Self::lookup_with_type_fallback(&self.source_uid_to_index, uid)
     }
 
     pub fn check_target(&self, uid: &Value) -> Option<NodeIndex> {
-        self.target_uid_to_index.get(uid).copied()
+        // Reuse source map when types are the same (avoids clone)
+        let map = self.target_uid_to_index.as_ref().unwrap_or(&self.source_uid_to_index);
+        Self::lookup_with_type_fallback(map, uid)
+    }
+
+    /// Helper function to handle Int64/UniqueId type mismatches during lookup
+    fn lookup_with_type_fallback(
+        map: &HashMap<Value, NodeIndex>,
+        uid: &Value,
+    ) -> Option<NodeIndex> {
+        // First try direct lookup
+        if let Some(idx) = map.get(uid).copied() {
+            return Some(idx);
+        }
+
+        // Handle type mismatches between Int64 and UniqueId
+        match uid {
+            Value::Int64(i) => {
+                if *i >= 0 && *i <= u32::MAX as i64 {
+                    map.get(&Value::UniqueId(*i as u32)).copied()
+                } else {
+                    None
+                }
+            }
+            Value::UniqueId(u) => {
+                map.get(&Value::Int64(*u as i64)).copied()
+            }
+            _ => None,
+        }
     }
 
     pub fn get_source_type(&self) -> &str {

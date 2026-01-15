@@ -4,22 +4,41 @@ use petgraph::graph::NodeIndex;
 use crate::datatypes::values::{Value, FilterCondition};
 use crate::graph::schema::{DirGraph, CurrentSelection, SelectionOperation};
 
+/// Constant for the "type" field key used in type filtering
+const TYPE_FIELD: &str = "type";
+
 
 pub fn matches_condition(value: &Value, condition: &FilterCondition) -> bool {
     match condition {
-        FilterCondition::Equals(target) => value == target,
-        FilterCondition::NotEquals(target) => value != target,
+        FilterCondition::Equals(target) => values_equal(value, target),
+        FilterCondition::NotEquals(target) => !values_equal(value, target),
         FilterCondition::GreaterThan(target) => compare_values(value, target) == Some(std::cmp::Ordering::Greater),
         FilterCondition::GreaterThanEquals(target) => {
-            matches!(compare_values(value, target), 
+            matches!(compare_values(value, target),
                 Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal))
         },
         FilterCondition::LessThan(target) => compare_values(value, target) == Some(std::cmp::Ordering::Less),
         FilterCondition::LessThanEquals(target) => {
-            matches!(compare_values(value, target), 
+            matches!(compare_values(value, target),
                 Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal))
         },
         FilterCondition::In(targets) => targets.contains(value),
+        FilterCondition::IsNull => matches!(value, Value::Null),
+        FilterCondition::IsNotNull => !matches!(value, Value::Null),
+    }
+}
+
+/// Check equality with cross-type numeric comparison support
+fn values_equal(a: &Value, b: &Value) -> bool {
+    // Direct equality check first
+    if a == b {
+        return true;
+    }
+    // Handle numeric cross-type comparison (Int64 vs Float64)
+    match (a, b) {
+        (Value::Int64(i), Value::Float64(f)) => (*i as f64) == *f,
+        (Value::Float64(f), Value::Int64(i)) => *f == (*i as f64),
+        _ => false,
     }
 }
 
@@ -28,7 +47,7 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         (Value::Null, Value::Null) => Some(std::cmp::Ordering::Equal),
         (Value::Null, _) => Some(std::cmp::Ordering::Less),
         (_, Value::Null) => Some(std::cmp::Ordering::Greater),
-        
+
         (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
         (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
@@ -37,8 +56,26 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         (Value::UniqueId(a), Value::UniqueId(b)) => Some(a.cmp(b)),
         (Value::DateTime(a), Value::DateTime(b)) => Some(a.cmp(b)),
         (Value::Boolean(a), Value::Boolean(b)) => Some(a.cmp(b)),
+        // Handle DateTime vs String comparison by parsing the string
+        (Value::DateTime(date), Value::String(s)) => {
+            parse_date_string(s).map(|parsed| date.cmp(&parsed))
+        },
+        (Value::String(s), Value::DateTime(date)) => {
+            parse_date_string(s).map(|parsed| parsed.cmp(date))
+        },
         _ => None,
     }
+}
+
+/// Parse a date string in common formats (ISO YYYY-MM-DD preferred)
+fn parse_date_string(s: &str) -> Option<chrono::NaiveDate> {
+    use chrono::NaiveDate;
+    // ISO format (YYYY-MM-DD)
+    NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .or_else(|_| NaiveDate::parse_from_str(s, "%Y/%m/%d"))
+        .or_else(|_| NaiveDate::parse_from_str(s, "%d-%m-%Y"))
+        .or_else(|_| NaiveDate::parse_from_str(s, "%m/%d/%Y"))
+        .ok()
 }
 
 // Optimized core operations
@@ -50,7 +87,7 @@ fn filter_nodes_by_conditions(
     // Special case for type filter which we can optimize
     if conditions.len() == 1 {
         if let Some((key, FilterCondition::Equals(Value::String(type_value)))) = conditions.iter().next() {
-            if key == "type" {
+            if key == TYPE_FIELD {
                 if let Some(type_nodes) = graph.type_indices.get(type_value) {
                     // Use HashSet for O(1) lookups
                     let type_set: HashSet<_> = type_nodes.iter().collect();
@@ -65,17 +102,23 @@ fn filter_nodes_by_conditions(
 
     // Cache field lookups for frequently accessed fields
     let estimated_cache_size = nodes.len() * conditions.len();
-    let mut field_cache: HashMap<(NodeIndex, &String), Option<Value>> = HashMap::with_capacity(estimated_cache_size);
-    
+    let mut field_cache: HashMap<(NodeIndex, &str), Option<Value>> = HashMap::with_capacity(estimated_cache_size);
+
     nodes.into_iter()
         .filter(|&idx| {
             if let Some(node) = graph.get_node(idx) {
                 conditions.iter().all(|(key, condition)| {
                     let value = field_cache
-                        .entry((idx, key))
+                        .entry((idx, key.as_str()))
                         .or_insert_with(|| node.get_field(key).map(|v| v.clone()));
-                    
-                    value.as_ref().map_or(false, |v| matches_condition(v, condition))
+
+                    match value {
+                        Some(v) => matches_condition(v, condition),
+                        None => {
+                            // Missing field is treated as null
+                            matches!(condition, FilterCondition::IsNull)
+                        }
+                    }
                 })
             } else {
                 false
@@ -90,23 +133,23 @@ fn sort_nodes_by_fields(
     sort_fields: &[(String, bool)]
 ) -> Vec<NodeIndex> {
     // Pre-fetch and cache field values for all nodes
-    let mut value_cache: HashMap<(NodeIndex, &String), Option<Value>> = HashMap::new();
-    
+    let mut value_cache: HashMap<(NodeIndex, &str), Option<Value>> = HashMap::new();
+
     for &node_idx in &nodes {
         if let Some(node) = graph.get_node(node_idx) {
             for (field, _) in sort_fields {
                 value_cache.insert(
-                    (node_idx, field),
+                    (node_idx, field.as_str()),
                     node.get_field(field).map(|v| v.clone())
                 );
             }
         }
     }
-    
+
     nodes.sort_by(|&a, &b| {
         for (field, ascending) in sort_fields {
-            let val_a = value_cache.get(&(a, field));
-            let val_b = value_cache.get(&(b, field));
+            let val_a = value_cache.get(&(a, field.as_str()));
+            let val_b = value_cache.get(&(b, field.as_str()));
             
             match (val_a, val_b) {
                 (Some(Some(va)), Some(Some(vb))) => {
@@ -166,15 +209,14 @@ pub fn filter_nodes(
     let level = selection.get_level_mut(current_index)
         .ok_or_else(|| "No active selection level".to_string())?;
 
-    if current_index == 0 {
-        level.selections.clear();
-    }
+    // Note: We don't clear selections here to allow chaining filters.
+    // Each filter operation builds on the previous selection.
 
     if level.selections.is_empty() {
         // Optimized type-only filter handling
         if conditions.len() == 1 {
             if let Some((key, FilterCondition::Equals(Value::String(type_value)))) = conditions.iter().next() {
-                if key == "type" {
+                if key == TYPE_FIELD {
                     if let Some(type_nodes) = graph.type_indices.get(type_value) {
                         let processed = process_nodes(
                             graph,
@@ -363,7 +405,7 @@ pub fn filter_orphan_nodes(
             // Filter children based on orphan status
             let filtered = children.iter()
                 .filter(|&&idx| include_orphans == is_orphan(idx))
-                .cloned()
+                .copied()
                 .collect::<Vec<_>>();
             
             // Apply sorting and max limit

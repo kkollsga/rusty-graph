@@ -1,10 +1,13 @@
 # Skip specific directories
 /pytest/
 /venv/
+/.venv/
+/.claude/
+/.pytest_cache/
 /data/
 
-# Ignore everything in the target directory except the wheels folder
-/target/*
+# Ignore Rust build artifacts (keep wheels for distribution)
+/target/
 !/target/wheels/
 
 # macOS system files

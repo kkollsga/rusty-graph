@@ -88,12 +88,33 @@ pub fn to_datetime(value: &Bound<'_, PyAny>) -> Option<NaiveDate> {
         return None;
     }
 
+    // Try to extract as Python datetime first
     Python::with_gil(|_py| {
         if let Ok(ts) = value.downcast::<PyDateTime>() {
-            NaiveDate::from_ymd_opt(ts.get_year(), ts.get_month() as u32, ts.get_day() as u32)
-        } else {
-            None
+            return NaiveDate::from_ymd_opt(ts.get_year(), ts.get_month() as u32, ts.get_day() as u32);
         }
+
+        // Try to parse string dates (ISO format: YYYY-MM-DD)
+        if let Ok(s) = value.extract::<String>() {
+            // Try ISO format first (YYYY-MM-DD)
+            if let Ok(date) = NaiveDate::parse_from_str(&s, "%Y-%m-%d") {
+                return Some(date);
+            }
+            // Try with slashes (YYYY/MM/DD)
+            if let Ok(date) = NaiveDate::parse_from_str(&s, "%Y/%m/%d") {
+                return Some(date);
+            }
+            // Try DD-MM-YYYY
+            if let Ok(date) = NaiveDate::parse_from_str(&s, "%d-%m-%Y") {
+                return Some(date);
+            }
+            // Try MM/DD/YYYY
+            if let Ok(date) = NaiveDate::parse_from_str(&s, "%m/%d/%Y") {
+                return Some(date);
+            }
+        }
+
+        None
     })
 }
 

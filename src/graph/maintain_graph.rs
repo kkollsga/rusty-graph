@@ -243,9 +243,21 @@ pub fn add_connections(
     batch.set_conflict_mode(conflict_mode);
     
     let mut skipped_count = 0;
-    // Instead of tracking ids directly, track counts of missing items 
+    // Instead of tracking ids directly, track counts of missing items
     let mut missing_source_count = 0;
     let mut missing_target_count = 0;
+
+    // Cache column names and pre-compute which columns are property columns (not ID or title fields)
+    // This avoids repeated allocations and string comparisons in the loop
+    let property_columns: Vec<String> = df_data.get_column_names()
+        .into_iter()
+        .filter(|col_name| {
+            let is_id_field = *col_name == source_id_field || *col_name == target_id_field;
+            let is_source_title = source_title_field.as_ref().map_or(false, |field| *col_name == *field);
+            let is_target_title = target_title_field.as_ref().map_or(false, |field| *col_name == *field);
+            !is_id_field && !is_source_title && !is_target_title
+        })
+        .collect();
 
     for row_idx in 0..df_data.row_count() {
         let source_id = match df_data.get_value_by_index(row_idx, source_id_idx) {
@@ -290,22 +302,14 @@ pub fn add_connections(
         update_node_titles(graph, source_idx, target_idx, row_idx, 
                          source_title_idx, target_title_idx, &df_data)?;
 
-        let mut properties = HashMap::with_capacity(df_data.get_column_names().len());
-        // Get all columns that aren't the ID or title fields
-        for col_name in df_data.get_column_names() {
-            // Check if this is an ID or title field
-            let is_id_field = *col_name == source_id_field || *col_name == target_id_field;
-            let is_source_title = source_title_field.as_ref().map_or(false, |field| *col_name == *field);
-            let is_target_title = target_title_field.as_ref().map_or(false, |field| *col_name == *field);
-            
-            // Only add properties for columns that aren't ID or title fields
-            if !is_id_field && !is_source_title && !is_target_title {
-                // Always include the property, even if it's None/Null
-                if let Some(value) = df_data.get_value(row_idx, &col_name) {
-                    properties.insert(col_name.clone(), value);
-                } else {
-                    properties.insert(col_name.clone(), Value::Null);
-                }
+        // Use pre-computed property columns (avoids get_column_names() call per row)
+        let mut properties = HashMap::with_capacity(property_columns.len());
+        for col_name in &property_columns {
+            // Always include the property, even if it's None/Null
+            if let Some(value) = df_data.get_value(row_idx, col_name) {
+                properties.insert(col_name.clone(), value);
+            } else {
+                properties.insert(col_name.clone(), Value::Null);
             }
         }
 

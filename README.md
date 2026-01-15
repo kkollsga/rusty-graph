@@ -8,15 +8,19 @@ A high-performance graph database library with Python bindings written in Rust.
 - [Introduction](#introduction)
 - [Basic Usage](#basic-usage)
 - [Working with Nodes](#working-with-nodes)
+- [Working with Dates](#working-with-dates)
 - [Creating Connections](#creating-connections)
 - [Filtering and Querying](#filtering-and-querying)
   - [Basic Filtering](#basic-filtering)
+  - [Null Value Checks](#null-value-checks)
   - [Filtering Orphan Nodes](#filtering-orphan-nodes)
   - [Sorting Results](#sorting-results)
   - [Limiting Results](#limiting-results)
 - [Traversing the Graph](#traversing-the-graph)
+- [Set Operations on Selections](#set-operations-on-selections)
 - [Statistics and Calculations](#statistics-and-calculations)
 - [Saving and Loading](#saving-and-loading)
+- [Operation Reports](#operation-reports)
 - [Performance Tips](#performance-tips)
 
 ## Installation
@@ -109,6 +113,136 @@ titles = products.get_titles()
 print(titles)
 ```
 
+## Working with Dates
+
+Rusty Graph supports native DateTime values for date-based filtering and operations.
+
+### Specifying Date Columns
+
+When adding nodes, use the `column_types` parameter to specify which columns should be parsed as dates:
+
+```python
+import pandas as pd
+
+# Create data with date columns
+estimates_df = pd.DataFrame({
+    'estimate_id': [1, 2, 3],
+    'name': ['Estimate A', 'Estimate B', 'Estimate C'],
+    'valid_from': ['2020-01-01', '2020-06-15', '2021-01-01'],
+    'valid_to': ['2020-12-31', '2021-06-14', '2021-12-31'],
+    'value': [100.5, 250.3, 180.0]
+})
+
+# Add nodes with date columns specified
+graph.add_nodes(
+    data=estimates_df,
+    node_type='Estimate',
+    unique_id_field='estimate_id',
+    node_title_field='name',
+    column_types={'valid_from': 'datetime', 'valid_to': 'datetime'}
+)
+```
+
+### Filtering on Date Fields
+
+Date fields can be filtered using comparison operators. ISO format strings (YYYY-MM-DD) work correctly for date comparisons:
+
+```python
+# Find estimates valid after a specific date
+recent_estimates = graph.type_filter('Estimate').filter({
+    'valid_from': {'>=': '2020-06-01'}
+})
+
+# Find estimates within a date range
+active_in_2020 = graph.type_filter('Estimate').filter({
+    'valid_from': {'<=': '2020-12-31'},
+    'valid_to': {'>=': '2020-01-01'}
+})
+```
+
+### Temporal Queries
+
+For entities with validity periods (like estimates, contracts, or versions), Rusty Graph provides convenient methods to query based on time:
+
+```python
+# Find entities valid at a specific point in time
+# Default field names: 'date_from' and 'date_to'
+valid_estimates = graph.type_filter('Estimate').valid_at('2020-06-15')
+
+# Use custom field names if your data uses different column names
+active_contracts = graph.type_filter('Contract').valid_at(
+    '2021-03-01',
+    date_from_field='start_date',
+    date_to_field='end_date'
+)
+
+# Find entities valid during a date range (overlapping periods)
+overlapping = graph.type_filter('Estimate').valid_during('2020-01-01', '2020-06-30')
+
+# Chain with other operations
+high_value_valid = (
+    graph.type_filter('Estimate')
+    .valid_at('2020-06-15')
+    .filter({'value': {'>=': 100.0}})
+)
+```
+
+**Note:** `valid_at(date)` finds nodes where `date_from <= date <= date_to`. `valid_during(start, end)` finds nodes whose validity period overlaps with the given range.
+
+### Batch Property Updates
+
+Update properties on multiple nodes at once based on a selection:
+
+```python
+# Select nodes and update them in batch
+result = graph.type_filter('Prospect').filter({'status': 'Inactive'}).update({
+    'is_active': False,
+    'deactivation_reason': 'status_inactive'
+})
+
+# Access the updated graph and count
+updated_graph = result['graph']
+nodes_updated = result['nodes_updated']
+print(f"Updated {nodes_updated} nodes")
+
+# Use keep_selection=True to preserve the selection for chaining
+result = selection.update({'processed': True}, keep_selection=True)
+
+# Update with different value types
+graph.type_filter('Node').update({
+    'count': 42,           # Integer
+    'ratio': 3.14159,      # Float
+    'active': True,        # Boolean
+    'category': 'updated'  # String
+})
+```
+
+**Note:** The `update()` method returns a dictionary with `graph` (the updated KnowledgeGraph), `nodes_updated` (count of updated nodes), and `report_index` (index of the operation report). By default, the selection is cleared after update; use `keep_selection=True` to preserve it.
+
+### Query Explain
+
+Get insight into how your queries are executed with the `explain()` method:
+
+```python
+# Build a query chain
+result = (
+    graph.type_filter('Prospect')
+    .filter({'region': 'North'})
+    .traverse('HAS_ESTIMATE')
+)
+
+# See the execution plan
+print(result.explain())
+# Output: TYPE_FILTER Prospect (6775 nodes) -> FILTER (3200 nodes) -> TRAVERSE HAS_ESTIMATE (10954 nodes)
+
+# Works with temporal queries too
+valid_estimates = graph.type_filter('Estimate').valid_at('2020-06-15')
+print(valid_estimates.explain())
+# Output: TYPE_FILTER Estimate (1000 nodes) -> VALID_AT (450 nodes)
+```
+
+**Note:** The `explain()` method shows each operation in the query chain with the actual number of nodes at each step. This helps you understand query performance and optimize your queries.
+
 ## Creating Connections
 
 ```python
@@ -161,6 +295,28 @@ popular_affordable = graph.type_filter('Product').filter({
 # In operator
 selected_products = graph.type_filter('Product').filter({
     'product_id': {'in': [101, 103]}
+})
+```
+
+### Null Value Checks
+
+You can filter nodes based on whether a field is null (missing) or not null:
+
+```python
+# Find nodes where a field is null or missing
+nodes_without_category = graph.type_filter('Product').filter({
+    'category': {'is_null': True}
+})
+
+# Find nodes where a field exists and is not null
+nodes_with_category = graph.type_filter('Product').filter({
+    'category': {'is_not_null': True}
+})
+
+# Combine with other conditions
+incomplete_products = graph.type_filter('Product').filter({
+    'description': {'is_null': True},
+    'price': {'>': 0}
 })
 ```
 
@@ -299,6 +455,99 @@ expensive_purchases = alice.traverse(
 connection_data = alice.get_connections(include_node_properties=True)
 ```
 
+### Filtering on Connection Properties
+
+You can filter traversals based on properties stored on the connections themselves:
+
+```python
+# Traverse only through connections with specific property values
+high_share_blocks = graph.type_filter('Discovery').traverse(
+    connection_type='EXTENDS_INTO',
+    filter_connection={'share_pct': {'>=': 50.0}}
+)
+
+# Combine connection and target filters
+result = graph.type_filter('Discovery').traverse(
+    connection_type='EXTENDS_INTO',
+    filter_connection={'year': 2021},
+    filter_target={'status': 'active'}
+)
+
+# Filter connections with null/not-null checks
+discounted = user.traverse(
+    connection_type='PURCHASED',
+    filter_connection={'discount': {'is_not_null': True}}
+)
+```
+
+## Set Operations on Selections
+
+Rusty Graph supports set operations to combine, intersect, or subtract selections. These operations create new selections without modifying the originals.
+
+### Union
+
+Combines all nodes from both selections (logical OR):
+
+```python
+# Select prospects from different geoprovinces
+n3_prospects = graph.type_filter('Prospect').filter({'geoprovince': 'N3'})
+m3_prospects = graph.type_filter('Prospect').filter({'geoprovince': 'M3'})
+
+# Combine both selections
+combined = n3_prospects.union(m3_prospects)
+print(f"Total prospects: {len(combined.get_nodes())}")
+```
+
+### Intersection
+
+Keeps only nodes present in both selections (logical AND):
+
+```python
+# Select large discoveries and discoveries in a specific block
+large_discoveries = graph.type_filter('Discovery').filter({'oil_reserves': {'>=': 100.0}})
+block_34_discoveries = graph.type_filter('Block').filter({'block_id': 34}).traverse('CONTAINS', direction='incoming')
+
+# Get large discoveries in block 34
+result = large_discoveries.intersection(block_34_discoveries)
+```
+
+### Difference
+
+Keeps nodes in the first selection but not in the second (subtraction):
+
+```python
+# Get all prospects
+all_prospects = graph.type_filter('Prospect')
+
+# Get prospects that have estimates
+with_estimates = graph.type_filter('ProspectEstimate').traverse('BELONGS_TO', direction='incoming')
+
+# Get prospects WITHOUT estimates
+without_estimates = all_prospects.difference(with_estimates)
+```
+
+### Symmetric Difference
+
+Keeps nodes that are in exactly one selection but not both (exclusive OR):
+
+```python
+# Nodes in category A or B but not both
+exclusive_nodes = category_a.symmetric_difference(category_b)
+```
+
+### Chaining Operations
+
+Set operations can be chained for complex queries:
+
+```python
+# (A union B) intersection C
+result = selection_a.union(selection_b).intersection(selection_c)
+
+# A difference (B intersection C)
+b_inter_c = selection_b.intersection(selection_c)
+result = selection_a.difference(b_inter_c)
+```
+
 ## Statistics and Calculations
 
 ### Basic Statistics
@@ -359,6 +608,50 @@ products_per_user = graph.type_filter('User').traverse('PURCHASED').count(
 )
 ```
 
+### Aggregating Connection Properties
+
+Aggregate properties stored on connections (edges) rather than nodes. This is useful when you have data like ownership percentages, weights, or quantities stored on the connections themselves.
+
+```python
+# Sum connection properties
+# For each Discovery, sum the share_pct on its EXTENDS_INTO connections
+total_shares = graph.type_filter('Discovery').traverse('EXTENDS_INTO').calculate(
+    expression='sum(share_pct)',
+    aggregate_connections=True  # Key parameter for connection aggregation
+)
+print(total_shares)  # Returns {'Discovery A': 100.0, 'Discovery B': 100.0}
+
+# Average connection properties
+avg_ownership = graph.type_filter('Company').traverse('OWNS').calculate(
+    expression='avg(ownership_pct)',
+    aggregate_connections=True
+)
+
+# Count connections
+connection_count = graph.type_filter('Parent').traverse('HAS_CHILD').calculate(
+    expression='count(any_property)',  # Use any property that exists on connections
+    aggregate_connections=True
+)
+
+# Store aggregated results on parent nodes
+updated_graph = graph.type_filter('Prospect').traverse('HAS_ESTIMATE').calculate(
+    expression='sum(weight)',
+    aggregate_connections=True,
+    store_as='total_weight'  # Stores result on parent Prospect nodes
+)
+```
+
+**Supported aggregate functions for connections:**
+
+- `sum(property)` - Sum of property values
+- `avg(property)` / `mean(property)` - Average of property values
+- `min(property)` - Minimum value
+- `max(property)` - Maximum value
+- `count(property)` - Count of connections (with non-null property values)
+- `std(property)` - Standard deviation
+
+**Note:** Connection aggregation requires a traversal before `calculate()`. The results are grouped by the parent (source) node of the traversal.
+
 ## Saving and Loading
 
 ```python
@@ -367,6 +660,60 @@ graph.save("my_graph.bin")
 
 # Load graph from file
 loaded_graph = rusty_graph.load("my_graph.bin")
+```
+
+## Operation Reports
+
+Rusty Graph provides detailed reports for operations that modify the graph, helping you track what changed and diagnose issues.
+
+### Getting Operation Reports
+
+```python
+# Add nodes and get the report
+report = graph.add_nodes(
+    data=df,
+    node_type='Product',
+    unique_id_field='product_id'
+)
+print(f"Created {report['nodes_created']} nodes in {report['processing_time_ms']}ms")
+
+# Check for errors
+if report['has_errors']:
+    print(f"Errors: {report['errors']}")
+```
+
+### Report Fields
+
+Node operation reports include:
+
+- `operation`: Type of operation performed
+- `timestamp`: When the operation occurred
+- `nodes_created`: Number of new nodes created
+- `nodes_updated`: Number of existing nodes updated
+- `nodes_skipped`: Number of nodes skipped (e.g., due to conflicts)
+- `processing_time_ms`: Time taken in milliseconds
+- `has_errors`: Boolean indicating if errors occurred
+- `errors`: List of error messages (if any)
+
+Connection operation reports include:
+
+- `connections_created`: Number of new connections created
+- `connections_skipped`: Number of connections skipped
+- `property_fields_tracked`: Number of property fields on connections
+
+### Operation History
+
+```python
+# Get the most recent operation report
+last_report = graph.get_last_report()
+
+# Get the operation index (sequential counter)
+op_index = graph.get_operation_index()
+
+# Get full operation history
+history = graph.get_report_history()
+for report in history:
+    print(f"{report['operation']}: {report['timestamp']}")
 ```
 
 ## Performance Tips
