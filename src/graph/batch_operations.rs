@@ -72,7 +72,7 @@ struct NodeUpdate {
 }
 
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct BatchStats {
     pub creates: usize,
     pub updates: usize,
@@ -92,6 +92,7 @@ pub struct BatchProcessor {
     capacity: usize,
     batch_type: BatchType,
     metrics: BatchMetrics,
+    accumulated_stats: BatchStats,  // Track stats across intermediate flushes
 }
 
 impl BatchProcessor {
@@ -108,6 +109,7 @@ impl BatchProcessor {
             capacity,
             batch_type,
             metrics: BatchMetrics::default(),
+            accumulated_stats: BatchStats::default(),
         }
     }
 
@@ -134,7 +136,8 @@ impl BatchProcessor {
         // For large batches, flush if we hit capacity
         if let BatchType::Large = self.batch_type {
             if self.creates.len() >= self.capacity {
-                self.flush_chunk(graph)?;
+                let stats = self.flush_chunk(graph)?;
+                self.accumulated_stats.combine(&stats);  // Accumulate stats from intermediate flushes
             }
         }
 
@@ -215,7 +218,8 @@ impl BatchProcessor {
     }
 
     pub fn execute(mut self, graph: &mut DirGraph) -> Result<(BatchStats, BatchMetrics), String> {
-        let mut total_stats = BatchStats::default();
+        // Start with accumulated stats from intermediate flushes (for large batches)
+        let mut total_stats = self.accumulated_stats;
 
         match self.batch_type {
             BatchType::Small | BatchType::Medium => {
@@ -244,7 +248,7 @@ struct ConnectionCreation {
     properties: HashMap<String, Value>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct ConnectionBatchStats {
     pub connections_created: usize,
     pub properties_tracked: usize,
@@ -264,7 +268,8 @@ pub struct ConnectionBatchProcessor {
     capacity: usize,
     batch_type: BatchType,
     metrics: BatchMetrics,
-    conflict_mode: ConflictHandling, // Add conflict handling mode
+    conflict_mode: ConflictHandling,
+    accumulated_stats: ConnectionBatchStats,  // Track stats across intermediate flushes
 }
 
 impl ConnectionBatchProcessor {
@@ -281,7 +286,8 @@ impl ConnectionBatchProcessor {
             capacity,
             batch_type,
             metrics: BatchMetrics::default(),
-            conflict_mode: ConflictHandling::Update, // Default to Update
+            conflict_mode: ConflictHandling::Update,
+            accumulated_stats: ConnectionBatchStats::default(),
         }
     }
     
@@ -320,7 +326,8 @@ impl ConnectionBatchProcessor {
         // For large batches, flush if we hit capacity
         if let BatchType::Large = self.batch_type {
             if self.connections.len() >= self.capacity {
-                self.flush_chunk(graph, connection_type)?;
+                let stats = self.flush_chunk(graph, connection_type)?;
+                self.accumulated_stats.combine(&stats);  // Accumulate stats from intermediate flushes
             }
         }
 
@@ -396,7 +403,8 @@ impl ConnectionBatchProcessor {
         graph: &mut DirGraph,
         connection_type: String,
     ) -> Result<(ConnectionBatchStats, BatchMetrics), String> {
-        let mut total_stats = ConnectionBatchStats::default();
+        // Start with accumulated stats from intermediate flushes (for large batches)
+        let mut total_stats = self.accumulated_stats;
 
         match self.batch_type {
             BatchType::Small | BatchType::Medium => {

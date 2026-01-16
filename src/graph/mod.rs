@@ -287,6 +287,260 @@ impl KnowledgeGraph {
         })
     }
 
+    // ========================================================================
+    // Connector API Methods (Bulk Loading)
+    // ========================================================================
+
+    /// Get the set of node types that exist in the graph.
+    ///
+    /// Returns:
+    ///     List of node type names (excludes internal SchemaNode type)
+    ///
+    /// Example:
+    ///     ```python
+    ///     graph.add_nodes(df, 'Person', 'id', 'name')
+    ///     graph.add_nodes(df2, 'Company', 'id', 'name')
+    ///     print(graph.node_types)  # ['Person', 'Company']
+    ///     ```
+    #[getter]
+    fn node_types(&self) -> Vec<String> {
+        self.inner.get_node_types()
+    }
+
+    /// Add multiple node types at once from a list of node specifications.
+    ///
+    /// This enables bulk loading of nodes from data sources that provide
+    /// standardized node specifications.
+    ///
+    /// Args:
+    ///     nodes: List of dicts, each containing:
+    ///         - 'node_type': str - The type/label for these nodes
+    ///         - 'unique_id_field': str - Column name for unique ID
+    ///         - 'node_title_field': str - Column name for display title
+    ///         - 'data': DataFrame - The node data
+    ///
+    /// Returns:
+    ///     Dict mapping node_type to count of nodes added
+    ///
+    /// Example:
+    ///     ```python
+    ///     nodes = [
+    ///         {'node_type': 'Person', 'unique_id_field': 'id',
+    ///          'node_title_field': 'name', 'data': people_df},
+    ///         {'node_type': 'Company', 'unique_id_field': 'id',
+    ///          'node_title_field': 'name', 'data': companies_df},
+    ///     ]
+    ///     stats = graph.add_nodes_bulk(nodes)
+    ///     # {'Person': 100, 'Company': 50}
+    ///     ```
+    fn add_nodes_bulk(
+        &mut self,
+        py: Python<'_>,
+        nodes: &Bound<'_, PyList>,
+    ) -> PyResult<PyObject> {
+        let result_dict = PyDict::new_bound(py);
+
+        for item in nodes.iter() {
+            let spec = item.downcast::<PyDict>()?;
+
+            let node_type: String = spec.get_item("node_type")?
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("Missing 'node_type' in node spec"))?
+                .extract()?;
+            let unique_id_field: String = spec.get_item("unique_id_field")?
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("Missing 'unique_id_field' in node spec"))?
+                .extract()?;
+            let node_title_field: String = spec.get_item("node_title_field")?
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("Missing 'node_title_field' in node spec"))?
+                .extract()?;
+            let data = spec.get_item("data")?
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("Missing 'data' in node spec"))?;
+
+            // Get columns from dataframe
+            let df_cols = data.getattr("columns")?;
+            let all_columns: Vec<String> = df_cols.extract()?;
+
+            let df_result = py_in::pandas_to_dataframe(
+                &data,
+                &[unique_id_field.clone()],
+                &all_columns,
+                None,
+            )?;
+
+            let mut graph = extract_or_clone_graph(&mut self.inner);
+
+            let report = maintain_graph::add_nodes(
+                &mut graph,
+                df_result,
+                node_type.clone(),
+                unique_id_field,
+                Some(node_title_field),
+                None,
+            ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+            self.inner = Arc::new(graph);
+            result_dict.set_item(&node_type, report.nodes_created + report.nodes_updated)?;
+        }
+
+        self.selection.clear();
+        Ok(result_dict.into())
+    }
+
+    /// Add multiple connection types at once from a list of connection specifications.
+    ///
+    /// This enables bulk loading of connections from data sources that provide
+    /// standardized connection specifications with 'source_id' and 'target_id' columns.
+    ///
+    /// Args:
+    ///     connections: List of dicts, each containing:
+    ///         - 'source_type': str - Node type of source nodes
+    ///         - 'target_type': str - Node type of target nodes
+    ///         - 'connection_name': str - The connection/edge type
+    ///         - 'data': DataFrame - Must have 'source_id' and 'target_id' columns
+    ///
+    /// Returns:
+    ///     Dict mapping connection_name to count of connections added
+    ///
+    /// Example:
+    ///     ```python
+    ///     connections = [
+    ///         {'source_type': 'Person', 'target_type': 'Company',
+    ///          'connection_name': 'WORKS_AT', 'data': works_df},
+    ///         {'source_type': 'Person', 'target_type': 'Person',
+    ///          'connection_name': 'KNOWS', 'data': knows_df},
+    ///     ]
+    ///     stats = graph.add_connections_bulk(connections)
+    ///     # {'WORKS_AT': 500, 'KNOWS': 1200}
+    ///     ```
+    fn add_connections_bulk(
+        &mut self,
+        py: Python<'_>,
+        connections: &Bound<'_, PyList>,
+    ) -> PyResult<PyObject> {
+        self.add_connections_internal(py, connections, false)
+    }
+
+    /// Add connections, automatically filtering to only those where
+    /// both source and target node types exist in the graph.
+    ///
+    /// This enables data sources to provide ALL possible connections,
+    /// and rusty-graph selects only the valid ones based on loaded node types.
+    ///
+    /// Args:
+    ///     connections: List of dicts, each containing:
+    ///         - 'source_type': str - Node type of source nodes
+    ///         - 'target_type': str - Node type of target nodes
+    ///         - 'connection_name': str - The connection/edge type
+    ///         - 'data': DataFrame - Must have 'source_id' and 'target_id' columns
+    ///
+    /// Returns:
+    ///     Dict mapping connection_name to count of connections added
+    ///     (only includes connections that were actually loaded)
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Data source provides all possible connections
+    ///     all_connections = data_source.get_all_connections()
+    ///
+    ///     # Graph only has Person and Company loaded
+    ///     # This will skip connections involving other node types
+    ///     stats = graph.add_connections_from_source(all_connections)
+    ///     ```
+    fn add_connections_from_source(
+        &mut self,
+        py: Python<'_>,
+        connections: &Bound<'_, PyList>,
+    ) -> PyResult<PyObject> {
+        self.add_connections_internal(py, connections, true)
+    }
+
+    /// Internal helper for bulk connection loading
+    fn add_connections_internal(
+        &mut self,
+        py: Python<'_>,
+        connections: &Bound<'_, PyList>,
+        filter_to_loaded: bool,
+    ) -> PyResult<PyObject> {
+        let result_dict = PyDict::new_bound(py);
+        let loaded_types: std::collections::HashSet<String> = if filter_to_loaded {
+            self.inner.get_node_types().into_iter().collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
+        for item in connections.iter() {
+            let spec = item.downcast::<PyDict>()?;
+
+            let source_type: String = spec.get_item("source_type")?
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("Missing 'source_type' in connection spec"))?
+                .extract()?;
+            let target_type: String = spec.get_item("target_type")?
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("Missing 'target_type' in connection spec"))?
+                .extract()?;
+            let connection_name: String = spec.get_item("connection_name")?
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("Missing 'connection_name' in connection spec"))?
+                .extract()?;
+            let data = spec.get_item("data")?
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("Missing 'data' in connection spec"))?;
+
+            // Skip if filtering and types not loaded
+            if filter_to_loaded {
+                if !loaded_types.contains(&source_type) || !loaded_types.contains(&target_type) {
+                    continue;
+                }
+            }
+
+            // Standardized column names for connector API
+            let source_id_field = "source_id".to_string();
+            let target_id_field = "target_id".to_string();
+
+            // Get columns from dataframe
+            let df_cols = data.getattr("columns")?;
+            let all_columns: Vec<String> = df_cols.extract()?;
+
+            // Verify required columns exist
+            if !all_columns.contains(&source_id_field) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("Connection spec for '{}' missing required 'source_id' column. Available: [{}]",
+                        connection_name, all_columns.join(", "))
+                ));
+            }
+            if !all_columns.contains(&target_id_field) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("Connection spec for '{}' missing required 'target_id' column. Available: [{}]",
+                        connection_name, all_columns.join(", "))
+                ));
+            }
+
+            let df_result = py_in::pandas_to_dataframe(
+                &data,
+                &[source_id_field.clone(), target_id_field.clone()],
+                &all_columns,
+                None,
+            )?;
+
+            let mut graph = extract_or_clone_graph(&mut self.inner);
+
+            let report = maintain_graph::add_connections(
+                &mut graph,
+                df_result,
+                connection_name.clone(),
+                source_type,
+                source_id_field,
+                target_type,
+                target_id_field,
+                None,  // source_title_field
+                None,  // target_title_field
+                None,  // conflict_handling
+            ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+            self.inner = Arc::new(graph);
+            result_dict.set_item(&connection_name, report.connections_created)?;
+        }
+
+        self.selection.clear();
+        Ok(result_dict.into())
+    }
+
     fn type_filter(
         &mut self,
         node_type: String,

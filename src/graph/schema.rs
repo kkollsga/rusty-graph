@@ -212,12 +212,33 @@ impl DirGraph {
         self.graph.node_weights().any(|node| {
             match node {
                 NodeData::Schema { node_type: nt, title, .. } => {
-                    nt == "SchemaNode" && 
+                    nt == "SchemaNode" &&
                     matches!(title, Value::String(t) if t == node_type)
                 },
                 _ => false
             }
         })
+    }
+
+    /// Get all node types that exist in the graph (excluding SchemaNode)
+    pub fn get_node_types(&self) -> Vec<String> {
+        let mut types: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Get types from type_indices (fast path)
+        for node_type in self.type_indices.keys() {
+            if node_type != "SchemaNode" {
+                types.insert(node_type.clone());
+            }
+        }
+
+        // Also scan for any types not in indices (fallback)
+        for node in self.graph.node_weights() {
+            if let NodeData::Regular { node_type, .. } = node {
+                types.insert(node_type.clone());
+            }
+        }
+
+        types.into_iter().collect()
     }
     
     pub fn get_node(&self, index: NodeIndex) -> Option<&NodeData> {

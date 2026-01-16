@@ -113,7 +113,20 @@ pub fn add_nodes(
     let title_idx = df_data.get_column_index(&title_field)
         .ok_or_else(|| format!("Column '{}' not found", title_field))?;
 
-    let column_names = df_data.get_column_names();
+    // OPTIMIZATION: Pre-compute property column info (name + index) to avoid repeated lookups
+    // This avoids: 1) string comparisons in the loop, 2) HashMap lookups per property
+    let property_columns: Vec<(String, usize)> = df_data.get_column_names()
+        .into_iter()
+        .filter_map(|col_name| {
+            if col_name != unique_id_field && col_name != title_field {
+                df_data.get_column_index(&col_name).map(|idx| (col_name, idx))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let property_count = property_columns.len();
     let mut batch = BatchProcessor::new(df_data.row_count());
     let mut skipped_count = 0;
 
@@ -133,16 +146,12 @@ pub fn add_nodes(
         let title = df_data.get_value_by_index(row_idx, title_idx)
             .unwrap_or(Value::Null);
 
-        let mut properties = HashMap::with_capacity(column_names.len());
-        for col_name in &column_names {
-            if col_name != &unique_id_field && col_name != &title_field {
-                // Always add the value, even if it's None/Null
-                if let Some(value) = df_data.get_value(row_idx, col_name) {
-                    properties.insert(col_name.clone(), value);
-                } else {
-                    properties.insert(col_name.clone(), Value::Null);
-                }
-            }
+        // OPTIMIZATION: Use pre-computed indices for direct column access
+        let mut properties = HashMap::with_capacity(property_count);
+        for (col_name, col_idx) in &property_columns {
+            let value = df_data.get_value_by_index(row_idx, *col_idx)
+                .unwrap_or(Value::Null);
+            properties.insert(col_name.clone(), value);
         }
 
         let action = match type_lookup.check_uid(&id) {
@@ -153,19 +162,19 @@ pub fn add_nodes(
                 } else {
                     None
                 };
-                
-                NodeAction::Update { 
-                    node_idx, 
+
+                NodeAction::Update {
+                    node_idx,
                     title: title_update,
-                    properties, 
-                    conflict_mode 
+                    properties,
+                    conflict_mode
                 }
             },
-            None => NodeAction::Create { 
-                node_type: node_type.clone(), 
-                id, 
-                title, 
-                properties 
+            None => NodeAction::Create {
+                node_type: node_type.clone(),
+                id,
+                title,
+                properties
             },
         };
         batch.add_action(action, graph)?;
