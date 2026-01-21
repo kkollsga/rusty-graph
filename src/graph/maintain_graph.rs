@@ -507,7 +507,7 @@ pub fn selection_to_new_connections(
         },
     };
 
-    let mut batch = ConnectionBatchProcessor::new(level.get_all_nodes().len());
+    let mut batch = ConnectionBatchProcessor::new(level.node_count());
     // Set the conflict handling mode
     batch.set_conflict_mode(conflict_mode);
     

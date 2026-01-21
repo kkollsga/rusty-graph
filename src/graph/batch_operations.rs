@@ -411,6 +411,9 @@ impl ConnectionBatchProcessor {
         graph: &mut DirGraph,
         connection_type: String,
     ) -> Result<(ConnectionBatchStats, BatchMetrics), String> {
+        // Register connection type for O(1) lookups
+        graph.register_connection_type(connection_type.clone());
+
         // Start with accumulated stats from intermediate flushes (for large batches)
         let mut total_stats = self.accumulated_stats;
 

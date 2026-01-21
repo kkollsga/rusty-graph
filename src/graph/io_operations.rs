@@ -21,8 +21,11 @@ pub fn save_to_file(graph: &Arc<DirGraph>, path: &str) -> io::Result<()> {
 pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
-    let dir_graph = bincode::deserialize_from::<_, DirGraph>(reader)
+    let mut dir_graph = bincode::deserialize_from::<_, DirGraph>(reader)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+    // Rebuild skipped caches after deserialization
+    dir_graph.build_connection_types_cache();
 
     // Create a new KnowledgeGraph with a fresh reports object
     Ok(KnowledgeGraph {

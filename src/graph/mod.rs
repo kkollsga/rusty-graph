@@ -575,7 +575,7 @@ impl KnowledgeGraph {
 
         // Record actual result
         let actual = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
-            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+            .map(|l| l.node_count()).unwrap_or(0);
         new_kg.selection.add_plan_step(
             PlanStep::new("TYPE_FILTER", Some(&node_type), estimated).with_actual_rows(actual)
         );
@@ -588,7 +588,7 @@ impl KnowledgeGraph {
 
         // Estimate based on current selection
         let estimated = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
-            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+            .map(|l| l.node_count()).unwrap_or(0);
 
         let filter_conditions = py_in::pydict_to_filter_conditions(conditions)?;
         let sort_fields = match sort {
@@ -601,7 +601,7 @@ impl KnowledgeGraph {
 
         // Record actual result
         let actual = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
-            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+            .map(|l| l.node_count()).unwrap_or(0);
         new_kg.selection.add_plan_step(
             PlanStep::new("FILTER", None, estimated).with_actual_rows(actual)
         );
@@ -675,7 +675,7 @@ impl KnowledgeGraph {
 
         // Estimate based on current selection
         let estimated = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
-            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+            .map(|l| l.node_count()).unwrap_or(0);
 
         // Build compound filter: date_from <= date AND date_to >= date
         let mut conditions = HashMap::new();
@@ -693,7 +693,7 @@ impl KnowledgeGraph {
 
         // Record actual result
         let actual = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
-            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+            .map(|l| l.node_count()).unwrap_or(0);
         new_kg.selection.add_plan_step(
             PlanStep::new("VALID_AT", None, estimated).with_actual_rows(actual)
         );
@@ -722,7 +722,7 @@ impl KnowledgeGraph {
 
         // Estimate based on current selection
         let estimated = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
-            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+            .map(|l| l.node_count()).unwrap_or(0);
 
         // Build compound filter for overlapping ranges:
         // node.date_from <= end_date AND node.date_to >= start_date
@@ -741,7 +741,7 @@ impl KnowledgeGraph {
 
         // Record actual result
         let actual = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
-            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+            .map(|l| l.node_count()).unwrap_or(0);
         new_kg.selection.add_plan_step(
             PlanStep::new("VALID_DURING", None, estimated).with_actual_rows(actual)
         );
@@ -1213,9 +1213,9 @@ impl KnowledgeGraph {
     ) -> PyResult<Self> {
         let mut new_kg = self.clone();
 
-        // Estimate based on current selection (source nodes)
+        // Estimate based on current selection (source nodes) - use node_count() to avoid allocation
         let estimated = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
-            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+            .map(|l| l.node_count()).unwrap_or(0);
 
         let conditions = if let Some(cond) = filter_target {
             Some(py_in::pydict_to_filter_conditions(cond)?)
@@ -1248,9 +1248,9 @@ impl KnowledgeGraph {
             new_level,
         ).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
 
-        // Record actual result
+        // Record actual result - use node_count() to avoid allocation
         let actual = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
-            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+            .map(|l| l.node_count()).unwrap_or(0);
         new_kg.selection.add_plan_step(
             PlanStep::new("TRAVERSE", Some(&connection_type), estimated).with_actual_rows(actual)
         );
@@ -2654,16 +2654,16 @@ impl KnowledgeGraph {
         let hops = hops.unwrap_or(1);
         let mut new_kg = self.clone();
 
-        // Record plan step
+        // Record plan step - use node_count() to avoid allocation
         let estimated = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
-            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+            .map(|l| l.node_count()).unwrap_or(0);
 
         subgraph::expand_selection(&self.inner, &mut new_kg.selection, hops)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
 
-        // Record actual result
+        // Record actual result - use node_count() to avoid allocation
         let actual = new_kg.selection.get_level(new_kg.selection.get_level_count().saturating_sub(1))
-            .map(|l| l.get_all_nodes().len()).unwrap_or(0);
+            .map(|l| l.node_count()).unwrap_or(0);
         new_kg.selection.add_plan_step(
             PlanStep::new("EXPAND", None, estimated).with_actual_rows(actual)
         );

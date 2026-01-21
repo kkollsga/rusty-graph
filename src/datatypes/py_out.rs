@@ -494,11 +494,7 @@ pub fn convert_computation_results_for_python(results: Vec<StatResult>) -> PyRes
             }
         }
         
-        // Check if we have any results at all
-        if dict.len() == 0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("No results found"));
-        }
-        
+        // Return empty dict if no results (not an error - traversal may have found nothing)
         Ok(dict.into())
     })
 }

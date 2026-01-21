@@ -43,29 +43,156 @@ pub fn make_traversal(
     }
 
     // First get the source level index
-    let source_level_index = level_index.unwrap_or_else(|| 
+    let source_level_index = level_index.unwrap_or_else(||
         selection.get_level_count().saturating_sub(1)
     );
-    
+
     let create_new_level = new_level.unwrap_or(true);
 
     // Get source level
     let source_level = selection.get_level(source_level_index)
         .ok_or_else(|| "No valid source level found for traversal".to_string())?;
 
+    // Early empty check
+    if source_level.is_empty() {
+        return Err("No source nodes available for traversal".to_string());
+    }
+
+    // Set up traversal directions
+    let dir = match direction.as_deref() {
+        Some("incoming") => Some(Direction::Incoming),
+        Some("outgoing") => Some(Direction::Outgoing),
+        Some(d) => return Err(format!("Invalid direction: {}. Must be 'incoming' or 'outgoing'", d)),
+        None => None, // Both directions
+    };
+
+    // FAST PATH: No filtering, sorting, or limits - optimized for common case
+    let use_fast_path = filter_target.is_none()
+        && filter_connection.is_none()
+        && sort_target.is_none()
+        && max_nodes.is_none()
+        && create_new_level;
+
+    if use_fast_path {
+        return make_traversal_fast(graph, selection, &connection_type, source_level_index, dir);
+    }
+
+    // SLOW PATH: Full processing with filtering/sorting/limits
+    make_traversal_full(
+        graph, selection, connection_type, source_level_index, dir,
+        filter_target, filter_connection, sort_target, max_nodes, create_new_level
+    )
+}
+
+/// Fast traversal path for the common case: no filtering, no sorting, no limits.
+/// Avoids HashMap overhead by collecting all targets directly.
+fn make_traversal_fast(
+    graph: &DirGraph,
+    selection: &mut CurrentSelection,
+    connection_type: &str,
+    source_level_index: usize,
+    direction: Option<Direction>,
+) -> Result<(), String> {
+    // Get source nodes using iterator to avoid allocation
+    let source_level = selection.get_level(source_level_index)
+        .ok_or_else(|| "No valid source level found for traversal".to_string())?;
+
+    // Collect source nodes (we need this twice - once for iteration, once for the parent map)
+    let source_nodes: Vec<NodeIndex> = source_level.iter_node_indices().collect();
+
+    // Create new level
+    selection.add_level();
+    let target_level_index = selection.get_level_count() - 1;
+
+    // Pre-allocate targets HashSet with estimated capacity
+    let mut all_targets_per_parent: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::with_capacity(source_nodes.len());
+
+    // Process each source node
+    for &source_node in &source_nodes {
+        let mut targets: HashSet<NodeIndex> = HashSet::new();
+
+        // Process edges based on direction
+        match direction {
+            Some(Direction::Outgoing) => {
+                for edge in graph.graph.edges_directed(source_node, Direction::Outgoing) {
+                    if edge.weight().connection_type == connection_type {
+                        targets.insert(edge.target());
+                    }
+                }
+            }
+            Some(Direction::Incoming) => {
+                for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
+                    if edge.weight().connection_type == connection_type {
+                        targets.insert(edge.source());
+                    }
+                }
+            }
+            None => {
+                // Both directions
+                for edge in graph.graph.edges_directed(source_node, Direction::Outgoing) {
+                    if edge.weight().connection_type == connection_type {
+                        targets.insert(edge.target());
+                    }
+                }
+                for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
+                    if edge.weight().connection_type == connection_type {
+                        targets.insert(edge.source());
+                    }
+                }
+            }
+        }
+
+        // Store targets for this parent
+        if !targets.is_empty() {
+            all_targets_per_parent.insert(source_node, targets.into_iter().collect());
+        }
+    }
+
+    // Get target level and populate it
+    let level = selection.get_level_mut(target_level_index)
+        .ok_or_else(|| "Failed to access target selection level".to_string())?;
+
+    // Set up operation
+    level.operations = vec![SelectionOperation::Traverse {
+        connection_type: connection_type.to_string(),
+        direction: direction.map(|d| if d == Direction::Incoming { "incoming" } else { "outgoing" }.to_string()),
+        max_nodes: None,
+    }];
+
+    // Add all parent->children mappings
+    for (parent, children) in all_targets_per_parent {
+        level.add_selection(Some(parent), children);
+    }
+
+    Ok(())
+}
+
+/// Full traversal path with filtering, sorting, and limits support.
+#[allow(clippy::too_many_arguments)]
+fn make_traversal_full(
+    graph: &DirGraph,
+    selection: &mut CurrentSelection,
+    connection_type: String,
+    source_level_index: usize,
+    direction: Option<Direction>,
+    filter_target: Option<&HashMap<String, FilterCondition>>,
+    filter_connection: Option<&HashMap<String, FilterCondition>>,
+    sort_target: Option<&Vec<(String, bool)>>,
+    max_nodes: Option<usize>,
+    create_new_level: bool,
+) -> Result<(), String> {
+    // Get source level
+    let source_level = selection.get_level(source_level_index)
+        .ok_or_else(|| "No valid source level found for traversal".to_string())?;
+
     // Collect all necessary data from source level
     let parents: Vec<NodeIndex> = if create_new_level {
-        source_level.get_all_nodes()
+        source_level.iter_node_indices().collect()
     } else {
         source_level.selections.keys()
             .filter_map(|k| *k)
             .collect()
     };
-
-    // Early empty check
-    if parents.is_empty() {
-        return Err("No source nodes available for traversal".to_string());
-    }
 
     // Create a mapping of parent nodes to their source nodes
     let source_nodes_map: HashMap<NodeIndex, Vec<NodeIndex>> = if create_new_level {
@@ -91,14 +218,6 @@ pub fn make_traversal(
         source_level_index
     };
 
-    // Set up traversal directions
-    let directions = match direction.as_deref() {
-        Some("incoming") => vec![Direction::Incoming],
-        Some("outgoing") => vec![Direction::Outgoing],
-        Some(d) => return Err(format!("Invalid direction: {}. Must be 'incoming' or 'outgoing'", d)),
-        None => vec![Direction::Outgoing, Direction::Incoming],
-    };
-
     // Get and initialize target level
     let level = selection.get_level_mut(target_level_index)
         .ok_or_else(|| "Failed to access target selection level".to_string())?;
@@ -106,7 +225,7 @@ pub fn make_traversal(
     // Set up operation
     let operation = SelectionOperation::Traverse {
         connection_type: connection_type.clone(),
-        direction: direction.clone(),
+        direction: direction.map(|d| if d == Direction::Incoming { "incoming" } else { "outgoing" }.to_string()),
         max_nodes,
     };
     level.operations = vec![operation];
@@ -118,55 +237,71 @@ pub fn make_traversal(
     for &parent in &parents {
         // Use a reference to an existing empty vector to avoid temporary lifetime issues
         let source_nodes = source_nodes_map.get(&parent).unwrap_or(&empty_vec);
-        
+
         if !create_new_level {
             // Clear existing selection for this parent
             level.selections.entry(Some(parent)).or_default().clear();
         }
-        
+
         // Collect all targets for this parent in one pass
         let mut targets = HashSet::new();
-        
-        // Optimize direction handling by collecting all nodes at once
-        for &source_node in source_nodes {
-            // Process outgoing edges if needed
-            if directions.contains(&Direction::Outgoing) {
-                graph.graph.edges_directed(source_node, Direction::Outgoing)
-                    .filter(|edge| edge.weight().connection_type == connection_type)
-                    .filter(|edge| {
-                        // Apply connection property filter if specified
-                        if let Some(conn_filter) = filter_connection {
-                            edge_matches_conditions(&edge.weight().properties, conn_filter)
-                        } else {
-                            true
-                        }
-                    })
-                    .for_each(|edge| {
-                        targets.insert(edge.target());
-                    });
-            }
 
-            // Process incoming edges if needed
-            if directions.contains(&Direction::Incoming) {
-                graph.graph.edges_directed(source_node, Direction::Incoming)
-                    .filter(|edge| edge.weight().connection_type == connection_type)
-                    .filter(|edge| {
-                        // Apply connection property filter if specified
-                        if let Some(conn_filter) = filter_connection {
-                            edge_matches_conditions(&edge.weight().properties, conn_filter)
-                        } else {
-                            true
+        // Process edges based on direction
+        for &source_node in source_nodes {
+            match direction {
+                Some(Direction::Outgoing) => {
+                    for edge in graph.graph.edges_directed(source_node, Direction::Outgoing) {
+                        if edge.weight().connection_type == connection_type {
+                            if let Some(conn_filter) = filter_connection {
+                                if !edge_matches_conditions(&edge.weight().properties, conn_filter) {
+                                    continue;
+                                }
+                            }
+                            targets.insert(edge.target());
                         }
-                    })
-                    .for_each(|edge| {
-                        targets.insert(edge.source());
-                    });
+                    }
+                }
+                Some(Direction::Incoming) => {
+                    for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
+                        if edge.weight().connection_type == connection_type {
+                            if let Some(conn_filter) = filter_connection {
+                                if !edge_matches_conditions(&edge.weight().properties, conn_filter) {
+                                    continue;
+                                }
+                            }
+                            targets.insert(edge.source());
+                        }
+                    }
+                }
+                None => {
+                    // Both directions
+                    for edge in graph.graph.edges_directed(source_node, Direction::Outgoing) {
+                        if edge.weight().connection_type == connection_type {
+                            if let Some(conn_filter) = filter_connection {
+                                if !edge_matches_conditions(&edge.weight().properties, conn_filter) {
+                                    continue;
+                                }
+                            }
+                            targets.insert(edge.target());
+                        }
+                    }
+                    for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
+                        if edge.weight().connection_type == connection_type {
+                            if let Some(conn_filter) = filter_connection {
+                                if !edge_matches_conditions(&edge.weight().properties, conn_filter) {
+                                    continue;
+                                }
+                            }
+                            targets.insert(edge.source());
+                        }
+                    }
+                }
             }
         }
-        
+
         // Convert to Vec for processing
         let target_vec: Vec<NodeIndex> = targets.into_iter().collect();
-        
+
         // Apply filtering and sorting in one pass
         let processed_nodes = filtering_methods::process_nodes(
             graph,
@@ -175,7 +310,7 @@ pub fn make_traversal(
             sort_target,
             max_nodes
         );
-        
+
         // Add the processed nodes to the selection
         level.add_selection(Some(parent), processed_nodes);
     }

@@ -103,8 +103,8 @@ pub fn process_equation(
             ));
         }
 
-        // Define nodes_processed at first usage
-        nodes_processed = level.get_all_nodes().len();
+        // Define nodes_processed at first usage - use node_count() to avoid allocation
+        nodes_processed = level.node_count();
     } else {
         return Err(format!("Invalid level index: {}. Selection only has {} levels.",
             effective_level_index, selection.get_level_count()));
@@ -544,8 +544,8 @@ pub fn count_nodes_in_level(
 
     let level = selection.get_level(effective_index)
         .expect("Level should exist");
-    
-    level.get_all_nodes().len()
+
+    level.node_count()
 }
 
 pub fn count_nodes_by_parent(

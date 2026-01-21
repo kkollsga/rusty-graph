@@ -235,6 +235,9 @@ pub struct DirGraph {
     /// Lazily built on first use for each node type, skipped during serialization
     #[serde(skip)]
     pub(crate) id_indices: HashMap<String, HashMap<Value, NodeIndex>>,
+    /// Fast O(1) lookup for connection types. Populated on first edge access.
+    #[serde(skip)]
+    pub(crate) connection_types: std::collections::HashSet<String>,
 }
 
 impl DirGraph {
@@ -246,6 +249,7 @@ impl DirGraph {
             property_indices: HashMap::new(),
             composite_indices: HashMap::new(),
             id_indices: HashMap::new(),
+            connection_types: std::collections::HashSet::new(),
         }
     }
 
@@ -356,16 +360,39 @@ impl DirGraph {
     }
 
     pub fn has_connection_type(&self, connection_type: &str) -> bool {
-        // Look for a SchemaNode that represents this connection type
+        // Fast path: check the connection_types cache first (O(1))
+        if !self.connection_types.is_empty() {
+            return self.connection_types.contains(connection_type);
+        }
+
+        // Fallback: scan SchemaNodes (O(n) - only happens if cache not built yet)
         self.graph.node_weights().any(|node| {
             match node {
                 NodeData::Schema { node_type, title, .. } => {
-                    node_type == "SchemaNode" && 
+                    node_type == "SchemaNode" &&
                     matches!(title, Value::String(t) if t == connection_type)
                 },
                 _ => false
             }
         })
+    }
+
+    /// Register a connection type for O(1) lookups.
+    /// Called when edges are added to the graph.
+    pub fn register_connection_type(&mut self, connection_type: String) {
+        self.connection_types.insert(connection_type);
+    }
+
+    /// Build the connection types cache by scanning all edges.
+    /// Called lazily after deserialization or when cache is needed.
+    pub fn build_connection_types_cache(&mut self) {
+        if !self.connection_types.is_empty() {
+            return; // Already built
+        }
+
+        for edge in self.graph.edge_weights() {
+            self.connection_types.insert(edge.connection_type.clone());
+        }
     }
 
     pub fn has_node_type(&self, node_type: &str) -> bool {
