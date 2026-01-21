@@ -3,9 +3,30 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use super::values::Value;
 use crate::graph::calculations::StatResult;
-use crate::graph::schema::NodeInfo;
+use crate::graph::schema::{NodeInfo, NodeData};
 use crate::graph::statistics_methods::PropertyStats;
 use crate::graph::data_retrieval::{LevelNodes, LevelValues, LevelConnections, UniqueValues};
+
+/// Convert NodeData directly to Python dict without intermediate NodeInfo clone.
+/// This is faster than to_node_info() + nodeinfo_to_pydict() because it avoids
+/// cloning the properties HashMap.
+pub fn nodedata_to_pydict(py: Python, node: &NodeData) -> PyResult<Option<PyObject>> {
+    match node {
+        NodeData::Regular { id, title, node_type, properties } => {
+            let dict = PyDict::new_bound(py);
+            dict.set_item("id", value_to_py(py, id)?)?;
+            dict.set_item("title", value_to_py(py, title)?)?;
+            dict.set_item("type", node_type)?;
+
+            for (k, v) in properties {
+                dict.set_item(k, value_to_py(py, v)?)?;
+            }
+
+            Ok(Some(dict.into()))
+        },
+        NodeData::Schema { .. } => Ok(None),
+    }
+}
 
 pub fn nodeinfo_to_pydict(py: Python, node: &NodeInfo) -> PyResult<PyObject> {
     let dict = PyDict::new_bound(py);

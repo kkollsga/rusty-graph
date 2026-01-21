@@ -864,14 +864,52 @@ impl KnowledgeGraph {
     fn get_nodes(
         &self,
         max_nodes: Option<usize>,
-        indices: Option<Vec<usize>>, 
+        indices: Option<Vec<usize>>,
         parent_type: Option<&str>,
         parent_info: Option<bool>,
         flatten_single_parent: Option<bool>
     ) -> PyResult<PyObject> {
+        // Fast path: when we just want a flat list of nodes without grouping,
+        // skip the intermediate NodeInfo clone and convert directly from NodeData.
+        // This avoids cloning the properties HashMap for each node.
+        //
+        // We only use fast path when selection is not empty, because empty selection
+        // with no query operations means "return all nodes" which requires different logic.
+        let selection_has_nodes = self.selection.current_node_count() > 0;
+        let has_query_operations = !self.selection.get_execution_plan().is_empty();
+
+        let use_fast_path = indices.is_none()
+            && parent_type.is_none()
+            && !parent_info.unwrap_or(false)
+            && flatten_single_parent.unwrap_or(true)
+            && (selection_has_nodes || has_query_operations);
+
+        if use_fast_path {
+            return Python::with_gil(|py| {
+                let result = PyList::empty_bound(py);
+                let max = max_nodes.unwrap_or(usize::MAX);
+                let mut count = 0;
+
+                for node_idx in self.selection.current_node_indices() {
+                    if count >= max {
+                        break;
+                    }
+                    if let Some(node) = self.inner.get_node(node_idx) {
+                        if let Some(py_node) = py_out::nodedata_to_pydict(py, node)? {
+                            result.append(py_node)?;
+                            count += 1;
+                        }
+                    }
+                }
+
+                Ok(result.into())
+            });
+        }
+
+        // Full path: handles grouping by parent, filtering, etc.
         let nodes = data_retrieval::get_nodes(
-            &self.inner, 
-            &self.selection, 
+            &self.inner,
+            &self.selection,
             None,
             indices.as_deref(),
             max_nodes
@@ -931,6 +969,39 @@ impl KnowledgeGraph {
                         dict.set_item("title", py_out::value_to_py(py, title)?)?;
                         dict.set_item("type", node_type)?;
                         result.append(dict)?;
+                    }
+                }
+            }
+
+            Ok(result.into())
+        })
+    }
+
+    /// Returns just the raw ID values from the current selection as a flat list.
+    /// This is the lightest possible output when you only need ID values.
+    ///
+    /// Much faster than get_nodes() or even get_ids() since it:
+    /// - Skips title and type extraction
+    /// - Returns raw values without dict wrapping
+    /// - Minimal Python object creation
+    ///
+    /// Returns:
+    ///     List of ID values (int, str, or whatever type the IDs are)
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Get just the user IDs
+    ///     user_ids = graph.type_filter('User').id_values()
+    ///     # Returns: [1, 2, 3, 4, 5, ...]
+    ///     ```
+    fn id_values(&self) -> PyResult<PyObject> {
+        Python::with_gil(|py| {
+            let result = PyList::empty_bound(py);
+
+            for node_idx in self.selection.current_node_indices() {
+                if let Some(node) = self.inner.get_node(node_idx) {
+                    if let schema::NodeData::Regular { id, .. } = node {
+                        result.append(py_out::value_to_py(py, id)?)?;
                     }
                 }
             }
@@ -2072,6 +2143,143 @@ impl KnowledgeGraph {
                 result_dict.set_item("length", path_result.cost)?;
 
                 Ok(result_dict.into())
+            }
+            None => Ok(py.None()),
+        }
+    }
+
+    /// Get just the length (hop count) of the shortest path between two nodes.
+    ///
+    /// This is a lightweight version of shortest_path() that avoids materializing
+    /// node data, making it much faster when you only need the distance.
+    ///
+    /// Args:
+    ///     source_type: The node type of the source node
+    ///     source_id: The unique ID of the source node
+    ///     target_type: The node type of the target node
+    ///     target_id: The unique ID of the target node
+    ///
+    /// Returns:
+    ///     The number of hops (edges) in the shortest path, or None if no path exists.
+    fn shortest_path_length(
+        &self,
+        source_type: &str,
+        source_id: &Bound<'_, PyAny>,
+        target_type: &str,
+        target_id: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<usize>> {
+        // Use O(1) direct lookup from id_indices (populated during add_nodes)
+        let source_value = py_in::py_value_to_value(source_id)?;
+        let source_idx = self.inner.lookup_by_id_normalized(source_type, &source_value)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Source node with id {:?} not found in type '{}'", source_value, source_type)
+            ))?;
+
+        let target_value = py_in::py_value_to_value(target_id)?;
+        let target_idx = self.inner.lookup_by_id_normalized(target_type, &target_value)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Target node with id {:?} not found in type '{}'", target_value, target_type)
+            ))?;
+
+        // Find shortest path and return just the cost
+        Ok(graph_algorithms::shortest_path(&self.inner, source_idx, target_idx)
+            .map(|result| result.cost))
+    }
+
+    /// Get just the node IDs along the shortest path between two nodes.
+    ///
+    /// This is a lightweight version of shortest_path() that returns only the
+    /// node IDs without full node info, making it faster when you don't need
+    /// titles, types, or connection info.
+    ///
+    /// Args:
+    ///     source_type: The node type of the source node
+    ///     source_id: The unique ID of the source node
+    ///     target_type: The node type of the target node
+    ///     target_id: The unique ID of the target node
+    ///
+    /// Returns:
+    ///     A list of node IDs along the path, or None if no path exists.
+    fn shortest_path_ids(
+        &self,
+        py: Python<'_>,
+        source_type: &str,
+        source_id: &Bound<'_, PyAny>,
+        target_type: &str,
+        target_id: &Bound<'_, PyAny>,
+    ) -> PyResult<PyObject> {
+        // Use O(1) direct lookup from id_indices (populated during add_nodes)
+        let source_value = py_in::py_value_to_value(source_id)?;
+        let source_idx = self.inner.lookup_by_id_normalized(source_type, &source_value)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Source node with id {:?} not found in type '{}'", source_value, source_type)
+            ))?;
+
+        let target_value = py_in::py_value_to_value(target_id)?;
+        let target_idx = self.inner.lookup_by_id_normalized(target_type, &target_value)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Target node with id {:?} not found in type '{}'", target_value, target_type)
+            ))?;
+
+        // Find shortest path
+        match graph_algorithms::shortest_path(&self.inner, source_idx, target_idx) {
+            Some(path_result) => {
+                // Extract just the IDs - no PyDict creation per node
+                let ids: Vec<PyObject> = path_result.path.iter()
+                    .filter_map(|&idx| {
+                        self.inner.get_node(idx)
+                            .and_then(|node| node.get_field("id"))
+                            .map(|id| py_out::value_to_py(py, &id).unwrap_or_else(|_| py.None()))
+                    })
+                    .collect();
+                Ok(ids.into_py(py))
+            }
+            None => Ok(py.None()),
+        }
+    }
+
+    /// Get just the raw graph indices along the shortest path between two nodes.
+    ///
+    /// This is the fastest path query - returns only integer indices without
+    /// any node data lookup. Use this when you need maximum performance and
+    /// will look up node data separately if needed.
+    ///
+    /// Args:
+    ///     source_type: The node type of the source node
+    ///     source_id: The unique ID of the source node
+    ///     target_type: The node type of the target node
+    ///     target_id: The unique ID of the target node
+    ///
+    /// Returns:
+    ///     A list of integer node indices along the path, or None if no path exists.
+    fn shortest_path_indices(
+        &self,
+        py: Python<'_>,
+        source_type: &str,
+        source_id: &Bound<'_, PyAny>,
+        target_type: &str,
+        target_id: &Bound<'_, PyAny>,
+    ) -> PyResult<PyObject> {
+        // Use O(1) direct lookup from id_indices (populated during add_nodes)
+        let source_value = py_in::py_value_to_value(source_id)?;
+        let source_idx = self.inner.lookup_by_id_normalized(source_type, &source_value)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Source node with id {:?} not found in type '{}'", source_value, source_type)
+            ))?;
+
+        let target_value = py_in::py_value_to_value(target_id)?;
+        let target_idx = self.inner.lookup_by_id_normalized(target_type, &target_value)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Target node with id {:?} not found in type '{}'", target_value, target_type)
+            ))?;
+
+        // Find shortest path and return raw indices
+        match graph_algorithms::shortest_path(&self.inner, source_idx, target_idx) {
+            Some(path_result) => {
+                let indices: Vec<usize> = path_result.path.iter()
+                    .map(|idx| idx.index())
+                    .collect();
+                Ok(indices.into_py(py))
             }
             None => Ok(py.None()),
         }

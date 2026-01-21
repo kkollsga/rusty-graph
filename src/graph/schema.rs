@@ -288,10 +288,10 @@ impl DirGraph {
         self.lookup_by_id_normalized(node_type, id)
     }
 
-    /// Internal helper that tries multiple integer representations for ID lookup.
+    /// Lookup node by ID with automatic type normalization.
     /// This handles the Python-Rust type mismatch where Python int -> Int64 but
     /// DataFrame unique_id columns store as UniqueId(u32).
-    fn lookup_by_id_normalized(&self, node_type: &str, id: &Value) -> Option<NodeIndex> {
+    pub fn lookup_by_id_normalized(&self, node_type: &str, id: &Value) -> Option<NodeIndex> {
         let type_index = self.id_indices.get(node_type)?;
 
         // Try direct lookup first

@@ -31,6 +31,7 @@ A high-performance graph database library with Python bindings written in Rust.
 - [Operation Reports](#operation-reports)
 - [Performance Tips](#performance-tips)
 - [Performance Model](#performance-model)
+- [Lightweight Methods Reference](#lightweight-methods-reference)
 
 ## Installation
 
@@ -1220,5 +1221,52 @@ count = graph.type_filter('User').node_count()
 user = graph.type_filter('User').filter({'id': 12345}).get_nodes()[0]
 
 # FAST: O(1) hash lookup after first call
+user = graph.get_node_by_id('User', 12345)
+```
+
+## Lightweight Methods Reference
+
+For performance-critical code, use these methods that skip full property materialization:
+
+### Node Retrieval
+
+| Method | Returns | Use When |
+|--------|---------|----------|
+| `node_count()` | Integer count | You only need to know how many nodes matched |
+| `indices()` | List of node indices | You need indices for internal processing |
+| `id_values()` | List of ID values | You need IDs for external lookups or joins |
+| `get_ids()` | List of `{id, title, type}` dicts | You need basic node identity without properties |
+| `get_nodes()` | List of full node dicts | You need all node properties |
+
+```python
+# Examples
+count = graph.type_filter('User').node_count()           # 5000
+indices = graph.type_filter('User').indices()            # [0, 1, 2, ...]
+ids = graph.type_filter('User').id_values()              # [1001, 1002, 1003, ...]
+id_info = graph.type_filter('User').get_ids()            # [{'id': 1001, 'title': 'Alice', 'type': 'User'}, ...]
+nodes = graph.type_filter('User').get_nodes()            # [{'id': 1001, 'title': 'Alice', 'type': 'User', 'age': 28, ...}, ...]
+```
+
+### Path Finding
+
+| Method | Returns | Use When |
+|--------|---------|----------|
+| `shortest_path_length()` | Integer hop count | You only need the distance |
+| `shortest_path_indices()` | List of node indices | You need the path for internal processing |
+| `shortest_path_ids()` | List of `(type, id)` tuples | You need node identities along the path |
+| `shortest_path()` | List of full node dicts | You need all properties for nodes in path |
+
+```python
+# Examples
+length = graph.shortest_path_length('User', 1, 'User', 100)     # 3
+indices = graph.shortest_path_indices('User', 1, 'User', 100)   # [0, 42, 87, 156]
+ids = graph.shortest_path_ids('User', 1, 'User', 100)           # [('User', 1), ('Company', 5), ('User', 100)]
+path = graph.shortest_path('User', 1, 'User', 100)              # [{'id': 1, ...}, {'id': 5, ...}, {'id': 100, ...}]
+```
+
+### Direct Lookups
+
+```python
+# O(1) lookup by type and ID (much faster than type_filter + filter)
 user = graph.get_node_by_id('User', 12345)
 ```

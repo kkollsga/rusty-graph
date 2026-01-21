@@ -150,6 +150,9 @@ impl BatchProcessor {
 
         // Process creates in current chunk
         for creation in self.creates.drain(..) {
+            let id_for_index = creation.id.clone();
+            let node_type_for_index = creation.node_type.clone();
+
             let node_data = NodeData::new(
                 creation.id,
                 creation.title,
@@ -159,6 +162,11 @@ impl BatchProcessor {
             let node_idx = graph.graph.add_node(node_data);
             // Add to type index
             graph.type_indices.entry(creation.node_type).or_default().push(node_idx);
+            // Add to ID index for O(1) lookups
+            graph.id_indices
+                .entry(node_type_for_index)
+                .or_default()
+                .insert(id_for_index, node_idx);
             stats.creates += 1;
         }
 
