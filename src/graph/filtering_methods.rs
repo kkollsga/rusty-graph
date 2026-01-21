@@ -22,7 +22,7 @@ pub fn matches_condition(value: &Value, condition: &FilterCondition) -> bool {
             matches!(compare_values(value, target),
                 Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal))
         },
-        FilterCondition::In(targets) => targets.contains(value),
+        FilterCondition::In(targets) => targets.iter().any(|t| values_equal(value, t)),
         FilterCondition::Between(min, max) => {
             // Inclusive range: min <= value <= max
             matches!(compare_values(value, min),
@@ -35,16 +35,24 @@ pub fn matches_condition(value: &Value, condition: &FilterCondition) -> bool {
     }
 }
 
-/// Check equality with cross-type numeric comparison support
+/// Check equality with cross-type numeric comparison support.
+/// Handles Int64 <-> Float64 <-> UniqueId conversions to match Python's loose typing.
 fn values_equal(a: &Value, b: &Value) -> bool {
     // Direct equality check first
     if a == b {
         return true;
     }
-    // Handle numeric cross-type comparison (Int64 vs Float64)
+    // Handle numeric cross-type comparison
     match (a, b) {
+        // Int64 <-> Float64
         (Value::Int64(i), Value::Float64(f)) => (*i as f64) == *f,
         (Value::Float64(f), Value::Int64(i)) => *f == (*i as f64),
+        // UniqueId <-> Int64 (Python int may come as Int64 but be stored as UniqueId)
+        (Value::UniqueId(u), Value::Int64(i)) => *i >= 0 && *u as i64 == *i,
+        (Value::Int64(i), Value::UniqueId(u)) => *i >= 0 && *i == *u as i64,
+        // UniqueId <-> Float64 (for completeness)
+        (Value::UniqueId(u), Value::Float64(f)) => f.fract() == 0.0 && *u as f64 == *f,
+        (Value::Float64(f), Value::UniqueId(u)) => f.fract() == 0.0 && *f == *u as f64,
         _ => false,
     }
 }
@@ -61,6 +69,12 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
         (Value::Float64(a), Value::Int64(b)) => a.partial_cmp(&(*b as f64)),
         (Value::UniqueId(a), Value::UniqueId(b)) => Some(a.cmp(b)),
+        // UniqueId <-> Int64 cross-type comparison
+        (Value::UniqueId(u), Value::Int64(i)) => (*u as i64).partial_cmp(i),
+        (Value::Int64(i), Value::UniqueId(u)) => i.partial_cmp(&(*u as i64)),
+        // UniqueId <-> Float64 cross-type comparison
+        (Value::UniqueId(u), Value::Float64(f)) => (*u as f64).partial_cmp(f),
+        (Value::Float64(f), Value::UniqueId(u)) => f.partial_cmp(&(*u as f64)),
         (Value::DateTime(a), Value::DateTime(b)) => Some(a.cmp(b)),
         (Value::Boolean(a), Value::Boolean(b)) => Some(a.cmp(b)),
         // Handle DateTime vs String comparison by parsing the string

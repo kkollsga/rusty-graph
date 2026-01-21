@@ -68,8 +68,13 @@ pub fn get_nodes(
         true
     };
 
-    // If selection is empty, return all regular nodes in the graph
-    if selection_is_empty {
+    // Check if any query operations have been applied (type_filter, filter, traverse, etc.)
+    let has_query_operations = !selection.get_execution_plan().is_empty();
+
+    // If selection is empty AND no query operations were applied, return all regular nodes.
+    // If selection is empty BUT query operations were applied (e.g., filter matched 0 nodes),
+    // return empty to respect the query result.
+    if selection_is_empty && !has_query_operations {
         let mut all_nodes = Vec::new();
         for node_idx in graph.graph.node_indices() {
             if let Some(node) = graph.get_node(node_idx) {

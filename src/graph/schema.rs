@@ -1,5 +1,6 @@
 // src/graph/schema.rs
 use std::collections::HashMap;
+use std::sync::Arc;
 use petgraph::graph::{DiGraph, NodeIndex, EdgeIndex};
 use serde::{Serialize, Deserialize};
 use crate::datatypes::values::{Value, FilterCondition};
@@ -54,6 +55,18 @@ impl SelectionLevel {
 
     pub fn iter_groups(&self) -> impl Iterator<Item = (&Option<NodeIndex>, &Vec<NodeIndex>)> {
         self.selections.iter()
+    }
+
+    /// Returns an iterator over all node indices without allocating a Vec.
+    /// Use this instead of get_all_nodes() when you only need to iterate or count.
+    pub fn iter_node_indices(&self) -> impl Iterator<Item = NodeIndex> + '_ {
+        self.selections.values().flat_map(|children| children.iter().copied())
+    }
+
+    /// Returns the total count of nodes without allocating a Vec.
+    /// More efficient than get_all_nodes().len() for just getting the count.
+    pub fn node_count(&self) -> usize {
+        self.selections.values().map(|v| v.len()).sum()
     }
 }
 
@@ -139,6 +152,60 @@ impl CurrentSelection {
     pub fn get_level_mut(&mut self, index: usize) -> Option<&mut SelectionLevel> {
         self.levels.get_mut(index)
     }
+
+    /// Returns the node count for the current (most recent) level without allocation.
+    pub fn current_node_count(&self) -> usize {
+        self.levels.last()
+            .map(|l| l.node_count())
+            .unwrap_or(0)
+    }
+
+    /// Returns an iterator over node indices in the current (most recent) level.
+    pub fn current_node_indices(&self) -> impl Iterator<Item = NodeIndex> + '_ {
+        self.levels.last()
+            .into_iter()
+            .flat_map(|l| l.iter_node_indices())
+    }
+}
+
+/// Copy-on-write wrapper for CurrentSelection.
+/// Avoids cloning the selection on every method call when the selection isn't modified.
+/// Implements Deref/DerefMut for transparent usage where CurrentSelection is expected.
+#[derive(Clone, Default)]
+pub struct CowSelection {
+    inner: Arc<CurrentSelection>,
+}
+
+impl CowSelection {
+    pub fn new() -> Self {
+        CowSelection {
+            inner: Arc::new(CurrentSelection::new()),
+        }
+    }
+
+    /// Check if we have exclusive ownership (no cloning needed for mutation).
+    #[inline]
+    pub fn is_unique(&self) -> bool {
+        Arc::strong_count(&self.inner) == 1
+    }
+}
+
+// Implement Deref for transparent read access
+impl std::ops::Deref for CowSelection {
+    type Target = CurrentSelection;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+// Implement DerefMut for copy-on-write mutation
+impl std::ops::DerefMut for CowSelection {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::make_mut(&mut self.inner)
+    }
 }
 
 /// Key for single-property indexes: (node_type, property_name)
@@ -164,6 +231,10 @@ pub struct DirGraph {
     /// Composite indexes for multi-field queries: (node_type, [properties]) -> composite_value -> [node_indices]
     #[serde(default)]
     pub(crate) composite_indices: HashMap<CompositeIndexKey, HashMap<CompositeValue, Vec<NodeIndex>>>,
+    /// Fast O(1) lookup by node ID: node_type -> (id_value -> NodeIndex)
+    /// Lazily built on first use for each node type, skipped during serialization
+    #[serde(skip)]
+    pub(crate) id_indices: HashMap<String, HashMap<Value, NodeIndex>>,
 }
 
 impl DirGraph {
@@ -174,7 +245,99 @@ impl DirGraph {
             schema_definition: None,
             property_indices: HashMap::new(),
             composite_indices: HashMap::new(),
+            id_indices: HashMap::new(),
         }
+    }
+
+    /// Build the ID index for a specific node type.
+    /// Called lazily on first lookup for that type.
+    pub fn build_id_index(&mut self, node_type: &str) {
+        if self.id_indices.contains_key(node_type) {
+            return; // Already built
+        }
+
+        let mut index = HashMap::new();
+
+        if let Some(node_indices) = self.type_indices.get(node_type) {
+            for &node_idx in node_indices {
+                if let Some(NodeData::Regular { id, .. }) = self.graph.node_weight(node_idx) {
+                    index.insert(id.clone(), node_idx);
+                }
+            }
+        }
+
+        self.id_indices.insert(node_type.to_string(), index);
+    }
+
+    /// Look up a node by type and ID value. O(1) after index is built.
+    /// Builds the index lazily if not already built.
+    /// Handles type normalization: Python int may come as Int64 but be stored as UniqueId.
+    pub fn lookup_by_id(&mut self, node_type: &str, id: &Value) -> Option<NodeIndex> {
+        // Build index if needed
+        if !self.id_indices.contains_key(node_type) {
+            self.build_id_index(node_type);
+        }
+
+        self.lookup_by_id_normalized(node_type, id)
+    }
+
+    /// Look up a node by type and ID value without building index.
+    /// Use this for read-only access when index already exists.
+    /// Handles type normalization for integer types.
+    pub fn lookup_by_id_readonly(&self, node_type: &str, id: &Value) -> Option<NodeIndex> {
+        self.lookup_by_id_normalized(node_type, id)
+    }
+
+    /// Internal helper that tries multiple integer representations for ID lookup.
+    /// This handles the Python-Rust type mismatch where Python int -> Int64 but
+    /// DataFrame unique_id columns store as UniqueId(u32).
+    fn lookup_by_id_normalized(&self, node_type: &str, id: &Value) -> Option<NodeIndex> {
+        let type_index = self.id_indices.get(node_type)?;
+
+        // Try direct lookup first
+        if let Some(&idx) = type_index.get(id) {
+            return Some(idx);
+        }
+
+        // If direct lookup fails, try alternative integer representations
+        match id {
+            Value::Int64(i) => {
+                // Int64 -> try UniqueId(u32) if value fits
+                if *i >= 0 && *i <= u32::MAX as i64 {
+                    type_index.get(&Value::UniqueId(*i as u32)).copied()
+                } else {
+                    None
+                }
+            }
+            Value::UniqueId(u) => {
+                // UniqueId -> try Int64
+                type_index.get(&Value::Int64(*u as i64)).copied()
+            }
+            Value::Float64(f) => {
+                // Float64 -> try Int64 then UniqueId if it's a whole number
+                if f.fract() == 0.0 {
+                    let i = *f as i64;
+                    if let Some(&idx) = type_index.get(&Value::Int64(i)) {
+                        return Some(idx);
+                    }
+                    if i >= 0 && i <= u32::MAX as i64 {
+                        return type_index.get(&Value::UniqueId(i as u32)).copied();
+                    }
+                }
+                None
+            }
+            _ => None, // String, Boolean, DateTime, Null - no normalization
+        }
+    }
+
+    /// Invalidate the ID index for a node type (call when nodes are added/removed)
+    pub fn invalidate_id_index(&mut self, node_type: &str) {
+        self.id_indices.remove(node_type);
+    }
+
+    /// Clear all ID indices (call after bulk operations)
+    pub fn clear_id_indices(&mut self) {
+        self.id_indices.clear();
     }
 
     /// Set the schema definition for this graph

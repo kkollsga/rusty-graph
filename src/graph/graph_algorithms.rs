@@ -40,44 +40,57 @@ pub fn shortest_path(
     Some(PathResult { path, cost })
 }
 
-/// Reconstruct path using BFS (more reliable than predecessor map)
+/// Reconstruct path using BFS with Vec-based tracking for O(1) operations.
+/// Uses Vec<bool> for visited and Vec<u32> for parent tracking instead of HashMap/HashSet.
 fn reconstruct_path_bfs(
     graph: &DirGraph,
     source: NodeIndex,
     target: NodeIndex,
 ) -> Option<Vec<NodeIndex>> {
-    use std::collections::{VecDeque, HashSet};
+    use std::collections::VecDeque;
 
     if source == target {
         return Some(vec![source]);
     }
 
-    // Pre-allocate with reasonable capacity based on graph size
     let node_count = graph.graph.node_count();
-    let estimated_visited = node_count / 4; // Assume we visit ~25% of nodes on average
-    let mut visited = HashSet::with_capacity(estimated_visited);
-    let mut queue = VecDeque::with_capacity(estimated_visited);
-    let mut parent_map: HashMap<NodeIndex, NodeIndex> = HashMap::with_capacity(estimated_visited);
 
-    queue.push_back(source);
-    visited.insert(source);
+    // Use Vec instead of HashSet/HashMap for O(1) direct indexing
+    // visited[i] = true if node i has been visited
+    let mut visited: Vec<bool> = vec![false; node_count];
+    // parent[i] = parent node index of node i (u32::MAX means no parent/source)
+    let mut parent: Vec<u32> = vec![u32::MAX; node_count];
 
-    while let Some(current) = queue.pop_front() {
+    let mut queue = VecDeque::with_capacity(node_count / 4);
+
+    let source_idx = source.index();
+    let target_idx = target.index();
+
+    queue.push_back(source_idx);
+    visited[source_idx] = true;
+
+    while let Some(current_idx) = queue.pop_front() {
+        let current = NodeIndex::new(current_idx);
+
         // Check all neighbors (both directions for undirected path finding)
         for neighbor in graph.graph.neighbors_undirected(current) {
-            if !visited.contains(&neighbor) {
-                visited.insert(neighbor);
-                parent_map.insert(neighbor, current);
-                queue.push_back(neighbor);
+            let neighbor_idx = neighbor.index();
 
-                if neighbor == target {
+            if !visited[neighbor_idx] {
+                visited[neighbor_idx] = true;
+                parent[neighbor_idx] = current_idx as u32;
+                queue.push_back(neighbor_idx);
+
+                if neighbor_idx == target_idx {
                     // Found target - reconstruct path
-                    let mut path = vec![target];
-                    let mut node = target;
-                    while let Some(&parent) = parent_map.get(&node) {
-                        path.push(parent);
-                        node = parent;
+                    let mut path = Vec::with_capacity(16);
+                    let mut node_idx = target_idx;
+
+                    while node_idx != source_idx {
+                        path.push(NodeIndex::new(node_idx));
+                        node_idx = parent[node_idx] as usize;
                     }
+                    path.push(source);
                     path.reverse();
                     return Some(path);
                 }
@@ -162,32 +175,39 @@ pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
 
 /// Find weakly connected components (treating graph as undirected).
 /// This is often more useful for knowledge graphs.
+/// Optimized to use Vec<bool> for O(1) visited tracking.
 pub fn weakly_connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
-    use std::collections::{HashSet, VecDeque};
+    use std::collections::VecDeque;
 
     let node_count = graph.graph.node_count();
-    let mut visited = HashSet::with_capacity(node_count);
+    // Use Vec<bool> for O(1) visited tracking instead of HashSet
+    let mut visited: Vec<bool> = vec![false; node_count];
     let mut components = Vec::new();
+    let mut visited_count = 0;
 
     for node in graph.graph.node_indices() {
-        if visited.contains(&node) {
+        let node_idx = node.index();
+        if visited[node_idx] {
             continue;
         }
 
         // BFS to find all connected nodes - estimate component size
-        let remaining = node_count - visited.len();
+        let remaining = node_count - visited_count;
         let mut component = Vec::with_capacity(remaining.min(100)); // Cap initial estimate
         let mut queue = VecDeque::with_capacity(remaining.min(100));
         queue.push_back(node);
-        visited.insert(node);
+        visited[node_idx] = true;
+        visited_count += 1;
 
         while let Some(current) = queue.pop_front() {
             component.push(current);
 
             // Add all neighbors (treating as undirected)
             for neighbor in graph.graph.neighbors_undirected(current) {
-                if !visited.contains(&neighbor) {
-                    visited.insert(neighbor);
+                let neighbor_idx = neighbor.index();
+                if !visited[neighbor_idx] {
+                    visited[neighbor_idx] = true;
+                    visited_count += 1;
                     queue.push_back(neighbor);
                 }
             }

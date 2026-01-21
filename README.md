@@ -7,6 +7,7 @@ A high-performance graph database library with Python bindings written in Rust.
 - [Installation](#installation)
 - [Introduction](#introduction)
 - [Basic Usage](#basic-usage)
+- [Important: Node Property Mapping](#️-important-node-property-mapping)
 - [Working with Nodes](#working-with-nodes)
 - [Working with Dates](#working-with-dates)
 - [Creating Connections](#creating-connections)
@@ -29,6 +30,7 @@ A high-performance graph database library with Python bindings written in Rust.
 - [Saving and Loading](#saving-and-loading)
 - [Operation Reports](#operation-reports)
 - [Performance Tips](#performance-tips)
+- [Performance Model](#performance-model)
 
 ## Installation
 
@@ -80,6 +82,69 @@ graph.add_nodes(
 # View graph schema
 print(graph.get_schema())
 ```
+
+## ⚠️ Important: Node Property Mapping
+
+When you add nodes to the graph, the column names are **mapped to internal property names**. Understanding this mapping is critical for correct filtering and querying.
+
+### Property Mapping Rules
+
+| Your DataFrame Column | Stored As | Why |
+|-----------------------|-----------|-----|
+| `unique_id_field` (e.g., `user_id`) | `id` | Internal node identifier |
+| `node_title_field` (e.g., `name`) | `title` | Display/label field |
+| All other columns | Same name | Properties are preserved |
+
+### Example: What Actually Gets Stored
+
+```python
+# Your DataFrame
+users_df = pd.DataFrame({
+    'user_id': [1001, 1002],
+    'name': ['Alice', 'Bob'],
+    'age': [28, 35]
+})
+
+# Adding nodes
+graph.add_nodes(
+    data=users_df,
+    node_type='User',
+    unique_id_field='user_id',   # → stored as 'id'
+    node_title_field='name'       # → stored as 'title'
+)
+
+# What the node actually looks like:
+# {'id': 1001, 'title': 'Alice', 'type': 'User', 'age': 28}
+#
+# NOTE: There is NO 'user_id' or 'name' property!
+```
+
+### Correct Filtering
+
+```python
+# ❌ WRONG - These properties don't exist:
+graph.type_filter('User').filter({'user_id': 1001})  # Returns 0 nodes!
+graph.type_filter('User').filter({'name': 'Alice'})  # Returns 0 nodes!
+
+# ✅ CORRECT - Use the mapped property names:
+graph.type_filter('User').filter({'id': 1001})       # Works!
+graph.type_filter('User').filter({'title': 'Alice'}) # Works!
+graph.type_filter('User').filter({'age': 28})        # Works (not mapped)
+```
+
+### Best Practice: Use explain()
+
+Always use `explain()` when developing queries to verify node counts at each step:
+
+```python
+result = graph.type_filter('User').filter({'id': 1001})
+print(result.explain())
+# Output: TYPE_FILTER User (1000 nodes) -> FILTER (1 nodes)
+#                                               ^^^^^^^^
+#                                          Verify this is > 0!
+```
+
+If you see `(0 nodes)` after a filter, you're likely using the wrong property name.
 
 ## Working with Nodes
 
@@ -413,7 +478,7 @@ new_expensive = graph.type_filter('Product').filter(
 )
 
 # In traversal
-alice_recent_purchases = graph.type_filter('User').filter({'name': 'Alice'}).traverse(
+alice_recent_purchases = graph.type_filter('User').filter({'title': 'Alice'}).traverse(
     connection_type='PURCHASED',
     sort_target='date',
     max_nodes=5
@@ -446,7 +511,7 @@ limited_products = graph.type_filter('Product').max_nodes(5)
 
 ```python
 # Find products purchased by a specific user
-alice = graph.type_filter('User').filter({'name': 'Alice'})
+alice = graph.type_filter('User').filter({'title': 'Alice'})
 alice_products = alice.traverse(
     connection_type='PURCHASED',
     direction='outgoing'
@@ -658,7 +723,7 @@ Extract a portion of the graph for isolated analysis or export:
 # Start with a selection and expand to include neighbors
 subgraph = (
     graph.type_filter('Company')
-    .filter({'name': 'Acme Corp'})
+    .filter({'title': 'Acme Corp'})
     .expand(hops=2)  # Include all nodes within 2 hops
     .to_subgraph()   # Create independent subgraph
 )
@@ -679,7 +744,7 @@ The `expand()` method uses breadth-first search to include neighboring nodes:
 
 ```python
 # Expand selection by 1 hop (immediate neighbors)
-expanded = graph.type_filter('Person').filter({'name': 'Alice'}).expand(hops=1)
+expanded = graph.type_filter('Person').filter({'title': 'Alice'}).expand(hops=1)
 
 # Expand by 3 hops for broader context
 broad_context = selection.expand(hops=3)
@@ -1100,3 +1165,54 @@ for report in history:
 8. **Create Indexes**: Use `create_index()` on frequently filtered properties for ~3.3x speedup on equality filters.
 
 9. **Use Pattern Matching Limits**: When using `match_pattern()`, set `max_matches` to avoid scanning the entire graph.
+
+10. **Use Lightweight Methods**: For counting or index-only operations, use `node_count()` or `indices()` instead of `get_nodes()` - they're 50-1000x faster because they skip property materialization.
+
+11. **Use get_node_by_id()**: For single-node lookups by ID, use `get_node_by_id('NodeType', id)` instead of `type_filter().filter()` - it's O(1) after the first call.
+
+## Performance Model
+
+Rusty Graph is optimized for **knowledge graph workloads** - complex multi-step queries on heterogeneous, property-rich graphs. It is NOT optimized for micro-benchmarks of raw graph algorithms.
+
+### What Rusty Graph is Good At
+
+- Complex multi-hop traversals with filtering at each step
+- Property-rich nodes with many attributes
+- Schema-aware queries with validation
+- Aggregations and calculations across traversals
+- Combining data from multiple sources
+
+### Performance Comparison Context
+
+If you're comparing Rusty Graph to libraries like `igraph` or `rustworkx`:
+
+| Operation | igraph/rustworkx | Rusty Graph | Why |
+|-----------|------------------|-------------|-----|
+| Raw BFS/DFS | ~10 µs | ~500 µs | RG materializes properties |
+| Simple traversal | ~10 µs | ~200 µs | RG builds selections, validates |
+| Property-rich queries | Requires manual work | Native support | RG's sweet spot |
+
+**The overhead comes from:**
+- Building and tracking selections at each step
+- Materializing Python dictionaries for node properties
+- Schema validation and type checking
+- Supporting the full query API (explain, undo, etc.)
+
+For pure algorithmic graph workloads (shortest path benchmarks, connected components on millions of nodes), consider `igraph` or `rustworkx`. For building and querying knowledge graphs with rich properties, Rusty Graph provides a much more ergonomic API.
+
+### Optimizing Your Queries
+
+```python
+# SLOW: Materializes all properties for every node
+nodes = graph.type_filter('User').get_nodes()
+count = len(nodes)
+
+# FAST: Just counts without materialization (1000x faster)
+count = graph.type_filter('User').node_count()
+
+# SLOW: Scans all nodes of type
+user = graph.type_filter('User').filter({'id': 12345}).get_nodes()[0]
+
+# FAST: O(1) hash lookup after first call
+user = graph.get_node_by_id('User', 12345)
+```

@@ -33,13 +33,13 @@ pub mod export;
 pub mod pattern_matching;
 pub mod spatial;
 
-use schema::{DirGraph, CurrentSelection, PlanStep, SchemaDefinition, NodeSchemaDefinition, ConnectionSchemaDefinition};
+use schema::{DirGraph, CurrentSelection, CowSelection, PlanStep, SchemaDefinition, NodeSchemaDefinition, ConnectionSchemaDefinition};
 
 #[pyclass]
 pub struct KnowledgeGraph {
     inner: Arc<DirGraph>,
-    selection: CurrentSelection,
-    reports: OperationReports,  // Add reports field
+    selection: CowSelection,  // Using Cow wrapper for copy-on-write semantics
+    reports: OperationReports,
 }
 
 
@@ -47,8 +47,8 @@ impl Clone for KnowledgeGraph {
     fn clone(&self) -> Self {
         KnowledgeGraph {
             inner: Arc::clone(&self.inner),
-            selection: self.selection.clone(),
-            reports: self.reports.clone(),  // Clone reports as well
+            selection: self.selection.clone(),  // Arc clone - O(1), shares data
+            reports: self.reports.clone(),
         }
     }
 }
@@ -108,8 +108,8 @@ impl KnowledgeGraph {
     fn new() -> Self {
         KnowledgeGraph {
             inner: Arc::new(DirGraph::new()),
-            selection: CurrentSelection::new(),
-            reports: OperationReports::new(),  // Initialize reports
+            selection: CowSelection::new(),
+            reports: OperationReports::new(),
         }
     }
 
@@ -831,7 +831,7 @@ impl KnowledgeGraph {
             selection: if keep_selection.unwrap_or(false) {
                 self.selection.clone()
             } else {
-                CurrentSelection::new()
+                CowSelection::new()
             },
             reports: self.reports.clone(),
         };
@@ -877,15 +877,148 @@ impl KnowledgeGraph {
             max_nodes
         );
         Python::with_gil(|py| py_out::level_nodes_to_pydict(
-            py, 
-            &nodes, 
-            parent_type, 
-            parent_info, 
+            py,
+            &nodes,
+            parent_type,
+            parent_info,
             flatten_single_parent
         ))
     }
-    
-    #[pyo3(signature = (indices=None, parent_info=None, include_node_properties=None, 
+
+    /// Returns the count of nodes in the current selection without materialization.
+    /// Much faster than get_nodes() when you only need the count.
+    ///
+    /// Example:
+    ///     ```python
+    ///     count = graph.type_filter('User').node_count()
+    ///     ```
+    fn node_count(&self) -> usize {
+        self.selection.current_node_count()
+    }
+
+    /// Returns the raw node indices in the current selection.
+    /// Much faster than get_nodes() when you only need indices for further processing.
+    ///
+    /// Example:
+    ///     ```python
+    ///     indices = graph.type_filter('User').indices()
+    ///     ```
+    fn indices(&self) -> Vec<usize> {
+        self.selection.current_node_indices()
+            .map(|idx| idx.index())
+            .collect()
+    }
+
+    /// Returns only id, title, and type for nodes - no other properties.
+    /// Much faster than get_nodes() when you only need basic identification.
+    ///
+    /// Returns:
+    ///     List of dicts with 'id', 'title', and 'type' keys only.
+    ///
+    /// Example:
+    ///     ```python
+    ///     ids = graph.type_filter('User').get_ids()
+    ///     ```
+    fn get_ids(&self) -> PyResult<PyObject> {
+        Python::with_gil(|py| {
+            let result = PyList::empty_bound(py);
+
+            for node_idx in self.selection.current_node_indices() {
+                if let Some(node) = self.inner.get_node(node_idx) {
+                    if let schema::NodeData::Regular { id, title, node_type, .. } = node {
+                        let dict = PyDict::new_bound(py);
+                        dict.set_item("id", py_out::value_to_py(py, id)?)?;
+                        dict.set_item("title", py_out::value_to_py(py, title)?)?;
+                        dict.set_item("type", node_type)?;
+                        result.append(dict)?;
+                    }
+                }
+            }
+
+            Ok(result.into())
+        })
+    }
+
+    /// Look up a single node by its type and ID value. O(1) after first call.
+    ///
+    /// This is much faster than type_filter().filter() for single-node lookups
+    /// because it uses a hash index instead of scanning all nodes.
+    ///
+    /// Args:
+    ///     node_type: The type of node to look up (e.g., "User", "Product")
+    ///     node_id: The ID value of the node
+    ///
+    /// Returns:
+    ///     Dict with all node properties, or None if not found
+    ///
+    /// Example:
+    ///     ```python
+    ///     user = graph.get_node_by_id("User", 38870)
+    ///     ```
+    #[pyo3(signature = (node_type, node_id))]
+    fn get_node_by_id(&mut self, node_type: &str, node_id: &Bound<'_, PyAny>) -> PyResult<Option<PyObject>> {
+        // Convert Python value to Rust Value
+        let id_value = py_in::py_value_to_value(node_id)?;
+
+        // Get mutable access to build index if needed
+        let graph = Arc::make_mut(&mut self.inner);
+
+        // This will build the index lazily if not already built
+        let node_idx = match graph.lookup_by_id(node_type, &id_value) {
+            Some(idx) => idx,
+            None => return Ok(None),
+        };
+
+        // Get the node data
+        let node = match graph.get_node(node_idx) {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+
+        // Convert to Python dict
+        if let Some(node_info) = node.to_node_info() {
+            Python::with_gil(|py| {
+                let dict = py_out::nodeinfo_to_pydict(py, &node_info)?;
+                Ok(Some(dict))
+            })
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Build ID indices for specified node types for faster get_node_by_id lookups.
+    ///
+    /// Call this after loading a graph if you plan to do many ID lookups.
+    /// Indices are built lazily anyway, but this pre-builds them.
+    ///
+    /// Args:
+    ///     node_types: List of node types to index. If None, indexes all types.
+    ///
+    /// Example:
+    ///     ```python
+    ///     graph.build_id_indices(["User", "Product"])
+    ///     ```
+    #[pyo3(signature = (node_types=None))]
+    fn build_id_indices(&mut self, node_types: Option<Vec<String>>) {
+        let graph = Arc::make_mut(&mut self.inner);
+
+        match node_types {
+            Some(types) => {
+                for node_type in types {
+                    graph.build_id_index(&node_type);
+                }
+            }
+            None => {
+                // Build for all existing types
+                let types: Vec<String> = graph.type_indices.keys().cloned().collect();
+                for node_type in types {
+                    graph.build_id_index(&node_type);
+                }
+            }
+        }
+    }
+
+    #[pyo3(signature = (indices=None, parent_info=None, include_node_properties=None,
                         flatten_single_parent=true))]
     fn get_connections(
         &self,
@@ -1076,7 +1209,7 @@ impl KnowledgeGraph {
             selection: if keep_selection.unwrap_or(false) {
                 self.selection.clone()
             } else {
-                CurrentSelection::new()
+                CowSelection::new()
             },
             reports: self.reports.clone(), // Copy over existing reports
         };
@@ -1181,7 +1314,7 @@ impl KnowledgeGraph {
             selection: if keep_selection.unwrap_or(false) {
                 self.selection.clone()
             } else {
-                CurrentSelection::new()
+                CowSelection::new()
             },
             reports: self.reports.clone(),
         };
@@ -1236,7 +1369,7 @@ impl KnowledgeGraph {
                         selection: if keep_selection.unwrap_or(false) {
                             self.selection.clone()
                         } else {
-                            CurrentSelection::new()
+                            CowSelection::new()
                         },
                         reports: self.reports.clone(), // Copy existing reports
                     };
@@ -1341,7 +1474,7 @@ impl KnowledgeGraph {
                 selection: if keep_selection.unwrap_or(false) {
                     self.selection.clone()
                 } else {
-                    CurrentSelection::new()
+                    CowSelection::new()
                 },
                 reports: self.reports.clone(), // Copy existing reports
             };
@@ -2358,7 +2491,7 @@ impl KnowledgeGraph {
 
         Ok(KnowledgeGraph {
             inner: Arc::new(extracted),
-            selection: CurrentSelection::new(),
+            selection: CowSelection::new(),
             reports: OperationReports::new(), // Fresh reports for new graph
         })
     }
@@ -2450,8 +2583,8 @@ impl KnowledgeGraph {
 
         // Determine if we should use selection
         let use_selection = selection_only.unwrap_or(self.selection.get_level_count() > 0);
-        let selection = if use_selection {
-            Some(&self.selection)
+        let selection: Option<&CurrentSelection> = if use_selection {
+            Some(&self.selection)  // Deref coercion: &CowSelection -> &CurrentSelection
         } else {
             None
         };
@@ -2540,8 +2673,8 @@ impl KnowledgeGraph {
             None => selection_has_nodes, // Auto: use selection if it has nodes
         };
 
-        let selection = if use_selection {
-            Some(&self.selection)
+        let selection: Option<&CurrentSelection> = if use_selection {
+            Some(&self.selection)  // Deref coercion
         } else {
             None
         };
