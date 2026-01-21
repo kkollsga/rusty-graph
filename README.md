@@ -91,9 +91,11 @@ When you add nodes to the graph, the column names are **mapped to internal prope
 
 | Your DataFrame Column | Stored As | Why |
 |-----------------------|-----------|-----|
-| `unique_id_field` (e.g., `user_id`) | `id` | Internal node identifier |
-| `node_title_field` (e.g., `name`) | `title` | Display/label field |
-| All other columns | Same name | Properties are preserved |
+| `unique_id_field` (e.g., `user_id`) | `id` | Canonical node identifier for lookups and filtering |
+| `node_title_field` (e.g., `name`) | `title` | Display/label field (renamed, not preserved) |
+| All other columns | Same name | Properties are preserved as-is |
+
+**Important:** The `unique_id_field` and `node_title_field` columns are **renamed**, not copied. The original column names (`user_id`, `name`) do not exist as properties on the stored node.
 
 ### Example: What Actually Gets Stored
 
@@ -369,9 +371,9 @@ popular_affordable = graph.type_filter('Product').filter({
     'stock': {'>': 50}
 })
 
-# In operator
+# In operator (note: product_id was the unique_id_field, so use 'id')
 selected_products = graph.type_filter('Product').filter({
-    'product_id': {'in': [101, 103]}
+    'id': {'in': [101, 103]}
 })
 ```
 
@@ -890,6 +892,8 @@ schema = graph.get_schema()
 print(schema)
 ```
 
+**Note:** `get_schema()` returns a formatted string representation of the schema for display purposes, not a Python dictionary.
+
 ## Index Management
 
 Create indexes for faster filtering on frequently queried properties:
@@ -1182,23 +1186,25 @@ Rusty Graph is optimized for **knowledge graph workloads** - complex multi-step 
 - Aggregations and calculations across traversals
 - Combining data from multiple sources
 
-### Performance Comparison Context
+### Understanding the Overhead
 
-If you're comparing Rusty Graph to libraries like `igraph` or `rustworkx`:
+Rusty Graph operations have overhead compared to raw graph algorithms because they provide additional features:
 
-| Operation | igraph/rustworkx | Rusty Graph | Why |
-|-----------|------------------|-------------|-----|
-| Raw BFS/DFS | ~10 µs | ~500 µs | RG materializes properties |
-| Simple traversal | ~10 µs | ~200 µs | RG builds selections, validates |
-| Property-rich queries | Requires manual work | Native support | RG's sweet spot |
-
-**The overhead comes from:**
-- Building and tracking selections at each step
+- Building and tracking selections at each step (enables `explain()`, chaining)
 - Materializing Python dictionaries for node properties
 - Schema validation and type checking
-- Supporting the full query API (explain, undo, etc.)
+- Supporting the full query API (undo, reports, etc.)
 
-For pure algorithmic graph workloads (shortest path benchmarks, connected components on millions of nodes), consider `igraph` or `rustworkx`. For building and querying knowledge graphs with rich properties, Rusty Graph provides a much more ergonomic API.
+### Benchmarking: Engine-Only vs End-to-End
+
+When benchmarking, distinguish between two modes:
+
+| Mode | Methods | What's Measured |
+|------|---------|-----------------|
+| **Engine-only** | `node_count()`, `indices()`, `get_node_by_id()`, `explain()` | Pure graph traversal speed |
+| **End-to-end** | `get_nodes()`, `get_properties()` | Includes Python dict materialization |
+
+**For fair performance comparisons**, use engine-only methods. Use end-to-end methods when measuring the full Python-facing workload including property access.
 
 ### Optimizing Your Queries
 
