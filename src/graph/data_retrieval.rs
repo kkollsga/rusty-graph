@@ -62,7 +62,7 @@ pub fn get_nodes(
     let selection_is_empty = if selection.get_level_count() > 0 {
         let level_idx = selection.get_level_count().saturating_sub(1);
         selection.get_level(level_idx)
-            .map(|l| l.get_all_nodes().is_empty())
+            .map(|l| l.node_count() == 0)
             .unwrap_or(true)
     } else {
         true
@@ -129,17 +129,14 @@ pub fn get_nodes(
                 Some(p) => {
                     if let Some(node) = graph.get_node(*p) {
                         (
-                            node.get_field("title")
+                            node.get_field_ref("title")
                                 .and_then(|v| match v {
-                                    Value::String(s) => Some(s),
+                                    Value::String(s) => Some(s.clone()),
                                     _ => None
                                 })
                                 .unwrap_or_else(|| "Unknown".to_string()),
-                            node.get_field("id"),
-                            match node {
-                                NodeData::Regular { node_type, .. } => Some(node_type.clone()),
-                                _ => None
-                            }
+                            node.get_field_ref("id").cloned(),
+                            node.get_node_type_ref().map(|s| s.to_string())
                         )
                     } else {
                         ("Unknown".to_string(), None, None)
@@ -191,8 +188,8 @@ pub fn get_property_values(
                     properties.iter()
                         .map(|&prop| {
                             graph.get_node(idx)
-                                .and_then(|node| node.get_field(prop))
-                                .map(|value| value.clone())
+                                .and_then(|node| node.get_field_ref(prop))
+                                .cloned()
                                 .unwrap_or(Value::Null)
                         })
                         .collect()
@@ -203,8 +200,8 @@ pub fn get_property_values(
             let parent_title = match parent {
                 Some(p) => {
                     if let Some(node) = graph.get_node(*p) {
-                        if let Some(Value::String(title)) = node.get_field("title") {
-                            title
+                        if let Some(Value::String(title)) = node.get_field_ref("title") {
+                            title.clone()
                         } else {
                             "Unknown".to_string()
                         }
@@ -214,7 +211,7 @@ pub fn get_property_values(
                 },
                 None => "Root".to_string(),
             };
-            
+
             // Always add to result, even with empty values
             result.push(LevelValues {
                 parent_title,
@@ -258,17 +255,17 @@ pub fn get_unique_values(
                 
                 for &idx in &filtered_children {
                     if let Some(node) = graph.get_node(idx) {
-                        if let Some(value) = node.get_field(property) {
+                        if let Some(value) = node.get_field_ref(property) {
                             unique_values.insert(value.clone());
                         }
                     }
                 }
-                
+
                 let parent_title = match parent {
                     Some(p) => {
                         if let Some(node) = graph.get_node(*p) {
-                            if let Some(Value::String(title)) = node.get_field("title") {
-                                title
+                            if let Some(Value::String(title)) = node.get_field_ref("title") {
+                                title.clone()
                             } else {
                                 "Unknown".to_string()
                             }
@@ -299,7 +296,7 @@ pub fn get_unique_values(
                 
                 for &idx in &filtered_children {
                     if let Some(node) = graph.get_node(idx) {
-                        if let Some(value) = node.get_field(property) {
+                        if let Some(value) = node.get_field_ref(property) {
                             all_unique_values.insert(value.clone());
                         }
                     }
@@ -435,8 +432,8 @@ pub fn get_connections(
                             };
                             incoming.push((
                                 edge_data.connection_type.clone(),
-                                source_node.get_field("id").unwrap_or(Value::Null),
-                                source_node.get_field("title").unwrap_or(Value::Null),
+                                source_node.get_field_ref("id").cloned().unwrap_or(Value::Null),
+                                source_node.get_field_ref("title").cloned().unwrap_or(Value::Null),
                                 edge_data.properties.clone(),
                                 node_props,
                             ));
@@ -457,8 +454,8 @@ pub fn get_connections(
                             };
                             outgoing.push((
                                 edge_data.connection_type.clone(),
-                                target_node.get_field("id").unwrap_or(Value::Null),
-                                target_node.get_field("title").unwrap_or(Value::Null),
+                                target_node.get_field_ref("id").cloned().unwrap_or(Value::Null),
+                                target_node.get_field_ref("title").cloned().unwrap_or(Value::Null),
                                 edge_data.properties.clone(),
                                 node_props,
                             ));
@@ -485,17 +482,14 @@ pub fn get_connections(
                     Some(p) => {
                         if let Some(node) = graph.get_node(p) {
                             (
-                                node.get_field("title")
+                                node.get_field_ref("title")
                                     .and_then(|v| match v {
-                                        Value::String(s) => Some(s),
+                                        Value::String(s) => Some(s.clone()),
                                         _ => None
                                     })
                                     .unwrap_or_else(|| "Unknown".to_string()),
-                                node.get_field("id"),
-                                match node {
-                                    NodeData::Regular { node_type, .. } => Some(node_type.clone()),
-                                    _ => None
-                                }
+                                node.get_field_ref("id").cloned(),
+                                node.get_node_type_ref().map(|s| s.to_string())
                             )
                         } else {
                             ("Unknown".to_string(), None, None)

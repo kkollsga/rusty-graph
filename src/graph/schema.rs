@@ -13,6 +13,16 @@ pub struct NodeInfo {
     pub properties: HashMap<String, Value>,
 }
 
+/// Zero-copy reference to node data. Use this for read-only access
+/// to avoid cloning overhead when converting to Python.
+#[derive(Debug)]
+pub struct NodeInfoRef<'a> {
+    pub id: &'a Value,
+    pub title: &'a Value,
+    pub node_type: &'a str,
+    pub properties: &'a HashMap<String, Value>,
+}
+
 #[derive(Clone, Debug)]
 pub enum SelectionOperation {
     Filter(HashMap<String, FilterCondition>),
@@ -690,6 +700,41 @@ impl NodeData {
         }
     }
 
+    /// Returns a reference to the field value without cloning.
+    /// Use this for read-only access to avoid allocation overhead.
+    /// Note: "type" field is not supported here as it requires Value::String allocation.
+    /// Use get_node_type_ref() for the node type.
+    #[inline]
+    pub fn get_field_ref(&self, field: &str) -> Option<&Value> {
+        match self {
+            NodeData::Regular { id, title, properties, .. } => {
+                match field {
+                    "id" => Some(id),
+                    "title" => Some(title),
+                    _ => properties.get(field)
+                }
+            },
+            NodeData::Schema { .. } => None
+        }
+    }
+
+    /// Returns the node type as a string reference without allocation.
+    #[inline]
+    pub fn get_node_type_ref(&self) -> Option<&str> {
+        match self {
+            NodeData::Regular { node_type, .. } | NodeData::Schema { node_type, .. } => Some(node_type.as_str()),
+        }
+    }
+
+    /// Returns a reference to the properties HashMap without cloning.
+    #[inline]
+    pub fn get_properties_ref(&self) -> Option<&HashMap<String, Value>> {
+        match self {
+            NodeData::Regular { properties, .. } => Some(properties),
+            NodeData::Schema { properties, .. } => Some(properties),
+        }
+    }
+
     pub fn is_regular(&self) -> bool {
         matches!(self, NodeData::Regular { .. })
     }
@@ -701,6 +746,21 @@ impl NodeData {
                 title: title.clone(),
                 node_type: node_type.clone(),
                 properties: properties.clone(),
+            }),
+            NodeData::Schema { .. } => None,
+        }
+    }
+
+    /// Returns a zero-copy reference to node data.
+    /// Use this instead of to_node_info() when you don't need ownership.
+    #[inline]
+    pub fn as_node_info_ref(&self) -> Option<NodeInfoRef<'_>> {
+        match self {
+            NodeData::Regular { id, title, node_type, properties } => Some(NodeInfoRef {
+                id,
+                title,
+                node_type: node_type.as_str(),
+                properties,
             }),
             NodeData::Schema { .. } => None,
         }

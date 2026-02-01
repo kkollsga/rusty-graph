@@ -21,7 +21,7 @@ pub fn expand_selection(
         .ok_or_else(|| "No active selection level".to_string())?;
 
     // Start with current selection
-    let mut frontier: HashSet<NodeIndex> = level.get_all_nodes().into_iter().collect();
+    let mut frontier: HashSet<NodeIndex> = level.iter_node_indices().collect();
     let mut visited = frontier.clone();
 
     // BFS expansion for N hops

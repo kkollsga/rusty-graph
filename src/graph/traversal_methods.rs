@@ -340,20 +340,20 @@ pub fn get_children_properties(
             if let Some(parent) = parent_opt {
                 // Get parent title
                 let parent_title = if let Some(node) = graph.get_node(parent) {
-                    match node.get_field("title") {
+                    match node.get_field_ref("title") {
                         Some(Value::String(s)) => s.clone(),
                         _ => format!("node_{}", parent.index())
                     }
                 } else {
                     format!("node_{}", parent.index())
                 };
-                
+
                 // For each parent, collect property values from children
                 let mut values_list = Vec::new();
-                
+
                 for &child_idx in children {
                     if let Some(node) = graph.get_node(child_idx) {
-                        let value = match node.get_field(property) {
+                        let value = match node.get_field_ref(property) {
                             Some(Value::String(s)) => s.clone(),
                             Some(Value::Int64(i)) => i.to_string(),
                             Some(Value::Float64(f)) => f.to_string(),
@@ -363,7 +363,7 @@ pub fn get_children_properties(
                             Some(Value::Null) => "null".to_string(),
                             None => continue,
                         };
-                        
+
                         values_list.push(value);
                     }
                 }

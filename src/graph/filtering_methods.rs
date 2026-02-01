@@ -232,7 +232,7 @@ fn filter_nodes_by_conditions(
                 conditions.iter().all(|(key, condition)| {
                     let value = field_cache
                         .entry((idx, key.as_str()))
-                        .or_insert_with(|| node.get_field(key));
+                        .or_insert_with(|| node.get_field_ref(key).cloned());
 
                     match value {
                         Some(v) => matches_condition(v, condition),
@@ -262,7 +262,7 @@ fn sort_nodes_by_fields(
             for (field, _) in sort_fields {
                 value_cache.insert(
                     (node_idx, field.as_str()),
-                    node.get_field(field)
+                    node.get_field_ref(field).cloned()
                 );
             }
         }

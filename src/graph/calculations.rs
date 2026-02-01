@@ -33,7 +33,7 @@ fn cache_parent_titles(
         .filter_map(|pair| pair.parent.map(|idx| (
             idx,
             graph.get_node(idx)
-                .and_then(|node| node.get_field("title"))
+                .and_then(|node| node.get_field_ref("title"))
                 .and_then(|v| v.as_string())
         )))
         .collect()
@@ -96,7 +96,7 @@ pub fn process_equation(
     let effective_level_index = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
     let nodes_processed;
     if let Some(level) = selection.get_level(effective_level_index) {
-        if level.get_all_nodes().is_empty() {
+        if level.node_count() == 0 {
             return Err(format!(
                 "No nodes found at level {}. Make sure your filters and traversals return data.",
                 effective_level_index
@@ -115,8 +115,8 @@ pub fn process_equation(
         if let Some(level) = selection.get_level(effective_level_index) {
             if !level.is_empty() {
                 // Get a sample node to determine node type
-                if let Some(nodes) = level.get_all_nodes().first() {
-                    if let Some(node) = graph.get_node(*nodes) {
+                if let Some(sample_node_idx) = level.iter_node_indices().next() {
+                    if let Some(node) = graph.get_node(sample_node_idx) {
                         match node {
                             NodeData::Regular { node_type, .. } => {
                                 // Check if schema node exists for this type
@@ -212,7 +212,7 @@ pub fn process_equation(
                 .collect();
             
             // Get all node indices directly from the current level
-            for node_idx in level.get_all_nodes() {
+            for node_idx in level.iter_node_indices() {
                 // Direct HashMap lookup instead of linear search
                 if let Some(&result) = result_map.get(&node_idx) {
                     // Verify node exists in the graph - IMPORTANT: Must check here
@@ -368,7 +368,7 @@ pub fn evaluate_equation(
             .map(|&node_idx| {
                 match graph.get_node(node_idx) {
                     Some(node) => {
-                        let title = node.get_field("title")
+                        let title = node.get_field_ref("title")
                             .and_then(|v| v.as_string());
                         let obj = convert_node_to_object(node);
                 
@@ -562,7 +562,7 @@ pub fn count_nodes_by_parent(
                 parent_idx: pair.parent,
                 parent_title: pair.parent.and_then(|idx| {
                     graph.get_node(idx)
-                        .and_then(|node| node.get_field("title"))
+                        .and_then(|node| node.get_field_ref("title"))
                         .and_then(|v| v.as_string())
                 }),
                 value: Value::Int64(pair.children.len() as i64),
@@ -609,11 +609,10 @@ pub fn store_count_results(
         let effective_index = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
         
         if let Some(level) = selection.get_level(effective_index) {
-            let all_nodes = level.get_all_nodes();
-            nodes_processed = all_nodes.len();
-            
+            nodes_processed = level.node_count();
+
             // Apply the count to each node in the level
-            for node_idx in all_nodes {
+            for node_idx in level.iter_node_indices() {
                 if graph.get_node(node_idx).is_some() {
                     nodes_to_update.push((Some(node_idx), Value::Int64(count as i64)));
                 } else {

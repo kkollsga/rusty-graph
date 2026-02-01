@@ -19,8 +19,8 @@ pub fn union_selections(
         .ok_or_else(|| "No valid source selection level".to_string())?;
 
     // Collect all nodes from both selections using HashSet for deduplication
-    let mut all_nodes: HashSet<NodeIndex> = target_level.get_all_nodes().into_iter().collect();
-    all_nodes.extend(source_level.get_all_nodes());
+    let mut all_nodes: HashSet<NodeIndex> = target_level.iter_node_indices().collect();
+    all_nodes.extend(source_level.iter_node_indices());
 
     // Update target selection with union result
     let target_level_mut = target.get_level_mut(target_level_idx)
@@ -46,8 +46,8 @@ pub fn intersection_selections(
         .ok_or_else(|| "No valid source selection level".to_string())?;
 
     // Build HashSets for efficient intersection
-    let target_set: HashSet<NodeIndex> = target_level.get_all_nodes().into_iter().collect();
-    let source_set: HashSet<NodeIndex> = source_level.get_all_nodes().into_iter().collect();
+    let target_set: HashSet<NodeIndex> = target_level.iter_node_indices().collect();
+    let source_set: HashSet<NodeIndex> = source_level.iter_node_indices().collect();
 
     // Compute intersection
     let result: Vec<NodeIndex> = target_set.intersection(&source_set).copied().collect();
@@ -76,8 +76,8 @@ pub fn difference_selections(
         .ok_or_else(|| "No valid source selection level".to_string())?;
 
     // Build HashSets for efficient difference
-    let target_set: HashSet<NodeIndex> = target_level.get_all_nodes().into_iter().collect();
-    let source_set: HashSet<NodeIndex> = source_level.get_all_nodes().into_iter().collect();
+    let target_set: HashSet<NodeIndex> = target_level.iter_node_indices().collect();
+    let source_set: HashSet<NodeIndex> = source_level.iter_node_indices().collect();
 
     // Compute difference (nodes in target but not in source)
     let result: Vec<NodeIndex> = target_set.difference(&source_set).copied().collect();
@@ -106,8 +106,8 @@ pub fn symmetric_difference_selections(
         .ok_or_else(|| "No valid source selection level".to_string())?;
 
     // Build HashSets for efficient symmetric difference
-    let target_set: HashSet<NodeIndex> = target_level.get_all_nodes().into_iter().collect();
-    let source_set: HashSet<NodeIndex> = source_level.get_all_nodes().into_iter().collect();
+    let target_set: HashSet<NodeIndex> = target_level.iter_node_indices().collect();
+    let source_set: HashSet<NodeIndex> = source_level.iter_node_indices().collect();
 
     // Compute symmetric difference (nodes in either but not both)
     let result: Vec<NodeIndex> = target_set.symmetric_difference(&source_set).copied().collect();

@@ -2238,8 +2238,8 @@ impl KnowledgeGraph {
                 let ids: Vec<Py<PyAny>> = path_result.path.iter()
                     .filter_map(|&idx| {
                         self.inner.get_node(idx)
-                            .and_then(|node| node.get_field("id"))
-                            .map(|id| py_out::value_to_py(py, &id).unwrap_or_else(|_| py.None()))
+                            .and_then(|node| node.get_field_ref("id"))
+                            .map(|id| py_out::value_to_py(py, id).unwrap_or_else(|_| py.None()))
                     })
                     .collect();
                 Ok(PyList::new(py, ids)?.into())
@@ -2479,7 +2479,7 @@ impl KnowledgeGraph {
         let level = self.selection.get_level(level_count - 1)
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No selection level"))?;
 
-        for node_idx in level.get_all_nodes() {
+        for node_idx in level.iter_node_indices() {
             if let Some(info) = graph_algorithms::get_node_info(&self.inner, node_idx) {
                 let degree = graph_algorithms::node_degree(&self.inner, node_idx);
                 result_dict.set_item(&info.title, degree)?;
@@ -2879,7 +2879,7 @@ impl KnowledgeGraph {
         let selection_has_nodes = if self.selection.get_level_count() > 0 {
             let level_idx = self.selection.get_level_count().saturating_sub(1);
             self.selection.get_level(level_idx)
-                .map(|l| !l.get_all_nodes().is_empty())
+                .map(|l| l.node_count() > 0)
                 .unwrap_or(false)
         } else {
             false
