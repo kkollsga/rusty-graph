@@ -4,7 +4,6 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use serde::{Serialize, Deserialize};
 use chrono::NaiveDate;
-use pyo3::prelude::*;
 
 #[derive(Debug, Clone)]
 pub enum FilterCondition {
@@ -75,20 +74,6 @@ impl Value {
         match self {
             Value::String(s) => Some(s.clone()),
             _ => None,
-        }
-    }
-}
-
-impl ToPyObject for Value {
-    fn to_object(&self, py: Python<'_>) -> PyObject {
-        match self {
-            Value::String(s) => s.to_object(py),
-            Value::Float64(f) => f.to_object(py),
-            Value::Int64(i) => i.to_object(py),
-            Value::Boolean(b) => b.to_object(py),
-            Value::UniqueId(u) => u.to_object(py),
-            Value::DateTime(d) => d.format("%Y-%m-%d").to_string().to_object(py),
-            Value::Null => py.None(),
         }
     }
 }

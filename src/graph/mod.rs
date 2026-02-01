@@ -1,7 +1,7 @@
 // src/graph/mod.rs
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use pyo3::Bound;
+use pyo3::{Bound, IntoPyObjectExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::mem;
@@ -83,14 +83,14 @@ fn centrality_results_to_py(
     graph: &DirGraph,
     results: Vec<graph_algorithms::CentralityResult>,
     top_k: Option<usize>,
-) -> PyResult<PyObject> {
-    let result_list = PyList::empty_bound(py);
+) -> PyResult<Py<PyAny>> {
+    let result_list = PyList::empty(py);
 
     let limit = top_k.unwrap_or(results.len());
 
     for result in results.into_iter().take(limit) {
         if let Some(info) = graph_algorithms::get_node_info(graph, result.node_idx) {
-            let node_dict = PyDict::new_bound(py);
+            let node_dict = PyDict::new(py);
             node_dict.set_item("node_type", &info.node_type)?;
             node_dict.set_item("title", &info.title)?;
             node_dict.set_item("id", py_out::value_to_py(py, &info.id)?)?;
@@ -113,6 +113,7 @@ impl KnowledgeGraph {
         }
     }
 
+    #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None))]
     fn add_nodes(
         &mut self,
         data: &Bound<'_, PyAny>,
@@ -123,7 +124,7 @@ impl KnowledgeGraph {
         conflict_handling: Option<String>,
         skip_columns: Option<&Bound<'_, PyList>>,
         column_types: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         // Get all columns from the dataframe
         let df_cols = data.getattr("columns")?;
         let all_columns: Vec<String> = df_cols.extract()?;
@@ -174,8 +175,8 @@ impl KnowledgeGraph {
         self.add_report(OperationReport::NodeOperation(result.clone()));
         
         // Convert the report to a Python dictionary
-        Python::with_gil(|py| {
-            let report_dict = PyDict::new_bound(py);
+        Python::attach(|py| {
+            let report_dict = PyDict::new(py);
             report_dict.set_item("operation", &result.operation_type)?;
             report_dict.set_item("timestamp", result.timestamp.to_rfc3339())?;
             report_dict.set_item("nodes_created", result.nodes_created)?;
@@ -195,6 +196,7 @@ impl KnowledgeGraph {
         })
     }
 
+    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None))]
     fn add_connections(
         &mut self,
         data: &Bound<'_, PyAny>,
@@ -209,7 +211,7 @@ impl KnowledgeGraph {
         skip_columns: Option<&Bound<'_, PyList>>,
         conflict_handling: Option<String>,
         column_types: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         // Get all columns from the dataframe
         let df_cols = data.getattr("columns")?;
         let all_columns: Vec<String> = df_cols.extract()?;
@@ -266,8 +268,8 @@ impl KnowledgeGraph {
         self.add_report(OperationReport::ConnectionOperation(result.clone()));
         
         // Convert the report to a Python dictionary
-        Python::with_gil(|py| {
-            let report_dict = PyDict::new_bound(py);
+        Python::attach(|py| {
+            let report_dict = PyDict::new(py);
             report_dict.set_item("operation", &result.operation_type)?;
             report_dict.set_item("timestamp", result.timestamp.to_rfc3339())?;
             report_dict.set_item("connections_created", result.connections_created)?;
@@ -337,11 +339,11 @@ impl KnowledgeGraph {
         &mut self,
         py: Python<'_>,
         nodes: &Bound<'_, PyList>,
-    ) -> PyResult<PyObject> {
-        let result_dict = PyDict::new_bound(py);
+    ) -> PyResult<Py<PyAny>> {
+        let result_dict = PyDict::new(py);
 
         for item in nodes.iter() {
-            let spec = item.downcast::<PyDict>()?;
+            let spec = item.cast::<PyDict>()?;
 
             let node_type: String = spec.get_item("node_type")?
                 .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("Missing 'node_type' in node spec"))?
@@ -415,7 +417,7 @@ impl KnowledgeGraph {
         &mut self,
         py: Python<'_>,
         connections: &Bound<'_, PyList>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         self.add_connections_internal(py, connections, false)
     }
 
@@ -449,7 +451,7 @@ impl KnowledgeGraph {
         &mut self,
         py: Python<'_>,
         connections: &Bound<'_, PyList>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         self.add_connections_internal(py, connections, true)
     }
 
@@ -459,8 +461,8 @@ impl KnowledgeGraph {
         py: Python<'_>,
         connections: &Bound<'_, PyList>,
         filter_to_loaded: bool,
-    ) -> PyResult<PyObject> {
-        let result_dict = PyDict::new_bound(py);
+    ) -> PyResult<Py<PyAny>> {
+        let result_dict = PyDict::new(py);
         let loaded_types: std::collections::HashSet<String> = if filter_to_loaded {
             self.inner.get_node_types().into_iter().collect()
         } else {
@@ -468,7 +470,7 @@ impl KnowledgeGraph {
         };
 
         for item in connections.iter() {
-            let spec = item.downcast::<PyDict>()?;
+            let spec = item.cast::<PyDict>()?;
 
             let source_type: String = spec.get_item("source_type")?
                 .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("Missing 'source_type' in connection spec"))?
@@ -541,6 +543,7 @@ impl KnowledgeGraph {
         Ok(result_dict.into())
     }
 
+    #[pyo3(signature = (node_type, sort=None, max_nodes=None))]
     fn type_filter(
         &mut self,
         node_type: String,
@@ -583,6 +586,7 @@ impl KnowledgeGraph {
         Ok(new_kg)
     }
 
+    #[pyo3(signature = (conditions, sort=None, max_nodes=None))]
     fn filter(&mut self, conditions: &Bound<'_, PyDict>, sort: Option<&Bound<'_, PyAny>>, max_nodes: Option<usize>) -> PyResult<Self> {
         let mut new_kg = self.clone();
 
@@ -609,6 +613,7 @@ impl KnowledgeGraph {
         Ok(new_kg)
     }
 
+    #[pyo3(signature = (include_orphans=None, sort=None, max_nodes=None))]
     fn filter_orphans(
         &mut self,
         include_orphans: Option<bool>,
@@ -635,6 +640,7 @@ impl KnowledgeGraph {
         Ok(new_kg)
     }
 
+    #[pyo3(signature = (sort, ascending=None))]
     fn sort(&mut self, sort: &Bound<'_, PyAny>, ascending: Option<bool>) -> PyResult<Self> {
         let mut new_kg = self.clone();
         let sort_fields = py_in::parse_sort_fields(sort, ascending)?;
@@ -777,7 +783,7 @@ impl KnowledgeGraph {
         &mut self,
         properties: &Bound<'_, PyDict>,
         keep_selection: Option<bool>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         // Get the current level's nodes
         let current_index = self.selection.get_level_count().saturating_sub(1);
         let level = self.selection.get_level(current_index)
@@ -850,9 +856,9 @@ impl KnowledgeGraph {
         let report_index = new_kg.add_report(OperationReport::NodeOperation(report));
 
         // Return the new KnowledgeGraph and the report
-        Python::with_gil(|py| {
-            let dict = PyDict::new_bound(py);
-            dict.set_item("graph", new_kg.into_py(py))?;
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            dict.set_item("graph", Py::new(py, new_kg)?.into_any())?;
             dict.set_item("nodes_updated", total_updated)?;
             dict.set_item("report_index", report_index)?;
             Ok(dict.into())
@@ -868,7 +874,7 @@ impl KnowledgeGraph {
         parent_type: Option<&str>,
         parent_info: Option<bool>,
         flatten_single_parent: Option<bool>
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         // Fast path: when we just want a flat list of nodes without grouping,
         // skip the intermediate NodeInfo clone and convert directly from NodeData.
         // This avoids cloning the properties HashMap for each node.
@@ -885,8 +891,8 @@ impl KnowledgeGraph {
             && (selection_has_nodes || has_query_operations);
 
         if use_fast_path {
-            return Python::with_gil(|py| {
-                let result = PyList::empty_bound(py);
+            return Python::attach(|py| {
+                let result = PyList::empty(py);
                 let max = max_nodes.unwrap_or(usize::MAX);
                 let mut count = 0;
 
@@ -914,7 +920,7 @@ impl KnowledgeGraph {
             indices.as_deref(),
             max_nodes
         );
-        Python::with_gil(|py| py_out::level_nodes_to_pydict(
+        Python::attach(|py| py_out::level_nodes_to_pydict(
             py,
             &nodes,
             parent_type,
@@ -957,14 +963,14 @@ impl KnowledgeGraph {
     ///     ```python
     ///     ids = graph.type_filter('User').get_ids()
     ///     ```
-    fn get_ids(&self) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
-            let result = PyList::empty_bound(py);
+    fn get_ids(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            let result = PyList::empty(py);
 
             for node_idx in self.selection.current_node_indices() {
                 if let Some(node) = self.inner.get_node(node_idx) {
                     if let schema::NodeData::Regular { id, title, node_type, .. } = node {
-                        let dict = PyDict::new_bound(py);
+                        let dict = PyDict::new(py);
                         dict.set_item("id", py_out::value_to_py(py, id)?)?;
                         dict.set_item("title", py_out::value_to_py(py, title)?)?;
                         dict.set_item("type", node_type)?;
@@ -994,9 +1000,9 @@ impl KnowledgeGraph {
     ///     user_ids = graph.type_filter('User').id_values()
     ///     # Returns: [1, 2, 3, 4, 5, ...]
     ///     ```
-    fn id_values(&self) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
-            let result = PyList::empty_bound(py);
+    fn id_values(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            let result = PyList::empty(py);
 
             for node_idx in self.selection.current_node_indices() {
                 if let Some(node) = self.inner.get_node(node_idx) {
@@ -1027,7 +1033,7 @@ impl KnowledgeGraph {
     ///     user = graph.get_node_by_id("User", 38870)
     ///     ```
     #[pyo3(signature = (node_type, node_id))]
-    fn get_node_by_id(&mut self, node_type: &str, node_id: &Bound<'_, PyAny>) -> PyResult<Option<PyObject>> {
+    fn get_node_by_id(&mut self, node_type: &str, node_id: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
         // Convert Python value to Rust Value
         let id_value = py_in::py_value_to_value(node_id)?;
 
@@ -1048,7 +1054,7 @@ impl KnowledgeGraph {
 
         // Convert to Python dict
         if let Some(node_info) = node.to_node_info() {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let dict = py_out::nodeinfo_to_pydict(py, &node_info)?;
                 Ok(Some(dict))
             })
@@ -1097,7 +1103,7 @@ impl KnowledgeGraph {
         parent_info: Option<bool>,
         include_node_properties: Option<bool>,
         flatten_single_parent: Option<bool>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let connections = data_retrieval::get_connections(
             &self.inner,
             &self.selection,
@@ -1105,7 +1111,7 @@ impl KnowledgeGraph {
             indices.as_deref(),
             include_node_properties.unwrap_or(true),
         );
-        Python::with_gil(|py| py_out::level_connections_to_pydict(
+        Python::attach(|py| py_out::level_connections_to_pydict(
             py, 
             &connections, 
             parent_info,
@@ -1113,7 +1119,8 @@ impl KnowledgeGraph {
         ))
     }
     
-    fn get_titles(&self, max_nodes: Option<usize>, indices: Option<Vec<usize>>) -> PyResult<PyObject> {
+    #[pyo3(signature = (max_nodes=None, indices=None))]
+    fn get_titles(&self, max_nodes: Option<usize>, indices: Option<Vec<usize>>) -> PyResult<Py<PyAny>> {
         let values = data_retrieval::get_property_values(
             &self.inner,
             &self.selection,
@@ -1122,7 +1129,7 @@ impl KnowledgeGraph {
             indices.as_deref(),
             max_nodes
         );
-        Python::with_gil(|py| py_out::level_single_values_to_pydict(py, &values))
+        Python::attach(|py| py_out::level_single_values_to_pydict(py, &values))
     }
 
     /// Returns a string representation of the query execution plan.
@@ -1146,7 +1153,8 @@ impl KnowledgeGraph {
         Ok(steps.join(" -> "))
     }
 
-    fn get_properties(&self, properties: Vec<String>, max_nodes: Option<usize>, indices: Option<Vec<usize>>) -> PyResult<PyObject> {
+    #[pyo3(signature = (properties, max_nodes=None, indices=None))]
+    fn get_properties(&self, properties: Vec<String>, max_nodes: Option<usize>, indices: Option<Vec<usize>>) -> PyResult<Py<PyAny>> {
         let property_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
         let values = data_retrieval::get_property_values(
             &self.inner,
@@ -1156,7 +1164,7 @@ impl KnowledgeGraph {
             indices.as_deref(),
             max_nodes
         );
-        Python::with_gil(|py| py_out::level_values_to_pydict(py, &values))
+        Python::attach(|py| py_out::level_values_to_pydict(py, &values))
     }
 
     fn unique_values(
@@ -1168,7 +1176,7 @@ impl KnowledgeGraph {
         store_as: Option<&str>,
         max_length: Option<usize>,
         keep_selection: Option<bool>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let values = data_retrieval::get_unique_values(
             &self.inner,
             &self.selection,
@@ -1194,12 +1202,13 @@ impl KnowledgeGraph {
                 self.selection.clear();
             }
 
-            Python::with_gil(|py| Ok(self.clone().into_py(py)))
+            Python::attach(|py| Ok(Py::new(py, self.clone())?.into_any()))
         } else {
-            Python::with_gil(|py| py_out::level_unique_values_to_pydict(py, &values))
+            Python::attach(|py| py_out::level_unique_values_to_pydict(py, &values))
         }
     }
     
+    #[pyo3(signature = (connection_type, level_index=None, direction=None, filter_target=None, filter_connection=None, sort_target=None, max_nodes=None, new_level=None))]
     fn traverse(
         &mut self,
         connection_type: String,
@@ -1302,7 +1311,7 @@ impl KnowledgeGraph {
         store_as: Option<&str>,
         max_length: Option<usize>,
         keep_selection: Option<bool>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let property_name = property.unwrap_or("title");
         
         // Apply filtering and sorting if needed
@@ -1361,7 +1370,7 @@ impl KnowledgeGraph {
                 max_length
             );
             
-            return Python::with_gil(|py| {
+            return Python::attach(|py| {
                 py_out::string_pairs_to_pydict(py, &dict_pairs)
             });
         }
@@ -1394,14 +1403,14 @@ impl KnowledgeGraph {
         new_kg.add_report(OperationReport::NodeOperation(result));
         
         // Return the updated graph (no report in return value)
-        Python::with_gil(|py| Ok(new_kg.into_py(py)))
+        Python::attach(|py| Ok(Py::new(py, new_kg)?.into_any()))
     }
 
     fn statistics(
         &self,
         property: &str,
         level_index: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let pairs = statistics_methods::get_parent_child_pairs(&self.selection, level_index);
         let stats = statistics_methods::calculate_property_stats(&self.inner, &pairs, property);
         py_out::convert_stats_for_python(stats)
@@ -1415,7 +1424,7 @@ impl KnowledgeGraph {
         store_as: Option<&str>,
         keep_selection: Option<bool>,
         aggregate_connections: Option<bool>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         // If we're storing results, we'll need a mutable graph
         if let Some(target_property) = store_as {
             // Extract graph or clone it if needed
@@ -1448,7 +1457,7 @@ impl KnowledgeGraph {
                     // Store the calculation report
                     new_kg.add_report(OperationReport::CalculationOperation(report));
                     
-                    Python::with_gil(|py| Ok(new_kg.into_py(py)))
+                    Python::attach(|py| Ok(Py::new(py, new_kg)?.into_any()))
                 },
                 Ok(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                     "Unexpected result type when storing calculation result"
@@ -1514,7 +1523,7 @@ impl KnowledgeGraph {
         group_by_parent: Option<bool>,
         store_as: Option<&str>,
         keep_selection: Option<bool>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         // Default to grouping by parent if we have a nested structure
         let has_multiple_levels = self.selection.get_level_count() > 1;
         // Use the provided group_by_parent if given, otherwise default based on structure
@@ -1553,7 +1562,7 @@ impl KnowledgeGraph {
             // Add the report
             new_kg.add_report(OperationReport::CalculationOperation(result));
             
-            Python::with_gil(|py| Ok(new_kg.into_py(py)))
+            Python::attach(|py| Ok(Py::new(py, new_kg)?.into_any()))
         } else if use_grouping {
             // Return counts grouped by parent
             let counts = calculations::count_nodes_by_parent(&self.inner, &self.selection, level_index);
@@ -1561,7 +1570,7 @@ impl KnowledgeGraph {
         } else {
             // Simple flat count
             let count = calculations::count_nodes_in_level(&self.selection, level_index);
-            Python::with_gil(|py| Ok(count.into_py(py)))
+            Python::attach(|py| count.into_py_any(py))
         }
     }
 
@@ -1585,12 +1594,12 @@ impl KnowledgeGraph {
     }
 
     /// Get the most recent operation report as a Python dictionary
-    fn get_last_report(&self) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
+    fn get_last_report(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
             if let Some(report) = self.reports.get_last_report() {
                 match report {
                     OperationReport::NodeOperation(node_report) => {
-                        let report_dict = PyDict::new_bound(py);
+                        let report_dict = PyDict::new(py);
                         report_dict.set_item("operation", &node_report.operation_type)?;
                         report_dict.set_item("timestamp", node_report.timestamp.to_rfc3339())?;
                         report_dict.set_item("nodes_created", node_report.nodes_created)?;
@@ -1609,7 +1618,7 @@ impl KnowledgeGraph {
                         Ok(report_dict.into())
                     },
                     OperationReport::ConnectionOperation(conn_report) => {
-                        let report_dict = PyDict::new_bound(py);
+                        let report_dict = PyDict::new(py);
                         report_dict.set_item("operation", &conn_report.operation_type)?;
                         report_dict.set_item("timestamp", conn_report.timestamp.to_rfc3339())?;
                         report_dict.set_item("connections_created", conn_report.connections_created)?;
@@ -1628,7 +1637,7 @@ impl KnowledgeGraph {
                         Ok(report_dict.into())
                     },
                     OperationReport::CalculationOperation(calc_report) => {
-                        let report_dict = PyDict::new_bound(py);
+                        let report_dict = PyDict::new(py);
                         report_dict.set_item("operation", &calc_report.operation_type)?;
                         report_dict.set_item("timestamp", calc_report.timestamp.to_rfc3339())?;
                         report_dict.set_item("expression", &calc_report.expression)?;
@@ -1650,7 +1659,7 @@ impl KnowledgeGraph {
                     }
                 }
             } else {
-                let empty_dict = PyDict::new_bound(py);
+                let empty_dict = PyDict::new(py);
                 Ok(empty_dict.into())
             }
         })
@@ -1662,15 +1671,15 @@ impl KnowledgeGraph {
     }
 
     /// Get all report history as a list of dictionaries
-    fn get_report_history(&self) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
-            // Create an empty list with PyList::empty_bound
-            let report_list = PyList::empty_bound(py);
+    fn get_report_history(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            // Create an empty list with PyList::empty
+            let report_list = PyList::empty(py);
             
             for report in self.reports.get_all_reports() {
                 let report_dict = match report {
                     OperationReport::NodeOperation(node_report) => {
-                        let dict = PyDict::new_bound(py);
+                        let dict = PyDict::new(py);
                         dict.set_item("operation", &node_report.operation_type)?;
                         dict.set_item("timestamp", node_report.timestamp.to_rfc3339())?;
                         dict.set_item("nodes_created", node_report.nodes_created)?;
@@ -1689,7 +1698,7 @@ impl KnowledgeGraph {
                         dict
                     },
                     OperationReport::ConnectionOperation(conn_report) => {
-                        let dict = PyDict::new_bound(py);
+                        let dict = PyDict::new(py);
                         dict.set_item("operation", &conn_report.operation_type)?;
                         dict.set_item("timestamp", conn_report.timestamp.to_rfc3339())?;
                         dict.set_item("connections_created", conn_report.connections_created)?;
@@ -1708,7 +1717,7 @@ impl KnowledgeGraph {
                         dict
                     },
                     OperationReport::CalculationOperation(calc_report) => {
-                        let dict = PyDict::new_bound(py);
+                        let dict = PyDict::new(py);
                         dict.set_item("operation", &calc_report.operation_type)?;
                         dict.set_item("timestamp", calc_report.timestamp.to_rfc3339())?;
                         dict.set_item("expression", &calc_report.expression)?;
@@ -1805,10 +1814,10 @@ impl KnowledgeGraph {
 
         // Parse node schemas
         if let Some(nodes_dict) = schema_dict.get_item("nodes")? {
-            if let Ok(nodes) = nodes_dict.downcast::<PyDict>() {
+            if let Ok(nodes) = nodes_dict.cast::<PyDict>() {
                 for (node_type_key, node_schema_val) in nodes.iter() {
                     let node_type: String = node_type_key.extract()?;
-                    let node_schema_dict = node_schema_val.downcast::<PyDict>()
+                    let node_schema_dict = node_schema_val.cast::<PyDict>()
                         .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                             format!("Schema for node type '{}' must be a dictionary", node_type)
                         ))?;
@@ -1827,7 +1836,7 @@ impl KnowledgeGraph {
 
                     // Parse field types
                     if let Some(types) = node_schema_dict.get_item("types")? {
-                        let types_dict = types.downcast::<PyDict>()
+                        let types_dict = types.cast::<PyDict>()
                             .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                                 "types must be a dictionary"
                             ))?;
@@ -1846,10 +1855,10 @@ impl KnowledgeGraph {
 
         // Parse connection schemas
         if let Some(connections_dict) = schema_dict.get_item("connections")? {
-            if let Ok(connections) = connections_dict.downcast::<PyDict>() {
+            if let Ok(connections) = connections_dict.cast::<PyDict>() {
                 for (conn_type_key, conn_schema_val) in connections.iter() {
                     let conn_type: String = conn_type_key.extract()?;
-                    let conn_schema_dict = conn_schema_val.downcast::<PyDict>()
+                    let conn_schema_dict = conn_schema_val.cast::<PyDict>()
                         .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                             format!("Schema for connection type '{}' must be a dictionary", conn_type)
                         ))?;
@@ -1888,7 +1897,7 @@ impl KnowledgeGraph {
 
                     // Parse property_types
                     if let Some(prop_types) = conn_schema_dict.get_item("property_types")? {
-                        let types_dict = prop_types.downcast::<PyDict>()
+                        let types_dict = prop_types.cast::<PyDict>()
                             .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                                 "property_types must be a dictionary"
                             ))?;
@@ -1925,7 +1934,8 @@ impl KnowledgeGraph {
     ///         - 'error_type': Type of error (e.g., 'missing_required_field', 'type_mismatch')
     ///         - 'message': Human-readable error message
     ///         - Additional fields depending on error type
-    fn validate_schema(&self, py: Python<'_>, strict: Option<bool>) -> PyResult<PyObject> {
+    #[pyo3(signature = (strict=None))]
+    fn validate_schema(&self, py: Python<'_>, strict: Option<bool>) -> PyResult<Py<PyAny>> {
         let schema = self.inner.get_schema()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "No schema defined. Call define_schema() first."
@@ -1938,9 +1948,9 @@ impl KnowledgeGraph {
         );
 
         // Convert errors to Python list of dicts
-        let result = PyList::empty_bound(py);
+        let result = PyList::empty(py);
         for error in errors {
-            let error_dict = PyDict::new_bound(py);
+            let error_dict = PyDict::new(py);
 
             match &error {
                 schema::ValidationError::MissingRequiredField { node_type, node_title, field } => {
@@ -2005,22 +2015,22 @@ impl KnowledgeGraph {
     }
 
     /// Get the current schema definition as a dictionary
-    fn get_schema_definition(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn get_schema_definition(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let schema = match self.inner.get_schema() {
             Some(s) => s,
             None => return Ok(py.None()),
         };
 
-        let result = PyDict::new_bound(py);
+        let result = PyDict::new(py);
 
         // Convert node schemas
-        let nodes_dict = PyDict::new_bound(py);
+        let nodes_dict = PyDict::new(py);
         for (node_type, node_schema) in &schema.node_schemas {
-            let schema_dict = PyDict::new_bound(py);
+            let schema_dict = PyDict::new(py);
             schema_dict.set_item("required", &node_schema.required_fields)?;
             schema_dict.set_item("optional", &node_schema.optional_fields)?;
 
-            let types_dict = PyDict::new_bound(py);
+            let types_dict = PyDict::new(py);
             for (field, field_type) in &node_schema.field_types {
                 types_dict.set_item(field, field_type)?;
             }
@@ -2031,9 +2041,9 @@ impl KnowledgeGraph {
         result.set_item("nodes", nodes_dict)?;
 
         // Convert connection schemas
-        let connections_dict = PyDict::new_bound(py);
+        let connections_dict = PyDict::new(py);
         for (conn_type, conn_schema) in &schema.connection_schemas {
-            let schema_dict = PyDict::new_bound(py);
+            let schema_dict = PyDict::new(py);
             schema_dict.set_item("source", &conn_schema.source_type)?;
             schema_dict.set_item("target", &conn_schema.target_type)?;
 
@@ -2046,7 +2056,7 @@ impl KnowledgeGraph {
             }
 
             if !conn_schema.property_types.is_empty() {
-                let types_dict = PyDict::new_bound(py);
+                let types_dict = PyDict::new(py);
                 for (prop, prop_type) in &conn_schema.property_types {
                     types_dict.set_item(prop, prop_type)?;
                 }
@@ -2085,7 +2095,7 @@ impl KnowledgeGraph {
         source_id: &Bound<'_, PyAny>,
         target_type: &str,
         target_id: &Bound<'_, PyAny>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         // Look up source node
         let source_lookup = lookups::TypeLookup::new(&self.inner.graph, source_type.to_string())
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
@@ -2115,13 +2125,13 @@ impl KnowledgeGraph {
 
         match result {
             Some(path_result) => {
-                let result_dict = PyDict::new_bound(py);
+                let result_dict = PyDict::new(py);
 
                 // Build path info list
-                let path_list = PyList::empty_bound(py);
+                let path_list = PyList::empty(py);
                 for &node_idx in &path_result.path {
                     if let Some(info) = graph_algorithms::get_node_info(&self.inner, node_idx) {
-                        let node_dict = PyDict::new_bound(py);
+                        let node_dict = PyDict::new(py);
                         node_dict.set_item("type", &info.node_type)?;
                         node_dict.set_item("title", &info.title)?;
                         node_dict.set_item("id", py_out::value_to_py(py, &info.id)?)?;
@@ -2132,7 +2142,7 @@ impl KnowledgeGraph {
 
                 // Build connections list
                 let connections = graph_algorithms::get_path_connections(&self.inner, &path_result.path);
-                let conn_list = PyList::empty_bound(py);
+                let conn_list = PyList::empty(py);
                 for conn in connections {
                     match conn {
                         Some(c) => conn_list.append(&c)?,
@@ -2207,7 +2217,7 @@ impl KnowledgeGraph {
         source_id: &Bound<'_, PyAny>,
         target_type: &str,
         target_id: &Bound<'_, PyAny>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         // Use O(1) direct lookup from id_indices (populated during add_nodes)
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = self.inner.lookup_by_id_normalized(source_type, &source_value)
@@ -2225,14 +2235,14 @@ impl KnowledgeGraph {
         match graph_algorithms::shortest_path(&self.inner, source_idx, target_idx) {
             Some(path_result) => {
                 // Extract just the IDs - no PyDict creation per node
-                let ids: Vec<PyObject> = path_result.path.iter()
+                let ids: Vec<Py<PyAny>> = path_result.path.iter()
                     .filter_map(|&idx| {
                         self.inner.get_node(idx)
                             .and_then(|node| node.get_field("id"))
                             .map(|id| py_out::value_to_py(py, &id).unwrap_or_else(|_| py.None()))
                     })
                     .collect();
-                Ok(ids.into_py(py))
+                Ok(PyList::new(py, ids)?.into())
             }
             None => Ok(py.None()),
         }
@@ -2259,7 +2269,7 @@ impl KnowledgeGraph {
         source_id: &Bound<'_, PyAny>,
         target_type: &str,
         target_id: &Bound<'_, PyAny>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         // Use O(1) direct lookup from id_indices (populated during add_nodes)
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = self.inner.lookup_by_id_normalized(source_type, &source_value)
@@ -2279,7 +2289,7 @@ impl KnowledgeGraph {
                 let indices: Vec<usize> = path_result.path.iter()
                     .map(|idx| idx.index())
                     .collect();
-                Ok(indices.into_py(py))
+                Ok(PyList::new(py, indices)?.into())
             }
             None => Ok(py.None()),
         }
@@ -2306,7 +2316,7 @@ impl KnowledgeGraph {
         target_type: &str,
         target_id: &Bound<'_, PyAny>,
         max_hops: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let max_hops = max_hops.unwrap_or(5);
 
         // Look up source node
@@ -2337,15 +2347,15 @@ impl KnowledgeGraph {
         let paths = graph_algorithms::all_paths(&self.inner, source_idx, target_idx, max_hops);
 
         // Convert to Python output
-        let result_list = PyList::empty_bound(py);
+        let result_list = PyList::empty(py);
         for path in paths {
-            let path_dict = PyDict::new_bound(py);
+            let path_dict = PyDict::new(py);
 
             // Build path info list
-            let path_list = PyList::empty_bound(py);
+            let path_list = PyList::empty(py);
             for &node_idx in &path {
                 if let Some(info) = graph_algorithms::get_node_info(&self.inner, node_idx) {
-                    let node_dict = PyDict::new_bound(py);
+                    let node_dict = PyDict::new(py);
                     node_dict.set_item("type", &info.node_type)?;
                     node_dict.set_item("title", &info.title)?;
                     node_dict.set_item("id", py_out::value_to_py(py, &info.id)?)?;
@@ -2356,7 +2366,7 @@ impl KnowledgeGraph {
 
             // Build connections list
             let connections = graph_algorithms::get_path_connections(&self.inner, &path);
-            let conn_list = PyList::empty_bound(py);
+            let conn_list = PyList::empty(py);
             for conn in connections {
                 match conn {
                     Some(c) => conn_list.append(&c)?,
@@ -2381,7 +2391,8 @@ impl KnowledgeGraph {
     /// Returns:
     ///     A list of components, each component is a list of node info dicts.
     ///     Components are sorted by size (largest first).
-    fn connected_components(&self, py: Python<'_>, weak: Option<bool>) -> PyResult<PyObject> {
+    #[pyo3(signature = (weak=None))]
+    fn connected_components(&self, py: Python<'_>, weak: Option<bool>) -> PyResult<Py<PyAny>> {
         let weak = weak.unwrap_or(true);
 
         let components = if weak {
@@ -2391,12 +2402,12 @@ impl KnowledgeGraph {
         };
 
         // Convert to Python output
-        let result_list = PyList::empty_bound(py);
+        let result_list = PyList::empty(py);
         for component in components {
-            let comp_list = PyList::empty_bound(py);
+            let comp_list = PyList::empty(py);
             for &node_idx in &component {
                 if let Some(info) = graph_algorithms::get_node_info(&self.inner, node_idx) {
-                    let node_dict = PyDict::new_bound(py);
+                    let node_dict = PyDict::new(py);
                     node_dict.set_item("type", &info.node_type)?;
                     node_dict.set_item("title", &info.title)?;
                     node_dict.set_item("id", py_out::value_to_py(py, &info.id)?)?;
@@ -2457,8 +2468,8 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     A dictionary mapping node titles to their degree counts
-    fn get_degrees(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let result_dict = PyDict::new_bound(py);
+    fn get_degrees(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let result_dict = PyDict::new(py);
 
         let level_count = self.selection.get_level_count();
         if level_count == 0 {
@@ -2512,7 +2523,7 @@ impl KnowledgeGraph {
         normalized: Option<bool>,
         sample_size: Option<usize>,
         top_k: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let normalized = normalized.unwrap_or(true);
 
         let results = graph_algorithms::betweenness_centrality(
@@ -2554,7 +2565,7 @@ impl KnowledgeGraph {
         max_iterations: Option<usize>,
         tolerance: Option<f64>,
         top_k: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let damping = damping_factor.unwrap_or(0.85);
         let max_iter = max_iterations.unwrap_or(100);
         let tol = tolerance.unwrap_or(1e-6);
@@ -2588,7 +2599,7 @@ impl KnowledgeGraph {
         py: Python<'_>,
         normalized: Option<bool>,
         top_k: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let normalized = normalized.unwrap_or(true);
 
         let results = graph_algorithms::degree_centrality(&self.inner, normalized);
@@ -2621,7 +2632,7 @@ impl KnowledgeGraph {
         py: Python<'_>,
         normalized: Option<bool>,
         top_k: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let normalized = normalized.unwrap_or(true);
 
         let results = graph_algorithms::closeness_centrality(&self.inner, normalized);
@@ -2650,6 +2661,7 @@ impl KnowledgeGraph {
     ///     # Start with a single field and expand to include connected nodes
     ///     expanded = graph.type_filter('Field').filter({'name': 'EKOFISK'}).expand(hops=2)
     ///     ```
+    #[pyo3(signature = (hops=None))]
     fn expand(&mut self, hops: Option<usize>) -> PyResult<Self> {
         let hops = hops.unwrap_or(1);
         let mut new_kg = self.clone();
@@ -2716,21 +2728,21 @@ impl KnowledgeGraph {
     ///         - 'edge_count': Total number of edges
     ///         - 'node_types': Dict of node type -> count
     ///         - 'connection_types': Dict of connection type -> count
-    fn subgraph_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn subgraph_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let stats = subgraph::get_subgraph_stats(&self.inner, &self.selection)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
 
-        let result_dict = PyDict::new_bound(py);
+        let result_dict = PyDict::new(py);
         result_dict.set_item("node_count", stats.node_count)?;
         result_dict.set_item("edge_count", stats.edge_count)?;
 
-        let node_types_dict = PyDict::new_bound(py);
+        let node_types_dict = PyDict::new(py);
         for (node_type, count) in &stats.node_types {
             node_types_dict.set_item(node_type, count)?;
         }
         result_dict.set_item("node_types", node_types_dict)?;
 
-        let conn_types_dict = PyDict::new_bound(py);
+        let conn_types_dict = PyDict::new(py);
         for (conn_type, count) in &stats.connection_types {
             conn_types_dict.set_item(conn_type, count)?;
         }
@@ -2932,12 +2944,12 @@ impl KnowledgeGraph {
     ///     # Now this filter will use the index (O(1) instead of O(n))
     ///     graph.type_filter('Prospect').filter({'geoprovince': 'North Sea'})
     ///     ```
-    fn create_index(&mut self, py: Python<'_>, node_type: &str, property: &str) -> PyResult<PyObject> {
+    fn create_index(&mut self, py: Python<'_>, node_type: &str, property: &str) -> PyResult<Py<PyAny>> {
         let mut graph = extract_or_clone_graph(&mut self.inner);
         let unique_values = graph.create_index(node_type, property);
         self.inner = Arc::new(graph);
 
-        let result_dict = PyDict::new_bound(py);
+        let result_dict = PyDict::new(py);
         result_dict.set_item("node_type", node_type)?;
         result_dict.set_item("property", property)?;
         result_dict.set_item("unique_values", unique_values)?;
@@ -2972,12 +2984,12 @@ impl KnowledgeGraph {
     ///     for idx in indexes:
     ///         print(f"{idx['node_type']}.{idx['property']}")
     ///     ```
-    fn list_indexes(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn list_indexes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let indexes = self.inner.list_indexes();
 
-        let result_list = pyo3::types::PyList::empty_bound(py);
+        let result_list = pyo3::types::PyList::empty(py);
         for (node_type, property) in indexes {
-            let idx_dict = PyDict::new_bound(py);
+            let idx_dict = PyDict::new(py);
             idx_dict.set_item("node_type", node_type)?;
             idx_dict.set_item("property", property)?;
             result_list.append(idx_dict)?;
@@ -3013,10 +3025,10 @@ impl KnowledgeGraph {
     ///     print(f"Unique values: {stats['unique_values']}")
     ///     print(f"Total entries: {stats['total_entries']}")
     ///     ```
-    fn index_stats(&self, py: Python<'_>, node_type: &str, property: &str) -> PyResult<PyObject> {
+    fn index_stats(&self, py: Python<'_>, node_type: &str, property: &str) -> PyResult<Py<PyAny>> {
         match self.inner.get_index_stats(node_type, property) {
             Some(stats) => {
-                let result_dict = PyDict::new_bound(py);
+                let result_dict = PyDict::new(py);
                 result_dict.set_item("node_type", node_type)?;
                 result_dict.set_item("property", property)?;
                 result_dict.set_item("unique_values", stats.unique_values)?;
@@ -3081,7 +3093,7 @@ impl KnowledgeGraph {
         py: Python<'_>,
         node_type: &str,
         properties: Vec<String>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let mut graph = extract_or_clone_graph(&mut self.inner);
 
         // Convert to slice of &str
@@ -3091,7 +3103,7 @@ impl KnowledgeGraph {
         self.inner = Arc::new(graph);
 
         // Return info dict
-        let result_dict = PyDict::new_bound(py);
+        let result_dict = PyDict::new(py);
         result_dict.set_item("node_type", node_type)?;
         result_dict.set_item("properties", properties)?;
         result_dict.set_item("unique_combinations", unique_values)?;
@@ -3122,12 +3134,12 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     A list of dicts with 'node_type' and 'properties' keys
-    fn list_composite_indexes(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn list_composite_indexes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let indexes = self.inner.list_composite_indexes();
 
-        let result_list = pyo3::types::PyList::empty_bound(py);
+        let result_list = pyo3::types::PyList::empty(py);
         for (node_type, properties) in indexes {
-            let idx_dict = PyDict::new_bound(py);
+            let idx_dict = PyDict::new(py);
             idx_dict.set_item("node_type", node_type)?;
             idx_dict.set_item("properties", properties)?;
             result_list.append(idx_dict)?;
@@ -3161,10 +3173,10 @@ impl KnowledgeGraph {
         py: Python<'_>,
         node_type: &str,
         properties: Vec<String>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         match self.inner.get_composite_index_stats(node_type, &properties) {
             Some(stats) => {
-                let result_dict = PyDict::new_bound(py);
+                let result_dict = PyDict::new(py);
                 result_dict.set_item("node_type", node_type)?;
                 result_dict.set_item("properties", properties)?;
                 result_dict.set_item("unique_combinations", stats.unique_values)?;
@@ -3222,7 +3234,7 @@ impl KnowledgeGraph {
     ///     top_10 = graph.match_pattern('(p:Person)-[:KNOWS]->(f:Person)', max_matches=10)
     ///     ```
     #[pyo3(signature = (pattern, max_matches=None))]
-    fn match_pattern(&self, py: Python<'_>, pattern: &str, max_matches: Option<usize>) -> PyResult<PyObject> {
+    fn match_pattern(&self, py: Python<'_>, pattern: &str, max_matches: Option<usize>) -> PyResult<Py<PyAny>> {
         // Parse the pattern
         let parsed = pattern_matching::parse_pattern(pattern)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -3623,13 +3635,13 @@ impl KnowledgeGraph {
         py: Python<'_>,
         lat_field: Option<&str>,
         lon_field: Option<&str>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let lat_field = lat_field.unwrap_or("latitude");
         let lon_field = lon_field.unwrap_or("longitude");
 
         match spatial::get_bounds(&self.inner, &self.selection, lat_field, lon_field) {
             Some((min_lat, max_lat, min_lon, max_lon)) => {
-                let result = PyDict::new_bound(py);
+                let result = PyDict::new(py);
                 result.set_item("min_lat", min_lat)?;
                 result.set_item("max_lat", max_lat)?;
                 result.set_item("min_lon", min_lon)?;
@@ -3664,13 +3676,13 @@ impl KnowledgeGraph {
         py: Python<'_>,
         lat_field: Option<&str>,
         lon_field: Option<&str>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let lat_field = lat_field.unwrap_or("latitude");
         let lon_field = lon_field.unwrap_or("longitude");
 
         match spatial::calculate_centroid(&self.inner, &self.selection, lat_field, lon_field) {
             Some((lat, lon)) => {
-                let result = PyDict::new_bound(py);
+                let result = PyDict::new(py);
                 result.set_item("latitude", lat)?;
                 result.set_item("longitude", lon)?;
                 Ok(result.into())
@@ -3697,10 +3709,10 @@ impl KnowledgeGraph {
     ///     print(f"Center: {centroid['latitude']}, {centroid['longitude']}")
     ///     # Output: Center: 0.5, 0.5
     ///     ```
-    fn wkt_centroid(&self, py: Python<'_>, wkt_string: &str) -> PyResult<PyObject> {
+    fn wkt_centroid(&self, py: Python<'_>, wkt_string: &str) -> PyResult<Py<PyAny>> {
         match spatial::wkt_centroid(wkt_string) {
             Ok((lat, lon)) => {
-                let result = PyDict::new_bound(py);
+                let result = PyDict::new(py);
                 result.set_item("latitude", lat)?;
                 result.set_item("longitude", lon)?;
                 Ok(result.into())

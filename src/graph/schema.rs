@@ -185,6 +185,7 @@ impl CowSelection {
 
     /// Check if we have exclusive ownership (no cloning needed for mutation).
     #[inline]
+    #[allow(dead_code)]
     pub fn is_unique(&self) -> bool {
         Arc::strong_count(&self.inner) == 1
     }
@@ -288,6 +289,7 @@ impl DirGraph {
     /// Look up a node by type and ID value without building index.
     /// Use this for read-only access when index already exists.
     /// Handles type normalization for integer types.
+    #[allow(dead_code)]
     pub fn lookup_by_id_readonly(&self, node_type: &str, id: &Value) -> Option<NodeIndex> {
         self.lookup_by_id_normalized(node_type, id)
     }
@@ -335,11 +337,13 @@ impl DirGraph {
     }
 
     /// Invalidate the ID index for a node type (call when nodes are added/removed)
+    #[allow(dead_code)]
     pub fn invalidate_id_index(&mut self, node_type: &str) {
         self.id_indices.remove(node_type);
     }
 
     /// Clear all ID indices (call after bulk operations)
+    #[allow(dead_code)]
     pub fn clear_id_indices(&mut self) {
         self.id_indices.clear();
     }

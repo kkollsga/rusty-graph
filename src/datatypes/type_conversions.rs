@@ -89,8 +89,8 @@ pub fn to_datetime(value: &Bound<'_, PyAny>) -> Option<NaiveDate> {
     }
 
     // Try to extract as Python datetime first
-    Python::with_gil(|_py| {
-        if let Ok(ts) = value.downcast::<PyDateTime>() {
+    Python::attach(|_py| {
+        if let Ok(ts) = value.cast::<PyDateTime>() {
             return NaiveDate::from_ymd_opt(ts.get_year(), ts.get_month() as u32, ts.get_day() as u32);
         }
 

@@ -11,7 +11,7 @@ pub fn pydict_to_filter_conditions(dict: &Bound<'_, PyDict>) -> PyResult<HashMap
     dict.iter()
         .map(|(k, v)| {
             let key = k.extract::<String>()?;
-            let condition = match v.downcast::<PyDict>() {
+            let condition = match v.cast::<PyDict>() {
                 // Handle operator-based condition
                 Ok(op_dict) => {
                     let (op, val) = op_dict.iter().next()
@@ -34,7 +34,7 @@ pub fn pydict_to_filter_conditions(dict: &Bound<'_, PyDict>) -> PyResult<HashMap
 fn parse_operator_condition(op: &str, val: &Bound<'_, PyAny>) -> PyResult<FilterCondition> {
     match op {
         "==" => {
-            if val.downcast::<PyList>().is_ok() {
+            if val.cast::<PyList>().is_ok() {
                 parse_in_condition(val)
             } else {
                 Ok(FilterCondition::Equals(py_value_to_value(val)?))
@@ -56,7 +56,7 @@ fn parse_operator_condition(op: &str, val: &Bound<'_, PyAny>) -> PyResult<Filter
 }
 
 fn parse_between_condition(val: &Bound<'_, PyAny>) -> PyResult<FilterCondition> {
-    match val.downcast::<PyList>() {
+    match val.cast::<PyList>() {
         Ok(list) => {
             let items: Vec<_> = list.iter().collect();
             if items.len() != 2 {
@@ -75,7 +75,7 @@ fn parse_between_condition(val: &Bound<'_, PyAny>) -> PyResult<FilterCondition> 
 }
 
 fn parse_in_condition(val: &Bound<'_, PyAny>) -> PyResult<FilterCondition> {
-    match val.downcast::<PyList>() {
+    match val.cast::<PyList>() {
         Ok(list) => {
             let values: PyResult<Vec<Value>> = list.iter()
                 .map(|item| py_value_to_value(&item))
@@ -158,7 +158,7 @@ pub fn pandas_to_dataframe(
 
     let mut df_out = DataFrame::new(Vec::new());
 
-    Python::with_gil(|_py| {
+    Python::attach(|_py| {
         for col_name in column_names {
             // Skip if column doesn't exist in the dataframe
             if !all_column_names.contains(col_name) {
@@ -325,7 +325,7 @@ pub fn parse_sort_fields(
     }
     
     // Handle list of sort specifications
-    let sort_list = sort_spec.downcast::<PyList>()?;
+    let sort_list = sort_spec.cast::<PyList>()?;
     if sort_list.is_empty() {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Sort specification cannot be empty"));
     }
@@ -337,7 +337,7 @@ pub fn parse_sort_fields(
                 Ok((field, true))
             } else if let Ok((field, ascending)) = item.extract::<(String, bool)>() {
                 Ok((field, ascending))
-            } else if let Ok(list) = item.downcast::<PyList>() {
+            } else if let Ok(list) = item.cast::<PyList>() {
                 if list.len() != 2 {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("List specification must have exactly 2 elements"));
                 }
