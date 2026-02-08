@@ -33,6 +33,7 @@ pub mod export;
 pub mod pattern_matching;
 pub mod spatial;
 pub mod cypher;
+pub mod value_operations;
 
 use schema::{DirGraph, CurrentSelection, CowSelection, PlanStep, SchemaDefinition, NodeSchemaDefinition, ConnectionSchemaDefinition};
 

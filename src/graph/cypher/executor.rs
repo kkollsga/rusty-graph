@@ -6,6 +6,7 @@ use crate::datatypes::values::Value;
 use crate::graph::schema::{DirGraph, NodeData};
 use crate::graph::pattern_matching::{PatternExecutor, PatternMatch, MatchBinding};
 use crate::graph::filtering_methods;
+use crate::graph::value_operations;
 use super::ast::*;
 use super::result::*;
 
@@ -273,10 +274,63 @@ impl<'a> CypherExecutor<'a> {
     // ========================================================================
 
     fn execute_where(&self, clause: &WhereClause, mut result_set: ResultSet) -> Result<ResultSet, String> {
+        // Try index-accelerated filtering for simple equality predicates
+        let index_filters = self.extract_indexable_predicates(&clause.predicate);
+        for (variable, property, value) in &index_filters {
+            if let Some(node_type) = self.infer_node_type(variable, &result_set) {
+                if let Some(matching_indices) = self.graph.lookup_by_index(&node_type, &property, value) {
+                    let index_set: HashSet<petgraph::graph::NodeIndex> = matching_indices.into_iter().collect();
+                    result_set.rows.retain(|row| {
+                        row.node_bindings.get(variable.as_str())
+                            .map_or(false, |idx| index_set.contains(idx))
+                    });
+                }
+            }
+        }
+
+        // Apply full predicate evaluation for remaining/non-indexable conditions
         result_set.rows.retain(|row| {
             self.evaluate_predicate(&clause.predicate, row).unwrap_or(false)
         });
         Ok(result_set)
+    }
+
+    /// Extract simple equality predicates (variable.property = literal) from AND-trees.
+    fn extract_indexable_predicates(&self, predicate: &Predicate) -> Vec<(String, String, Value)> {
+        let mut results = Vec::new();
+        self.collect_indexable(predicate, &mut results);
+        results
+    }
+
+    fn collect_indexable(&self, predicate: &Predicate, results: &mut Vec<(String, String, Value)>) {
+        match predicate {
+            Predicate::Comparison { left, operator, right } => {
+                if *operator == ComparisonOp::Equals {
+                    if let (Expression::PropertyAccess { variable, property }, Expression::Literal(value)) = (left, right) {
+                        results.push((variable.clone(), property.clone(), value.clone()));
+                    } else if let (Expression::Literal(value), Expression::PropertyAccess { variable, property }) = (left, right) {
+                        results.push((variable.clone(), property.clone(), value.clone()));
+                    }
+                }
+            }
+            Predicate::And(left, right) => {
+                self.collect_indexable(left, results);
+                self.collect_indexable(right, results);
+            }
+            _ => {}
+        }
+    }
+
+    /// Infer the node type for a variable by checking the first row's binding.
+    fn infer_node_type(&self, variable: &str, result_set: &ResultSet) -> Option<String> {
+        result_set.rows.iter()
+            .find_map(|row| {
+                row.node_bindings.get(variable)
+                    .and_then(|&idx| self.graph.graph.node_weight(idx))
+                    .map(|node| match node {
+                        NodeData::Regular { node_type, .. } | NodeData::Schema { node_type, .. } => node_type.clone(),
+                    })
+            })
     }
 
     fn evaluate_predicate(&self, pred: &Predicate, row: &ResultRow) -> Result<bool, String> {
@@ -1279,129 +1333,243 @@ fn node_to_map_value(node: &NodeData) -> Value {
     }
 }
 
-/// Format a value compactly for hashing/display
-fn format_value_compact(val: &Value) -> String {
-    match val {
-        Value::UniqueId(v) => v.to_string(),
-        Value::Int64(v) => v.to_string(),
-        Value::Float64(v) => {
-            if v.fract() == 0.0 {
-                format!("{:.1}", v)
-            } else {
-                format!("{}", v)
-            }
-        }
-        Value::String(v) => v.clone(),
-        Value::Boolean(v) => v.to_string(),
-        Value::DateTime(v) => v.format("%Y-%m-%d").to_string(),
-        Value::Null => "null".to_string(),
-    }
-}
+// Delegate to shared value_operations module
+fn format_value_compact(val: &Value) -> String { value_operations::format_value_compact(val) }
+fn value_to_f64(val: &Value) -> Option<f64> { value_operations::value_to_f64(val) }
+fn arithmetic_add(a: &Value, b: &Value) -> Value { value_operations::arithmetic_add(a, b) }
+fn arithmetic_sub(a: &Value, b: &Value) -> Value { value_operations::arithmetic_sub(a, b) }
+fn arithmetic_mul(a: &Value, b: &Value) -> Value { value_operations::arithmetic_mul(a, b) }
+fn arithmetic_div(a: &Value, b: &Value) -> Value { value_operations::arithmetic_div(a, b) }
+fn arithmetic_negate(a: &Value) -> Value { value_operations::arithmetic_negate(a) }
+fn to_integer(val: &Value) -> Value { value_operations::to_integer(val) }
+fn to_float(val: &Value) -> Value { value_operations::to_float(val) }
+fn parse_value_string(s: &str) -> Value { value_operations::parse_value_string(s) }
 
-/// Convert a Value to f64 for numeric aggregations
-fn value_to_f64(val: &Value) -> Option<f64> {
-    match val {
-        Value::Int64(i) => Some(*i as f64),
-        Value::Float64(f) => Some(*f),
-        Value::UniqueId(u) => Some(*u as f64),
-        _ => None,
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::datatypes::values::Value;
 
-/// Arithmetic operations on Values
-fn arithmetic_add(a: &Value, b: &Value) -> Value {
-    match (a, b) {
-        (Value::Int64(x), Value::Int64(y)) => Value::Int64(x + y),
-        (Value::String(x), Value::String(y)) => Value::String(format!("{}{}", x, y)),
-        _ => {
-            match (value_to_f64(a), value_to_f64(b)) {
-                (Some(x), Some(y)) => Value::Float64(x + y),
-                _ => Value::Null,
-            }
-        }
-    }
-}
+    // ========================================================================
+    // evaluate_comparison
+    // ========================================================================
 
-fn arithmetic_sub(a: &Value, b: &Value) -> Value {
-    match (a, b) {
-        (Value::Int64(x), Value::Int64(y)) => Value::Int64(x - y),
-        _ => {
-            match (value_to_f64(a), value_to_f64(b)) {
-                (Some(x), Some(y)) => Value::Float64(x - y),
-                _ => Value::Null,
-            }
-        }
+    #[test]
+    fn test_comparison_equals() {
+        assert!(evaluate_comparison(&Value::Int64(5), &ComparisonOp::Equals, &Value::Int64(5)));
+        assert!(!evaluate_comparison(&Value::Int64(5), &ComparisonOp::Equals, &Value::Int64(6)));
     }
-}
 
-fn arithmetic_mul(a: &Value, b: &Value) -> Value {
-    match (a, b) {
-        (Value::Int64(x), Value::Int64(y)) => Value::Int64(x * y),
-        _ => {
-            match (value_to_f64(a), value_to_f64(b)) {
-                (Some(x), Some(y)) => Value::Float64(x * y),
-                _ => Value::Null,
-            }
-        }
+    #[test]
+    fn test_comparison_not_equals() {
+        assert!(evaluate_comparison(&Value::Int64(5), &ComparisonOp::NotEquals, &Value::Int64(6)));
+        assert!(!evaluate_comparison(&Value::Int64(5), &ComparisonOp::NotEquals, &Value::Int64(5)));
     }
-}
 
-fn arithmetic_div(a: &Value, b: &Value) -> Value {
-    match (value_to_f64(a), value_to_f64(b)) {
-        (Some(x), Some(y)) if y != 0.0 => Value::Float64(x / y),
-        _ => Value::Null,
+    #[test]
+    fn test_comparison_less_than() {
+        assert!(evaluate_comparison(&Value::Int64(3), &ComparisonOp::LessThan, &Value::Int64(5)));
+        assert!(!evaluate_comparison(&Value::Int64(5), &ComparisonOp::LessThan, &Value::Int64(5)));
     }
-}
 
-fn arithmetic_negate(a: &Value) -> Value {
-    match a {
-        Value::Int64(x) => Value::Int64(-x),
-        Value::Float64(x) => Value::Float64(-x),
-        _ => Value::Null,
+    #[test]
+    fn test_comparison_less_than_eq() {
+        assert!(evaluate_comparison(&Value::Int64(5), &ComparisonOp::LessThanEq, &Value::Int64(5)));
+        assert!(evaluate_comparison(&Value::Int64(3), &ComparisonOp::LessThanEq, &Value::Int64(5)));
+        assert!(!evaluate_comparison(&Value::Int64(6), &ComparisonOp::LessThanEq, &Value::Int64(5)));
     }
-}
 
-fn to_integer(val: &Value) -> Value {
-    match val {
-        Value::Int64(_) => val.clone(),
-        Value::Float64(f) => Value::Int64(*f as i64),
-        Value::UniqueId(u) => Value::Int64(*u as i64),
-        Value::String(s) => s.parse::<i64>().map(Value::Int64).unwrap_or(Value::Null),
-        Value::Boolean(b) => Value::Int64(if *b { 1 } else { 0 }),
-        _ => Value::Null,
+    #[test]
+    fn test_comparison_greater_than() {
+        assert!(evaluate_comparison(&Value::Int64(7), &ComparisonOp::GreaterThan, &Value::Int64(5)));
+        assert!(!evaluate_comparison(&Value::Int64(5), &ComparisonOp::GreaterThan, &Value::Int64(5)));
     }
-}
 
-fn to_float(val: &Value) -> Value {
-    match val {
-        Value::Float64(_) => val.clone(),
-        Value::Int64(i) => Value::Float64(*i as f64),
-        Value::UniqueId(u) => Value::Float64(*u as f64),
-        Value::String(s) => s.parse::<f64>().map(Value::Float64).unwrap_or(Value::Null),
-        _ => Value::Null,
+    #[test]
+    fn test_comparison_greater_than_eq() {
+        assert!(evaluate_comparison(&Value::Int64(5), &ComparisonOp::GreaterThanEq, &Value::Int64(5)));
+        assert!(evaluate_comparison(&Value::Int64(7), &ComparisonOp::GreaterThanEq, &Value::Int64(5)));
     }
-}
 
-/// Parse a value from its compact string representation
-fn parse_value_string(s: &str) -> Value {
-    if s == "null" {
-        return Value::Null;
+    #[test]
+    fn test_comparison_cross_type() {
+        // Int64 vs Float64
+        assert!(evaluate_comparison(&Value::Int64(5), &ComparisonOp::Equals, &Value::Float64(5.0)));
+        assert!(evaluate_comparison(&Value::Int64(3), &ComparisonOp::LessThan, &Value::Float64(3.5)));
     }
-    if s == "true" {
-        return Value::Boolean(true);
+
+    // ========================================================================
+    // arithmetic helpers
+    // ========================================================================
+
+    #[test]
+    fn test_arithmetic_add_integers() {
+        assert_eq!(arithmetic_add(&Value::Int64(3), &Value::Int64(4)), Value::Int64(7));
     }
-    if s == "false" {
-        return Value::Boolean(false);
+
+    #[test]
+    fn test_arithmetic_add_floats() {
+        let result = arithmetic_add(&Value::Float64(1.5), &Value::Float64(2.5));
+        assert_eq!(result, Value::Float64(4.0));
     }
-    if let Ok(i) = s.parse::<i64>() {
-        return Value::Int64(i);
+
+    #[test]
+    fn test_arithmetic_add_string_concatenation() {
+        let result = arithmetic_add(
+            &Value::String("hello".to_string()),
+            &Value::String(" world".to_string()),
+        );
+        assert_eq!(result, Value::String("hello world".to_string()));
     }
-    if let Ok(f) = s.parse::<f64>() {
-        return Value::Float64(f);
+
+    #[test]
+    fn test_arithmetic_add_mixed_numeric() {
+        let result = arithmetic_add(&Value::Int64(3), &Value::Float64(1.5));
+        assert_eq!(result, Value::Float64(4.5));
     }
-    // Strip quotes if present
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-        return Value::String(s[1..s.len() - 1].to_string());
+
+    #[test]
+    fn test_arithmetic_sub() {
+        assert_eq!(arithmetic_sub(&Value::Int64(10), &Value::Int64(3)), Value::Int64(7));
+        assert_eq!(arithmetic_sub(&Value::Float64(5.0), &Value::Float64(2.0)), Value::Float64(3.0));
     }
-    Value::String(s.to_string())
+
+    #[test]
+    fn test_arithmetic_mul() {
+        assert_eq!(arithmetic_mul(&Value::Int64(3), &Value::Int64(4)), Value::Int64(12));
+    }
+
+    #[test]
+    fn test_arithmetic_div() {
+        assert_eq!(arithmetic_div(&Value::Int64(10), &Value::Int64(4)), Value::Float64(2.5));
+    }
+
+    #[test]
+    fn test_arithmetic_div_by_zero() {
+        assert_eq!(arithmetic_div(&Value::Int64(10), &Value::Int64(0)), Value::Null);
+        assert_eq!(arithmetic_div(&Value::Float64(10.0), &Value::Float64(0.0)), Value::Null);
+    }
+
+    #[test]
+    fn test_arithmetic_negate() {
+        assert_eq!(arithmetic_negate(&Value::Int64(5)), Value::Int64(-5));
+        assert_eq!(arithmetic_negate(&Value::Float64(3.14)), Value::Float64(-3.14));
+        assert_eq!(arithmetic_negate(&Value::String("x".to_string())), Value::Null);
+    }
+
+    #[test]
+    fn test_arithmetic_incompatible_returns_null() {
+        assert_eq!(arithmetic_add(&Value::Boolean(true), &Value::Boolean(false)), Value::Null);
+        assert_eq!(arithmetic_sub(&Value::String("a".to_string()), &Value::Int64(1)), Value::Null);
+    }
+
+    // ========================================================================
+    // value_to_f64
+    // ========================================================================
+
+    #[test]
+    fn test_value_to_f64_conversions() {
+        assert_eq!(value_to_f64(&Value::Int64(42)), Some(42.0));
+        assert_eq!(value_to_f64(&Value::Float64(3.14)), Some(3.14));
+        assert_eq!(value_to_f64(&Value::UniqueId(7)), Some(7.0));
+        assert_eq!(value_to_f64(&Value::String("x".to_string())), None);
+        assert_eq!(value_to_f64(&Value::Null), None);
+        assert_eq!(value_to_f64(&Value::Boolean(true)), None);
+    }
+
+    // ========================================================================
+    // to_integer / to_float
+    // ========================================================================
+
+    #[test]
+    fn test_to_integer() {
+        assert_eq!(to_integer(&Value::Int64(42)), Value::Int64(42));
+        assert_eq!(to_integer(&Value::Float64(3.7)), Value::Int64(3));
+        assert_eq!(to_integer(&Value::UniqueId(5)), Value::Int64(5));
+        assert_eq!(to_integer(&Value::String("123".to_string())), Value::Int64(123));
+        assert_eq!(to_integer(&Value::String("abc".to_string())), Value::Null);
+        assert_eq!(to_integer(&Value::Boolean(true)), Value::Int64(1));
+        assert_eq!(to_integer(&Value::Boolean(false)), Value::Int64(0));
+        assert_eq!(to_integer(&Value::Null), Value::Null);
+    }
+
+    #[test]
+    fn test_to_float() {
+        assert_eq!(to_float(&Value::Float64(3.14)), Value::Float64(3.14));
+        assert_eq!(to_float(&Value::Int64(42)), Value::Float64(42.0));
+        assert_eq!(to_float(&Value::UniqueId(5)), Value::Float64(5.0));
+        assert_eq!(to_float(&Value::String("2.5".to_string())), Value::Float64(2.5));
+        assert_eq!(to_float(&Value::String("abc".to_string())), Value::Null);
+    }
+
+    // ========================================================================
+    // format_value_compact
+    // ========================================================================
+
+    #[test]
+    fn test_format_value_compact() {
+        assert_eq!(format_value_compact(&Value::UniqueId(42)), "42");
+        assert_eq!(format_value_compact(&Value::Int64(-5)), "-5");
+        assert_eq!(format_value_compact(&Value::Float64(3.0)), "3.0");
+        assert_eq!(format_value_compact(&Value::Float64(3.14)), "3.14");
+        assert_eq!(format_value_compact(&Value::String("hi".to_string())), "hi");
+        assert_eq!(format_value_compact(&Value::Boolean(true)), "true");
+        assert_eq!(format_value_compact(&Value::Null), "null");
+    }
+
+    // ========================================================================
+    // parse_value_string
+    // ========================================================================
+
+    #[test]
+    fn test_parse_value_string() {
+        assert_eq!(parse_value_string("null"), Value::Null);
+        assert_eq!(parse_value_string("true"), Value::Boolean(true));
+        assert_eq!(parse_value_string("false"), Value::Boolean(false));
+        assert_eq!(parse_value_string("42"), Value::Int64(42));
+        assert_eq!(parse_value_string("3.14"), Value::Float64(3.14));
+        assert_eq!(parse_value_string("\"hello\""), Value::String("hello".to_string()));
+        assert_eq!(parse_value_string("'world'"), Value::String("world".to_string()));
+        assert_eq!(parse_value_string("unquoted"), Value::String("unquoted".to_string()));
+    }
+
+    // ========================================================================
+    // is_aggregate_expression
+    // ========================================================================
+
+    #[test]
+    fn test_is_aggregate_expression() {
+        let agg = Expression::FunctionCall {
+            name: "count".to_string(),
+            args: vec![Expression::Star],
+            distinct: false,
+        };
+        assert!(is_aggregate_expression(&agg));
+
+        let non_agg = Expression::FunctionCall {
+            name: "toUpper".to_string(),
+            args: vec![Expression::Variable("x".to_string())],
+            distinct: false,
+        };
+        assert!(!is_aggregate_expression(&non_agg));
+    }
+
+    #[test]
+    fn test_is_aggregate_in_arithmetic() {
+        let expr = Expression::Add(
+            Box::new(Expression::FunctionCall {
+                name: "sum".to_string(),
+                args: vec![Expression::Variable("x".to_string())],
+                distinct: false,
+            }),
+            Box::new(Expression::Literal(Value::Int64(1))),
+        );
+        assert!(is_aggregate_expression(&expr));
+    }
+
+    #[test]
+    fn test_is_aggregate_literal_false() {
+        assert!(!is_aggregate_expression(&Expression::Literal(Value::Int64(1))));
+        assert!(!is_aggregate_expression(&Expression::Variable("x".to_string())));
+    }
 }

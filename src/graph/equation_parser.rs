@@ -1,6 +1,7 @@
 // src/graph/equation_parser.rs
 use std::collections::HashMap;
 use crate::datatypes::values::Value;
+use crate::graph::value_operations;
 
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -309,24 +310,14 @@ impl Evaluator {
                         total_objects += 1;
                         match Self::evaluate_single(inner, obj) {
                             Ok(value) => {
-                                match value {
-                                    Value::Float64(f) => {
-                                        successful_evals += 1;
-                                        Some(f)
-                                    },
-                                    Value::Int64(i) => {
-                                        successful_evals += 1;
-                                        Some(i as f64)
-                                    },
-                                    Value::UniqueId(u) => {
-                                        successful_evals += 1;
-                                        Some(u as f64)
-                                    },
-                                    Value::Null => {
-                                        null_results += 1;
-                                        None
-                                    },
-                                    _ => None
+                                if matches!(value, Value::Null) {
+                                    null_results += 1;
+                                    None
+                                } else if let Some(f) = value_operations::value_to_f64(&value) {
+                                    successful_evals += 1;
+                                    Some(f)
+                                } else {
+                                    None
                                 }
                             },
                             Err(msg) => {
@@ -364,21 +355,13 @@ impl Evaluator {
                     };
                 }
 
-                // Rest of the aggregation code
+                // Use shared aggregation functions (population std: divides by N)
                 let result = match agg_type {
-                    AggregateType::Sum => values.iter().sum(),
-                    AggregateType::Mean => values.iter().sum::<f64>() / values.len() as f64,
-                    AggregateType::Std => {
-                        let mean = values.iter().sum::<f64>() / values.len() as f64;
-                        let variance = values.iter()
-                            .map(|x| (x - mean).powi(2))
-                            .sum::<f64>() / values.len() as f64;
-                        variance.sqrt()
-                    },
-                    AggregateType::Min => values.iter()
-                        .fold(f64::INFINITY, |a, &b| a.min(b)),
-                    AggregateType::Max => values.iter()
-                        .fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
+                    AggregateType::Sum => value_operations::aggregate_sum(&values),
+                    AggregateType::Mean => value_operations::aggregate_mean(&values).unwrap(),
+                    AggregateType::Std => value_operations::aggregate_std(&values, true).unwrap(),
+                    AggregateType::Min => value_operations::aggregate_min(&values).unwrap(),
+                    AggregateType::Max => value_operations::aggregate_max(&values).unwrap(),
                     AggregateType::Count => values.len() as f64,
                 };
                 
@@ -463,5 +446,259 @@ impl Evaluator {
             },
             Expr::Aggregate(_, _) => Err("Nested aggregates not supported".to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use crate::datatypes::values::Value;
+
+    // ========================================================================
+    // AggregateType::from_string
+    // ========================================================================
+
+    #[test]
+    fn test_aggregate_type_from_string() {
+        assert_eq!(AggregateType::from_string("sum"), Some(AggregateType::Sum));
+        assert_eq!(AggregateType::from_string("mean"), Some(AggregateType::Mean));
+        assert_eq!(AggregateType::from_string("avg"), Some(AggregateType::Mean));
+        assert_eq!(AggregateType::from_string("average"), Some(AggregateType::Mean));
+        assert_eq!(AggregateType::from_string("std"), Some(AggregateType::Std));
+        assert_eq!(AggregateType::from_string("min"), Some(AggregateType::Min));
+        assert_eq!(AggregateType::from_string("max"), Some(AggregateType::Max));
+        assert_eq!(AggregateType::from_string("count"), Some(AggregateType::Count));
+        assert_eq!(AggregateType::from_string("unknown"), None);
+    }
+
+    #[test]
+    fn test_aggregate_type_case_insensitive() {
+        assert_eq!(AggregateType::from_string("SUM"), Some(AggregateType::Sum));
+        assert_eq!(AggregateType::from_string("Mean"), Some(AggregateType::Mean));
+    }
+
+    // ========================================================================
+    // Parser — simple expressions
+    // ========================================================================
+
+    #[test]
+    fn test_parse_number() {
+        let expr = Parser::parse_expression("42").unwrap();
+        assert!(matches!(expr, Expr::Number(n) if (n - 42.0).abs() < f64::EPSILON));
+    }
+
+    #[test]
+    fn test_parse_variable() {
+        let expr = Parser::parse_expression("price").unwrap();
+        assert!(matches!(expr, Expr::Variable(ref name) if name == "price"));
+    }
+
+    #[test]
+    fn test_parse_addition() {
+        let expr = Parser::parse_expression("a + b").unwrap();
+        assert!(matches!(expr, Expr::Add(_, _)));
+    }
+
+    #[test]
+    fn test_parse_subtraction() {
+        let expr = Parser::parse_expression("a - b").unwrap();
+        assert!(matches!(expr, Expr::Subtract(_, _)));
+    }
+
+    #[test]
+    fn test_parse_multiplication() {
+        let expr = Parser::parse_expression("a * b").unwrap();
+        assert!(matches!(expr, Expr::Multiply(_, _)));
+    }
+
+    #[test]
+    fn test_parse_division() {
+        let expr = Parser::parse_expression("a / b").unwrap();
+        assert!(matches!(expr, Expr::Divide(_, _)));
+    }
+
+    #[test]
+    fn test_parse_operator_precedence() {
+        // a + b * c should be a + (b * c)
+        let expr = Parser::parse_expression("a + b * c").unwrap();
+        match expr {
+            Expr::Add(_, right) => assert!(matches!(*right, Expr::Multiply(_, _))),
+            _ => panic!("Expected Add at top level"),
+        }
+    }
+
+    #[test]
+    fn test_parse_parentheses() {
+        // (a + b) * c should be (a + b) * c
+        let expr = Parser::parse_expression("(a + b) * c").unwrap();
+        match expr {
+            Expr::Multiply(left, _) => assert!(matches!(*left, Expr::Add(_, _))),
+            _ => panic!("Expected Multiply at top level"),
+        }
+    }
+
+    #[test]
+    fn test_parse_aggregate() {
+        let expr = Parser::parse_expression("sum(value)").unwrap();
+        match expr {
+            Expr::Aggregate(AggregateType::Sum, inner) => {
+                assert!(matches!(*inner, Expr::Variable(ref name) if name == "value"));
+            }
+            _ => panic!("Expected Aggregate Sum"),
+        }
+    }
+
+    // ========================================================================
+    // Expr::extract_variables
+    // ========================================================================
+
+    #[test]
+    fn test_extract_variables() {
+        let expr = Parser::parse_expression("a + b * c").unwrap();
+        let vars = expr.extract_variables();
+        assert_eq!(vars, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_extract_variables_deduplicates() {
+        let expr = Parser::parse_expression("a + a").unwrap();
+        let vars = expr.extract_variables();
+        assert_eq!(vars, vec!["a"]);
+    }
+
+    #[test]
+    fn test_extract_variables_number_has_none() {
+        let expr = Parser::parse_expression("42").unwrap();
+        let vars = expr.extract_variables();
+        assert!(vars.is_empty());
+    }
+
+    // ========================================================================
+    // Evaluator — single-object evaluation
+    // ========================================================================
+
+    #[test]
+    fn test_evaluate_number() {
+        let expr = Parser::parse_expression("42").unwrap();
+        let objs = vec![HashMap::new()];
+        let result = Evaluator::evaluate(&expr, &objs).unwrap();
+        assert_eq!(result, Value::Float64(42.0));
+    }
+
+    #[test]
+    fn test_evaluate_variable() {
+        let expr = Parser::parse_expression("price").unwrap();
+        let mut obj = HashMap::new();
+        obj.insert("price".to_string(), Value::Float64(9.99));
+        let result = Evaluator::evaluate(&expr, &[obj]).unwrap();
+        assert_eq!(result, Value::Float64(9.99));
+    }
+
+    #[test]
+    fn test_evaluate_missing_variable_returns_null() {
+        let expr = Parser::parse_expression("missing").unwrap();
+        let objs = vec![HashMap::new()];
+        let result = Evaluator::evaluate(&expr, &objs).unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_evaluate_arithmetic() {
+        let expr = Parser::parse_expression("a + b").unwrap();
+        let mut obj = HashMap::new();
+        obj.insert("a".to_string(), Value::Int64(3));
+        obj.insert("b".to_string(), Value::Int64(7));
+        let result = Evaluator::evaluate(&expr, &[obj]).unwrap();
+        assert_eq!(result, Value::Int64(10));
+    }
+
+    #[test]
+    fn test_evaluate_division_by_zero_returns_null() {
+        let expr = Parser::parse_expression("a / b").unwrap();
+        let mut obj = HashMap::new();
+        obj.insert("a".to_string(), Value::Float64(10.0));
+        obj.insert("b".to_string(), Value::Float64(0.0));
+        let result = Evaluator::evaluate(&expr, &[obj]).unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    // ========================================================================
+    // Evaluator — aggregation
+    // ========================================================================
+
+    #[test]
+    fn test_evaluate_sum() {
+        let expr = Parser::parse_expression("sum(value)").unwrap();
+        let objs: Vec<HashMap<String, Value>> = (1..=5)
+            .map(|i| {
+                let mut m = HashMap::new();
+                m.insert("value".to_string(), Value::Float64(i as f64));
+                m
+            })
+            .collect();
+        let result = Evaluator::evaluate(&expr, &objs).unwrap();
+        assert_eq!(result, Value::Float64(15.0));
+    }
+
+    #[test]
+    fn test_evaluate_mean() {
+        let expr = Parser::parse_expression("mean(value)").unwrap();
+        let objs: Vec<HashMap<String, Value>> = vec![2.0, 4.0, 6.0]
+            .into_iter()
+            .map(|v| {
+                let mut m = HashMap::new();
+                m.insert("value".to_string(), Value::Float64(v));
+                m
+            })
+            .collect();
+        let result = Evaluator::evaluate(&expr, &objs).unwrap();
+        assert_eq!(result, Value::Float64(4.0));
+    }
+
+    #[test]
+    fn test_evaluate_count() {
+        let expr = Parser::parse_expression("count(value)").unwrap();
+        let objs: Vec<HashMap<String, Value>> = (0..3)
+            .map(|i| {
+                let mut m = HashMap::new();
+                m.insert("value".to_string(), Value::Int64(i));
+                m
+            })
+            .collect();
+        let result = Evaluator::evaluate(&expr, &objs).unwrap();
+        assert_eq!(result, Value::Float64(3.0));
+    }
+
+    #[test]
+    fn test_evaluate_min_max() {
+        let expr_min = Parser::parse_expression("min(v)").unwrap();
+        let expr_max = Parser::parse_expression("max(v)").unwrap();
+        let objs: Vec<HashMap<String, Value>> = vec![5.0, 1.0, 9.0, 3.0]
+            .into_iter()
+            .map(|v| {
+                let mut m = HashMap::new();
+                m.insert("v".to_string(), Value::Float64(v));
+                m
+            })
+            .collect();
+        assert_eq!(Evaluator::evaluate(&expr_min, &objs).unwrap(), Value::Float64(1.0));
+        assert_eq!(Evaluator::evaluate(&expr_max, &objs).unwrap(), Value::Float64(9.0));
+    }
+
+    #[test]
+    fn test_evaluate_sum_empty_returns_zero() {
+        let expr = Parser::parse_expression("sum(value)").unwrap();
+        let objs: Vec<HashMap<String, Value>> = vec![];
+        let result = Evaluator::evaluate(&expr, &objs).unwrap();
+        assert_eq!(result, Value::Float64(0.0));
+    }
+
+    #[test]
+    fn test_evaluate_mean_empty_returns_null() {
+        let expr = Parser::parse_expression("mean(value)").unwrap();
+        let objs: Vec<HashMap<String, Value>> = vec![];
+        let result = Evaluator::evaluate(&expr, &objs).unwrap();
+        assert_eq!(result, Value::Null);
     }
 }

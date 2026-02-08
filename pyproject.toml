@@ -39,3 +39,11 @@ Documentation = "https://github.com/kkollsga/rusty-graph#readme"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "benchmark: performance benchmark tests (deselect with '-m not benchmark')",
+    "slow: slow tests taking >5s (deselect with '-m not slow')",
+]
+addopts = "-m 'not benchmark'"

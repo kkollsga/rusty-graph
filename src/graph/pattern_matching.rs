@@ -769,6 +769,12 @@ impl<'a> PatternExecutor<'a> {
     /// Find all nodes matching a node pattern
     fn find_matching_nodes(&self, pattern: &NodePattern) -> Result<Vec<NodeIndex>, String> {
         let candidates: Vec<NodeIndex> = if let Some(ref node_type) = pattern.node_type {
+            // Try property index acceleration when we have both type and properties
+            if let Some(ref props) = pattern.properties {
+                if let Some(indexed) = self.try_index_lookup(node_type, props) {
+                    return Ok(indexed);
+                }
+            }
             // Use type index for O(1) lookup
             self.graph
                 .type_indices
@@ -791,6 +797,43 @@ impl<'a> PatternExecutor<'a> {
         };
 
         Ok(filtered)
+    }
+
+    /// Try to use property indexes for faster node lookup.
+    /// Returns None if no indexes cover the requested properties.
+    fn try_index_lookup(
+        &self,
+        node_type: &str,
+        props: &HashMap<String, PropertyMatcher>,
+    ) -> Option<Vec<NodeIndex>> {
+        // Extract equality values from PropertyMatcher::Equals
+        let equality_props: Vec<(&String, &Value)> = props.iter()
+            .filter_map(|(k, v)| match v {
+                PropertyMatcher::Equals(val) => Some((k, val)),
+            })
+            .collect();
+
+        if equality_props.is_empty() {
+            return None;
+        }
+
+        // Try single property index
+        for (prop, value) in &equality_props {
+            if let Some(results) = self.graph.lookup_by_index(node_type, prop, value) {
+                if equality_props.len() == 1 && props.len() == 1 {
+                    // Index covers all properties — return directly
+                    return Some(results);
+                } else {
+                    // Index covers one property — filter remaining manually
+                    let filtered = results.into_iter()
+                        .filter(|&idx| self.node_matches_properties(idx, props))
+                        .collect();
+                    return Some(filtered);
+                }
+            }
+        }
+
+        None
     }
 
     /// Check if a node matches property filters

@@ -32,6 +32,24 @@ pub fn matches_condition(value: &Value, condition: &FilterCondition) -> bool {
         },
         FilterCondition::IsNull => matches!(value, Value::Null),
         FilterCondition::IsNotNull => !matches!(value, Value::Null),
+        FilterCondition::Contains(target) => {
+            match (value, target) {
+                (Value::String(s), Value::String(t)) => s.contains(t.as_str()),
+                _ => false,
+            }
+        }
+        FilterCondition::StartsWith(target) => {
+            match (value, target) {
+                (Value::String(s), Value::String(t)) => s.starts_with(t.as_str()),
+                _ => false,
+            }
+        }
+        FilterCondition::EndsWith(target) => {
+            match (value, target) {
+                (Value::String(s), Value::String(t)) => s.ends_with(t.as_str()),
+                _ => false,
+            }
+        }
     }
 }
 
@@ -554,4 +572,258 @@ pub fn filter_orphan_nodes(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::datatypes::values::{Value, FilterCondition};
+    use chrono::NaiveDate;
+
+    // ========================================================================
+    // values_equal — cross-type numeric comparisons
+    // ========================================================================
+
+    #[test]
+    fn test_values_equal_same_type() {
+        assert!(values_equal(&Value::Int64(5), &Value::Int64(5)));
+        assert!(values_equal(&Value::Float64(3.14), &Value::Float64(3.14)));
+        assert!(values_equal(&Value::String("abc".into()), &Value::String("abc".into())));
+        assert!(values_equal(&Value::Null, &Value::Null));
+    }
+
+    #[test]
+    fn test_values_equal_int_float_crosstype() {
+        assert!(values_equal(&Value::Int64(5), &Value::Float64(5.0)));
+        assert!(values_equal(&Value::Float64(5.0), &Value::Int64(5)));
+        assert!(!values_equal(&Value::Int64(5), &Value::Float64(5.1)));
+    }
+
+    #[test]
+    fn test_values_equal_uniqueid_int() {
+        assert!(values_equal(&Value::UniqueId(10), &Value::Int64(10)));
+        assert!(values_equal(&Value::Int64(10), &Value::UniqueId(10)));
+        assert!(!values_equal(&Value::UniqueId(10), &Value::Int64(11)));
+    }
+
+    #[test]
+    fn test_values_equal_uniqueid_float() {
+        assert!(values_equal(&Value::UniqueId(7), &Value::Float64(7.0)));
+        assert!(!values_equal(&Value::UniqueId(7), &Value::Float64(7.5)));
+    }
+
+    #[test]
+    fn test_values_equal_different_types() {
+        assert!(!values_equal(&Value::Int64(1), &Value::String("1".into())));
+        assert!(!values_equal(&Value::Boolean(true), &Value::Int64(1)));
+    }
+
+    // ========================================================================
+    // compare_values — ordering
+    // ========================================================================
+
+    #[test]
+    fn test_compare_values_integers() {
+        assert_eq!(compare_values(&Value::Int64(1), &Value::Int64(2)), Some(std::cmp::Ordering::Less));
+        assert_eq!(compare_values(&Value::Int64(2), &Value::Int64(2)), Some(std::cmp::Ordering::Equal));
+        assert_eq!(compare_values(&Value::Int64(3), &Value::Int64(2)), Some(std::cmp::Ordering::Greater));
+    }
+
+    #[test]
+    fn test_compare_values_floats() {
+        assert_eq!(compare_values(&Value::Float64(1.0), &Value::Float64(2.0)), Some(std::cmp::Ordering::Less));
+        assert_eq!(compare_values(&Value::Float64(2.0), &Value::Float64(2.0)), Some(std::cmp::Ordering::Equal));
+    }
+
+    #[test]
+    fn test_compare_values_cross_type_numeric() {
+        assert_eq!(compare_values(&Value::Int64(1), &Value::Float64(2.5)), Some(std::cmp::Ordering::Less));
+        assert_eq!(compare_values(&Value::Float64(3.0), &Value::Int64(2)), Some(std::cmp::Ordering::Greater));
+    }
+
+    #[test]
+    fn test_compare_values_strings() {
+        assert_eq!(
+            compare_values(&Value::String("abc".into()), &Value::String("def".into())),
+            Some(std::cmp::Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn test_compare_values_null_ordering() {
+        // Null < any non-null
+        assert_eq!(compare_values(&Value::Null, &Value::Int64(0)), Some(std::cmp::Ordering::Less));
+        assert_eq!(compare_values(&Value::Int64(0), &Value::Null), Some(std::cmp::Ordering::Greater));
+        assert_eq!(compare_values(&Value::Null, &Value::Null), Some(std::cmp::Ordering::Equal));
+    }
+
+    #[test]
+    fn test_compare_values_incompatible_types() {
+        assert_eq!(compare_values(&Value::String("a".into()), &Value::Int64(1)), None);
+        assert_eq!(compare_values(&Value::Boolean(true), &Value::Float64(1.0)), None);
+    }
+
+    #[test]
+    fn test_compare_values_datetime_vs_string() {
+        let date = NaiveDate::from_ymd_opt(2024, 6, 15).unwrap();
+        let result = compare_values(&Value::DateTime(date), &Value::String("2024-06-15".into()));
+        assert_eq!(result, Some(std::cmp::Ordering::Equal));
+
+        let result = compare_values(&Value::DateTime(date), &Value::String("2024-01-01".into()));
+        assert_eq!(result, Some(std::cmp::Ordering::Greater));
+    }
+
+    // ========================================================================
+    // matches_condition — filter operators
+    // ========================================================================
+
+    #[test]
+    fn test_matches_condition_equals() {
+        assert!(matches_condition(&Value::Int64(5), &FilterCondition::Equals(Value::Int64(5))));
+        assert!(!matches_condition(&Value::Int64(5), &FilterCondition::Equals(Value::Int64(6))));
+    }
+
+    #[test]
+    fn test_matches_condition_not_equals() {
+        assert!(matches_condition(&Value::Int64(5), &FilterCondition::NotEquals(Value::Int64(6))));
+        assert!(!matches_condition(&Value::Int64(5), &FilterCondition::NotEquals(Value::Int64(5))));
+    }
+
+    #[test]
+    fn test_matches_condition_greater_than() {
+        assert!(matches_condition(&Value::Int64(10), &FilterCondition::GreaterThan(Value::Int64(5))));
+        assert!(!matches_condition(&Value::Int64(5), &FilterCondition::GreaterThan(Value::Int64(5))));
+        assert!(!matches_condition(&Value::Int64(3), &FilterCondition::GreaterThan(Value::Int64(5))));
+    }
+
+    #[test]
+    fn test_matches_condition_greater_than_equals() {
+        assert!(matches_condition(&Value::Int64(10), &FilterCondition::GreaterThanEquals(Value::Int64(5))));
+        assert!(matches_condition(&Value::Int64(5), &FilterCondition::GreaterThanEquals(Value::Int64(5))));
+        assert!(!matches_condition(&Value::Int64(3), &FilterCondition::GreaterThanEquals(Value::Int64(5))));
+    }
+
+    #[test]
+    fn test_matches_condition_less_than() {
+        assert!(matches_condition(&Value::Int64(3), &FilterCondition::LessThan(Value::Int64(5))));
+        assert!(!matches_condition(&Value::Int64(5), &FilterCondition::LessThan(Value::Int64(5))));
+    }
+
+    #[test]
+    fn test_matches_condition_less_than_equals() {
+        assert!(matches_condition(&Value::Int64(3), &FilterCondition::LessThanEquals(Value::Int64(5))));
+        assert!(matches_condition(&Value::Int64(5), &FilterCondition::LessThanEquals(Value::Int64(5))));
+        assert!(!matches_condition(&Value::Int64(6), &FilterCondition::LessThanEquals(Value::Int64(5))));
+    }
+
+    #[test]
+    fn test_matches_condition_in() {
+        let targets = vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)];
+        assert!(matches_condition(&Value::Int64(2), &FilterCondition::In(targets.clone())));
+        assert!(!matches_condition(&Value::Int64(5), &FilterCondition::In(targets)));
+    }
+
+    #[test]
+    fn test_matches_condition_between() {
+        assert!(matches_condition(&Value::Int64(5), &FilterCondition::Between(Value::Int64(1), Value::Int64(10))));
+        assert!(matches_condition(&Value::Int64(1), &FilterCondition::Between(Value::Int64(1), Value::Int64(10)))); // inclusive
+        assert!(matches_condition(&Value::Int64(10), &FilterCondition::Between(Value::Int64(1), Value::Int64(10)))); // inclusive
+        assert!(!matches_condition(&Value::Int64(0), &FilterCondition::Between(Value::Int64(1), Value::Int64(10))));
+        assert!(!matches_condition(&Value::Int64(11), &FilterCondition::Between(Value::Int64(1), Value::Int64(10))));
+    }
+
+    #[test]
+    fn test_matches_condition_is_null() {
+        assert!(matches_condition(&Value::Null, &FilterCondition::IsNull));
+        assert!(!matches_condition(&Value::Int64(0), &FilterCondition::IsNull));
+    }
+
+    #[test]
+    fn test_matches_condition_is_not_null() {
+        assert!(matches_condition(&Value::Int64(0), &FilterCondition::IsNotNull));
+        assert!(!matches_condition(&Value::Null, &FilterCondition::IsNotNull));
+    }
+
+    // ========================================================================
+    // parse_date_string
+    // ========================================================================
+
+    // ========================================================================
+    // matches_condition — string predicates
+    // ========================================================================
+
+    #[test]
+    fn test_matches_condition_contains() {
+        assert!(matches_condition(
+            &Value::String("hello world".into()),
+            &FilterCondition::Contains(Value::String("world".into()))
+        ));
+        assert!(matches_condition(
+            &Value::String("hello world".into()),
+            &FilterCondition::Contains(Value::String("hello".into()))
+        ));
+        assert!(!matches_condition(
+            &Value::String("hello".into()),
+            &FilterCondition::Contains(Value::String("world".into()))
+        ));
+        // Non-string values return false
+        assert!(!matches_condition(
+            &Value::Int64(42),
+            &FilterCondition::Contains(Value::String("4".into()))
+        ));
+    }
+
+    #[test]
+    fn test_matches_condition_starts_with() {
+        assert!(matches_condition(
+            &Value::String("hello world".into()),
+            &FilterCondition::StartsWith(Value::String("hello".into()))
+        ));
+        assert!(!matches_condition(
+            &Value::String("hello world".into()),
+            &FilterCondition::StartsWith(Value::String("world".into()))
+        ));
+        assert!(!matches_condition(
+            &Value::Int64(42),
+            &FilterCondition::StartsWith(Value::String("4".into()))
+        ));
+    }
+
+    #[test]
+    fn test_matches_condition_ends_with() {
+        assert!(matches_condition(
+            &Value::String("hello world".into()),
+            &FilterCondition::EndsWith(Value::String("world".into()))
+        ));
+        assert!(!matches_condition(
+            &Value::String("hello world".into()),
+            &FilterCondition::EndsWith(Value::String("hello".into()))
+        ));
+        assert!(!matches_condition(
+            &Value::Int64(42),
+            &FilterCondition::EndsWith(Value::String("2".into()))
+        ));
+    }
+
+    // ========================================================================
+    // parse_date_string
+    // ========================================================================
+
+    #[test]
+    fn test_parse_date_string_iso() {
+        let result = parse_date_string("2024-06-15");
+        assert_eq!(result, Some(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()));
+    }
+
+    #[test]
+    fn test_parse_date_string_slash() {
+        let result = parse_date_string("2024/06/15");
+        assert_eq!(result, Some(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()));
+    }
+
+    #[test]
+    fn test_parse_date_string_invalid() {
+        assert_eq!(parse_date_string("not-a-date"), None);
+        assert_eq!(parse_date_string(""), None);
+    }
 }

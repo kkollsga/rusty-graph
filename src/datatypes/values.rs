@@ -17,6 +17,9 @@ pub enum FilterCondition {
     Between(Value, Value),  // Inclusive range [min, max]
     IsNull,
     IsNotNull,
+    Contains(Value),
+    StartsWith(Value),
+    EndsWith(Value),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
@@ -324,4 +327,194 @@ fn format_col_type(col_type: &ColumnType) -> String {
         ColumnType::Boolean => "bool",
         ColumnType::DateTime => "datetime",
     }.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========================================================================
+    // Value::as_string
+    // ========================================================================
+
+    #[test]
+    fn test_as_string_with_string_value() {
+        let v = Value::String("hello".to_string());
+        assert_eq!(v.as_string(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_as_string_with_non_string_values() {
+        assert_eq!(Value::Int64(42).as_string(), None);
+        assert_eq!(Value::Float64(3.14).as_string(), None);
+        assert_eq!(Value::Boolean(true).as_string(), None);
+        assert_eq!(Value::Null.as_string(), None);
+        assert_eq!(Value::UniqueId(1).as_string(), None);
+    }
+
+    // ========================================================================
+    // Value equality and hash
+    // ========================================================================
+
+    #[test]
+    fn test_value_equality_same_types() {
+        assert_eq!(Value::Int64(42), Value::Int64(42));
+        assert_eq!(Value::Float64(3.14), Value::Float64(3.14));
+        assert_eq!(Value::String("a".to_string()), Value::String("a".to_string()));
+        assert_eq!(Value::Boolean(true), Value::Boolean(true));
+        assert_eq!(Value::Null, Value::Null);
+        assert_eq!(Value::UniqueId(5), Value::UniqueId(5));
+    }
+
+    #[test]
+    fn test_value_inequality() {
+        assert_ne!(Value::Int64(1), Value::Int64(2));
+        assert_ne!(Value::String("a".to_string()), Value::String("b".to_string()));
+        assert_ne!(Value::Boolean(true), Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_value_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(Value::Int64(42));
+        set.insert(Value::Int64(42)); // duplicate
+        assert_eq!(set.len(), 1);
+
+        set.insert(Value::String("test".to_string()));
+        assert_eq!(set.len(), 2);
+
+        set.insert(Value::Null);
+        set.insert(Value::Null); // duplicate
+        assert_eq!(set.len(), 3);
+    }
+
+    #[test]
+    fn test_float_hash_negative_zero() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(Value::Float64(0.0));
+        set.insert(Value::Float64(-0.0));
+        // 0.0 and -0.0 should hash the same
+        assert_eq!(set.len(), 1);
+    }
+
+    // ========================================================================
+    // format_value
+    // ========================================================================
+
+    #[test]
+    fn test_format_value_types() {
+        assert_eq!(format_value(&Value::UniqueId(42)), "42");
+        assert_eq!(format_value(&Value::Int64(-5)), "-5");
+        assert_eq!(format_value(&Value::Float64(3.14)), "3.14");
+        assert_eq!(format_value(&Value::String("hi".to_string())), "\"hi\"");
+        assert_eq!(format_value(&Value::Boolean(true)), "true");
+        assert_eq!(format_value(&Value::Null), "NULL");
+    }
+
+    #[test]
+    fn test_format_value_nan_is_null() {
+        assert_eq!(format_value(&Value::Float64(f64::NAN)), "NULL");
+    }
+
+    // ========================================================================
+    // ColumnType Display
+    // ========================================================================
+
+    #[test]
+    fn test_column_type_display() {
+        assert_eq!(format!("{}", ColumnType::UniqueId), "UniqueId");
+        assert_eq!(format!("{}", ColumnType::Int64), "Int64");
+        assert_eq!(format!("{}", ColumnType::Float64), "Float64");
+        assert_eq!(format!("{}", ColumnType::String), "String");
+        assert_eq!(format!("{}", ColumnType::Boolean), "Boolean");
+        assert_eq!(format!("{}", ColumnType::DateTime), "DateTime");
+    }
+
+    // ========================================================================
+    // DataFrame
+    // ========================================================================
+
+    #[test]
+    fn test_dataframe_new_empty() {
+        let df = DataFrame::new(vec![
+            ("id".to_string(), ColumnType::Int64),
+            ("name".to_string(), ColumnType::String),
+        ]);
+        assert_eq!(df.row_count(), 0);
+        assert_eq!(df.column_count(), 2);
+        assert!(df.verify_column("id"));
+        assert!(df.verify_column("name"));
+        assert!(!df.verify_column("missing"));
+    }
+
+    #[test]
+    fn test_dataframe_column_names() {
+        let df = DataFrame::new(vec![
+            ("a".to_string(), ColumnType::Int64),
+            ("b".to_string(), ColumnType::String),
+        ]);
+        let names = df.get_column_names();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_dataframe_column_type() {
+        let df = DataFrame::new(vec![
+            ("id".to_string(), ColumnType::Int64),
+            ("name".to_string(), ColumnType::String),
+        ]);
+        assert_eq!(df.get_column_type("id"), ColumnType::Int64);
+        assert_eq!(df.get_column_type("name"), ColumnType::String);
+    }
+
+    #[test]
+    fn test_dataframe_add_column() {
+        let mut df = DataFrame::new(vec![
+            ("id".to_string(), ColumnType::Int64),
+        ]);
+        let result = df.add_column(
+            "name".to_string(),
+            ColumnType::String,
+            ColumnData::String(vec![]),
+        );
+        assert!(result.is_ok());
+        assert_eq!(df.column_count(), 2);
+    }
+
+    #[test]
+    fn test_dataframe_add_duplicate_column() {
+        let mut df = DataFrame::new(vec![
+            ("id".to_string(), ColumnType::Int64),
+        ]);
+        let result = df.add_column(
+            "id".to_string(),
+            ColumnType::Int64,
+            ColumnData::Int64(vec![]),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dataframe_add_column_type_mismatch() {
+        let mut df = DataFrame::new(vec![]);
+        let result = df.add_column(
+            "x".to_string(),
+            ColumnType::Int64,
+            ColumnData::String(vec![]),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dataframe_get_column_index() {
+        let df = DataFrame::new(vec![
+            ("a".to_string(), ColumnType::Int64),
+            ("b".to_string(), ColumnType::String),
+        ]);
+        assert_eq!(df.get_column_index("a"), Some(0));
+        assert_eq!(df.get_column_index("b"), Some(1));
+        assert_eq!(df.get_column_index("c"), None);
+    }
 }

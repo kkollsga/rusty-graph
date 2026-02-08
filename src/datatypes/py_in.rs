@@ -49,6 +49,9 @@ fn parse_operator_condition(op: &str, val: &Bound<'_, PyAny>) -> PyResult<Filter
         "between" => parse_between_condition(val),
         "is_null" => Ok(FilterCondition::IsNull),
         "is_not_null" => Ok(FilterCondition::IsNotNull),
+        "contains" => Ok(FilterCondition::Contains(py_value_to_value(val)?)),
+        "starts_with" => Ok(FilterCondition::StartsWith(py_value_to_value(val)?)),
+        "ends_with" => Ok(FilterCondition::EndsWith(py_value_to_value(val)?)),
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             format!("Unsupported operator: {}", op)
         )),
