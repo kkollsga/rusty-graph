@@ -12,8 +12,7 @@ pub fn save_to_file(graph: &Arc<DirGraph>, path: &str) -> io::Result<()> {
     let writer = BufWriter::new(file);
 
     // Dereference the Arc to get the DirGraph for serialization
-    bincode::serialize_into(writer, &**graph)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    bincode::serialize_into(writer, &**graph).map_err(io::Error::other)?;
 
     Ok(())
 }
@@ -21,8 +20,8 @@ pub fn save_to_file(graph: &Arc<DirGraph>, path: &str) -> io::Result<()> {
 pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
-    let mut dir_graph = bincode::deserialize_from::<_, DirGraph>(reader)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let mut dir_graph =
+        bincode::deserialize_from::<_, DirGraph>(reader).map_err(io::Error::other)?;
 
     // Rebuild skipped caches after deserialization
     dir_graph.build_connection_types_cache();

@@ -153,7 +153,7 @@ impl KnowledgeGraph {
 
         let df_result = py_in::pandas_to_dataframe(
             data,
-            &[unique_id_field.clone()],
+            std::slice::from_ref(&unique_id_field),
             &column_list,
             column_types,
         )?;
@@ -380,8 +380,12 @@ impl KnowledgeGraph {
             let df_cols = data.getattr("columns")?;
             let all_columns: Vec<String> = df_cols.extract()?;
 
-            let df_result =
-                py_in::pandas_to_dataframe(&data, &[unique_id_field.clone()], &all_columns, None)?;
+            let df_result = py_in::pandas_to_dataframe(
+                &data,
+                std::slice::from_ref(&unique_id_field),
+                &all_columns,
+                None,
+            )?;
 
             let mut graph = extract_or_clone_graph(&mut self.inner);
 

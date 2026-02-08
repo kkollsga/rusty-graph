@@ -704,8 +704,8 @@ pub fn store_count_results(
         "count".to_string(),
         format!(
             "count({})",
-            if level_index.is_some() {
-                format!("level {}", level_index.unwrap())
+            if let Some(idx) = level_index {
+                format!("level {}", idx)
             } else {
                 "current level".to_string()
             }
