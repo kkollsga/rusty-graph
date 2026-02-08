@@ -289,14 +289,14 @@ impl<'a> CypherExecutor<'a> {
         for (variable, property, value) in &index_filters {
             if let Some(node_type) = self.infer_node_type(variable, &result_set) {
                 if let Some(matching_indices) =
-                    self.graph.lookup_by_index(&node_type, &property, value)
+                    self.graph.lookup_by_index(&node_type, property, value)
                 {
                     let index_set: HashSet<petgraph::graph::NodeIndex> =
                         matching_indices.into_iter().collect();
                     result_set.rows.retain(|row| {
                         row.node_bindings
                             .get(variable.as_str())
-                            .map_or(false, |idx| index_set.contains(idx))
+                            .is_some_and(|idx| index_set.contains(idx))
                     });
                 }
             }
@@ -313,11 +313,11 @@ impl<'a> CypherExecutor<'a> {
     /// Extract simple equality predicates (variable.property = literal) from AND-trees.
     fn extract_indexable_predicates(&self, predicate: &Predicate) -> Vec<(String, String, Value)> {
         let mut results = Vec::new();
-        self.collect_indexable(predicate, &mut results);
+        Self::collect_indexable(predicate, &mut results);
         results
     }
 
-    fn collect_indexable(&self, predicate: &Predicate, results: &mut Vec<(String, String, Value)>) {
+    fn collect_indexable(predicate: &Predicate, results: &mut Vec<(String, String, Value)>) {
         match predicate {
             Predicate::Comparison {
                 left,
@@ -341,8 +341,8 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             Predicate::And(left, right) => {
-                self.collect_indexable(left, results);
-                self.collect_indexable(right, results);
+                Self::collect_indexable(left, results);
+                Self::collect_indexable(right, results);
             }
             _ => {}
         }
@@ -582,23 +582,19 @@ impl<'a> CypherExecutor<'a> {
             }
             "type" => {
                 // type(r) returns the relationship type
-                if let Some(expr) = args.first() {
-                    if let Expression::Variable(var) = expr {
-                        if let Some(edge) = row.edge_bindings.get(var) {
-                            return Ok(Value::String(edge.connection_type.clone()));
-                        }
+                if let Some(Expression::Variable(var)) = args.first() {
+                    if let Some(edge) = row.edge_bindings.get(var) {
+                        return Ok(Value::String(edge.connection_type.clone()));
                     }
                 }
                 Ok(Value::Null)
             }
             "id" => {
                 // id(n) returns the node id
-                if let Some(expr) = args.first() {
-                    if let Expression::Variable(var) = expr {
-                        if let Some(&idx) = row.node_bindings.get(var) {
-                            if let Some(node) = self.graph.graph.node_weight(idx) {
-                                return Ok(resolve_node_property(node, "id"));
-                            }
+                if let Some(Expression::Variable(var)) = args.first() {
+                    if let Some(&idx) = row.node_bindings.get(var) {
+                        if let Some(node) = self.graph.graph.node_weight(idx) {
+                            return Ok(resolve_node_property(node, "id"));
                         }
                     }
                 }
@@ -606,12 +602,10 @@ impl<'a> CypherExecutor<'a> {
             }
             "labels" => {
                 // labels(n) returns node type
-                if let Some(expr) = args.first() {
-                    if let Expression::Variable(var) = expr {
-                        if let Some(&idx) = row.node_bindings.get(var) {
-                            if let Some(node) = self.graph.graph.node_weight(idx) {
-                                return Ok(resolve_node_property(node, "type"));
-                            }
+                if let Some(Expression::Variable(var)) = args.first() {
+                    if let Some(&idx) = row.node_bindings.get(var) {
+                        if let Some(node) = self.graph.graph.node_weight(idx) {
+                            return Ok(resolve_node_property(node, "type"));
                         }
                     }
                 }
@@ -663,11 +657,7 @@ impl<'a> CypherExecutor<'a> {
         clause: &ReturnClause,
         result_set: ResultSet,
     ) -> Result<ResultSet, String> {
-        let columns: Vec<String> = clause
-            .items
-            .iter()
-            .map(|item| return_item_column_name(item))
-            .collect();
+        let columns: Vec<String> = clause.items.iter().map(return_item_column_name).collect();
 
         let mut rows = Vec::with_capacity(result_set.rows.len());
 
@@ -711,11 +701,7 @@ impl<'a> CypherExecutor<'a> {
             .map(|(i, _)| i)
             .collect();
 
-        let columns: Vec<String> = clause
-            .items
-            .iter()
-            .map(|item| return_item_column_name(item))
-            .collect();
+        let columns: Vec<String> = clause.items.iter().map(return_item_column_name).collect();
 
         // Special case: no grouping keys = aggregate over all rows
         if group_key_indices.is_empty() {

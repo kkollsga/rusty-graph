@@ -128,49 +128,44 @@ pub fn process_equation(
             if !level.is_empty() {
                 // Get a sample node to determine node type
                 if let Some(sample_node_idx) = level.iter_node_indices().next() {
-                    if let Some(node) = graph.get_node(sample_node_idx) {
-                        match node {
-                            NodeData::Regular { node_type, .. } => {
-                                // Check if schema node exists for this type
-                                let schema_lookup =
-                                    match TypeLookup::new(&graph.graph, "SchemaNode".to_string()) {
-                                        Ok(lookup) => lookup,
-                                        Err(_) => {
-                                            return Err(
-                                                "Could not access schema information".to_string()
-                                            )
-                                        }
-                                    };
+                    if let Some(NodeData::Regular { node_type, .. }) =
+                        graph.get_node(sample_node_idx)
+                    {
+                        // Check if schema node exists for this type
+                        let schema_lookup =
+                            match TypeLookup::new(&graph.graph, "SchemaNode".to_string()) {
+                                Ok(lookup) => lookup,
+                                Err(_) => {
+                                    return Err("Could not access schema information".to_string())
+                                }
+                            };
 
-                                let schema_title = Value::String(node_type.clone());
+                        let schema_title = Value::String(node_type.clone());
 
-                                if let Some(schema_idx) = schema_lookup.check_title(&schema_title) {
-                                    if let Some(NodeData::Schema { properties, .. }) =
-                                        graph.get_node(schema_idx)
+                        if let Some(schema_idx) = schema_lookup.check_title(&schema_title) {
+                            if let Some(NodeData::Schema { properties, .. }) =
+                                graph.get_node(schema_idx)
+                            {
+                                // Validate each variable against schema properties
+                                // Don't check reserved field names like 'id', 'title', 'type'
+                                for var in &variables {
+                                    if var != "id"
+                                        && var != "title"
+                                        && var != "type"
+                                        && !properties.contains_key(var)
                                     {
-                                        // Validate each variable against schema properties
-                                        // Don't check reserved field names like 'id', 'title', 'type'
-                                        for var in &variables {
-                                            if var != "id"
-                                                && var != "title"
-                                                && var != "type"
-                                                && !properties.contains_key(var)
-                                            {
-                                                let available = properties
-                                                    .keys()
-                                                    .cloned()
-                                                    .collect::<Vec<String>>()
-                                                    .join(", ");
-                                                return Err(format!(
-                                                    "Property '{}' does not exist on '{}' nodes. Available properties: {}",
-                                                    var, node_type, available
-                                                ));
-                                            }
-                                        }
+                                        let available = properties
+                                            .keys()
+                                            .cloned()
+                                            .collect::<Vec<String>>()
+                                            .join(", ");
+                                        return Err(format!(
+                                            "Property '{}' does not exist on '{}' nodes. Available properties: {}",
+                                            var, node_type, available
+                                        ));
                                     }
                                 }
                             }
-                            _ => {} // Skip schema nodes
                         }
                     }
                 }
@@ -353,11 +348,7 @@ pub fn evaluate_equation(
                 let objects: Vec<HashMap<String, Value>> = pair
                     .children
                     .iter()
-                    .filter_map(|&node_idx| {
-                        graph
-                            .get_node(node_idx)
-                            .map(|node| convert_node_to_object(node))
-                    })
+                    .filter_map(|&node_idx| graph.get_node(node_idx).map(convert_node_to_object))
                     .collect();
 
                 if objects.is_empty() {

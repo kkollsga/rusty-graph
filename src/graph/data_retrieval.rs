@@ -377,6 +377,7 @@ pub fn format_unique_values_for_storage(
 }
 
 #[derive(Debug)]
+#[allow(clippy::type_complexity)]
 pub struct ConnectionInfo {
     pub node_id: Value,
     pub node_title: String,
@@ -430,10 +431,7 @@ pub fn get_connections(
         let groups = if indices.is_some() {
             vec![(None, nodes)]
         } else {
-            level
-                .iter_groups()
-                .map(|(p, c)| (p.clone(), c.clone()))
-                .collect()
+            level.iter_groups().map(|(p, c)| (*p, c.clone())).collect()
         };
 
         for (parent, children) in groups {
@@ -561,7 +559,7 @@ pub fn get_connections(
             result.push(LevelConnections {
                 parent_title,
                 parent_id,
-                parent_idx: parent.map(|p| p),
+                parent_idx: parent,
                 parent_type,
                 connections: level_connections,
             });

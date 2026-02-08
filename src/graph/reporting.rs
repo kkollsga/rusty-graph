@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 const MAX_REPORT_HISTORY: usize = 10;
 
 #[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum OperationReport {
     NodeOperation(NodeOperationReport),
     ConnectionOperation(ConnectionOperationReport),

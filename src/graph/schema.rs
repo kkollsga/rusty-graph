@@ -643,7 +643,7 @@ impl DirGraph {
         let mut sorted_filter: Vec<String> = filter_properties.to_vec();
         sorted_filter.sort();
 
-        for (key, _) in &self.composite_indices {
+        for key in self.composite_indices.keys() {
             if key.0 == node_type {
                 let mut sorted_index: Vec<String> = key.1.clone();
                 sorted_index.sort();

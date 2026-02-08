@@ -68,41 +68,39 @@ pub fn to_graphml(
 
     // Export nodes (only Regular nodes, skip Schema metadata nodes)
     for &idx in &regular_indices {
-        if let Some(node_data) = graph.graph.node_weight(idx) {
-            if let NodeData::Regular {
-                node_type,
-                id,
-                title,
-                properties,
-            } = node_data
-            {
-                xml.push_str(&format!("    <node id=\"n{}\">\n", idx.index()));
-                xml.push_str(&format!(
-                    "      <data key=\"node_type\">{}</data>\n",
-                    escape_xml(node_type)
-                ));
-                xml.push_str(&format!(
-                    "      <data key=\"node_title\">{}</data>\n",
-                    escape_xml(&value_to_string(title))
-                ));
-                xml.push_str(&format!(
-                    "      <data key=\"node_id\">{}</data>\n",
-                    escape_xml(&value_to_string(id))
-                ));
+        if let Some(NodeData::Regular {
+            node_type,
+            id,
+            title,
+            properties,
+        }) = graph.graph.node_weight(idx)
+        {
+            xml.push_str(&format!("    <node id=\"n{}\">\n", idx.index()));
+            xml.push_str(&format!(
+                "      <data key=\"node_type\">{}</data>\n",
+                escape_xml(node_type)
+            ));
+            xml.push_str(&format!(
+                "      <data key=\"node_title\">{}</data>\n",
+                escape_xml(&value_to_string(title))
+            ));
+            xml.push_str(&format!(
+                "      <data key=\"node_id\">{}</data>\n",
+                escape_xml(&value_to_string(id))
+            ));
 
-                // Serialize properties as JSON
-                if !properties.is_empty() {
-                    let props_json = properties_to_json(properties);
-                    xml.push_str(&format!(
-                        "      <data key=\"node_properties\">{}</data>\n",
-                        escape_xml(&props_json)
-                    ));
-                }
-
-                xml.push_str("    </node>\n");
+            // Serialize properties as JSON
+            if !properties.is_empty() {
+                let props_json = properties_to_json(properties);
+                xml.push_str(&format!(
+                    "      <data key=\"node_properties\">{}</data>\n",
+                    escape_xml(&props_json)
+                ));
             }
-            // Skip Schema nodes - they're metadata, not data
+
+            xml.push_str("    </node>\n");
         }
+        // Skip Schema nodes - they're metadata, not data
     }
 
     // Export edges (only between selected regular nodes)
@@ -188,31 +186,29 @@ pub fn to_d3_json(
     // Build nodes array (only Regular nodes, skip Schema metadata nodes)
     let mut nodes_json = Vec::with_capacity(regular_indices.len());
     for &idx in &regular_indices {
-        if let Some(node_data) = graph.graph.node_weight(idx) {
-            if let NodeData::Regular {
-                node_type,
-                id,
-                title,
-                properties,
-            } = node_data
-            {
-                let mut obj = String::from("{");
-                obj.push_str(&format!("\"id\":{},", json_value(id)));
-                obj.push_str(&format!("\"type\":{},", json_string(node_type)));
-                obj.push_str(&format!("\"title\":{}", json_value(title)));
+        if let Some(NodeData::Regular {
+            node_type,
+            id,
+            title,
+            properties,
+        }) = graph.graph.node_weight(idx)
+        {
+            let mut obj = String::from("{");
+            obj.push_str(&format!("\"id\":{},", json_value(id)));
+            obj.push_str(&format!("\"type\":{},", json_string(node_type)));
+            obj.push_str(&format!("\"title\":{}", json_value(title)));
 
-                // Add select properties (not all to keep output clean)
-                for (key, value) in properties {
-                    if key != "id" && key != "title" && key != "type" {
-                        obj.push_str(&format!(",{}:{}", json_string(key), json_value(value)));
-                    }
+            // Add select properties (not all to keep output clean)
+            for (key, value) in properties {
+                if key != "id" && key != "title" && key != "type" {
+                    obj.push_str(&format!(",{}:{}", json_string(key), json_value(value)));
                 }
-
-                obj.push('}');
-                nodes_json.push(obj);
             }
-            // Skip Schema nodes - they're metadata, not data
+
+            obj.push('}');
+            nodes_json.push(obj);
         }
+        // Skip Schema nodes - they're metadata, not data
     }
 
     // Build links array

@@ -216,7 +216,7 @@ pub fn pandas_to_dataframe(
             let data = convert_pandas_series(&series, col_type.clone())?;
             df_out
                 .add_column(col_name.clone(), col_type, data)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         }
         Ok(())
     })?;
@@ -241,7 +241,9 @@ fn determine_column_type(series: &Bound<'_, PyAny>, col_name: &str) -> PyResult<
         "float64" | "float32" => Ok(ColumnType::Float64),
         "bool" | "boolean" => Ok(ColumnType::Boolean),
         s if s.starts_with("datetime64") => Ok(ColumnType::DateTime),
-        "object" | "string" => Ok(ColumnType::String),
+        "object" | "string" | "str" | "string[python]" | "string[pyarrow]" => {
+            Ok(ColumnType::String)
+        }
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             format!("Unsupported column type '{}' for column '{}'. Supported types: int, float, bool, datetime, string/object.", type_str, col_name)
         )),

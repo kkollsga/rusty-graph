@@ -123,6 +123,7 @@ pub fn all_paths(
     results
 }
 
+#[allow(clippy::only_used_in_recursion)]
 fn find_all_paths_recursive(
     graph: &DirGraph,
     current: NodeIndex,
@@ -213,7 +214,7 @@ pub fn weakly_connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
     }
 
     // Sort components by size (largest first)
-    components.sort_by(|a, b| b.len().cmp(&a.len()));
+    components.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
     components
 }

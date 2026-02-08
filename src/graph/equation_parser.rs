@@ -317,7 +317,7 @@ impl Evaluator {
 
                 let values: Vec<f64> = objects
                     .iter()
-                    .map(|obj| {
+                    .filter_map(|obj| {
                         total_objects += 1;
                         match Self::evaluate_single(inner, obj) {
                             Ok(value) => {
@@ -337,7 +337,6 @@ impl Evaluator {
                             }
                         }
                     })
-                    .filter_map(|x| x)
                     .collect();
 
                 // If we have no valid evaluations but have objects, return 0 for sum operations

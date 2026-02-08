@@ -714,7 +714,7 @@ impl<'a> PatternExecutor<'a> {
         // Process edge-node pairs
         let mut i = 1;
         while i < pattern.elements.len() {
-            if self.max_matches.map_or(false, |max| matches.len() >= max) {
+            if self.max_matches.is_some_and(|max| matches.len() >= max) {
                 break;
             }
 
@@ -737,13 +737,8 @@ impl<'a> PatternExecutor<'a> {
             let mut new_matches = Vec::new();
             let mut new_indices = Vec::new();
 
-            for (_match_idx, (current_match, &source_idx)) in
-                matches.iter().zip(current_indices.iter()).enumerate()
-            {
-                if self
-                    .max_matches
-                    .map_or(false, |max| new_matches.len() >= max)
-                {
+            for (current_match, &source_idx) in matches.iter().zip(current_indices.iter()) {
+                if self.max_matches.is_some_and(|max| new_matches.len() >= max) {
                     break;
                 }
 
@@ -751,10 +746,7 @@ impl<'a> PatternExecutor<'a> {
                 let expansions = self.expand_from_node(source_idx, edge_pattern, node_pattern)?;
 
                 for (target_idx, edge_binding) in expansions {
-                    if self
-                        .max_matches
-                        .map_or(false, |max| new_matches.len() >= max)
-                    {
+                    if self.max_matches.is_some_and(|max| new_matches.len() >= max) {
                         break;
                     }
 
@@ -828,8 +820,8 @@ impl<'a> PatternExecutor<'a> {
         // Extract equality values from PropertyMatcher::Equals
         let equality_props: Vec<(&String, &Value)> = props
             .iter()
-            .filter_map(|(k, v)| match v {
-                PropertyMatcher::Equals(val) => Some((k, val)),
+            .map(|(k, v)| match v {
+                PropertyMatcher::Equals(val) => (k, val),
             })
             .collect();
 
@@ -1025,7 +1017,8 @@ impl<'a> PatternExecutor<'a> {
 
         // BFS state: (current_node, depth, path_info)
         // path_info stores the path taken for creating variable-length edge binding
-        let mut queue: VecDeque<(NodeIndex, usize, Vec<(NodeIndex, String)>)> = VecDeque::new();
+        type PathInfo = Vec<(NodeIndex, String)>;
+        let mut queue: VecDeque<(NodeIndex, usize, PathInfo)> = VecDeque::new();
         let mut visited_at_depth: HashMap<(NodeIndex, usize), bool> = HashMap::new();
 
         queue.push_back((source, 0, Vec::new()));
@@ -1085,20 +1078,11 @@ impl<'a> PatternExecutor<'a> {
 
             // Second pass: process valid targets with smart path management
             let new_depth = depth + 1;
-            let num_targets = valid_targets.len();
 
-            for (i, (target, conn_type)) in valid_targets.into_iter().enumerate() {
-                let is_last = i == num_targets - 1;
+            for (target, conn_type) in valid_targets {
                 let needs_queue = new_depth < max_hops;
 
-                // Build new_path efficiently:
-                // - For last target: reuse path by moving it (no clone)
-                // - For others: clone the path
-                let mut new_path = if is_last {
-                    path.clone() // Can't avoid this clone since path is borrowed
-                } else {
-                    path.clone()
-                };
+                let mut new_path = path.clone();
                 new_path.push((target, conn_type));
 
                 // If we're within the valid hop range and target matches node pattern, add to results

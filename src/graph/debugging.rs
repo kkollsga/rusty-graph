@@ -25,70 +25,67 @@ pub fn get_schema_string(graph: &DirGraph) -> String {
 
     for &node_index in &schema_nodes {
         if let Some(node_data) = graph.get_node(node_index) {
-            match node_data {
-                NodeData::Schema {
-                    title, properties, ..
-                } => {
-                    if properties.contains_key("source_type")
-                        && properties.contains_key("target_type")
-                    {
-                        // Connection schema
-                        let source_type = properties
-                            .get("source_type")
-                            .and_then(|v| v.as_string())
-                            .unwrap_or_else(|| "Unknown".to_string());
+            if let NodeData::Schema {
+                title, properties, ..
+            } = node_data
+            {
+                if properties.contains_key("source_type") && properties.contains_key("target_type")
+                {
+                    // Connection schema
+                    let source_type = properties
+                        .get("source_type")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or_else(|| "Unknown".to_string());
 
-                        let target_type = properties
-                            .get("target_type")
-                            .and_then(|v| v.as_string())
-                            .unwrap_or_else(|| "Unknown".to_string());
+                    let target_type = properties
+                        .get("target_type")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or_else(|| "Unknown".to_string());
 
-                        let connection_type = match title {
-                            Value::String(s) => s.clone(),
-                            _ => "Unknown".to_string(),
-                        };
+                    let connection_type = match title {
+                        Value::String(s) => s.clone(),
+                        _ => "Unknown".to_string(),
+                    };
 
-                        schema_string.push_str(&format!(
-                            "  Connection Type: {} ({} -> {})\n",
-                            connection_type, source_type, target_type
-                        ));
+                    schema_string.push_str(&format!(
+                        "  Connection Type: {} ({} -> {})\n",
+                        connection_type, source_type, target_type
+                    ));
 
-                        // Filter out source_type and target_type from properties
-                        let filtered_properties: Vec<(&String, &Value)> = properties
-                            .iter()
-                            .filter(|(k, _)| *k != "source_type" && *k != "target_type")
-                            .collect();
+                    // Filter out source_type and target_type from properties
+                    let filtered_properties: Vec<(&String, &Value)> = properties
+                        .iter()
+                        .filter(|(k, _)| *k != "source_type" && *k != "target_type")
+                        .collect();
 
-                        if !filtered_properties.is_empty() {
-                            schema_string.push_str("    Properties:\n");
-                            for (key, value) in filtered_properties {
-                                if let Value::String(type_name) = value {
-                                    schema_string
-                                        .push_str(&format!("      - {}: {}\n", key, type_name));
-                                }
+                    if !filtered_properties.is_empty() {
+                        schema_string.push_str("    Properties:\n");
+                        for (key, value) in filtered_properties {
+                            if let Value::String(type_name) = value {
+                                schema_string
+                                    .push_str(&format!("      - {}: {}\n", key, type_name));
                             }
                         }
-                    } else {
-                        // Node schema
-                        let node_type = match title {
-                            Value::String(s) => s.clone(),
-                            _ => "Unknown".to_string(),
-                        };
+                    }
+                } else {
+                    // Node schema
+                    let node_type = match title {
+                        Value::String(s) => s.clone(),
+                        _ => "Unknown".to_string(),
+                    };
 
-                        schema_string.push_str(&format!("  Node Type: {}\n", node_type));
+                    schema_string.push_str(&format!("  Node Type: {}\n", node_type));
 
-                        if !properties.is_empty() {
-                            schema_string.push_str("    Properties:\n");
-                            for (key, value) in properties {
-                                if let Value::String(type_name) = value {
-                                    schema_string
-                                        .push_str(&format!("      - {}: {}\n", key, type_name));
-                                }
+                    if !properties.is_empty() {
+                        schema_string.push_str("    Properties:\n");
+                        for (key, value) in properties {
+                            if let Value::String(type_name) = value {
+                                schema_string
+                                    .push_str(&format!("      - {}: {}\n", key, type_name));
                             }
                         }
                     }
                 }
-                _ => {} // Skip non-schema nodes
             }
             schema_string.push('\n');
         }

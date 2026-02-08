@@ -481,7 +481,7 @@ impl CypherParser {
                     // if we're in an expression context (not at clause boundary)
                     // Heuristic: if next token after dash is a number, identifier, or '(',
                     // it's subtraction. Otherwise, stop.
-                    if self.peek_at(1).map_or(false, |t| {
+                    if self.peek_at(1).is_some_and(|t| {
                         matches!(
                             t,
                             CypherToken::IntLit(_)

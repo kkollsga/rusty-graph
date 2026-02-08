@@ -57,7 +57,7 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
         Value::Boolean(b) => b.into_py_any(py),
         Value::UniqueId(u) => u.into_py_any(py),
         Value::DateTime(d) => d.format("%Y-%m-%d").to_string().into_py_any(py),
-        Value::Null => Ok(py.None().into()),
+        Value::Null => Ok(py.None()),
     }
 }
 
@@ -95,16 +95,16 @@ pub fn convert_stats_for_python(stats: Vec<PropertyStats>) -> PyResult<Py<PyAny>
             parent_idx.append(
                 stat.parent_idx
                     .map(|idx| idx.index().into_pyobject(py).unwrap().into_any().unbind())
-                    .unwrap_or_else(|| py.None().into()),
+                    .unwrap_or_else(|| py.None()),
             )?;
             parent_type.append(stat.parent_type.unwrap_or_default())?;
             parent_title.append(
                 stat.parent_title
-                    .map_or_else(|| py.None().into(), |v| value_to_py(py, &v).unwrap()),
+                    .map_or_else(|| py.None(), |v| value_to_py(py, &v).unwrap()),
             )?;
             parent_id.append(
                 stat.parent_id
-                    .map_or_else(|| py.None().into(), |v| value_to_py(py, &v).unwrap()),
+                    .map_or_else(|| py.None(), |v| value_to_py(py, &v).unwrap()),
             )?;
             property_name.append(stat.property_name)?;
             value_type.append(stat.value_type)?;
@@ -116,22 +116,22 @@ pub fn convert_stats_for_python(stats: Vec<PropertyStats>) -> PyResult<Py<PyAny>
                 sum_val.append(
                     stat.sum
                         .map(|v| v.into_pyobject(py).unwrap().into_any().unbind())
-                        .unwrap_or_else(|| py.None().into()),
+                        .unwrap_or_else(|| py.None()),
                 )?;
                 avg.append(
                     stat.avg
                         .map(|v| v.into_pyobject(py).unwrap().into_any().unbind())
-                        .unwrap_or_else(|| py.None().into()),
+                        .unwrap_or_else(|| py.None()),
                 )?;
                 min_val.append(
                     stat.min
                         .map(|v| v.into_pyobject(py).unwrap().into_any().unbind())
-                        .unwrap_or_else(|| py.None().into()),
+                        .unwrap_or_else(|| py.None()),
                 )?;
                 max_val.append(
                     stat.max
                         .map(|v| v.into_pyobject(py).unwrap().into_any().unbind())
-                        .unwrap_or_else(|| py.None().into()),
+                        .unwrap_or_else(|| py.None()),
                 )?;
             } else {
                 sum_val.append(py.None())?;
@@ -527,7 +527,7 @@ pub fn convert_computation_results_for_python(results: Vec<StatResult>) -> PyRes
             };
 
             // Insert the value or null for errors
-            if let Some(_) = &result.error_msg {
+            if result.error_msg.is_some() {
                 // Add null for error cases
                 dict.set_item(&key, py.None())?;
             } else {

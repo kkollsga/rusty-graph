@@ -21,6 +21,7 @@ use crate::graph::schema::{CurrentSelection, DirGraph, NodeData};
 /// * `max_lat` - Maximum latitude (north bound)
 /// * `min_lon` - Minimum longitude (west bound)
 /// * `max_lon` - Maximum longitude (east bound)
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn within_bounds(
     graph: &DirGraph,
     selection: &CurrentSelection,
@@ -49,8 +50,8 @@ pub fn within_bounds(
         if let Some(node) = graph.graph.node_weight(node_idx) {
             let (lat, lon) = match node {
                 NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-                    let lat = properties.get(lat_field).and_then(|v| value_to_f64(v));
-                    let lon = properties.get(lon_field).and_then(|v| value_to_f64(v));
+                    let lat = properties.get(lat_field).and_then(value_to_f64);
+                    let lon = properties.get(lon_field).and_then(value_to_f64);
                     (lat, lon)
                 }
             };
@@ -107,8 +108,8 @@ pub fn near_point(
         if let Some(node) = graph.graph.node_weight(node_idx) {
             let (lat, lon) = match node {
                 NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-                    let lat = properties.get(lat_field).and_then(|v| value_to_f64(v));
-                    let lon = properties.get(lon_field).and_then(|v| value_to_f64(v));
+                    let lat = properties.get(lat_field).and_then(value_to_f64);
+                    let lon = properties.get(lon_field).and_then(value_to_f64);
                     (lat, lon)
                 }
             };
@@ -187,8 +188,8 @@ pub fn near_point_km(
         if let Some(node) = graph.graph.node_weight(node_idx) {
             let (lat, lon) = match node {
                 NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-                    let lat = properties.get(lat_field).and_then(|v| value_to_f64(v));
-                    let lon = properties.get(lon_field).and_then(|v| value_to_f64(v));
+                    let lat = properties.get(lat_field).and_then(value_to_f64);
+                    let lon = properties.get(lon_field).and_then(value_to_f64);
                     (lat, lon)
                 }
             };
@@ -469,8 +470,8 @@ pub fn calculate_centroid(
         if let Some(node) = graph.graph.node_weight(node_idx) {
             let (lat, lon) = match node {
                 NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-                    let lat = properties.get(lat_field).and_then(|v| value_to_f64(v));
-                    let lon = properties.get(lon_field).and_then(|v| value_to_f64(v));
+                    let lat = properties.get(lat_field).and_then(value_to_f64);
+                    let lon = properties.get(lon_field).and_then(value_to_f64);
                     (lat, lon)
                 }
             };
@@ -517,8 +518,8 @@ pub fn get_bounds(
         if let Some(node) = graph.graph.node_weight(node_idx) {
             let (lat, lon) = match node {
                 NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-                    let lat = properties.get(lat_field).and_then(|v| value_to_f64(v));
-                    let lon = properties.get(lon_field).and_then(|v| value_to_f64(v));
+                    let lat = properties.get(lat_field).and_then(value_to_f64);
+                    let lon = properties.get(lon_field).and_then(value_to_f64);
                     (lat, lon)
                 }
             };

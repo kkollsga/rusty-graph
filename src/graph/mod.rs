@@ -117,6 +117,7 @@ impl KnowledgeGraph {
     }
 
     #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None))]
+    #[allow(clippy::too_many_arguments)]
     fn add_nodes(
         &mut self,
         data: &Bound<'_, PyAny>,
@@ -169,7 +170,7 @@ impl KnowledgeGraph {
             node_title_field,
             conflict_handling,
         )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Replace the Arc with the new graph
         self.inner = Arc::new(graph);
@@ -201,6 +202,7 @@ impl KnowledgeGraph {
     }
 
     #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None))]
+    #[allow(clippy::too_many_arguments)]
     fn add_connections(
         &mut self,
         data: &Bound<'_, PyAny>,
@@ -263,7 +265,7 @@ impl KnowledgeGraph {
             target_title_field,
             conflict_handling,
         )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Replace the Arc with the new graph
         self.inner = Arc::new(graph);
@@ -391,7 +393,7 @@ impl KnowledgeGraph {
                 Some(node_title_field),
                 None,
             )
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
             self.inner = Arc::new(graph);
             result_dict.set_item(&node_type, report.nodes_created + report.nodes_updated)?;
@@ -515,10 +517,10 @@ impl KnowledgeGraph {
             })?;
 
             // Skip if filtering and types not loaded
-            if filter_to_loaded {
-                if !loaded_types.contains(&source_type) || !loaded_types.contains(&target_type) {
-                    continue;
-                }
+            if filter_to_loaded
+                && (!loaded_types.contains(&source_type) || !loaded_types.contains(&target_type))
+            {
+                continue;
             }
 
             // Standardized column names for connector API
@@ -566,7 +568,7 @@ impl KnowledgeGraph {
                 None, // target_title_field
                 None, // conflict_handling
             )
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
             self.inner = Arc::new(graph);
             result_dict.set_item(&connection_name, report.connections_created)?;
@@ -616,7 +618,7 @@ impl KnowledgeGraph {
             sort_fields,
             max_nodes,
         )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Record actual result
         let actual = new_kg
@@ -660,7 +662,7 @@ impl KnowledgeGraph {
             sort_fields,
             max_nodes,
         )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Record actual result
         let actual = new_kg
@@ -698,7 +700,7 @@ impl KnowledgeGraph {
             sort_fields.as_ref(),
             max_nodes,
         )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         Ok(new_kg)
     }
@@ -709,14 +711,14 @@ impl KnowledgeGraph {
         let sort_fields = py_in::parse_sort_fields(sort, ascending)?;
 
         filtering_methods::sort_nodes(&self.inner, &mut new_kg.selection, sort_fields)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
     }
 
     fn max_nodes(&mut self, max_per_group: usize) -> PyResult<Self> {
         let mut new_kg = self.clone();
         filtering_methods::limit_nodes_per_group(&self.inner, &mut new_kg.selection, max_per_group)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         Ok(new_kg)
     }
@@ -758,7 +760,7 @@ impl KnowledgeGraph {
         );
 
         filtering_methods::filter_nodes(&self.inner, &mut new_kg.selection, conditions, None, None)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Record actual result
         let actual = new_kg
@@ -812,7 +814,7 @@ impl KnowledgeGraph {
         );
 
         filtering_methods::filter_nodes(&self.inner, &mut new_kg.selection, conditions, None, None)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Record actual result
         let actual = new_kg
@@ -1045,20 +1047,18 @@ impl KnowledgeGraph {
             let result = PyList::empty(py);
 
             for node_idx in self.selection.current_node_indices() {
-                if let Some(node) = self.inner.get_node(node_idx) {
-                    if let schema::NodeData::Regular {
-                        id,
-                        title,
-                        node_type,
-                        ..
-                    } = node
-                    {
-                        let dict = PyDict::new(py);
-                        dict.set_item("id", py_out::value_to_py(py, id)?)?;
-                        dict.set_item("title", py_out::value_to_py(py, title)?)?;
-                        dict.set_item("type", node_type)?;
-                        result.append(dict)?;
-                    }
+                if let Some(schema::NodeData::Regular {
+                    id,
+                    title,
+                    node_type,
+                    ..
+                }) = self.inner.get_node(node_idx)
+                {
+                    let dict = PyDict::new(py);
+                    dict.set_item("id", py_out::value_to_py(py, id)?)?;
+                    dict.set_item("title", py_out::value_to_py(py, title)?)?;
+                    dict.set_item("type", node_type)?;
+                    result.append(dict)?;
                 }
             }
 
@@ -1088,10 +1088,8 @@ impl KnowledgeGraph {
             let result = PyList::empty(py);
 
             for node_idx in self.selection.current_node_indices() {
-                if let Some(node) = self.inner.get_node(node_idx) {
-                    if let schema::NodeData::Regular { id, .. } = node {
-                        result.append(py_out::value_to_py(py, id)?)?;
-                    }
+                if let Some(schema::NodeData::Regular { id, .. }) = self.inner.get_node(node_idx) {
+                    result.append(py_out::value_to_py(py, id)?)?;
                 }
             }
 
@@ -1270,6 +1268,7 @@ impl KnowledgeGraph {
         Python::attach(|py| py_out::level_values_to_pydict(py, &values))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn unique_values(
         &mut self,
         property: String,
@@ -1296,7 +1295,7 @@ impl KnowledgeGraph {
             let mut graph = extract_or_clone_graph(&mut self.inner);
 
             maintain_graph::update_node_properties(&mut graph, &nodes, target_property)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
             // Replace the Arc with the updated graph
             self.inner = Arc::new(graph);
@@ -1312,6 +1311,7 @@ impl KnowledgeGraph {
     }
 
     #[pyo3(signature = (connection_type, level_index=None, direction=None, filter_target=None, filter_connection=None, sort_target=None, max_nodes=None, new_level=None))]
+    #[allow(clippy::too_many_arguments)]
     fn traverse(
         &mut self,
         connection_type: String,
@@ -1362,7 +1362,7 @@ impl KnowledgeGraph {
             max_nodes,
             new_level,
         )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Record actual result - use node_count() to avoid allocation
         let actual = new_kg
@@ -1392,7 +1392,7 @@ impl KnowledgeGraph {
             connection_type,
             conflict_handling,
         )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Create new graph with the updated data
         let mut new_kg = KnowledgeGraph {
@@ -1413,6 +1413,7 @@ impl KnowledgeGraph {
     }
 
     #[pyo3(signature = (property=None, filter=None, sort=None, max_nodes=None, store_as=None, max_length=None, keep_selection=None))]
+    #[allow(clippy::too_many_arguments)]
     fn children_properties_to_list(
         &mut self,
         property: Option<&str>,
@@ -1442,12 +1443,12 @@ impl KnowledgeGraph {
                 sort_fields,
                 max_nodes,
             )
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         } else if let Some(spec) = sort {
             let sort_fields = py_in::parse_sort_fields(spec, None)?;
 
             filtering_methods::sort_nodes(&self.inner, &mut filtered_kg.selection, sort_fields)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
             if let Some(max) = max_nodes {
                 filtering_methods::limit_nodes_per_group(
@@ -1455,11 +1456,11 @@ impl KnowledgeGraph {
                     &mut filtered_kg.selection,
                     max,
                 )
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
             }
         } else if let Some(max) = max_nodes {
             filtering_methods::limit_nodes_per_group(&self.inner, &mut filtered_kg.selection, max)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         }
 
         // Generate the property lists with titles already included
@@ -1485,7 +1486,7 @@ impl KnowledgeGraph {
 
         // Update parent properties
         let result = maintain_graph::update_node_properties(&mut graph, &nodes, store_as.unwrap())
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Create a new graph with the updated data
         let mut new_kg = KnowledgeGraph {
@@ -1864,7 +1865,7 @@ impl KnowledgeGraph {
     fn union(&self, other: &Self) -> PyResult<Self> {
         let mut new_kg = self.clone();
         set_operations::union_selections(&mut new_kg.selection, &other.selection)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
     }
 
@@ -1873,7 +1874,7 @@ impl KnowledgeGraph {
     fn intersection(&self, other: &Self) -> PyResult<Self> {
         let mut new_kg = self.clone();
         set_operations::intersection_selections(&mut new_kg.selection, &other.selection)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
     }
 
@@ -1882,7 +1883,7 @@ impl KnowledgeGraph {
     fn difference(&self, other: &Self) -> PyResult<Self> {
         let mut new_kg = self.clone();
         set_operations::difference_selections(&mut new_kg.selection, &other.selection)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
     }
 
@@ -1891,7 +1892,7 @@ impl KnowledgeGraph {
     fn symmetric_difference(&self, other: &Self) -> PyResult<Self> {
         let mut new_kg = self.clone();
         set_operations::symmetric_difference_selections(&mut new_kg.selection, &other.selection)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
     }
 
@@ -2248,7 +2249,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         // Look up source node
         let source_lookup = lookups::TypeLookup::new(&self.inner.graph, source_type.to_string())
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = source_lookup.check_uid(&source_value).ok_or_else(|| {
@@ -2263,7 +2264,7 @@ impl KnowledgeGraph {
             source_lookup
         } else {
             lookups::TypeLookup::new(&self.inner.graph, target_type.to_string())
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
         };
 
         let target_value = py_in::py_value_to_value(target_id)?;
@@ -2509,7 +2510,7 @@ impl KnowledgeGraph {
 
         // Look up source node
         let source_lookup = lookups::TypeLookup::new(&self.inner.graph, source_type.to_string())
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = source_lookup.check_uid(&source_value).ok_or_else(|| {
@@ -2524,7 +2525,7 @@ impl KnowledgeGraph {
             source_lookup
         } else {
             lookups::TypeLookup::new(&self.inner.graph, target_type.to_string())
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
         };
 
         let target_value = py_in::py_value_to_value(target_id)?;
@@ -2631,7 +2632,7 @@ impl KnowledgeGraph {
     ) -> PyResult<bool> {
         // Look up source node
         let source_lookup = lookups::TypeLookup::new(&self.inner.graph, source_type.to_string())
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = source_lookup.check_uid(&source_value).ok_or_else(|| {
@@ -2646,7 +2647,7 @@ impl KnowledgeGraph {
             source_lookup
         } else {
             lookups::TypeLookup::new(&self.inner.graph, target_type.to_string())
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
         };
 
         let target_value = py_in::py_value_to_value(target_id)?;
@@ -2872,7 +2873,7 @@ impl KnowledgeGraph {
             .unwrap_or(0);
 
         subgraph::expand_selection(&self.inner, &mut new_kg.selection, hops)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Record actual result - use node_count() to avoid allocation
         let actual = new_kg
@@ -2911,7 +2912,7 @@ impl KnowledgeGraph {
     ///     ```
     fn to_subgraph(&self) -> PyResult<Self> {
         let extracted = subgraph::extract_subgraph(&self.inner, &self.selection)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         Ok(KnowledgeGraph {
             inner: Arc::new(extracted),
@@ -2934,7 +2935,7 @@ impl KnowledgeGraph {
     ///         - 'connection_types': Dict of connection type -> count
     fn subgraph_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let stats = subgraph::get_subgraph_stats(&self.inner, &self.selection)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         let result_dict = PyDict::new(py);
         result_dict.set_item("node_count", stats.node_count)?;
@@ -3016,25 +3017,25 @@ impl KnowledgeGraph {
         match fmt {
             "graphml" => {
                 let content = export::to_graphml(&self.inner, selection)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                    .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
                 std::fs::write(path, content)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
             }
             "gexf" => {
                 let content = export::to_gexf(&self.inner, selection)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                    .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
                 std::fs::write(path, content)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
             }
             "d3" | "json" => {
                 let content = export::to_d3_json(&self.inner, selection)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                    .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
                 std::fs::write(path, content)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
             }
             "csv" => {
                 let (nodes_csv, edges_csv) = export::to_csv(&self.inner, selection)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                    .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
                 // Write nodes file
                 let nodes_path = path.replace(".csv", "_nodes.csv");
@@ -3103,11 +3104,11 @@ impl KnowledgeGraph {
 
         match format {
             "graphml" => export::to_graphml(&self.inner, selection)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e)),
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>),
             "gexf" => export::to_gexf(&self.inner, selection)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e)),
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>),
             "d3" | "json" => export::to_d3_json(&self.inner, selection)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e)),
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>),
             _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Unknown export format: '{}'. Supported: graphml, gexf, d3, json",
                 format
@@ -3559,7 +3560,7 @@ impl KnowledgeGraph {
             min_lon,
             max_lon,
         )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Create new selection with matching nodes
         let mut new_kg = self.clone();
@@ -3626,7 +3627,7 @@ impl KnowledgeGraph {
             center_lon,
             max_distance,
         )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Create new selection with matching nodes
         let mut new_kg = self.clone();
@@ -3689,7 +3690,7 @@ impl KnowledgeGraph {
             center_lon,
             max_distance_km,
         )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Create new selection with matching nodes
         let mut new_kg = self.clone();
@@ -3749,7 +3750,7 @@ impl KnowledgeGraph {
             center_lon,
             max_distance_km,
         )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Create new selection with matching nodes
         let mut new_kg = self.clone();
@@ -3799,7 +3800,7 @@ impl KnowledgeGraph {
 
         let matching_nodes =
             spatial::contains_point(&self.inner, &self.selection, geometry_field, lat, lon)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Create new selection with matching nodes
         let mut new_kg = self.clone();
@@ -3846,7 +3847,7 @@ impl KnowledgeGraph {
 
         let matching_nodes =
             spatial::intersects_geometry(&self.inner, &self.selection, geometry_field, query_wkt)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Create new selection with matching nodes
         let mut new_kg = self.clone();

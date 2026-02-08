@@ -41,18 +41,13 @@ pub enum NodeAction {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ConflictHandling {
-    Replace,  // Replace all properties and title (current behavior)
-    Skip,     // Don't update existing nodes
-    Update,   // Update properties and title if provided
+    Replace, // Replace all properties and title (current behavior)
+    Skip,    // Don't update existing nodes
+    #[default]
+    Update, // Update properties and title if provided
     Preserve, // Update but prefer existing values
-}
-
-impl Default for ConflictHandling {
-    fn default() -> Self {
-        ConflictHandling::Update // New default behavior
-    }
 }
 
 #[derive(Debug)]
