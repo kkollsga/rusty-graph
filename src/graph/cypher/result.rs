@@ -1,0 +1,116 @@
+// src/graph/cypher/result.rs
+// Result types for the Cypher query pipeline
+
+use std::collections::HashMap;
+use petgraph::graph::NodeIndex;
+use crate::datatypes::values::Value;
+
+// ============================================================================
+// Pipeline Result Types
+// ============================================================================
+
+/// A single row in the pipeline result set.
+/// During execution, rows carry lightweight NodeIndex references.
+/// Properties are resolved on-demand (zero-copy via get_field_ref).
+#[derive(Debug, Clone)]
+pub struct ResultRow {
+    /// Node variable bindings: variable_name -> NodeIndex
+    pub node_bindings: HashMap<String, NodeIndex>,
+    /// Edge variable bindings: variable_name -> (source_idx, target_idx, connection_type, properties)
+    pub edge_bindings: HashMap<String, EdgeBinding>,
+    /// Variable-length path bindings
+    pub path_bindings: HashMap<String, PathBinding>,
+    /// Projected values from WITH/RETURN
+    pub projected: HashMap<String, Value>,
+}
+
+/// Lightweight edge binding
+#[derive(Debug, Clone)]
+pub struct EdgeBinding {
+    pub source: NodeIndex,
+    pub target: NodeIndex,
+    pub connection_type: String,
+    pub properties: HashMap<String, Value>,
+}
+
+/// Variable-length path binding
+#[derive(Debug, Clone)]
+pub struct PathBinding {
+    pub source: NodeIndex,
+    pub target: NodeIndex,
+    pub hops: usize,
+    pub path: Vec<(NodeIndex, String)>,
+}
+
+impl ResultRow {
+    pub fn new() -> Self {
+        ResultRow {
+            node_bindings: HashMap::new(),
+            edge_bindings: HashMap::new(),
+            path_bindings: HashMap::new(),
+            projected: HashMap::new(),
+        }
+    }
+
+    /// Create a row with only projected values (for aggregation results)
+    pub fn from_projected(projected: HashMap<String, Value>) -> Self {
+        ResultRow {
+            node_bindings: HashMap::new(),
+            edge_bindings: HashMap::new(),
+            path_bindings: HashMap::new(),
+            projected,
+        }
+    }
+
+    /// Check if a variable exists in any binding type
+    pub fn has_variable(&self, name: &str) -> bool {
+        self.node_bindings.contains_key(name)
+            || self.edge_bindings.contains_key(name)
+            || self.path_bindings.contains_key(name)
+            || self.projected.contains_key(name)
+    }
+}
+
+/// The result set flowing through the pipeline
+#[derive(Debug)]
+pub struct ResultSet {
+    pub rows: Vec<ResultRow>,
+    /// Column names in output order (populated by RETURN)
+    pub columns: Vec<String>,
+}
+
+impl ResultSet {
+    pub fn new() -> Self {
+        ResultSet {
+            rows: Vec::new(),
+            columns: Vec::new(),
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        ResultSet {
+            rows: Vec::with_capacity(capacity),
+            columns: Vec::new(),
+        }
+    }
+}
+
+// ============================================================================
+// Final Output
+// ============================================================================
+
+/// Final query result returned to Python
+#[derive(Debug)]
+pub struct CypherResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
+}
+
+impl CypherResult {
+    pub fn empty() -> Self {
+        CypherResult {
+            columns: Vec::new(),
+            rows: Vec::new(),
+        }
+    }
+}

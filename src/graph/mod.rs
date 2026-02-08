@@ -32,6 +32,7 @@ pub mod subgraph;
 pub mod export;
 pub mod pattern_matching;
 pub mod spatial;
+pub mod cypher;
 
 use schema::{DirGraph, CurrentSelection, CowSelection, PlanStep, SchemaDefinition, NodeSchemaDefinition, ConnectionSchemaDefinition};
 
@@ -3250,6 +3251,59 @@ impl KnowledgeGraph {
 
         // Convert matches to Python
         py_out::pattern_matches_to_pylist(py, &matches)
+    }
+
+    /// Execute a Cypher query against the graph.
+    ///
+    /// Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, WITH,
+    /// OPTIONAL MATCH, UNWIND, UNION, and aggregation functions
+    /// (count, sum, avg, min, max, collect, std).
+    ///
+    /// The MATCH clause uses the same pattern syntax as match_pattern().
+    /// WHERE supports AND/OR/NOT, comparisons (=, <>, <, <=, >, >=),
+    /// IS NULL, IS NOT NULL, IN, STARTS WITH, ENDS WITH, CONTAINS.
+    /// RETURN supports property access (n.prop), aliases (AS), aggregation,
+    /// and DISTINCT.
+    ///
+    /// Args:
+    ///     query: The Cypher query string
+    ///
+    /// Returns:
+    ///     A dict with 'columns' (list of column names) and 'rows'
+    ///     (list of row dicts mapping column name to value).
+    ///
+    /// Example:
+    ///     ```python
+    ///     result = graph.cypher('''
+    ///         MATCH (p:Person)-[:KNOWS]->(f:Person)
+    ///         WHERE p.age > 25
+    ///         RETURN p.name AS person, count(f) AS friends
+    ///         ORDER BY friends DESC
+    ///         LIMIT 10
+    ///     ''')
+    ///     for row in result['rows']:
+    ///         print(f"{row['person']}: {row['friends']} friends")
+    ///     ```
+    #[pyo3(signature = (query))]
+    fn cypher(&self, py: Python<'_>, query: &str) -> PyResult<Py<PyAny>> {
+        // Parse the Cypher query
+        let mut parsed = cypher::parse_cypher(query)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Cypher syntax error: {}", e)
+            ))?;
+
+        // Optimize (predicate pushdown, etc.)
+        cypher::optimize(&mut parsed, &self.inner);
+
+        // Execute
+        let executor = cypher::CypherExecutor::new(&self.inner);
+        let result = executor.execute(&parsed)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                format!("Cypher execution error: {}", e)
+            ))?;
+
+        // Convert to Python
+        cypher::py_convert::cypher_result_to_py(py, &result)
     }
 
     // ========================================================================

@@ -37,7 +37,7 @@ pub fn matches_condition(value: &Value, condition: &FilterCondition) -> bool {
 
 /// Check equality with cross-type numeric comparison support.
 /// Handles Int64 <-> Float64 <-> UniqueId conversions to match Python's loose typing.
-fn values_equal(a: &Value, b: &Value) -> bool {
+pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     // Direct equality check first
     if a == b {
         return true;
