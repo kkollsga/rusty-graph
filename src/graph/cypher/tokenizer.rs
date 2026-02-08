@@ -41,60 +41,37 @@ pub enum CypherToken {
     False,
 
     // Symbols
-    LParen,           // (
-    RParen,           // )
-    LBracket,         // [
-    RBracket,         // ]
-    LBrace,           // {
-    RBrace,           // }
-    Colon,            // :
-    Comma,            // ,
-    Dot,              // .
-    Semicolon,        // ;
-    Dash,             // -
-    GreaterThan,      // >
-    LessThan,         // <
-    Star,             // *
-    DotDot,           // ..
+    LParen,      // (
+    RParen,      // )
+    LBracket,    // [
+    RBracket,    // ]
+    LBrace,      // {
+    RBrace,      // }
+    Colon,       // :
+    Comma,       // ,
+    Dot,         // .
+    Semicolon,   // ;
+    Dash,        // -
+    GreaterThan, // >
+    LessThan,    // <
+    Star,        // *
+    DotDot,      // ..
 
     // Comparison operators
-    Equals,           // =
-    NotEquals,        // <>
-    LessThanEquals,   // <=
+    Equals,            // =
+    NotEquals,         // <>
+    LessThanEquals,    // <=
     GreaterThanEquals, // >=
 
     // Arithmetic
-    Plus,             // +
-    Slash,            // /
+    Plus,  // +
+    Slash, // /
 
     // Literals and identifiers
     Identifier(String),
     StringLit(String),
     IntLit(i64),
     FloatLit(f64),
-}
-
-impl CypherToken {
-    /// Check if this token is a clause-starting keyword
-    pub fn is_clause_keyword(&self) -> bool {
-        matches!(
-            self,
-            CypherToken::Match
-                | CypherToken::Optional
-                | CypherToken::Where
-                | CypherToken::Return
-                | CypherToken::With
-                | CypherToken::Order
-                | CypherToken::Limit
-                | CypherToken::Skip
-                | CypherToken::Unwind
-                | CypherToken::Union
-                | CypherToken::Create
-                | CypherToken::Set
-                | CypherToken::Delete
-                | CypherToken::Detach
-        )
-    }
 }
 
 // ============================================================================
@@ -125,19 +102,58 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
         }
 
         match ch {
-            '(' => { tokens.push(CypherToken::LParen); i += 1; }
-            ')' => { tokens.push(CypherToken::RParen); i += 1; }
-            '[' => { tokens.push(CypherToken::LBracket); i += 1; }
-            ']' => { tokens.push(CypherToken::RBracket); i += 1; }
-            '{' => { tokens.push(CypherToken::LBrace); i += 1; }
-            '}' => { tokens.push(CypherToken::RBrace); i += 1; }
-            ':' => { tokens.push(CypherToken::Colon); i += 1; }
-            ',' => { tokens.push(CypherToken::Comma); i += 1; }
-            ';' => { tokens.push(CypherToken::Semicolon); i += 1; }
-            '*' => { tokens.push(CypherToken::Star); i += 1; }
-            '+' => { tokens.push(CypherToken::Plus); i += 1; }
-            '/' => { tokens.push(CypherToken::Slash); i += 1; }
-            '=' => { tokens.push(CypherToken::Equals); i += 1; }
+            '(' => {
+                tokens.push(CypherToken::LParen);
+                i += 1;
+            }
+            ')' => {
+                tokens.push(CypherToken::RParen);
+                i += 1;
+            }
+            '[' => {
+                tokens.push(CypherToken::LBracket);
+                i += 1;
+            }
+            ']' => {
+                tokens.push(CypherToken::RBracket);
+                i += 1;
+            }
+            '{' => {
+                tokens.push(CypherToken::LBrace);
+                i += 1;
+            }
+            '}' => {
+                tokens.push(CypherToken::RBrace);
+                i += 1;
+            }
+            ':' => {
+                tokens.push(CypherToken::Colon);
+                i += 1;
+            }
+            ',' => {
+                tokens.push(CypherToken::Comma);
+                i += 1;
+            }
+            ';' => {
+                tokens.push(CypherToken::Semicolon);
+                i += 1;
+            }
+            '*' => {
+                tokens.push(CypherToken::Star);
+                i += 1;
+            }
+            '+' => {
+                tokens.push(CypherToken::Plus);
+                i += 1;
+            }
+            '/' => {
+                tokens.push(CypherToken::Slash);
+                i += 1;
+            }
+            '=' => {
+                tokens.push(CypherToken::Equals);
+                i += 1;
+            }
 
             '-' => {
                 // Could be dash (edge syntax) or negative number in some contexts,
@@ -181,7 +197,9 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
                         i += 1;
                     }
                     let num_str: String = chars[start..i].iter().collect();
-                    let f: f64 = num_str.parse().map_err(|_| format!("Invalid float: {}", num_str))?;
+                    let f: f64 = num_str
+                        .parse()
+                        .map_err(|_| format!("Invalid float: {}", num_str))?;
                     tokens.push(CypherToken::FloatLit(f));
                 } else {
                     tokens.push(CypherToken::Dot);
@@ -238,10 +256,14 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
                 }
                 let num_str: String = chars[start..i].iter().collect();
                 if has_dot {
-                    let f: f64 = num_str.parse().map_err(|_| format!("Invalid float: {}", num_str))?;
+                    let f: f64 = num_str
+                        .parse()
+                        .map_err(|_| format!("Invalid float: {}", num_str))?;
                     tokens.push(CypherToken::FloatLit(f));
                 } else {
-                    let n: i64 = num_str.parse().map_err(|_| format!("Invalid integer: {}", num_str))?;
+                    let n: i64 = num_str
+                        .parse()
+                        .map_err(|_| format!("Invalid integer: {}", num_str))?;
                     tokens.push(CypherToken::IntLit(n));
                 }
             }
@@ -271,10 +293,7 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
             }
 
             _ => {
-                return Err(format!(
-                    "Unexpected character '{}' at position {}",
-                    ch, i
-                ));
+                return Err(format!("Unexpected character '{}' at position {}", ch, i));
             }
         }
     }
@@ -331,35 +350,41 @@ mod tests {
     #[test]
     fn test_simple_match_return() {
         let tokens = tokenize_cypher("MATCH (n:Person) RETURN n").unwrap();
-        assert_eq!(tokens, vec![
-            CypherToken::Match,
-            CypherToken::LParen,
-            CypherToken::Identifier("n".to_string()),
-            CypherToken::Colon,
-            CypherToken::Identifier("Person".to_string()),
-            CypherToken::RParen,
-            CypherToken::Return,
-            CypherToken::Identifier("n".to_string()),
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                CypherToken::Match,
+                CypherToken::LParen,
+                CypherToken::Identifier("n".to_string()),
+                CypherToken::Colon,
+                CypherToken::Identifier("Person".to_string()),
+                CypherToken::RParen,
+                CypherToken::Return,
+                CypherToken::Identifier("n".to_string()),
+            ]
+        );
     }
 
     #[test]
     fn test_where_with_comparison() {
         let tokens = tokenize_cypher("WHERE n.age > 30 AND n.name = 'Alice'").unwrap();
-        assert_eq!(tokens, vec![
-            CypherToken::Where,
-            CypherToken::Identifier("n".to_string()),
-            CypherToken::Dot,
-            CypherToken::Identifier("age".to_string()),
-            CypherToken::GreaterThan,
-            CypherToken::IntLit(30),
-            CypherToken::And,
-            CypherToken::Identifier("n".to_string()),
-            CypherToken::Dot,
-            CypherToken::Identifier("name".to_string()),
-            CypherToken::Equals,
-            CypherToken::StringLit("Alice".to_string()),
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                CypherToken::Where,
+                CypherToken::Identifier("n".to_string()),
+                CypherToken::Dot,
+                CypherToken::Identifier("age".to_string()),
+                CypherToken::GreaterThan,
+                CypherToken::IntLit(30),
+                CypherToken::And,
+                CypherToken::Identifier("n".to_string()),
+                CypherToken::Dot,
+                CypherToken::Identifier("name".to_string()),
+                CypherToken::Equals,
+                CypherToken::StringLit("Alice".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -423,21 +448,24 @@ mod tests {
     #[test]
     fn test_edge_pattern_tokens() {
         let tokens = tokenize_cypher("(a)-[:KNOWS]->(b)").unwrap();
-        assert_eq!(tokens, vec![
-            CypherToken::LParen,
-            CypherToken::Identifier("a".to_string()),
-            CypherToken::RParen,
-            CypherToken::Dash,
-            CypherToken::LBracket,
-            CypherToken::Colon,
-            CypherToken::Identifier("KNOWS".to_string()),
-            CypherToken::RBracket,
-            CypherToken::Dash,
-            CypherToken::GreaterThan,
-            CypherToken::LParen,
-            CypherToken::Identifier("b".to_string()),
-            CypherToken::RParen,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                CypherToken::LParen,
+                CypherToken::Identifier("a".to_string()),
+                CypherToken::RParen,
+                CypherToken::Dash,
+                CypherToken::LBracket,
+                CypherToken::Colon,
+                CypherToken::Identifier("KNOWS".to_string()),
+                CypherToken::RBracket,
+                CypherToken::Dash,
+                CypherToken::GreaterThan,
+                CypherToken::LParen,
+                CypherToken::Identifier("b".to_string()),
+                CypherToken::RParen,
+            ]
+        );
     }
 
     #[test]

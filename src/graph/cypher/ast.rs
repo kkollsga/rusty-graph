@@ -27,8 +27,11 @@ pub enum Clause {
     Limit(LimitClause),
     Unwind(UnwindClause),
     Union(UnionClause),
+    #[allow(dead_code)]
     Create(CreateClause),
+    #[allow(dead_code)]
     Set(SetClause),
+    #[allow(dead_code)]
     Delete(DeleteClause),
 }
 

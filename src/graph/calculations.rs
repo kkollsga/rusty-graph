@@ -1,18 +1,18 @@
 // src/graph/calculations.rs
-use super::statistics_methods::{get_parent_child_pairs, ParentChildPair};
-use super::equation_parser::{Parser, Evaluator, Expr, AggregateType};
-use super::maintain_graph;
+use super::equation_parser::{AggregateType, Evaluator, Expr, Parser};
 use super::lookups::TypeLookup;
+use super::maintain_graph;
+use super::statistics_methods::{get_parent_child_pairs, ParentChildPair};
 use crate::datatypes::values::Value;
-use crate::graph::schema::{DirGraph, CurrentSelection, NodeData};
 use crate::graph::reporting::CalculationOperationReport; // Remove unused OperationReport import
+use crate::graph::schema::{CurrentSelection, DirGraph, NodeData};
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
 use std::time::Instant; // For timing operations
 
 pub enum EvaluationResult {
     Stored(CalculationOperationReport),
-    Computed(Vec<StatResult>)
+    Computed(Vec<StatResult>),
 }
 
 #[derive(Debug)]
@@ -27,15 +27,21 @@ pub struct StatResult {
 /// Cache parent titles from pairs to avoid redundant graph lookups
 fn cache_parent_titles(
     pairs: &[ParentChildPair],
-    graph: &DirGraph
+    graph: &DirGraph,
 ) -> HashMap<NodeIndex, Option<String>> {
-    pairs.iter()
-        .filter_map(|pair| pair.parent.map(|idx| (
-            idx,
-            graph.get_node(idx)
-                .and_then(|node| node.get_field_ref("title"))
-                .and_then(|v| v.as_string())
-        )))
+    pairs
+        .iter()
+        .filter_map(|pair| {
+            pair.parent.map(|idx| {
+                (
+                    idx,
+                    graph
+                        .get_node(idx)
+                        .and_then(|node| node.get_field_ref("title"))
+                        .and_then(|v| v.as_string()),
+                )
+            })
+        })
         .collect()
 }
 
@@ -49,7 +55,7 @@ pub fn process_equation(
 ) -> Result<EvaluationResult, String> {
     // Start tracking time for reporting
     let start_time = Instant::now();
-    
+
     // Track non-fatal errors that occur during processing
     let mut errors = Vec::new();
 
@@ -81,7 +87,7 @@ pub fn process_equation(
             } else {
                 format!("Failed to parse expression: {}. Check for syntax errors or case sensitivity in function names (use 'sum', not 'SUM').", err)
             });
-        },
+        }
     };
 
     // Extract variables from the expression
@@ -89,11 +95,14 @@ pub fn process_equation(
 
     // Check if selection is valid or empty
     if selection.get_level_count() == 0 {
-        return Err("No nodes selected. Please apply filters or traversals before calculating.".to_string());
+        return Err(
+            "No nodes selected. Please apply filters or traversals before calculating.".to_string(),
+        );
     }
 
     // Additional check to see if the current level has any nodes
-    let effective_level_index = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
+    let effective_level_index =
+        level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
     let nodes_processed;
     if let Some(level) = selection.get_level(effective_level_index) {
         if level.node_count() == 0 {
@@ -106,8 +115,11 @@ pub fn process_equation(
         // Define nodes_processed at first usage - use node_count() to avoid allocation
         nodes_processed = level.node_count();
     } else {
-        return Err(format!("Invalid level index: {}. Selection only has {} levels.",
-            effective_level_index, selection.get_level_count()));
+        return Err(format!(
+            "Invalid level index: {}. Selection only has {} levels.",
+            effective_level_index,
+            selection.get_level_count()
+        ));
     }
     // If we have a selection, validate variables against schema
     // Skip validation for connection aggregation since properties are on edges, not nodes
@@ -120,20 +132,35 @@ pub fn process_equation(
                         match node {
                             NodeData::Regular { node_type, .. } => {
                                 // Check if schema node exists for this type
-                                let schema_lookup = match TypeLookup::new(&graph.graph, "SchemaNode".to_string()) {
-                                    Ok(lookup) => lookup,
-                                    Err(_) => return Err("Could not access schema information".to_string()),
-                                };
+                                let schema_lookup =
+                                    match TypeLookup::new(&graph.graph, "SchemaNode".to_string()) {
+                                        Ok(lookup) => lookup,
+                                        Err(_) => {
+                                            return Err(
+                                                "Could not access schema information".to_string()
+                                            )
+                                        }
+                                    };
 
                                 let schema_title = Value::String(node_type.clone());
 
                                 if let Some(schema_idx) = schema_lookup.check_title(&schema_title) {
-                                    if let Some(NodeData::Schema { properties, .. }) = graph.get_node(schema_idx) {
+                                    if let Some(NodeData::Schema { properties, .. }) =
+                                        graph.get_node(schema_idx)
+                                    {
                                         // Validate each variable against schema properties
                                         // Don't check reserved field names like 'id', 'title', 'type'
                                         for var in &variables {
-                                            if var != "id" && var != "title" && var != "type" && !properties.contains_key(var) {
-                                                let available = properties.keys().cloned().collect::<Vec<String>>().join(", ");
+                                            if var != "id"
+                                                && var != "title"
+                                                && var != "type"
+                                                && !properties.contains_key(var)
+                                            {
+                                                let available = properties
+                                                    .keys()
+                                                    .cloned()
+                                                    .collect::<Vec<String>>()
+                                                    .join(", ");
                                                 return Err(format!(
                                                     "Property '{}' does not exist on '{}' nodes. Available properties: {}",
                                                     var, node_type, available
@@ -142,27 +169,27 @@ pub fn process_equation(
                                         }
                                     }
                                 }
-                            },
-                            _ => {}, // Skip schema nodes
+                            }
+                            _ => {} // Skip schema nodes
                         }
                     }
                 }
             }
         }
     }
-    
+
     let is_aggregation = has_aggregation(&parsed_expr);
-    
+
     // When performing evaluation, we can use an immutable reference to graph
     let results = if aggregate_connections.unwrap_or(false) {
         evaluate_connection_equation(graph, selection, &parsed_expr, level_index)
     } else {
         evaluate_equation(graph, selection, &parsed_expr, level_index)
     };
-    
+
     // Count nodes with errors for reporting
     let nodes_with_errors = results.iter().filter(|r| r.error_msg.is_some()).count();
-    
+
     // Collect evaluation errors
     for result in &results {
         if let Some(error_msg) = &result.error_msg {
@@ -174,25 +201,28 @@ pub fn process_equation(
             errors.push(format!("{}Evaluation error: {}", node_info, error_msg));
         }
     }
-    
+
     // If we don't need to store results, just return them directly
     if store_as.is_none() {
         if results.is_empty() {
-            return Err("No results from calculation. Check that your selection contains data.".to_string());
+            return Err(
+                "No results from calculation. Check that your selection contains data.".to_string(),
+            );
         }
 
         return Ok(EvaluationResult::Computed(results));
     }
-    
+
     // Only proceed with node updating logic if we need to store results
     let target_property = store_as.unwrap();
-    
+
     // Determine where to store results based on whether there's aggregation
-    let effective_level_index = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
-    
+    let effective_level_index =
+        level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
+
     // Prepare a Vec to hold valid nodes for update
     let mut nodes_to_update: Vec<(Option<NodeIndex>, Value)> = Vec::new();
-    
+
     if is_aggregation {
         // For aggregation - get actual parent nodes from the selection
         for result in &results {
@@ -207,10 +237,11 @@ pub fn process_equation(
         // For non-aggregation - get actual child nodes from the selection
         if let Some(level) = selection.get_level(effective_level_index) {
             // Create HashMap from node indices to results
-            let result_map: HashMap<NodeIndex, &StatResult> = results.iter()
+            let result_map: HashMap<NodeIndex, &StatResult> = results
+                .iter()
                 .filter_map(|r| r.node_idx.map(|idx| (idx, r)))
                 .collect();
-            
+
             // Get all node indices directly from the current level
             for node_idx in level.iter_node_indices() {
                 // Direct HashMap lookup instead of linear search
@@ -223,24 +254,25 @@ pub fn process_equation(
             }
         }
     }
-    
+
     // Check if we found any valid nodes to update
     if nodes_to_update.is_empty() {
         return Err(format!(
-            "No valid nodes found to store '{}'. Selection level: {}, Aggregation: {}", 
+            "No valid nodes found to store '{}'. Selection level: {}, Aggregation: {}",
             target_property, effective_level_index, is_aggregation
         ));
     }
-    
+
     // Update the node properties with verified node indices
-    let update_result = maintain_graph::update_node_properties(graph, &nodes_to_update, target_property)?;
-    
+    let update_result =
+        maintain_graph::update_node_properties(graph, &nodes_to_update, target_property)?;
+
     // Update nodes_updated from the result (now used)
     let nodes_updated = update_result.nodes_updated;
-    
+
     // Calculate elapsed time for report
     let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-    
+
     // Create the report - using all counters to avoid unused assignment warnings
     let mut report = CalculationOperationReport::new(
         "process_equation".to_string(),
@@ -249,14 +281,14 @@ pub fn process_equation(
         nodes_updated,
         nodes_with_errors,
         elapsed_ms,
-        is_aggregation
+        is_aggregation,
     );
-    
+
     // Add errors if we found any
     if !errors.is_empty() {
         report = report.with_errors(errors);
     }
-    
+
     Ok(EvaluationResult::Stored(report))
 }
 
@@ -264,12 +296,12 @@ pub fn process_equation(
 fn extract_unknown_aggregate_function(expression: &str) -> Option<String> {
     // Simple heuristic: if expression contains word(property) pattern but word is not a known aggregate
     let lowercase_expr = expression.to_lowercase();
-    
+
     // Check for common patterns like "func(arg)" where func is not recognized
     let parts: Vec<&str> = lowercase_expr.split('(').collect();
     if parts.len() > 1 {
         let func_part = parts[0].trim();
-        
+
         // Skip known functions
         if !is_known_aggregate(func_part) {
             // Check that it looks like a function name (alphanumeric)
@@ -278,7 +310,7 @@ fn extract_unknown_aggregate_function(expression: &str) -> Option<String> {
             }
         }
     }
-    
+
     None
 }
 
@@ -290,13 +322,13 @@ fn is_known_aggregate(name: &str) -> bool {
 // Check if a string looks like it might be intended as an aggregate function name
 fn is_likely_aggregate_name(name: &str) -> bool {
     let name = name.trim().to_lowercase();
-    
+
     // Common aggregate function names people might try to use
     let common_aggregates = [
-        "sum", "avg", "average", "mean", "median", "min", "max", "count", 
-        "std", "stdev", "stddev", "var", "variance"
+        "sum", "avg", "average", "mean", "median", "min", "max", "count", "std", "stdev", "stddev",
+        "var", "variance",
     ];
-    
+
     common_aggregates.contains(&name.as_str())
 }
 
@@ -314,12 +346,16 @@ pub fn evaluate_equation(
         let pairs = get_parent_child_pairs(selection, level_index);
         let parent_titles = cache_parent_titles(&pairs, graph);
 
-        pairs.iter()
+        pairs
+            .iter()
             .map(|pair| {
                 // Collect property objects directly - no need to clone NodeData
-                let objects: Vec<HashMap<String, Value>> = pair.children.iter()
+                let objects: Vec<HashMap<String, Value>> = pair
+                    .children
+                    .iter()
                     .filter_map(|&node_idx| {
-                        graph.get_node(node_idx)
+                        graph
+                            .get_node(node_idx)
                             .map(|node| convert_node_to_object(node))
                     })
                     .collect();
@@ -329,7 +365,9 @@ pub fn evaluate_equation(
                         node_idx: None,
                         parent_idx: pair.parent,
                         // Use cached parent title instead of looking it up again
-                        parent_title: pair.parent.and_then(|idx| parent_titles.get(&idx).cloned().flatten()),
+                        parent_title: pair
+                            .parent
+                            .and_then(|idx| parent_titles.get(&idx).cloned().flatten()),
                         value: Value::Null,
                         error_msg: Some("No valid nodes found".to_string()),
                     };
@@ -340,7 +378,9 @@ pub fn evaluate_equation(
                         node_idx: None,
                         parent_idx: pair.parent,
                         // Use cached parent title
-                        parent_title: pair.parent.and_then(|idx| parent_titles.get(&idx).cloned().flatten()),
+                        parent_title: pair
+                            .parent
+                            .and_then(|idx| parent_titles.get(&idx).cloned().flatten()),
                         value,
                         error_msg: None,
                     },
@@ -348,7 +388,9 @@ pub fn evaluate_equation(
                         node_idx: None,
                         parent_idx: pair.parent,
                         // Use cached parent title
-                        parent_title: pair.parent.and_then(|idx| parent_titles.get(&idx).cloned().flatten()),
+                        parent_title: pair
+                            .parent
+                            .and_then(|idx| parent_titles.get(&idx).cloned().flatten()),
                         value: Value::Null,
                         error_msg: Some(err),
                     },
@@ -356,7 +398,8 @@ pub fn evaluate_equation(
             })
             .collect()
     } else {
-        let effective_index = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
+        let effective_index =
+            level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
         let level = match selection.get_level(effective_index) {
             Some(l) => l,
             None => return vec![],
@@ -364,41 +407,37 @@ pub fn evaluate_equation(
 
         let nodes = level.get_all_nodes();
 
-        nodes.iter()
-            .map(|&node_idx| {
-                match graph.get_node(node_idx) {
-                    Some(node) => {
-                        let title = node.get_field_ref("title")
-                            .and_then(|v| v.as_string());
-                        let obj = convert_node_to_object(node);
-                
-                        match Evaluator::evaluate(parsed_expr, &[obj]) {
-                            Ok(value) => StatResult {
-                                node_idx: Some(node_idx),
-                                parent_idx: None,
-                                parent_title: title,
-                                value,
-                                error_msg: None,
-                            },
-                            Err(err) => {
-                                StatResult {
-                                    node_idx: Some(node_idx),
-                                    parent_idx: None,
-                                    parent_title: title,
-                                    value: Value::Null,
-                                    error_msg: Some(err),
-                                }
-                            }
-                        }
-                    },
-                    None => StatResult {
-                        node_idx: Some(node_idx),
-                        parent_idx: None,
-                        parent_title: None,
-                        value: Value::Null,
-                        error_msg: Some("Node not found".to_string()),
-                    },
+        nodes
+            .iter()
+            .map(|&node_idx| match graph.get_node(node_idx) {
+                Some(node) => {
+                    let title = node.get_field_ref("title").and_then(|v| v.as_string());
+                    let obj = convert_node_to_object(node);
+
+                    match Evaluator::evaluate(parsed_expr, &[obj]) {
+                        Ok(value) => StatResult {
+                            node_idx: Some(node_idx),
+                            parent_idx: None,
+                            parent_title: title,
+                            value,
+                            error_msg: None,
+                        },
+                        Err(err) => StatResult {
+                            node_idx: Some(node_idx),
+                            parent_idx: None,
+                            parent_title: title,
+                            value: Value::Null,
+                            error_msg: Some(err),
+                        },
+                    }
                 }
+                None => StatResult {
+                    node_idx: Some(node_idx),
+                    parent_idx: None,
+                    parent_title: None,
+                    value: Value::Null,
+                    error_msg: Some("Node not found".to_string()),
+                },
             })
             .collect()
     }
@@ -419,14 +458,18 @@ pub fn evaluate_connection_equation(
             parent_idx: None,
             parent_title: None,
             value: Value::Null,
-            error_msg: Some("Connection aggregation requires a traversal (at least 2 selection levels)".to_string()),
+            error_msg: Some(
+                "Connection aggregation requires a traversal (at least 2 selection levels)"
+                    .to_string(),
+            ),
         }];
     }
 
     let pairs = get_parent_child_pairs(selection, level_index);
     let parent_titles = cache_parent_titles(&pairs, graph);
 
-    pairs.iter()
+    pairs
+        .iter()
         .map(|pair| {
             let parent_idx = match pair.parent {
                 Some(idx) => idx,
@@ -443,18 +486,27 @@ pub fn evaluate_connection_equation(
 
             // Collect edge properties from edges connecting parent to children
             // Use find_edge for O(1) lookup instead of O(n) linear search
-            let edge_objects: Vec<HashMap<String, Value>> = pair.children.iter()
+            let edge_objects: Vec<HashMap<String, Value>> = pair
+                .children
+                .iter()
                 .filter_map(|&child_idx| {
                     // Try parent->child direction first, then child->parent
-                    let edge_idx = graph.graph.find_edge(parent_idx, child_idx)
+                    let edge_idx = graph
+                        .graph
+                        .find_edge(parent_idx, child_idx)
                         .or_else(|| graph.graph.find_edge(child_idx, parent_idx));
 
-                    edge_idx.and_then(|idx| graph.graph.edge_weight(idx)).map(|edge_data| {
-                        let mut props = edge_data.properties.clone();
-                        // Also include the connection_type as a property
-                        props.insert("connection_type".to_string(), Value::String(edge_data.connection_type.clone()));
-                        props
-                    })
+                    edge_idx
+                        .and_then(|idx| graph.graph.edge_weight(idx))
+                        .map(|edge_data| {
+                            let mut props = edge_data.properties.clone();
+                            // Also include the connection_type as a property
+                            props.insert(
+                                "connection_type".to_string(),
+                                Value::String(edge_data.connection_type.clone()),
+                            );
+                            props
+                        })
                 })
                 .collect();
 
@@ -533,16 +585,14 @@ fn convert_node_to_object(node: &NodeData) -> HashMap<String, Value> {
     object
 }
 
-pub fn count_nodes_in_level(
-    selection: &CurrentSelection,
-    level_index: Option<usize>,
-) -> usize {
+pub fn count_nodes_in_level(selection: &CurrentSelection, level_index: Option<usize>) -> usize {
     let effective_index = match level_index {
         Some(idx) => idx,
-        None => selection.get_level_count().saturating_sub(1)
+        None => selection.get_level_count().saturating_sub(1),
     };
 
-    let level = selection.get_level(effective_index)
+    let level = selection
+        .get_level(effective_index)
         .expect("Level should exist");
 
     level.node_count()
@@ -554,20 +604,20 @@ pub fn count_nodes_by_parent(
     level_index: Option<usize>,
 ) -> Vec<StatResult> {
     let pairs = get_parent_child_pairs(selection, level_index);
-    
-    pairs.iter()
-        .map(|pair| {
-            StatResult {
-                node_idx: None,
-                parent_idx: pair.parent,
-                parent_title: pair.parent.and_then(|idx| {
-                    graph.get_node(idx)
-                        .and_then(|node| node.get_field_ref("title"))
-                        .and_then(|v| v.as_string())
-                }),
-                value: Value::Int64(pair.children.len() as i64),
-                error_msg: None,
-            }
+
+    pairs
+        .iter()
+        .map(|pair| StatResult {
+            node_idx: None,
+            parent_idx: pair.parent,
+            parent_title: pair.parent.and_then(|idx| {
+                graph
+                    .get_node(idx)
+                    .and_then(|node| node.get_field_ref("title"))
+                    .and_then(|v| v.as_string())
+            }),
+            value: Value::Int64(pair.children.len() as i64),
+            error_msg: None,
         })
         .collect()
 }
@@ -581,33 +631,37 @@ pub fn store_count_results(
 ) -> Result<CalculationOperationReport, String> {
     // Track start time for reporting
     let start_time = std::time::Instant::now();
-    
+
     // Track errors
     let mut errors = Vec::new();
-    
+
     let mut nodes_to_update: Vec<(Option<NodeIndex>, Value)> = Vec::new();
-    
+
     let nodes_processed;
     if group_by_parent {
         // For grouped counting, store count for each parent
         let counts = count_nodes_by_parent(graph, selection, level_index);
         nodes_processed = counts.len();
-        
+
         for result in &counts {
             if let Some(parent_idx) = result.parent_idx {
                 // Verify the parent node exists in the graph
                 if graph.get_node(parent_idx).is_some() {
                     nodes_to_update.push((Some(parent_idx), result.value.clone()));
                 } else {
-                    errors.push(format!("Parent node index {:?} not found in graph", parent_idx));
+                    errors.push(format!(
+                        "Parent node index {:?} not found in graph",
+                        parent_idx
+                    ));
                 }
             }
         }
     } else {
         // For flat counting, store same count for all nodes in level
         let count = count_nodes_in_level(selection, level_index);
-        let effective_index = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
-        
+        let effective_index =
+            level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
+
         if let Some(level) = selection.get_level(effective_index) {
             nodes_processed = level.node_count();
 
@@ -625,48 +679,57 @@ pub fn store_count_results(
             return Err(error_msg);
         }
     }
-    
+
     // Check if we found any valid nodes to update
     if nodes_to_update.is_empty() {
         let error_msg = format!(
-            "No valid nodes found to store '{}' count values.", target_property
+            "No valid nodes found to store '{}' count values.",
+            target_property
         );
         errors.push(error_msg.clone());
         return Err(error_msg);
     }
-    
+
     // Use the optimized batch update (which now returns a NodeOperationReport)
-    let update_result = match maintain_graph::update_node_properties(graph, &nodes_to_update, target_property) {
-        Ok(result) => result,
-        Err(e) => {
-            errors.push(format!("Failed to update node properties: {}", e));
-            return Err(format!("Failed to update node properties: {}", e));
-        }
-    };
-    
+    let update_result =
+        match maintain_graph::update_node_properties(graph, &nodes_to_update, target_property) {
+            Ok(result) => result,
+            Err(e) => {
+                errors.push(format!("Failed to update node properties: {}", e));
+                return Err(format!("Failed to update node properties: {}", e));
+            }
+        };
+
     // Add any errors from the update operation
     for error in &update_result.errors {
         errors.push(error.clone());
     }
-    
+
     // Calculate elapsed time
     let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-    
+
     // Create the calculation report
     let mut report = CalculationOperationReport::new(
         "count".to_string(),
-        format!("count({})", if level_index.is_some() { format!("level {}", level_index.unwrap()) } else { "current level".to_string() }),
+        format!(
+            "count({})",
+            if level_index.is_some() {
+                format!("level {}", level_index.unwrap())
+            } else {
+                "current level".to_string()
+            }
+        ),
         nodes_processed,
         update_result.nodes_updated,
         update_result.nodes_skipped,
         elapsed_ms,
-        group_by_parent
+        group_by_parent,
     );
-    
+
     // Add errors if we found any
     if !errors.is_empty() {
         report = report.with_errors(errors);
     }
-    
+
     Ok(report)
 }

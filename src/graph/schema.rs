@@ -1,9 +1,9 @@
 // src/graph/schema.rs
+use crate::datatypes::values::{FilterCondition, Value};
+use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use petgraph::graph::{DiGraph, NodeIndex, EdgeIndex};
-use serde::{Serialize, Deserialize};
-use crate::datatypes::values::{Value, FilterCondition};
 
 #[derive(Clone, Debug)]
 pub struct NodeInfo {
@@ -13,26 +13,16 @@ pub struct NodeInfo {
     pub properties: HashMap<String, Value>,
 }
 
-/// Zero-copy reference to node data. Use this for read-only access
-/// to avoid cloning overhead when converting to Python.
-#[derive(Debug)]
-pub struct NodeInfoRef<'a> {
-    pub id: &'a Value,
-    pub title: &'a Value,
-    pub node_type: &'a str,
-    pub properties: &'a HashMap<String, Value>,
-}
-
 #[derive(Clone, Debug)]
 pub enum SelectionOperation {
     Filter(HashMap<String, FilterCondition>),
-    Sort(Vec<(String, bool)>),  // (field_name, ascending)
+    Sort(Vec<(String, bool)>), // (field_name, ascending)
     Traverse {
         connection_type: String,
         direction: Option<String>,
         max_nodes: Option<usize>,
     },
-    Custom(String),  // For operations that don't fit other categories
+    Custom(String), // For operations that don't fit other categories
 }
 
 #[derive(Clone, Debug)]
@@ -54,7 +44,8 @@ impl SelectionLevel {
     }
 
     pub fn get_all_nodes(&self) -> Vec<NodeIndex> {
-        self.selections.values()
+        self.selections
+            .values()
             .flat_map(|children| children.iter().copied())
             .collect()
     }
@@ -70,7 +61,9 @@ impl SelectionLevel {
     /// Returns an iterator over all node indices without allocating a Vec.
     /// Use this instead of get_all_nodes() when you only need to iterate or count.
     pub fn iter_node_indices(&self) -> impl Iterator<Item = NodeIndex> + '_ {
-        self.selections.values().flat_map(|children| children.iter().copied())
+        self.selections
+            .values()
+            .flat_map(|children| children.iter().copied())
     }
 
     /// Returns the total count of nodes without allocating a Vec.
@@ -165,14 +158,13 @@ impl CurrentSelection {
 
     /// Returns the node count for the current (most recent) level without allocation.
     pub fn current_node_count(&self) -> usize {
-        self.levels.last()
-            .map(|l| l.node_count())
-            .unwrap_or(0)
+        self.levels.last().map(|l| l.node_count()).unwrap_or(0)
     }
 
     /// Returns an iterator over node indices in the current (most recent) level.
     pub fn current_node_indices(&self) -> impl Iterator<Item = NodeIndex> + '_ {
-        self.levels.last()
+        self.levels
+            .last()
             .into_iter()
             .flat_map(|l| l.iter_node_indices())
     }
@@ -241,7 +233,8 @@ pub struct DirGraph {
     pub(crate) property_indices: HashMap<IndexKey, HashMap<Value, Vec<NodeIndex>>>,
     /// Composite indexes for multi-field queries: (node_type, [properties]) -> composite_value -> [node_indices]
     #[serde(default)]
-    pub(crate) composite_indices: HashMap<CompositeIndexKey, HashMap<CompositeValue, Vec<NodeIndex>>>,
+    pub(crate) composite_indices:
+        HashMap<CompositeIndexKey, HashMap<CompositeValue, Vec<NodeIndex>>>,
     /// Fast O(1) lookup by node ID: node_type -> (id_value -> NodeIndex)
     /// Lazily built on first use for each node type, skipped during serialization
     #[serde(skip)]
@@ -380,14 +373,14 @@ impl DirGraph {
         }
 
         // Fallback: scan SchemaNodes (O(n) - only happens if cache not built yet)
-        self.graph.node_weights().any(|node| {
-            match node {
-                NodeData::Schema { node_type, title, .. } => {
-                    node_type == "SchemaNode" &&
-                    matches!(title, Value::String(t) if t == connection_type)
-                },
-                _ => false
+        self.graph.node_weights().any(|node| match node {
+            NodeData::Schema {
+                node_type, title, ..
+            } => {
+                node_type == "SchemaNode"
+                    && matches!(title, Value::String(t) if t == connection_type)
             }
+            _ => false,
         })
     }
 
@@ -444,7 +437,7 @@ impl DirGraph {
 
         types.into_iter().collect()
     }
-    
+
     pub fn get_node(&self, index: NodeIndex) -> Option<&NodeData> {
         self.graph.node_weight(index)
     }
@@ -508,9 +501,15 @@ impl DirGraph {
 
     /// Look up nodes by property value using an index.
     /// Returns None if no index exists, otherwise returns matching node indices.
-    pub fn lookup_by_index(&self, node_type: &str, property: &str, value: &Value) -> Option<Vec<NodeIndex>> {
+    pub fn lookup_by_index(
+        &self,
+        node_type: &str,
+        property: &str,
+        value: &Value,
+    ) -> Option<Vec<NodeIndex>> {
         let key = (node_type.to_string(), property.to_string());
-        self.property_indices.get(&key)
+        self.property_indices
+            .get(&key)
             .and_then(|idx| idx.get(value))
             .cloned()
     }
@@ -523,7 +522,11 @@ impl DirGraph {
             IndexStats {
                 unique_values: idx.len(),
                 total_entries,
-                avg_entries_per_value: if idx.is_empty() { 0.0 } else { total_entries as f64 / idx.len() as f64 },
+                avg_entries_per_value: if idx.is_empty() {
+                    0.0
+                } else {
+                    total_entries as f64 / idx.len() as f64
+                },
             }
         })
     }
@@ -550,9 +553,13 @@ impl DirGraph {
 
         if let Some(node_indices) = self.type_indices.get(node_type) {
             for &idx in node_indices {
-                if let Some(NodeData::Regular { properties: props, .. }) = self.graph.node_weight(idx) {
+                if let Some(NodeData::Regular {
+                    properties: props, ..
+                }) = self.graph.node_weight(idx)
+                {
                     // Extract values for all properties in order
-                    let values: Vec<Value> = properties.iter()
+                    let values: Vec<Value> = properties
+                        .iter()
                         .map(|p| props.get(*p).cloned().unwrap_or(Value::Null))
                         .collect();
 
@@ -598,7 +605,8 @@ impl DirGraph {
         let key = (node_type.to_string(), properties.to_vec());
         let composite_value = CompositeValue(values.to_vec());
 
-        self.composite_indices.get(&key)
+        self.composite_indices
+            .get(&key)
             .and_then(|idx| idx.get(&composite_value))
             .cloned()
     }
@@ -615,7 +623,11 @@ impl DirGraph {
             IndexStats {
                 unique_values: idx.len(),
                 total_entries,
-                avg_entries_per_value: if idx.is_empty() { 0.0 } else { total_entries as f64 / idx.len() as f64 },
+                avg_entries_per_value: if idx.is_empty() {
+                    0.0
+                } else {
+                    total_entries as f64 / idx.len() as f64
+                },
             }
         })
     }
@@ -643,8 +655,9 @@ impl DirGraph {
                 }
 
                 // Check if index is a prefix of filter (can be used for partial filtering)
-                if sorted_filter.starts_with(&sorted_index) ||
-                   sorted_index.iter().all(|p| sorted_filter.contains(p)) {
+                if sorted_filter.starts_with(&sorted_index)
+                    || sorted_index.iter().all(|p| sorted_filter.contains(p))
+                {
                     return Some((key.clone(), false)); // Partial match
                 }
             }
@@ -678,7 +691,12 @@ pub enum NodeData {
 }
 
 impl NodeData {
-    pub fn new(id: Value, title: Value, node_type: String, properties: HashMap<String, Value>) -> Self {
+    pub fn new(
+        id: Value,
+        title: Value,
+        node_type: String,
+        properties: HashMap<String, Value>,
+    ) -> Self {
         NodeData::Regular {
             id,
             title,
@@ -686,20 +704,6 @@ impl NodeData {
             properties,
         }
     }
-    pub fn get_field(&self, field: &str) -> Option<Value> {
-        match self {
-            NodeData::Regular { id, title, node_type, properties } => {
-                match field {
-                    "id" => Some(id.clone()),
-                    "title" => Some(title.clone()),
-                    "type" => Some(Value::String(node_type.clone())),
-                    _ => properties.get(field).cloned()
-                }
-            },
-            NodeData::Schema { .. } => None
-        }
-    }
-
     /// Returns a reference to the field value without cloning.
     /// Use this for read-only access to avoid allocation overhead.
     /// Note: "type" field is not supported here as it requires Value::String allocation.
@@ -707,14 +711,17 @@ impl NodeData {
     #[inline]
     pub fn get_field_ref(&self, field: &str) -> Option<&Value> {
         match self {
-            NodeData::Regular { id, title, properties, .. } => {
-                match field {
-                    "id" => Some(id),
-                    "title" => Some(title),
-                    _ => properties.get(field)
-                }
+            NodeData::Regular {
+                id,
+                title,
+                properties,
+                ..
+            } => match field {
+                "id" => Some(id),
+                "title" => Some(title),
+                _ => properties.get(field),
             },
-            NodeData::Schema { .. } => None
+            NodeData::Schema { .. } => None,
         }
     }
 
@@ -722,16 +729,9 @@ impl NodeData {
     #[inline]
     pub fn get_node_type_ref(&self) -> Option<&str> {
         match self {
-            NodeData::Regular { node_type, .. } | NodeData::Schema { node_type, .. } => Some(node_type.as_str()),
-        }
-    }
-
-    /// Returns a reference to the properties HashMap without cloning.
-    #[inline]
-    pub fn get_properties_ref(&self) -> Option<&HashMap<String, Value>> {
-        match self {
-            NodeData::Regular { properties, .. } => Some(properties),
-            NodeData::Schema { properties, .. } => Some(properties),
+            NodeData::Regular { node_type, .. } | NodeData::Schema { node_type, .. } => {
+                Some(node_type.as_str())
+            }
         }
     }
 
@@ -741,26 +741,16 @@ impl NodeData {
 
     pub fn to_node_info(&self) -> Option<NodeInfo> {
         match self {
-            NodeData::Regular { id, title, node_type, properties } => Some(NodeInfo {
+            NodeData::Regular {
+                id,
+                title,
+                node_type,
+                properties,
+            } => Some(NodeInfo {
                 id: id.clone(),
                 title: title.clone(),
                 node_type: node_type.clone(),
                 properties: properties.clone(),
-            }),
-            NodeData::Schema { .. } => None,
-        }
-    }
-
-    /// Returns a zero-copy reference to node data.
-    /// Use this instead of to_node_info() when you don't need ownership.
-    #[inline]
-    pub fn as_node_info_ref(&self) -> Option<NodeInfoRef<'_>> {
-        match self {
-            NodeData::Regular { id, title, node_type, properties } => Some(NodeInfoRef {
-                id,
-                title,
-                node_type: node_type.as_str(),
-                properties,
             }),
             NodeData::Schema { .. } => None,
         }
@@ -837,7 +827,11 @@ impl SchemaDefinition {
     }
 
     /// Add a connection type schema
-    pub fn add_connection_schema(&mut self, connection_type: String, schema: ConnectionSchemaDefinition) {
+    pub fn add_connection_schema(
+        &mut self,
+        connection_type: String,
+        schema: ConnectionSchemaDefinition,
+    ) {
         self.connection_schemas.insert(connection_type, schema);
     }
 }
@@ -875,10 +869,7 @@ pub enum ValidationError {
         property: String,
     },
     /// A node type exists in the graph but not in the schema
-    UndefinedNodeType {
-        node_type: String,
-        count: usize,
-    },
+    UndefinedNodeType { node_type: String, count: usize },
     /// A connection type exists in the graph but not in the schema
     UndefinedConnectionType {
         connection_type: String,
@@ -889,25 +880,66 @@ pub enum ValidationError {
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ValidationError::MissingRequiredField { node_type, node_title, field } => {
-                write!(f, "Missing required field '{}' on {} node '{}'", field, node_type, node_title)
+            ValidationError::MissingRequiredField {
+                node_type,
+                node_title,
+                field,
+            } => {
+                write!(
+                    f,
+                    "Missing required field '{}' on {} node '{}'",
+                    field, node_type, node_title
+                )
             }
-            ValidationError::TypeMismatch { node_type, node_title, field, expected_type, actual_type } => {
-                write!(f, "Type mismatch on {} node '{}': field '{}' expected {}, got {}",
-                    node_type, node_title, field, expected_type, actual_type)
+            ValidationError::TypeMismatch {
+                node_type,
+                node_title,
+                field,
+                expected_type,
+                actual_type,
+            } => {
+                write!(
+                    f,
+                    "Type mismatch on {} node '{}': field '{}' expected {}, got {}",
+                    node_type, node_title, field, expected_type, actual_type
+                )
             }
-            ValidationError::InvalidConnectionEndpoint { connection_type, expected_source, expected_target, actual_source, actual_target } => {
-                write!(f, "Invalid connection '{}': expected {}->{}  but found {}->{}",
-                    connection_type, expected_source, expected_target, actual_source, actual_target)
+            ValidationError::InvalidConnectionEndpoint {
+                connection_type,
+                expected_source,
+                expected_target,
+                actual_source,
+                actual_target,
+            } => {
+                write!(
+                    f,
+                    "Invalid connection '{}': expected {}->{}  but found {}->{}",
+                    connection_type, expected_source, expected_target, actual_source, actual_target
+                )
             }
-            ValidationError::MissingConnectionProperty { connection_type, source_title, target_title, property } => {
-                write!(f, "Missing required property '{}' on {} connection from '{}' to '{}'",
-                    property, connection_type, source_title, target_title)
+            ValidationError::MissingConnectionProperty {
+                connection_type,
+                source_title,
+                target_title,
+                property,
+            } => {
+                write!(
+                    f,
+                    "Missing required property '{}' on {} connection from '{}' to '{}'",
+                    property, connection_type, source_title, target_title
+                )
             }
             ValidationError::UndefinedNodeType { node_type, count } => {
-                write!(f, "Node type '{}' ({} nodes) exists in graph but not defined in schema", node_type, count)
+                write!(
+                    f,
+                    "Node type '{}' ({} nodes) exists in graph but not defined in schema",
+                    node_type, count
+                )
             }
-            ValidationError::UndefinedConnectionType { connection_type, count } => {
+            ValidationError::UndefinedConnectionType {
+                connection_type,
+                count,
+            } => {
                 write!(f, "Connection type '{}' ({} connections) exists in graph but not defined in schema", connection_type, count)
             }
         }

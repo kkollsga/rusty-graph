@@ -1,7 +1,7 @@
 // src/graph/statistics_methods.rs
-use petgraph::graph::NodeIndex;
-use crate::graph::schema::{DirGraph, CurrentSelection, NodeData};
 use crate::datatypes::values::Value;
+use crate::graph::schema::{CurrentSelection, DirGraph, NodeData};
+use petgraph::graph::NodeIndex;
 use std::collections::HashSet;
 
 #[derive(Debug)]
@@ -15,16 +15,15 @@ pub fn get_parent_child_pairs(
     level_index: Option<usize>,
 ) -> Vec<ParentChildPair> {
     // If no level specified, use the deepest level
-    let target_level = level_index.unwrap_or_else(|| 
-        selection.get_level_count().saturating_sub(1)
-    );
+    let target_level = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
 
     // Return empty vec if level doesn't exist
     if target_level >= selection.get_level_count() {
         return Vec::new();
     }
 
-    let level = selection.get_level(target_level)
+    let level = selection
+        .get_level(target_level)
         .expect("Level index was already checked");
 
     // If the level has no selections, return empty vec
@@ -34,7 +33,8 @@ pub fn get_parent_child_pairs(
 
     // If we have parent-child pairs, return them
     if level.iter_groups().any(|(parent, _)| parent.is_some()) {
-        level.iter_groups()
+        level
+            .iter_groups()
             .map(|(parent, children)| ParentChildPair {
                 parent: *parent,
                 children: children.clone(),
@@ -72,10 +72,22 @@ impl PropertyStats {
         let (parent_type, parent_title, parent_id) = parent_idx
             .and_then(|idx| graph.get_node(idx))
             .map(|node| match node {
-                NodeData::Regular { node_type, title, id, .. } |
-                NodeData::Schema { node_type, title, id, .. } => {
-                    (Some(node_type.clone()), Some(title.clone()), Some(id.clone()))
+                NodeData::Regular {
+                    node_type,
+                    title,
+                    id,
+                    ..
                 }
+                | NodeData::Schema {
+                    node_type,
+                    title,
+                    id,
+                    ..
+                } => (
+                    Some(node_type.clone()),
+                    Some(title.clone()),
+                    Some(id.clone()),
+                ),
             })
             .unwrap_or((None, None, None));
 
@@ -113,7 +125,8 @@ pub fn calculate_property_stats(
     pairs: &[ParentChildPair],
     property: &str,
 ) -> Vec<PropertyStats> {
-    pairs.iter()
+    pairs
+        .iter()
         .map(|pair| {
             let mut stats = PropertyStats::new(pair.parent, graph, property);
             calculate_stats_for_nodes(graph, &pair.children, property, &mut stats);

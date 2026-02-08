@@ -1,14 +1,13 @@
 // src/lib.rs
 use pyo3::prelude::*;
-mod graph;
 mod datatypes;
-use graph::KnowledgeGraph;
+mod graph;
 use graph::io_operations::load_file;
+use graph::KnowledgeGraph;
 
 #[pyfunction]
 fn load(path: String) -> PyResult<KnowledgeGraph> {
-    load_file(&path)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
+    load_file(&path).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
 }
 
 #[pymodule]

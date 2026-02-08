@@ -1,9 +1,9 @@
 // src/graph/cypher/result.rs
 // Result types for the Cypher query pipeline
 
-use std::collections::HashMap;
-use petgraph::graph::NodeIndex;
 use crate::datatypes::values::Value;
+use petgraph::graph::NodeIndex;
+use std::collections::HashMap;
 
 // ============================================================================
 // Pipeline Result Types
@@ -27,7 +27,9 @@ pub struct ResultRow {
 /// Lightweight edge binding
 #[derive(Debug, Clone)]
 pub struct EdgeBinding {
+    #[allow(dead_code)]
     pub source: NodeIndex,
+    #[allow(dead_code)]
     pub target: NodeIndex,
     pub connection_type: String,
     pub properties: HashMap<String, Value>,
@@ -36,9 +38,12 @@ pub struct EdgeBinding {
 /// Variable-length path binding
 #[derive(Debug, Clone)]
 pub struct PathBinding {
+    #[allow(dead_code)]
     pub source: NodeIndex,
+    #[allow(dead_code)]
     pub target: NodeIndex,
     pub hops: usize,
+    #[allow(dead_code)]
     pub path: Vec<(NodeIndex, String)>,
 }
 
@@ -61,14 +66,6 @@ impl ResultRow {
             projected,
         }
     }
-
-    /// Check if a variable exists in any binding type
-    pub fn has_variable(&self, name: &str) -> bool {
-        self.node_bindings.contains_key(name)
-            || self.edge_bindings.contains_key(name)
-            || self.path_bindings.contains_key(name)
-            || self.projected.contains_key(name)
-    }
 }
 
 /// The result set flowing through the pipeline
@@ -83,13 +80,6 @@ impl ResultSet {
     pub fn new() -> Self {
         ResultSet {
             rows: Vec::new(),
-            columns: Vec::new(),
-        }
-    }
-
-    pub fn with_capacity(capacity: usize) -> Self {
-        ResultSet {
-            rows: Vec::with_capacity(capacity),
             columns: Vec::new(),
         }
     }

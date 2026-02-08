@@ -1,10 +1,10 @@
 // src/graph/cypher/parser.rs
 // Cypher clause parser - delegates MATCH patterns to pattern_matching::parse_pattern()
 
-use crate::datatypes::values::Value;
-use crate::graph::pattern_matching;
 use super::ast::*;
 use super::tokenizer::CypherToken;
+use crate::datatypes::values::Value;
+use crate::graph::pattern_matching;
 
 // ============================================================================
 // Parser
@@ -46,14 +46,8 @@ impl CypherParser {
                 self.advance();
                 Ok(())
             }
-            Some(t) => Err(format!(
-                "Expected {:?}, found {:?}",
-                expected, t
-            )),
-            None => Err(format!(
-                "Expected {:?}, but reached end of query",
-                expected
-            )),
+            Some(t) => Err(format!("Expected {:?}, found {:?}", expected, t)),
+            None => Err(format!("Expected {:?}, but reached end of query", expected)),
         }
     }
 
@@ -69,10 +63,17 @@ impl CypherParser {
     /// Check if we're at a clause boundary (start of a new clause)
     fn at_clause_boundary(&self) -> bool {
         match self.peek() {
-            Some(CypherToken::Where) | Some(CypherToken::Return) | Some(CypherToken::With)
-            | Some(CypherToken::Limit) | Some(CypherToken::Skip) | Some(CypherToken::Unwind)
-            | Some(CypherToken::Union) | Some(CypherToken::Create) | Some(CypherToken::Set)
-            | Some(CypherToken::Delete) | Some(CypherToken::Detach) => true,
+            Some(CypherToken::Where)
+            | Some(CypherToken::Return)
+            | Some(CypherToken::With)
+            | Some(CypherToken::Limit)
+            | Some(CypherToken::Skip)
+            | Some(CypherToken::Unwind)
+            | Some(CypherToken::Union)
+            | Some(CypherToken::Create)
+            | Some(CypherToken::Set)
+            | Some(CypherToken::Delete)
+            | Some(CypherToken::Detach) => true,
             Some(CypherToken::Match) => true,
             Some(CypherToken::Optional) => {
                 // OPTIONAL MATCH
@@ -229,10 +230,22 @@ impl CypherParser {
             let token = self.advance().unwrap().clone();
 
             match &token {
-                CypherToken::LParen => { paren_depth += 1; parts.push("(".to_string()); }
-                CypherToken::RParen => { paren_depth -= 1; parts.push(")".to_string()); }
-                CypherToken::LBracket => { bracket_depth += 1; parts.push("[".to_string()); }
-                CypherToken::RBracket => { bracket_depth -= 1; parts.push("]".to_string()); }
+                CypherToken::LParen => {
+                    paren_depth += 1;
+                    parts.push("(".to_string());
+                }
+                CypherToken::RParen => {
+                    paren_depth -= 1;
+                    parts.push(")".to_string());
+                }
+                CypherToken::LBracket => {
+                    bracket_depth += 1;
+                    parts.push("[".to_string());
+                }
+                CypherToken::RBracket => {
+                    bracket_depth -= 1;
+                    parts.push("]".to_string());
+                }
                 CypherToken::LBrace => parts.push("{".to_string()),
                 CypherToken::RBrace => parts.push("}".to_string()),
                 CypherToken::Colon => parts.push(":".to_string()),
@@ -351,10 +364,13 @@ impl CypherParser {
         // Check for STARTS WITH
         if self.check(&CypherToken::StartsWith) {
             self.advance(); // consume STARTS
-            // Expect WITH keyword (we use With token)
+                            // Expect WITH keyword (we use With token)
             self.expect(&CypherToken::With)?;
             let pattern = self.parse_expression()?;
-            return Ok(Predicate::StartsWith { expr: left, pattern });
+            return Ok(Predicate::StartsWith {
+                expr: left,
+                pattern,
+            });
         }
 
         // Check for ENDS WITH
@@ -362,14 +378,20 @@ impl CypherParser {
             self.advance(); // consume ENDS
             self.expect(&CypherToken::With)?;
             let pattern = self.parse_expression()?;
-            return Ok(Predicate::EndsWith { expr: left, pattern });
+            return Ok(Predicate::EndsWith {
+                expr: left,
+                pattern,
+            });
         }
 
         // Check for CONTAINS
         if self.check(&CypherToken::Contains) {
             self.advance();
             let pattern = self.parse_expression()?;
-            return Ok(Predicate::Contains { expr: left, pattern });
+            return Ok(Predicate::Contains {
+                expr: left,
+                pattern,
+            });
         }
 
         // Check for comparison operator
@@ -459,9 +481,15 @@ impl CypherParser {
                     // if we're in an expression context (not at clause boundary)
                     // Heuristic: if next token after dash is a number, identifier, or '(',
                     // it's subtraction. Otherwise, stop.
-                    if self.peek_at(1).map_or(false, |t| matches!(t,
-                        CypherToken::IntLit(_) | CypherToken::FloatLit(_)
-                        | CypherToken::Identifier(_) | CypherToken::LParen)) {
+                    if self.peek_at(1).map_or(false, |t| {
+                        matches!(
+                            t,
+                            CypherToken::IntLit(_)
+                                | CypherToken::FloatLit(_)
+                                | CypherToken::Identifier(_)
+                                | CypherToken::LParen
+                        )
+                    }) {
                         // But check it's not an edge pattern (dash followed by bracket)
                         if self.peek_at(1) == Some(&CypherToken::LBracket) {
                             break;
@@ -588,12 +616,10 @@ impl CypherParser {
                 if self.check(&CypherToken::Dot) {
                     self.advance(); // consume dot
                     match self.advance().cloned() {
-                        Some(CypherToken::Identifier(prop)) => {
-                            Ok(Expression::PropertyAccess {
-                                variable: name,
-                                property: prop,
-                            })
-                        }
+                        Some(CypherToken::Identifier(prop)) => Ok(Expression::PropertyAccess {
+                            variable: name,
+                            property: prop,
+                        }),
                         _ => Err("Expected property name after '.'".to_string()),
                     }
                 } else {
@@ -838,9 +864,8 @@ mod tests {
 
     #[test]
     fn test_match_where_return() {
-        let query = parse_cypher(
-            "MATCH (n:Person) WHERE n.age > 30 RETURN n.name AS name"
-        ).unwrap();
+        let query =
+            parse_cypher("MATCH (n:Person) WHERE n.age > 30 RETURN n.name AS name").unwrap();
         assert_eq!(query.clauses.len(), 3);
         assert!(matches!(&query.clauses[0], Clause::Match(_)));
         assert!(matches!(&query.clauses[1], Clause::Where(_)));
@@ -848,9 +873,16 @@ mod tests {
 
         // Check WHERE predicate
         if let Clause::Where(w) = &query.clauses[1] {
-            if let Predicate::Comparison { left, operator, right } = &w.predicate {
-                assert!(matches!(left, Expression::PropertyAccess { variable, property }
-                    if variable == "n" && property == "age"));
+            if let Predicate::Comparison {
+                left,
+                operator,
+                right,
+            } = &w.predicate
+            {
+                assert!(
+                    matches!(left, Expression::PropertyAccess { variable, property }
+                    if variable == "n" && property == "age")
+                );
                 assert_eq!(*operator, ComparisonOp::GreaterThan);
                 assert!(matches!(right, Expression::Literal(Value::Int64(30))));
             } else {
@@ -870,8 +902,9 @@ mod tests {
     #[test]
     fn test_where_and_or() {
         let query = parse_cypher(
-            "MATCH (n:Person) WHERE n.age > 18 AND n.city = 'Oslo' OR n.vip = true RETURN n"
-        ).unwrap();
+            "MATCH (n:Person) WHERE n.age > 18 AND n.city = 'Oslo' OR n.vip = true RETURN n",
+        )
+        .unwrap();
 
         if let Clause::Where(w) = &query.clauses[1] {
             // Should be: (age > 18 AND city = 'Oslo') OR vip = true
@@ -881,9 +914,7 @@ mod tests {
 
     #[test]
     fn test_where_not() {
-        let query = parse_cypher(
-            "MATCH (n:Person) WHERE NOT n.active = false RETURN n"
-        ).unwrap();
+        let query = parse_cypher("MATCH (n:Person) WHERE NOT n.active = false RETURN n").unwrap();
 
         if let Clause::Where(w) = &query.clauses[1] {
             assert!(matches!(&w.predicate, Predicate::Not(_)));
@@ -892,9 +923,7 @@ mod tests {
 
     #[test]
     fn test_where_is_null() {
-        let query = parse_cypher(
-            "MATCH (n:Person) WHERE n.email IS NULL RETURN n"
-        ).unwrap();
+        let query = parse_cypher("MATCH (n:Person) WHERE n.email IS NULL RETURN n").unwrap();
 
         if let Clause::Where(w) = &query.clauses[1] {
             assert!(matches!(&w.predicate, Predicate::IsNull(_)));
@@ -903,9 +932,7 @@ mod tests {
 
     #[test]
     fn test_where_is_not_null() {
-        let query = parse_cypher(
-            "MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n"
-        ).unwrap();
+        let query = parse_cypher("MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n").unwrap();
 
         if let Clause::Where(w) = &query.clauses[1] {
             assert!(matches!(&w.predicate, Predicate::IsNotNull(_)));
@@ -915,8 +942,9 @@ mod tests {
     #[test]
     fn test_where_in_list() {
         let query = parse_cypher(
-            "MATCH (n:Person) WHERE n.city IN ['Oslo', 'Bergen', 'Trondheim'] RETURN n"
-        ).unwrap();
+            "MATCH (n:Person) WHERE n.city IN ['Oslo', 'Bergen', 'Trondheim'] RETURN n",
+        )
+        .unwrap();
 
         if let Clause::Where(w) = &query.clauses[1] {
             if let Predicate::In { expr: _, list } = &w.predicate {
@@ -929,9 +957,8 @@ mod tests {
 
     #[test]
     fn test_return_multiple_items() {
-        let query = parse_cypher(
-            "MATCH (n:Person) RETURN n.name AS name, n.age AS age, n.city"
-        ).unwrap();
+        let query =
+            parse_cypher("MATCH (n:Person) RETURN n.name AS name, n.age AS age, n.city").unwrap();
 
         if let Clause::Return(r) = &query.clauses[1] {
             assert_eq!(r.items.len(), 3);
@@ -943,9 +970,7 @@ mod tests {
 
     #[test]
     fn test_return_distinct() {
-        let query = parse_cypher(
-            "MATCH (n:Person) RETURN DISTINCT n.city"
-        ).unwrap();
+        let query = parse_cypher("MATCH (n:Person) RETURN DISTINCT n.city").unwrap();
 
         if let Clause::Return(r) = &query.clauses[1] {
             assert!(r.distinct);
@@ -954,12 +979,15 @@ mod tests {
 
     #[test]
     fn test_return_function_call() {
-        let query = parse_cypher(
-            "MATCH (n:Person) RETURN count(n) AS total"
-        ).unwrap();
+        let query = parse_cypher("MATCH (n:Person) RETURN count(n) AS total").unwrap();
 
         if let Clause::Return(r) = &query.clauses[1] {
-            if let Expression::FunctionCall { name, args, distinct } = &r.items[0].expression {
+            if let Expression::FunctionCall {
+                name,
+                args,
+                distinct,
+            } = &r.items[0].expression
+            {
                 assert_eq!(name, "count");
                 assert_eq!(args.len(), 1);
                 assert!(!distinct);
@@ -971,9 +999,7 @@ mod tests {
 
     #[test]
     fn test_return_count_star() {
-        let query = parse_cypher(
-            "MATCH (n:Person) RETURN count(*) AS total"
-        ).unwrap();
+        let query = parse_cypher("MATCH (n:Person) RETURN count(*) AS total").unwrap();
 
         if let Clause::Return(r) = &query.clauses[1] {
             if let Expression::FunctionCall { args, .. } = &r.items[0].expression {
@@ -984,9 +1010,8 @@ mod tests {
 
     #[test]
     fn test_return_count_distinct() {
-        let query = parse_cypher(
-            "MATCH (n:Person) RETURN count(DISTINCT n.city) AS cities"
-        ).unwrap();
+        let query =
+            parse_cypher("MATCH (n:Person) RETURN count(DISTINCT n.city) AS cities").unwrap();
 
         if let Clause::Return(r) = &query.clauses[1] {
             if let Expression::FunctionCall { distinct, .. } = &r.items[0].expression {
@@ -997,9 +1022,9 @@ mod tests {
 
     #[test]
     fn test_order_by_limit_skip() {
-        let query = parse_cypher(
-            "MATCH (n:Person) RETURN n.name ORDER BY n.age DESC SKIP 5 LIMIT 10"
-        ).unwrap();
+        let query =
+            parse_cypher("MATCH (n:Person) RETURN n.name ORDER BY n.age DESC SKIP 5 LIMIT 10")
+                .unwrap();
 
         assert!(matches!(&query.clauses[2], Clause::OrderBy(_)));
         assert!(matches!(&query.clauses[3], Clause::Skip(_)));
@@ -1014,8 +1039,9 @@ mod tests {
     #[test]
     fn test_with_clause() {
         let query = parse_cypher(
-            "MATCH (n:Person) WITH n.city AS city, count(n) AS cnt WHERE cnt > 5 RETURN city, cnt"
-        ).unwrap();
+            "MATCH (n:Person) WITH n.city AS city, count(n) AS cnt WHERE cnt > 5 RETURN city, cnt",
+        )
+        .unwrap();
 
         assert!(matches!(&query.clauses[1], Clause::With(_)));
         if let Clause::With(w) = &query.clauses[1] {
@@ -1026,9 +1052,9 @@ mod tests {
 
     #[test]
     fn test_optional_match() {
-        let query = parse_cypher(
-            "MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(f:Person) RETURN n, f"
-        ).unwrap();
+        let query =
+            parse_cypher("MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(f:Person) RETURN n, f")
+                .unwrap();
 
         assert!(matches!(&query.clauses[0], Clause::Match(_)));
         assert!(matches!(&query.clauses[1], Clause::OptionalMatch(_)));
@@ -1037,9 +1063,8 @@ mod tests {
 
     #[test]
     fn test_match_with_edge_pattern() {
-        let query = parse_cypher(
-            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name"
-        ).unwrap();
+        let query =
+            parse_cypher("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name").unwrap();
 
         if let Clause::Match(m) = &query.clauses[0] {
             assert_eq!(m.patterns.len(), 1);
@@ -1049,18 +1074,14 @@ mod tests {
 
     #[test]
     fn test_match_with_var_length() {
-        let query = parse_cypher(
-            "MATCH (a:Person)-[:KNOWS*1..3]->(b:Person) RETURN a, b"
-        ).unwrap();
+        let query = parse_cypher("MATCH (a:Person)-[:KNOWS*1..3]->(b:Person) RETURN a, b").unwrap();
 
         assert!(matches!(&query.clauses[0], Clause::Match(_)));
     }
 
     #[test]
     fn test_multiple_match_patterns() {
-        let query = parse_cypher(
-            "MATCH (a:Person), (b:Company) RETURN a, b"
-        ).unwrap();
+        let query = parse_cypher("MATCH (a:Person), (b:Company) RETURN a, b").unwrap();
 
         if let Clause::Match(m) = &query.clauses[0] {
             assert_eq!(m.patterns.len(), 2);
@@ -1069,17 +1090,14 @@ mod tests {
 
     #[test]
     fn test_case_insensitive() {
-        let query = parse_cypher(
-            "match (n:Person) where n.age > 30 return n"
-        ).unwrap();
+        let query = parse_cypher("match (n:Person) where n.age > 30 return n").unwrap();
         assert_eq!(query.clauses.len(), 3);
     }
 
     #[test]
     fn test_arithmetic_in_return() {
-        let query = parse_cypher(
-            "MATCH (n:Product) RETURN n.price * 1.1 AS price_with_tax"
-        ).unwrap();
+        let query =
+            parse_cypher("MATCH (n:Product) RETURN n.price * 1.1 AS price_with_tax").unwrap();
 
         if let Clause::Return(r) = &query.clauses[1] {
             assert!(matches!(&r.items[0].expression, Expression::Multiply(_, _)));
@@ -1088,9 +1106,7 @@ mod tests {
 
     #[test]
     fn test_where_contains() {
-        let query = parse_cypher(
-            "MATCH (n:Person) WHERE n.name CONTAINS 'son' RETURN n"
-        ).unwrap();
+        let query = parse_cypher("MATCH (n:Person) WHERE n.name CONTAINS 'son' RETURN n").unwrap();
 
         if let Clause::Where(w) = &query.clauses[1] {
             assert!(matches!(&w.predicate, Predicate::Contains { .. }));
@@ -1099,9 +1115,7 @@ mod tests {
 
     #[test]
     fn test_unwind() {
-        let query = parse_cypher(
-            "UNWIND [1, 2, 3] AS x RETURN x"
-        ).unwrap();
+        let query = parse_cypher("UNWIND [1, 2, 3] AS x RETURN x").unwrap();
 
         assert!(matches!(&query.clauses[0], Clause::Unwind(_)));
         if let Clause::Unwind(u) = &query.clauses[0] {

@@ -1,9 +1,9 @@
 // src/graph/lookups.rs
-use std::collections::HashMap;
-use petgraph::graph::NodeIndex;
-use serde::{Serialize, Deserialize};
-use crate::datatypes::Value;
 use super::schema::{Graph, NodeData};
+use crate::datatypes::Value;
+use petgraph::graph::NodeIndex;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeLookup {
@@ -25,14 +25,19 @@ impl TypeLookup {
         for i in graph.node_indices() {
             if let Some(node_data) = graph.node_weight(i) {
                 match node_data {
-                    NodeData::Regular { node_type: nt, id, title, .. } if nt == &node_type => {
+                    NodeData::Regular {
+                        node_type: nt,
+                        id,
+                        title,
+                        ..
+                    } if nt == &node_type => {
                         uid_to_index.insert(id.clone(), i);
                         title_to_index.insert(title.clone(), i);
-                    },
+                    }
                     NodeData::Schema { title, .. } if node_type == "SchemaNode" => {
                         uid_to_index.insert(title.clone(), i);
                         title_to_index.insert(title.clone(), i);
-                    },
+                    }
                     _ => {}
                 }
             }
@@ -94,7 +99,7 @@ impl CombinedTypeLookup {
         let same_type = source_type == target_type;
         let mut source_uid_to_index = HashMap::new();
         let mut target_uid_to_index_map: Option<HashMap<Value, NodeIndex>> = if same_type {
-            None  // Don't allocate separate map when types are the same
+            None // Don't allocate separate map when types are the same
         } else {
             Some(HashMap::new())
         };
@@ -113,8 +118,10 @@ impl CombinedTypeLookup {
                                 target_map.insert(id.clone(), idx);
                             }
                         }
-                    },
-                    NodeData::Schema { node_type, title, .. } if node_type == "SchemaNode" => {
+                    }
+                    NodeData::Schema {
+                        node_type, title, ..
+                    } if node_type == "SchemaNode" => {
                         if source_type == "SchemaNode" {
                             source_uid_to_index.insert(title.clone(), idx);
                         }
@@ -123,7 +130,7 @@ impl CombinedTypeLookup {
                                 target_map.insert(title.clone(), idx);
                             }
                         }
-                    },
+                    }
                     _ => {}
                 }
             }
@@ -144,7 +151,10 @@ impl CombinedTypeLookup {
 
     pub fn check_target(&self, uid: &Value) -> Option<NodeIndex> {
         // Reuse source map when types are the same (avoids clone)
-        let map = self.target_uid_to_index.as_ref().unwrap_or(&self.source_uid_to_index);
+        let map = self
+            .target_uid_to_index
+            .as_ref()
+            .unwrap_or(&self.source_uid_to_index);
         Self::lookup_with_type_fallback(map, uid)
     }
 
@@ -167,9 +177,7 @@ impl CombinedTypeLookup {
                     None
                 }
             }
-            Value::UniqueId(u) => {
-                map.get(&Value::Int64(*u as i64)).copied()
-            }
+            Value::UniqueId(u) => map.get(&Value::Int64(*u as i64)).copied(),
             _ => None,
         }
     }

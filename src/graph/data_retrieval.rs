@@ -1,9 +1,9 @@
 // src/graph/data_retrieval.rs
-use crate::datatypes::values::{Value, format_value};
-use crate::graph::schema::{DirGraph, CurrentSelection, NodeInfo, NodeData};
+use crate::datatypes::values::{format_value, Value};
+use crate::graph::schema::{CurrentSelection, DirGraph, NodeData, NodeInfo};
 use petgraph::graph::NodeIndex;
-use std::collections::HashMap;
 use petgraph::visit::EdgeRef;
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct LevelNodes {
@@ -25,7 +25,7 @@ pub fn get_nodes(
     selection: &CurrentSelection,
     level_index: Option<usize>,
     indices: Option<&[usize]>,
-    max_nodes: Option<usize>
+    max_nodes: Option<usize>,
 ) -> Vec<LevelNodes> {
     // If specific indices are provided, do direct lookup
     if let Some(idx) = indices {
@@ -44,7 +44,7 @@ pub fn get_nodes(
                 }
             }
         }
-        
+
         if !direct_nodes.is_empty() {
             return vec![LevelNodes {
                 parent_title: "Direct Lookup".to_string(),
@@ -56,12 +56,13 @@ pub fn get_nodes(
         }
         return Vec::new();
     }
-    
+
     // Check if selection is effectively empty (no nodes selected)
     // Note: CurrentSelection always has at least one level, so we check if the level is empty
     let selection_is_empty = if selection.get_level_count() > 0 {
         let level_idx = selection.get_level_count().saturating_sub(1);
-        selection.get_level(level_idx)
+        selection
+            .get_level(level_idx)
             .map(|l| l.node_count() == 0)
             .unwrap_or(true)
     } else {
@@ -132,16 +133,16 @@ pub fn get_nodes(
                             node.get_field_ref("title")
                                 .and_then(|v| match v {
                                     Value::String(s) => Some(s.clone()),
-                                    _ => None
+                                    _ => None,
                                 })
                                 .unwrap_or_else(|| "Unknown".to_string()),
                             node.get_field_ref("id").cloned(),
-                            node.get_node_type_ref().map(|s| s.to_string())
+                            node.get_node_type_ref().map(|s| s.to_string()),
                         )
                     } else {
                         ("Unknown".to_string(), None, None)
                     }
-                },
+                }
                 None => ("Root".to_string(), None, None),
             };
 
@@ -163,31 +164,36 @@ pub fn get_property_values(
     level_index: Option<usize>,
     properties: &[&str],
     indices: Option<&[usize]>,
-    max_nodes: Option<usize>
+    max_nodes: Option<usize>,
 ) -> Vec<LevelValues> {
     let level_idx = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
     let mut result = Vec::new();
-    
+
     if let Some(level) = selection.get_level(level_idx) {
         for (parent, children) in level.iter_groups() {
             let filtered_children: Vec<NodeIndex> = match indices {
-                Some(idx) => children.iter()
+                Some(idx) => children
+                    .iter()
                     .filter(|&c| idx.contains(&c.index()))
                     .take(max_nodes.unwrap_or(usize::MAX))
                     .cloned()
                     .collect(),
-                None => children.iter()
+                None => children
+                    .iter()
                     .take(max_nodes.unwrap_or(usize::MAX))
                     .cloned()
                     .collect(),
             };
-            
+
             // Always create values vector, even if empty
-            let values: Vec<Vec<Value>> = filtered_children.iter()
+            let values: Vec<Vec<Value>> = filtered_children
+                .iter()
                 .map(|&idx| {
-                    properties.iter()
+                    properties
+                        .iter()
                         .map(|&prop| {
-                            graph.get_node(idx)
+                            graph
+                                .get_node(idx)
                                 .and_then(|node| node.get_field_ref(prop))
                                 .cloned()
                                 .unwrap_or(Value::Null)
@@ -195,7 +201,7 @@ pub fn get_property_values(
                         .collect()
                 })
                 .collect();
-                
+
             // Get parent title even if there are no children
             let parent_title = match parent {
                 Some(p) => {
@@ -208,7 +214,7 @@ pub fn get_property_values(
                     } else {
                         "Unknown".to_string()
                     }
-                },
+                }
                 None => "Root".to_string(),
             };
 
@@ -235,24 +241,25 @@ pub fn get_unique_values(
     property: &str,
     level_index: Option<usize>,
     group_by_parent: bool,
-    indices: Option<&[usize]>
+    indices: Option<&[usize]>,
 ) -> Vec<UniqueValues> {
     let level_idx = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
     let mut result = Vec::new();
-    
+
     if let Some(level) = selection.get_level(level_idx) {
         if group_by_parent {
             for (parent, children) in level.iter_groups() {
                 let filtered_children: Vec<NodeIndex> = match indices {
-                    Some(idx) => children.iter()
+                    Some(idx) => children
+                        .iter()
                         .filter(|&c| idx.contains(&c.index()))
                         .cloned()
                         .collect(),
                     None => children.clone(),
                 };
-                
+
                 let mut unique_values = std::collections::HashSet::new();
-                
+
                 for &idx in &filtered_children {
                     if let Some(node) = graph.get_node(idx) {
                         if let Some(value) = node.get_field_ref(property) {
@@ -272,10 +279,10 @@ pub fn get_unique_values(
                         } else {
                             "Unknown".to_string()
                         }
-                    },
+                    }
                     None => "Root".to_string(),
                 };
-                
+
                 result.push(UniqueValues {
                     parent_title,
                     parent_idx: parent.map(|p| p),
@@ -284,16 +291,17 @@ pub fn get_unique_values(
             }
         } else {
             let mut all_unique_values = std::collections::HashSet::new();
-            
+
             for (_, children) in level.iter_groups() {
                 let filtered_children: Vec<NodeIndex> = match indices {
-                    Some(idx) => children.iter()
+                    Some(idx) => children
+                        .iter()
                         .filter(|&c| idx.contains(&c.index()))
                         .cloned()
                         .collect(),
                     None => children.clone(),
                 };
-                
+
                 for &idx in &filtered_children {
                     if let Some(node) = graph.get_node(idx) {
                         if let Some(value) = node.get_field_ref(property) {
@@ -302,7 +310,7 @@ pub fn get_unique_values(
                     }
                 }
             }
-            
+
             result.push(UniqueValues {
                 parent_title: "All".to_string(),
                 parent_idx: None,
@@ -310,50 +318,60 @@ pub fn get_unique_values(
             });
         }
     }
-    
+
     result
 }
 
 pub fn format_unique_values_for_storage(
     values: &[UniqueValues],
-    max_length: Option<usize>
+    max_length: Option<usize>,
 ) -> Vec<(Option<NodeIndex>, Value)> {
-    values.iter()
+    values
+        .iter()
         .map(|unique_values| {
-            let mut value_list: Vec<String> = unique_values.values.iter()
+            let mut value_list: Vec<String> = unique_values
+                .values
+                .iter()
                 .map(|v| {
                     // Get formatted value
                     let formatted = format_value(v);
-                    
+
                     // Remove quotes from strings (if present)
                     match v {
                         Value::String(_) => {
                             // The format_value function wraps strings in quotes
                             // We need to remove the opening and closing quotes
                             if formatted.starts_with('"') && formatted.ends_with('"') {
-                                formatted[1..formatted.len()-1].to_string()
+                                formatted[1..formatted.len() - 1].to_string()
                             } else {
                                 formatted
                             }
-                        },
-                        _ => formatted
+                        }
+                        _ => formatted,
                     }
                 })
                 .collect::<Vec<String>>();
-            
+
             value_list.sort();
             value_list.dedup();
-            
+
             if let Some(max_len) = max_length {
                 if value_list.len() > max_len {
-                    println!("Warning: Truncating value list from {} to {} items for parent: {}", 
-                           value_list.len(), max_len, unique_values.parent_title);
+                    println!(
+                        "Warning: Truncating value list from {} to {} items for parent: {}",
+                        value_list.len(),
+                        max_len,
+                        unique_values.parent_title
+                    );
                     value_list.truncate(max_len);
                 }
             }
-            
+
             // Join with comma and space
-            (unique_values.parent_idx, Value::String(value_list.join(", ")))
+            (
+                unique_values.parent_idx,
+                Value::String(value_list.join(", ")),
+            )
         })
         .collect()
 }
@@ -363,8 +381,20 @@ pub struct ConnectionInfo {
     pub node_id: Value,
     pub node_title: String,
     pub node_type: String,
-    pub incoming: Vec<(String, Value, Value, HashMap<String, Value>, Option<HashMap<String, Value>>)>, // (type, id, title, conn_props, node_props)
-    pub outgoing: Vec<(String, Value, Value, HashMap<String, Value>, Option<HashMap<String, Value>>)>, // (type, id, title, conn_props, node_props)
+    pub incoming: Vec<(
+        String,
+        Value,
+        Value,
+        HashMap<String, Value>,
+        Option<HashMap<String, Value>>,
+    )>, // (type, id, title, conn_props, node_props)
+    pub outgoing: Vec<(
+        String,
+        Value,
+        Value,
+        HashMap<String, Value>,
+        Option<HashMap<String, Value>>,
+    )>, // (type, id, title, conn_props, node_props)
 }
 
 #[derive(Debug)]
@@ -385,7 +415,7 @@ pub fn get_connections(
 ) -> Vec<LevelConnections> {
     let level_idx = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
     let mut result = Vec::new();
-    
+
     if let Some(level) = selection.get_level(level_idx) {
         // Handle direct lookup if indices provided
         let nodes = if let Some(idx) = indices {
@@ -400,16 +430,23 @@ pub fn get_connections(
         let groups = if indices.is_some() {
             vec![(None, nodes)]
         } else {
-            level.iter_groups()
+            level
+                .iter_groups()
                 .map(|(p, c)| (p.clone(), c.clone()))
                 .collect()
         };
 
         for (parent, children) in groups {
             let mut level_connections = Vec::new();
-            
+
             for node_idx in children {
-                if let Some(NodeData::Regular { id, title, node_type, .. }) = graph.get_node(node_idx) {
+                if let Some(NodeData::Regular {
+                    id,
+                    title,
+                    node_type,
+                    ..
+                }) = graph.get_node(node_idx)
+                {
                     let title_str = match title {
                         Value::String(ref s) => s.clone(),
                         _ => "Unknown".to_string(),
@@ -419,12 +456,17 @@ pub fn get_connections(
                     let mut outgoing = Vec::new();
 
                     // Collect incoming connections
-                    for edge_ref in graph.graph.edges_directed(node_idx, petgraph::Direction::Incoming) {
+                    for edge_ref in graph
+                        .graph
+                        .edges_directed(node_idx, petgraph::Direction::Incoming)
+                    {
                         if let Some(source_node) = graph.get_node(edge_ref.source()) {
                             let edge_data = edge_ref.weight();
                             let node_props = if include_node_properties {
                                 match source_node {
-                                    NodeData::Regular { properties, .. } => Some(properties.clone()),
+                                    NodeData::Regular { properties, .. } => {
+                                        Some(properties.clone())
+                                    }
                                     _ => Some(HashMap::new()),
                                 }
                             } else {
@@ -432,8 +474,14 @@ pub fn get_connections(
                             };
                             incoming.push((
                                 edge_data.connection_type.clone(),
-                                source_node.get_field_ref("id").cloned().unwrap_or(Value::Null),
-                                source_node.get_field_ref("title").cloned().unwrap_or(Value::Null),
+                                source_node
+                                    .get_field_ref("id")
+                                    .cloned()
+                                    .unwrap_or(Value::Null),
+                                source_node
+                                    .get_field_ref("title")
+                                    .cloned()
+                                    .unwrap_or(Value::Null),
                                 edge_data.properties.clone(),
                                 node_props,
                             ));
@@ -441,12 +489,17 @@ pub fn get_connections(
                     }
 
                     // Collect outgoing connections
-                    for edge_ref in graph.graph.edges_directed(node_idx, petgraph::Direction::Outgoing) {
+                    for edge_ref in graph
+                        .graph
+                        .edges_directed(node_idx, petgraph::Direction::Outgoing)
+                    {
                         if let Some(target_node) = graph.get_node(edge_ref.target()) {
                             let edge_data = edge_ref.weight();
                             let node_props = if include_node_properties {
                                 match target_node {
-                                    NodeData::Regular { properties, .. } => Some(properties.clone()),
+                                    NodeData::Regular { properties, .. } => {
+                                        Some(properties.clone())
+                                    }
                                     _ => Some(HashMap::new()),
                                 }
                             } else {
@@ -454,8 +507,14 @@ pub fn get_connections(
                             };
                             outgoing.push((
                                 edge_data.connection_type.clone(),
-                                target_node.get_field_ref("id").cloned().unwrap_or(Value::Null),
-                                target_node.get_field_ref("title").cloned().unwrap_or(Value::Null),
+                                target_node
+                                    .get_field_ref("id")
+                                    .cloned()
+                                    .unwrap_or(Value::Null),
+                                target_node
+                                    .get_field_ref("title")
+                                    .cloned()
+                                    .unwrap_or(Value::Null),
                                 edge_data.properties.clone(),
                                 node_props,
                             ));
@@ -485,16 +544,16 @@ pub fn get_connections(
                                 node.get_field_ref("title")
                                     .and_then(|v| match v {
                                         Value::String(s) => Some(s.clone()),
-                                        _ => None
+                                        _ => None,
                                     })
                                     .unwrap_or_else(|| "Unknown".to_string()),
                                 node.get_field_ref("id").cloned(),
-                                node.get_node_type_ref().map(|s| s.to_string())
+                                node.get_node_type_ref().map(|s| s.to_string()),
                             )
                         } else {
                             ("Unknown".to_string(), None, None)
                         }
-                    },
+                    }
                     None => ("Root".to_string(), None, None),
                 }
             };

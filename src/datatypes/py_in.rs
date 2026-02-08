@@ -1,31 +1,31 @@
 // src/datatypes/py_in.rs
+use super::type_conversions::{to_bool, to_datetime, to_f64, to_i64, to_u32};
+use super::values::{ColumnData, ColumnType, DataFrame, FilterCondition, Value};
 use pyo3::prelude::*;
-use pyo3::Bound;
 use pyo3::types::{PyDict, PyList};
+use pyo3::Bound;
 use std::collections::HashMap;
-use super::values::{DataFrame, ColumnType, ColumnData, Value, FilterCondition};
-use super::type_conversions::{to_u32, to_i64, to_f64, to_datetime, to_bool};
 
-
-pub fn pydict_to_filter_conditions(dict: &Bound<'_, PyDict>) -> PyResult<HashMap<String, FilterCondition>> {
+pub fn pydict_to_filter_conditions(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<HashMap<String, FilterCondition>> {
     dict.iter()
         .map(|(k, v)| {
             let key = k.extract::<String>()?;
             let condition = match v.cast::<PyDict>() {
                 // Handle operator-based condition
                 Ok(op_dict) => {
-                    let (op, val) = op_dict.iter().next()
-                        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                            "Empty operator dictionary"
-                        ))?;
+                    let (op, val) = op_dict.iter().next().ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>("Empty operator dictionary")
+                    })?;
 
                     let op_str = op.extract::<String>()?;
                     parse_operator_condition(&op_str, &val)?
-                },
+                }
                 // Handle direct value match (equivalent to ==)
                 Err(_) => FilterCondition::Equals(py_value_to_value(&v)?),
             };
-            
+
             Ok((key, condition))
         })
         .collect()
@@ -39,7 +39,7 @@ fn parse_operator_condition(op: &str, val: &Bound<'_, PyAny>) -> PyResult<Filter
             } else {
                 Ok(FilterCondition::Equals(py_value_to_value(val)?))
             }
-        },
+        }
         "!=" => Ok(FilterCondition::NotEquals(py_value_to_value(val)?)),
         ">" => Ok(FilterCondition::GreaterThan(py_value_to_value(val)?)),
         ">=" => Ok(FilterCondition::GreaterThanEquals(py_value_to_value(val)?)),
@@ -52,9 +52,10 @@ fn parse_operator_condition(op: &str, val: &Bound<'_, PyAny>) -> PyResult<Filter
         "contains" => Ok(FilterCondition::Contains(py_value_to_value(val)?)),
         "starts_with" => Ok(FilterCondition::StartsWith(py_value_to_value(val)?)),
         "ends_with" => Ok(FilterCondition::EndsWith(py_value_to_value(val)?)),
-        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("Unsupported operator: {}", op)
-        )),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Unsupported operator: {}",
+            op
+        ))),
     }
 }
 
@@ -64,15 +65,15 @@ fn parse_between_condition(val: &Bound<'_, PyAny>) -> PyResult<FilterCondition> 
             let items: Vec<_> = list.iter().collect();
             if items.len() != 2 {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "'between' operator requires a list of exactly 2 values [min, max]"
+                    "'between' operator requires a list of exactly 2 values [min, max]",
                 ));
             }
             let min = py_value_to_value(&items[0])?;
             let max = py_value_to_value(&items[1])?;
             Ok(FilterCondition::Between(min, max))
-        },
+        }
         Err(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "'between' operator requires a list of [min, max] values"
+            "'between' operator requires a list of [min, max] values",
         )),
     }
 }
@@ -80,13 +81,12 @@ fn parse_between_condition(val: &Bound<'_, PyAny>) -> PyResult<FilterCondition> 
 fn parse_in_condition(val: &Bound<'_, PyAny>) -> PyResult<FilterCondition> {
     match val.cast::<PyList>() {
         Ok(list) => {
-            let values: PyResult<Vec<Value>> = list.iter()
-                .map(|item| py_value_to_value(&item))
-                .collect();
+            let values: PyResult<Vec<Value>> =
+                list.iter().map(|item| py_value_to_value(&item)).collect();
             Ok(FilterCondition::In(values?))
-        },
+        }
         Err(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "'in' operator requires a list value"
+            "'in' operator requires a list value",
         )),
     }
 }
@@ -102,7 +102,7 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
                 vec.push(to_u32(&value));
             }
             Ok(ColumnData::UniqueId(vec))
-        },
+        }
         ColumnType::Int64 => {
             let mut vec = Vec::with_capacity(length);
             for i in 0..length {
@@ -110,7 +110,7 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
                 vec.push(to_i64(&value));
             }
             Ok(ColumnData::Int64(vec))
-        },
+        }
         ColumnType::Float64 => {
             let mut vec = Vec::with_capacity(length);
             for i in 0..length {
@@ -118,7 +118,7 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
                 vec.push(to_f64(&value));
             }
             Ok(ColumnData::Float64(vec))
-        },
+        }
         ColumnType::String => {
             let mut vec = Vec::with_capacity(length);
             for i in 0..length {
@@ -130,7 +130,7 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
                 });
             }
             Ok(ColumnData::String(vec))
-        },
+        }
         ColumnType::Boolean => {
             let mut vec = Vec::with_capacity(length);
             for i in 0..length {
@@ -138,7 +138,7 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
                 vec.push(to_bool(&value));
             }
             Ok(ColumnData::Boolean(vec))
-        },
+        }
         ColumnType::DateTime => {
             let mut vec = Vec::with_capacity(length);
             for i in 0..length {
@@ -146,7 +146,7 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
                 vec.push(to_datetime(&value));
             }
             Ok(ColumnData::DateTime(vec))
-        },
+        }
     }
 }
 
@@ -175,16 +175,16 @@ pub fn pandas_to_dataframe(
                     format!("Failed to access column '{}': {}. If using a reserved name like 'shape', 'index', or 'columns', please rename your column.", col_name, e)
                 )
             })?;
-            
+
             // Determine column type - check custom type mapping first
             let col_type = if let Some(type_dict) = column_types {
                 // Get item returns Result<Option<...>, ...> so we need to handle both
                 let maybe_type_value = type_dict.get_item(col_name)?;
-                
+
                 if let Some(type_value) = maybe_type_value {
                     // Extract type string from the dictionary
                     let type_str = type_value.extract::<String>()?;
-                    
+
                     // Parse the requested type
                     match type_str.to_lowercase().as_str() {
                         "uniqueid" | "unique_id" | "id" => ColumnType::UniqueId,
@@ -193,9 +193,12 @@ pub fn pandas_to_dataframe(
                         "str" | "string" | "text" => ColumnType::String,
                         "bool" | "boolean" => ColumnType::Boolean,
                         "date" | "datetime" | "timestamp" => ColumnType::DateTime,
-                        _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                            format!("Unsupported column type '{}' specified for column '{}'", type_str, col_name)
-                        )),
+                        _ => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Unsupported column type '{}' specified for column '{}'",
+                                type_str, col_name
+                            )))
+                        }
                     }
                 } else if unique_id_fields.contains(col_name) {
                     ColumnType::UniqueId
@@ -211,7 +214,8 @@ pub fn pandas_to_dataframe(
             };
 
             let data = convert_pandas_series(&series, col_type.clone())?;
-            df_out.add_column(col_name.clone(), col_type, data)
+            df_out
+                .add_column(col_name.clone(), col_type, data)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
         }
         Ok(())
@@ -223,14 +227,12 @@ pub fn pandas_to_dataframe(
 // Helper function to determine column type from pandas series
 fn determine_column_type(series: &Bound<'_, PyAny>, col_name: &str) -> PyResult<ColumnType> {
     let dtype = series.getattr("dtype").map_err(|_| {
-        PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!(
-                "Could not determine type for column '{}'. The data may not be a valid pandas Series. \
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Could not determine type for column '{}'. The data may not be a valid pandas Series. \
                 If your column is named 'shape', 'index', 'columns', 'values', or 'dtype', \
                 please rename it as these conflict with pandas DataFrame attributes.",
-                col_name
-            )
-        )
+            col_name
+        ))
     })?;
     let type_str = dtype.str()?.to_string();
 
@@ -255,7 +257,8 @@ pub fn ensure_columns(
 ) -> PyResult<Vec<String>> {
     // Process columns_to_skip if present
     let skip_cols = match columns_to_skip {
-        Some(list) => list.iter()
+        Some(list) => list
+            .iter()
             .map(|item| item.extract::<String>())
             .collect::<PyResult<Vec<String>>>()?,
         None => Vec::new(),
@@ -263,78 +266,83 @@ pub fn ensure_columns(
 
     // Process user-specified columns if present
     if let Some(include_list) = columns_to_include {
-        let mut result: Vec<String> = include_list.iter()
+        let mut result: Vec<String> = include_list
+            .iter()
             .map(|item| item.extract::<String>())
             .collect::<PyResult<_>>()?;
-        
+
         // Always add default columns
         for &field in default_columns {
             if !result.contains(&field.to_string()) && !skip_cols.contains(&field.to_string()) {
                 result.push(field.to_string());
             }
         }
-        
+
         // Filter out any skipped columns
         result.retain(|col| !skip_cols.contains(col));
-        
+
         Ok(result)
     } else if enforce_columns.unwrap_or(false) {
         // If enforce_columns is true and no columns specified, use only default columns
         let mut result = Vec::new();
-        
+
         for &field in default_columns {
             if !skip_cols.contains(&field.to_string()) {
                 result.push(field.to_string());
             }
         }
-        
+
         Ok(result)
     } else {
         // Use all dataframe columns except skipped ones
-        let mut result = df_columns.iter()
+        let mut result = df_columns
+            .iter()
             .filter(|col| !skip_cols.contains(col))
             .cloned()
             .collect::<Vec<String>>();
-        
+
         // Ensure default columns are included
         for &field in default_columns {
             if !result.contains(&field.to_string()) && !skip_cols.contains(&field.to_string()) {
                 result.push(field.to_string());
             }
         }
-        
+
         Ok(result)
     }
 }
 
 pub fn parse_sort_fields(
-    sort_spec: &Bound<'_, PyAny>, 
-    ascending: Option<bool>
+    sort_spec: &Bound<'_, PyAny>,
+    ascending: Option<bool>,
 ) -> PyResult<Vec<(String, bool)>> {
     // Handle single field with explicit direction
     if let Some(asc) = ascending {
         let field = sort_spec.extract::<String>()?;
         return Ok(vec![(field, asc)]);
     }
-    
+
     // Handle single string
     if let Ok(field) = sort_spec.extract::<String>() {
         return Ok(vec![(field, true)]);
     }
-    
+
     // Handle single tuple
     if let Ok((field, ascending)) = sort_spec.extract::<(String, bool)>() {
         return Ok(vec![(field, ascending)]);
     }
-    
+
     // Handle list of sort specifications
     let sort_list = sort_spec.cast::<PyList>()?;
     if sort_list.is_empty() {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Sort specification cannot be empty"));
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Sort specification cannot be empty",
+        ));
     }
 
     // Process each item in the list
-    sort_list.iter()
+    sort_list
+        .iter()
         .map(|item| {
             if let Ok(field) = item.extract::<String>() {
                 Ok((field, true))
@@ -342,14 +350,18 @@ pub fn parse_sort_fields(
                 Ok((field, ascending))
             } else if let Ok(list) = item.cast::<PyList>() {
                 if list.len() != 2 {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("List specification must have exactly 2 elements"));
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "List specification must have exactly 2 elements",
+                    ));
                 }
                 Ok((
                     list.get_item(0)?.extract::<String>()?,
-                    list.get_item(1)?.extract::<bool>()?
+                    list.get_item(1)?.extract::<bool>()?,
                 ))
             } else {
-                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid sort specification"))
+                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Invalid sort specification",
+                ))
             }
         })
         .collect()

@@ -1,12 +1,12 @@
 // Pattern Matching Module for Cypher-like queries
 // Supports patterns like: (p:Play)-[:HAS_PROSPECT]->(pr:Prospect)-[:BECAME_DISCOVERY]->(d:Discovery)
 
-use std::collections::HashMap;
-use petgraph::graph::NodeIndex;
-use petgraph::Direction;
-use petgraph::visit::EdgeRef;
 use crate::datatypes::values::Value;
 use crate::graph::schema::DirGraph;
+use petgraph::graph::NodeIndex;
+use petgraph::visit::EdgeRef;
+use petgraph::Direction;
+use std::collections::HashMap;
 
 // ============================================================================
 // AST Types
@@ -54,9 +54,9 @@ pub struct EdgePattern {
 /// Direction of edge traversal
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EdgeDirection {
-    Outgoing,  // -[]->
-    Incoming,  // <-[]-
-    Both,      // -[]-
+    Outgoing, // -[]->
+    Incoming, // <-[]-
+    Both,     // -[]-
 }
 
 /// Property value matcher (currently only equality)
@@ -401,7 +401,10 @@ impl Parser {
                 if let Some(Token::Identifier(name)) = self.advance().cloned() {
                     node_type = Some(name);
                 } else {
-                    return Err("Expected node type name after ':'. Example: (:Person) or (n:Person)".to_string());
+                    return Err(
+                        "Expected node type name after ':'. Example: (:Person) or (n:Person)"
+                            .to_string(),
+                    );
                 }
             }
             Some(Token::Identifier(_)) => {
@@ -415,7 +418,10 @@ impl Parser {
                     if let Some(Token::Identifier(name)) = self.advance().cloned() {
                         node_type = Some(name);
                     } else {
-                        return Err("Expected node type name after ':'. Example: (:Person) or (n:Person)".to_string());
+                        return Err(
+                            "Expected node type name after ':'. Example: (:Person) or (n:Person)"
+                                .to_string(),
+                        );
                     }
                 }
             }
@@ -555,7 +561,7 @@ impl Parser {
                 // Check for range
                 if let Some(Token::DotDot) = self.peek() {
                     self.advance(); // consume ..
-                    // Check for max
+                                    // Check for max
                     if let Some(Token::IntLit(_)) = self.peek() {
                         let max = if let Some(Token::IntLit(n)) = self.advance().cloned() {
                             n as usize
@@ -578,7 +584,10 @@ impl Parser {
                 let max = if let Some(Token::IntLit(n)) = self.advance().cloned() {
                     n as usize
                 } else {
-                    return Err("Expected max hop count after '*..'. Example: *..3 means up to 3 hops".to_string());
+                    return Err(
+                        "Expected max hop count after '*..'. Example: *..3 means up to 3 hops"
+                            .to_string(),
+                    );
                 };
                 Ok((1, max))
             }
@@ -667,7 +676,12 @@ impl<'a> PatternExecutor<'a> {
         // Start with the first node pattern
         let first_node = match &pattern.elements[0] {
             PatternElement::Node(np) => np,
-            _ => return Err("Pattern must start with a node in parentheses. Example: (n:Person) or ()".to_string()),
+            _ => {
+                return Err(
+                    "Pattern must start with a node in parentheses. Example: (n:Person) or ()"
+                        .to_string(),
+                )
+            }
         };
 
         // Find all nodes matching the first pattern
@@ -726,16 +740,21 @@ impl<'a> PatternExecutor<'a> {
             for (_match_idx, (current_match, &source_idx)) in
                 matches.iter().zip(current_indices.iter()).enumerate()
             {
-                if self.max_matches.map_or(false, |max| new_matches.len() >= max) {
+                if self
+                    .max_matches
+                    .map_or(false, |max| new_matches.len() >= max)
+                {
                     break;
                 }
 
                 // Find all valid expansions
-                let expansions =
-                    self.expand_from_node(source_idx, edge_pattern, node_pattern)?;
+                let expansions = self.expand_from_node(source_idx, edge_pattern, node_pattern)?;
 
                 for (target_idx, edge_binding) in expansions {
-                    if self.max_matches.map_or(false, |max| new_matches.len() >= max) {
+                    if self
+                        .max_matches
+                        .map_or(false, |max| new_matches.len() >= max)
+                    {
                         break;
                     }
 
@@ -807,7 +826,8 @@ impl<'a> PatternExecutor<'a> {
         props: &HashMap<String, PropertyMatcher>,
     ) -> Option<Vec<NodeIndex>> {
         // Extract equality values from PropertyMatcher::Equals
-        let equality_props: Vec<(&String, &Value)> = props.iter()
+        let equality_props: Vec<(&String, &Value)> = props
+            .iter()
             .filter_map(|(k, v)| match v {
                 PropertyMatcher::Equals(val) => Some((k, val)),
             })
@@ -825,7 +845,8 @@ impl<'a> PatternExecutor<'a> {
                     return Some(results);
                 } else {
                     // Index covers one property — filter remaining manually
-                    let filtered = results.into_iter()
+                    let filtered = results
+                        .into_iter()
                         .filter(|&idx| self.node_matches_properties(idx, props))
                         .collect();
                     return Some(filtered);
@@ -846,7 +867,12 @@ impl<'a> PatternExecutor<'a> {
         if let Some(node) = self.graph.graph.node_weight(idx) {
             use crate::graph::schema::NodeData;
             match node {
-                NodeData::Regular { properties, title, id, .. } => {
+                NodeData::Regular {
+                    properties,
+                    title,
+                    id,
+                    ..
+                } => {
                     for (key, matcher) in props {
                         // Check special fields first: name/title maps to title, id maps to id
                         // Use references to avoid cloning
@@ -1134,7 +1160,8 @@ impl<'a> PatternExecutor<'a> {
                     id,
                     title,
                     properties,
-                } | NodeData::Schema {
+                }
+                | NodeData::Schema {
                     node_type,
                     id,
                     title,
@@ -1154,7 +1181,7 @@ impl<'a> PatternExecutor<'a> {
                         id: id.clone(),
                         properties: properties.clone(),
                     }
-                },
+                }
             }
         } else {
             MatchBinding::Node {

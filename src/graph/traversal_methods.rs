@@ -1,17 +1,17 @@
 // src/graph/traversal_methods.rs
-use std::collections::{HashSet, HashMap};
-use petgraph::visit::EdgeRef;
-use petgraph::graph::NodeIndex;
-use petgraph::Direction;
-use crate::graph::schema::{DirGraph, CurrentSelection, SelectionOperation};
 use crate::datatypes::values::FilterCondition;
-use crate::graph::filtering_methods;
 use crate::datatypes::values::Value;
+use crate::graph::filtering_methods;
+use crate::graph::schema::{CurrentSelection, DirGraph, SelectionOperation};
+use petgraph::graph::NodeIndex;
+use petgraph::visit::EdgeRef;
+use petgraph::Direction;
+use std::collections::{HashMap, HashSet};
 
 /// Check if edge properties match all given filter conditions
 fn edge_matches_conditions(
     properties: &HashMap<String, Value>,
-    conditions: &HashMap<String, FilterCondition>
+    conditions: &HashMap<String, FilterCondition>,
 ) -> bool {
     conditions.iter().all(|(field, condition)| {
         match properties.get(field) {
@@ -39,18 +39,21 @@ pub fn make_traversal(
 ) -> Result<(), String> {
     // Validate connection type exists
     if !graph.has_connection_type(&connection_type) {
-        return Err(format!("Connection type '{}' does not exist in graph", connection_type));
+        return Err(format!(
+            "Connection type '{}' does not exist in graph",
+            connection_type
+        ));
     }
 
     // First get the source level index
-    let source_level_index = level_index.unwrap_or_else(||
-        selection.get_level_count().saturating_sub(1)
-    );
+    let source_level_index =
+        level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
 
     let create_new_level = new_level.unwrap_or(true);
 
     // Get source level
-    let source_level = selection.get_level(source_level_index)
+    let source_level = selection
+        .get_level(source_level_index)
         .ok_or_else(|| "No valid source level found for traversal".to_string())?;
 
     // Early empty check
@@ -62,7 +65,12 @@ pub fn make_traversal(
     let dir = match direction.as_deref() {
         Some("incoming") => Some(Direction::Incoming),
         Some("outgoing") => Some(Direction::Outgoing),
-        Some(d) => return Err(format!("Invalid direction: {}. Must be 'incoming' or 'outgoing'", d)),
+        Some(d) => {
+            return Err(format!(
+                "Invalid direction: {}. Must be 'incoming' or 'outgoing'",
+                d
+            ))
+        }
         None => None, // Both directions
     };
 
@@ -79,8 +87,16 @@ pub fn make_traversal(
 
     // SLOW PATH: Full processing with filtering/sorting/limits
     make_traversal_full(
-        graph, selection, connection_type, source_level_index, dir,
-        filter_target, filter_connection, sort_target, max_nodes, create_new_level
+        graph,
+        selection,
+        connection_type,
+        source_level_index,
+        dir,
+        filter_target,
+        filter_connection,
+        sort_target,
+        max_nodes,
+        create_new_level,
     )
 }
 
@@ -94,7 +110,8 @@ fn make_traversal_fast(
     direction: Option<Direction>,
 ) -> Result<(), String> {
     // Get source nodes using iterator to avoid allocation
-    let source_level = selection.get_level(source_level_index)
+    let source_level = selection
+        .get_level(source_level_index)
         .ok_or_else(|| "No valid source level found for traversal".to_string())?;
 
     // Collect source nodes (we need this twice - once for iteration, once for the parent map)
@@ -105,7 +122,8 @@ fn make_traversal_fast(
     let target_level_index = selection.get_level_count() - 1;
 
     // Pre-allocate targets HashSet with estimated capacity
-    let mut all_targets_per_parent: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::with_capacity(source_nodes.len());
+    let mut all_targets_per_parent: HashMap<NodeIndex, Vec<NodeIndex>> =
+        HashMap::with_capacity(source_nodes.len());
 
     // Process each source node
     for &source_node in &source_nodes {
@@ -149,13 +167,21 @@ fn make_traversal_fast(
     }
 
     // Get target level and populate it
-    let level = selection.get_level_mut(target_level_index)
+    let level = selection
+        .get_level_mut(target_level_index)
         .ok_or_else(|| "Failed to access target selection level".to_string())?;
 
     // Set up operation
     level.operations = vec![SelectionOperation::Traverse {
         connection_type: connection_type.to_string(),
-        direction: direction.map(|d| if d == Direction::Incoming { "incoming" } else { "outgoing" }.to_string()),
+        direction: direction.map(|d| {
+            if d == Direction::Incoming {
+                "incoming"
+            } else {
+                "outgoing"
+            }
+            .to_string()
+        }),
         max_nodes: None,
     }];
 
@@ -182,28 +208,28 @@ fn make_traversal_full(
     create_new_level: bool,
 ) -> Result<(), String> {
     // Get source level
-    let source_level = selection.get_level(source_level_index)
+    let source_level = selection
+        .get_level(source_level_index)
         .ok_or_else(|| "No valid source level found for traversal".to_string())?;
 
     // Collect all necessary data from source level
     let parents: Vec<NodeIndex> = if create_new_level {
         source_level.iter_node_indices().collect()
     } else {
-        source_level.selections.keys()
-            .filter_map(|k| *k)
-            .collect()
+        source_level.selections.keys().filter_map(|k| *k).collect()
     };
 
     // Create a mapping of parent nodes to their source nodes
     let source_nodes_map: HashMap<NodeIndex, Vec<NodeIndex>> = if create_new_level {
-        parents.iter()
+        parents
+            .iter()
             .map(|&parent| (parent, vec![parent]))
             .collect()
     } else {
-        source_level.selections.iter()
-            .filter_map(|(parent, children)| {
-                parent.map(|p| (p, children.clone()))
-            })
+        source_level
+            .selections
+            .iter()
+            .filter_map(|(parent, children)| parent.map(|p| (p, children.clone())))
             .collect()
     };
 
@@ -219,13 +245,21 @@ fn make_traversal_full(
     };
 
     // Get and initialize target level
-    let level = selection.get_level_mut(target_level_index)
+    let level = selection
+        .get_level_mut(target_level_index)
         .ok_or_else(|| "Failed to access target selection level".to_string())?;
 
     // Set up operation
     let operation = SelectionOperation::Traverse {
         connection_type: connection_type.clone(),
-        direction: direction.map(|d| if d == Direction::Incoming { "incoming" } else { "outgoing" }.to_string()),
+        direction: direction.map(|d| {
+            if d == Direction::Incoming {
+                "incoming"
+            } else {
+                "outgoing"
+            }
+            .to_string()
+        }),
         max_nodes,
     };
     level.operations = vec![operation];
@@ -253,7 +287,8 @@ fn make_traversal_full(
                     for edge in graph.graph.edges_directed(source_node, Direction::Outgoing) {
                         if edge.weight().connection_type == connection_type {
                             if let Some(conn_filter) = filter_connection {
-                                if !edge_matches_conditions(&edge.weight().properties, conn_filter) {
+                                if !edge_matches_conditions(&edge.weight().properties, conn_filter)
+                                {
                                     continue;
                                 }
                             }
@@ -265,7 +300,8 @@ fn make_traversal_full(
                     for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
                         if edge.weight().connection_type == connection_type {
                             if let Some(conn_filter) = filter_connection {
-                                if !edge_matches_conditions(&edge.weight().properties, conn_filter) {
+                                if !edge_matches_conditions(&edge.weight().properties, conn_filter)
+                                {
                                     continue;
                                 }
                             }
@@ -278,7 +314,8 @@ fn make_traversal_full(
                     for edge in graph.graph.edges_directed(source_node, Direction::Outgoing) {
                         if edge.weight().connection_type == connection_type {
                             if let Some(conn_filter) = filter_connection {
-                                if !edge_matches_conditions(&edge.weight().properties, conn_filter) {
+                                if !edge_matches_conditions(&edge.weight().properties, conn_filter)
+                                {
                                     continue;
                                 }
                             }
@@ -288,7 +325,8 @@ fn make_traversal_full(
                     for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
                         if edge.weight().connection_type == connection_type {
                             if let Some(conn_filter) = filter_connection {
-                                if !edge_matches_conditions(&edge.weight().properties, conn_filter) {
+                                if !edge_matches_conditions(&edge.weight().properties, conn_filter)
+                                {
                                     continue;
                                 }
                             }
@@ -308,7 +346,7 @@ fn make_traversal_full(
             target_vec,
             filter_target,
             sort_target,
-            max_nodes
+            max_nodes,
         );
 
         // Add the processed nodes to the selection
@@ -321,19 +359,19 @@ fn make_traversal_full(
 pub struct ChildPropertyGroup {
     pub parent_idx: NodeIndex,
     pub parent_title: String,
-    pub values: Vec<String>
+    pub values: Vec<String>,
 }
 
 pub fn get_children_properties(
     graph: &DirGraph,
     selection: &CurrentSelection,
-    property: &str
+    property: &str,
 ) -> Vec<ChildPropertyGroup> {
     let mut result = Vec::new();
-    
+
     // Get the current level index
     let level_index = selection.get_level_count().saturating_sub(1);
-    
+
     // Get all parents with their children
     if let Some(level) = selection.get_level(level_index) {
         for (&parent_opt, children) in &level.selections {
@@ -342,7 +380,7 @@ pub fn get_children_properties(
                 let parent_title = if let Some(node) = graph.get_node(parent) {
                     match node.get_field_ref("title") {
                         Some(Value::String(s)) => s.clone(),
-                        _ => format!("node_{}", parent.index())
+                        _ => format!("node_{}", parent.index()),
                     }
                 } else {
                     format!("node_{}", parent.index())
@@ -367,16 +405,16 @@ pub fn get_children_properties(
                         values_list.push(value);
                     }
                 }
-                
+
                 result.push(ChildPropertyGroup {
                     parent_idx: parent,
                     parent_title,
-                    values: values_list
+                    values: values_list,
                 });
             }
         }
     }
-    
+
     result
 }
 
@@ -393,9 +431,10 @@ fn format_property_list(values: &[String], max_length: Option<usize>) -> String 
 
 pub fn format_for_storage(
     property_groups: &[ChildPropertyGroup],
-    max_length: Option<usize>
+    max_length: Option<usize>,
 ) -> Vec<(Option<NodeIndex>, Value)> {
-    property_groups.iter()
+    property_groups
+        .iter()
         .map(|group| {
             let formatted = format_property_list(&group.values, max_length);
             (Some(group.parent_idx), Value::String(formatted))
@@ -405,9 +444,10 @@ pub fn format_for_storage(
 
 pub fn format_for_dictionary(
     property_groups: &[ChildPropertyGroup],
-    max_length: Option<usize>
+    max_length: Option<usize>,
 ) -> Vec<(String, String)> {
-    property_groups.iter()
+    property_groups
+        .iter()
         .map(|group| {
             let formatted = format_property_list(&group.values, max_length);
             (group.parent_title.clone(), formatted)

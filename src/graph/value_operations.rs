@@ -1,6 +1,5 @@
 /// Shared value operations: arithmetic, type coercion, aggregation, and formatting.
 /// Used by both the Cypher executor and the equation parser.
-
 use crate::datatypes::values::Value;
 
 // ============================================================================
@@ -49,12 +48,10 @@ pub fn arithmetic_add(a: &Value, b: &Value) -> Value {
     match (a, b) {
         (Value::Int64(x), Value::Int64(y)) => Value::Int64(x + y),
         (Value::String(x), Value::String(y)) => Value::String(format!("{}{}", x, y)),
-        _ => {
-            match (value_to_f64(a), value_to_f64(b)) {
-                (Some(x), Some(y)) => Value::Float64(x + y),
-                _ => Value::Null,
-            }
-        }
+        _ => match (value_to_f64(a), value_to_f64(b)) {
+            (Some(x), Some(y)) => Value::Float64(x + y),
+            _ => Value::Null,
+        },
     }
 }
 
@@ -62,12 +59,10 @@ pub fn arithmetic_add(a: &Value, b: &Value) -> Value {
 pub fn arithmetic_sub(a: &Value, b: &Value) -> Value {
     match (a, b) {
         (Value::Int64(x), Value::Int64(y)) => Value::Int64(x - y),
-        _ => {
-            match (value_to_f64(a), value_to_f64(b)) {
-                (Some(x), Some(y)) => Value::Float64(x - y),
-                _ => Value::Null,
-            }
-        }
+        _ => match (value_to_f64(a), value_to_f64(b)) {
+            (Some(x), Some(y)) => Value::Float64(x - y),
+            _ => Value::Null,
+        },
     }
 }
 
@@ -75,12 +70,10 @@ pub fn arithmetic_sub(a: &Value, b: &Value) -> Value {
 pub fn arithmetic_mul(a: &Value, b: &Value) -> Value {
     match (a, b) {
         (Value::Int64(x), Value::Int64(y)) => Value::Int64(x * y),
-        _ => {
-            match (value_to_f64(a), value_to_f64(b)) {
-                (Some(x), Some(y)) => Value::Float64(x * y),
-                _ => Value::Null,
-            }
-        }
+        _ => match (value_to_f64(a), value_to_f64(b)) {
+            (Some(x), Some(y)) => Value::Float64(x * y),
+            _ => Value::Null,
+        },
     }
 }
 
@@ -127,9 +120,7 @@ pub fn aggregate_std(values: &[f64], population: bool) -> Option<f64> {
     }
     let mean = values.iter().sum::<f64>() / n as f64;
     let divisor = if population { n as f64 } else { (n - 1) as f64 };
-    let variance = values.iter()
-        .map(|x| (x - mean).powi(2))
-        .sum::<f64>() / divisor;
+    let variance = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / divisor;
     Some(variance.sqrt())
 }
 
@@ -255,7 +246,10 @@ mod tests {
 
     #[test]
     fn test_add_integers() {
-        assert_eq!(arithmetic_add(&Value::Int64(3), &Value::Int64(4)), Value::Int64(7));
+        assert_eq!(
+            arithmetic_add(&Value::Int64(3), &Value::Int64(4)),
+            Value::Int64(7)
+        );
     }
 
     #[test]
@@ -277,24 +271,36 @@ mod tests {
     #[test]
     fn test_add_strings() {
         assert_eq!(
-            arithmetic_add(&Value::String("hello".into()), &Value::String(" world".into())),
+            arithmetic_add(
+                &Value::String("hello".into()),
+                &Value::String(" world".into())
+            ),
             Value::String("hello world".into())
         );
     }
 
     #[test]
     fn test_add_incompatible() {
-        assert_eq!(arithmetic_add(&Value::String("a".into()), &Value::Int64(1)), Value::Null);
+        assert_eq!(
+            arithmetic_add(&Value::String("a".into()), &Value::Int64(1)),
+            Value::Null
+        );
     }
 
     #[test]
     fn test_sub_integers() {
-        assert_eq!(arithmetic_sub(&Value::Int64(10), &Value::Int64(3)), Value::Int64(7));
+        assert_eq!(
+            arithmetic_sub(&Value::Int64(10), &Value::Int64(3)),
+            Value::Int64(7)
+        );
     }
 
     #[test]
     fn test_mul_integers() {
-        assert_eq!(arithmetic_mul(&Value::Int64(3), &Value::Int64(4)), Value::Int64(12));
+        assert_eq!(
+            arithmetic_mul(&Value::Int64(3), &Value::Int64(4)),
+            Value::Int64(12)
+        );
     }
 
     #[test]
@@ -307,14 +313,23 @@ mod tests {
 
     #[test]
     fn test_div_by_zero() {
-        assert_eq!(arithmetic_div(&Value::Int64(10), &Value::Int64(0)), Value::Null);
-        assert_eq!(arithmetic_div(&Value::Float64(1.0), &Value::Float64(0.0)), Value::Null);
+        assert_eq!(
+            arithmetic_div(&Value::Int64(10), &Value::Int64(0)),
+            Value::Null
+        );
+        assert_eq!(
+            arithmetic_div(&Value::Float64(1.0), &Value::Float64(0.0)),
+            Value::Null
+        );
     }
 
     #[test]
     fn test_negate() {
         assert_eq!(arithmetic_negate(&Value::Int64(5)), Value::Int64(-5));
-        assert_eq!(arithmetic_negate(&Value::Float64(3.14)), Value::Float64(-3.14));
+        assert_eq!(
+            arithmetic_negate(&Value::Float64(3.14)),
+            Value::Float64(-3.14)
+        );
         assert_eq!(arithmetic_negate(&Value::String("a".into())), Value::Null);
     }
 
@@ -376,7 +391,10 @@ mod tests {
         assert_eq!(format_value_compact(&Value::Int64(42)), "42");
         assert_eq!(format_value_compact(&Value::Float64(3.14)), "3.14");
         assert_eq!(format_value_compact(&Value::Float64(5.0)), "5.0");
-        assert_eq!(format_value_compact(&Value::String("hello".into())), "hello");
+        assert_eq!(
+            format_value_compact(&Value::String("hello".into())),
+            "hello"
+        );
         assert_eq!(format_value_compact(&Value::Boolean(true)), "true");
         assert_eq!(format_value_compact(&Value::Null), "null");
     }
@@ -392,7 +410,10 @@ mod tests {
 
     #[test]
     fn test_parse_value_string_quoted() {
-        assert_eq!(parse_value_string("\"hello\""), Value::String("hello".into()));
+        assert_eq!(
+            parse_value_string("\"hello\""),
+            Value::String("hello".into())
+        );
         assert_eq!(parse_value_string("'world'"), Value::String("world".into()));
     }
 

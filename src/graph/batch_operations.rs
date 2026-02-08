@@ -1,9 +1,9 @@
 // src/graph/batch_operations.rs
+use crate::datatypes::Value;
+use crate::graph::schema::{DirGraph, EdgeData, NodeData};
+use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
-use petgraph::graph::NodeIndex;
-use crate::datatypes::Value;
-use crate::graph::schema::{DirGraph, NodeData, EdgeData};
 
 // Constants for batch size optimization
 const SMALL_BATCH_THRESHOLD: usize = 100;
@@ -29,9 +29,9 @@ pub struct BatchMetrics {
 pub enum NodeAction {
     Update {
         node_idx: NodeIndex,
-        title: Option<Value>,  // Changed to Option to indicate if title should be updated
+        title: Option<Value>, // Changed to Option to indicate if title should be updated
         properties: HashMap<String, Value>,
-        conflict_mode: ConflictHandling,  // Added conflict mode
+        conflict_mode: ConflictHandling, // Added conflict mode
     },
     Create {
         node_type: String,
@@ -43,15 +43,15 @@ pub enum NodeAction {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConflictHandling {
-    Replace,     // Replace all properties and title (current behavior)
-    Skip,        // Don't update existing nodes
-    Update,      // Update properties and title if provided
-    Preserve,    // Update but prefer existing values
+    Replace,  // Replace all properties and title (current behavior)
+    Skip,     // Don't update existing nodes
+    Update,   // Update properties and title if provided
+    Preserve, // Update but prefer existing values
 }
 
 impl Default for ConflictHandling {
     fn default() -> Self {
-        ConflictHandling::Update  // New default behavior
+        ConflictHandling::Update // New default behavior
     }
 }
 
@@ -66,11 +66,10 @@ struct NodeCreation {
 #[derive(Debug)]
 struct NodeUpdate {
     node_idx: NodeIndex,
-    title: Option<Value>,  // Changed to Option
+    title: Option<Value>, // Changed to Option
     properties: HashMap<String, Value>,
     conflict_mode: ConflictHandling,
 }
-
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BatchStats {
@@ -92,7 +91,7 @@ pub struct BatchProcessor {
     capacity: usize,
     batch_type: BatchType,
     metrics: BatchMetrics,
-    accumulated_stats: BatchStats,  // Track stats across intermediate flushes
+    accumulated_stats: BatchStats, // Track stats across intermediate flushes
 }
 
 impl BatchProcessor {
@@ -115,20 +114,30 @@ impl BatchProcessor {
 
     pub fn add_action(&mut self, action: NodeAction, graph: &mut DirGraph) -> Result<(), String> {
         match action {
-            NodeAction::Create { node_type, id, title, properties } => {
+            NodeAction::Create {
+                node_type,
+                id,
+                title,
+                properties,
+            } => {
                 self.creates.push(NodeCreation {
                     node_type,
                     id,
                     title,
                     properties,
                 });
-            },
-            NodeAction::Update { node_idx, title, properties, conflict_mode } => {
+            }
+            NodeAction::Update {
+                node_idx,
+                title,
+                properties,
+                conflict_mode,
+            } => {
                 self.updates.push(NodeUpdate {
                     node_idx,
                     title,
                     properties,
-                    conflict_mode,  // Add this field
+                    conflict_mode, // Add this field
                 });
             }
         }
@@ -137,7 +146,7 @@ impl BatchProcessor {
         if let BatchType::Large = self.batch_type {
             if self.creates.len() >= self.capacity {
                 let stats = self.flush_chunk(graph)?;
-                self.accumulated_stats.combine(&stats);  // Accumulate stats from intermediate flushes
+                self.accumulated_stats.combine(&stats); // Accumulate stats from intermediate flushes
             }
         }
 
@@ -161,9 +170,14 @@ impl BatchProcessor {
             );
             let node_idx = graph.graph.add_node(node_data);
             // Add to type index
-            graph.type_indices.entry(creation.node_type).or_default().push(node_idx);
+            graph
+                .type_indices
+                .entry(creation.node_type)
+                .or_default()
+                .push(node_idx);
             // Add to ID index for O(1) lookups
-            graph.id_indices
+            graph
+                .id_indices
                 .entry(node_type_for_index)
                 .or_default()
                 .insert(id_for_index, node_idx);
@@ -174,20 +188,24 @@ impl BatchProcessor {
         for update in self.updates.drain(..) {
             if let Some(node) = graph.get_node_mut(update.node_idx) {
                 match node {
-                    NodeData::Regular { title, properties, .. } |
-                    NodeData::Schema { title, properties, .. } => {
+                    NodeData::Regular {
+                        title, properties, ..
+                    }
+                    | NodeData::Schema {
+                        title, properties, ..
+                    } => {
                         match update.conflict_mode {
                             ConflictHandling::Skip => {
                                 // Skip this node entirely
                                 continue;
-                            },
+                            }
                             ConflictHandling::Replace => {
                                 // Current behavior - complete replacement
                                 if let Some(new_title) = update.title {
                                     *title = new_title;
                                 }
                                 *properties = update.properties;
-                            },
+                            }
                             ConflictHandling::Update => {
                                 // Update only if provided
                                 if let Some(new_title) = update.title {
@@ -197,7 +215,7 @@ impl BatchProcessor {
                                 for (k, v) in update.properties {
                                     properties.insert(k, v);
                                 }
-                            },
+                            }
                             ConflictHandling::Preserve => {
                                 // Update only if provided, but preserve existing values
                                 if let Some(new_title) = update.title {
@@ -234,7 +252,7 @@ impl BatchProcessor {
                 // Process in a single batch
                 let stats = self.flush_chunk(graph)?;
                 total_stats.combine(&stats);
-            },
+            }
             BatchType::Large => {
                 // Process any remaining items
                 if !self.creates.is_empty() || !self.updates.is_empty() {
@@ -277,7 +295,7 @@ pub struct ConnectionBatchProcessor {
     batch_type: BatchType,
     metrics: BatchMetrics,
     conflict_mode: ConflictHandling,
-    accumulated_stats: ConnectionBatchStats,  // Track stats across intermediate flushes
+    accumulated_stats: ConnectionBatchStats, // Track stats across intermediate flushes
 }
 
 impl ConnectionBatchProcessor {
@@ -298,7 +316,7 @@ impl ConnectionBatchProcessor {
             accumulated_stats: ConnectionBatchStats::default(),
         }
     }
-    
+
     // Add setter for conflict mode
     pub fn set_conflict_mode(&mut self, mode: ConflictHandling) {
         self.conflict_mode = mode;
@@ -314,12 +332,12 @@ impl ConnectionBatchProcessor {
     ) -> Result<(), String> {
         // Check if the edge already exists
         let existing_edge = graph.graph.find_edge(source_idx, target_idx);
-        
+
         // If edge exists and conflict mode is Skip, don't add it
         if existing_edge.is_some() && self.conflict_mode == ConflictHandling::Skip {
             return Ok(());
         }
-        
+
         // Track property names for schema
         for key in properties.keys() {
             self.schema_properties.insert(key.clone());
@@ -335,7 +353,7 @@ impl ConnectionBatchProcessor {
         if let BatchType::Large = self.batch_type {
             if self.connections.len() >= self.capacity {
                 let stats = self.flush_chunk(graph, connection_type)?;
-                self.accumulated_stats.combine(&stats);  // Accumulate stats from intermediate flushes
+                self.accumulated_stats.combine(&stats); // Accumulate stats from intermediate flushes
             }
         }
 
@@ -358,29 +376,37 @@ impl ConnectionBatchProcessor {
                     ConflictHandling::Skip => {
                         // Skip this edge (should already be filtered in add_connection)
                         continue;
-                    },
+                    }
                     ConflictHandling::Replace => {
                         // Remove the existing edge and create a new one
                         graph.graph.remove_edge(edge_idx);
                         let edge_data = EdgeData::new(connection_type.to_string(), conn.properties);
-                        graph.graph.add_edge(conn.source_idx, conn.target_idx, edge_data);
+                        graph
+                            .graph
+                            .add_edge(conn.source_idx, conn.target_idx, edge_data);
                         stats.connections_created += 1;
-                    },
+                    }
                     ConflictHandling::Update => {
                         // Update existing edge properties
-                        if let Some(EdgeData { properties: edge_props, .. }) = 
-                              graph.graph.edge_weight_mut(edge_idx) {
+                        if let Some(EdgeData {
+                            properties: edge_props,
+                            ..
+                        }) = graph.graph.edge_weight_mut(edge_idx)
+                        {
                             // Merge properties, preferring new values
                             for (k, v) in conn.properties {
                                 edge_props.insert(k, v);
                             }
                             stats.connections_created += 1;
                         }
-                    },
+                    }
                     ConflictHandling::Preserve => {
                         // Update but preserve existing values
-                        if let Some(EdgeData { properties: edge_props, .. }) = 
-                              graph.graph.edge_weight_mut(edge_idx) {
+                        if let Some(EdgeData {
+                            properties: edge_props,
+                            ..
+                        }) = graph.graph.edge_weight_mut(edge_idx)
+                        {
                             // Merge properties, preferring existing values
                             for (k, v) in conn.properties {
                                 edge_props.entry(k).or_insert(v);
@@ -392,7 +418,9 @@ impl ConnectionBatchProcessor {
             } else {
                 // Create new edge
                 let edge_data = EdgeData::new(connection_type.to_string(), conn.properties);
-                graph.graph.add_edge(conn.source_idx, conn.target_idx, edge_data);
+                graph
+                    .graph
+                    .add_edge(conn.source_idx, conn.target_idx, edge_data);
                 stats.connections_created += 1;
             }
         }
@@ -422,7 +450,7 @@ impl ConnectionBatchProcessor {
                 // Process in a single batch
                 let stats = self.flush_chunk(graph, &connection_type)?;
                 total_stats.combine(&stats);
-            },
+            }
             BatchType::Large => {
                 // Process any remaining items
                 if !self.connections.is_empty() {

@@ -1,10 +1,10 @@
 // src/graph/cypher/planner.rs
 // Query optimizer: predicate pushdown, index hints, limit pushdown
 
-use crate::datatypes::values::Value;
-use crate::graph::schema::DirGraph;
-use crate::graph::pattern_matching::{PatternElement, PropertyMatcher};
 use super::ast::*;
+use crate::datatypes::values::Value;
+use crate::graph::pattern_matching::{PatternElement, PropertyMatcher};
+use crate::graph::schema::DirGraph;
 
 /// Optimize a parsed Cypher query before execution
 pub fn optimize(query: &mut CypherQuery, graph: &DirGraph) {
@@ -157,10 +157,8 @@ fn try_extract_equality(
     match_vars: &[(String, Option<String>)],
 ) -> Option<(String, String, Value)> {
     // Left is property access, right is literal
-    if let (
-        Expression::PropertyAccess { variable, property },
-        Expression::Literal(val),
-    ) = (left, right)
+    if let (Expression::PropertyAccess { variable, property }, Expression::Literal(val)) =
+        (left, right)
     {
         if match_vars.iter().any(|(v, _)| v == variable) {
             return Some((variable.clone(), property.clone(), val.clone()));
@@ -168,10 +166,8 @@ fn try_extract_equality(
     }
 
     // Right is property access, left is literal (commutative)
-    if let (
-        Expression::Literal(val),
-        Expression::PropertyAccess { variable, property },
-    ) = (left, right)
+    if let (Expression::Literal(val), Expression::PropertyAccess { variable, property }) =
+        (left, right)
     {
         if match_vars.iter().any(|(v, _)| v == variable) {
             return Some((variable.clone(), property.clone(), val.clone()));
@@ -212,9 +208,7 @@ mod tests {
 
     #[test]
     fn test_predicate_pushdown_simple() {
-        let mut query = parse_cypher(
-            "MATCH (n:Person) WHERE n.age = 30 RETURN n"
-        ).unwrap();
+        let mut query = parse_cypher("MATCH (n:Person) WHERE n.age = 30 RETURN n").unwrap();
 
         let graph = DirGraph::new();
         optimize(&mut query, &graph);
@@ -238,9 +232,8 @@ mod tests {
 
     #[test]
     fn test_predicate_pushdown_partial() {
-        let mut query = parse_cypher(
-            "MATCH (n:Person) WHERE n.age = 30 AND n.score > 100 RETURN n"
-        ).unwrap();
+        let mut query =
+            parse_cypher("MATCH (n:Person) WHERE n.age = 30 AND n.score > 100 RETURN n").unwrap();
 
         let graph = DirGraph::new();
         optimize(&mut query, &graph);
@@ -251,15 +244,19 @@ mod tests {
 
         if let Clause::Where(w) = &query.clauses[1] {
             // Remaining should be n.score > 100
-            assert!(matches!(&w.predicate, Predicate::Comparison { operator: ComparisonOp::GreaterThan, .. }));
+            assert!(matches!(
+                &w.predicate,
+                Predicate::Comparison {
+                    operator: ComparisonOp::GreaterThan,
+                    ..
+                }
+            ));
         }
     }
 
     #[test]
     fn test_no_pushdown_for_non_equality() {
-        let mut query = parse_cypher(
-            "MATCH (n:Person) WHERE n.age > 30 RETURN n"
-        ).unwrap();
+        let mut query = parse_cypher("MATCH (n:Person) WHERE n.age > 30 RETURN n").unwrap();
 
         let graph = DirGraph::new();
         optimize(&mut query, &graph);

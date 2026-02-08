@@ -72,8 +72,8 @@ jobs:
       - name: Install dependencies
         run: pip install maturin pytest pandas
 
-      - name: Build extension
-        run: maturin develop
+      - name: Build and install extension
+        run: pip install .
 
       - name: Run Python tests
         run: pytest tests/ -v --tb=short
@@ -107,8 +107,8 @@ jobs:
       - name: Install dependencies
         run: pip install maturin pytest pandas
 
-      - name: Build extension
-        run: maturin develop --release
+      - name: Build and install extension
+        run: pip install .
 
       - name: Run benchmarks
         run: pytest tests/benchmarks/ -v -m benchmark -s

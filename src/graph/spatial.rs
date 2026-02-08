@@ -1,13 +1,13 @@
 // Spatial/Geometry Operations Module
 // Provides spatial filtering and geometry operations on graph nodes
 
+use geo::geometry::{Geometry, LineString, Point, Polygon};
+use geo::{Centroid, Contains, Intersects, Rect};
 use petgraph::graph::NodeIndex;
-use geo::{Rect, Contains, Intersects, Centroid};
-use geo::geometry::{Geometry, Polygon, LineString, Point};
 use wkt::TryFromWkt;
 
 use crate::datatypes::values::Value;
-use crate::graph::schema::{DirGraph, CurrentSelection, NodeData};
+use crate::graph::schema::{CurrentSelection, DirGraph, NodeData};
 
 /// Filter nodes that fall within a geographic bounding box
 ///
@@ -34,7 +34,8 @@ pub fn within_bounds(
     // Get nodes from current selection
     let level_count = selection.get_level_count();
     let nodes: Vec<NodeIndex> = if level_count > 0 {
-        selection.get_level(level_count - 1)
+        selection
+            .get_level(level_count - 1)
             .map(|l| l.get_all_nodes())
             .unwrap_or_default()
     } else {
@@ -92,7 +93,8 @@ pub fn near_point(
     // Get nodes from current selection
     let level_count = selection.get_level_count();
     let nodes: Vec<NodeIndex> = if level_count > 0 {
-        selection.get_level(level_count - 1)
+        selection
+            .get_level(level_count - 1)
             .map(|l| l.get_all_nodes())
             .unwrap_or_default()
     } else {
@@ -171,7 +173,8 @@ pub fn near_point_km(
     // Get nodes from current selection
     let level_count = selection.get_level_count();
     let nodes: Vec<NodeIndex> = if level_count > 0 {
-        selection.get_level(level_count - 1)
+        selection
+            .get_level(level_count - 1)
             .map(|l| l.get_all_nodes())
             .unwrap_or_default()
     } else {
@@ -204,8 +207,7 @@ pub fn near_point_km(
 
 /// Parse a WKT string into a geo Geometry
 pub fn parse_wkt(wkt_string: &str) -> Result<Geometry<f64>, String> {
-    Geometry::try_from_wkt_str(wkt_string)
-        .map_err(|e| format!("Invalid WKT: {:?}", e))
+    Geometry::try_from_wkt_str(wkt_string).map_err(|e| format!("Invalid WKT: {:?}", e))
 }
 
 /// Extract centroid coordinates from a WKT geometry string
@@ -226,7 +228,7 @@ pub fn wkt_centroid(wkt_string: &str) -> Result<(f64, f64), String> {
     };
 
     match centroid {
-        Some(point) => Ok((point.y(), point.x())),  // lat=y, lon=x
+        Some(point) => Ok((point.y(), point.x())), // lat=y, lon=x
         None => Err("Could not calculate centroid for geometry".to_string()),
     }
 }
@@ -254,7 +256,8 @@ pub fn near_point_km_from_geometry(
     // Get nodes from current selection
     let level_count = selection.get_level_count();
     let nodes: Vec<NodeIndex> = if level_count > 0 {
-        selection.get_level(level_count - 1)
+        selection
+            .get_level(level_count - 1)
             .map(|l| l.get_all_nodes())
             .unwrap_or_default()
     } else {
@@ -300,12 +303,13 @@ pub fn contains_point(
     lat: f64,
     lon: f64,
 ) -> Result<Vec<NodeIndex>, String> {
-    let query_point = Point::new(lon, lat);  // geo uses (x, y) = (lon, lat)
+    let query_point = Point::new(lon, lat); // geo uses (x, y) = (lon, lat)
 
     // Get nodes from current selection
     let level_count = selection.get_level_count();
     let nodes: Vec<NodeIndex> = if level_count > 0 {
-        selection.get_level(level_count - 1)
+        selection
+            .get_level(level_count - 1)
             .map(|l| l.get_all_nodes())
             .unwrap_or_default()
     } else {
@@ -359,7 +363,8 @@ pub fn intersects_geometry(
     // Get nodes from current selection
     let level_count = selection.get_level_count();
     let nodes: Vec<NodeIndex> = if level_count > 0 {
-        selection.get_level(level_count - 1)
+        selection
+            .get_level(level_count - 1)
             .map(|l| l.get_all_nodes())
             .unwrap_or_default()
     } else {
@@ -393,29 +398,21 @@ pub fn intersects_geometry(
 fn geometries_intersect(a: &Geometry<f64>, b: &Geometry<f64>) -> bool {
     match (a, b) {
         (Geometry::Point(p1), Geometry::Point(p2)) => p1 == p2,
-        (Geometry::Point(p), Geometry::Polygon(poly)) | (Geometry::Polygon(poly), Geometry::Point(p)) => {
-            poly.contains(p)
-        }
+        (Geometry::Point(p), Geometry::Polygon(poly))
+        | (Geometry::Polygon(poly), Geometry::Point(p)) => poly.contains(p),
         (Geometry::Point(p), Geometry::Rect(r)) | (Geometry::Rect(r), Geometry::Point(p)) => {
             r.contains(p)
         }
-        (Geometry::Polygon(p1), Geometry::Polygon(p2)) => {
-            p1.intersects(p2)
-        }
-        (Geometry::Rect(r1), Geometry::Rect(r2)) => {
-            r1.intersects(r2)
-        }
+        (Geometry::Polygon(p1), Geometry::Polygon(p2)) => p1.intersects(p2),
+        (Geometry::Rect(r1), Geometry::Rect(r2)) => r1.intersects(r2),
         (Geometry::Polygon(p), Geometry::Rect(r)) | (Geometry::Rect(r), Geometry::Polygon(p)) => {
             // Convert rect to polygon for intersection check
             let rect_poly = rect_to_polygon(r);
             p.intersects(&rect_poly)
         }
-        (Geometry::LineString(l1), Geometry::LineString(l2)) => {
-            l1.intersects(l2)
-        }
-        (Geometry::LineString(l), Geometry::Polygon(p)) | (Geometry::Polygon(p), Geometry::LineString(l)) => {
-            l.intersects(p)
-        }
+        (Geometry::LineString(l1), Geometry::LineString(l2)) => l1.intersects(l2),
+        (Geometry::LineString(l), Geometry::Polygon(p))
+        | (Geometry::Polygon(p), Geometry::LineString(l)) => l.intersects(p),
         // For other combinations, try a general approach
         _ => false,
     }
@@ -456,7 +453,8 @@ pub fn calculate_centroid(
 ) -> Option<(f64, f64)> {
     let level_count = selection.get_level_count();
     let nodes: Vec<NodeIndex> = if level_count > 0 {
-        selection.get_level(level_count - 1)
+        selection
+            .get_level(level_count - 1)
             .map(|l| l.get_all_nodes())
             .unwrap_or_default()
     } else {
@@ -501,7 +499,8 @@ pub fn get_bounds(
 ) -> Option<(f64, f64, f64, f64)> {
     let level_count = selection.get_level_count();
     let nodes: Vec<NodeIndex> = if level_count > 0 {
-        selection.get_level(level_count - 1)
+        selection
+            .get_level(level_count - 1)
             .map(|l| l.get_all_nodes())
             .unwrap_or_default()
     } else {

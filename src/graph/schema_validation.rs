@@ -1,18 +1,18 @@
 // src/graph/schema_validation.rs
 //! Schema validation module for validating graph data against a defined schema.
 
-use std::collections::HashMap;
-use petgraph::visit::EdgeRef;
 use crate::datatypes::values::Value;
 use crate::graph::schema::{
-    DirGraph, NodeData, SchemaDefinition, NodeSchemaDefinition, ValidationError
+    DirGraph, NodeData, NodeSchemaDefinition, SchemaDefinition, ValidationError,
 };
+use petgraph::visit::EdgeRef;
+use std::collections::HashMap;
 
 /// Validate the graph against the provided schema definition
 pub fn validate_graph(
     graph: &DirGraph,
     schema: &SchemaDefinition,
-    strict: bool,  // If true, report undefined types as errors
+    strict: bool, // If true, report undefined types as errors
 ) -> Vec<ValidationError> {
     let mut errors = Vec::new();
 
@@ -72,7 +72,9 @@ fn validate_single_node(
     let mut errors = Vec::new();
 
     let (title, properties) = match node {
-        NodeData::Regular { title, properties, .. } => {
+        NodeData::Regular {
+            title, properties, ..
+        } => {
             let title_str = match title {
                 Value::String(s) => s.clone(),
                 _ => format!("{:?}", title),
@@ -89,7 +91,8 @@ fn validate_single_node(
             continue;
         }
 
-        let has_field = properties.get(required_field)
+        let has_field = properties
+            .get(required_field)
             .map(|v| !matches!(v, Value::Null))
             .unwrap_or(false);
 
@@ -135,7 +138,9 @@ fn validate_connections(
         let connection_type = &edge_data.connection_type;
 
         // Count connection types for strict mode check
-        *connection_type_counts.entry(connection_type.clone()).or_insert(0) += 1;
+        *connection_type_counts
+            .entry(connection_type.clone())
+            .or_insert(0) += 1;
 
         // If there's a schema for this connection type, validate it
         if let Some(conn_schema) = schema.connection_schemas.get(connection_type) {
@@ -159,7 +164,9 @@ fn validate_connections(
 
             // Validate required properties
             for required_prop in &conn_schema.required_properties {
-                let has_prop = edge_data.properties.get(required_prop)
+                let has_prop = edge_data
+                    .properties
+                    .get(required_prop)
                     .map(|v| !matches!(v, Value::Null))
                     .unwrap_or(false);
 
@@ -193,14 +200,18 @@ fn validate_connections(
 /// Get node type and title from a node index
 fn get_node_info(graph: &DirGraph, node_idx: petgraph::graph::NodeIndex) -> (String, String) {
     match graph.get_node(node_idx) {
-        Some(NodeData::Regular { node_type, title, .. }) => {
+        Some(NodeData::Regular {
+            node_type, title, ..
+        }) => {
             let title_str = match title {
                 Value::String(s) => s.clone(),
                 _ => format!("{:?}", title),
             };
             (node_type.clone(), title_str)
         }
-        Some(NodeData::Schema { node_type, title, .. }) => {
+        Some(NodeData::Schema {
+            node_type, title, ..
+        }) => {
             let title_str = match title {
                 Value::String(s) => s.clone(),
                 _ => format!("{:?}", title),
@@ -217,13 +228,16 @@ fn value_matches_type(value: &Value, expected_type: &str) -> bool {
         "string" | "str" => matches!(value, Value::String(_)),
         "integer" | "int" | "i64" => matches!(value, Value::Int64(_) | Value::UniqueId(_)),
         "float" | "double" | "f64" | "number" => {
-            matches!(value, Value::Float64(_) | Value::Int64(_) | Value::UniqueId(_))
+            matches!(
+                value,
+                Value::Float64(_) | Value::Int64(_) | Value::UniqueId(_)
+            )
         }
         "boolean" | "bool" => matches!(value, Value::Boolean(_)),
         "datetime" | "date" => matches!(value, Value::DateTime(_)),
         "null" => matches!(value, Value::Null),
-        "any" => true,  // Any type is valid
-        _ => true,  // Unknown types default to valid (permissive)
+        "any" => true, // Any type is valid
+        _ => true,     // Unknown types default to valid (permissive)
     }
 }
 
@@ -246,10 +260,16 @@ mod tests {
 
     #[test]
     fn test_value_matches_type() {
-        assert!(value_matches_type(&Value::String("test".to_string()), "string"));
+        assert!(value_matches_type(
+            &Value::String("test".to_string()),
+            "string"
+        ));
         assert!(value_matches_type(&Value::Int64(42), "integer"));
         assert!(value_matches_type(&Value::Float64(3.14), "float"));
         assert!(value_matches_type(&Value::Boolean(true), "boolean"));
-        assert!(!value_matches_type(&Value::String("test".to_string()), "integer"));
+        assert!(!value_matches_type(
+            &Value::String("test".to_string()),
+            "integer"
+        ));
     }
 }

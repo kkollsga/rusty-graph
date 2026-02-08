@@ -1,12 +1,12 @@
 // src/graph/graph_algorithms.rs
 //! Graph algorithms module providing path finding and connectivity analysis.
 
-use std::collections::HashMap;
-use petgraph::graph::NodeIndex;
-use petgraph::algo::kosaraju_scc;
-use petgraph::visit::EdgeRef;
-use crate::graph::schema::{DirGraph, NodeData};
 use crate::datatypes::values::Value;
+use crate::graph::schema::{DirGraph, NodeData};
+use petgraph::algo::kosaraju_scc;
+use petgraph::graph::NodeIndex;
+use petgraph::visit::EdgeRef;
+use std::collections::HashMap;
 
 /// Result of a path finding operation
 #[derive(Debug, Clone)]
@@ -28,11 +28,7 @@ pub struct PathNodeInfo {
 /// Find the shortest path between two nodes using undirected BFS.
 /// This treats the graph as undirected, finding connections in either direction.
 /// Returns None if no path exists.
-pub fn shortest_path(
-    graph: &DirGraph,
-    source: NodeIndex,
-    target: NodeIndex,
-) -> Option<PathResult> {
+pub fn shortest_path(graph: &DirGraph, source: NodeIndex, target: NodeIndex) -> Option<PathResult> {
     // Use BFS for undirected path finding (more appropriate for knowledge graphs)
     let path = reconstruct_path_bfs(graph, source, target)?;
     let cost = path.len().saturating_sub(1); // Cost is number of edges
@@ -225,7 +221,12 @@ pub fn weakly_connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
 /// Get node info for building Python-friendly path output
 pub fn get_node_info(graph: &DirGraph, node_idx: NodeIndex) -> Option<PathNodeInfo> {
     match graph.get_node(node_idx)? {
-        NodeData::Regular { node_type, title, id, .. } => {
+        NodeData::Regular {
+            node_type,
+            title,
+            id,
+            ..
+        } => {
             let title_str = match title {
                 Value::String(s) => s.clone(),
                 _ => format!("{:?}", title),
@@ -236,7 +237,9 @@ pub fn get_node_info(graph: &DirGraph, node_idx: NodeIndex) -> Option<PathNodeIn
                 id: id.clone(),
             })
         }
-        NodeData::Schema { node_type, title, .. } => {
+        NodeData::Schema {
+            node_type, title, ..
+        } => {
             let title_str = match title {
                 Value::String(s) => s.clone(),
                 _ => format!("{:?}", title),
@@ -251,10 +254,7 @@ pub fn get_node_info(graph: &DirGraph, node_idx: NodeIndex) -> Option<PathNodeIn
 }
 
 /// Get information about what connection types link nodes in a path
-pub fn get_path_connections(
-    graph: &DirGraph,
-    path: &[NodeIndex],
-) -> Vec<Option<String>> {
+pub fn get_path_connections(graph: &DirGraph, path: &[NodeIndex]) -> Vec<Option<String>> {
     // Pre-allocate with exact size (one connection per edge = path.len() - 1)
     let mut connections = Vec::with_capacity(path.len().saturating_sub(1));
 
@@ -263,11 +263,15 @@ pub fn get_path_connections(
         let to = window[1];
 
         // Find edge between these nodes (either direction)
-        let conn_type = graph.graph.edges(from)
+        let conn_type = graph
+            .graph
+            .edges(from)
             .find(|e| e.target() == to)
             .map(|e| e.weight().connection_type.clone())
             .or_else(|| {
-                graph.graph.edges(to)
+                graph
+                    .graph
+                    .edges(to)
                     .find(|e| e.target() == from)
                     .map(|e| e.weight().connection_type.clone())
             });
@@ -285,8 +289,11 @@ pub fn are_connected(graph: &DirGraph, source: NodeIndex, target: NodeIndex) -> 
 
 /// Calculate the degree (number of connections) for a node
 pub fn node_degree(graph: &DirGraph, node: NodeIndex) -> usize {
-    graph.graph.edges(node).count() +
-    graph.graph.neighbors_directed(node, petgraph::Direction::Incoming).count()
+    graph.graph.edges(node).count()
+        + graph
+            .graph
+            .neighbors_directed(node, petgraph::Direction::Incoming)
+            .count()
 }
 
 // ============================================================================
@@ -324,11 +331,18 @@ pub fn betweenness_centrality(
     let n = nodes.len();
 
     if n <= 2 {
-        return nodes.iter().map(|&idx| CentralityResult { node_idx: idx, score: 0.0 }).collect();
+        return nodes
+            .iter()
+            .map(|&idx| CentralityResult {
+                node_idx: idx,
+                score: 0.0,
+            })
+            .collect();
     }
 
     // Create node index mapping for O(1) lookup (NodeIndex -> array index)
-    let node_to_idx: HashMap<NodeIndex, usize> = nodes.iter()
+    let node_to_idx: HashMap<NodeIndex, usize> = nodes
+        .iter()
         .enumerate()
         .map(|(i, &node)| (node, i))
         .collect();
@@ -423,13 +437,21 @@ pub fn betweenness_centrality(
     }
 
     // Convert to sorted results
-    let mut results: Vec<CentralityResult> = nodes.iter()
+    let mut results: Vec<CentralityResult> = nodes
+        .iter()
         .enumerate()
-        .map(|(i, &node_idx)| CentralityResult { node_idx, score: betweenness[i] })
+        .map(|(i, &node_idx)| CentralityResult {
+            node_idx,
+            score: betweenness[i],
+        })
         .collect();
 
     // Sort by score descending
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     results
 }
@@ -458,19 +480,22 @@ pub fn pagerank(
     }
 
     // Create node index mapping for efficient lookup
-    let node_to_idx: HashMap<NodeIndex, usize> = nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+    let node_to_idx: HashMap<NodeIndex, usize> =
+        nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
     // Initialize PageRank scores (uniform distribution)
     let mut pr: Vec<f64> = vec![1.0 / n as f64; n];
     let mut new_pr: Vec<f64> = vec![0.0; n];
 
     // Precompute out-degrees
-    let out_degrees: Vec<usize> = nodes.iter()
+    let out_degrees: Vec<usize> = nodes
+        .iter()
         .map(|&node| graph.graph.neighbors_undirected(node).count())
         .collect();
 
     // Identify dangling nodes (no outgoing links)
-    let dangling_nodes: Vec<usize> = out_degrees.iter()
+    let dangling_nodes: Vec<usize> = out_degrees
+        .iter()
         .enumerate()
         .filter(|(_, &deg)| deg == 0)
         .map(|(i, _)| i)
@@ -502,7 +527,9 @@ pub fn pagerank(
         }
 
         // Check for convergence
-        let diff: f64 = pr.iter().zip(new_pr.iter())
+        let diff: f64 = pr
+            .iter()
+            .zip(new_pr.iter())
             .map(|(old, new)| (old - new).abs())
             .sum();
 
@@ -514,12 +541,20 @@ pub fn pagerank(
     }
 
     // Convert to results and sort by score
-    let mut results: Vec<CentralityResult> = nodes.iter()
+    let mut results: Vec<CentralityResult> = nodes
+        .iter()
         .enumerate()
-        .map(|(i, &node_idx)| CentralityResult { node_idx, score: pr[i] })
+        .map(|(i, &node_idx)| CentralityResult {
+            node_idx,
+            score: pr[i],
+        })
         .collect();
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     results
 }
@@ -532,9 +567,14 @@ pub fn degree_centrality(graph: &DirGraph, normalized: bool) -> Vec<CentralityRe
     let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
     let n = nodes.len();
 
-    let scale = if normalized && n > 1 { 1.0 / (n - 1) as f64 } else { 1.0 };
+    let scale = if normalized && n > 1 {
+        1.0 / (n - 1) as f64
+    } else {
+        1.0
+    };
 
-    let mut results: Vec<CentralityResult> = nodes.iter()
+    let mut results: Vec<CentralityResult> = nodes
+        .iter()
         .map(|&node_idx| {
             let degree = node_degree(graph, node_idx);
             CentralityResult {
@@ -544,7 +584,11 @@ pub fn degree_centrality(graph: &DirGraph, normalized: bool) -> Vec<CentralityRe
         })
         .collect();
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     results
 }
@@ -567,7 +611,8 @@ pub fn closeness_centrality(graph: &DirGraph, normalized: bool) -> Vec<Centralit
     }
 
     // Create node index mapping for O(1) lookup (NodeIndex -> array index)
-    let node_to_idx: HashMap<NodeIndex, usize> = nodes.iter()
+    let node_to_idx: HashMap<NodeIndex, usize> = nodes
+        .iter()
         .enumerate()
         .map(|(i, &node)| (node, i))
         .collect();
@@ -623,13 +668,23 @@ pub fn closeness_centrality(graph: &DirGraph, normalized: bool) -> Vec<Centralit
                 closeness
             };
 
-            results.push(CentralityResult { node_idx: source, score });
+            results.push(CentralityResult {
+                node_idx: source,
+                score,
+            });
         } else {
-            results.push(CentralityResult { node_idx: source, score: 0.0 });
+            results.push(CentralityResult {
+                node_idx: source,
+                score: 0.0,
+            });
         }
     }
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     results
 }
@@ -637,9 +692,9 @@ pub fn closeness_centrality(graph: &DirGraph, normalized: bool) -> Vec<Centralit
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use crate::datatypes::values::Value;
-    use crate::graph::schema::{DirGraph, NodeData, EdgeData};
+    use crate::graph::schema::{DirGraph, EdgeData, NodeData};
+    use std::collections::HashMap;
 
     /// Build a linear graph: A -> B -> C -> D -> E
     fn build_chain_graph() -> (DirGraph, Vec<petgraph::graph::NodeIndex>) {
@@ -653,7 +708,11 @@ mod tests {
                 HashMap::new(),
             );
             let idx = graph.graph.add_node(node);
-            graph.type_indices.entry("Chain".to_string()).or_default().push(idx);
+            graph
+                .type_indices
+                .entry("Chain".to_string())
+                .or_default()
+                .push(idx);
             indices.push(idx);
         }
         for i in 0..4 {
@@ -675,7 +734,11 @@ mod tests {
                 HashMap::new(),
             );
             let idx = graph.graph.add_node(node);
-            graph.type_indices.entry("Node".to_string()).or_default().push(idx);
+            graph
+                .type_indices
+                .entry("Node".to_string())
+                .or_default()
+                .push(idx);
             indices.push(idx);
         }
         // A->B, B->C, C->A
@@ -699,13 +762,25 @@ mod tests {
                 HashMap::new(),
             );
             let idx = graph.graph.add_node(node);
-            graph.type_indices.entry("Node".to_string()).or_default().push(idx);
+            graph
+                .type_indices
+                .entry("Node".to_string())
+                .or_default()
+                .push(idx);
             indices.push(idx);
         }
         // Component 1: A-B
-        graph.graph.add_edge(indices[0], indices[1], EdgeData::new("LINK".to_string(), HashMap::new()));
+        graph.graph.add_edge(
+            indices[0],
+            indices[1],
+            EdgeData::new("LINK".to_string(), HashMap::new()),
+        );
         // Component 2: C-D
-        graph.graph.add_edge(indices[2], indices[3], EdgeData::new("LINK".to_string(), HashMap::new()));
+        graph.graph.add_edge(
+            indices[2],
+            indices[3],
+            EdgeData::new("LINK".to_string(), HashMap::new()),
+        );
         (graph, indices)
     }
 
@@ -858,8 +933,16 @@ mod tests {
         let results = betweenness_centrality(&graph, false, None);
         assert_eq!(results.len(), 5);
         // Middle node (index 2) should have highest betweenness in a chain
-        let middle_score = results.iter().find(|r| r.node_idx == indices[2]).unwrap().score;
-        let end_score = results.iter().find(|r| r.node_idx == indices[0]).unwrap().score;
+        let middle_score = results
+            .iter()
+            .find(|r| r.node_idx == indices[2])
+            .unwrap()
+            .score;
+        let end_score = results
+            .iter()
+            .find(|r| r.node_idx == indices[0])
+            .unwrap()
+            .score;
         assert!(middle_score > end_score);
     }
 
@@ -883,7 +966,11 @@ mod tests {
         // All nodes in a symmetric triangle should have roughly equal PageRank
         let scores: Vec<f64> = results.iter().map(|r| r.score).collect();
         let diff = (scores[0] - scores[2]).abs();
-        assert!(diff < 0.01, "Triangle nodes should have similar PageRank: {:?}", scores);
+        assert!(
+            diff < 0.01,
+            "Triangle nodes should have similar PageRank: {:?}",
+            scores
+        );
     }
 
     #[test]
@@ -892,8 +979,16 @@ mod tests {
         let results = closeness_centrality(&graph, false);
         assert_eq!(results.len(), 5);
         // Middle node should have highest closeness
-        let middle = results.iter().find(|r| r.node_idx == indices[2]).unwrap().score;
-        let end = results.iter().find(|r| r.node_idx == indices[0]).unwrap().score;
+        let middle = results
+            .iter()
+            .find(|r| r.node_idx == indices[2])
+            .unwrap()
+            .score;
+        let end = results
+            .iter()
+            .find(|r| r.node_idx == indices[0])
+            .unwrap()
+            .score;
         assert!(middle > end);
     }
 

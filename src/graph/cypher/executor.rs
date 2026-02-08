@@ -1,14 +1,14 @@
 // src/graph/cypher/executor.rs
 // Pipeline executor for Cypher queries
 
-use std::collections::{HashMap, HashSet};
-use crate::datatypes::values::Value;
-use crate::graph::schema::{DirGraph, NodeData};
-use crate::graph::pattern_matching::{PatternExecutor, PatternMatch, MatchBinding};
-use crate::graph::filtering_methods;
-use crate::graph::value_operations;
 use super::ast::*;
 use super::result::*;
+use crate::datatypes::values::Value;
+use crate::graph::filtering_methods;
+use crate::graph::pattern_matching::{MatchBinding, PatternExecutor, PatternMatch};
+use crate::graph::schema::{DirGraph, NodeData};
+use crate::graph::value_operations;
+use std::collections::{HashMap, HashSet};
 
 // ============================================================================
 // Executor
@@ -40,7 +40,9 @@ impl<'a> CypherExecutor<'a> {
                 Clause::Unwind(u) => self.execute_unwind(u, result_set)?,
                 Clause::Union(u) => self.execute_union(u, result_set)?,
                 Clause::Create(_) | Clause::Set(_) | Clause::Delete(_) => {
-                    return Err("Mutation queries (CREATE/SET/DELETE) are not yet supported".to_string());
+                    return Err(
+                        "Mutation queries (CREATE/SET/DELETE) are not yet supported".to_string()
+                    );
                 }
             };
         }
@@ -53,7 +55,11 @@ impl<'a> CypherExecutor<'a> {
     // MATCH
     // ========================================================================
 
-    fn execute_match(&self, clause: &MatchClause, existing: ResultSet) -> Result<ResultSet, String> {
+    fn execute_match(
+        &self,
+        clause: &MatchClause,
+        existing: ResultSet,
+    ) -> Result<ResultSet, String> {
         if existing.rows.is_empty() {
             // First MATCH: execute patterns to produce initial bindings
             let mut all_rows = Vec::new();
@@ -273,15 +279,23 @@ impl<'a> CypherExecutor<'a> {
     // WHERE
     // ========================================================================
 
-    fn execute_where(&self, clause: &WhereClause, mut result_set: ResultSet) -> Result<ResultSet, String> {
+    fn execute_where(
+        &self,
+        clause: &WhereClause,
+        mut result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
         // Try index-accelerated filtering for simple equality predicates
         let index_filters = self.extract_indexable_predicates(&clause.predicate);
         for (variable, property, value) in &index_filters {
             if let Some(node_type) = self.infer_node_type(variable, &result_set) {
-                if let Some(matching_indices) = self.graph.lookup_by_index(&node_type, &property, value) {
-                    let index_set: HashSet<petgraph::graph::NodeIndex> = matching_indices.into_iter().collect();
+                if let Some(matching_indices) =
+                    self.graph.lookup_by_index(&node_type, &property, value)
+                {
+                    let index_set: HashSet<petgraph::graph::NodeIndex> =
+                        matching_indices.into_iter().collect();
                     result_set.rows.retain(|row| {
-                        row.node_bindings.get(variable.as_str())
+                        row.node_bindings
+                            .get(variable.as_str())
                             .map_or(false, |idx| index_set.contains(idx))
                     });
                 }
@@ -290,7 +304,8 @@ impl<'a> CypherExecutor<'a> {
 
         // Apply full predicate evaluation for remaining/non-indexable conditions
         result_set.rows.retain(|row| {
-            self.evaluate_predicate(&clause.predicate, row).unwrap_or(false)
+            self.evaluate_predicate(&clause.predicate, row)
+                .unwrap_or(false)
         });
         Ok(result_set)
     }
@@ -304,11 +319,23 @@ impl<'a> CypherExecutor<'a> {
 
     fn collect_indexable(&self, predicate: &Predicate, results: &mut Vec<(String, String, Value)>) {
         match predicate {
-            Predicate::Comparison { left, operator, right } => {
+            Predicate::Comparison {
+                left,
+                operator,
+                right,
+            } => {
                 if *operator == ComparisonOp::Equals {
-                    if let (Expression::PropertyAccess { variable, property }, Expression::Literal(value)) = (left, right) {
+                    if let (
+                        Expression::PropertyAccess { variable, property },
+                        Expression::Literal(value),
+                    ) = (left, right)
+                    {
                         results.push((variable.clone(), property.clone(), value.clone()));
-                    } else if let (Expression::Literal(value), Expression::PropertyAccess { variable, property }) = (left, right) {
+                    } else if let (
+                        Expression::Literal(value),
+                        Expression::PropertyAccess { variable, property },
+                    ) = (left, right)
+                    {
                         results.push((variable.clone(), property.clone(), value.clone()));
                     }
                 }
@@ -323,14 +350,16 @@ impl<'a> CypherExecutor<'a> {
 
     /// Infer the node type for a variable by checking the first row's binding.
     fn infer_node_type(&self, variable: &str, result_set: &ResultSet) -> Option<String> {
-        result_set.rows.iter()
-            .find_map(|row| {
-                row.node_bindings.get(variable)
-                    .and_then(|&idx| self.graph.graph.node_weight(idx))
-                    .map(|node| match node {
-                        NodeData::Regular { node_type, .. } | NodeData::Schema { node_type, .. } => node_type.clone(),
-                    })
-            })
+        result_set.rows.iter().find_map(|row| {
+            row.node_bindings
+                .get(variable)
+                .and_then(|&idx| self.graph.graph.node_weight(idx))
+                .map(|node| match node {
+                    NodeData::Regular { node_type, .. } | NodeData::Schema { node_type, .. } => {
+                        node_type.clone()
+                    }
+                })
+        })
     }
 
     fn evaluate_predicate(&self, pred: &Predicate, row: &ResultRow) -> Result<bool, String> {
@@ -358,9 +387,7 @@ impl<'a> CypherExecutor<'a> {
                 }
                 self.evaluate_predicate(right, row)
             }
-            Predicate::Not(inner) => {
-                Ok(!self.evaluate_predicate(inner, row)?)
-            }
+            Predicate::Not(inner) => Ok(!self.evaluate_predicate(inner, row)?),
             Predicate::IsNull(expr) => {
                 let val = self.evaluate_expression(expr, row)?;
                 Ok(matches!(val, Value::Null))
@@ -475,7 +502,12 @@ impl<'a> CypherExecutor<'a> {
 
     /// Resolve property access: variable.property
     /// Uses zero-copy get_field_ref when possible
-    fn resolve_property(&self, variable: &str, property: &str, row: &ResultRow) -> Result<Value, String> {
+    fn resolve_property(
+        &self,
+        variable: &str,
+        property: &str,
+        row: &ResultRow,
+    ) -> Result<Value, String> {
         // Check projected values first (from WITH)
         if let Some(val) = row.projected.get(variable) {
             // Projected values are flat - property access not applicable
@@ -596,12 +628,10 @@ impl<'a> CypherExecutor<'a> {
                 Ok(Value::Null)
             }
             // Aggregate functions should not be evaluated per-row
-            "count" | "sum" | "avg" | "min" | "max" | "collect" | "mean" | "std" => {
-                Err(format!(
-                    "Aggregate function '{}' cannot be used outside of RETURN/WITH",
-                    name
-                ))
-            }
+            "count" | "sum" | "avg" | "min" | "max" | "collect" | "mean" | "std" => Err(format!(
+                "Aggregate function '{}' cannot be used outside of RETURN/WITH",
+                name
+            )),
             _ => Err(format!("Unknown function: {}", name)),
         }
     }
@@ -610,8 +640,15 @@ impl<'a> CypherExecutor<'a> {
     // RETURN
     // ========================================================================
 
-    fn execute_return(&self, clause: &ReturnClause, result_set: ResultSet) -> Result<ResultSet, String> {
-        let has_aggregation = clause.items.iter().any(|item| is_aggregate_expression(&item.expression));
+    fn execute_return(
+        &self,
+        clause: &ReturnClause,
+        result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
+        let has_aggregation = clause
+            .items
+            .iter()
+            .any(|item| is_aggregate_expression(&item.expression));
 
         if has_aggregation {
             self.execute_return_with_aggregation(clause, result_set)
@@ -707,10 +744,7 @@ impl<'a> CypherExecutor<'a> {
                 })
                 .collect();
 
-            let key_strings: Vec<String> = key_values
-                .iter()
-                .map(format_value_compact)
-                .collect();
+            let key_strings: Vec<String> = key_values.iter().map(format_value_compact).collect();
 
             if let Some(&group_idx) = group_index_map.get(&key_strings) {
                 groups[group_idx].1.push(row_idx);
@@ -725,10 +759,8 @@ impl<'a> CypherExecutor<'a> {
         let mut result_rows = Vec::with_capacity(groups.len());
 
         for (group_key_values, row_indices) in &groups {
-            let group_rows: Vec<&ResultRow> = row_indices
-                .iter()
-                .map(|&i| &result_set.rows[i])
-                .collect();
+            let group_rows: Vec<&ResultRow> =
+                row_indices.iter().map(|&i| &result_set.rows[i]).collect();
 
             let mut projected = HashMap::new();
 
@@ -786,125 +818,120 @@ impl<'a> CypherExecutor<'a> {
                 name,
                 args,
                 distinct,
-            } => {
-                match name.to_lowercase().as_str() {
-                    "count" => {
-                        if args.len() == 1 && matches!(args[0], Expression::Star) {
-                            Ok(Value::Int64(rows.len() as i64))
-                        } else {
-                            let mut count = 0i64;
-                            let mut seen = HashSet::new();
-                            for row in rows {
-                                let val = self.evaluate_expression(&args[0], row)?;
-                                if !matches!(val, Value::Null) {
-                                    if *distinct {
-                                        if seen.insert(format_value_compact(&val)) {
-                                            count += 1;
-                                        }
-                                    } else {
-                                        count += 1;
-                                    }
-                                }
-                            }
-                            Ok(Value::Int64(count))
-                        }
-                    }
-                    "sum" => {
-                        let values = self.collect_numeric_values(&args[0], rows, *distinct)?;
-                        if values.is_empty() {
-                            Ok(Value::Int64(0))
-                        } else {
-                            Ok(Value::Float64(values.iter().sum()))
-                        }
-                    }
-                    "avg" | "mean" | "average" => {
-                        let values = self.collect_numeric_values(&args[0], rows, *distinct)?;
-                        if values.is_empty() {
-                            Ok(Value::Null)
-                        } else {
-                            Ok(Value::Float64(
-                                values.iter().sum::<f64>() / values.len() as f64,
-                            ))
-                        }
-                    }
-                    "min" => {
-                        let mut min_val: Option<Value> = None;
-                        for row in rows {
-                            let val = self.evaluate_expression(&args[0], row)?;
-                            if matches!(val, Value::Null) {
-                                continue;
-                            }
-                            min_val = Some(match min_val {
-                                None => val,
-                                Some(current) => {
-                                    if filtering_methods::compare_values(&val, &current)
-                                        == Some(std::cmp::Ordering::Less)
-                                    {
-                                        val
-                                    } else {
-                                        current
-                                    }
-                                }
-                            });
-                        }
-                        Ok(min_val.unwrap_or(Value::Null))
-                    }
-                    "max" => {
-                        let mut max_val: Option<Value> = None;
-                        for row in rows {
-                            let val = self.evaluate_expression(&args[0], row)?;
-                            if matches!(val, Value::Null) {
-                                continue;
-                            }
-                            max_val = Some(match max_val {
-                                None => val,
-                                Some(current) => {
-                                    if filtering_methods::compare_values(&val, &current)
-                                        == Some(std::cmp::Ordering::Greater)
-                                    {
-                                        val
-                                    } else {
-                                        current
-                                    }
-                                }
-                            });
-                        }
-                        Ok(max_val.unwrap_or(Value::Null))
-                    }
-                    "collect" => {
-                        let mut values = Vec::new();
+            } => match name.to_lowercase().as_str() {
+                "count" => {
+                    if args.len() == 1 && matches!(args[0], Expression::Star) {
+                        Ok(Value::Int64(rows.len() as i64))
+                    } else {
+                        let mut count = 0i64;
                         let mut seen = HashSet::new();
                         for row in rows {
                             let val = self.evaluate_expression(&args[0], row)?;
                             if !matches!(val, Value::Null) {
                                 if *distinct {
-                                    let key = format_value_compact(&val);
-                                    if !seen.insert(key) {
-                                        continue;
+                                    if seen.insert(format_value_compact(&val)) {
+                                        count += 1;
                                     }
+                                } else {
+                                    count += 1;
                                 }
-                                values.push(format_value_compact(&val));
                             }
                         }
-                        Ok(Value::String(format!("[{}]", values.join(", "))))
+                        Ok(Value::Int64(count))
                     }
-                    "std" => {
-                        let values = self.collect_numeric_values(&args[0], rows, *distinct)?;
-                        if values.len() < 2 {
-                            Ok(Value::Null)
-                        } else {
-                            let mean = values.iter().sum::<f64>() / values.len() as f64;
-                            let variance = values
-                                .iter()
-                                .map(|v| (v - mean).powi(2))
-                                .sum::<f64>()
-                                / (values.len() - 1) as f64;
-                            Ok(Value::Float64(variance.sqrt()))
+                }
+                "sum" => {
+                    let values = self.collect_numeric_values(&args[0], rows, *distinct)?;
+                    if values.is_empty() {
+                        Ok(Value::Int64(0))
+                    } else {
+                        Ok(Value::Float64(values.iter().sum()))
+                    }
+                }
+                "avg" | "mean" | "average" => {
+                    let values = self.collect_numeric_values(&args[0], rows, *distinct)?;
+                    if values.is_empty() {
+                        Ok(Value::Null)
+                    } else {
+                        Ok(Value::Float64(
+                            values.iter().sum::<f64>() / values.len() as f64,
+                        ))
+                    }
+                }
+                "min" => {
+                    let mut min_val: Option<Value> = None;
+                    for row in rows {
+                        let val = self.evaluate_expression(&args[0], row)?;
+                        if matches!(val, Value::Null) {
+                            continue;
+                        }
+                        min_val = Some(match min_val {
+                            None => val,
+                            Some(current) => {
+                                if filtering_methods::compare_values(&val, &current)
+                                    == Some(std::cmp::Ordering::Less)
+                                {
+                                    val
+                                } else {
+                                    current
+                                }
+                            }
+                        });
+                    }
+                    Ok(min_val.unwrap_or(Value::Null))
+                }
+                "max" => {
+                    let mut max_val: Option<Value> = None;
+                    for row in rows {
+                        let val = self.evaluate_expression(&args[0], row)?;
+                        if matches!(val, Value::Null) {
+                            continue;
+                        }
+                        max_val = Some(match max_val {
+                            None => val,
+                            Some(current) => {
+                                if filtering_methods::compare_values(&val, &current)
+                                    == Some(std::cmp::Ordering::Greater)
+                                {
+                                    val
+                                } else {
+                                    current
+                                }
+                            }
+                        });
+                    }
+                    Ok(max_val.unwrap_or(Value::Null))
+                }
+                "collect" => {
+                    let mut values = Vec::new();
+                    let mut seen = HashSet::new();
+                    for row in rows {
+                        let val = self.evaluate_expression(&args[0], row)?;
+                        if !matches!(val, Value::Null) {
+                            if *distinct {
+                                let key = format_value_compact(&val);
+                                if !seen.insert(key) {
+                                    continue;
+                                }
+                            }
+                            values.push(format_value_compact(&val));
                         }
                     }
-                    _ => Err(format!("Unknown aggregate function: {}", name)),
+                    Ok(Value::String(format!("[{}]", values.join(", "))))
                 }
-            }
+                "std" => {
+                    let values = self.collect_numeric_values(&args[0], rows, *distinct)?;
+                    if values.len() < 2 {
+                        Ok(Value::Null)
+                    } else {
+                        let mean = values.iter().sum::<f64>() / values.len() as f64;
+                        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                            / (values.len() - 1) as f64;
+                        Ok(Value::Float64(variance.sqrt()))
+                    }
+                }
+                _ => Err(format!("Unknown aggregate function: {}", name)),
+            },
             // Non-aggregate expression in an aggregation context - evaluate with first row
             _ => {
                 if let Some(row) = rows.first() {
@@ -946,7 +973,11 @@ impl<'a> CypherExecutor<'a> {
     // WITH
     // ========================================================================
 
-    fn execute_with(&self, clause: &WithClause, result_set: ResultSet) -> Result<ResultSet, String> {
+    fn execute_with(
+        &self,
+        clause: &WithClause,
+        result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
         // WITH is essentially RETURN that continues the pipeline
         let return_clause = ReturnClause {
             items: clause.items.clone(),
@@ -979,7 +1010,10 @@ impl<'a> CypherExecutor<'a> {
                 clause
                     .items
                     .iter()
-                    .map(|item| self.evaluate_expression(&item.expression, row).unwrap_or(Value::Null))
+                    .map(|item| {
+                        self.evaluate_expression(&item.expression, row)
+                            .unwrap_or(Value::Null)
+                    })
                     .collect()
             })
             .collect();
@@ -1027,7 +1061,11 @@ impl<'a> CypherExecutor<'a> {
     // LIMIT / SKIP
     // ========================================================================
 
-    fn execute_limit(&self, clause: &LimitClause, mut result_set: ResultSet) -> Result<ResultSet, String> {
+    fn execute_limit(
+        &self,
+        clause: &LimitClause,
+        mut result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
         let n = match self.evaluate_expression(&clause.count, &ResultRow::new())? {
             Value::Int64(n) if n >= 0 => n as usize,
             _ => return Err("LIMIT requires a non-negative integer".to_string()),
@@ -1036,7 +1074,11 @@ impl<'a> CypherExecutor<'a> {
         Ok(result_set)
     }
 
-    fn execute_skip(&self, clause: &SkipClause, mut result_set: ResultSet) -> Result<ResultSet, String> {
+    fn execute_skip(
+        &self,
+        clause: &SkipClause,
+        mut result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
         let n = match self.evaluate_expression(&clause.count, &ResultRow::new())? {
             Value::Int64(n) if n >= 0 => n as usize,
             _ => return Err("SKIP requires a non-negative integer".to_string()),
@@ -1053,7 +1095,11 @@ impl<'a> CypherExecutor<'a> {
     // UNWIND
     // ========================================================================
 
-    fn execute_unwind(&self, clause: &UnwindClause, result_set: ResultSet) -> Result<ResultSet, String> {
+    fn execute_unwind(
+        &self,
+        clause: &UnwindClause,
+        result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
         let mut new_rows = Vec::new();
 
         let source_rows = if result_set.rows.is_empty() {
@@ -1100,7 +1146,11 @@ impl<'a> CypherExecutor<'a> {
     // UNION
     // ========================================================================
 
-    fn execute_union(&self, clause: &UnionClause, result_set: ResultSet) -> Result<ResultSet, String> {
+    fn execute_union(
+        &self,
+        clause: &UnionClause,
+        result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
         // Execute the right side query
         let right_result = self.execute(&clause.query)?;
 
@@ -1229,9 +1279,7 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
         Expression::Add(l, r)
         | Expression::Subtract(l, r)
         | Expression::Multiply(l, r)
-        | Expression::Divide(l, r) => {
-            is_aggregate_expression(l) || is_aggregate_expression(r)
-        }
+        | Expression::Divide(l, r) => is_aggregate_expression(l) || is_aggregate_expression(r),
         Expression::Negate(inner) => is_aggregate_expression(inner),
         _ => false,
     }
@@ -1252,7 +1300,11 @@ fn expression_to_string(expr: &Expression) -> String {
         Expression::PropertyAccess { variable, property } => format!("{}.{}", variable, property),
         Expression::Variable(name) => name.clone(),
         Expression::Literal(val) => format_value_compact(val),
-        Expression::FunctionCall { name, args, distinct } => {
+        Expression::FunctionCall {
+            name,
+            args,
+            distinct,
+        } => {
             let args_str: Vec<String> = args.iter().map(expression_to_string).collect();
             if *distinct {
                 format!("{}(DISTINCT {})", name, args_str.join(", "))
@@ -1261,10 +1313,18 @@ fn expression_to_string(expr: &Expression) -> String {
             }
         }
         Expression::Star => "*".to_string(),
-        Expression::Add(l, r) => format!("{} + {}", expression_to_string(l), expression_to_string(r)),
-        Expression::Subtract(l, r) => format!("{} - {}", expression_to_string(l), expression_to_string(r)),
-        Expression::Multiply(l, r) => format!("{} * {}", expression_to_string(l), expression_to_string(r)),
-        Expression::Divide(l, r) => format!("{} / {}", expression_to_string(l), expression_to_string(r)),
+        Expression::Add(l, r) => {
+            format!("{} + {}", expression_to_string(l), expression_to_string(r))
+        }
+        Expression::Subtract(l, r) => {
+            format!("{} - {}", expression_to_string(l), expression_to_string(r))
+        }
+        Expression::Multiply(l, r) => {
+            format!("{} * {}", expression_to_string(l), expression_to_string(r))
+        }
+        Expression::Divide(l, r) => {
+            format!("{} / {}", expression_to_string(l), expression_to_string(r))
+        }
         Expression::Negate(inner) => format!("-{}", expression_to_string(inner)),
         Expression::ListLiteral(items) => {
             let items_str: Vec<String> = items.iter().map(expression_to_string).collect();
@@ -1322,7 +1382,11 @@ fn resolve_node_property(node: &NodeData, property: &str) -> Value {
 fn resolve_edge_property(edge: &EdgeBinding, property: &str) -> Value {
     match property {
         "type" | "connection_type" => Value::String(edge.connection_type.clone()),
-        _ => edge.properties.get(property).cloned().unwrap_or(Value::Null),
+        _ => edge
+            .properties
+            .get(property)
+            .cloned()
+            .unwrap_or(Value::Null),
     }
 }
 
@@ -1334,16 +1398,36 @@ fn node_to_map_value(node: &NodeData) -> Value {
 }
 
 // Delegate to shared value_operations module
-fn format_value_compact(val: &Value) -> String { value_operations::format_value_compact(val) }
-fn value_to_f64(val: &Value) -> Option<f64> { value_operations::value_to_f64(val) }
-fn arithmetic_add(a: &Value, b: &Value) -> Value { value_operations::arithmetic_add(a, b) }
-fn arithmetic_sub(a: &Value, b: &Value) -> Value { value_operations::arithmetic_sub(a, b) }
-fn arithmetic_mul(a: &Value, b: &Value) -> Value { value_operations::arithmetic_mul(a, b) }
-fn arithmetic_div(a: &Value, b: &Value) -> Value { value_operations::arithmetic_div(a, b) }
-fn arithmetic_negate(a: &Value) -> Value { value_operations::arithmetic_negate(a) }
-fn to_integer(val: &Value) -> Value { value_operations::to_integer(val) }
-fn to_float(val: &Value) -> Value { value_operations::to_float(val) }
-fn parse_value_string(s: &str) -> Value { value_operations::parse_value_string(s) }
+fn format_value_compact(val: &Value) -> String {
+    value_operations::format_value_compact(val)
+}
+fn value_to_f64(val: &Value) -> Option<f64> {
+    value_operations::value_to_f64(val)
+}
+fn arithmetic_add(a: &Value, b: &Value) -> Value {
+    value_operations::arithmetic_add(a, b)
+}
+fn arithmetic_sub(a: &Value, b: &Value) -> Value {
+    value_operations::arithmetic_sub(a, b)
+}
+fn arithmetic_mul(a: &Value, b: &Value) -> Value {
+    value_operations::arithmetic_mul(a, b)
+}
+fn arithmetic_div(a: &Value, b: &Value) -> Value {
+    value_operations::arithmetic_div(a, b)
+}
+fn arithmetic_negate(a: &Value) -> Value {
+    value_operations::arithmetic_negate(a)
+}
+fn to_integer(val: &Value) -> Value {
+    value_operations::to_integer(val)
+}
+fn to_float(val: &Value) -> Value {
+    value_operations::to_float(val)
+}
+fn parse_value_string(s: &str) -> Value {
+    value_operations::parse_value_string(s)
+}
 
 #[cfg(test)]
 mod tests {
@@ -1356,46 +1440,106 @@ mod tests {
 
     #[test]
     fn test_comparison_equals() {
-        assert!(evaluate_comparison(&Value::Int64(5), &ComparisonOp::Equals, &Value::Int64(5)));
-        assert!(!evaluate_comparison(&Value::Int64(5), &ComparisonOp::Equals, &Value::Int64(6)));
+        assert!(evaluate_comparison(
+            &Value::Int64(5),
+            &ComparisonOp::Equals,
+            &Value::Int64(5)
+        ));
+        assert!(!evaluate_comparison(
+            &Value::Int64(5),
+            &ComparisonOp::Equals,
+            &Value::Int64(6)
+        ));
     }
 
     #[test]
     fn test_comparison_not_equals() {
-        assert!(evaluate_comparison(&Value::Int64(5), &ComparisonOp::NotEquals, &Value::Int64(6)));
-        assert!(!evaluate_comparison(&Value::Int64(5), &ComparisonOp::NotEquals, &Value::Int64(5)));
+        assert!(evaluate_comparison(
+            &Value::Int64(5),
+            &ComparisonOp::NotEquals,
+            &Value::Int64(6)
+        ));
+        assert!(!evaluate_comparison(
+            &Value::Int64(5),
+            &ComparisonOp::NotEquals,
+            &Value::Int64(5)
+        ));
     }
 
     #[test]
     fn test_comparison_less_than() {
-        assert!(evaluate_comparison(&Value::Int64(3), &ComparisonOp::LessThan, &Value::Int64(5)));
-        assert!(!evaluate_comparison(&Value::Int64(5), &ComparisonOp::LessThan, &Value::Int64(5)));
+        assert!(evaluate_comparison(
+            &Value::Int64(3),
+            &ComparisonOp::LessThan,
+            &Value::Int64(5)
+        ));
+        assert!(!evaluate_comparison(
+            &Value::Int64(5),
+            &ComparisonOp::LessThan,
+            &Value::Int64(5)
+        ));
     }
 
     #[test]
     fn test_comparison_less_than_eq() {
-        assert!(evaluate_comparison(&Value::Int64(5), &ComparisonOp::LessThanEq, &Value::Int64(5)));
-        assert!(evaluate_comparison(&Value::Int64(3), &ComparisonOp::LessThanEq, &Value::Int64(5)));
-        assert!(!evaluate_comparison(&Value::Int64(6), &ComparisonOp::LessThanEq, &Value::Int64(5)));
+        assert!(evaluate_comparison(
+            &Value::Int64(5),
+            &ComparisonOp::LessThanEq,
+            &Value::Int64(5)
+        ));
+        assert!(evaluate_comparison(
+            &Value::Int64(3),
+            &ComparisonOp::LessThanEq,
+            &Value::Int64(5)
+        ));
+        assert!(!evaluate_comparison(
+            &Value::Int64(6),
+            &ComparisonOp::LessThanEq,
+            &Value::Int64(5)
+        ));
     }
 
     #[test]
     fn test_comparison_greater_than() {
-        assert!(evaluate_comparison(&Value::Int64(7), &ComparisonOp::GreaterThan, &Value::Int64(5)));
-        assert!(!evaluate_comparison(&Value::Int64(5), &ComparisonOp::GreaterThan, &Value::Int64(5)));
+        assert!(evaluate_comparison(
+            &Value::Int64(7),
+            &ComparisonOp::GreaterThan,
+            &Value::Int64(5)
+        ));
+        assert!(!evaluate_comparison(
+            &Value::Int64(5),
+            &ComparisonOp::GreaterThan,
+            &Value::Int64(5)
+        ));
     }
 
     #[test]
     fn test_comparison_greater_than_eq() {
-        assert!(evaluate_comparison(&Value::Int64(5), &ComparisonOp::GreaterThanEq, &Value::Int64(5)));
-        assert!(evaluate_comparison(&Value::Int64(7), &ComparisonOp::GreaterThanEq, &Value::Int64(5)));
+        assert!(evaluate_comparison(
+            &Value::Int64(5),
+            &ComparisonOp::GreaterThanEq,
+            &Value::Int64(5)
+        ));
+        assert!(evaluate_comparison(
+            &Value::Int64(7),
+            &ComparisonOp::GreaterThanEq,
+            &Value::Int64(5)
+        ));
     }
 
     #[test]
     fn test_comparison_cross_type() {
         // Int64 vs Float64
-        assert!(evaluate_comparison(&Value::Int64(5), &ComparisonOp::Equals, &Value::Float64(5.0)));
-        assert!(evaluate_comparison(&Value::Int64(3), &ComparisonOp::LessThan, &Value::Float64(3.5)));
+        assert!(evaluate_comparison(
+            &Value::Int64(5),
+            &ComparisonOp::Equals,
+            &Value::Float64(5.0)
+        ));
+        assert!(evaluate_comparison(
+            &Value::Int64(3),
+            &ComparisonOp::LessThan,
+            &Value::Float64(3.5)
+        ));
     }
 
     // ========================================================================
@@ -1404,7 +1548,10 @@ mod tests {
 
     #[test]
     fn test_arithmetic_add_integers() {
-        assert_eq!(arithmetic_add(&Value::Int64(3), &Value::Int64(4)), Value::Int64(7));
+        assert_eq!(
+            arithmetic_add(&Value::Int64(3), &Value::Int64(4)),
+            Value::Int64(7)
+        );
     }
 
     #[test]
@@ -1430,37 +1577,67 @@ mod tests {
 
     #[test]
     fn test_arithmetic_sub() {
-        assert_eq!(arithmetic_sub(&Value::Int64(10), &Value::Int64(3)), Value::Int64(7));
-        assert_eq!(arithmetic_sub(&Value::Float64(5.0), &Value::Float64(2.0)), Value::Float64(3.0));
+        assert_eq!(
+            arithmetic_sub(&Value::Int64(10), &Value::Int64(3)),
+            Value::Int64(7)
+        );
+        assert_eq!(
+            arithmetic_sub(&Value::Float64(5.0), &Value::Float64(2.0)),
+            Value::Float64(3.0)
+        );
     }
 
     #[test]
     fn test_arithmetic_mul() {
-        assert_eq!(arithmetic_mul(&Value::Int64(3), &Value::Int64(4)), Value::Int64(12));
+        assert_eq!(
+            arithmetic_mul(&Value::Int64(3), &Value::Int64(4)),
+            Value::Int64(12)
+        );
     }
 
     #[test]
     fn test_arithmetic_div() {
-        assert_eq!(arithmetic_div(&Value::Int64(10), &Value::Int64(4)), Value::Float64(2.5));
+        assert_eq!(
+            arithmetic_div(&Value::Int64(10), &Value::Int64(4)),
+            Value::Float64(2.5)
+        );
     }
 
     #[test]
     fn test_arithmetic_div_by_zero() {
-        assert_eq!(arithmetic_div(&Value::Int64(10), &Value::Int64(0)), Value::Null);
-        assert_eq!(arithmetic_div(&Value::Float64(10.0), &Value::Float64(0.0)), Value::Null);
+        assert_eq!(
+            arithmetic_div(&Value::Int64(10), &Value::Int64(0)),
+            Value::Null
+        );
+        assert_eq!(
+            arithmetic_div(&Value::Float64(10.0), &Value::Float64(0.0)),
+            Value::Null
+        );
     }
 
     #[test]
     fn test_arithmetic_negate() {
         assert_eq!(arithmetic_negate(&Value::Int64(5)), Value::Int64(-5));
-        assert_eq!(arithmetic_negate(&Value::Float64(3.14)), Value::Float64(-3.14));
-        assert_eq!(arithmetic_negate(&Value::String("x".to_string())), Value::Null);
+        assert_eq!(
+            arithmetic_negate(&Value::Float64(3.14)),
+            Value::Float64(-3.14)
+        );
+        assert_eq!(
+            arithmetic_negate(&Value::String("x".to_string())),
+            Value::Null
+        );
     }
 
     #[test]
     fn test_arithmetic_incompatible_returns_null() {
-        assert_eq!(arithmetic_add(&Value::Boolean(true), &Value::Boolean(false)), Value::Null);
-        assert_eq!(arithmetic_sub(&Value::String("a".to_string()), &Value::Int64(1)), Value::Null);
+        assert_eq!(
+            arithmetic_add(&Value::Boolean(true), &Value::Boolean(false)),
+            Value::Null
+        );
+        assert_eq!(
+            arithmetic_sub(&Value::String("a".to_string()), &Value::Int64(1)),
+            Value::Null
+        );
     }
 
     // ========================================================================
@@ -1486,7 +1663,10 @@ mod tests {
         assert_eq!(to_integer(&Value::Int64(42)), Value::Int64(42));
         assert_eq!(to_integer(&Value::Float64(3.7)), Value::Int64(3));
         assert_eq!(to_integer(&Value::UniqueId(5)), Value::Int64(5));
-        assert_eq!(to_integer(&Value::String("123".to_string())), Value::Int64(123));
+        assert_eq!(
+            to_integer(&Value::String("123".to_string())),
+            Value::Int64(123)
+        );
         assert_eq!(to_integer(&Value::String("abc".to_string())), Value::Null);
         assert_eq!(to_integer(&Value::Boolean(true)), Value::Int64(1));
         assert_eq!(to_integer(&Value::Boolean(false)), Value::Int64(0));
@@ -1498,7 +1678,10 @@ mod tests {
         assert_eq!(to_float(&Value::Float64(3.14)), Value::Float64(3.14));
         assert_eq!(to_float(&Value::Int64(42)), Value::Float64(42.0));
         assert_eq!(to_float(&Value::UniqueId(5)), Value::Float64(5.0));
-        assert_eq!(to_float(&Value::String("2.5".to_string())), Value::Float64(2.5));
+        assert_eq!(
+            to_float(&Value::String("2.5".to_string())),
+            Value::Float64(2.5)
+        );
         assert_eq!(to_float(&Value::String("abc".to_string())), Value::Null);
     }
 
@@ -1528,9 +1711,18 @@ mod tests {
         assert_eq!(parse_value_string("false"), Value::Boolean(false));
         assert_eq!(parse_value_string("42"), Value::Int64(42));
         assert_eq!(parse_value_string("3.14"), Value::Float64(3.14));
-        assert_eq!(parse_value_string("\"hello\""), Value::String("hello".to_string()));
-        assert_eq!(parse_value_string("'world'"), Value::String("world".to_string()));
-        assert_eq!(parse_value_string("unquoted"), Value::String("unquoted".to_string()));
+        assert_eq!(
+            parse_value_string("\"hello\""),
+            Value::String("hello".to_string())
+        );
+        assert_eq!(
+            parse_value_string("'world'"),
+            Value::String("world".to_string())
+        );
+        assert_eq!(
+            parse_value_string("unquoted"),
+            Value::String("unquoted".to_string())
+        );
     }
 
     // ========================================================================
@@ -1569,7 +1761,11 @@ mod tests {
 
     #[test]
     fn test_is_aggregate_literal_false() {
-        assert!(!is_aggregate_expression(&Expression::Literal(Value::Int64(1))));
-        assert!(!is_aggregate_expression(&Expression::Variable("x".to_string())));
+        assert!(!is_aggregate_expression(&Expression::Literal(
+            Value::Int64(1)
+        )));
+        assert!(!is_aggregate_expression(&Expression::Variable(
+            "x".to_string()
+        )));
     }
 }

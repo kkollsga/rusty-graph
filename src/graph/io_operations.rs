@@ -1,11 +1,11 @@
 // src/graph/io_operations.rs
-use std::fs::File;
-use std::io::{self, BufWriter, BufReader};
-use std::sync::Arc;
-use bincode;
-use crate::graph::schema::{DirGraph, CowSelection};
-use crate::graph::KnowledgeGraph;
 use crate::graph::reporting::OperationReports;
+use crate::graph::schema::{CowSelection, DirGraph};
+use crate::graph::KnowledgeGraph;
+use bincode;
+use std::fs::File;
+use std::io::{self, BufReader, BufWriter};
+use std::sync::Arc;
 
 pub fn save_to_file(graph: &Arc<DirGraph>, path: &str) -> io::Result<()> {
     let file = File::create(path)?;

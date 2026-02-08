@@ -1,8 +1,8 @@
 // src/datatypes/type_conversions.rs
-use pyo3::prelude::*;
-use pyo3::Bound;
 use chrono::NaiveDate;
-use pyo3::types::{PyDateTime, PyDateAccess};
+use pyo3::prelude::*;
+use pyo3::types::{PyDateAccess, PyDateTime};
+use pyo3::Bound;
 
 pub fn to_u32(value: &Bound<'_, PyAny>) -> Option<u32> {
     if value.is_none() {
@@ -45,7 +45,7 @@ pub fn to_i64(value: &Bound<'_, PyAny>) -> Option<i64> {
         if val.fract() == 0.0 && val >= i64::MIN as f64 && val <= i64::MAX as f64 {
             return Some(val as i64);
         }
-    }    
+    }
     if let Ok(s) = value.extract::<String>() {
         if let Ok(val) = s.parse::<i64>() {
             return Some(val);
@@ -91,7 +91,11 @@ pub fn to_datetime(value: &Bound<'_, PyAny>) -> Option<NaiveDate> {
     // Try to extract as Python datetime first
     Python::attach(|_py| {
         if let Ok(ts) = value.cast::<PyDateTime>() {
-            return NaiveDate::from_ymd_opt(ts.get_year(), ts.get_month() as u32, ts.get_day() as u32);
+            return NaiveDate::from_ymd_opt(
+                ts.get_year(),
+                ts.get_month() as u32,
+                ts.get_day() as u32,
+            );
         }
 
         // Try to parse string dates (ISO format: YYYY-MM-DD)

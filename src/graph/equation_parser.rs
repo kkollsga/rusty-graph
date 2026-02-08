@@ -1,7 +1,7 @@
 // src/graph/equation_parser.rs
-use std::collections::HashMap;
 use crate::datatypes::values::Value;
 use crate::graph::value_operations;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -26,13 +26,15 @@ impl Expr {
     fn collect_variables(&self, variables: &mut Vec<String>) {
         match self {
             Expr::Variable(name) => variables.push(name.clone()),
-            Expr::Add(left, right) | Expr::Subtract(left, right) | 
-            Expr::Multiply(left, right) | Expr::Divide(left, right) => {
+            Expr::Add(left, right)
+            | Expr::Subtract(left, right)
+            | Expr::Multiply(left, right)
+            | Expr::Divide(left, right) => {
                 left.collect_variables(variables);
                 right.collect_variables(variables);
-            },
+            }
             Expr::Aggregate(_, inner) => inner.collect_variables(variables),
-            Expr::Number(_) => {}, // Number doesn't contain variables
+            Expr::Number(_) => {} // Number doesn't contain variables
         }
     }
 }
@@ -93,22 +95,19 @@ impl Parser {
 
     fn new(input: &str) -> Self {
         let tokens = Self::tokenize(input);
-        Parser {
-            tokens,
-            pos: 0,
-        }
+        Parser { tokens, pos: 0 }
     }
 
     fn tokenize(input: &str) -> Vec<Token> {
         let mut tokens = Vec::new();
         let mut chars = input.chars().peekable();
-        
+
         while let Some(&c) = chars.peek() {
             match c {
                 '0'..='9' | '.' => {
                     let mut number = String::new();
                     let mut has_decimal = false;
-                    
+
                     while let Some(&c) = chars.peek() {
                         match c {
                             '0'..='9' => {
@@ -123,7 +122,7 @@ impl Parser {
                             _ => break,
                         }
                     }
-                    
+
                     if let Ok(num) = number.parse() {
                         tokens.push(Token::Number(num));
                     }
@@ -138,7 +137,7 @@ impl Parser {
                             break;
                         }
                     }
-                    
+
                     // Check if the identifier is an aggregate function
                     if let Some(agg_type) = AggregateType::from_string(&ident) {
                         tokens.push(Token::Aggregate(agg_type));
@@ -173,7 +172,7 @@ impl Parser {
                 ' ' | '\t' | '\n' | '\r' => {
                     chars.next();
                 }
-                _ => return vec![],  // Return empty vec for invalid input
+                _ => return vec![], // Return empty vec for invalid input
             }
         }
         tokens
@@ -204,11 +203,14 @@ impl Parser {
 
     fn parse_aggregate(&mut self) -> Result<Expr, String> {
         let token = self.peek_and_consume_if(|t| matches!(t, Token::Aggregate(_)));
-        
+
         match token {
             Some(Token::Aggregate(agg_type)) => {
                 // Expect opening parenthesis
-                if self.peek_and_consume_if(|t| matches!(t, Token::LParen)).is_none() {
+                if self
+                    .peek_and_consume_if(|t| matches!(t, Token::LParen))
+                    .is_none()
+                {
                     return Err("Expected opening parenthesis after aggregate function".to_string());
                 }
 
@@ -216,13 +218,18 @@ impl Parser {
                 let expr = self.parse_expr()?;
 
                 // Expect closing parenthesis
-                if self.peek_and_consume_if(|t| matches!(t, Token::RParen)).is_none() {
-                    return Err("Expected closing parenthesis after aggregate expression".to_string());
+                if self
+                    .peek_and_consume_if(|t| matches!(t, Token::RParen))
+                    .is_none()
+                {
+                    return Err(
+                        "Expected closing parenthesis after aggregate expression".to_string()
+                    );
                 }
 
                 Ok(Expr::Aggregate(agg_type, Box::new(expr)))
             }
-            _ => self.parse_expr()
+            _ => self.parse_expr(),
         }
     }
 
@@ -282,7 +289,10 @@ impl Parser {
             Some(Token::LParen) => {
                 self.consume();
                 let expr = self.parse_expr()?;
-                if self.peek_and_consume_if(|t| matches!(t, Token::RParen)).is_none() {
+                if self
+                    .peek_and_consume_if(|t| matches!(t, Token::RParen))
+                    .is_none()
+                {
                     return Err("Expected closing parenthesis".to_string());
                 }
                 Ok(expr)
@@ -304,8 +314,9 @@ impl Evaluator {
                 let mut successful_evals = 0;
                 let mut null_results = 0;
                 let mut error_messages = Vec::new();
-                
-                let values: Vec<f64> = objects.iter()
+
+                let values: Vec<f64> = objects
+                    .iter()
                     .map(|obj| {
                         total_objects += 1;
                         match Self::evaluate_single(inner, obj) {
@@ -319,7 +330,7 @@ impl Evaluator {
                                 } else {
                                     None
                                 }
-                            },
+                            }
                             Err(msg) => {
                                 error_messages.push(msg);
                                 None
@@ -328,18 +339,19 @@ impl Evaluator {
                     })
                     .filter_map(|x| x)
                     .collect();
-                
+
                 // If we have no valid evaluations but have objects, return 0 for sum operations
                 // instead of null - this makes sums more intuitive when fields are missing
                 if total_objects > 0 && successful_evals == 0 {
                     if !error_messages.is_empty() {
                         // Print just a few error messages to avoid flooding the output
-                        let sample_errors: Vec<_> = error_messages.iter()
-                            .take(3)
-                            .collect();
-                        println!("Warning: All evaluations failed. Sample errors: {:?}", sample_errors);
+                        let sample_errors: Vec<_> = error_messages.iter().take(3).collect();
+                        println!(
+                            "Warning: All evaluations failed. Sample errors: {:?}",
+                            sample_errors
+                        );
                     }
-                    
+
                     // For sum and count, return 0 when all values are null or errors
                     // For other aggregates, return null
                     return match agg_type {
@@ -364,9 +376,9 @@ impl Evaluator {
                     AggregateType::Max => value_operations::aggregate_max(&values).unwrap(),
                     AggregateType::Count => values.len() as f64,
                 };
-                
+
                 Ok(Value::Float64(result))
-            },
+            }
             // The rest of the code for non-aggregate expressions
             _ => {
                 if objects.len() == 1 {
@@ -384,9 +396,12 @@ impl Evaluator {
             Expr::Variable(name) => {
                 // Return null instead of error for missing variables
                 Ok(object.get(name).cloned().unwrap_or(Value::Null))
-            },
+            }
             Expr::Add(left, right) => {
-                match (Self::evaluate_single(left, object)?, Self::evaluate_single(right, object)?) {
+                match (
+                    Self::evaluate_single(left, object)?,
+                    Self::evaluate_single(right, object)?,
+                ) {
                     (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a + b)),
                     (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a + b)),
                     (Value::Int64(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 + b)),
@@ -400,11 +415,14 @@ impl Evaluator {
                     (Value::Float64(a), Value::Null) => Ok(Value::Float64(a)),
                     (Value::Null, Value::UniqueId(b)) => Ok(Value::UniqueId(b)),
                     (Value::UniqueId(a), Value::Null) => Ok(Value::UniqueId(a)),
-                    (a, b) => Err(format!("Cannot add values: {:?} and {:?}", a, b))
+                    (a, b) => Err(format!("Cannot add values: {:?} and {:?}", a, b)),
                 }
-            },
+            }
             Expr::Subtract(left, right) => {
-                match (Self::evaluate_single(left, object)?, Self::evaluate_single(right, object)?) {
+                match (
+                    Self::evaluate_single(left, object)?,
+                    Self::evaluate_single(right, object)?,
+                ) {
                     (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a - b)),
                     (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a - b)),
                     (Value::Int64(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 - b)),
@@ -416,34 +434,42 @@ impl Evaluator {
                     (Value::Int64(a), Value::Null) => Ok(Value::Int64(a)), // a - null = a
                     (Value::Float64(a), Value::Null) => Ok(Value::Float64(a)),
                     (Value::UniqueId(a), Value::Null) => Ok(Value::UniqueId(a)),
-                    (a, b) => Err(format!("Cannot subtract values: {:?} and {:?}", a, b))
+                    (a, b) => Err(format!("Cannot subtract values: {:?} and {:?}", a, b)),
                 }
-            },
+            }
             Expr::Multiply(left, right) => {
-                match (Self::evaluate_single(left, object)?, Self::evaluate_single(right, object)?) {
+                match (
+                    Self::evaluate_single(left, object)?,
+                    Self::evaluate_single(right, object)?,
+                ) {
                     (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a * b)),
                     (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a * b)),
                     (Value::Int64(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 * b)),
                     (Value::Float64(a), Value::Int64(b)) => Ok(Value::Float64(a * b as f64)),
                     (Value::UniqueId(a), Value::UniqueId(b)) => Ok(Value::UniqueId(a * b)),
                     (Value::Null, _) | (_, Value::Null) => Ok(Value::Null), // null * anything = null
-                    (a, b) => Err(format!("Cannot multiply values: {:?} and {:?}", a, b))
+                    (a, b) => Err(format!("Cannot multiply values: {:?} and {:?}", a, b)),
                 }
-            },
+            }
             Expr::Divide(left, right) => {
-                match (Self::evaluate_single(left, object)?, Self::evaluate_single(right, object)?) {
+                match (
+                    Self::evaluate_single(left, object)?,
+                    Self::evaluate_single(right, object)?,
+                ) {
                     (_, Value::Int64(0)) | (_, Value::Float64(0.0)) | (_, Value::UniqueId(0)) => {
-                        Ok(Value::Null)  // Return null for division by zero
-                    },
+                        Ok(Value::Null) // Return null for division by zero
+                    }
                     (Value::Int64(a), Value::Int64(b)) => Ok(Value::Float64(a as f64 / b as f64)),
                     (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a / b)),
                     (Value::Int64(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 / b)),
                     (Value::Float64(a), Value::Int64(b)) => Ok(Value::Float64(a / b as f64)),
-                    (Value::UniqueId(a), Value::UniqueId(b)) => Ok(Value::Float64(a as f64 / b as f64)),
+                    (Value::UniqueId(a), Value::UniqueId(b)) => {
+                        Ok(Value::Float64(a as f64 / b as f64))
+                    }
                     (Value::Null, _) | (_, Value::Null) => Ok(Value::Null), // null / anything = null
-                    (a, b) => Err(format!("Cannot divide values: {:?} and {:?}", a, b))
+                    (a, b) => Err(format!("Cannot divide values: {:?} and {:?}", a, b)),
                 }
-            },
+            }
             Expr::Aggregate(_, _) => Err("Nested aggregates not supported".to_string()),
         }
     }
@@ -452,8 +478,8 @@ impl Evaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use crate::datatypes::values::Value;
+    use std::collections::HashMap;
 
     // ========================================================================
     // AggregateType::from_string
@@ -462,20 +488,32 @@ mod tests {
     #[test]
     fn test_aggregate_type_from_string() {
         assert_eq!(AggregateType::from_string("sum"), Some(AggregateType::Sum));
-        assert_eq!(AggregateType::from_string("mean"), Some(AggregateType::Mean));
+        assert_eq!(
+            AggregateType::from_string("mean"),
+            Some(AggregateType::Mean)
+        );
         assert_eq!(AggregateType::from_string("avg"), Some(AggregateType::Mean));
-        assert_eq!(AggregateType::from_string("average"), Some(AggregateType::Mean));
+        assert_eq!(
+            AggregateType::from_string("average"),
+            Some(AggregateType::Mean)
+        );
         assert_eq!(AggregateType::from_string("std"), Some(AggregateType::Std));
         assert_eq!(AggregateType::from_string("min"), Some(AggregateType::Min));
         assert_eq!(AggregateType::from_string("max"), Some(AggregateType::Max));
-        assert_eq!(AggregateType::from_string("count"), Some(AggregateType::Count));
+        assert_eq!(
+            AggregateType::from_string("count"),
+            Some(AggregateType::Count)
+        );
         assert_eq!(AggregateType::from_string("unknown"), None);
     }
 
     #[test]
     fn test_aggregate_type_case_insensitive() {
         assert_eq!(AggregateType::from_string("SUM"), Some(AggregateType::Sum));
-        assert_eq!(AggregateType::from_string("Mean"), Some(AggregateType::Mean));
+        assert_eq!(
+            AggregateType::from_string("Mean"),
+            Some(AggregateType::Mean)
+        );
     }
 
     // ========================================================================
@@ -682,8 +720,14 @@ mod tests {
                 m
             })
             .collect();
-        assert_eq!(Evaluator::evaluate(&expr_min, &objs).unwrap(), Value::Float64(1.0));
-        assert_eq!(Evaluator::evaluate(&expr_max, &objs).unwrap(), Value::Float64(9.0));
+        assert_eq!(
+            Evaluator::evaluate(&expr_min, &objs).unwrap(),
+            Value::Float64(1.0)
+        );
+        assert_eq!(
+            Evaluator::evaluate(&expr_max, &objs).unwrap(),
+            Value::Float64(9.0)
+        );
     }
 
     #[test]

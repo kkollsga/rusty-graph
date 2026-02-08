@@ -39,6 +39,7 @@ Documentation = "https://github.com/kkollsga/rusty-graph#readme"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+include = ["rusty_graph.pyi", "py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

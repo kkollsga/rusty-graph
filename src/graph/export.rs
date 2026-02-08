@@ -1,10 +1,10 @@
 // src/graph/export.rs
 //! Export graph data to various visualization formats
 
-use std::collections::HashMap;
-use petgraph::visit::EdgeRef;
-use crate::graph::schema::{DirGraph, CurrentSelection, NodeData};
 use crate::datatypes::values::Value;
+use crate::graph::schema::{CurrentSelection, DirGraph, NodeData};
+use petgraph::visit::EdgeRef;
+use std::collections::HashMap;
 
 /// Export the graph (or selection) to GraphML format.
 ///
@@ -24,8 +24,12 @@ pub fn to_graphml(
     xml.push_str("         http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd\">\n");
 
     // Define attribute keys for nodes
-    xml.push_str("  <key id=\"node_type\" for=\"node\" attr.name=\"type\" attr.type=\"string\"/>\n");
-    xml.push_str("  <key id=\"node_title\" for=\"node\" attr.name=\"title\" attr.type=\"string\"/>\n");
+    xml.push_str(
+        "  <key id=\"node_type\" for=\"node\" attr.name=\"type\" attr.type=\"string\"/>\n",
+    );
+    xml.push_str(
+        "  <key id=\"node_title\" for=\"node\" attr.name=\"title\" attr.type=\"string\"/>\n",
+    );
     xml.push_str("  <key id=\"node_id\" for=\"node\" attr.name=\"id\" attr.type=\"string\"/>\n");
     xml.push_str("  <key id=\"node_properties\" for=\"node\" attr.name=\"properties\" attr.type=\"string\"/>\n");
 
@@ -48,9 +52,12 @@ pub fn to_graphml(
     };
 
     // Filter to only Regular nodes
-    let regular_indices: Vec<_> = node_indices.iter()
+    let regular_indices: Vec<_> = node_indices
+        .iter()
         .filter(|&&idx| {
-            graph.graph.node_weight(idx)
+            graph
+                .graph
+                .node_weight(idx)
                 .map(|n| n.is_regular())
                 .unwrap_or(false)
         })
@@ -62,16 +69,34 @@ pub fn to_graphml(
     // Export nodes (only Regular nodes, skip Schema metadata nodes)
     for &idx in &regular_indices {
         if let Some(node_data) = graph.graph.node_weight(idx) {
-            if let NodeData::Regular { node_type, id, title, properties } = node_data {
+            if let NodeData::Regular {
+                node_type,
+                id,
+                title,
+                properties,
+            } = node_data
+            {
                 xml.push_str(&format!("    <node id=\"n{}\">\n", idx.index()));
-                xml.push_str(&format!("      <data key=\"node_type\">{}</data>\n", escape_xml(node_type)));
-                xml.push_str(&format!("      <data key=\"node_title\">{}</data>\n", escape_xml(&value_to_string(title))));
-                xml.push_str(&format!("      <data key=\"node_id\">{}</data>\n", escape_xml(&value_to_string(id))));
+                xml.push_str(&format!(
+                    "      <data key=\"node_type\">{}</data>\n",
+                    escape_xml(node_type)
+                ));
+                xml.push_str(&format!(
+                    "      <data key=\"node_title\">{}</data>\n",
+                    escape_xml(&value_to_string(title))
+                ));
+                xml.push_str(&format!(
+                    "      <data key=\"node_id\">{}</data>\n",
+                    escape_xml(&value_to_string(id))
+                ));
 
                 // Serialize properties as JSON
                 if !properties.is_empty() {
                     let props_json = properties_to_json(properties);
-                    xml.push_str(&format!("      <data key=\"node_properties\">{}</data>\n", escape_xml(&props_json)));
+                    xml.push_str(&format!(
+                        "      <data key=\"node_properties\">{}</data>\n",
+                        escape_xml(&props_json)
+                    ));
                 }
 
                 xml.push_str("    </node>\n");
@@ -88,14 +113,23 @@ pub fn to_graphml(
 
             // Only include edge if target is in selection
             if node_set.contains(&target_idx) {
-                xml.push_str(&format!("    <edge id=\"e{}\" source=\"n{}\" target=\"n{}\">\n",
-                    edge_id, source_idx.index(), target_idx.index()));
-                xml.push_str(&format!("      <data key=\"edge_type\">{}</data>\n",
-                    escape_xml(&edge.weight().connection_type)));
+                xml.push_str(&format!(
+                    "    <edge id=\"e{}\" source=\"n{}\" target=\"n{}\">\n",
+                    edge_id,
+                    source_idx.index(),
+                    target_idx.index()
+                ));
+                xml.push_str(&format!(
+                    "      <data key=\"edge_type\">{}</data>\n",
+                    escape_xml(&edge.weight().connection_type)
+                ));
 
                 if !edge.weight().properties.is_empty() {
                     let props_json = properties_to_json(&edge.weight().properties);
-                    xml.push_str(&format!("      <data key=\"edge_properties\">{}</data>\n", escape_xml(&props_json)));
+                    xml.push_str(&format!(
+                        "      <data key=\"edge_properties\">{}</data>\n",
+                        escape_xml(&props_json)
+                    ));
                 }
 
                 xml.push_str("    </edge>\n");
@@ -131,9 +165,12 @@ pub fn to_d3_json(
     };
 
     // Filter to only Regular nodes and build index mapping
-    let regular_indices: Vec<_> = node_indices.iter()
+    let regular_indices: Vec<_> = node_indices
+        .iter()
         .filter(|&&idx| {
-            graph.graph.node_weight(idx)
+            graph
+                .graph
+                .node_weight(idx)
                 .map(|n| n.is_regular())
                 .unwrap_or(false)
         })
@@ -152,7 +189,13 @@ pub fn to_d3_json(
     let mut nodes_json = Vec::with_capacity(regular_indices.len());
     for &idx in &regular_indices {
         if let Some(node_data) = graph.graph.node_weight(idx) {
-            if let NodeData::Regular { node_type, id, title, properties } = node_data {
+            if let NodeData::Regular {
+                node_type,
+                id,
+                title,
+                properties,
+            } = node_data
+            {
                 let mut obj = String::from("{");
                 obj.push_str(&format!("\"id\":{},", json_value(id)));
                 obj.push_str(&format!("\"type\":{},", json_string(node_type)));
@@ -179,13 +222,17 @@ pub fn to_d3_json(
             let target_idx = edge.target();
 
             if node_set.contains(&target_idx) {
-                if let (Some(&source_pos), Some(&target_pos)) =
-                    (index_map.get(&source_idx.index()), index_map.get(&target_idx.index()))
-                {
+                if let (Some(&source_pos), Some(&target_pos)) = (
+                    index_map.get(&source_idx.index()),
+                    index_map.get(&target_idx.index()),
+                ) {
                     let mut link = String::from("{");
                     link.push_str(&format!("\"source\":{},", source_pos));
                     link.push_str(&format!("\"target\":{},", target_pos));
-                    link.push_str(&format!("\"type\":{}", json_string(&edge.weight().connection_type)));
+                    link.push_str(&format!(
+                        "\"type\":{}",
+                        json_string(&edge.weight().connection_type)
+                    ));
 
                     // Add edge properties
                     for (key, value) in &edge.weight().properties {
@@ -214,10 +261,7 @@ pub fn to_d3_json(
 ///
 /// GEXF is the native format for Gephi and supports dynamic graphs,
 /// hierarchies, and rich attribute types.
-pub fn to_gexf(
-    graph: &DirGraph,
-    selection: Option<&CurrentSelection>,
-) -> Result<String, String> {
+pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result<String, String> {
     let mut xml = String::with_capacity(64 * 1024);
 
     // XML header
@@ -256,9 +300,12 @@ pub fn to_gexf(
     };
 
     // Filter to only Regular nodes
-    let regular_indices: Vec<_> = node_indices.iter()
+    let regular_indices: Vec<_> = node_indices
+        .iter()
         .filter(|&&idx| {
-            graph.graph.node_weight(idx)
+            graph
+                .graph
+                .node_weight(idx)
                 .map(|n| n.is_regular())
                 .unwrap_or(false)
         })
@@ -270,13 +317,25 @@ pub fn to_gexf(
     // Export nodes (only Regular nodes)
     xml.push_str("    <nodes>\n");
     for &idx in &regular_indices {
-        if let Some(NodeData::Regular { node_type, title, .. }) = graph.graph.node_weight(idx) {
+        if let Some(NodeData::Regular {
+            node_type, title, ..
+        }) = graph.graph.node_weight(idx)
+        {
             let title_str = value_to_string(title);
-            xml.push_str(&format!("      <node id=\"{}\" label=\"{}\">\n",
-                idx.index(), escape_xml(&title_str)));
+            xml.push_str(&format!(
+                "      <node id=\"{}\" label=\"{}\">\n",
+                idx.index(),
+                escape_xml(&title_str)
+            ));
             xml.push_str("        <attvalues>\n");
-            xml.push_str(&format!("          <attvalue for=\"0\" value=\"{}\"/>\n", escape_xml(node_type)));
-            xml.push_str(&format!("          <attvalue for=\"1\" value=\"{}\"/>\n", escape_xml(&title_str)));
+            xml.push_str(&format!(
+                "          <attvalue for=\"0\" value=\"{}\"/>\n",
+                escape_xml(node_type)
+            ));
+            xml.push_str(&format!(
+                "          <attvalue for=\"1\" value=\"{}\"/>\n",
+                escape_xml(&title_str)
+            ));
             xml.push_str("        </attvalues>\n");
             xml.push_str("      </node>\n");
         }
@@ -291,11 +350,17 @@ pub fn to_gexf(
             let target_idx = edge.target();
 
             if node_set.contains(&target_idx) {
-                xml.push_str(&format!("      <edge id=\"{}\" source=\"{}\" target=\"{}\">\n",
-                    edge_id, source_idx.index(), target_idx.index()));
+                xml.push_str(&format!(
+                    "      <edge id=\"{}\" source=\"{}\" target=\"{}\">\n",
+                    edge_id,
+                    source_idx.index(),
+                    target_idx.index()
+                ));
                 xml.push_str("        <attvalues>\n");
-                xml.push_str(&format!("          <attvalue for=\"0\" value=\"{}\"/>\n",
-                    escape_xml(&edge.weight().connection_type)));
+                xml.push_str(&format!(
+                    "          <attvalue for=\"0\" value=\"{}\"/>\n",
+                    escape_xml(&edge.weight().connection_type)
+                ));
                 xml.push_str("        </attvalues>\n");
                 xml.push_str("      </edge>\n");
                 edge_id += 1;
@@ -330,9 +395,12 @@ pub fn to_csv(
     };
 
     // Filter to only Regular nodes
-    let regular_indices: Vec<_> = node_indices.iter()
+    let regular_indices: Vec<_> = node_indices
+        .iter()
         .filter(|&&idx| {
-            graph.graph.node_weight(idx)
+            graph
+                .graph
+                .node_weight(idx)
                 .map(|n| n.is_regular())
                 .unwrap_or(false)
         })
@@ -344,8 +412,12 @@ pub fn to_csv(
     // Build nodes CSV (only Regular nodes)
     let mut nodes_csv = String::from("id,type,title\n");
     for &idx in &regular_indices {
-        if let Some(NodeData::Regular { node_type, title, .. }) = graph.graph.node_weight(idx) {
-            nodes_csv.push_str(&format!("{},{},{}\n",
+        if let Some(NodeData::Regular {
+            node_type, title, ..
+        }) = graph.graph.node_weight(idx)
+        {
+            nodes_csv.push_str(&format!(
+                "{},{},{}\n",
                 idx.index(),
                 escape_csv(node_type),
                 escape_csv(&value_to_string(title))
@@ -360,7 +432,8 @@ pub fn to_csv(
             let target_idx = edge.target();
 
             if node_set.contains(&target_idx) {
-                edges_csv.push_str(&format!("{},{},{}\n",
+                edges_csv.push_str(&format!(
+                    "{},{},{}\n",
                     source_idx.index(),
                     target_idx.index(),
                     escape_csv(&edge.weight().connection_type)
@@ -403,7 +476,12 @@ fn value_to_string(value: &Value) -> String {
 }
 
 fn json_string(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"))
+    format!(
+        "\"{}\"",
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    )
 }
 
 fn json_value(value: &Value) -> String {
@@ -425,7 +503,8 @@ fn json_value(value: &Value) -> String {
 }
 
 fn properties_to_json(properties: &HashMap<String, Value>) -> String {
-    let pairs: Vec<String> = properties.iter()
+    let pairs: Vec<String> = properties
+        .iter()
         .map(|(k, v)| format!("{}:{}", json_string(k), json_value(v)))
         .collect();
     format!("{{{}}}", pairs.join(","))

@@ -1,9 +1,9 @@
 // src/datatypes/values.rs
+use chrono::NaiveDate;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use serde::{Serialize, Deserialize};
-use chrono::NaiveDate;
 
 #[derive(Debug, Clone)]
 pub enum FilterCondition {
@@ -14,7 +14,7 @@ pub enum FilterCondition {
     LessThan(Value),
     LessThanEquals(Value),
     In(Vec<Value>),
-    Between(Value, Value),  // Inclusive range [min, max]
+    Between(Value, Value), // Inclusive range [min, max]
     IsNull,
     IsNotNull,
     Contains(Value),
@@ -45,7 +45,7 @@ impl Hash for Value {
     fn hash<H: Hasher>(&self, state: &mut H) {
         // First hash discriminant to differentiate variants
         std::mem::discriminant(self).hash(state);
-        
+
         // Then hash the contained value
         match self {
             Value::UniqueId(v) => v.hash(state),
@@ -63,7 +63,7 @@ impl Hash for Value {
                         v.to_bits().hash(state)
                     }
                 }
-            },
+            }
             Value::String(v) => v.hash(state),
             Value::Boolean(v) => v.hash(state),
             Value::DateTime(v) => v.hash(state),
@@ -155,7 +155,8 @@ impl Column {
 impl DataFrame {
     pub fn new(columns: Vec<(String, ColumnType)>) -> Self {
         let mut column_indices = HashMap::with_capacity(columns.len());
-        let columns: Vec<Column> = columns.into_iter()
+        let columns: Vec<Column> = columns
+            .into_iter()
             .enumerate()
             .map(|(idx, (name, col_type))| {
                 let data = match col_type {
@@ -167,74 +168,90 @@ impl DataFrame {
                     ColumnType::DateTime => ColumnData::DateTime(Vec::new()),
                 };
                 column_indices.insert(name.clone(), idx);
-                Column { name, col_type, data }
+                Column {
+                    name,
+                    col_type,
+                    data,
+                }
             })
             .collect();
- 
+
         DataFrame {
             columns,
             column_indices,
         }
     }
- 
+
     pub fn get_value(&self, row: usize, column: &str) -> Option<Value> {
-        self.column_indices.get(column)
+        self.column_indices
+            .get(column)
             .and_then(|&idx| self.columns.get(idx))
             .and_then(|col| col.get_value(row))
     }
- 
+
     pub fn get_value_by_index(&self, row_idx: usize, col_idx: usize) -> Option<Value> {
-        self.columns.get(col_idx)
+        self.columns
+            .get(col_idx)
             .and_then(|col| col.get_value(row_idx))
     }
- 
+
     pub fn get_column_index(&self, name: &str) -> Option<usize> {
         self.column_indices.get(name).copied()
     }
- 
+
     pub fn verify_column(&self, name: &str) -> bool {
         self.column_indices.contains_key(name)
     }
- 
+
     pub fn row_count(&self) -> usize {
         self.columns.first().map_or(0, |col| col.len())
     }
- 
+
     pub fn column_count(&self) -> usize {
         self.columns.len()
     }
- 
+
     pub fn get_column_names(&self) -> Vec<String> {
         self.columns.iter().map(|col| col.name.clone()).collect()
     }
- 
+
     pub fn get_column_type(&self, col_name: &str) -> ColumnType {
-        self.column_indices.get(col_name)
+        self.column_indices
+            .get(col_name)
             .and_then(|&idx| self.columns.get(idx))
             .map(|col| col.col_type.clone())
             .unwrap_or_else(|| panic!("Column {} not found", col_name))
     }
- 
-    pub fn add_column(&mut self, name: String, col_type: ColumnType, data: ColumnData) -> Result<(), String> {
+
+    pub fn add_column(
+        &mut self,
+        name: String,
+        col_type: ColumnType,
+        data: ColumnData,
+    ) -> Result<(), String> {
         if self.column_indices.contains_key(&name) {
             return Err(format!("Column {} already exists", name));
         }
 
         // Validate that the provided data matches the column type
         match (&col_type, &data) {
-            (ColumnType::UniqueId, ColumnData::UniqueId(_)) |
-            (ColumnType::Int64, ColumnData::Int64(_)) |
-            (ColumnType::Float64, ColumnData::Float64(_)) |
-            (ColumnType::String, ColumnData::String(_)) |
-            (ColumnType::Boolean, ColumnData::Boolean(_)) |
-            (ColumnType::DateTime, ColumnData::DateTime(_)) => (),
+            (ColumnType::UniqueId, ColumnData::UniqueId(_))
+            | (ColumnType::Int64, ColumnData::Int64(_))
+            | (ColumnType::Float64, ColumnData::Float64(_))
+            | (ColumnType::String, ColumnData::String(_))
+            | (ColumnType::Boolean, ColumnData::Boolean(_))
+            | (ColumnType::DateTime, ColumnData::DateTime(_)) => (),
             _ => return Err(format!("Data type mismatch for column {}", name)),
         }
 
         let idx = self.columns.len();
         self.column_indices.insert(name.clone(), idx);
-        self.columns.push(Column { name, col_type, data });
-        
+        self.columns.push(Column {
+            name,
+            col_type,
+            data,
+        });
+
         Ok(())
     }
 }
@@ -245,9 +262,7 @@ impl std::fmt::Display for DataFrame {
         let columns = self.get_column_names();
 
         // Determine max width for each column
-        let mut col_widths: Vec<usize> = columns.iter()
-            .map(|col| col.len())
-            .collect();
+        let mut col_widths: Vec<usize> = columns.iter().map(|col| col.len()).collect();
 
         // Adjust widths based on values and column types
         for (col_idx, col) in self.columns.iter().enumerate() {
@@ -265,7 +280,8 @@ impl std::fmt::Display for DataFrame {
 
         // Format helper
         let format_row = |values: Vec<String>| -> String {
-            values.into_iter()
+            values
+                .into_iter()
                 .enumerate()
                 .map(|(i, val)| format!(" {:^width$} ", val, width = col_widths[i]))
                 .collect::<Vec<_>>()
@@ -276,13 +292,16 @@ impl std::fmt::Display for DataFrame {
         writeln!(f, "\n| #  |{}|", format_row(columns))?;
 
         // Print column types
-        let type_row: Vec<String> = self.columns.iter()
+        let type_row: Vec<String> = self
+            .columns
+            .iter()
             .map(|col| format_col_type(&col.col_type))
             .collect();
         writeln!(f, "|    |{}|", format_row(type_row))?;
 
         // Print separator
-        let separator = col_widths.iter()
+        let separator = col_widths
+            .iter()
             .map(|w| format!("{:-^width$}", "-", width = w + 2))
             .collect::<Vec<_>>()
             .join("|");
@@ -291,7 +310,13 @@ impl std::fmt::Display for DataFrame {
         // Print data rows
         for row_idx in 0..row_limit {
             let row_data: Vec<String> = (0..self.column_count())
-                .map(|col_idx| format_value(&self.get_value_by_index(row_idx, col_idx).unwrap_or(Value::Null)))
+                .map(|col_idx| {
+                    format_value(
+                        &self
+                            .get_value_by_index(row_idx, col_idx)
+                            .unwrap_or(Value::Null),
+                    )
+                })
                 .collect();
             writeln!(f, "| {:^2} |{}|", row_idx, format_row(row_data))?;
         }
@@ -310,7 +335,13 @@ pub fn format_value(value: &Value) -> String {
     match value {
         Value::UniqueId(v) => format!("{}", v),
         Value::Int64(v) => format!("{}", v),
-        Value::Float64(v) => if v.is_nan() { "NULL".to_string() } else { format!("{:.2}", v) },
+        Value::Float64(v) => {
+            if v.is_nan() {
+                "NULL".to_string()
+            } else {
+                format!("{:.2}", v)
+            }
+        }
         Value::String(v) => format!("\"{}\"", v),
         Value::Boolean(v) => format!("{}", v),
         Value::DateTime(v) => format!("\"{}\"", v.format("%Y-%m-%d")),
@@ -326,7 +357,8 @@ fn format_col_type(col_type: &ColumnType) -> String {
         ColumnType::String => "str",
         ColumnType::Boolean => "bool",
         ColumnType::DateTime => "datetime",
-    }.to_string()
+    }
+    .to_string()
 }
 
 #[cfg(test)]
@@ -360,7 +392,10 @@ mod tests {
     fn test_value_equality_same_types() {
         assert_eq!(Value::Int64(42), Value::Int64(42));
         assert_eq!(Value::Float64(3.14), Value::Float64(3.14));
-        assert_eq!(Value::String("a".to_string()), Value::String("a".to_string()));
+        assert_eq!(
+            Value::String("a".to_string()),
+            Value::String("a".to_string())
+        );
         assert_eq!(Value::Boolean(true), Value::Boolean(true));
         assert_eq!(Value::Null, Value::Null);
         assert_eq!(Value::UniqueId(5), Value::UniqueId(5));
@@ -369,7 +404,10 @@ mod tests {
     #[test]
     fn test_value_inequality() {
         assert_ne!(Value::Int64(1), Value::Int64(2));
-        assert_ne!(Value::String("a".to_string()), Value::String("b".to_string()));
+        assert_ne!(
+            Value::String("a".to_string()),
+            Value::String("b".to_string())
+        );
         assert_ne!(Value::Boolean(true), Value::Boolean(false));
     }
 
@@ -471,9 +509,7 @@ mod tests {
 
     #[test]
     fn test_dataframe_add_column() {
-        let mut df = DataFrame::new(vec![
-            ("id".to_string(), ColumnType::Int64),
-        ]);
+        let mut df = DataFrame::new(vec![("id".to_string(), ColumnType::Int64)]);
         let result = df.add_column(
             "name".to_string(),
             ColumnType::String,
@@ -485,9 +521,7 @@ mod tests {
 
     #[test]
     fn test_dataframe_add_duplicate_column() {
-        let mut df = DataFrame::new(vec![
-            ("id".to_string(), ColumnType::Int64),
-        ]);
+        let mut df = DataFrame::new(vec![("id".to_string(), ColumnType::Int64)]);
         let result = df.add_column(
             "id".to_string(),
             ColumnType::Int64,

@@ -8,14 +8,14 @@
 // WHERE/RETURN/ORDER BY etc. are handled by the Cypher-level parser and executor.
 
 pub mod ast;
-pub mod tokenizer;
+pub mod executor;
 pub mod parser;
 pub mod planner;
-pub mod executor;
-pub mod result;
 pub mod py_convert;
+pub mod result;
+pub mod tokenizer;
 
 // Re-exports for convenience
-pub use parser::parse_cypher;
 pub use executor::CypherExecutor;
+pub use parser::parse_cypher;
 pub use planner::optimize;

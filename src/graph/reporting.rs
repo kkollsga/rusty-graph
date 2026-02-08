@@ -32,7 +32,7 @@ impl CalculationOperationReport {
         nodes_updated: usize,
         nodes_with_errors: usize,
         processing_time_ms: f64,
-        is_aggregation: bool
+        is_aggregation: bool,
     ) -> Self {
         Self {
             operation_type,
@@ -46,7 +46,7 @@ impl CalculationOperationReport {
             errors: Vec::new(),
         }
     }
-    
+
     pub fn with_errors(mut self, errors: Vec<String>) -> Self {
         self.errors = errors;
         self
@@ -70,7 +70,7 @@ impl NodeOperationReport {
         nodes_created: usize,
         nodes_updated: usize,
         nodes_skipped: usize,
-        processing_time_ms: f64
+        processing_time_ms: f64,
     ) -> Self {
         Self {
             operation_type,
@@ -82,7 +82,7 @@ impl NodeOperationReport {
             errors: Vec::new(),
         }
     }
-    
+
     pub fn with_errors(mut self, errors: Vec<String>) -> Self {
         self.errors = errors;
         self
@@ -106,7 +106,7 @@ impl ConnectionOperationReport {
         connections_created: usize,
         connections_skipped: usize,
         property_fields_tracked: usize,
-        processing_time_ms: f64
+        processing_time_ms: f64,
     ) -> Self {
         Self {
             operation_type,
@@ -118,7 +118,7 @@ impl ConnectionOperationReport {
             errors: Vec::new(),
         }
     }
-    
+
     pub fn with_errors(mut self, errors: Vec<String>) -> Self {
         self.errors = errors;
         self
@@ -139,31 +139,31 @@ impl OperationReports {
             last_operation_index: 0,
         }
     }
-    
+
     pub fn add_report(&mut self, report: OperationReport) -> usize {
         // Increment the operation index
         self.last_operation_index += 1;
-        
+
         // Add to the reports queue
         self.reports.push_back(report);
-        
+
         // Remove oldest if we exceed the max history
         if self.reports.len() > MAX_REPORT_HISTORY {
             self.reports.pop_front();
         }
-        
+
         // Return the operation index
         self.last_operation_index
     }
-    
+
     pub fn get_last_report(&self) -> Option<&OperationReport> {
         self.reports.back()
     }
-    
+
     pub fn get_all_reports(&self) -> &VecDeque<OperationReport> {
         &self.reports
     }
-    
+
     pub fn get_last_operation_index(&self) -> usize {
         self.last_operation_index
     }

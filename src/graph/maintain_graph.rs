@@ -1,11 +1,13 @@
 // src/graph/maintain_graph.rs
-use std::collections::{HashMap, HashSet};
-use crate::graph::schema::{DirGraph, NodeData, CurrentSelection};
-use crate::graph::lookups::{TypeLookup, CombinedTypeLookup};
-use crate::graph::batch_operations::{BatchProcessor, ConflictHandling, ConnectionBatchProcessor, NodeAction};
-use crate::datatypes::{Value, DataFrame};
-use crate::graph::reporting::{NodeOperationReport, ConnectionOperationReport};
+use crate::datatypes::{DataFrame, Value};
+use crate::graph::batch_operations::{
+    BatchProcessor, ConflictHandling, ConnectionBatchProcessor, NodeAction,
+};
+use crate::graph::lookups::{CombinedTypeLookup, TypeLookup};
+use crate::graph::reporting::{ConnectionOperationReport, NodeOperationReport};
+use crate::graph::schema::{CurrentSelection, DirGraph, NodeData};
 use petgraph::graph::NodeIndex;
+use std::collections::{HashMap, HashSet};
 
 fn check_data_validity(df_data: &DataFrame, unique_id_field: &str) -> Result<(), String> {
     // Remove strict UniqueId type verification to allow nulls
@@ -48,7 +50,7 @@ pub fn add_nodes(
             other
         )),
     };
-    
+
     let should_update_title = node_title_field.is_some();
     let title_field = node_title_field.unwrap_or_else(|| unique_id_field.clone());
     check_data_validity(&df_data, &unique_id_field)?;
@@ -72,7 +74,9 @@ pub fn add_nodes(
             for (col_name, col_type_val) in &df_schema_properties {
                 if let Some(existing_type) = properties.get(col_name) {
                     // Since Value doesn't implement Display, use pattern matching to compare
-                    if let (Value::String(existing), Value::String(new)) = (existing_type, col_type_val) {
+                    if let (Value::String(existing), Value::String(new)) =
+                        (existing_type, col_type_val)
+                    {
                         if existing != new {
                             errors.push(format!(
                                 "Type mismatch for property '{}': existing schema has '{}', but data has '{}'",
@@ -108,18 +112,23 @@ pub fn add_nodes(
     }
 
     let type_lookup = TypeLookup::new(&graph.graph, node_type.clone())?;
-    let id_idx = df_data.get_column_index(&unique_id_field)
+    let id_idx = df_data
+        .get_column_index(&unique_id_field)
         .ok_or_else(|| format!("Column '{}' not found", unique_id_field))?;
-    let title_idx = df_data.get_column_index(&title_field)
+    let title_idx = df_data
+        .get_column_index(&title_field)
         .ok_or_else(|| format!("Column '{}' not found", title_field))?;
 
     // OPTIMIZATION: Pre-compute property column info (name + index) to avoid repeated lookups
     // This avoids: 1) string comparisons in the loop, 2) HashMap lookups per property
-    let property_columns: Vec<(String, usize)> = df_data.get_column_names()
+    let property_columns: Vec<(String, usize)> = df_data
+        .get_column_names()
         .into_iter()
         .filter_map(|col_name| {
             if col_name != unique_id_field && col_name != title_field {
-                df_data.get_column_index(&col_name).map(|idx| (col_name, idx))
+                df_data
+                    .get_column_index(&col_name)
+                    .map(|idx| (col_name, idx))
             } else {
                 None
             }
@@ -143,13 +152,15 @@ pub fn add_nodes(
             }
         };
 
-        let title = df_data.get_value_by_index(row_idx, title_idx)
+        let title = df_data
+            .get_value_by_index(row_idx, title_idx)
             .unwrap_or(Value::Null);
 
         // OPTIMIZATION: Use pre-computed indices for direct column access
         let mut properties = HashMap::with_capacity(property_count);
         for (col_name, col_idx) in &property_columns {
-            let value = df_data.get_value_by_index(row_idx, *col_idx)
+            let value = df_data
+                .get_value_by_index(row_idx, *col_idx)
                 .unwrap_or(Value::Null);
             properties.insert(col_name.clone(), value);
         }
@@ -167,14 +178,14 @@ pub fn add_nodes(
                     node_idx,
                     title: title_update,
                     properties,
-                    conflict_mode
+                    conflict_mode,
                 }
-            },
+            }
             None => NodeAction::Create {
                 node_type: node_type.clone(),
                 id,
                 title,
-                properties
+                properties,
             },
         };
         batch.add_action(action, graph)?;
@@ -182,24 +193,24 @@ pub fn add_nodes(
 
     // Execute the batch and get the statistics
     let (stats, metrics) = batch.execute(graph)?;
-    
+
     // Calculate elapsed time
     let elapsed_ms = metrics.processing_time * 1000.0; // Convert to milliseconds
-    
+
     // Create and return the operation report with timestamp and errors
     let mut report = NodeOperationReport::new(
         "add_nodes".to_string(),
         stats.creates,
         stats.updates,
         skipped_count,
-        elapsed_ms
+        elapsed_ms,
     );
-    
+
     // Add errors if we found any
     if !errors.is_empty() {
         report = report.with_errors(errors);
     }
-    
+
     Ok(report)
 }
 
@@ -249,29 +260,39 @@ pub fn add_connections(
 
     // Check if source and target types exist
     if !graph.has_node_type(&source_type) {
-        errors.push(format!("Source node type '{}' does not exist in the graph", source_type));
-    }
-    
-    if !graph.has_node_type(&target_type) {
-        errors.push(format!("Target node type '{}' does not exist in the graph", target_type));
+        errors.push(format!(
+            "Source node type '{}' does not exist in the graph",
+            source_type
+        ));
     }
 
-    let source_id_idx = df_data.get_column_index(&source_id_field)
+    if !graph.has_node_type(&target_type) {
+        errors.push(format!(
+            "Target node type '{}' does not exist in the graph",
+            target_type
+        ));
+    }
+
+    let source_id_idx = df_data
+        .get_column_index(&source_id_field)
         .ok_or_else(|| format!("Source ID column '{}' not found", source_id_field))?;
-    let target_id_idx = df_data.get_column_index(&target_id_field)
+    let target_id_idx = df_data
+        .get_column_index(&target_id_field)
         .ok_or_else(|| format!("Target ID column '{}' not found", target_id_field))?;
 
     // Use as_ref() to borrow rather than move
-    let source_title_idx = source_title_field.as_ref()
+    let source_title_idx = source_title_field
+        .as_ref()
         .and_then(|field| df_data.get_column_index(field));
-    let target_title_idx = target_title_field.as_ref()
+    let target_title_idx = target_title_field
+        .as_ref()
         .and_then(|field| df_data.get_column_index(field));
 
     let lookup = CombinedTypeLookup::new(&graph.graph, source_type.clone(), target_type.clone())?;
     let mut batch = ConnectionBatchProcessor::new(df_data.row_count());
     // Set the conflict handling mode
     batch.set_conflict_mode(conflict_mode);
-    
+
     let mut skipped_count = 0;
     // Instead of tracking ids directly, track counts of missing items
     let mut missing_source_count = 0;
@@ -279,12 +300,17 @@ pub fn add_connections(
 
     // Cache column names and pre-compute which columns are property columns (not ID or title fields)
     // This avoids repeated allocations and string comparisons in the loop
-    let property_columns: Vec<String> = df_data.get_column_names()
+    let property_columns: Vec<String> = df_data
+        .get_column_names()
         .into_iter()
         .filter(|col_name| {
             let is_id_field = *col_name == source_id_field || *col_name == target_id_field;
-            let is_source_title = source_title_field.as_ref().is_some_and(|field| *col_name == *field);
-            let is_target_title = target_title_field.as_ref().is_some_and(|field| *col_name == *field);
+            let is_source_title = source_title_field
+                .as_ref()
+                .is_some_and(|field| *col_name == *field);
+            let is_target_title = target_title_field
+                .as_ref()
+                .is_some_and(|field| *col_name == *field);
             !is_id_field && !is_source_title && !is_target_title
         })
         .collect();
@@ -306,20 +332,23 @@ pub fn add_connections(
             Some(id) => id,
         };
 
-        let (source_idx, target_idx) = match (lookup.check_source(&source_id), lookup.check_target(&target_id)) {
+        let (source_idx, target_idx) = match (
+            lookup.check_source(&source_id),
+            lookup.check_target(&target_id),
+        ) {
             (Some(src_idx), Some(tgt_idx)) => (src_idx, tgt_idx),
             (None, Some(_)) => {
                 // Track missing source node
                 missing_source_count += 1;
                 skipped_count += 1;
                 continue;
-            },
+            }
             (Some(_), None) => {
                 // Track missing target node
                 missing_target_count += 1;
                 skipped_count += 1;
                 continue;
-            },
+            }
             (None, None) => {
                 // Track both missing
                 missing_source_count += 1;
@@ -329,8 +358,15 @@ pub fn add_connections(
             }
         };
 
-        update_node_titles(graph, source_idx, target_idx, row_idx, 
-                         source_title_idx, target_title_idx, &df_data)?;
+        update_node_titles(
+            graph,
+            source_idx,
+            target_idx,
+            row_idx,
+            source_title_idx,
+            target_title_idx,
+            &df_data,
+        )?;
 
         // Use pre-computed property columns (avoids get_column_names() call per row)
         let mut properties = HashMap::with_capacity(property_columns.len());
@@ -344,7 +380,9 @@ pub fn add_connections(
         }
 
         // This will respect the conflict handling mode we set earlier
-        if let Err(e) = batch.add_connection(source_idx, target_idx, properties, graph, &connection_type) {
+        if let Err(e) =
+            batch.add_connection(source_idx, target_idx, properties, graph, &connection_type)
+        {
             skipped_count += 1;
             errors.push(format!("Failed to add connection: {}", e));
             continue;
@@ -353,10 +391,16 @@ pub fn add_connections(
 
     // Add missing nodes as errors
     if missing_source_count > 0 {
-        errors.push(format!("Missing source nodes: {} occurrences", missing_source_count));
+        errors.push(format!(
+            "Missing source nodes: {} occurrences",
+            missing_source_count
+        ));
     }
     if missing_target_count > 0 {
-        errors.push(format!("Missing target nodes: {} occurrences", missing_target_count));
+        errors.push(format!(
+            "Missing target nodes: {} occurrences",
+            missing_target_count
+        ));
     }
 
     update_schema_node(
@@ -369,21 +413,21 @@ pub fn add_connections(
 
     // Execute the batch and get the statistics
     let (stats, metrics) = batch.execute(graph, connection_type)?;
-    
+
     // Create and return the operation report
     let mut report = ConnectionOperationReport::new(
         "add_connections".to_string(),
         stats.connections_created,
         skipped_count,
         stats.properties_tracked,
-        metrics.processing_time * 1000.0 // Convert to milliseconds
+        metrics.processing_time * 1000.0, // Convert to milliseconds
     );
-    
+
     // Add errors if we found any
     if !errors.is_empty() {
         report = report.with_errors(errors);
     }
-    
+
     Ok(report)
 }
 
@@ -429,10 +473,16 @@ fn update_schema_node(
     properties: &HashSet<String>,
 ) -> Result<(), String> {
     if !graph.has_node_type(source_type) {
-        return Err(format!("Source type '{}' does not exist in graph", source_type));
+        return Err(format!(
+            "Source type '{}' does not exist in graph",
+            source_type
+        ));
     }
     if !graph.has_node_type(target_type) {
-        return Err(format!("Target type '{}' does not exist in graph", target_type));
+        return Err(format!(
+            "Target type '{}' does not exist in graph",
+            target_type
+        ));
     }
 
     let schema_title = Value::String(connection_type.to_string());
@@ -440,16 +490,29 @@ fn update_schema_node(
 
     match schema_lookup.check_title(&schema_title) {
         Some(idx) => {
-            if let Some(NodeData::Schema { properties: schema_props, .. }) = graph.get_node_mut(idx) {
+            if let Some(NodeData::Schema {
+                properties: schema_props,
+                ..
+            }) = graph.get_node_mut(idx)
+            {
                 for prop in properties {
                     if !schema_props.contains_key(prop) {
                         schema_props.insert(prop.clone(), Value::String("Unknown".to_string()));
                     }
                 }
-                schema_props.insert("source_type".to_string(), Value::String(source_type.to_string()));
-                schema_props.insert("target_type".to_string(), Value::String(target_type.to_string()));
+                schema_props.insert(
+                    "source_type".to_string(),
+                    Value::String(source_type.to_string()),
+                );
+                schema_props.insert(
+                    "target_type".to_string(),
+                    Value::String(target_type.to_string()),
+                );
             } else {
-                return Err(format!("Invalid schema node found for connection type '{}'", connection_type));
+                return Err(format!(
+                    "Invalid schema node found for connection type '{}'",
+                    connection_type
+                ));
             }
         }
         None => {
@@ -458,8 +521,14 @@ fn update_schema_node(
                 .map(|prop| (prop.clone(), Value::String("Unknown".to_string())))
                 .collect();
 
-            schema_properties.insert("source_type".to_string(), Value::String(source_type.to_string()));
-            schema_properties.insert("target_type".to_string(), Value::String(target_type.to_string()));
+            schema_properties.insert(
+                "source_type".to_string(),
+                Value::String(source_type.to_string()),
+            );
+            schema_properties.insert(
+                "target_type".to_string(),
+                Value::String(target_type.to_string()),
+            );
 
             let schema_node_data = NodeData::Schema {
                 id: Value::String(connection_type.to_string()),
@@ -501,16 +570,19 @@ pub fn selection_to_new_connections(
             // Return empty report since there's nothing to do
             let report = ConnectionOperationReport::new(
                 "selection_to_new_connections".to_string(),
-                0, 0, 0, 0.0
+                0,
+                0,
+                0,
+                0.0,
             );
             return Ok(report);
-        },
+        }
     };
 
     let mut batch = ConnectionBatchProcessor::new(level.node_count());
     // Set the conflict handling mode
     batch.set_conflict_mode(conflict_mode);
-    
+
     let mut skipped = 0;
     let mut source_type = None;
     let mut target_type = None;
@@ -530,13 +602,9 @@ pub fn selection_to_new_connections(
                     }
                 }
 
-                if let Err(e) = batch.add_connection(
-                    *parent,
-                    child,
-                    HashMap::new(),
-                    graph,
-                    &connection_type,
-                ) {
+                if let Err(e) =
+                    batch.add_connection(*parent, child, HashMap::new(), graph, &connection_type)
+                {
                     skipped += 1;
                     errors.push(format!("Failed to add connection: {}", e));
                     continue;
@@ -557,47 +625,47 @@ pub fn selection_to_new_connections(
 
     // Execute the batch and get the statistics
     let (stats, metrics) = batch.execute(graph, connection_type)?;
-    
+
     // Create and return the operation report
     let mut report = ConnectionOperationReport::new(
         "selection_to_new_connections".to_string(),
         stats.connections_created,
         skipped,
         stats.properties_tracked,
-        metrics.processing_time * 1000.0 // Convert to milliseconds
+        metrics.processing_time * 1000.0, // Convert to milliseconds
     );
-    
+
     // Add errors if we found any
     if !errors.is_empty() {
         report = report.with_errors(errors);
     }
-    
+
     Ok(report)
 }
 
 pub fn update_node_properties(
     graph: &mut DirGraph,
     nodes: &[(Option<NodeIndex>, Value)],
-    property: &str
+    property: &str,
 ) -> Result<NodeOperationReport, String> {
     if nodes.is_empty() {
         return Err("No nodes to update".to_string());
     }
-    
+
     // Track start time for the report
     let start_time = std::time::Instant::now();
-    
+
     // Create property string once
     let property_string = property.to_string();
-    
+
     // Track errors
     let mut errors = Vec::new();
-    
+
     // Step 1: Collect information about node types and check if schema update is needed
     let mut node_types = HashMap::new();
     let mut first_value_type = None;
     let mut skipped_count = 0;
-    
+
     for (node_idx_opt, value) in nodes {
         if let Some(node_idx) = node_idx_opt {
             if let Some(node) = graph.get_node(*node_idx) {
@@ -605,7 +673,7 @@ pub fn update_node_properties(
                     NodeData::Regular { node_type, .. } => {
                         // Track node type and count for each node
                         *node_types.entry(node_type.clone()).or_insert(0) += 1;
-                        
+
                         // Capture type of first value for schema
                         if first_value_type.is_none() {
                             first_value_type = Some(match value {
@@ -630,7 +698,7 @@ pub fn update_node_properties(
             skipped_count += 1;
         }
     }
-    
+
     // Step 2: Update schema nodes for each node type
     let schema_lookup = match TypeLookup::new(&graph.graph, "SchemaNode".to_string()) {
         Ok(lookup) => lookup,
@@ -639,10 +707,10 @@ pub fn update_node_properties(
             return Err(format!("Failed to access schema nodes: {}", e));
         }
     };
-    
+
     for (node_type, _count) in node_types.iter() {
         let schema_title = Value::String(node_type.clone());
-        
+
         match schema_lookup.check_title(&schema_title) {
             Some(schema_idx) => {
                 // Schema exists, update it
@@ -651,7 +719,7 @@ pub fn update_node_properties(
                         let type_value = first_value_type
                             .map(|t| Value::String(t.to_string()))
                             .unwrap_or_else(|| Value::String("Calculated".to_string()));
-                        
+
                         properties.insert(property_string.clone(), type_value);
                     } else {
                         // Check for type mismatch
@@ -659,8 +727,10 @@ pub fn update_node_properties(
                             let new_type = first_value_type
                                 .map(|t| Value::String(t.to_string()))
                                 .unwrap_or_else(|| Value::String("Calculated".to_string()));
-                                
-                            if let (Value::String(existing), Value::String(new_str)) = (existing_type, &new_type) {
+
+                            if let (Value::String(existing), Value::String(new_str)) =
+                                (existing_type, &new_type)
+                            {
                                 if existing != new_str {
                                     errors.push(format!(
                                         "Type mismatch for property '{}': existing schema has '{}', but data has '{}'",
@@ -677,16 +747,16 @@ pub fn update_node_properties(
                         }
                     }
                 }
-            },
+            }
             None => {
                 // Schema doesn't exist, create it
                 let mut properties = HashMap::new();
                 let type_value = first_value_type
                     .map(|t| Value::String(t.to_string()))
                     .unwrap_or_else(|| Value::String("Calculated".to_string()));
-                
+
                 properties.insert(property_string.clone(), type_value);
-                
+
                 let schema_node_data = NodeData::Schema {
                     id: Value::String(node_type.clone()),
                     title: schema_title,
@@ -697,18 +767,18 @@ pub fn update_node_properties(
             }
         }
     }
-    
+
     // Step 3: Prepare batch updates for nodes
     let batch_size = nodes.len();
     let mut batch = BatchProcessor::new(batch_size);
-    
+
     for (node_idx_opt, value) in nodes {
         if let Some(node_idx) = node_idx_opt {
             // Only add valid nodes to batch
             if node_idx.index() < graph.graph.node_count() {
                 let mut properties = HashMap::new();
                 properties.insert(property_string.clone(), value.clone());
-                
+
                 // Create update action
                 let action = NodeAction::Update {
                     node_idx: *node_idx,
@@ -716,7 +786,7 @@ pub fn update_node_properties(
                     properties,
                     conflict_mode: ConflictHandling::Update,
                 };
-                
+
                 if let Err(e) = batch.add_action(action, graph) {
                     errors.push(format!("Failed to update node property: {}", e));
                     skipped_count += 1;
@@ -729,7 +799,7 @@ pub fn update_node_properties(
             skipped_count += 1;
         }
     }
-    
+
     // Step 4: Execute batch update
     let (stats, _metrics) = match batch.execute(graph) {
         Ok(result) => result,
@@ -738,27 +808,27 @@ pub fn update_node_properties(
             return Err(format!("Failed to execute batch update: {}", e));
         }
     };
-    
+
     if stats.updates == 0 && errors.is_empty() {
         errors.push("No nodes were updated".to_string());
     }
-    
+
     // Calculate elapsed time
     let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-    
+
     // Create and return the operation report
     let mut report = NodeOperationReport::new(
         "update_node_properties".to_string(),
         0, // We don't create nodes in this function
         stats.updates,
         skipped_count,
-        elapsed_ms
+        elapsed_ms,
     );
-    
+
     // Add errors if we found any
     if !errors.is_empty() {
         report = report.with_errors(errors);
     }
-    
+
     Ok(report)
 }

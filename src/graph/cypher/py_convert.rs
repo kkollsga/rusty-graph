@@ -1,10 +1,10 @@
 // src/graph/cypher/py_convert.rs
 // Convert CypherResult to Python objects
 
+use super::result::CypherResult;
+use crate::datatypes::py_out;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use crate::datatypes::py_out;
-use super::result::CypherResult;
 
 /// Convert a CypherResult to a Python dict with 'columns' and 'rows' keys
 pub fn cypher_result_to_py(py: Python<'_>, result: &CypherResult) -> PyResult<Py<PyAny>> {

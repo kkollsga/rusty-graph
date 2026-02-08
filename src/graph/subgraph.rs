@@ -1,10 +1,10 @@
 // src/graph/subgraph.rs
 //! Subgraph extraction and selection expansion operations
 
-use std::collections::{HashMap, HashSet};
+use crate::graph::schema::{CurrentSelection, DirGraph, EdgeData, NodeData};
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
-use crate::graph::schema::{DirGraph, CurrentSelection, NodeData, EdgeData};
+use std::collections::{HashMap, HashSet};
 
 /// Expand the current selection by N hops using BFS.
 ///
@@ -17,7 +17,8 @@ pub fn expand_selection(
     hops: usize,
 ) -> Result<(), String> {
     let level_idx = selection.get_level_count().saturating_sub(1);
-    let level = selection.get_level(level_idx)
+    let level = selection
+        .get_level(level_idx)
         .ok_or_else(|| "No active selection level".to_string())?;
 
     // Start with current selection
@@ -51,7 +52,8 @@ pub fn expand_selection(
     }
 
     // Update selection with expanded nodes
-    let level_mut = selection.get_level_mut(level_idx)
+    let level_mut = selection
+        .get_level_mut(level_idx)
         .ok_or_else(|| "Failed to get mutable selection level".to_string())?;
 
     level_mut.selections.clear();
@@ -69,7 +71,8 @@ pub fn extract_subgraph(
     selection: &CurrentSelection,
 ) -> Result<DirGraph, String> {
     let level_idx = selection.get_level_count().saturating_sub(1);
-    let level = selection.get_level(level_idx)
+    let level = selection
+        .get_level(level_idx)
         .ok_or_else(|| "No active selection level".to_string())?;
 
     let nodes = level.get_all_nodes();
@@ -89,7 +92,8 @@ pub fn extract_subgraph(
 
             // Update type indices
             if let NodeData::Regular { node_type, .. } = node_data {
-                new_graph.type_indices
+                new_graph
+                    .type_indices
                     .entry(node_type.clone())
                     .or_default()
                     .push(new_idx);
@@ -104,9 +108,10 @@ pub fn extract_subgraph(
 
             // Only copy edge if target is also in selection
             if node_set.contains(&old_target_idx) {
-                if let (Some(&new_source), Some(&new_target)) =
-                    (index_map.get(&old_source_idx), index_map.get(&old_target_idx))
-                {
+                if let (Some(&new_source), Some(&new_target)) = (
+                    index_map.get(&old_source_idx),
+                    index_map.get(&old_target_idx),
+                ) {
                     // Clone edge data
                     let edge_data = EdgeData::new(
                         edge.weight().connection_type.clone(),
@@ -134,7 +139,8 @@ pub fn get_subgraph_stats(
     selection: &CurrentSelection,
 ) -> Result<SubgraphStats, String> {
     let level_idx = selection.get_level_count().saturating_sub(1);
-    let level = selection.get_level(level_idx)
+    let level = selection
+        .get_level(level_idx)
         .ok_or_else(|| "No active selection level".to_string())?;
 
     let nodes = level.get_all_nodes();

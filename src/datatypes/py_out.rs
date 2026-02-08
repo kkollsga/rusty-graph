@@ -1,20 +1,25 @@
 // src/datatypes/py_out.rs
+use super::values::Value;
+use crate::graph::calculations::StatResult;
+use crate::graph::data_retrieval::{LevelConnections, LevelNodes, LevelValues, UniqueValues};
+use crate::graph::schema::{NodeData, NodeInfo};
+use crate::graph::statistics_methods::PropertyStats;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use pyo3::IntoPyObjectExt;
 use std::collections::HashMap;
-use super::values::Value;
-use crate::graph::calculations::StatResult;
-use crate::graph::schema::{NodeInfo, NodeData};
-use crate::graph::statistics_methods::PropertyStats;
-use crate::graph::data_retrieval::{LevelNodes, LevelValues, LevelConnections, UniqueValues};
 
 /// Convert NodeData directly to Python dict without intermediate NodeInfo clone.
 /// This is faster than to_node_info() + nodeinfo_to_pydict() because it avoids
 /// cloning the properties HashMap.
 pub fn nodedata_to_pydict(py: Python, node: &NodeData) -> PyResult<Option<Py<PyAny>>> {
     match node {
-        NodeData::Regular { id, title, node_type, properties } => {
+        NodeData::Regular {
+            id,
+            title,
+            node_type,
+            properties,
+        } => {
             let dict = PyDict::new(py);
             dict.set_item("id", value_to_py(py, id)?)?;
             dict.set_item("title", value_to_py(py, title)?)?;
@@ -25,7 +30,7 @@ pub fn nodedata_to_pydict(py: Python, node: &NodeData) -> PyResult<Option<Py<PyA
             }
 
             Ok(Some(dict.into()))
-        },
+        }
         NodeData::Schema { .. } => Ok(None),
     }
 }
@@ -57,7 +62,10 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
 }
 
 /// Convert a HashMap<String, Value> to a Python dict
-pub fn hashmap_to_pydict<'py>(py: Python<'py>, map: &HashMap<String, Value>) -> PyResult<Bound<'py, PyDict>> {
+pub fn hashmap_to_pydict<'py>(
+    py: Python<'py>,
+    map: &HashMap<String, Value>,
+) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     for (k, v) in map {
         dict.set_item(k, value_to_py(py, v)?)?;
@@ -68,7 +76,7 @@ pub fn hashmap_to_pydict<'py>(py: Python<'py>, map: &HashMap<String, Value>) -> 
 pub fn convert_stats_for_python(stats: Vec<PropertyStats>) -> PyResult<Py<PyAny>> {
     Python::attach(|py| {
         let dict = PyDict::new(py);
-        
+
         let parent_idx = PyList::empty(py);
         let parent_type = PyList::empty(py);
         let parent_title = PyList::empty(py);
@@ -84,11 +92,20 @@ pub fn convert_stats_for_python(stats: Vec<PropertyStats>) -> PyResult<Py<PyAny>
         let max_val = PyList::empty(py);
 
         for stat in stats {
-            parent_idx.append(stat.parent_idx.map(|idx| idx.index().into_pyobject(py).unwrap().into_any().unbind())
-                                           .unwrap_or_else(|| py.None().into()))?;
+            parent_idx.append(
+                stat.parent_idx
+                    .map(|idx| idx.index().into_pyobject(py).unwrap().into_any().unbind())
+                    .unwrap_or_else(|| py.None().into()),
+            )?;
             parent_type.append(stat.parent_type.unwrap_or_default())?;
-            parent_title.append(stat.parent_title.map_or_else(|| py.None().into(), |v| value_to_py(py, &v).unwrap()))?;
-            parent_id.append(stat.parent_id.map_or_else(|| py.None().into(), |v| value_to_py(py, &v).unwrap()))?;
+            parent_title.append(
+                stat.parent_title
+                    .map_or_else(|| py.None().into(), |v| value_to_py(py, &v).unwrap()),
+            )?;
+            parent_id.append(
+                stat.parent_id
+                    .map_or_else(|| py.None().into(), |v| value_to_py(py, &v).unwrap()),
+            )?;
             property_name.append(stat.property_name)?;
             value_type.append(stat.value_type)?;
             children.append(stat.children)?;
@@ -96,10 +113,26 @@ pub fn convert_stats_for_python(stats: Vec<PropertyStats>) -> PyResult<Py<PyAny>
             valid_count.append(stat.valid_count)?;
 
             if stat.is_numeric {
-                sum_val.append(stat.sum.map(|v| v.into_pyobject(py).unwrap().into_any().unbind()).unwrap_or_else(|| py.None().into()))?;
-                avg.append(stat.avg.map(|v| v.into_pyobject(py).unwrap().into_any().unbind()).unwrap_or_else(|| py.None().into()))?;
-                min_val.append(stat.min.map(|v| v.into_pyobject(py).unwrap().into_any().unbind()).unwrap_or_else(|| py.None().into()))?;
-                max_val.append(stat.max.map(|v| v.into_pyobject(py).unwrap().into_any().unbind()).unwrap_or_else(|| py.None().into()))?;
+                sum_val.append(
+                    stat.sum
+                        .map(|v| v.into_pyobject(py).unwrap().into_any().unbind())
+                        .unwrap_or_else(|| py.None().into()),
+                )?;
+                avg.append(
+                    stat.avg
+                        .map(|v| v.into_pyobject(py).unwrap().into_any().unbind())
+                        .unwrap_or_else(|| py.None().into()),
+                )?;
+                min_val.append(
+                    stat.min
+                        .map(|v| v.into_pyobject(py).unwrap().into_any().unbind())
+                        .unwrap_or_else(|| py.None().into()),
+                )?;
+                max_val.append(
+                    stat.max
+                        .map(|v| v.into_pyobject(py).unwrap().into_any().unbind())
+                        .unwrap_or_else(|| py.None().into()),
+                )?;
             } else {
                 sum_val.append(py.None())?;
                 avg.append(py.None())?;
@@ -121,7 +154,7 @@ pub fn convert_stats_for_python(stats: Vec<PropertyStats>) -> PyResult<Py<PyAny>
         dict.set_item("avg", avg)?;
         dict.set_item("min", min_val)?;
         dict.set_item("max", max_val)?;
-        
+
         Ok(dict.into())
     })
 }
@@ -131,19 +164,19 @@ pub fn level_nodes_to_pydict(
     level_nodes: &[LevelNodes],
     parent_key: Option<&str>,
     parent_info: Option<bool>,
-    flatten_single_parent: Option<bool>
+    flatten_single_parent: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
     // Default to true if not specified
     let should_flatten = flatten_single_parent.unwrap_or(true);
-    
+
     // If there's only one parent and flatten_single_parent is true, return just the nodes
     if should_flatten && level_nodes.len() == 1 {
         let group = &level_nodes[0];
-        
+
         if parent_info.unwrap_or(false) && group.parent_idx.is_some() {
             // When parent info is requested, still return a dict but with a simpler structure
             let parent_dict = PyDict::new(py);
-            
+
             if let Some(ref id) = group.parent_id {
                 parent_dict.set_item("id", value_to_py(py, id)?)?;
             }
@@ -151,16 +184,20 @@ pub fn level_nodes_to_pydict(
             if let Some(ref type_str) = group.parent_type {
                 parent_dict.set_item("type", type_str)?;
             }
-            
-            let nodes: Vec<Py<PyAny>> = group.nodes.iter()
+
+            let nodes: Vec<Py<PyAny>> = group
+                .nodes
+                .iter()
                 .map(|node| nodeinfo_to_pydict(py, node))
                 .collect::<PyResult<_>>()?;
             parent_dict.set_item("nodes", nodes)?;
-            
+
             return Ok(parent_dict.into());
         } else {
             // Just return the list of nodes
-            let nodes: Vec<Py<PyAny>> = group.nodes.iter()
+            let nodes: Vec<Py<PyAny>> = group
+                .nodes
+                .iter()
                 .map(|node| nodeinfo_to_pydict(py, node))
                 .collect::<PyResult<_>>()?;
             return Ok(PyList::new(py, nodes)?.into());
@@ -170,7 +207,7 @@ pub fn level_nodes_to_pydict(
     // Original behavior for multiple parents
     let result = PyDict::new(py);
     let mut seen_keys = std::collections::HashMap::new();
-    
+
     for group in level_nodes {
         let base_key = match parent_key {
             Some("idx") => {
@@ -179,7 +216,7 @@ pub fn level_nodes_to_pydict(
                 } else {
                     String::from("no_idx")
                 }
-            },
+            }
             Some("id") => {
                 if let Some(ref id) = group.parent_id {
                     match id {
@@ -187,25 +224,25 @@ pub fn level_nodes_to_pydict(
                         Value::Int64(i) => i.to_string(),
                         Value::Float64(f) => f.to_string(),
                         Value::UniqueId(u) => u.to_string(),
-                        _ => format!("{:?}", id)
+                        _ => format!("{:?}", id),
                     }
                 } else {
                     String::from("no_id")
                 }
-            },
+            }
             _ => {
                 if !group.parent_title.is_empty() {
                     group.parent_title.clone()
                 } else {
                     String::from("no_title")
                 }
-            },
+            }
         };
 
         let key = {
             let count = seen_keys.entry(base_key.clone()).or_insert(0);
             *count += 1;
-            
+
             if *count > 1 {
                 format!("{}_{}", base_key, count)
             } else {
@@ -224,57 +261,67 @@ pub fn level_nodes_to_pydict(
                 parent_dict.set_item("type", type_str)?;
             }
 
-            let nodes: Vec<Py<PyAny>> = group.nodes.iter()
+            let nodes: Vec<Py<PyAny>> = group
+                .nodes
+                .iter()
                 .map(|node| nodeinfo_to_pydict(py, node))
                 .collect::<PyResult<_>>()?;
             parent_dict.set_item("children", nodes)?;
 
             parent_dict.into()
         } else {
-            let nodes: Vec<Py<PyAny>> = group.nodes.iter()
+            let nodes: Vec<Py<PyAny>> = group
+                .nodes
+                .iter()
                 .map(|node| nodeinfo_to_pydict(py, node))
                 .collect::<PyResult<_>>()?;
             PyList::new(py, nodes)?.into()
         };
-        
+
         result.set_item(key, value)?;
     }
-    
+
     Ok(result.into())
 }
 
 pub fn level_values_to_pydict(py: Python, level_values: &[LevelValues]) -> PyResult<Py<PyAny>> {
     let result = PyDict::new(py);
-    
+
     for group in level_values {
-        let values: Vec<Py<PyAny>> = group.values.iter()
+        let values: Vec<Py<PyAny>> = group
+            .values
+            .iter()
             .map(|vec_values| {
-                let tuple_values: Vec<Py<PyAny>> = vec_values.iter()
+                let tuple_values: Vec<Py<PyAny>> = vec_values
+                    .iter()
                     .map(|v| value_to_py(py, v))
                     .collect::<PyResult<_>>()?;
                 Ok(PyTuple::new(py, &tuple_values)?.into())
             })
             .collect::<PyResult<_>>()?;
-            
+
         result.set_item(&group.parent_title, values)?;
     }
-    
+
     Ok(result.into())
 }
 
-pub fn level_single_values_to_pydict(py: Python, level_values: &[LevelValues]) -> PyResult<Py<PyAny>> {
+pub fn level_single_values_to_pydict(
+    py: Python,
+    level_values: &[LevelValues],
+) -> PyResult<Py<PyAny>> {
     let result = PyDict::new(py);
-    
+
     for group in level_values {
-        let values: Vec<Py<PyAny>> = group.values.iter()
-            .map(|vec_values| {
-                value_to_py(py, &vec_values[0])
-            })
+        let values: Vec<Py<PyAny>> = group
+            .values
+            .iter()
+            .map(|vec_values| value_to_py(py, &vec_values[0]))
             .collect::<PyResult<_>>()?;
-            
+
         result.set_item(&group.parent_title, values)?;
     }
-    
+
     Ok(result.into())
 }
 
@@ -282,7 +329,7 @@ pub fn level_connections_to_pydict(
     py: Python,
     connections: &[LevelConnections],
     parent_info: Option<bool>,
-    flatten_single_parent: Option<bool>
+    flatten_single_parent: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
     // Default to true if not specified
     let should_flatten = flatten_single_parent.unwrap_or(true);
@@ -451,7 +498,9 @@ pub fn level_connections_to_pydict(
 pub fn level_unique_values_to_pydict(py: Python, values: &[UniqueValues]) -> PyResult<Py<PyAny>> {
     let result = PyDict::new(py);
     for unique_values in values {
-        let py_values: PyResult<Vec<Py<PyAny>>> = unique_values.values.iter()
+        let py_values: PyResult<Vec<Py<PyAny>>> = unique_values
+            .values
+            .iter()
             .map(|v| value_to_py(py, v))
             .collect();
         result.set_item(&unique_values.parent_title, PyList::new(py, py_values?)?)?;
@@ -462,7 +511,7 @@ pub fn level_unique_values_to_pydict(py: Python, values: &[UniqueValues]) -> PyR
 pub fn convert_computation_results_for_python(results: Vec<StatResult>) -> PyResult<Py<PyAny>> {
     Python::attach(|py| {
         let dict = PyDict::new(py);
-        
+
         // Convert and insert each result within the GIL scope
         for (i, result) in results.iter().enumerate() {
             // Get a key from parent_title or generate one
@@ -476,7 +525,7 @@ pub fn convert_computation_results_for_python(results: Vec<StatResult>) -> PyRes
                     }
                 }
             };
-            
+
             // Insert the value or null for errors
             if let Some(_) = &result.error_msg {
                 // Add null for error cases
@@ -486,17 +535,17 @@ pub fn convert_computation_results_for_python(results: Vec<StatResult>) -> PyRes
                 match &result.value {
                     Value::Int64(i) => {
                         dict.set_item(&key, i)?;
-                    },
+                    }
                     Value::Float64(f) => {
                         dict.set_item(&key, f)?;
-                    },
+                    }
                     Value::UniqueId(u) => {
                         dict.set_item(&key, u)?;
-                    },
+                    }
                     Value::Null => {
                         // Add explicit null value
                         dict.set_item(&key, py.None())?;
-                    },
+                    }
                     _ => {
                         // Add null for unsupported types
                         dict.set_item(&key, py.None())?;
@@ -504,7 +553,7 @@ pub fn convert_computation_results_for_python(results: Vec<StatResult>) -> PyRes
                 }
             }
         }
-        
+
         // Return empty dict if no results (not an error - traversal may have found nothing)
         Ok(dict.into())
     })
@@ -536,7 +585,13 @@ pub fn pattern_matches_to_pylist(
             let binding_dict = PyDict::new(py);
 
             match binding {
-                MatchBinding::Node { node_type, title, id, properties, .. } => {
+                MatchBinding::Node {
+                    node_type,
+                    title,
+                    id,
+                    properties,
+                    ..
+                } => {
                     binding_dict.set_item("type", node_type)?;
                     binding_dict.set_item("title", title)?;
                     binding_dict.set_item("id", value_to_py(py, id)?)?;
@@ -548,7 +603,12 @@ pub fn pattern_matches_to_pylist(
                     }
                     binding_dict.set_item("properties", props_dict)?;
                 }
-                MatchBinding::Edge { connection_type, properties, source, target } => {
+                MatchBinding::Edge {
+                    connection_type,
+                    properties,
+                    source,
+                    target,
+                } => {
                     binding_dict.set_item("connection_type", connection_type)?;
                     binding_dict.set_item("source_idx", source.index())?;
                     binding_dict.set_item("target_idx", target.index())?;
@@ -560,7 +620,12 @@ pub fn pattern_matches_to_pylist(
                     }
                     binding_dict.set_item("properties", props_dict)?;
                 }
-                MatchBinding::VariableLengthPath { source, target, hops, path } => {
+                MatchBinding::VariableLengthPath {
+                    source,
+                    target,
+                    hops,
+                    path,
+                } => {
                     binding_dict.set_item("source_idx", source.index())?;
                     binding_dict.set_item("target_idx", target.index())?;
                     binding_dict.set_item("hops", *hops)?;
