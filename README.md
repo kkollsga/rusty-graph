@@ -11,6 +11,16 @@ pip install rusty-graph
 pip install rusty-graph --upgrade  # upgrade
 ```
 
+## ⚡ Start Here
+
+**Most users should:**
+
+- **Use Cypher queries** for creating, reading, updating, and deleting data — it's declarative, familiar, and returns DataFrames
+- **Use `add_nodes()` / `add_connections()`** when bulk-loading from pandas DataFrames (thousands of rows at once)
+- **Use `create_index()`** on frequently-filtered properties for ~3x speedup on large graphs
+
+**Compatibility note:** rusty_graph implements a Cypher subset (see [Supported Cypher Subset](#supported-cypher-subset)). Not supported: `CALL`, subqueries, `SET n:Label` (label mutation). If you need Neo4j-specific features, check the compatibility table first.
+
 ## Quick Start
 
 ```python
@@ -46,19 +56,149 @@ df = graph.cypher("MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age", to_df=
 
 ## Table of Contents
 
-- [Cypher Queries](#cypher-queries) — Full Cypher query language with MATCH, CREATE, SET, DELETE, REMOVE, MERGE, aggregation (recommended API)
+### Getting Started
+
 - [When to Use What](#when-to-use-what) — Choosing between Cypher, fluent API, and pattern matching
-- [Advanced API: Data Management](#advanced-api-data-management) — Adding nodes, connections, dates, batch updates (fluent/native API)
-- [Advanced API: Querying](#advanced-api-querying) — Filtering, traversal, set operations (fluent/native API)
-- [Pattern Matching](#pattern-matching) — Cypher-like pattern syntax for multi-hop traversals
+- [Common Recipes](#common-recipes) — Quick copy/paste examples for common tasks
+
+### Query Interfaces
+
+- [Cypher Queries](#cypher-queries) — MATCH, CREATE, SET, DELETE, REMOVE, MERGE, aggregation (recommended)
+- [Advanced API: Data Management](#advanced-api-data-management) — Bulk loading from DataFrames
+- [Advanced API: Querying](#advanced-api-querying) — Fluent filtering, traversal, set operations
+- [Pattern Matching](#pattern-matching) — Lightweight structural pattern queries
+
+### Graph Analysis
+
 - [Graph Algorithms](#graph-algorithms) — Shortest path, all paths, connected components, centrality
 - [Spatial Operations](#spatial-operations) — Bounding box, distance, WKT geometry, point-in-polygon
 - [Analytics](#analytics) — Statistics, calculations, connection aggregation
+
+### Advanced Topics
+
 - [Schema and Indexes](#schema-and-indexes) — Schema definition, validation, index management
 - [Import and Export](#import-and-export) — Save/load, GraphML, GEXF, D3 JSON, CSV, subgraphs
 - [Performance](#performance) — Tips, lightweight methods, performance model
 - [Graph Maintenance](#graph-maintenance) — Reindex, vacuum, graph health diagnostics
 - [Operation Reports](#operation-reports) — Tracking graph mutations
+
+---
+
+## When to Use What
+
+rusty_graph offers three query interfaces:
+
+| Interface | Best For | Key Benefits |
+|-----------|----------|--------------|
+| **Cypher** (recommended) | Ad-hoc queries, exploration, analytics, mutations | Standard syntax, declarative, returns DataFrames, familiar to Neo4j users |
+| **Fluent API** (advanced) | Bulk loading from DataFrames, multi-step pipelines with stored intermediate results | Chainable operations, `explain()`, computed properties stored on nodes |
+| **Pattern matching** (specialized) | Quick structural checks without full Cypher overhead | Lightweight, minimal parsing |
+
+**Start with Cypher** for most tasks — it's the most expressive and widely understood interface. Use the fluent API when you need to load data from pandas DataFrames or build complex pipelines that store intermediate computed properties. Use pattern matching for simple structural queries where you don't need WHERE/RETURN clauses.
+
+All three interfaces share the same underlying graph engine and have similar performance characteristics.
+
+---
+
+## Common Recipes
+
+Quick copy/paste snippets for common tasks:
+
+### Upsert with MERGE
+
+```python
+# Create node if it doesn't exist, update timestamp if it does
+graph.cypher("""
+    MERGE (p:Person {email: 'alice@example.com'})
+    ON CREATE SET p.created = '2024-01-01', p.name = 'Alice'
+    ON MATCH SET p.last_seen = '2024-01-15'
+""")
+```
+
+### Top-K Nodes by Centrality
+
+```python
+# Find the 10 most connected people
+top_nodes = graph.pagerank(top_k=10)
+for node in top_nodes:
+    print(f"{node['title']}: {node['score']:.3f}")
+```
+
+### 2-Hop Neighborhood
+
+```python
+# Find friends-of-friends
+graph.cypher("""
+    MATCH (me:Person {name: 'Alice'})-[:KNOWS*2]-(friend_of_friend:Person)
+    WHERE friend_of_friend <> me
+    RETURN DISTINCT friend_of_friend.name
+""")
+```
+
+### Export Subgraph
+
+```python
+# Export Alice's 2-hop network as GraphML
+subgraph = (
+    graph.type_filter('Person')
+    .filter({'name': 'Alice'})
+    .expand(hops=2)
+    .to_subgraph()
+)
+subgraph.export('alice_network.graphml', format='graphml')
+```
+
+### Bulk Load from DataFrame
+
+```python
+import pandas as pd
+
+# Load 10k nodes efficiently
+users_df = pd.DataFrame({
+    'user_id': range(10000),
+    'name': [f'User{i}' for i in range(10000)],
+    'age': [20 + (i % 50) for i in range(10000)]
+})
+
+graph.add_nodes(
+    data=users_df,
+    node_type='User',
+    unique_id_field='user_id',
+    node_title_field='name'
+)
+```
+
+### Create Index for Speed
+
+```python
+# Create index before filtering
+graph.create_index('Product', 'category')
+
+# Now ~3x faster on large graphs
+result = graph.cypher("MATCH (p:Product) WHERE p.category = 'Electronics' RETURN p.name")
+```
+
+### Delete Subgraph
+
+```python
+# Delete all inactive users and their relationships
+graph.cypher("""
+    MATCH (u:User)
+    WHERE u.status = 'inactive'
+    DETACH DELETE u
+""")
+```
+
+### Aggregation with Relationship Properties
+
+```python
+# Average movie rating per user
+graph.cypher("""
+    MATCH (p:Person)-[r:RATED]->(m:Movie)
+    RETURN p.name, avg(r.score) AS avg_rating, count(m) AS movies_rated
+    ORDER BY avg_rating DESC
+""")
+```
 
 ---
 
@@ -454,22 +594,6 @@ The Cypher executor uses several optimizations:
 | **Scalar functions** | `toUpper`/`upper`, `toLower`/`lower`, `toString`, `toInteger`/`toInt`, `toFloat`, `size`/`length`, `type`, `id`, `labels`, `coalesce` |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE n`, `DETACH DELETE n`, `REMOVE n.prop`, `MERGE (n:Label {props})`, `ON CREATE SET`, `ON MATCH SET` |
 | **Not supported** | `CALL`, subqueries, `SET n:Label` (label mutation), `REMOVE n:Label` |
-
----
-
-## When to Use What
-
-rusty_graph offers three query interfaces:
-
-| Interface | Best For | Key Benefits |
-|-----------|----------|--------------|
-| **Cypher** (recommended) | Ad-hoc queries, exploration, analytics, mutations | Standard syntax, declarative, returns DataFrames, familiar to Neo4j users |
-| **Fluent API** (advanced) | Bulk loading from DataFrames, multi-step pipelines with stored intermediate results | Chainable operations, `explain()`, computed properties stored on nodes |
-| **Pattern matching** (specialized) | Quick structural checks without full Cypher overhead | Lightweight, minimal parsing |
-
-**Start with Cypher** for most tasks — it's the most expressive and widely understood interface. Use the fluent API when you need to load data from pandas DataFrames or build complex pipelines that store intermediate computed properties. Use pattern matching for simple structural queries where you don't need WHERE/RETURN clauses.
-
-All three interfaces share the same underlying graph engine and have similar performance characteristics.
 
 ---
 
