@@ -1,0 +1,253 @@
+"""Tests for shortestPath() in Cypher queries."""
+
+import pytest
+from rusty_graph import KnowledgeGraph
+
+
+@pytest.fixture
+def chain_graph():
+    """Linear chain: Alice -> Bob -> Charlie -> Dave -> Eve."""
+    graph = KnowledgeGraph()
+
+    for name in ['Alice', 'Bob', 'Charlie', 'Dave', 'Eve']:
+        graph.cypher(f"CREATE (:Person {{name: '{name}'}})")
+
+    graph.cypher("MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) CREATE (a)-[:KNOWS]->(b)")
+    graph.cypher("MATCH (a:Person {name: 'Bob'}), (b:Person {name: 'Charlie'}) CREATE (a)-[:KNOWS]->(b)")
+    graph.cypher("MATCH (a:Person {name: 'Charlie'}), (b:Person {name: 'Dave'}) CREATE (a)-[:KNOWS]->(b)")
+    graph.cypher("MATCH (a:Person {name: 'Dave'}), (b:Person {name: 'Eve'}) CREATE (a)-[:KNOWS]->(b)")
+
+    return graph
+
+
+@pytest.fixture
+def diamond_graph():
+    """Diamond graph with shortcut: A -> B -> D and A -> C -> D (two paths of length 2)."""
+    graph = KnowledgeGraph()
+
+    for name in ['A', 'B', 'C', 'D']:
+        graph.cypher(f"CREATE (:Node {{name: '{name}'}})")
+
+    graph.cypher("MATCH (a:Node {name: 'A'}), (b:Node {name: 'B'}) CREATE (a)-[:EDGE]->(b)")
+    graph.cypher("MATCH (a:Node {name: 'A'}), (c:Node {name: 'C'}) CREATE (a)-[:EDGE]->(c)")
+    graph.cypher("MATCH (b:Node {name: 'B'}), (d:Node {name: 'D'}) CREATE (b)-[:EDGE]->(d)")
+    graph.cypher("MATCH (c:Node {name: 'C'}), (d:Node {name: 'D'}) CREATE (c)-[:EDGE]->(d)")
+
+    return graph
+
+
+@pytest.fixture
+def shortcut_graph():
+    """Graph where direct edge is shorter than chain: A->B->C and A->C (shortcut)."""
+    graph = KnowledgeGraph()
+
+    for name in ['A', 'B', 'C']:
+        graph.cypher(f"CREATE (:Node {{name: '{name}'}})")
+
+    graph.cypher("MATCH (a:Node {name: 'A'}), (b:Node {name: 'B'}) CREATE (a)-[:EDGE]->(b)")
+    graph.cypher("MATCH (b:Node {name: 'B'}), (c:Node {name: 'C'}) CREATE (b)-[:EDGE]->(c)")
+    graph.cypher("MATCH (a:Node {name: 'A'}), (c:Node {name: 'C'}) CREATE (a)-[:SHORTCUT]->(c)")
+
+    return graph
+
+
+class TestShortestPathBasic:
+    """Basic shortestPath functionality."""
+
+    def test_simple_chain(self, chain_graph):
+        """Shortest path along a chain."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Eve'})) "
+            "RETURN length(p)"
+        )
+        assert len(result['rows']) == 1
+        assert result['rows'][0]['length(p)'] == 4
+
+    def test_adjacent_nodes(self, chain_graph):
+        """Shortest path between directly connected nodes."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Bob'})) "
+            "RETURN length(p)"
+        )
+        assert len(result['rows']) == 1
+        assert result['rows'][0]['length(p)'] == 1
+
+    def test_shortcut_found(self, shortcut_graph):
+        """Direct shortcut should be found over longer chain."""
+        result = shortcut_graph.cypher(
+            "MATCH p = shortestPath((a:Node {name: 'A'})-[*..10]->(b:Node {name: 'C'})) "
+            "RETURN length(p)"
+        )
+        assert len(result['rows']) == 1
+        assert result['rows'][0]['length(p)'] == 1  # direct edge A->C
+
+    def test_diamond_length(self, diamond_graph):
+        """Both paths through diamond are length 2."""
+        result = diamond_graph.cypher(
+            "MATCH p = shortestPath((a:Node {name: 'A'})-[:EDGE*..10]->(b:Node {name: 'D'})) "
+            "RETURN length(p)"
+        )
+        assert len(result['rows']) == 1
+        assert result['rows'][0]['length(p)'] == 2
+
+    def test_no_path_returns_empty(self, chain_graph):
+        """No path between disconnected nodes returns empty result."""
+        chain_graph.cypher("CREATE (:Person {name: 'Isolated'})")
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Isolated'})) "
+            "RETURN length(p)"
+        )
+        assert len(result['rows']) == 0
+
+    def test_same_type_filter(self, chain_graph):
+        """Type filter restricts endpoints correctly."""
+        chain_graph.cypher("CREATE (:Animal {name: 'Rex'})")
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Animal {name: 'Rex'})) "
+            "RETURN length(p)"
+        )
+        assert len(result['rows']) == 0
+
+
+class TestShortestPathFunctions:
+    """Test length(), nodes(), relationships() on paths."""
+
+    def test_length_function(self, chain_graph):
+        """length(p) returns hop count."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
+            "RETURN length(p)"
+        )
+        assert result['rows'][0]['length(p)'] == 2
+
+    def test_nodes_function(self, chain_graph):
+        """nodes(p) returns list of node representations."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
+            "RETURN nodes(p)"
+        )
+        nodes_str = result['rows'][0]['nodes(p)']
+        assert 'Alice' in nodes_str
+        assert 'Bob' in nodes_str
+        assert 'Charlie' in nodes_str
+
+    def test_relationships_function(self, chain_graph):
+        """relationships(p) returns list of relationship types."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
+            "RETURN relationships(p)"
+        )
+        rels_str = result['rows'][0]['relationships(p)']
+        assert ':KNOWS' in rels_str
+
+    def test_all_path_functions_together(self, chain_graph):
+        """All path functions work in the same RETURN."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Dave'})) "
+            "RETURN length(p), nodes(p), relationships(p)"
+        )
+        row = result['rows'][0]
+        assert row['length(p)'] == 3
+        assert 'Alice' in row['nodes(p)']
+        assert 'Dave' in row['nodes(p)']
+        assert ':KNOWS' in row['relationships(p)']
+
+    def test_source_target_variables(self, chain_graph):
+        """Source and target node variables are accessible."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Dave'})) "
+            "RETURN a.name, b.name, length(p)"
+        )
+        row = result['rows'][0]
+        assert row['a.name'] == 'Alice'
+        assert row['b.name'] == 'Dave'
+        assert row['length(p)'] == 3
+
+
+class TestShortestPathEdgeCases:
+    """Edge cases for shortestPath."""
+
+    def test_reverse_direction_no_path(self, chain_graph):
+        """Chain is directed; reverse direction should find no path."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Eve'})-[:KNOWS*..10]->(b:Person {name: 'Alice'})) "
+            "RETURN length(p)"
+        )
+        assert len(result['rows']) == 0
+
+    def test_single_node_graph(self):
+        """shortestPath with single node — no path to itself."""
+        graph = KnowledgeGraph()
+        graph.cypher("CREATE (:Person {name: 'Alone'})")
+        result = graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alone'})-[:KNOWS*..10]->(b:Person {name: 'Alone'})) "
+            "RETURN length(p)"
+        )
+        # Same source and target — executor skips self-loops
+        assert len(result['rows']) == 0
+
+    def test_multiple_types_unfiltered(self, shortcut_graph):
+        """Without edge type filter, any edge type is traversed."""
+        result = shortcut_graph.cypher(
+            "MATCH p = shortestPath((a:Node {name: 'A'})-[*..10]->(b:Node {name: 'C'})) "
+            "RETURN length(p)"
+        )
+        assert result['rows'][0]['length(p)'] == 1  # uses SHORTCUT
+
+    def test_columns_correct(self, chain_graph):
+        """Column names are correct."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Bob'})) "
+            "RETURN length(p), nodes(p), relationships(p)"
+        )
+        assert result['columns'] == ['length(p)', 'nodes(p)', 'relationships(p)']
+
+    def test_empty_graph(self):
+        """shortestPath on empty graph returns no rows."""
+        graph = KnowledgeGraph()
+        # This should fail to parse or return empty — depends on whether patterns can match
+        # With no nodes of type Person, both source and target candidates are empty
+        result = graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'X'})-[:KNOWS*..10]->(b:Person {name: 'Y'})) "
+            "RETURN length(p)"
+        )
+        assert len(result['rows']) == 0
+
+
+class TestNormalMatchNotBroken:
+    """Ensure normal MATCH patterns still work after shortestPath changes."""
+
+    def test_simple_node_match(self):
+        """Normal node MATCH still works."""
+        graph = KnowledgeGraph()
+        graph.cypher("CREATE (:Person {name: 'Alice'})")
+        result = graph.cypher("MATCH (n:Person) RETURN n.name")
+        assert result['rows'][0]['n.name'] == 'Alice'
+
+    def test_edge_match(self):
+        """Normal edge MATCH still works."""
+        graph = KnowledgeGraph()
+        graph.cypher("CREATE (:Person {name: 'Alice'})")
+        graph.cypher("CREATE (:Person {name: 'Bob'})")
+        graph.cypher("MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) CREATE (a)-[:KNOWS]->(b)")
+        result = graph.cypher("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name")
+        assert result['rows'][0]['a.name'] == 'Alice'
+        assert result['rows'][0]['b.name'] == 'Bob'
+
+    def test_multi_pattern_match(self):
+        """Comma-separated patterns still work."""
+        graph = KnowledgeGraph()
+        graph.cypher("CREATE (:Person {name: 'Alice'})")
+        graph.cypher("CREATE (:Person {name: 'Bob'})")
+        result = graph.cypher("MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) RETURN a.name, b.name")
+        assert result['rows'][0]['a.name'] == 'Alice'
+        assert result['rows'][0]['b.name'] == 'Bob'
+
+    def test_where_clause_match(self):
+        """MATCH with WHERE still works."""
+        graph = KnowledgeGraph()
+        graph.cypher("CREATE (:Person {name: 'Alice', age: 30})")
+        graph.cypher("CREATE (:Person {name: 'Bob', age: 25})")
+        result = graph.cypher("MATCH (n:Person) WHERE n.age > 28 RETURN n.name")
+        assert len(result['rows']) == 1
+        assert result['rows'][0]['n.name'] == 'Alice'

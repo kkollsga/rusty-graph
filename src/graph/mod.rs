@@ -4,6 +4,7 @@ use crate::datatypes::{py_in, py_out};
 use crate::graph::calculations::StatResult;
 use crate::graph::io_operations::save_to_file;
 use crate::graph::reporting::{OperationReport, OperationReports};
+use petgraph::graph::NodeIndex;
 use petgraph::visit::NodeIndexable;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -104,6 +105,42 @@ fn centrality_results_to_py(
     }
 
     Ok(result_list.into())
+}
+
+/// Helper to convert community detection results to Python dict
+fn community_results_to_py(
+    py: Python<'_>,
+    graph: &DirGraph,
+    result: graph_algorithms::CommunityResult,
+) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+
+    // Group nodes by community
+    let communities = PyDict::new(py);
+    let mut grouped: HashMap<usize, Vec<NodeIndex>> = HashMap::new();
+    for a in &result.assignments {
+        grouped.entry(a.community_id).or_default().push(a.node_idx);
+    }
+
+    for (comm_id, members) in &grouped {
+        let member_list = PyList::empty(py);
+        for &node_idx in members {
+            if let Some(info) = graph_algorithms::get_node_info(graph, node_idx) {
+                let node_dict = PyDict::new(py);
+                node_dict.set_item("node_type", &info.node_type)?;
+                node_dict.set_item("title", &info.title)?;
+                node_dict.set_item("id", py_out::value_to_py(py, &info.id)?)?;
+                member_list.append(node_dict)?;
+            }
+        }
+        communities.set_item(comm_id, member_list)?;
+    }
+
+    dict.set_item("communities", communities)?;
+    dict.set_item("modularity", result.modularity)?;
+    dict.set_item("num_communities", result.num_communities)?;
+
+    Ok(dict.into())
 }
 
 #[pymethods]
@@ -3022,6 +3059,53 @@ impl KnowledgeGraph {
         let results = graph_algorithms::closeness_centrality(&self.inner, normalized);
 
         centrality_results_to_py(py, &self.inner, results, top_k)
+    }
+
+    // ========================================================================
+    // Community Detection
+    // ========================================================================
+
+    /// Detect communities using the Louvain modularity optimization algorithm.
+    ///
+    /// Args:
+    ///     weight_property: Edge property to use as weight (default: all edges weight 1.0)
+    ///     resolution: Resolution parameter (default: 1.0). Higher values produce more communities.
+    ///
+    /// Returns:
+    ///     dict with 'communities' (dict mapping community_id -> list of node dicts),
+    ///     'modularity' (float), and 'num_communities' (int)
+    #[pyo3(signature = (weight_property=None, resolution=None))]
+    fn louvain_communities(
+        &self,
+        py: Python<'_>,
+        weight_property: Option<String>,
+        resolution: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        let res = resolution.unwrap_or(1.0);
+        let result =
+            graph_algorithms::louvain_communities(&self.inner, weight_property.as_deref(), res);
+        community_results_to_py(py, &self.inner, result)
+    }
+
+    /// Detect communities using label propagation.
+    ///
+    /// Each node adopts the most frequent label among its neighbors until convergence.
+    ///
+    /// Args:
+    ///     max_iterations: Maximum iterations before stopping (default: 100)
+    ///
+    /// Returns:
+    ///     dict with 'communities' (dict mapping community_id -> list of node dicts),
+    ///     'modularity' (float), and 'num_communities' (int)
+    #[pyo3(signature = (max_iterations=None))]
+    fn label_propagation(
+        &self,
+        py: Python<'_>,
+        max_iterations: Option<usize>,
+    ) -> PyResult<Py<PyAny>> {
+        let max_iter = max_iterations.unwrap_or(100);
+        let result = graph_algorithms::label_propagation(&self.inner, max_iter);
+        community_results_to_py(py, &self.inner, result)
     }
 
     // ========================================================================

@@ -3,9 +3,10 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::DirGraph;
+use crate::graph::value_operations;
 use petgraph::algo::kosaraju_scc;
 use petgraph::graph::NodeIndex;
-use petgraph::visit::{EdgeRef, NodeIndexable};
+use petgraph::visit::{EdgeRef, IntoEdgeReferences, NodeIndexable};
 use std::collections::HashMap;
 
 /// Result of a path finding operation
@@ -97,6 +98,67 @@ fn reconstruct_path_bfs(
     }
 
     None // No path found
+}
+
+/// Directed BFS shortest path — only follows outgoing edges.
+/// Used by Cypher shortestPath() which respects edge direction.
+pub fn shortest_path_directed(
+    graph: &DirGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+) -> Option<PathResult> {
+    use petgraph::Direction;
+    use std::collections::VecDeque;
+
+    if source == target {
+        return Some(PathResult {
+            path: vec![source],
+            cost: 0,
+        });
+    }
+
+    let node_bound = graph.graph.node_bound();
+    let mut visited: Vec<bool> = vec![false; node_bound];
+    let mut parent: Vec<u32> = vec![u32::MAX; node_bound];
+    let mut queue = VecDeque::with_capacity(node_bound / 4);
+
+    let source_idx = source.index();
+    let target_idx = target.index();
+
+    queue.push_back(source_idx);
+    visited[source_idx] = true;
+
+    while let Some(current_idx) = queue.pop_front() {
+        let current = NodeIndex::new(current_idx);
+
+        // Only follow outgoing edges
+        for neighbor in graph.graph.neighbors_directed(current, Direction::Outgoing) {
+            let neighbor_idx = neighbor.index();
+
+            if !visited[neighbor_idx] {
+                visited[neighbor_idx] = true;
+                parent[neighbor_idx] = current_idx as u32;
+                queue.push_back(neighbor_idx);
+
+                if neighbor_idx == target_idx {
+                    let mut path = Vec::with_capacity(16);
+                    let mut node_idx = target_idx;
+
+                    while node_idx != source_idx {
+                        path.push(NodeIndex::new(node_idx));
+                        node_idx = parent[node_idx] as usize;
+                    }
+                    path.push(source);
+                    path.reverse();
+
+                    let cost = path.len().saturating_sub(1);
+                    return Some(PathResult { path, cost });
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Find all paths between two nodes up to a maximum number of hops.
@@ -670,6 +732,362 @@ pub fn closeness_centrality(graph: &DirGraph, normalized: bool) -> Vec<Centralit
     });
 
     results
+}
+
+// ============================================================================
+// Community Detection
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub struct CommunityAssignment {
+    pub node_idx: NodeIndex,
+    pub community_id: usize,
+}
+
+#[derive(Debug)]
+pub struct CommunityResult {
+    pub assignments: Vec<CommunityAssignment>,
+    pub num_communities: usize,
+    pub modularity: f64,
+}
+
+/// Louvain modularity optimization for community detection.
+///
+/// Each node starts in its own community. Iteratively moves nodes to the
+/// neighboring community that yields the largest modularity gain, until
+/// no improvement is found.
+pub fn louvain_communities(
+    graph: &DirGraph,
+    weight_property: Option<&str>,
+    resolution: f64,
+) -> CommunityResult {
+    let bound = graph.graph.node_bound();
+    if bound == 0 {
+        return CommunityResult {
+            assignments: Vec::new(),
+            num_communities: 0,
+            modularity: 0.0,
+        };
+    }
+
+    // Build adjacency with weights
+    // community[i] = community id for node at index i
+    let mut community: Vec<usize> = vec![0; bound];
+    let mut node_exists: Vec<bool> = vec![false; bound];
+
+    // Initialize: each node in its own community
+    let mut next_id = 0usize;
+    for node_idx in graph.graph.node_indices() {
+        let i = node_idx.index();
+        community[i] = next_id;
+        node_exists[i] = true;
+        next_id += 1;
+    }
+
+    // Compute total edge weight (2m)
+    let mut total_weight = 0.0f64;
+    for edge in graph.graph.edge_references() {
+        let w = edge_weight(graph, edge.id(), weight_property);
+        total_weight += w;
+    }
+
+    if total_weight == 0.0 {
+        // No edges — each node is its own community
+        let assignments: Vec<CommunityAssignment> = graph
+            .graph
+            .node_indices()
+            .map(|idx| CommunityAssignment {
+                node_idx: idx,
+                community_id: community[idx.index()],
+            })
+            .collect();
+        let num_communities = assignments.len();
+        return CommunityResult {
+            assignments,
+            num_communities,
+            modularity: 0.0,
+        };
+    }
+
+    // Precompute node degrees (undirected: sum of all edge weights touching the node)
+    let mut degree: Vec<f64> = vec![0.0; bound];
+    for edge in graph.graph.edge_references() {
+        let w = edge_weight(graph, edge.id(), weight_property);
+        degree[edge.source().index()] += w;
+        degree[edge.target().index()] += w;
+    }
+
+    // Precompute sum of degrees per community (sigma_tot)
+    let mut sigma_tot: Vec<f64> = vec![0.0; next_id];
+    for node_idx in graph.graph.node_indices() {
+        sigma_tot[community[node_idx.index()]] += degree[node_idx.index()];
+    }
+
+    // m = total edge weight (each edge counted once)
+    let m = total_weight;
+    let two_m = 2.0 * m;
+
+    // Iterative optimization
+    let max_iterations = 100;
+    for _ in 0..max_iterations {
+        let mut improved = false;
+
+        for node_idx in graph.graph.node_indices() {
+            let i = node_idx.index();
+            let current_community = community[i];
+            let k_i = degree[i];
+
+            // Compute weight from node i to each neighboring community (undirected)
+            let mut community_weights: HashMap<usize, f64> = HashMap::new();
+
+            for edge in graph.graph.edges(node_idx) {
+                let neighbor = edge.target();
+                let w = edge_weight(graph, edge.id(), weight_property);
+                *community_weights
+                    .entry(community[neighbor.index()])
+                    .or_default() += w;
+            }
+            for edge in graph
+                .graph
+                .edges_directed(node_idx, petgraph::Direction::Incoming)
+            {
+                let neighbor = edge.source();
+                let w = edge_weight(graph, edge.id(), weight_property);
+                *community_weights
+                    .entry(community[neighbor.index()])
+                    .or_default() += w;
+            }
+
+            // Weight from i into its own community (excluding self)
+            let k_i_in_current = *community_weights.get(&current_community).unwrap_or(&0.0);
+
+            // Find best community to move to
+            let mut best_community = current_community;
+            let mut best_delta = 0.0f64;
+
+            for (&cand_community, &k_i_in_cand) in &community_weights {
+                if cand_community == current_community {
+                    continue;
+                }
+
+                // Standard Louvain modularity gain formula:
+                // delta_Q = k_i_in_cand/m - resolution * sigma_tot_cand * k_i / (2m^2)
+                //         - (- k_i_in_current/m + resolution * (sigma_tot_current - k_i) * k_i / (2m^2))
+                let sigma_cand = sigma_tot[cand_community];
+                let sigma_curr = sigma_tot[current_community] - k_i; // exclude node i
+
+                let gain_add = k_i_in_cand / m - resolution * sigma_cand * k_i / (two_m * two_m);
+                let loss_remove =
+                    k_i_in_current / m - resolution * sigma_curr * k_i / (two_m * two_m);
+                let delta = gain_add - loss_remove;
+
+                if delta > best_delta {
+                    best_delta = delta;
+                    best_community = cand_community;
+                }
+            }
+
+            if best_community != current_community {
+                // Update sigma_tot
+                sigma_tot[current_community] -= k_i;
+                sigma_tot[best_community] += k_i;
+                community[i] = best_community;
+                improved = true;
+            }
+        }
+
+        if !improved {
+            break;
+        }
+    }
+
+    // Renumber communities to be contiguous 0..n
+    let mut id_map: HashMap<usize, usize> = HashMap::new();
+    for node_idx in graph.graph.node_indices() {
+        let c = community[node_idx.index()];
+        let next_id = id_map.len();
+        id_map.entry(c).or_insert(next_id);
+    }
+
+    let assignments: Vec<CommunityAssignment> = graph
+        .graph
+        .node_indices()
+        .map(|idx| CommunityAssignment {
+            node_idx: idx,
+            community_id: *id_map.get(&community[idx.index()]).unwrap(),
+        })
+        .collect();
+
+    let num_communities = id_map.len();
+    let modularity = compute_modularity(
+        graph,
+        &community,
+        &node_exists,
+        total_weight,
+        weight_property,
+    );
+
+    CommunityResult {
+        assignments,
+        num_communities,
+        modularity,
+    }
+}
+
+/// Label propagation for community detection.
+///
+/// Each node adopts the most frequent label among its neighbors.
+/// Converges when no node changes its label.
+pub fn label_propagation(graph: &DirGraph, max_iterations: usize) -> CommunityResult {
+    let bound = graph.graph.node_bound();
+    if bound == 0 {
+        return CommunityResult {
+            assignments: Vec::new(),
+            num_communities: 0,
+            modularity: 0.0,
+        };
+    }
+
+    let mut labels: Vec<usize> = vec![0; bound];
+    let mut node_exists: Vec<bool> = vec![false; bound];
+
+    // Initialize: each node gets a unique label
+    for (i, node_idx) in graph.graph.node_indices().enumerate() {
+        labels[node_idx.index()] = i;
+        node_exists[node_idx.index()] = true;
+    }
+
+    // Collect node indices for iteration
+    let node_indices: Vec<NodeIndex> = graph.graph.node_indices().collect();
+
+    for _ in 0..max_iterations {
+        let mut changed = false;
+
+        for &node_idx in &node_indices {
+            // Count neighbor labels
+            let mut label_counts: HashMap<usize, usize> = HashMap::new();
+
+            for neighbor in graph.graph.neighbors_undirected(node_idx) {
+                *label_counts.entry(labels[neighbor.index()]).or_default() += 1;
+            }
+
+            if label_counts.is_empty() {
+                continue; // isolated node keeps its label
+            }
+
+            // Find most frequent label
+            let &best_label = label_counts
+                .iter()
+                .max_by_key(|&(_, count)| count)
+                .map(|(label, _)| label)
+                .unwrap();
+
+            if best_label != labels[node_idx.index()] {
+                labels[node_idx.index()] = best_label;
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    // Renumber labels to be contiguous
+    let mut id_map: HashMap<usize, usize> = HashMap::new();
+    for &node_idx in &node_indices {
+        let l = labels[node_idx.index()];
+        let next_id = id_map.len();
+        id_map.entry(l).or_insert(next_id);
+    }
+
+    let assignments: Vec<CommunityAssignment> = node_indices
+        .iter()
+        .map(|&idx| CommunityAssignment {
+            node_idx: idx,
+            community_id: *id_map.get(&labels[idx.index()]).unwrap(),
+        })
+        .collect();
+
+    // Compute modularity for result
+    let mut total_weight = 0.0f64;
+    for _ in graph.graph.edge_references() {
+        total_weight += 1.0;
+    }
+
+    let num_communities = id_map.len();
+    let modularity = compute_modularity(graph, &labels, &node_exists, total_weight, None);
+
+    CommunityResult {
+        assignments,
+        num_communities,
+        modularity,
+    }
+}
+
+/// Get edge weight from a property, or 1.0 if not specified.
+fn edge_weight(
+    graph: &DirGraph,
+    edge_id: petgraph::graph::EdgeIndex,
+    weight_property: Option<&str>,
+) -> f64 {
+    if let Some(prop) = weight_property {
+        if let Some(edge_data) = graph.graph.edge_weight(edge_id) {
+            if let Some(val) = edge_data.properties.get(prop) {
+                return value_operations::value_to_f64(val).unwrap_or(1.0);
+            }
+        }
+    }
+    1.0
+}
+
+/// Sum of edge weights for all nodes in a community.
+/// Compute Newman modularity: Q = (1/2m) * sum [ A_ij - k_i*k_j/(2m) ] * delta(c_i, c_j)
+fn compute_modularity(
+    graph: &DirGraph,
+    community: &[usize],
+    node_exists: &[bool],
+    total_weight: f64,
+    weight_property: Option<&str>,
+) -> f64 {
+    if total_weight == 0.0 {
+        return 0.0;
+    }
+
+    let two_m = 2.0 * total_weight;
+    let mut q = 0.0f64;
+
+    // Compute degree (sum of edge weights) for each node
+    let bound = graph.graph.node_bound();
+    let mut degrees: Vec<f64> = vec![0.0; bound];
+    for node_idx in graph.graph.node_indices() {
+        let i = node_idx.index();
+        if !node_exists[i] {
+            continue;
+        }
+        for edge in graph.graph.edges(node_idx) {
+            degrees[i] += edge_weight(graph, edge.id(), weight_property);
+        }
+        for edge in graph
+            .graph
+            .edges_directed(node_idx, petgraph::Direction::Incoming)
+        {
+            degrees[i] += edge_weight(graph, edge.id(), weight_property);
+        }
+    }
+
+    // Sum over all edges
+    for edge in graph.graph.edge_references() {
+        let u = edge.source().index();
+        let v = edge.target().index();
+        let w = edge_weight(graph, edge.id(), weight_property);
+
+        if community[u] == community[v] {
+            q += w - degrees[u] * degrees[v] / two_m;
+        }
+    }
+
+    q / two_m
 }
 
 #[cfg(test)]

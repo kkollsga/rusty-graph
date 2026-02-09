@@ -47,6 +47,7 @@ pub enum CypherToken {
     End,
     True,
     False,
+    Exists,
 
     // Parameters
     Parameter(String), // $param_name
@@ -376,6 +377,7 @@ fn identifier_to_token(ident: String) -> CypherToken {
         "STARTS" => CypherToken::StartsWith,
         "ENDS" => CypherToken::EndsWith,
         "CONTAINS" => CypherToken::Contains,
+        "EXISTS" => CypherToken::Exists,
         _ => CypherToken::Identifier(ident),
     }
 }

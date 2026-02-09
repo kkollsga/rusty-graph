@@ -777,6 +777,11 @@ impl<'a> PatternExecutor<'a> {
         Ok(matches)
     }
 
+    /// Public wrapper for find_matching_nodes (used by Cypher executor for shortestPath)
+    pub fn find_matching_nodes_pub(&self, pattern: &NodePattern) -> Result<Vec<NodeIndex>, String> {
+        self.find_matching_nodes(pattern)
+    }
+
     /// Find all nodes matching a node pattern
     fn find_matching_nodes(&self, pattern: &NodePattern) -> Result<Vec<NodeIndex>, String> {
         let candidates: Vec<NodeIndex> = if let Some(ref node_type) = pattern.node_type {

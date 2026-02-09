@@ -5,9 +5,10 @@ use super::ast::*;
 use super::result::*;
 use crate::datatypes::values::Value;
 use crate::graph::filtering_methods;
-use crate::graph::pattern_matching::{MatchBinding, PatternExecutor, PatternMatch};
+use crate::graph::pattern_matching::{MatchBinding, PatternElement, PatternExecutor, PatternMatch};
 use crate::graph::schema::{DirGraph, EdgeData, NodeData};
 use crate::graph::value_operations;
+use petgraph::graph::NodeIndex;
 use petgraph::visit::NodeIndexable;
 use std::collections::{HashMap, HashSet};
 
@@ -76,6 +77,13 @@ impl<'a> CypherExecutor<'a> {
         clause: &MatchClause,
         existing: ResultSet,
     ) -> Result<ResultSet, String> {
+        // Check for shortestPath assignments
+        if let Some(pa) = clause.path_assignments.first() {
+            if pa.is_shortest_path {
+                return self.execute_shortest_path_match(clause, pa, existing);
+            }
+        }
+
         if existing.rows.is_empty() {
             // First MATCH: execute patterns to produce initial bindings
             let mut all_rows = Vec::new();
@@ -133,6 +141,103 @@ impl<'a> CypherExecutor<'a> {
                 columns: existing.columns,
             })
         }
+    }
+
+    /// Execute a shortestPath MATCH: find shortest path between anchored endpoints
+    fn execute_shortest_path_match(
+        &self,
+        clause: &MatchClause,
+        path_assignment: &PathAssignment,
+        existing: ResultSet,
+    ) -> Result<ResultSet, String> {
+        use crate::graph::graph_algorithms;
+
+        let pattern = clause
+            .patterns
+            .get(path_assignment.pattern_index)
+            .ok_or("Invalid pattern index for shortestPath")?;
+
+        // Extract source and target node patterns from the pattern
+        let elements = &pattern.elements;
+        if elements.len() < 3 {
+            return Err("shortestPath requires a pattern like (a)-[:REL*..N]->(b)".to_string());
+        }
+
+        let source_pattern = match &elements[0] {
+            PatternElement::Node(np) => np,
+            _ => return Err("shortestPath pattern must start with a node".to_string()),
+        };
+
+        let target_pattern = match elements.last() {
+            Some(PatternElement::Node(np)) => np,
+            _ => return Err("shortestPath pattern must end with a node".to_string()),
+        };
+
+        // Find matching source and target nodes
+        let executor = PatternExecutor::new(self.graph, None);
+        let source_nodes = executor.find_matching_nodes_pub(source_pattern)?;
+        let target_nodes = executor.find_matching_nodes_pub(target_pattern)?;
+
+        let mut all_rows = Vec::new();
+
+        for &source_idx in &source_nodes {
+            for &target_idx in &target_nodes {
+                if source_idx == target_idx {
+                    continue;
+                }
+
+                if let Some(path_result) =
+                    graph_algorithms::shortest_path_directed(self.graph, source_idx, target_idx)
+                {
+                    let mut row = ResultRow::new();
+
+                    // Bind source variable
+                    if let Some(ref var) = source_pattern.variable {
+                        row.node_bindings.insert(var.clone(), source_idx);
+                    }
+
+                    // Bind target variable
+                    if let Some(ref var) = target_pattern.variable {
+                        row.node_bindings.insert(var.clone(), target_idx);
+                    }
+
+                    // Build path with connection types
+                    let connections =
+                        graph_algorithms::get_path_connections(self.graph, &path_result.path);
+                    let path_nodes: Vec<(NodeIndex, String)> = path_result
+                        .path
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &idx)| {
+                            let conn_type = if i < connections.len() {
+                                connections[i].clone().unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            (idx, conn_type)
+                        })
+                        .collect();
+
+                    // Store path binding
+                    row.path_bindings.insert(
+                        path_assignment.variable.clone(),
+                        PathBinding {
+                            source: source_idx,
+                            target: target_idx,
+                            hops: path_result.cost,
+                            path: path_nodes,
+                        },
+                    );
+
+                    all_rows.push(row);
+                }
+            }
+        }
+
+        Ok(ResultSet {
+            rows: all_rows,
+            columns: existing.columns,
+        })
     }
 
     /// Convert a PatternMatch to a lightweight ResultRow
@@ -447,6 +552,19 @@ impl<'a> CypherExecutor<'a> {
                     _ => Ok(false),
                 }
             }
+            Predicate::Exists { patterns } => {
+                // Execute each pattern and check if any match is compatible
+                // with the current row's bindings (outer variables must match)
+                for pattern in patterns {
+                    let executor = PatternExecutor::new(self.graph, None);
+                    let matches = executor.execute(pattern)?;
+                    let found = matches.iter().any(|m| self.bindings_compatible(row, m));
+                    if !found {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
         }
     }
 
@@ -678,12 +796,57 @@ impl<'a> CypherExecutor<'a> {
                 let val = self.evaluate_expression(&args[0], row)?;
                 Ok(to_float(&val))
             }
-            "size" | "length" => {
+            "size" => {
                 let val = self.evaluate_expression(&args[0], row)?;
                 match val {
                     Value::String(s) => Ok(Value::Int64(s.len() as i64)),
                     _ => Ok(Value::Null),
                 }
+            }
+            "length" => {
+                // length(p) for paths, length(s) for strings
+                if let Some(Expression::Variable(var)) = args.first() {
+                    if let Some(path) = row.path_bindings.get(var) {
+                        return Ok(Value::Int64(path.hops as i64));
+                    }
+                }
+                let val = self.evaluate_expression(&args[0], row)?;
+                match val {
+                    Value::String(s) => Ok(Value::Int64(s.len() as i64)),
+                    _ => Ok(Value::Null),
+                }
+            }
+            "nodes" => {
+                // nodes(p) returns list of nodes in a path
+                if let Some(Expression::Variable(var)) = args.first() {
+                    if let Some(path) = row.path_bindings.get(var) {
+                        let mut node_strs = Vec::new();
+                        for (node_idx, _) in &path.path {
+                            if let Some(node) = self.graph.graph.node_weight(*node_idx) {
+                                node_strs.push(format_value_compact(&node_to_map_value(node)));
+                            }
+                        }
+                        return Ok(Value::String(format!("[{}]", node_strs.join(", "))));
+                    }
+                }
+                Ok(Value::Null)
+            }
+            "relationships" | "rels" => {
+                // relationships(p) returns list of relationships in a path
+                if let Some(Expression::Variable(var)) = args.first() {
+                    if let Some(path) = row.path_bindings.get(var) {
+                        let mut rel_strs = Vec::new();
+                        // path.path has (node_idx, connection_type) pairs
+                        // The connection_type at index i is the edge FROM node[i] TO node[i+1]
+                        for (i, (_, conn_type)) in path.path.iter().enumerate() {
+                            if !conn_type.is_empty() && i < path.path.len() - 1 {
+                                rel_strs.push(format!(":{}", conn_type));
+                            }
+                        }
+                        return Ok(Value::String(format!("[{}]", rel_strs.join(", "))));
+                    }
+                }
+                Ok(Value::Null)
             }
             "type" => {
                 // type(r) returns the relationship type

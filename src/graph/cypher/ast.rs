@@ -42,6 +42,15 @@ pub enum Clause {
 #[derive(Debug, Clone)]
 pub struct MatchClause {
     pub patterns: Vec<Pattern>,
+    pub path_assignments: Vec<PathAssignment>,
+}
+
+/// Path variable assignment: `p = shortestPath(pattern)`
+#[derive(Debug, Clone)]
+pub struct PathAssignment {
+    pub variable: String,
+    pub pattern_index: usize,
+    pub is_shortest_path: bool,
 }
 
 // ============================================================================
@@ -82,6 +91,9 @@ pub enum Predicate {
     Contains {
         expr: Expression,
         pattern: Expression,
+    },
+    Exists {
+        patterns: Vec<Pattern>,
     },
 }
 

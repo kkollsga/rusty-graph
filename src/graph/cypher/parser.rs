@@ -178,15 +178,79 @@ impl CypherParser {
     fn parse_match_clause(&mut self, optional: bool) -> Result<Clause, String> {
         self.expect(&CypherToken::Match)?;
 
-        // Collect tokens until the next clause keyword, then reconstruct as a pattern string
-        // for delegation to pattern_matching::parse_pattern()
+        let mut path_assignments = Vec::new();
+
+        // Check for path assignment: p = shortestPath(...)
+        // Pattern: Identifier Equals [Identifier("shortestPath") LParen] pattern [RParen]
+        if self.is_path_assignment() {
+            let path_var = self.consume_identifier()?;
+            self.expect(&CypherToken::Equals)?;
+
+            // Check for shortestPath( wrapper
+            let is_shortest = self.is_shortest_path_call();
+            if is_shortest {
+                self.advance(); // consume "shortestPath" identifier
+                self.expect(&CypherToken::LParen)?;
+            }
+
+            let patterns = self.parse_match_patterns()?;
+
+            if is_shortest {
+                self.expect(&CypherToken::RParen)?;
+            }
+
+            path_assignments.push(PathAssignment {
+                variable: path_var,
+                pattern_index: 0,
+                is_shortest_path: is_shortest,
+            });
+
+            let clause = MatchClause {
+                patterns,
+                path_assignments,
+            };
+            return if optional {
+                Ok(Clause::OptionalMatch(clause))
+            } else {
+                Ok(Clause::Match(clause))
+            };
+        }
+
+        // Normal MATCH clause
         let patterns = self.parse_match_patterns()?;
 
-        let clause = MatchClause { patterns };
+        let clause = MatchClause {
+            patterns,
+            path_assignments,
+        };
         if optional {
             Ok(Clause::OptionalMatch(clause))
         } else {
             Ok(Clause::Match(clause))
+        }
+    }
+
+    /// Check if current position looks like: Identifier = [shortestPath(] ...
+    fn is_path_assignment(&self) -> bool {
+        matches!(self.peek(), Some(CypherToken::Identifier(_)))
+            && self.peek_at(1) == Some(&CypherToken::Equals)
+    }
+
+    /// Check if current position is shortestPath( — called AFTER consuming "var ="
+    fn is_shortest_path_call(&self) -> bool {
+        if let Some(CypherToken::Identifier(name)) = self.peek() {
+            name.eq_ignore_ascii_case("shortestPath")
+                && self.peek_at(1) == Some(&CypherToken::LParen)
+        } else {
+            false
+        }
+    }
+
+    /// Consume an identifier token and return the string
+    fn consume_identifier(&mut self) -> Result<String, String> {
+        match self.advance() {
+            Some(CypherToken::Identifier(s)) => Ok(s.clone()),
+            other => Err(format!("Expected identifier, got {:?}", other)),
         }
     }
 
@@ -217,6 +281,95 @@ impl CypherParser {
         Ok(patterns)
     }
 
+    /// Parse patterns inside EXISTS { ... } — same as parse_match_patterns but uses
+    /// extract_exists_pattern_string which stops at RBrace instead of clause boundaries.
+    fn parse_exists_patterns(&mut self) -> Result<Vec<pattern_matching::Pattern>, String> {
+        let mut patterns = Vec::new();
+
+        loop {
+            let pattern_str = self.extract_exists_pattern_string()?;
+            if pattern_str.is_empty() {
+                if patterns.is_empty() {
+                    return Err("Expected a pattern inside EXISTS { }".to_string());
+                }
+                break;
+            }
+
+            let pattern = pattern_matching::parse_pattern(&pattern_str)
+                .map_err(|e| format!("Pattern parse error in EXISTS: {}", e))?;
+            patterns.push(pattern);
+
+            if self.check(&CypherToken::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        Ok(patterns)
+    }
+
+    /// Extract tokens forming a pattern inside EXISTS { ... }, stopping at RBrace or comma.
+    fn extract_exists_pattern_string(&mut self) -> Result<String, String> {
+        let mut parts = Vec::new();
+        let mut paren_depth = 0i32;
+        let mut bracket_depth = 0i32;
+
+        while self.has_tokens() {
+            // Stop at closing brace (the EXISTS boundary)
+            if paren_depth == 0 && bracket_depth == 0 && self.check(&CypherToken::RBrace) {
+                break;
+            }
+
+            // Stop at comma at top level (pattern separator)
+            if paren_depth == 0 && bracket_depth == 0 && self.check(&CypherToken::Comma) {
+                break;
+            }
+
+            let token = self.advance().unwrap().clone();
+
+            match &token {
+                CypherToken::LParen => {
+                    paren_depth += 1;
+                    parts.push("(".to_string());
+                }
+                CypherToken::RParen => {
+                    paren_depth -= 1;
+                    parts.push(")".to_string());
+                }
+                CypherToken::LBracket => {
+                    bracket_depth += 1;
+                    parts.push("[".to_string());
+                }
+                CypherToken::RBracket => {
+                    bracket_depth -= 1;
+                    parts.push("]".to_string());
+                }
+                CypherToken::LBrace => parts.push("{".to_string()),
+                CypherToken::RBrace => parts.push("}".to_string()),
+                CypherToken::Colon => parts.push(":".to_string()),
+                CypherToken::Comma => parts.push(",".to_string()),
+                CypherToken::Dash => parts.push("-".to_string()),
+                CypherToken::GreaterThan => parts.push(">".to_string()),
+                CypherToken::LessThan => parts.push("<".to_string()),
+                CypherToken::Star => parts.push("*".to_string()),
+                CypherToken::DotDot => parts.push("..".to_string()),
+                CypherToken::Dot => parts.push(".".to_string()),
+                CypherToken::Identifier(s) => parts.push(s.clone()),
+                CypherToken::StringLit(s) => parts.push(format!("'{}'", s)),
+                CypherToken::IntLit(n) => parts.push(n.to_string()),
+                CypherToken::FloatLit(f) => parts.push(f.to_string()),
+                CypherToken::True => parts.push("true".to_string()),
+                CypherToken::False => parts.push("false".to_string()),
+                _ => {
+                    return Err(format!("Unexpected token in EXISTS pattern: {:?}", token));
+                }
+            }
+        }
+
+        Ok(parts.join(" "))
+    }
+
     /// Extract tokens forming a single pattern and reconstruct as a string
     /// for the existing pattern_matching parser.
     /// Stops at commas (outside parens/brackets), clause keywords, or end of input.
@@ -233,6 +386,11 @@ impl CypherParser {
 
             // Stop at comma at top level (pattern separator)
             if paren_depth == 0 && bracket_depth == 0 && self.check(&CypherToken::Comma) {
+                break;
+            }
+
+            // Stop at RParen that would go negative (e.g. closing shortestPath(...))
+            if paren_depth == 0 && self.check(&CypherToken::RParen) {
                 break;
             }
 
@@ -334,6 +492,16 @@ impl CypherParser {
 
     /// Parse comparison expressions and IS NULL/IS NOT NULL/IN
     fn parse_comparison_predicate(&mut self) -> Result<Predicate, String> {
+        // Check for EXISTS { pattern }
+        if self.check(&CypherToken::Exists) {
+            self.advance(); // consume EXISTS
+            self.expect(&CypherToken::LBrace)?;
+            // Parse the pattern(s) inside braces by collecting tokens up to RBrace
+            let patterns = self.parse_exists_patterns()?;
+            self.expect(&CypherToken::RBrace)?;
+            return Ok(Predicate::Exists { patterns });
+        }
+
         // Check for parenthesized predicate
         if self.check(&CypherToken::LParen) {
             // Could be a parenthesized predicate or the start of a pattern
