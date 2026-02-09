@@ -1,5 +1,5 @@
 // src/graph/lookups.rs
-use super::schema::{Graph, NodeData};
+use super::schema::Graph;
 use crate::datatypes::Value;
 use petgraph::graph::NodeIndex;
 use serde::{Deserialize, Serialize};
@@ -24,21 +24,9 @@ impl TypeLookup {
         // Single pass through the graph
         for i in graph.node_indices() {
             if let Some(node_data) = graph.node_weight(i) {
-                match node_data {
-                    NodeData::Regular {
-                        node_type: nt,
-                        id,
-                        title,
-                        ..
-                    } if nt == &node_type => {
-                        uid_to_index.insert(id.clone(), i);
-                        title_to_index.insert(title.clone(), i);
-                    }
-                    NodeData::Schema { title, .. } if node_type == "SchemaNode" => {
-                        uid_to_index.insert(title.clone(), i);
-                        title_to_index.insert(title.clone(), i);
-                    }
-                    _ => {}
+                if node_data.node_type == node_type {
+                    uid_to_index.insert(node_data.id.clone(), i);
+                    title_to_index.insert(node_data.title.clone(), i);
                 }
             }
         }
@@ -107,31 +95,14 @@ impl CombinedTypeLookup {
         // Single pass through graph - collect both source and target if different types
         for idx in graph.node_indices() {
             if let Some(node_data) = graph.node_weight(idx) {
-                match node_data {
-                    NodeData::Regular { node_type, id, .. } => {
-                        if node_type == &source_type {
-                            source_uid_to_index.insert(id.clone(), idx);
-                        }
-                        // Also collect target type in same pass (if different from source)
-                        if let Some(ref mut target_map) = target_uid_to_index_map {
-                            if node_type == &target_type {
-                                target_map.insert(id.clone(), idx);
-                            }
-                        }
+                if node_data.node_type == source_type {
+                    source_uid_to_index.insert(node_data.id.clone(), idx);
+                }
+                // Also collect target type in same pass (if different from source)
+                if let Some(ref mut target_map) = target_uid_to_index_map {
+                    if node_data.node_type == target_type {
+                        target_map.insert(node_data.id.clone(), idx);
                     }
-                    NodeData::Schema {
-                        node_type, title, ..
-                    } if node_type == "SchemaNode" => {
-                        if source_type == "SchemaNode" {
-                            source_uid_to_index.insert(title.clone(), idx);
-                        }
-                        if let Some(ref mut target_map) = target_uid_to_index_map {
-                            if target_type == "SchemaNode" {
-                                target_map.insert(title.clone(), idx);
-                            }
-                        }
-                    }
-                    _ => {}
                 }
             }
         }

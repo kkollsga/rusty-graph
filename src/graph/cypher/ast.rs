@@ -29,8 +29,9 @@ pub enum Clause {
     Union(UnionClause),
     Create(CreateClause),
     Set(SetClause),
-    #[allow(dead_code)]
     Delete(DeleteClause),
+    Remove(RemoveClause),
+    Merge(MergeClause),
 }
 
 // ============================================================================
@@ -295,8 +296,28 @@ pub enum SetItem {
 
 /// DELETE clause
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct DeleteClause {
     pub detach: bool,
     pub expressions: Vec<Expression>,
+}
+
+/// REMOVE clause — removes properties or labels from nodes
+#[derive(Debug, Clone)]
+pub struct RemoveClause {
+    pub items: Vec<RemoveItem>,
+}
+
+/// Single REMOVE item
+#[derive(Debug, Clone)]
+pub enum RemoveItem {
+    Property { variable: String, property: String },
+    Label { variable: String, label: String },
+}
+
+/// MERGE clause — match-or-create with optional ON CREATE/ON MATCH SET
+#[derive(Debug, Clone)]
+pub struct MergeClause {
+    pub pattern: CreatePattern,
+    pub on_create: Option<Vec<SetItem>>,
+    pub on_match: Option<Vec<SetItem>>,
 }

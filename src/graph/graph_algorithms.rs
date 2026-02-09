@@ -2,10 +2,10 @@
 //! Graph algorithms module providing path finding and connectivity analysis.
 
 use crate::datatypes::values::Value;
-use crate::graph::schema::{DirGraph, NodeData};
+use crate::graph::schema::DirGraph;
 use petgraph::algo::kosaraju_scc;
 use petgraph::graph::NodeIndex;
-use petgraph::visit::EdgeRef;
+use petgraph::visit::{EdgeRef, NodeIndexable};
 use std::collections::HashMap;
 
 /// Result of a path finding operation
@@ -49,15 +49,17 @@ fn reconstruct_path_bfs(
         return Some(vec![source]);
     }
 
-    let node_count = graph.graph.node_count();
+    // Use node_bound() not node_count() — with StableDiGraph, deleted nodes leave
+    // holes so indices can exceed node_count(). node_bound() is the upper bound.
+    let node_bound = graph.graph.node_bound();
 
     // Use Vec instead of HashSet/HashMap for O(1) direct indexing
     // visited[i] = true if node i has been visited
-    let mut visited: Vec<bool> = vec![false; node_count];
+    let mut visited: Vec<bool> = vec![false; node_bound];
     // parent[i] = parent node index of node i (u32::MAX means no parent/source)
-    let mut parent: Vec<u32> = vec![u32::MAX; node_count];
+    let mut parent: Vec<u32> = vec![u32::MAX; node_bound];
 
-    let mut queue = VecDeque::with_capacity(node_count / 4);
+    let mut queue = VecDeque::with_capacity(node_bound / 4);
 
     let source_idx = source.index();
     let target_idx = target.index();
@@ -176,9 +178,10 @@ pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
 pub fn weakly_connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
     use std::collections::VecDeque;
 
-    let node_count = graph.graph.node_count();
+    // Use node_bound() not node_count() — StableDiGraph indices can have gaps
+    let node_bound = graph.graph.node_bound();
     // Use Vec<bool> for O(1) visited tracking instead of HashSet
-    let mut visited: Vec<bool> = vec![false; node_count];
+    let mut visited: Vec<bool> = vec![false; node_bound];
     let mut components = Vec::new();
     let mut visited_count = 0;
 
@@ -189,7 +192,7 @@ pub fn weakly_connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
         }
 
         // BFS to find all connected nodes - estimate component size
-        let remaining = node_count - visited_count;
+        let remaining = graph.graph.node_count() - visited_count;
         let mut component = Vec::with_capacity(remaining.min(100)); // Cap initial estimate
         let mut queue = VecDeque::with_capacity(remaining.min(100));
         queue.push_back(node);
@@ -221,37 +224,16 @@ pub fn weakly_connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
 
 /// Get node info for building Python-friendly path output
 pub fn get_node_info(graph: &DirGraph, node_idx: NodeIndex) -> Option<PathNodeInfo> {
-    match graph.get_node(node_idx)? {
-        NodeData::Regular {
-            node_type,
-            title,
-            id,
-            ..
-        } => {
-            let title_str = match title {
-                Value::String(s) => s.clone(),
-                _ => format!("{:?}", title),
-            };
-            Some(PathNodeInfo {
-                node_type: node_type.clone(),
-                title: title_str,
-                id: id.clone(),
-            })
-        }
-        NodeData::Schema {
-            node_type, title, ..
-        } => {
-            let title_str = match title {
-                Value::String(s) => s.clone(),
-                _ => format!("{:?}", title),
-            };
-            Some(PathNodeInfo {
-                node_type: node_type.clone(),
-                title: title_str,
-                id: title.clone(),
-            })
-        }
-    }
+    let node = graph.get_node(node_idx)?;
+    let title_str = match &node.title {
+        Value::String(s) => s.clone(),
+        _ => format!("{:?}", node.title),
+    };
+    Some(PathNodeInfo {
+        node_type: node.node_type.clone(),
+        title: title_str,
+        id: node.id.clone(),
+    })
 }
 
 /// Get information about what connection types link nodes in a path

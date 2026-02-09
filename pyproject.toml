@@ -30,6 +30,7 @@ classifiers = [
     "Topic :: Scientific/Engineering",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
+dependencies = ["pandas>=1.5"]
 dynamic = ["version"]
 
 [project.urls]

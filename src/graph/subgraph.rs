@@ -1,7 +1,7 @@
 // src/graph/subgraph.rs
 //! Subgraph extraction and selection expansion operations
 
-use crate::graph::schema::{CurrentSelection, DirGraph, EdgeData, NodeData};
+use crate::graph::schema::{CurrentSelection, DirGraph, EdgeData};
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 use std::collections::{HashMap, HashSet};
@@ -32,13 +32,9 @@ pub fn expand_selection(
         for &node in &frontier {
             // Add all neighbors (both directions)
             for neighbor in graph.graph.neighbors_undirected(node) {
-                // Only add if not already visited and is a regular node
+                // Only add if not already visited
                 if visited.insert(neighbor) {
-                    if let Some(node_data) = graph.graph.node_weight(neighbor) {
-                        if node_data.is_regular() {
-                            next_frontier.insert(neighbor);
-                        }
-                    }
+                    next_frontier.insert(neighbor);
                 }
             }
         }
@@ -91,13 +87,11 @@ pub fn extract_subgraph(
             index_map.insert(old_idx, new_idx);
 
             // Update type indices
-            if let NodeData::Regular { node_type, .. } = node_data {
-                new_graph
-                    .type_indices
-                    .entry(node_type.clone())
-                    .or_default()
-                    .push(new_idx);
-            }
+            new_graph
+                .type_indices
+                .entry(node_data.node_type.clone())
+                .or_default()
+                .push(new_idx);
         }
     }
 
@@ -153,8 +147,8 @@ pub fn get_subgraph_stats(
 
     // Count node types
     for &node_idx in &nodes {
-        if let Some(NodeData::Regular { node_type, .. }) = source.graph.node_weight(node_idx) {
-            *node_types.entry(node_type.clone()).or_insert(0) += 1;
+        if let Some(node) = source.graph.node_weight(node_idx) {
+            *node_types.entry(node.node_type.clone()).or_insert(0) += 1;
         }
     }
 

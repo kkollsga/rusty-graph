@@ -73,7 +73,10 @@ impl CypherParser {
             | Some(CypherToken::Create)
             | Some(CypherToken::Set)
             | Some(CypherToken::Delete)
-            | Some(CypherToken::Detach) => true,
+            | Some(CypherToken::Detach)
+            | Some(CypherToken::Merge)
+            | Some(CypherToken::Remove)
+            | Some(CypherToken::On) => true,
             Some(CypherToken::Match) => true,
             Some(CypherToken::Optional) => {
                 // OPTIONAL MATCH
@@ -146,7 +149,13 @@ impl CypherParser {
                     clauses.push(self.parse_set_clause()?);
                 }
                 Some(CypherToken::Delete) | Some(CypherToken::Detach) => {
-                    return Err("DELETE clause is not yet supported".to_string());
+                    clauses.push(self.parse_delete_clause()?);
+                }
+                Some(CypherToken::Remove) => {
+                    clauses.push(self.parse_remove_clause()?);
+                }
+                Some(CypherToken::Merge) => {
+                    clauses.push(self.parse_merge_clause()?);
                 }
                 Some(t) => {
                     return Err(format!("Unexpected token at start of clause: {:?}", t));
@@ -1091,6 +1100,12 @@ impl CypherParser {
 
     fn parse_set_clause(&mut self) -> Result<Clause, String> {
         self.expect(&CypherToken::Set)?;
+        let items = self.parse_set_items()?;
+        Ok(Clause::Set(SetClause { items }))
+    }
+
+    /// Parse comma-separated SET items (shared by SET and MERGE ON CREATE/ON MATCH)
+    fn parse_set_items(&mut self) -> Result<Vec<SetItem>, String> {
         let mut items = Vec::new();
 
         loop {
@@ -1150,7 +1165,158 @@ impl CypherParser {
             }
         }
 
-        Ok(Clause::Set(SetClause { items }))
+        Ok(items)
+    }
+
+    // ========================================================================
+    // DELETE Clause
+    // ========================================================================
+
+    fn parse_delete_clause(&mut self) -> Result<Clause, String> {
+        let detach = if self.check(&CypherToken::Detach) {
+            self.advance(); // consume DETACH
+            true
+        } else {
+            false
+        };
+        self.expect(&CypherToken::Delete)?;
+
+        let mut expressions = Vec::new();
+        loop {
+            let expr = match self.peek().cloned() {
+                Some(CypherToken::Identifier(name)) => {
+                    self.advance();
+                    Expression::Variable(name)
+                }
+                other => {
+                    return Err(format!("Expected variable name in DELETE, got {:?}", other));
+                }
+            };
+            expressions.push(expr);
+
+            if self.check(&CypherToken::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        Ok(Clause::Delete(DeleteClause {
+            detach,
+            expressions,
+        }))
+    }
+
+    // ========================================================================
+    // REMOVE Clause
+    // ========================================================================
+
+    fn parse_remove_clause(&mut self) -> Result<Clause, String> {
+        self.expect(&CypherToken::Remove)?;
+        let mut items = Vec::new();
+
+        loop {
+            let var_name = match self.peek().cloned() {
+                Some(CypherToken::Identifier(name)) => {
+                    self.advance();
+                    name
+                }
+                other => {
+                    return Err(format!("Expected variable name in REMOVE, got {:?}", other));
+                }
+            };
+
+            if self.check(&CypherToken::Dot) {
+                // Property removal: var.prop
+                self.advance(); // consume .
+                let prop_name = match self.peek().cloned() {
+                    Some(CypherToken::Identifier(name)) => {
+                        self.advance();
+                        name
+                    }
+                    other => {
+                        return Err(format!(
+                            "Expected property name after '.' in REMOVE, got {:?}",
+                            other
+                        ));
+                    }
+                };
+                items.push(RemoveItem::Property {
+                    variable: var_name,
+                    property: prop_name,
+                });
+            } else if self.check(&CypherToken::Colon) {
+                // Label removal: var:Label
+                self.advance(); // consume :
+                let label = match self.peek().cloned() {
+                    Some(CypherToken::Identifier(name)) => {
+                        self.advance();
+                        name
+                    }
+                    other => {
+                        return Err(format!(
+                            "Expected label name after ':' in REMOVE, got {:?}",
+                            other
+                        ));
+                    }
+                };
+                items.push(RemoveItem::Label {
+                    variable: var_name,
+                    label,
+                });
+            } else {
+                return Err("Expected '.' or ':' after variable name in REMOVE".to_string());
+            }
+
+            if self.check(&CypherToken::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        Ok(Clause::Remove(RemoveClause { items }))
+    }
+
+    // ========================================================================
+    // MERGE Clause
+    // ========================================================================
+
+    fn parse_merge_clause(&mut self) -> Result<Clause, String> {
+        self.expect(&CypherToken::Merge)?;
+        let pattern = self.parse_create_pattern()?;
+
+        let mut on_create = None;
+        let mut on_match = None;
+
+        // Parse optional ON CREATE SET / ON MATCH SET (can appear in either order)
+        while self.check(&CypherToken::On) {
+            self.advance(); // consume ON
+            match self.peek() {
+                Some(CypherToken::Create) => {
+                    self.advance(); // consume CREATE
+                    self.expect(&CypherToken::Set)?;
+                    on_create = Some(self.parse_set_items()?);
+                }
+                Some(CypherToken::Match) => {
+                    self.advance(); // consume MATCH
+                    self.expect(&CypherToken::Set)?;
+                    on_match = Some(self.parse_set_items()?);
+                }
+                other => {
+                    return Err(format!(
+                        "Expected CREATE or MATCH after ON in MERGE, got {:?}",
+                        other
+                    ));
+                }
+            }
+        }
+
+        Ok(Clause::Merge(MergeClause {
+            pattern,
+            on_create,
+            on_match,
+        }))
     }
 }
 
@@ -1664,5 +1830,136 @@ mod tests {
         assert!(matches!(&query.clauses[1], Clause::Create(_)));
         assert!(matches!(&query.clauses[2], Clause::Set(_)));
         assert!(matches!(&query.clauses[3], Clause::Return(_)));
+    }
+
+    // ========================================================================
+    // DELETE Clause
+    // ========================================================================
+
+    #[test]
+    fn test_parse_delete() {
+        let query = parse_cypher("MATCH (n:Person) DELETE n").unwrap();
+        assert_eq!(query.clauses.len(), 2);
+        if let Clause::Delete(d) = &query.clauses[1] {
+            assert!(!d.detach);
+            assert_eq!(d.expressions.len(), 1);
+            assert!(matches!(&d.expressions[0], Expression::Variable(v) if v == "n"));
+        } else {
+            panic!("Expected DELETE clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_detach_delete() {
+        let query = parse_cypher("MATCH (n:Person) DETACH DELETE n").unwrap();
+        if let Clause::Delete(d) = &query.clauses[1] {
+            assert!(d.detach);
+            assert_eq!(d.expressions.len(), 1);
+        } else {
+            panic!("Expected DELETE clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_delete_multiple() {
+        let query = parse_cypher("MATCH (a)-[r]->(b) DELETE a, r, b").unwrap();
+        if let Clause::Delete(d) = &query.clauses[1] {
+            assert_eq!(d.expressions.len(), 3);
+        }
+    }
+
+    // ========================================================================
+    // REMOVE Clause
+    // ========================================================================
+
+    #[test]
+    fn test_parse_remove_property() {
+        let query = parse_cypher("MATCH (n:Person) REMOVE n.age").unwrap();
+        assert!(matches!(&query.clauses[1], Clause::Remove(_)));
+        if let Clause::Remove(r) = &query.clauses[1] {
+            assert_eq!(r.items.len(), 1);
+            if let RemoveItem::Property { variable, property } = &r.items[0] {
+                assert_eq!(variable, "n");
+                assert_eq!(property, "age");
+            } else {
+                panic!("Expected property removal");
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_remove_multiple() {
+        let query = parse_cypher("MATCH (n:Person) REMOVE n.age, n.city").unwrap();
+        if let Clause::Remove(r) = &query.clauses[1] {
+            assert_eq!(r.items.len(), 2);
+        }
+    }
+
+    #[test]
+    fn test_parse_remove_label() {
+        let query = parse_cypher("MATCH (n:Person) REMOVE n:Temporary").unwrap();
+        if let Clause::Remove(r) = &query.clauses[1] {
+            assert!(
+                matches!(&r.items[0], RemoveItem::Label { variable, label } if variable == "n" && label == "Temporary")
+            );
+        }
+    }
+
+    // ========================================================================
+    // MERGE Clause
+    // ========================================================================
+
+    #[test]
+    fn test_parse_merge_node() {
+        let query = parse_cypher("MERGE (n:Person {name: 'Alice'})").unwrap();
+        assert_eq!(query.clauses.len(), 1);
+        assert!(matches!(&query.clauses[0], Clause::Merge(_)));
+        if let Clause::Merge(m) = &query.clauses[0] {
+            assert_eq!(m.pattern.elements.len(), 1);
+            assert!(m.on_create.is_none());
+            assert!(m.on_match.is_none());
+        }
+    }
+
+    #[test]
+    fn test_parse_merge_on_create() {
+        let query =
+            parse_cypher("MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.age = 30").unwrap();
+        if let Clause::Merge(m) = &query.clauses[0] {
+            assert!(m.on_create.is_some());
+            assert!(m.on_match.is_none());
+            assert_eq!(m.on_create.as_ref().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_parse_merge_on_match() {
+        let query =
+            parse_cypher("MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.visits = 1").unwrap();
+        if let Clause::Merge(m) = &query.clauses[0] {
+            assert!(m.on_create.is_none());
+            assert!(m.on_match.is_some());
+        }
+    }
+
+    #[test]
+    fn test_parse_merge_both() {
+        let query = parse_cypher(
+            "MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.age = 30 ON MATCH SET n.visits = 1",
+        )
+        .unwrap();
+        if let Clause::Merge(m) = &query.clauses[0] {
+            assert!(m.on_create.is_some());
+            assert!(m.on_match.is_some());
+        }
+    }
+
+    #[test]
+    fn test_parse_merge_relationship() {
+        let query = parse_cypher("MATCH (a:Person), (b:Person) MERGE (a)-[r:KNOWS]->(b)").unwrap();
+        assert_eq!(query.clauses.len(), 2);
+        if let Clause::Merge(m) = &query.clauses[1] {
+            assert_eq!(m.pattern.elements.len(), 3);
+        }
     }
 }

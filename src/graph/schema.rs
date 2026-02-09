@@ -1,6 +1,8 @@
 // src/graph/schema.rs
 use crate::datatypes::values::{FilterCondition, Value};
-use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
+use petgraph::graph::{EdgeIndex, NodeIndex};
+use petgraph::stable_graph::StableDiGraph;
+use petgraph::visit::NodeIndexable;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -221,6 +223,15 @@ pub type CompositeIndexKey = (String, Vec<String>);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CompositeValue(pub Vec<Value>);
 
+/// Metadata about a connection type: which node types it connects and what properties it carries.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ConnectionTypeInfo {
+    pub source_type: String,
+    pub target_type: String,
+    /// property_name → type_string (e.g. "weight" → "Float64")
+    pub property_types: HashMap<String, String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DirGraph {
     pub(crate) graph: Graph,
@@ -242,6 +253,14 @@ pub struct DirGraph {
     /// Fast O(1) lookup for connection types. Populated on first edge access.
     #[serde(skip)]
     pub(crate) connection_types: std::collections::HashSet<String>,
+    /// Node type metadata: node_type → { property_name → type_string }
+    /// Replaces SchemaNode graph nodes — persisted via serde/bincode.
+    #[serde(default)]
+    pub(crate) node_type_metadata: HashMap<String, HashMap<String, String>>,
+    /// Connection type metadata: connection_type → ConnectionTypeInfo
+    /// Replaces SchemaNode graph nodes for connections — persisted via serde/bincode.
+    #[serde(default)]
+    pub(crate) connection_type_metadata: HashMap<String, ConnectionTypeInfo>,
 }
 
 impl DirGraph {
@@ -254,6 +273,8 @@ impl DirGraph {
             composite_indices: HashMap::new(),
             id_indices: HashMap::new(),
             connection_types: std::collections::HashSet::new(),
+            node_type_metadata: HashMap::new(),
+            connection_type_metadata: HashMap::new(),
         }
     }
 
@@ -268,8 +289,8 @@ impl DirGraph {
 
         if let Some(node_indices) = self.type_indices.get(node_type) {
             for &node_idx in node_indices {
-                if let Some(NodeData::Regular { id, .. }) = self.graph.node_weight(node_idx) {
-                    index.insert(id.clone(), node_idx);
+                if let Some(node) = self.graph.node_weight(node_idx) {
+                    index.insert(node.id.clone(), node_idx);
                 }
             }
         }
@@ -300,43 +321,72 @@ impl DirGraph {
     /// Lookup node by ID with automatic type normalization.
     /// This handles the Python-Rust type mismatch where Python int -> Int64 but
     /// DataFrame unique_id columns store as UniqueId(u32).
+    ///
+    /// Falls back to a linear scan of type_indices if the id_index hasn't been
+    /// built yet (e.g., after DELETE invalidates id_indices).
     pub fn lookup_by_id_normalized(&self, node_type: &str, id: &Value) -> Option<NodeIndex> {
-        let type_index = self.id_indices.get(node_type)?;
+        if let Some(type_index) = self.id_indices.get(node_type) {
+            // Try direct lookup first
+            if let Some(&idx) = type_index.get(id) {
+                return Some(idx);
+            }
 
-        // Try direct lookup first
-        if let Some(&idx) = type_index.get(id) {
-            return Some(idx);
-        }
-
-        // If direct lookup fails, try alternative integer representations
-        match id {
-            Value::Int64(i) => {
-                // Int64 -> try UniqueId(u32) if value fits
-                if *i >= 0 && *i <= u32::MAX as i64 {
-                    type_index.get(&Value::UniqueId(*i as u32)).copied()
-                } else {
+            // If direct lookup fails, try alternative integer representations
+            let result = match id {
+                Value::Int64(i) => {
+                    if *i >= 0 && *i <= u32::MAX as i64 {
+                        type_index.get(&Value::UniqueId(*i as u32)).copied()
+                    } else {
+                        None
+                    }
+                }
+                Value::UniqueId(u) => type_index.get(&Value::Int64(*u as i64)).copied(),
+                Value::Float64(f) => {
+                    if f.fract() == 0.0 {
+                        let i = *f as i64;
+                        if let Some(&idx) = type_index.get(&Value::Int64(i)) {
+                            return Some(idx);
+                        }
+                        if i >= 0 && i <= u32::MAX as i64 {
+                            return type_index.get(&Value::UniqueId(i as u32)).copied();
+                        }
+                    }
                     None
                 }
+                _ => None,
+            };
+            if result.is_some() {
+                return result;
             }
-            Value::UniqueId(u) => {
-                // UniqueId -> try Int64
-                type_index.get(&Value::Int64(*u as i64)).copied()
-            }
-            Value::Float64(f) => {
-                // Float64 -> try Int64 then UniqueId if it's a whole number
-                if f.fract() == 0.0 {
-                    let i = *f as i64;
-                    if let Some(&idx) = type_index.get(&Value::Int64(i)) {
-                        return Some(idx);
+        }
+
+        // Fallback: linear scan through type_indices when id_index is missing
+        // (e.g., after DELETE invalidates id_indices for this type)
+        if let Some(node_indices) = self.type_indices.get(node_type) {
+            for &node_idx in node_indices {
+                if let Some(node) = self.graph.node_weight(node_idx) {
+                    let node_id = &node.id;
+                    if node_id == id {
+                        return Some(node_idx);
                     }
-                    if i >= 0 && i <= u32::MAX as i64 {
-                        return type_index.get(&Value::UniqueId(i as u32)).copied();
+                    // Normalize: check Int64 ↔ UniqueId
+                    match (id, node_id) {
+                        (Value::Int64(i), Value::UniqueId(u)) => {
+                            if *i >= 0 && *i as u32 == *u {
+                                return Some(node_idx);
+                            }
+                        }
+                        (Value::UniqueId(u), Value::Int64(i)) => {
+                            if *i >= 0 && *u == *i as u32 {
+                                return Some(node_idx);
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                None
             }
-            _ => None, // String, Boolean, DateTime, Null - no normalization
         }
+        None
     }
 
     /// Invalidate the ID index for a node type (call when nodes are added/removed)
@@ -367,21 +417,12 @@ impl DirGraph {
     }
 
     pub fn has_connection_type(&self, connection_type: &str) -> bool {
-        // Fast path: check the connection_types cache first (O(1))
+        // Fast path: check the connection_types cache (O(1))
         if !self.connection_types.is_empty() {
             return self.connection_types.contains(connection_type);
         }
-
-        // Fallback: scan SchemaNodes (O(n) - only happens if cache not built yet)
-        self.graph.node_weights().any(|node| match node {
-            NodeData::Schema {
-                node_type, title, ..
-            } => {
-                node_type == "SchemaNode"
-                    && matches!(title, Value::String(t) if t == connection_type)
-            }
-            _ => false,
-        })
+        // Fallback: check metadata
+        self.connection_type_metadata.contains_key(connection_type)
     }
 
     /// Register a connection type for O(1) lookups.
@@ -402,37 +443,72 @@ impl DirGraph {
         }
     }
 
-    pub fn has_node_type(&self, node_type: &str) -> bool {
-        // Check if we have any nodes of this type in our type indices
-        self.type_indices.contains_key(node_type) ||
-        // Also check for SchemaNodes that might represent this type
-        self.graph.node_weights().any(|node| {
-            match node {
-                NodeData::Schema { node_type: nt, title, .. } => {
-                    nt == "SchemaNode" &&
-                    matches!(title, Value::String(t) if t == node_type)
-                },
-                _ => false
-            }
-        })
+    // ========================================================================
+    // Type Metadata Methods (replaces SchemaNode graph nodes)
+    // ========================================================================
+
+    /// Get metadata for a node type (property names → type strings).
+    pub fn get_node_type_metadata(&self, node_type: &str) -> Option<&HashMap<String, String>> {
+        self.node_type_metadata.get(node_type)
     }
 
-    /// Get all node types that exist in the graph (excluding SchemaNode)
+    /// Get metadata for a connection type.
+    #[allow(dead_code)]
+    pub fn get_connection_type_info(&self, conn_type: &str) -> Option<&ConnectionTypeInfo> {
+        self.connection_type_metadata.get(conn_type)
+    }
+
+    /// Upsert node type metadata — merges new property types into existing.
+    pub fn upsert_node_type_metadata(&mut self, node_type: &str, props: HashMap<String, String>) {
+        let entry = self
+            .node_type_metadata
+            .entry(node_type.to_string())
+            .or_default();
+        for (k, v) in props {
+            entry.insert(k, v);
+        }
+    }
+
+    /// Upsert connection type metadata — merges property types into existing.
+    pub fn upsert_connection_type_metadata(
+        &mut self,
+        conn_type: &str,
+        source_type: &str,
+        target_type: &str,
+        prop_types: HashMap<String, String>,
+    ) {
+        let entry = self
+            .connection_type_metadata
+            .entry(conn_type.to_string())
+            .or_insert_with(|| ConnectionTypeInfo {
+                source_type: source_type.to_string(),
+                target_type: target_type.to_string(),
+                property_types: HashMap::new(),
+            });
+        // Update source/target if provided (shouldn't change, but be safe)
+        entry.source_type = source_type.to_string();
+        entry.target_type = target_type.to_string();
+        for (k, v) in prop_types {
+            entry.property_types.insert(k, v);
+        }
+    }
+
+    pub fn has_node_type(&self, node_type: &str) -> bool {
+        self.type_indices.contains_key(node_type) || self.node_type_metadata.contains_key(node_type)
+    }
+
+    /// Get all node types that exist in the graph.
     pub fn get_node_types(&self) -> Vec<String> {
         let mut types: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        // Get types from type_indices (fast path)
+        // Get types from type_indices
         for node_type in self.type_indices.keys() {
-            if node_type != "SchemaNode" {
-                types.insert(node_type.clone());
-            }
+            types.insert(node_type.clone());
         }
 
-        // Also scan for any types not in indices (fallback)
-        for node in self.graph.node_weights() {
-            if let NodeData::Regular { node_type, .. } = node {
-                types.insert(node_type.clone());
-            }
+        // Also include types from metadata (may have metadata but no live nodes)
+        for node_type in self.node_type_metadata.keys() {
+            types.insert(node_type.clone());
         }
 
         types.into_iter().collect()
@@ -468,8 +544,8 @@ impl DirGraph {
 
         if let Some(node_indices) = self.type_indices.get(node_type) {
             for &idx in node_indices {
-                if let Some(NodeData::Regular { properties, .. }) = self.graph.node_weight(idx) {
-                    if let Some(value) = properties.get(property) {
+                if let Some(node) = self.graph.node_weight(idx) {
+                    if let Some(value) = node.properties.get(property) {
                         index.entry(value.clone()).or_default().push(idx);
                     }
                 }
@@ -553,14 +629,11 @@ impl DirGraph {
 
         if let Some(node_indices) = self.type_indices.get(node_type) {
             for &idx in node_indices {
-                if let Some(NodeData::Regular {
-                    properties: props, ..
-                }) = self.graph.node_weight(idx)
-                {
+                if let Some(node) = self.graph.node_weight(idx) {
                     // Extract values for all properties in order
                     let values: Vec<Value> = properties
                         .iter()
-                        .map(|p| props.get(*p).cloned().unwrap_or(Value::Null))
+                        .map(|p| node.properties.get(*p).cloned().unwrap_or(Value::Null))
                         .collect();
 
                     // Only index if at least one value is non-null
@@ -664,6 +737,290 @@ impl DirGraph {
         }
         None
     }
+
+    // ========================================================================
+    // Incremental Index Maintenance (called by Cypher mutations)
+    // ========================================================================
+
+    /// Update property and composite indices after a new node is added.
+    /// Only updates indices that already exist for this node_type.
+    pub fn update_property_indices_for_add(&mut self, node_type: &str, node_idx: NodeIndex) {
+        // Collect single-property index updates (immutable borrow of self.graph)
+        let prop_updates: Vec<(IndexKey, Value)> = {
+            let node = match self.graph.node_weight(node_idx) {
+                Some(n) => n,
+                None => return,
+            };
+            self.property_indices
+                .keys()
+                .filter(|(nt, _)| nt == node_type)
+                .filter_map(|key| {
+                    node.properties
+                        .get(&key.1)
+                        .map(|v| (key.clone(), v.clone()))
+                })
+                .collect()
+        };
+        for (key, value) in prop_updates {
+            if let Some(value_map) = self.property_indices.get_mut(&key) {
+                value_map.entry(value).or_default().push(node_idx);
+            }
+        }
+
+        // Collect composite index updates
+        let comp_updates: Vec<(CompositeIndexKey, CompositeValue)> = {
+            let node = match self.graph.node_weight(node_idx) {
+                Some(n) => n,
+                None => return,
+            };
+            self.composite_indices
+                .keys()
+                .filter(|(nt, _)| nt == node_type)
+                .filter_map(|key| {
+                    let vals: Vec<Value> = key
+                        .1
+                        .iter()
+                        .map(|p| node.properties.get(p).cloned().unwrap_or(Value::Null))
+                        .collect();
+                    if vals.iter().any(|v| !matches!(v, Value::Null)) {
+                        Some((key.clone(), CompositeValue(vals)))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        for (key, comp_val) in comp_updates {
+            if let Some(comp_map) = self.composite_indices.get_mut(&key) {
+                comp_map.entry(comp_val).or_default().push(node_idx);
+            }
+        }
+    }
+
+    /// Update property and composite indices after a property value is changed.
+    /// Removes node from the old value bucket and adds to the new value bucket.
+    pub fn update_property_indices_for_set(
+        &mut self,
+        node_type: &str,
+        node_idx: NodeIndex,
+        property: &str,
+        old_value: Option<&Value>,
+        new_value: &Value,
+    ) {
+        let key = (node_type.to_string(), property.to_string());
+        if let Some(value_map) = self.property_indices.get_mut(&key) {
+            // Remove from old bucket
+            if let Some(old_val) = old_value {
+                if let Some(indices) = value_map.get_mut(old_val) {
+                    indices.retain(|&idx| idx != node_idx);
+                    if indices.is_empty() {
+                        value_map.remove(old_val);
+                    }
+                }
+            }
+            // Add to new bucket
+            value_map
+                .entry(new_value.clone())
+                .or_default()
+                .push(node_idx);
+        }
+
+        // Update any composite indices that include this property
+        self.update_composite_indices_for_property_change(node_type, node_idx, property);
+    }
+
+    /// Update property and composite indices after a property is removed.
+    pub fn update_property_indices_for_remove(
+        &mut self,
+        node_type: &str,
+        node_idx: NodeIndex,
+        property: &str,
+        old_value: &Value,
+    ) {
+        let key = (node_type.to_string(), property.to_string());
+        if let Some(value_map) = self.property_indices.get_mut(&key) {
+            if let Some(indices) = value_map.get_mut(old_value) {
+                indices.retain(|&idx| idx != node_idx);
+                if indices.is_empty() {
+                    value_map.remove(old_value);
+                }
+            }
+        }
+
+        // Update any composite indices that include this property
+        self.update_composite_indices_for_property_change(node_type, node_idx, property);
+    }
+
+    /// Re-index a single node in all composite indices that include the changed property.
+    /// Reads current node properties to build the new composite value.
+    fn update_composite_indices_for_property_change(
+        &mut self,
+        node_type: &str,
+        node_idx: NodeIndex,
+        changed_property: &str,
+    ) {
+        let comp_keys: Vec<CompositeIndexKey> = self
+            .composite_indices
+            .keys()
+            .filter(|(nt, props)| nt == node_type && props.contains(&changed_property.to_string()))
+            .cloned()
+            .collect();
+
+        if comp_keys.is_empty() {
+            return;
+        }
+
+        // Read current node properties once
+        let current_props: HashMap<String, Value> = match self.graph.node_weight(node_idx) {
+            Some(node) => node.properties.clone(),
+            None => return,
+        };
+
+        for key in comp_keys {
+            if let Some(comp_map) = self.composite_indices.get_mut(&key) {
+                // Remove node from all existing composite buckets
+                for indices in comp_map.values_mut() {
+                    indices.retain(|&idx| idx != node_idx);
+                }
+                // Remove empty buckets
+                comp_map.retain(|_, v| !v.is_empty());
+
+                // Build new composite value from current properties
+                let new_values: Vec<Value> = key
+                    .1
+                    .iter()
+                    .map(|p| current_props.get(p).cloned().unwrap_or(Value::Null))
+                    .collect();
+                if new_values.iter().any(|v| !matches!(v, Value::Null)) {
+                    comp_map
+                        .entry(CompositeValue(new_values))
+                        .or_default()
+                        .push(node_idx);
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Graph Maintenance: reindex, vacuum, graph_info
+    // ========================================================================
+
+    /// Rebuild all indexes from the current graph state.
+    ///
+    /// Reconstructs type_indices, property_indices, and composite_indices by
+    /// scanning all live nodes. Clears lazy caches (id_indices, connection_types)
+    /// so they rebuild on next access.
+    ///
+    /// Use after bulk mutations to ensure index consistency, or when you suspect
+    /// indexes have drifted from the actual graph state.
+    pub fn reindex(&mut self) {
+        // 1. Rebuild type_indices from scratch
+        let mut new_type_indices: HashMap<String, Vec<NodeIndex>> = HashMap::new();
+        for node_idx in self.graph.node_indices() {
+            if let Some(node) = self.graph.node_weight(node_idx) {
+                new_type_indices
+                    .entry(node.node_type.clone())
+                    .or_default()
+                    .push(node_idx);
+            }
+        }
+        self.type_indices = new_type_indices;
+
+        // 2. Clear lazy caches — they'll rebuild on next access
+        self.id_indices.clear();
+        self.connection_types.clear();
+
+        // 3. Rebuild existing property_indices (preserve which indexes exist)
+        let property_keys: Vec<IndexKey> = self.property_indices.keys().cloned().collect();
+        for (node_type, property) in property_keys {
+            self.create_index(&node_type, &property);
+        }
+
+        // 4. Rebuild existing composite_indices (preserve which indexes exist)
+        let composite_keys: Vec<CompositeIndexKey> =
+            self.composite_indices.keys().cloned().collect();
+        for (node_type, properties) in composite_keys {
+            let prop_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
+            self.create_composite_index(&node_type, &prop_refs);
+        }
+    }
+
+    /// Compact the graph by removing tombstones left by deleted nodes/edges.
+    ///
+    /// With StableDiGraph, deletions leave holes (tombstones) in the internal
+    /// storage. Over time, this wastes memory and degrades iteration performance.
+    /// vacuum() rebuilds the graph with contiguous indices, then rebuilds all indexes.
+    ///
+    /// Returns a mapping from old NodeIndex → new NodeIndex so callers can
+    /// update any external references (e.g., selections).
+    ///
+    /// No-op if there are no tombstones (node_count == node_bound).
+    pub fn vacuum(&mut self) -> HashMap<NodeIndex, NodeIndex> {
+        let old_node_count = self.graph.node_count();
+        let old_node_bound = self.graph.node_bound();
+
+        // No tombstones — nothing to compact
+        if old_node_count == old_node_bound {
+            return HashMap::new();
+        }
+
+        // Build new graph with contiguous indices
+        let mut new_graph = StableDiGraph::with_capacity(old_node_count, self.graph.edge_count());
+        let mut old_to_new: HashMap<NodeIndex, NodeIndex> = HashMap::with_capacity(old_node_count);
+
+        // Copy all live nodes, recording index mapping
+        for old_idx in self.graph.node_indices() {
+            let node_data = self.graph[old_idx].clone();
+            let new_idx = new_graph.add_node(node_data);
+            old_to_new.insert(old_idx, new_idx);
+        }
+
+        // Copy all live edges with remapped endpoints
+        for old_edge_idx in self.graph.edge_indices() {
+            if let Some((src, tgt)) = self.graph.edge_endpoints(old_edge_idx) {
+                let edge_data = self.graph[old_edge_idx].clone();
+                let new_src = old_to_new[&src];
+                let new_tgt = old_to_new[&tgt];
+                new_graph.add_edge(new_src, new_tgt, edge_data);
+            }
+        }
+
+        // Replace graph storage
+        self.graph = new_graph;
+
+        // Rebuild all indexes from the compacted graph
+        self.reindex();
+
+        old_to_new
+    }
+
+    /// Return diagnostic information about graph storage health.
+    ///
+    /// Useful for deciding when to call vacuum():
+    /// - `tombstones` > 0 means deleted nodes left holes
+    /// - `fragmentation_ratio` approaching 1.0 means most storage is wasted
+    /// - A ratio above 0.3 is a good threshold for calling vacuum()
+    pub fn graph_info(&self) -> GraphInfo {
+        let node_count = self.graph.node_count();
+        let node_bound = self.graph.node_bound();
+        let edge_count = self.graph.edge_count();
+        let node_tombstones = node_bound - node_count;
+
+        GraphInfo {
+            node_count,
+            node_capacity: node_bound,
+            node_tombstones,
+            edge_count,
+            fragmentation_ratio: if node_bound == 0 {
+                0.0
+            } else {
+                node_tombstones as f64 / node_bound as f64
+            },
+            type_count: self.type_indices.len(),
+            property_index_count: self.property_indices.len(),
+            composite_index_count: self.composite_indices.len(),
+        }
+    }
 }
 
 /// Statistics about a property index
@@ -674,20 +1031,33 @@ pub struct IndexStats {
     pub avg_entries_per_value: f64,
 }
 
+/// Diagnostic information about graph storage health.
+#[derive(Debug, Clone)]
+pub struct GraphInfo {
+    /// Number of live nodes in the graph
+    pub node_count: usize,
+    /// Upper bound of node indices (includes tombstones from deletions)
+    pub node_capacity: usize,
+    /// Number of tombstone slots (node_capacity - node_count)
+    pub node_tombstones: usize,
+    /// Number of live edges in the graph
+    pub edge_count: usize,
+    /// Ratio of wasted storage (0.0 = clean, approaching 1.0 = heavily fragmented)
+    pub fragmentation_ratio: f64,
+    /// Number of distinct node types
+    pub type_count: usize,
+    /// Number of single-property indexes
+    pub property_index_count: usize,
+    /// Number of composite indexes
+    pub composite_index_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum NodeData {
-    Regular {
-        id: Value,
-        title: Value,
-        node_type: String,
-        properties: HashMap<String, Value>,
-    },
-    Schema {
-        id: Value,
-        title: Value,
-        node_type: String,
-        properties: HashMap<String, Value>,
-    },
+pub struct NodeData {
+    pub id: Value,
+    pub title: Value,
+    pub node_type: String,
+    pub properties: HashMap<String, Value>,
 }
 
 impl NodeData {
@@ -697,62 +1067,39 @@ impl NodeData {
         node_type: String,
         properties: HashMap<String, Value>,
     ) -> Self {
-        NodeData::Regular {
+        NodeData {
             id,
             title,
             node_type,
             properties,
         }
     }
+
     /// Returns a reference to the field value without cloning.
     /// Use this for read-only access to avoid allocation overhead.
     /// Note: "type" field is not supported here as it requires Value::String allocation.
     /// Use get_node_type_ref() for the node type.
     #[inline]
     pub fn get_field_ref(&self, field: &str) -> Option<&Value> {
-        match self {
-            NodeData::Regular {
-                id,
-                title,
-                properties,
-                ..
-            } => match field {
-                "id" => Some(id),
-                "title" => Some(title),
-                _ => properties.get(field),
-            },
-            NodeData::Schema { .. } => None,
+        match field {
+            "id" => Some(&self.id),
+            "title" => Some(&self.title),
+            _ => self.properties.get(field),
         }
     }
 
     /// Returns the node type as a string reference without allocation.
     #[inline]
-    pub fn get_node_type_ref(&self) -> Option<&str> {
-        match self {
-            NodeData::Regular { node_type, .. } | NodeData::Schema { node_type, .. } => {
-                Some(node_type.as_str())
-            }
-        }
+    pub fn get_node_type_ref(&self) -> &str {
+        self.node_type.as_str()
     }
 
-    pub fn is_regular(&self) -> bool {
-        matches!(self, NodeData::Regular { .. })
-    }
-
-    pub fn to_node_info(&self) -> Option<NodeInfo> {
-        match self {
-            NodeData::Regular {
-                id,
-                title,
-                node_type,
-                properties,
-            } => Some(NodeInfo {
-                id: id.clone(),
-                title: title.clone(),
-                node_type: node_type.clone(),
-                properties: properties.clone(),
-            }),
-            NodeData::Schema { .. } => None,
+    pub fn to_node_info(&self) -> NodeInfo {
+        NodeInfo {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            node_type: self.node_type.clone(),
+            properties: self.properties.clone(),
         }
     }
 }
@@ -772,7 +1119,7 @@ impl EdgeData {
     }
 }
 
-pub type Graph = DiGraph<NodeData, EdgeData>;
+pub type Graph = StableDiGraph<NodeData, EdgeData>;
 
 // ============================================================================
 // Schema Definition & Validation Types
@@ -943,5 +1290,446 @@ impl std::fmt::Display for ValidationError {
                 write!(f, "Connection type '{}' ({} connections) exists in graph but not defined in schema", connection_type, count)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod maintenance_tests {
+    use super::*;
+
+    /// Helper: create a DirGraph with N Person nodes and edges between consecutive pairs
+    fn make_test_graph(num_nodes: usize, num_edges: bool) -> DirGraph {
+        let mut g = DirGraph::new();
+        for i in 0..num_nodes {
+            let mut props = HashMap::new();
+            props.insert("age".to_string(), Value::Int64(20 + i as i64));
+            let node = NodeData::new(
+                Value::UniqueId(i as u32),
+                Value::String(format!("Person_{}", i)),
+                "Person".to_string(),
+                props,
+            );
+            let idx = g.graph.add_node(node);
+            g.type_indices
+                .entry("Person".to_string())
+                .or_default()
+                .push(idx);
+        }
+        if num_edges {
+            for i in 0..(num_nodes.saturating_sub(1)) {
+                let src = NodeIndex::new(i);
+                let tgt = NodeIndex::new(i + 1);
+                g.graph
+                    .add_edge(src, tgt, EdgeData::new("KNOWS".to_string(), HashMap::new()));
+            }
+        }
+        g
+    }
+
+    #[test]
+    fn test_graph_info_clean() {
+        let g = make_test_graph(5, true);
+        let info = g.graph_info();
+        assert_eq!(info.node_count, 5);
+        assert_eq!(info.node_capacity, 5);
+        assert_eq!(info.node_tombstones, 0);
+        assert_eq!(info.edge_count, 4);
+        assert_eq!(info.fragmentation_ratio, 0.0);
+        assert_eq!(info.type_count, 1);
+    }
+
+    #[test]
+    fn test_graph_info_after_deletion() {
+        let mut g = make_test_graph(5, false);
+        // Delete node 2 — leaves a tombstone
+        g.graph.remove_node(NodeIndex::new(2));
+        let info = g.graph_info();
+        assert_eq!(info.node_count, 4);
+        assert_eq!(info.node_capacity, 5); // Still 5 slots
+        assert_eq!(info.node_tombstones, 1);
+        assert!(info.fragmentation_ratio > 0.19 && info.fragmentation_ratio < 0.21);
+    }
+
+    #[test]
+    fn test_graph_info_empty() {
+        let g = DirGraph::new();
+        let info = g.graph_info();
+        assert_eq!(info.node_count, 0);
+        assert_eq!(info.node_capacity, 0);
+        assert_eq!(info.fragmentation_ratio, 0.0);
+    }
+
+    #[test]
+    fn test_reindex_rebuilds_type_indices() {
+        let mut g = make_test_graph(5, false);
+
+        // Manually corrupt type_indices (simulate drift)
+        g.type_indices.clear();
+        assert!(g.type_indices.is_empty());
+
+        g.reindex();
+
+        // type_indices should be rebuilt
+        assert_eq!(g.type_indices.len(), 1);
+        assert_eq!(g.type_indices["Person"].len(), 5);
+    }
+
+    #[test]
+    fn test_reindex_rebuilds_property_indices() {
+        let mut g = make_test_graph(5, false);
+
+        // Create a property index
+        g.create_index("Person", "age");
+        assert!(g.has_index("Person", "age"));
+
+        // Manually corrupt the property index
+        g.property_indices
+            .get_mut(&("Person".to_string(), "age".to_string()))
+            .unwrap()
+            .clear();
+
+        g.reindex();
+
+        // Property index should be rebuilt with correct data
+        let stats = g.get_index_stats("Person", "age").unwrap();
+        assert_eq!(stats.unique_values, 5); // ages 20..24
+        assert_eq!(stats.total_entries, 5);
+    }
+
+    #[test]
+    fn test_reindex_rebuilds_composite_indices() {
+        let mut g = make_test_graph(5, false);
+        g.create_composite_index("Person", &["age"]);
+        assert!(g.has_composite_index("Person", &["age".to_string()]));
+
+        // Corrupt composite index
+        g.composite_indices.values_mut().for_each(|v| v.clear());
+
+        g.reindex();
+
+        let stats = g
+            .get_composite_index_stats("Person", &["age".to_string()])
+            .unwrap();
+        assert_eq!(stats.unique_values, 5);
+    }
+
+    #[test]
+    fn test_reindex_clears_id_indices() {
+        let mut g = make_test_graph(3, false);
+        g.build_id_index("Person");
+        assert!(g.id_indices.contains_key("Person"));
+
+        g.reindex();
+
+        // id_indices should be cleared (lazy rebuild on next access)
+        assert!(g.id_indices.is_empty());
+    }
+
+    #[test]
+    fn test_reindex_after_deletion() {
+        let mut g = make_test_graph(5, false);
+        // Delete node 2
+        g.graph.remove_node(NodeIndex::new(2));
+        // type_indices still has the stale entry
+        assert_eq!(g.type_indices["Person"].len(), 5);
+
+        g.reindex();
+
+        // Now type_indices should reflect only 4 live nodes
+        assert_eq!(g.type_indices["Person"].len(), 4);
+        // And none of them should be index 2
+        assert!(!g.type_indices["Person"].contains(&NodeIndex::new(2)));
+    }
+
+    #[test]
+    fn test_vacuum_noop_when_clean() {
+        let mut g = make_test_graph(5, true);
+        let mapping = g.vacuum();
+        assert!(mapping.is_empty()); // No remapping needed
+        assert_eq!(g.graph.node_count(), 5);
+        assert_eq!(g.graph_info().node_tombstones, 0);
+    }
+
+    #[test]
+    fn test_vacuum_compacts_after_deletion() {
+        let mut g = make_test_graph(5, true);
+        // Delete middle node (creates tombstone)
+        g.graph.remove_node(NodeIndex::new(2));
+        assert_eq!(g.graph.node_count(), 4);
+        assert_eq!(g.graph_info().node_tombstones, 1);
+
+        let mapping = g.vacuum();
+
+        // After vacuum: no tombstones, indices are contiguous
+        assert_eq!(g.graph.node_count(), 4);
+        assert_eq!(g.graph_info().node_tombstones, 0);
+        assert_eq!(g.graph_info().node_capacity, 4);
+
+        // Mapping should have 4 entries (one for each surviving node)
+        assert_eq!(mapping.len(), 4);
+    }
+
+    #[test]
+    fn test_vacuum_preserves_node_data() {
+        let mut g = make_test_graph(3, false);
+        g.graph.remove_node(NodeIndex::new(1)); // Delete Person_1
+
+        let mapping = g.vacuum();
+
+        // Verify all surviving nodes are present with correct data
+        let mut titles: Vec<String> = Vec::new();
+        for idx in g.graph.node_indices() {
+            if let Some(node) = g.graph.node_weight(idx) {
+                if let Value::String(s) = &node.title {
+                    titles.push(s.clone());
+                }
+            }
+        }
+        titles.sort();
+        assert_eq!(titles, vec!["Person_0", "Person_2"]);
+        assert_eq!(mapping.len(), 2);
+    }
+
+    #[test]
+    fn test_vacuum_preserves_edges() {
+        let mut g = make_test_graph(4, true);
+        // Edges: 0→1, 1→2, 2→3
+        // Delete node 0 (and its edge to 1)
+        g.graph.remove_node(NodeIndex::new(0));
+        // Remaining edges should be 1→2, 2→3
+
+        let _mapping = g.vacuum();
+
+        assert_eq!(g.graph.edge_count(), 2);
+        assert_eq!(g.graph.node_count(), 3);
+    }
+
+    #[test]
+    fn test_vacuum_rebuilds_type_indices() {
+        let mut g = make_test_graph(5, false);
+        g.graph.remove_node(NodeIndex::new(2));
+
+        g.vacuum();
+
+        // type_indices should point to valid, contiguous indices
+        assert_eq!(g.type_indices["Person"].len(), 4);
+        for &idx in &g.type_indices["Person"] {
+            assert!(g.graph.node_weight(idx).is_some());
+        }
+    }
+
+    #[test]
+    fn test_vacuum_rebuilds_property_indices() {
+        let mut g = make_test_graph(5, false);
+        g.create_index("Person", "age");
+        g.graph.remove_node(NodeIndex::new(2));
+
+        g.vacuum();
+
+        // Property index should still exist with correct entries
+        assert!(g.has_index("Person", "age"));
+        let stats = g.get_index_stats("Person", "age").unwrap();
+        assert_eq!(stats.total_entries, 4); // 5 - 1 deleted
+    }
+
+    #[test]
+    fn test_vacuum_heavy_fragmentation() {
+        let mut g = make_test_graph(100, false);
+        // Delete every other node — 50% fragmentation
+        for i in (0..100).step_by(2) {
+            g.graph.remove_node(NodeIndex::new(i));
+        }
+        assert_eq!(g.graph.node_count(), 50);
+        let info = g.graph_info();
+        assert!(info.fragmentation_ratio > 0.49);
+
+        let mapping = g.vacuum();
+
+        assert_eq!(mapping.len(), 50);
+        assert_eq!(g.graph.node_count(), 50);
+        assert_eq!(g.graph_info().node_tombstones, 0);
+        assert_eq!(g.graph_info().fragmentation_ratio, 0.0);
+    }
+
+    // ========================================================================
+    // Incremental Index Update Tests
+    // ========================================================================
+
+    #[test]
+    fn test_update_property_indices_for_add() {
+        let mut g = DirGraph::new();
+        // Add a node and create an index
+        let mut props = HashMap::new();
+        props.insert("city".to_string(), Value::String("Oslo".to_string()));
+        let n0 = g.graph.add_node(NodeData::new(
+            Value::Int64(1),
+            Value::String("Alice".to_string()),
+            "Person".to_string(),
+            props,
+        ));
+        g.type_indices
+            .entry("Person".to_string())
+            .or_default()
+            .push(n0);
+        g.create_index("Person", "city");
+
+        // Add a second node and call the helper
+        let mut props2 = HashMap::new();
+        props2.insert("city".to_string(), Value::String("Bergen".to_string()));
+        let n1 = g.graph.add_node(NodeData::new(
+            Value::Int64(2),
+            Value::String("Bob".to_string()),
+            "Person".to_string(),
+            props2,
+        ));
+        g.type_indices
+            .entry("Person".to_string())
+            .or_default()
+            .push(n1);
+        g.update_property_indices_for_add("Person", n1);
+
+        // Verify index was updated
+        let oslo = g.lookup_by_index("Person", "city", &Value::String("Oslo".to_string()));
+        assert_eq!(oslo.unwrap().len(), 1);
+        let bergen = g.lookup_by_index("Person", "city", &Value::String("Bergen".to_string()));
+        let bergen = bergen.unwrap();
+        assert_eq!(bergen.len(), 1);
+        assert_eq!(bergen[0], n1);
+    }
+
+    #[test]
+    fn test_update_property_indices_for_set() {
+        let mut g = DirGraph::new();
+        let mut props = HashMap::new();
+        props.insert("city".to_string(), Value::String("Oslo".to_string()));
+        let n0 = g.graph.add_node(NodeData::new(
+            Value::Int64(1),
+            Value::String("Alice".to_string()),
+            "Person".to_string(),
+            props,
+        ));
+        g.type_indices
+            .entry("Person".to_string())
+            .or_default()
+            .push(n0);
+        g.create_index("Person", "city");
+
+        // Simulate SET n.city = 'Bergen'
+        let old_val = Value::String("Oslo".to_string());
+        let new_val = Value::String("Bergen".to_string());
+        // Actually change the property on the node
+        if let Some(node) = g.graph.node_weight_mut(n0) {
+            node.properties.insert("city".to_string(), new_val.clone());
+        }
+        g.update_property_indices_for_set("Person", n0, "city", Some(&old_val), &new_val);
+
+        // Verify: Oslo bucket should be empty, Bergen should have the node
+        let oslo = g.lookup_by_index("Person", "city", &Value::String("Oslo".to_string()));
+        assert!(oslo.is_none() || oslo.unwrap().is_empty());
+        let bergen = g.lookup_by_index("Person", "city", &Value::String("Bergen".to_string()));
+        assert_eq!(bergen.unwrap(), vec![n0]);
+    }
+
+    #[test]
+    fn test_update_property_indices_for_remove() {
+        let mut g = DirGraph::new();
+        let mut props = HashMap::new();
+        props.insert("city".to_string(), Value::String("Oslo".to_string()));
+        let n0 = g.graph.add_node(NodeData::new(
+            Value::Int64(1),
+            Value::String("Alice".to_string()),
+            "Person".to_string(),
+            props,
+        ));
+        g.type_indices
+            .entry("Person".to_string())
+            .or_default()
+            .push(n0);
+        g.create_index("Person", "city");
+
+        // Simulate REMOVE n.city
+        let old_val = Value::String("Oslo".to_string());
+        if let Some(node) = g.graph.node_weight_mut(n0) {
+            node.properties.remove("city");
+        }
+        g.update_property_indices_for_remove("Person", n0, "city", &old_val);
+
+        // Verify: Oslo bucket should be empty
+        let oslo = g.lookup_by_index("Person", "city", &Value::String("Oslo".to_string()));
+        assert!(oslo.is_none() || oslo.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_update_composite_index_on_property_change() {
+        let mut g = DirGraph::new();
+        let mut props = HashMap::new();
+        props.insert("city".to_string(), Value::String("Oslo".to_string()));
+        props.insert("age".to_string(), Value::Int64(30));
+        let n0 = g.graph.add_node(NodeData::new(
+            Value::Int64(1),
+            Value::String("Alice".to_string()),
+            "Person".to_string(),
+            props,
+        ));
+        g.type_indices
+            .entry("Person".to_string())
+            .or_default()
+            .push(n0);
+        g.create_composite_index("Person", &["city", "age"]);
+
+        // Verify initial state
+        let key = (
+            "Person".to_string(),
+            vec!["city".to_string(), "age".to_string()],
+        );
+        assert!(g.composite_indices.get(&key).unwrap().len() == 1);
+
+        // Change city to Bergen
+        let old_val = Value::String("Oslo".to_string());
+        let new_val = Value::String("Bergen".to_string());
+        if let Some(node) = g.graph.node_weight_mut(n0) {
+            node.properties.insert("city".to_string(), new_val.clone());
+        }
+        g.update_property_indices_for_set("Person", n0, "city", Some(&old_val), &new_val);
+
+        // Verify: old composite value gone, new one present
+        let comp_map = g.composite_indices.get(&key).unwrap();
+        let old_comp = CompositeValue(vec![Value::String("Oslo".to_string()), Value::Int64(30)]);
+        let new_comp = CompositeValue(vec![Value::String("Bergen".to_string()), Value::Int64(30)]);
+        assert!(!comp_map.contains_key(&old_comp) || comp_map.get(&old_comp).unwrap().is_empty());
+        assert_eq!(comp_map.get(&new_comp).unwrap(), &vec![n0]);
+    }
+
+    #[test]
+    fn test_no_update_when_no_index_exists() {
+        let mut g = DirGraph::new();
+        let mut props = HashMap::new();
+        props.insert("city".to_string(), Value::String("Oslo".to_string()));
+        let n0 = g.graph.add_node(NodeData::new(
+            Value::Int64(1),
+            Value::String("Alice".to_string()),
+            "Person".to_string(),
+            props,
+        ));
+        g.type_indices
+            .entry("Person".to_string())
+            .or_default()
+            .push(n0);
+        // No index created — these should be no-ops without crash
+        g.update_property_indices_for_add("Person", n0);
+        g.update_property_indices_for_set(
+            "Person",
+            n0,
+            "city",
+            Some(&Value::String("Oslo".to_string())),
+            &Value::String("Bergen".to_string()),
+        );
+        g.update_property_indices_for_remove(
+            "Person",
+            n0,
+            "city",
+            &Value::String("Oslo".to_string()),
+        );
+        assert!(g.property_indices.is_empty());
     }
 }

@@ -8,6 +8,7 @@ use crate::graph::filtering_methods;
 use crate::graph::pattern_matching::{MatchBinding, PatternExecutor, PatternMatch};
 use crate::graph::schema::{DirGraph, EdgeData, NodeData};
 use crate::graph::value_operations;
+use petgraph::visit::NodeIndexable;
 use std::collections::{HashMap, HashSet};
 
 // ============================================================================
@@ -56,7 +57,11 @@ impl<'a> CypherExecutor<'a> {
             Clause::Skip(s) => self.execute_skip(s, result_set),
             Clause::Unwind(u) => self.execute_unwind(u, result_set),
             Clause::Union(u) => self.execute_union(u, result_set),
-            Clause::Create(_) | Clause::Set(_) | Clause::Delete(_) => {
+            Clause::Create(_)
+            | Clause::Set(_)
+            | Clause::Delete(_)
+            | Clause::Remove(_)
+            | Clause::Merge(_) => {
                 Err("Mutation clauses cannot be executed in read-only mode".to_string())
             }
         }
@@ -370,11 +375,7 @@ impl<'a> CypherExecutor<'a> {
             row.node_bindings
                 .get(variable)
                 .and_then(|&idx| self.graph.graph.node_weight(idx))
-                .map(|node| match node {
-                    NodeData::Regular { node_type, .. } | NodeData::Schema { node_type, .. } => {
-                        node_type.clone()
-                    }
-                })
+                .map(|node| node.node_type.clone())
         })
     }
 
@@ -1328,10 +1329,16 @@ impl<'a> CypherExecutor<'a> {
 
 /// Check if a query contains any mutation clauses
 pub fn is_mutation_query(query: &CypherQuery) -> bool {
-    query
-        .clauses
-        .iter()
-        .any(|c| matches!(c, Clause::Create(_) | Clause::Set(_) | Clause::Delete(_)))
+    query.clauses.iter().any(|c| {
+        matches!(
+            c,
+            Clause::Create(_)
+                | Clause::Set(_)
+                | Clause::Delete(_)
+                | Clause::Remove(_)
+                | Clause::Merge(_)
+        )
+    })
 }
 
 /// Execute a mutation query against a mutable graph.
@@ -1353,8 +1360,14 @@ pub fn execute_mutable(
             Clause::Set(set) => {
                 execute_set(graph, set, &result_set, &params, &mut stats)?;
             }
-            Clause::Delete(_) => {
-                return Err("DELETE clause is not yet supported".to_string());
+            Clause::Delete(del) => {
+                execute_delete(graph, del, &result_set, &mut stats)?;
+            }
+            Clause::Remove(rem) => {
+                execute_remove(graph, rem, &result_set, &mut stats)?;
+            }
+            Clause::Merge(merge) => {
+                result_set = execute_merge(graph, merge, result_set, &params, &mut stats)?;
             }
             // Read clauses: create temporary immutable executor
             _ => {
@@ -1515,7 +1528,7 @@ fn create_node(
     }
 
     // Generate ID
-    let id = Value::UniqueId(graph.graph.node_count() as u32);
+    let id = Value::UniqueId(graph.graph.node_bound() as u32);
 
     // Determine title: use 'name' or 'title' property if present
     let title = properties
@@ -1524,7 +1537,7 @@ fn create_node(
         .cloned()
         .unwrap_or_else(|| {
             let label = node_pat.label.as_deref().unwrap_or("Node");
-            Value::String(format!("{}_{}", label, graph.graph.node_count()))
+            Value::String(format!("{}_{}", label, graph.graph.node_bound()))
         });
 
     let label = node_pat.label.clone().unwrap_or_else(|| "Node".to_string());
@@ -1543,9 +1556,50 @@ fn create_node(
     // Invalidate id_indices for this type (lazy rebuild on next lookup)
     graph.id_indices.remove(&label);
 
+    // Update property and composite indices for the new node
+    graph.update_property_indices_for_add(&label, node_idx);
+
+    // Ensure type metadata exists for this type (consistent with Python add_nodes API)
+    ensure_type_metadata(graph, &label, node_idx);
+
     stats.nodes_created += 1;
 
     Ok(node_idx)
+}
+
+/// Ensure type metadata exists for the given node type.
+/// Reads property types from the sample node and upserts them into graph metadata.
+/// This mirrors the behavior of the Python add_nodes() API in maintain_graph.rs.
+fn ensure_type_metadata(
+    graph: &mut DirGraph,
+    node_type: &str,
+    sample_node_idx: petgraph::graph::NodeIndex,
+) {
+    // Read sample node properties for type inference
+    let sample_props: HashMap<String, String> = match graph.graph.node_weight(sample_node_idx) {
+        Some(node) => node
+            .properties
+            .iter()
+            .map(|(k, v)| (k.clone(), value_type_name(v)))
+            .collect(),
+        None => return,
+    };
+
+    graph.upsert_node_type_metadata(node_type, sample_props);
+}
+
+/// Map a Value variant to its type name string (for SchemaNode property types).
+fn value_type_name(v: &Value) -> String {
+    match v {
+        Value::String(_) => "String",
+        Value::Int64(_) => "Int64",
+        Value::Float64(_) => "Float64",
+        Value::Boolean(_) => "Boolean",
+        Value::UniqueId(_) => "UniqueId",
+        Value::DateTime(_) => "DateTime",
+        Value::Null => "Null",
+    }
+    .to_string()
 }
 
 /// Extract the variable name from a CreateElement::Node
@@ -1605,30 +1659,51 @@ fn execute_set(
                         executor.evaluate_expression(expression, row)?
                     };
 
+                    // Capture old value + node_type before mutable borrow (for index update)
+                    let (old_value, node_type_str) = match graph.get_node(*node_idx) {
+                        Some(node) => {
+                            let nt = node.get_node_type_ref().to_string();
+                            let old = match property.as_str() {
+                                "name" => node.get_field_ref("name").cloned(),
+                                _ => node.get_field_ref(property).cloned(),
+                            };
+                            (old, nt)
+                        }
+                        None => continue,
+                    };
+
+                    // Clone value before it may be consumed by the mutation
+                    let value_for_index = value.clone();
+
                     // Apply the mutation (borrows graph mutably)
                     if let Some(node) = graph.get_node_mut(*node_idx) {
-                        match node {
-                            NodeData::Regular {
-                                title, properties, ..
+                        match property.as_str() {
+                            "title" => {
+                                node.title = value;
                             }
-                            | NodeData::Schema {
-                                title, properties, ..
-                            } => match property.as_str() {
-                                "title" => {
-                                    *title = value;
-                                }
-                                "name" => {
-                                    // "name" maps to title in Cypher reads;
-                                    // update both title and properties for consistency
-                                    *title = value.clone();
-                                    properties.insert("name".to_string(), value);
-                                }
-                                _ => {
-                                    properties.insert(property.clone(), value);
-                                }
-                            },
+                            "name" => {
+                                // "name" maps to title in Cypher reads;
+                                // update both title and properties for consistency
+                                node.title = value.clone();
+                                node.properties.insert("name".to_string(), value);
+                            }
+                            _ => {
+                                node.properties.insert(property.clone(), value);
+                            }
                         }
                         stats.properties_set += 1;
+                    }
+
+                    // Update property/composite indices (no active borrows)
+                    // "title" only changes the title field, not a HashMap property
+                    if property != "title" {
+                        graph.update_property_indices_for_set(
+                            &node_type_str,
+                            *node_idx,
+                            property,
+                            old_value.as_ref(),
+                            &value_for_index,
+                        );
                     }
                 }
                 SetItem::Label { variable, label } => {
@@ -1641,6 +1716,443 @@ fn execute_set(
         }
     }
     Ok(())
+}
+
+/// Execute a DELETE clause, removing nodes and/or edges from the graph.
+fn execute_delete(
+    graph: &mut DirGraph,
+    delete: &DeleteClause,
+    result_set: &ResultSet,
+    stats: &mut MutationStats,
+) -> Result<(), String> {
+    use petgraph::visit::EdgeRef;
+    use std::collections::HashSet;
+
+    let mut nodes_to_delete: HashSet<petgraph::graph::NodeIndex> = HashSet::new();
+    // For edge deletion we store (source, target, connection_type) tuples to identify edges
+    let mut edge_vars_to_delete: Vec<(
+        String,
+        petgraph::graph::NodeIndex,
+        petgraph::graph::NodeIndex,
+        String,
+    )> = Vec::new();
+
+    // Phase 1: collect all nodes and edges to delete across all rows
+    for row in &result_set.rows {
+        for expr in &delete.expressions {
+            let var_name = match expr {
+                Expression::Variable(name) => name,
+                other => return Err(format!("DELETE expects variable names, got {:?}", other)),
+            };
+
+            if let Some(&node_idx) = row.node_bindings.get(var_name) {
+                nodes_to_delete.insert(node_idx);
+            } else if let Some(edge_binding) = row.edge_bindings.get(var_name) {
+                edge_vars_to_delete.push((
+                    var_name.clone(),
+                    edge_binding.source,
+                    edge_binding.target,
+                    edge_binding.connection_type.clone(),
+                ));
+            } else {
+                return Err(format!(
+                    "Variable '{}' not bound to a node or relationship in DELETE",
+                    var_name
+                ));
+            }
+        }
+    }
+
+    // Phase 2: for plain DELETE (not DETACH), verify no node has edges
+    if !delete.detach {
+        for &node_idx in &nodes_to_delete {
+            let has_edges = graph
+                .graph
+                .edges_directed(node_idx, petgraph::Direction::Outgoing)
+                .next()
+                .is_some()
+                || graph
+                    .graph
+                    .edges_directed(node_idx, petgraph::Direction::Incoming)
+                    .next()
+                    .is_some();
+            if has_edges {
+                let name = graph
+                    .graph
+                    .node_weight(node_idx)
+                    .map(|n| {
+                        n.get_field_ref("name")
+                            .or_else(|| n.get_field_ref("title"))
+                            .map(|v| format!("{:?}", v))
+                            .unwrap_or_else(|| format!("index {}", node_idx.index()))
+                    })
+                    .unwrap_or_else(|| "unknown".to_string());
+                return Err(format!(
+                    "Cannot delete node '{}' because it still has relationships. Use DETACH DELETE to delete the node and all its relationships.",
+                    name
+                ));
+            }
+        }
+    }
+
+    // Phase 3: delete explicitly-requested edges (from edge variable bindings)
+    let mut deleted_edges: HashSet<petgraph::graph::EdgeIndex> = HashSet::new();
+    for (_var, source, target, conn_type) in &edge_vars_to_delete {
+        // Find the edge by source, target, and connection type
+        let edge_idx = graph
+            .graph
+            .edges_directed(*source, petgraph::Direction::Outgoing)
+            .find(|e| e.target() == *target && e.weight().connection_type == *conn_type)
+            .map(|e| e.id());
+        if let Some(idx) = edge_idx {
+            if deleted_edges.insert(idx) {
+                graph.graph.remove_edge(idx);
+                stats.relationships_deleted += 1;
+            }
+        }
+    }
+
+    // Phase 4: for DETACH DELETE, remove all incident edges of nodes being deleted
+    if delete.detach {
+        for &node_idx in &nodes_to_delete {
+            // Collect incident edge indices first (can't mutate while iterating)
+            let incident: Vec<petgraph::graph::EdgeIndex> = graph
+                .graph
+                .edges_directed(node_idx, petgraph::Direction::Outgoing)
+                .chain(
+                    graph
+                        .graph
+                        .edges_directed(node_idx, petgraph::Direction::Incoming),
+                )
+                .map(|e| e.id())
+                .collect();
+            for edge_idx in incident {
+                if deleted_edges.insert(edge_idx) {
+                    graph.graph.remove_edge(edge_idx);
+                    stats.relationships_deleted += 1;
+                }
+            }
+        }
+    }
+
+    // Phase 5: collect node types before deletion (for index cleanup)
+    let mut affected_types: HashSet<String> = HashSet::new();
+    for &node_idx in &nodes_to_delete {
+        if let Some(node) = graph.graph.node_weight(node_idx) {
+            affected_types.insert(node.get_node_type_ref().to_string());
+        }
+    }
+
+    // Phase 6: delete nodes
+    for &node_idx in &nodes_to_delete {
+        graph.graph.remove_node(node_idx);
+        stats.nodes_deleted += 1;
+    }
+
+    // Phase 7: index cleanup (StableDiGraph keeps remaining indices stable)
+    for node_type in &affected_types {
+        // type_indices: remove deleted entries
+        if let Some(indices) = graph.type_indices.get_mut(node_type) {
+            indices.retain(|idx| !nodes_to_delete.contains(idx));
+        }
+        // id_indices: invalidate for lazy rebuild
+        graph.id_indices.remove(node_type);
+        // property_indices: remove deleted entries for affected types
+        let prop_keys: Vec<_> = graph
+            .property_indices
+            .keys()
+            .filter(|(nt, _)| nt == node_type)
+            .cloned()
+            .collect();
+        for key in prop_keys {
+            if let Some(value_map) = graph.property_indices.get_mut(&key) {
+                for indices in value_map.values_mut() {
+                    indices.retain(|idx| !nodes_to_delete.contains(idx));
+                }
+            }
+        }
+        // composite_indices: same treatment
+        let comp_keys: Vec<_> = graph
+            .composite_indices
+            .keys()
+            .filter(|(nt, _)| nt == node_type)
+            .cloned()
+            .collect();
+        for key in comp_keys {
+            if let Some(value_map) = graph.composite_indices.get_mut(&key) {
+                for indices in value_map.values_mut() {
+                    indices.retain(|idx| !nodes_to_delete.contains(idx));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Execute a REMOVE clause, removing properties from nodes.
+fn execute_remove(
+    graph: &mut DirGraph,
+    remove: &RemoveClause,
+    result_set: &ResultSet,
+    stats: &mut MutationStats,
+) -> Result<(), String> {
+    for row in &result_set.rows {
+        for item in &remove.items {
+            match item {
+                RemoveItem::Property { variable, property } => {
+                    // Protect immutable fields
+                    if property == "id" {
+                        return Err("Cannot REMOVE node id — it is immutable".to_string());
+                    }
+                    if property == "type" || property == "node_type" || property == "label" {
+                        return Err("Cannot REMOVE node type".to_string());
+                    }
+
+                    let node_idx = row.node_bindings.get(variable).ok_or_else(|| {
+                        format!("Variable '{}' not bound to a node in REMOVE", variable)
+                    })?;
+
+                    // Read node_type before mutable borrow (for index update)
+                    let node_type_str = graph
+                        .get_node(*node_idx)
+                        .map(|n| n.get_node_type_ref().to_string())
+                        .unwrap_or_default();
+
+                    // Remove property (mutable borrow, returns old value)
+                    let removed_value = if let Some(node) = graph.get_node_mut(*node_idx) {
+                        node.properties.remove(property)
+                    } else {
+                        None
+                    };
+
+                    // Update stats + indices (no active borrows)
+                    if let Some(old_val) = removed_value {
+                        stats.properties_removed += 1;
+                        graph.update_property_indices_for_remove(
+                            &node_type_str,
+                            *node_idx,
+                            property,
+                            &old_val,
+                        );
+                    }
+                }
+                RemoveItem::Label { variable, label } => {
+                    return Err(format!(
+                        "REMOVE label (REMOVE {}:{}) is not supported — rusty_graph uses single node_type",
+                        variable, label
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Execute a MERGE clause: match-or-create a pattern.
+fn execute_merge(
+    graph: &mut DirGraph,
+    merge: &MergeClause,
+    existing: ResultSet,
+    params: &HashMap<String, Value>,
+    stats: &mut MutationStats,
+) -> Result<ResultSet, String> {
+    let source_rows = if existing.rows.is_empty() {
+        vec![ResultRow::new()]
+    } else {
+        existing.rows
+    };
+
+    let mut new_rows = Vec::with_capacity(source_rows.len());
+
+    for row in &source_rows {
+        let mut new_row = row.clone();
+
+        // Try to match the MERGE pattern
+        let matched = try_match_merge_pattern(graph, &merge.pattern, &new_row, params)?;
+
+        if let Some(bound_row) = matched {
+            // Pattern matched — merge bindings into row
+            for (var, idx) in &bound_row.node_bindings {
+                new_row.node_bindings.insert(var.clone(), *idx);
+            }
+            for (var, binding) in &bound_row.edge_bindings {
+                new_row.edge_bindings.insert(var.clone(), binding.clone());
+            }
+
+            // Execute ON MATCH SET
+            if let Some(ref set_items) = merge.on_match {
+                let set_clause = SetClause {
+                    items: set_items.clone(),
+                };
+                let temp_rs = ResultSet {
+                    rows: vec![new_row.clone()],
+                    columns: Vec::new(),
+                };
+                execute_set(graph, &set_clause, &temp_rs, params, stats)?;
+            }
+        } else {
+            // No match — CREATE the pattern
+            let create_clause = CreateClause {
+                patterns: vec![merge.pattern.clone()],
+            };
+            let temp_rs = ResultSet {
+                rows: vec![new_row.clone()],
+                columns: existing.columns.clone(),
+            };
+            let created = execute_create(graph, &create_clause, temp_rs, params, stats)?;
+
+            // Merge newly created bindings into our row
+            if let Some(created_row) = created.rows.into_iter().next() {
+                for (var, idx) in created_row.node_bindings {
+                    new_row.node_bindings.insert(var, idx);
+                }
+                for (var, binding) in created_row.edge_bindings {
+                    new_row.edge_bindings.insert(var, binding);
+                }
+            }
+
+            // Execute ON CREATE SET
+            if let Some(ref set_items) = merge.on_create {
+                let set_clause = SetClause {
+                    items: set_items.clone(),
+                };
+                let temp_rs = ResultSet {
+                    rows: vec![new_row.clone()],
+                    columns: Vec::new(),
+                };
+                execute_set(graph, &set_clause, &temp_rs, params, stats)?;
+            }
+        }
+
+        new_rows.push(new_row);
+    }
+
+    Ok(ResultSet {
+        rows: new_rows,
+        columns: existing.columns,
+    })
+}
+
+/// Try to match a MERGE pattern against the graph.
+/// Returns Some(ResultRow) with variable bindings if a match is found, None otherwise.
+fn try_match_merge_pattern(
+    graph: &DirGraph,
+    pattern: &CreatePattern,
+    row: &ResultRow,
+    params: &HashMap<String, Value>,
+) -> Result<Option<ResultRow>, String> {
+    use petgraph::visit::EdgeRef;
+
+    let executor = CypherExecutor::with_params(graph, params);
+
+    match pattern.elements.len() {
+        1 => {
+            // Node-only MERGE: (var:Label {key: val, ...})
+            if let CreateElement::Node(node_pat) = &pattern.elements[0] {
+                // If variable is already bound from prior MATCH, it's already matched
+                if let Some(ref var) = node_pat.variable {
+                    if let Some(&existing_idx) = row.node_bindings.get(var) {
+                        if graph.graph.node_weight(existing_idx).is_some() {
+                            let mut result_row = ResultRow::new();
+                            result_row.node_bindings.insert(var.clone(), existing_idx);
+                            return Ok(Some(result_row));
+                        }
+                    }
+                }
+
+                let label = node_pat.label.as_deref().unwrap_or("Node");
+
+                // Evaluate expected properties
+                let expected_props: Vec<(&str, Value)> = node_pat
+                    .properties
+                    .iter()
+                    .map(|(key, expr)| {
+                        executor
+                            .evaluate_expression(expr, row)
+                            .map(|val| (key.as_str(), val))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                // Search type_indices for a matching node
+                if let Some(type_indices) = graph.type_indices.get(label) {
+                    for &idx in type_indices {
+                        if let Some(node) = graph.graph.node_weight(idx) {
+                            // Match "name"/"title" to the node's title field,
+                            // consistent with pattern_matching::node_matches_properties
+                            let all_match = expected_props.iter().all(|(key, expected)| {
+                                let value = if *key == "name" || *key == "title" {
+                                    node.get_field_ref("title")
+                                } else {
+                                    node.get_field_ref(key)
+                                };
+                                value == Some(expected)
+                            });
+                            if all_match {
+                                let mut result_row = ResultRow::new();
+                                if let Some(ref var) = node_pat.variable {
+                                    result_row.node_bindings.insert(var.clone(), idx);
+                                }
+                                return Ok(Some(result_row));
+                            }
+                        }
+                    }
+                }
+                Ok(None)
+            } else {
+                Err("MERGE pattern must start with a node".to_string())
+            }
+        }
+        3 => {
+            // Relationship MERGE: (a)-[r:TYPE]->(b)
+            let source_var = get_create_node_variable(&pattern.elements[0]);
+            let target_var = get_create_node_variable(&pattern.elements[2]);
+
+            let source_idx = source_var
+                .and_then(|v| row.node_bindings.get(v).copied())
+                .ok_or("MERGE path: source node must be bound by prior MATCH")?;
+            let target_idx = target_var
+                .and_then(|v| row.node_bindings.get(v).copied())
+                .ok_or("MERGE path: target node must be bound by prior MATCH")?;
+
+            if let CreateElement::Edge(edge_pat) = &pattern.elements[1] {
+                let (actual_src, actual_tgt) = match edge_pat.direction {
+                    CreateEdgeDirection::Outgoing => (source_idx, target_idx),
+                    CreateEdgeDirection::Incoming => (target_idx, source_idx),
+                };
+
+                // Search for existing edge matching type
+                let matching_edge = graph
+                    .graph
+                    .edges_directed(actual_src, petgraph::Direction::Outgoing)
+                    .find(|e| {
+                        e.target() == actual_tgt
+                            && e.weight().connection_type == edge_pat.connection_type
+                    });
+
+                if let Some(edge_ref) = matching_edge {
+                    let mut result_row = ResultRow::new();
+                    if let Some(ref var) = edge_pat.variable {
+                        result_row.edge_bindings.insert(
+                            var.clone(),
+                            EdgeBinding {
+                                source: actual_src,
+                                target: actual_tgt,
+                                connection_type: edge_ref.weight().connection_type.clone(),
+                                properties: edge_ref.weight().properties.clone(),
+                            },
+                        );
+                    }
+                    Ok(Some(result_row))
+                } else {
+                    Ok(None)
+                }
+            } else {
+                Err("Expected edge in MERGE path pattern".to_string())
+            }
+        }
+        _ => Err("MERGE supports single-node or single-edge patterns only".to_string()),
+    }
 }
 
 // ============================================================================
@@ -1751,24 +2263,15 @@ fn evaluate_comparison(left: &Value, op: &ComparisonOp, right: &Value) -> bool {
 
 /// Resolve a property from a NodeData
 fn resolve_node_property(node: &NodeData, property: &str) -> Value {
-    match node {
-        NodeData::Regular {
-            id,
-            title,
-            node_type,
-            properties,
-        }
-        | NodeData::Schema {
-            id,
-            title,
-            node_type,
-            properties,
-        } => match property {
-            "id" => id.clone(),
-            "title" | "name" => title.clone(),
-            "type" | "node_type" | "label" => Value::String(node_type.clone()),
-            _ => properties.get(property).cloned().unwrap_or(Value::Null),
-        },
+    match property {
+        "id" => node.id.clone(),
+        "title" | "name" => node.title.clone(),
+        "type" | "node_type" | "label" => Value::String(node.node_type.clone()),
+        _ => node
+            .properties
+            .get(property)
+            .cloned()
+            .unwrap_or(Value::Null),
     }
 }
 
@@ -1786,9 +2289,7 @@ fn resolve_edge_property(edge: &EdgeBinding, property: &str) -> Value {
 
 /// Convert a NodeData to a representative Value (title string)
 fn node_to_map_value(node: &NodeData) -> Value {
-    match node {
-        NodeData::Regular { title, .. } | NodeData::Schema { title, .. } => title.clone(),
-    }
+    node.title.clone()
 }
 
 // Delegate to shared value_operations module
@@ -2380,7 +2881,7 @@ mod tests {
         assert_eq!(stats.nodes_created, 1);
         assert_eq!(stats.relationships_created, 0);
 
-        // Verify node was created
+        // Verify node was created (no SchemaNodes — metadata stored in HashMap)
         assert_eq!(graph.graph.node_count(), 1);
         let node = graph
             .graph
@@ -2406,7 +2907,7 @@ mod tests {
             .node_weight(petgraph::graph::NodeIndex::new(0))
             .unwrap();
         assert_eq!(node.get_field_ref("price"), Some(&Value::Int64(999)));
-        assert_eq!(node.get_node_type_ref(), Some("Product"));
+        assert_eq!(node.get_node_type_ref(), "Product");
     }
 
     #[test]
@@ -2438,6 +2939,7 @@ mod tests {
         let stats = result.stats.unwrap();
         assert_eq!(stats.nodes_created, 2);
         assert_eq!(stats.relationships_created, 1);
+        // 2 Person nodes (no SchemaNodes — metadata stored in HashMap)
         assert_eq!(graph.graph.node_count(), 2);
         assert_eq!(graph.graph.edge_count(), 1);
     }
@@ -2559,5 +3061,339 @@ mod tests {
         let set_query =
             super::super::parser::parse_cypher("MATCH (n:Person) SET n.age = 30").unwrap();
         assert!(is_mutation_query(&set_query));
+
+        let delete_query = super::super::parser::parse_cypher("MATCH (n:Person) DELETE n").unwrap();
+        assert!(is_mutation_query(&delete_query));
+
+        let merge_query =
+            super::super::parser::parse_cypher("MERGE (n:Person {name: 'A'})").unwrap();
+        assert!(is_mutation_query(&merge_query));
+
+        let remove_query =
+            super::super::parser::parse_cypher("MATCH (n:Person) REMOVE n.age").unwrap();
+        assert!(is_mutation_query(&remove_query));
+    }
+
+    // ==================================================================
+    // DELETE Tests
+    // ==================================================================
+
+    #[test]
+    fn test_detach_delete_node() {
+        let mut graph = build_test_graph();
+        assert_eq!(graph.graph.node_count(), 2);
+        assert_eq!(graph.graph.edge_count(), 1);
+
+        let query =
+            super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) DETACH DELETE n")
+                .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        let stats = result.stats.unwrap();
+        assert_eq!(stats.nodes_deleted, 1);
+        assert_eq!(stats.relationships_deleted, 1);
+        assert_eq!(graph.graph.node_count(), 1);
+        assert_eq!(graph.graph.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_delete_node_with_edges_error() {
+        let mut graph = build_test_graph();
+        let query = super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) DELETE n")
+            .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("DETACH DELETE"));
+    }
+
+    #[test]
+    fn test_delete_relationship() {
+        let mut graph = build_test_graph();
+        assert_eq!(graph.graph.edge_count(), 1);
+
+        let query =
+            super::super::parser::parse_cypher("MATCH (a:Person)-[r:KNOWS]->(b:Person) DELETE r")
+                .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        let stats = result.stats.unwrap();
+        assert_eq!(stats.relationships_deleted, 1);
+        assert_eq!(graph.graph.edge_count(), 0);
+        assert_eq!(graph.graph.node_count(), 2);
+    }
+
+    #[test]
+    fn test_delete_node_no_edges() {
+        let mut graph = DirGraph::new();
+        let node = NodeData::new(
+            Value::UniqueId(1),
+            Value::String("Solo".to_string()),
+            "Person".to_string(),
+            HashMap::from([("name".to_string(), Value::String("Solo".to_string()))]),
+        );
+        let idx = graph.graph.add_node(node);
+        graph
+            .type_indices
+            .entry("Person".to_string())
+            .or_default()
+            .push(idx);
+
+        let query =
+            super::super::parser::parse_cypher("MATCH (n:Person {name: 'Solo'}) DELETE n").unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        assert_eq!(result.stats.unwrap().nodes_deleted, 1);
+        assert_eq!(graph.graph.node_count(), 0);
+    }
+
+    #[test]
+    fn test_detach_delete_updates_type_indices() {
+        let mut graph = build_test_graph();
+        let query =
+            super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) DETACH DELETE n")
+                .unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        let person_indices = graph.type_indices.get("Person").unwrap();
+        assert_eq!(person_indices.len(), 1);
+    }
+
+    // ==================================================================
+    // REMOVE Tests
+    // ==================================================================
+
+    #[test]
+    fn test_remove_property() {
+        let mut graph = build_test_graph();
+        let query =
+            super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) REMOVE n.age")
+                .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        assert_eq!(result.stats.as_ref().unwrap().properties_removed, 1);
+
+        let node = graph
+            .graph
+            .node_weight(petgraph::graph::NodeIndex::new(0))
+            .unwrap();
+        assert_eq!(node.get_field_ref("age"), None);
+    }
+
+    #[test]
+    fn test_remove_nonexistent_property() {
+        let mut graph = build_test_graph();
+        let query = super::super::parser::parse_cypher(
+            "MATCH (n:Person {name: 'Alice'}) REMOVE n.nonexistent",
+        )
+        .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        assert_eq!(result.stats.as_ref().unwrap().properties_removed, 0);
+    }
+
+    #[test]
+    fn test_remove_label_error() {
+        let mut graph = build_test_graph();
+        let query =
+            super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) REMOVE n:Person")
+                .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not supported"));
+    }
+
+    // ==================================================================
+    // MERGE Tests
+    // ==================================================================
+
+    #[test]
+    fn test_merge_creates_when_not_found() {
+        let mut graph = DirGraph::new();
+        let query = super::super::parser::parse_cypher("MERGE (n:Person {name: 'Alice'})").unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        assert_eq!(result.stats.as_ref().unwrap().nodes_created, 1);
+        // 1 Person node (no SchemaNodes — metadata stored in HashMap)
+        assert_eq!(graph.graph.node_count(), 1);
+    }
+
+    #[test]
+    fn test_merge_matches_when_found() {
+        let mut graph = build_test_graph();
+        let initial_count = graph.graph.node_count();
+        let query = super::super::parser::parse_cypher("MERGE (n:Person {name: 'Alice'})").unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        assert_eq!(result.stats.as_ref().unwrap().nodes_created, 0);
+        // No new nodes — MERGE matched existing; schema may or may not exist already
+        assert_eq!(graph.graph.node_count(), initial_count);
+    }
+
+    #[test]
+    fn test_merge_on_create_set() {
+        let mut graph = DirGraph::new();
+        let query = super::super::parser::parse_cypher(
+            "MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.age = 30",
+        )
+        .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        assert_eq!(result.stats.as_ref().unwrap().nodes_created, 1);
+        assert_eq!(result.stats.as_ref().unwrap().properties_set, 1);
+    }
+
+    #[test]
+    fn test_merge_on_match_set() {
+        let mut graph = build_test_graph();
+        let query = super::super::parser::parse_cypher(
+            "MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.visits = 1",
+        )
+        .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        assert_eq!(result.stats.as_ref().unwrap().nodes_created, 0);
+        assert_eq!(result.stats.as_ref().unwrap().properties_set, 1);
+
+        let node = graph
+            .graph
+            .node_weight(petgraph::graph::NodeIndex::new(0))
+            .unwrap();
+        assert_eq!(node.get_field_ref("visits"), Some(&Value::Int64(1)));
+    }
+
+    #[test]
+    fn test_merge_relationship_matches() {
+        let mut graph = build_test_graph();
+        let query = super::super::parser::parse_cypher(
+            "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) MERGE (a)-[r:KNOWS]->(b)",
+        )
+        .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        assert_eq!(result.stats.as_ref().unwrap().relationships_created, 0);
+        assert_eq!(graph.graph.edge_count(), 1);
+    }
+
+    #[test]
+    fn test_merge_creates_relationship() {
+        let mut graph = build_test_graph();
+        let query = super::super::parser::parse_cypher(
+            "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) MERGE (a)-[r:FRIENDS]->(b)",
+        )
+        .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        assert_eq!(result.stats.as_ref().unwrap().relationships_created, 1);
+        assert_eq!(graph.graph.edge_count(), 2);
+    }
+
+    // ========================================================================
+    // Index auto-maintenance integration tests
+    // ========================================================================
+
+    #[test]
+    fn test_create_updates_property_index() {
+        let mut graph = build_test_graph();
+        graph.create_index("Person", "age");
+
+        // CREATE a new Person — should appear in the age index
+        let query =
+            super::super::parser::parse_cypher("CREATE (p:Person {name: 'Charlie', age: 40})")
+                .unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        let found = graph.lookup_by_index("Person", "age", &Value::Int64(40));
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_set_updates_property_index() {
+        let mut graph = build_test_graph();
+        graph.create_index("Person", "age");
+
+        // SET Alice.age from 30 to 99
+        let query =
+            super::super::parser::parse_cypher("MATCH (p:Person {name: 'Alice'}) SET p.age = 99")
+                .unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        // Old value should be gone
+        let old = graph.lookup_by_index("Person", "age", &Value::Int64(30));
+        assert!(old.is_none() || old.unwrap().is_empty());
+
+        // New value should be present
+        let new = graph.lookup_by_index("Person", "age", &Value::Int64(99));
+        assert!(new.is_some());
+        assert_eq!(new.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_remove_updates_property_index() {
+        let mut graph = build_test_graph();
+        graph.create_index("Person", "age");
+
+        // REMOVE Alice.age — should disappear from index
+        let query =
+            super::super::parser::parse_cypher("MATCH (p:Person {name: 'Alice'}) REMOVE p.age")
+                .unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        let found = graph.lookup_by_index("Person", "age", &Value::Int64(30));
+        assert!(found.is_none() || found.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_create_creates_type_metadata() {
+        let mut graph = DirGraph::new();
+        let query =
+            super::super::parser::parse_cypher("CREATE (p:Animal {name: 'Rex', species: 'Dog'})")
+                .unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        // Type metadata for "Animal" should exist
+        let metadata = graph.get_node_type_metadata("Animal");
+        assert!(
+            metadata.is_some(),
+            "Type metadata for Animal should exist after CREATE"
+        );
+        let props = metadata.unwrap();
+        assert!(props.contains_key("name"), "metadata should contain 'name'");
+        assert!(
+            props.contains_key("species"),
+            "metadata should contain 'species'"
+        );
+    }
+
+    #[test]
+    fn test_merge_updates_indices() {
+        let mut graph = build_test_graph();
+        graph.create_index("Person", "age");
+
+        // MERGE create path — new node should appear in index
+        let query = super::super::parser::parse_cypher(
+            "MERGE (p:Person {name: 'Dave'}) ON CREATE SET p.age = 50",
+        )
+        .unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        let found = graph.lookup_by_index("Person", "age", &Value::Int64(50));
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().len(), 1);
+
+        // MERGE match path with SET — index should update
+        let query2 = super::super::parser::parse_cypher(
+            "MERGE (p:Person {name: 'Alice'}) ON MATCH SET p.age = 31",
+        )
+        .unwrap();
+        execute_mutable(&mut graph, &query2, HashMap::new()).unwrap();
+
+        // Old Alice age gone
+        let old = graph.lookup_by_index("Person", "age", &Value::Int64(30));
+        assert!(old.is_none() || old.unwrap().is_empty());
+
+        // New Alice age present
+        let new = graph.lookup_by_index("Person", "age", &Value::Int64(31));
+        assert!(new.is_some());
+        assert_eq!(new.unwrap().len(), 1);
     }
 }

@@ -652,3 +652,169 @@ class TestMutationStats:
         """Read-only queries should not have stats key."""
         result = cypher_graph.cypher("MATCH (n:Person) RETURN n.name")
         assert 'stats' not in result
+
+    def test_delete_returns_stats(self, cypher_graph):
+        """DELETE result includes deletion stats."""
+        result = cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Eve'
+            DETACH DELETE n
+        """)
+        assert 'stats' in result
+        assert result['stats']['nodes_deleted'] == 1
+
+    def test_remove_returns_stats(self, cypher_graph):
+        """REMOVE result includes properties_removed stat."""
+        result = cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Alice'
+            REMOVE n.age
+        """)
+        assert 'stats' in result
+        assert result['stats']['properties_removed'] == 1
+
+
+class TestDeleteClause:
+    """Tests for DELETE clause — node and edge deletion via Cypher."""
+
+    def test_detach_delete_node(self, cypher_graph):
+        """DETACH DELETE removes a node and its edges."""
+        before = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")
+        before_cnt = before['rows'][0]['cnt']
+
+        result = cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Eve'
+            DETACH DELETE n
+        """)
+        assert result['stats']['nodes_deleted'] == 1
+
+        after = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")
+        assert after['rows'][0]['cnt'] == before_cnt - 1
+
+    def test_detach_delete_node_with_edges(self, cypher_graph):
+        """DETACH DELETE removes connected edges too."""
+        result = cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Alice'
+            DETACH DELETE n
+        """)
+        assert result['stats']['nodes_deleted'] == 1
+        assert result['stats']['relationships_deleted'] > 0
+
+    def test_delete_node_error_has_edges(self, cypher_graph):
+        """Plain DELETE on a node with edges should error."""
+        with pytest.raises(RuntimeError, match="DETACH DELETE"):
+            cypher_graph.cypher("""
+                MATCH (n:Person) WHERE n.name = 'Alice'
+                DELETE n
+            """)
+
+    def test_delete_relationship(self, cypher_graph):
+        """DELETE r removes a relationship but keeps nodes."""
+        before_persons = cypher_graph.cypher(
+            "MATCH (n:Person) RETURN count(*) AS cnt"
+        )['rows'][0]['cnt']
+
+        result = cypher_graph.cypher("""
+            MATCH (a:Person)-[r:KNOWS]->(b:Person)
+            DELETE r
+        """)
+        assert result['stats']['relationships_deleted'] > 0
+
+        # Nodes should still be there
+        after_persons = cypher_graph.cypher(
+            "MATCH (n:Person) RETURN count(*) AS cnt"
+        )['rows'][0]['cnt']
+        assert after_persons == before_persons
+
+
+class TestRemoveClause:
+    """Tests for REMOVE clause — property removal via Cypher."""
+
+    def test_remove_property(self, cypher_graph):
+        """REMOVE n.prop deletes the property from the node."""
+        cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Alice'
+            REMOVE n.age
+        """)
+        result = cypher_graph.cypher(
+            "MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.age AS age"
+        )
+        assert result['rows'][0]['age'] is None
+
+    def test_remove_multiple_properties(self, cypher_graph):
+        """REMOVE n.a, n.b removes multiple properties."""
+        result = cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Alice'
+            REMOVE n.age, n.city
+        """)
+        assert result['stats']['properties_removed'] == 2
+
+    def test_remove_nonexistent_is_noop(self, cypher_graph):
+        """REMOVE on a non-existent property is a no-op."""
+        result = cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Alice'
+            REMOVE n.nonexistent
+        """)
+        assert result['stats']['properties_removed'] == 0
+
+
+class TestMergeClause:
+    """Tests for MERGE clause — match-or-create via Cypher."""
+
+    def test_merge_creates_node(self, cypher_graph):
+        """MERGE creates a node when no match is found."""
+        before = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")
+        result = cypher_graph.cypher("MERGE (n:Person {name: 'Frank'})")
+        assert result['stats']['nodes_created'] == 1
+
+        after = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")
+        assert after['rows'][0]['cnt'] == before['rows'][0]['cnt'] + 1
+
+    def test_merge_matches_existing(self, cypher_graph):
+        """MERGE does not create when a match is found."""
+        before = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")
+        result = cypher_graph.cypher("MERGE (n:Person {name: 'Alice'})")
+        assert result['stats']['nodes_created'] == 0
+
+        after = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")
+        assert after['rows'][0]['cnt'] == before['rows'][0]['cnt']
+
+    def test_merge_on_create_set(self, cypher_graph):
+        """MERGE ON CREATE SET runs when creating."""
+        result = cypher_graph.cypher(
+            "MERGE (n:Person {name: 'Frank'}) ON CREATE SET n.age = 40"
+        )
+        assert result['stats']['nodes_created'] == 1
+        assert result['stats']['properties_set'] == 1
+
+        check = cypher_graph.cypher(
+            "MATCH (n:Person) WHERE n.name = 'Frank' RETURN n.age AS age"
+        )
+        assert check['rows'][0]['age'] == 40
+
+    def test_merge_on_match_set(self, cypher_graph):
+        """MERGE ON MATCH SET runs when matching existing."""
+        result = cypher_graph.cypher(
+            "MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.visits = 1"
+        )
+        assert result['stats']['nodes_created'] == 0
+        assert result['stats']['properties_set'] == 1
+
+        check = cypher_graph.cypher(
+            "MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.visits AS visits"
+        )
+        assert check['rows'][0]['visits'] == 1
+
+    def test_merge_relationship_exists(self, cypher_graph):
+        """MERGE does not create duplicate edge when one already exists."""
+        result = cypher_graph.cypher("""
+            MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
+            MERGE (a)-[r:KNOWS]->(b)
+        """)
+        assert result['stats']['relationships_created'] == 0
+
+    def test_merge_creates_relationship(self, cypher_graph):
+        """MERGE creates edge when no matching edge exists."""
+        result = cypher_graph.cypher("""
+            MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
+            MERGE (a)-[r:FRIENDS]->(b)
+        """)
+        assert result['stats']['relationships_created'] == 1

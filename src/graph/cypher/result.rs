@@ -95,6 +95,9 @@ pub struct MutationStats {
     pub nodes_created: usize,
     pub relationships_created: usize,
     pub properties_set: usize,
+    pub nodes_deleted: usize,
+    pub relationships_deleted: usize,
+    pub properties_removed: usize,
 }
 
 /// Final query result returned to Python

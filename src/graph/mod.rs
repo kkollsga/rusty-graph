@@ -4,6 +4,7 @@ use crate::datatypes::{py_in, py_out};
 use crate::graph::calculations::StatResult;
 use crate::graph::io_operations::save_to_file;
 use crate::graph::reporting::{OperationReport, OperationReports};
+use petgraph::visit::NodeIndexable;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::{Bound, IntoPyObjectExt};
@@ -1025,22 +1026,12 @@ impl KnowledgeGraph {
 
         for node_idx in self.selection.current_node_indices() {
             if let Some(node) = self.inner.get_node(node_idx) {
-                match node {
-                    schema::NodeData::Regular {
-                        id,
-                        title,
-                        node_type,
-                        properties,
-                    } => {
-                        for key in properties.keys() {
-                            if prop_keys_seen.insert(key.clone()) {
-                                prop_keys.push(key.clone());
-                            }
-                        }
-                        nodes_data.push((node_type, id, title, properties));
+                for key in node.properties.keys() {
+                    if prop_keys_seen.insert(key.clone()) {
+                        prop_keys.push(key.clone());
                     }
-                    schema::NodeData::Schema { .. } => continue,
                 }
+                nodes_data.push((&node.node_type, &node.id, &node.title, &node.properties));
             }
         }
 
@@ -1151,17 +1142,11 @@ impl KnowledgeGraph {
             let result = PyList::empty(py);
 
             for node_idx in self.selection.current_node_indices() {
-                if let Some(schema::NodeData::Regular {
-                    id,
-                    title,
-                    node_type,
-                    ..
-                }) = self.inner.get_node(node_idx)
-                {
+                if let Some(node) = self.inner.get_node(node_idx) {
                     let dict = PyDict::new(py);
-                    dict.set_item("id", py_out::value_to_py(py, id)?)?;
-                    dict.set_item("title", py_out::value_to_py(py, title)?)?;
-                    dict.set_item("type", node_type)?;
+                    dict.set_item("id", py_out::value_to_py(py, &node.id)?)?;
+                    dict.set_item("title", py_out::value_to_py(py, &node.title)?)?;
+                    dict.set_item("type", &node.node_type)?;
                     result.append(dict)?;
                 }
             }
@@ -1192,8 +1177,8 @@ impl KnowledgeGraph {
             let result = PyList::empty(py);
 
             for node_idx in self.selection.current_node_indices() {
-                if let Some(schema::NodeData::Regular { id, .. }) = self.inner.get_node(node_idx) {
-                    result.append(py_out::value_to_py(py, id)?)?;
+                if let Some(node) = self.inner.get_node(node_idx) {
+                    result.append(py_out::value_to_py(py, &node.id)?)?;
                 }
             }
 
@@ -1242,14 +1227,11 @@ impl KnowledgeGraph {
         };
 
         // Convert to Python dict
-        if let Some(node_info) = node.to_node_info() {
-            Python::attach(|py| {
-                let dict = py_out::nodeinfo_to_pydict(py, &node_info)?;
-                Ok(Some(dict))
-            })
-        } else {
-            Ok(None)
-        }
+        let node_info = node.to_node_info();
+        Python::attach(|py| {
+            let dict = py_out::nodeinfo_to_pydict(py, &node_info)?;
+            Ok(Some(dict))
+        })
     }
 
     /// Build ID indices for specified node types for faster get_node_by_id lookups.
@@ -1282,6 +1264,105 @@ impl KnowledgeGraph {
                 }
             }
         }
+    }
+
+    /// Rebuild all indexes from the current graph state.
+    ///
+    /// Reconstructs type_indices, property_indices, and composite_indices by
+    /// scanning all live nodes. Clears lazy caches (id_indices, connection_types)
+    /// so they rebuild on next access.
+    ///
+    /// Use after bulk mutations (especially Cypher DELETE/REMOVE) to ensure
+    /// index consistency.
+    ///
+    /// Example:
+    ///     ```python
+    ///     graph.reindex()
+    ///     ```
+    fn reindex(&mut self) {
+        let graph = Arc::make_mut(&mut self.inner);
+        graph.reindex();
+    }
+
+    /// Compact the graph by removing tombstones left by node/edge deletions.
+    ///
+    /// With StableDiGraph, deletions leave holes in the internal storage.
+    /// Over time, this wastes memory and degrades iteration performance.
+    /// vacuum() rebuilds the graph with contiguous indices, then rebuilds all indexes.
+    ///
+    /// **Important**: This resets the current selection since node indices change.
+    /// Call this between query chains, not in the middle of one.
+    ///
+    /// Returns:
+    ///     dict: Statistics about the compaction:
+    ///         - 'nodes_remapped': Number of nodes that were remapped
+    ///         - 'tombstones_removed': Number of tombstone slots reclaimed
+    ///
+    /// Example:
+    ///     ```python
+    ///     info = graph.graph_info()
+    ///     if info['fragmentation_ratio'] > 0.3:
+    ///         result = graph.vacuum()
+    ///         print(f"Reclaimed {result['tombstones_removed']} slots")
+    ///     ```
+    fn vacuum(&mut self) -> PyResult<Py<PyAny>> {
+        let mut graph = extract_or_clone_graph(&mut self.inner);
+
+        let tombstones_before = graph.graph.node_bound() - graph.graph.node_count();
+        let old_to_new = graph.vacuum();
+        let nodes_remapped = old_to_new.len();
+
+        self.inner = Arc::new(graph);
+
+        // Reset selection — indices have changed
+        if nodes_remapped > 0 {
+            self.selection = CowSelection::new();
+        }
+
+        Python::attach(|py| {
+            let result = PyDict::new(py);
+            result.set_item("nodes_remapped", nodes_remapped)?;
+            result.set_item("tombstones_removed", tombstones_before)?;
+            Ok(result.into())
+        })
+    }
+
+    /// Get diagnostic information about graph storage health.
+    ///
+    /// Returns a dictionary with storage metrics useful for deciding when
+    /// to call vacuum() or reindex().
+    ///
+    /// Returns:
+    ///     dict: Graph health metrics:
+    ///         - 'node_count': Number of live nodes
+    ///         - 'node_capacity': Upper bound of node indices (includes tombstones)
+    ///         - 'node_tombstones': Number of wasted slots from deletions
+    ///         - 'edge_count': Number of live edges
+    ///         - 'fragmentation_ratio': Ratio of wasted storage (0.0 = clean)
+    ///         - 'type_count': Number of distinct node types
+    ///         - 'property_index_count': Number of single-property indexes
+    ///         - 'composite_index_count': Number of composite indexes
+    ///
+    /// Example:
+    ///     ```python
+    ///     info = graph.graph_info()
+    ///     if info['fragmentation_ratio'] > 0.3:
+    ///         graph.vacuum()
+    ///     ```
+    fn graph_info(&self) -> PyResult<Py<PyAny>> {
+        let info = self.inner.graph_info();
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            dict.set_item("node_count", info.node_count)?;
+            dict.set_item("node_capacity", info.node_capacity)?;
+            dict.set_item("node_tombstones", info.node_tombstones)?;
+            dict.set_item("edge_count", info.edge_count)?;
+            dict.set_item("fragmentation_ratio", info.fragmentation_ratio)?;
+            dict.set_item("type_count", info.type_count)?;
+            dict.set_item("property_index_count", info.property_index_count)?;
+            dict.set_item("composite_index_count", info.composite_index_count)?;
+            Ok(dict.into())
+        })
     }
 
     #[pyo3(signature = (indices=None, parent_info=None, include_node_properties=None,

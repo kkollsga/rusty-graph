@@ -255,3 +255,253 @@ class TestCypherPerformance:
         elapsed = time.time() - start
         assert len(result['rows']) > 0
         print(f"  Cypher scaling {n} nodes: {elapsed*1000:.1f}ms, {len(result['rows'])} rows")
+
+
+class TestCypherMutationPerformance:
+    """Benchmarks for DELETE, REMOVE, and MERGE operations."""
+
+    # ------------------------------------------------------------------ DELETE
+    def test_delete_single_node(self):
+        """DETACH DELETE a single node — baseline cost."""
+        graph = _build_cypher_bench_graph(500)
+        start = time.time()
+        result = graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Person_0'
+            DETACH DELETE n
+        """)
+        elapsed = time.time() - start
+        assert result['stats']['nodes_deleted'] == 1
+        print(f"  Delete single node: {elapsed*1000:.2f}ms")
+
+    def test_delete_relationship_only(self):
+        """DELETE r — remove edges without touching nodes."""
+        graph = _build_cypher_bench_graph(500)
+        start = time.time()
+        result = graph.cypher("""
+            MATCH (a:Person)-[r:KNOWS]->(b:Person)
+            WHERE a.name = 'Person_0'
+            DELETE r
+        """)
+        elapsed = time.time() - start
+        assert result['stats']['relationships_deleted'] > 0
+        print(f"  Delete relationships for 1 node: {elapsed*1000:.2f}ms, "
+              f"{result['stats']['relationships_deleted']} edges removed")
+
+    @pytest.mark.parametrize("n", [100, 500, 1000])
+    def test_detach_delete_all_scaling(self, n):
+        """DETACH DELETE all nodes — measures index cleanup scaling."""
+        graph = _build_cypher_bench_graph(n)
+        start = time.time()
+        result = graph.cypher("MATCH (n:Person) DETACH DELETE n")
+        elapsed = time.time() - start
+        assert result['stats']['nodes_deleted'] == n
+        print(f"  Detach delete all {n} people: {elapsed*1000:.1f}ms, "
+              f"{result['stats']['relationships_deleted']} edges")
+
+    def test_delete_subset(self):
+        """DETACH DELETE a filtered subset — common real-world pattern."""
+        graph = _build_cypher_bench_graph(1000)
+        start = time.time()
+        result = graph.cypher("""
+            MATCH (n:Person) WHERE n.age > 60
+            DETACH DELETE n
+        """)
+        elapsed = time.time() - start
+        deleted = result['stats']['nodes_deleted']
+        print(f"  Delete subset (age>60): {elapsed*1000:.1f}ms, "
+              f"{deleted} nodes, {result['stats']['relationships_deleted']} edges")
+
+    # ------------------------------------------------------------------ REMOVE
+    def test_remove_single_property(self):
+        """REMOVE n.prop — single property from one node."""
+        graph = _build_cypher_bench_graph(500)
+        start = time.time()
+        result = graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Person_0'
+            REMOVE n.salary
+        """)
+        elapsed = time.time() - start
+        assert result['stats']['properties_removed'] == 1
+        print(f"  Remove 1 property from 1 node: {elapsed*1000:.2f}ms")
+
+    def test_remove_property_all_nodes(self):
+        """REMOVE n.prop across all nodes — bulk property removal."""
+        graph = _build_cypher_bench_graph(500)
+        start = time.time()
+        result = graph.cypher("MATCH (n:Person) REMOVE n.salary")
+        elapsed = time.time() - start
+        assert result['stats']['properties_removed'] == 500
+        print(f"  Remove salary from 500 nodes: {elapsed*1000:.1f}ms")
+
+    @pytest.mark.parametrize("n", [100, 500, 1000])
+    def test_remove_scaling(self, n):
+        """REMOVE property scaling across graph sizes."""
+        graph = _build_cypher_bench_graph(n)
+        start = time.time()
+        result = graph.cypher("MATCH (n:Person) REMOVE n.city, n.salary")
+        elapsed = time.time() - start
+        assert result['stats']['properties_removed'] == n * 2
+        print(f"  Remove 2 props from {n} nodes: {elapsed*1000:.1f}ms, "
+              f"{result['stats']['properties_removed']} removed")
+
+    # ------------------------------------------------------------------ MERGE
+    def test_merge_creates_single_node(self):
+        """MERGE creating one new node — CREATE path."""
+        graph = _build_cypher_bench_graph(500)
+        start = time.time()
+        result = graph.cypher(
+            "MERGE (n:Person {name: 'NewPerson'}) ON CREATE SET n.age = 99"
+        )
+        elapsed = time.time() - start
+        assert result['stats']['nodes_created'] == 1
+        print(f"  Merge create 1 node: {elapsed*1000:.2f}ms")
+
+    def test_merge_matches_existing_node(self):
+        """MERGE matching an existing node — MATCH path."""
+        graph = _build_cypher_bench_graph(500)
+        start = time.time()
+        result = graph.cypher(
+            "MERGE (n:Person {name: 'Person_0'}) ON MATCH SET n.visits = 1"
+        )
+        elapsed = time.time() - start
+        assert result['stats']['nodes_created'] == 0
+        print(f"  Merge match existing (500 nodes scanned): {elapsed*1000:.2f}ms")
+
+    @pytest.mark.parametrize("n", [100, 500, 1000])
+    def test_merge_match_scaling(self, n):
+        """MERGE matching existing — scales with type_indices size."""
+        graph = _build_cypher_bench_graph(n)
+        # Match the last person — worst case linear scan
+        target = f'Person_{n-1}'
+        start = time.time()
+        result = graph.cypher(
+            f"MERGE (n:Person {{name: '{target}'}}) ON MATCH SET n.visits = 1"
+        )
+        elapsed = time.time() - start
+        assert result['stats']['nodes_created'] == 0
+        print(f"  Merge match last of {n} nodes: {elapsed*1000:.2f}ms")
+
+    def test_merge_relationship_exists(self):
+        """MERGE edge that already exists — edge scan path."""
+        graph = _build_cypher_bench_graph(500)
+        start = time.time()
+        result = graph.cypher("""
+            MATCH (a:Person {name: 'Person_0'}), (b:Person {name: 'Person_1'})
+            MERGE (a)-[r:KNOWS]->(b)
+        """)
+        elapsed = time.time() - start
+        assert result['stats']['relationships_created'] == 0
+        print(f"  Merge existing edge: {elapsed*1000:.2f}ms")
+
+    def test_merge_relationship_new(self):
+        """MERGE edge that doesn't exist — CREATE path."""
+        graph = _build_cypher_bench_graph(500)
+        start = time.time()
+        result = graph.cypher("""
+            MATCH (a:Person {name: 'Person_0'}), (b:Person {name: 'Person_99'})
+            MERGE (a)-[r:FRIENDS]->(b)
+        """)
+        elapsed = time.time() - start
+        assert result['stats']['relationships_created'] == 1
+        print(f"  Merge create new edge: {elapsed*1000:.2f}ms")
+
+    def test_merge_batch_create_nodes(self):
+        """UNWIND + MERGE — batch creating nodes that don't exist."""
+        graph = _build_cypher_bench_graph(100)
+        start = time.time()
+        for i in range(100):
+            graph.cypher(
+                f"MERGE (n:City {{name: 'City_{i}'}}) ON CREATE SET n.pop = {i * 1000}"
+            )
+        elapsed = time.time() - start
+        # Verify all created
+        check = graph.cypher("MATCH (n:City) RETURN count(*) AS cnt")
+        assert check['rows'][0]['cnt'] == 100
+        print(f"  Merge-create 100 cities (sequential): {elapsed*1000:.1f}ms "
+              f"({elapsed*10:.2f}ms/op)")
+
+    def test_merge_batch_match_nodes(self):
+        """Sequential MERGE matching existing nodes — amortized lookup cost."""
+        graph = _build_cypher_bench_graph(500)
+        start = time.time()
+        for i in range(100):
+            graph.cypher(
+                f"MERGE (n:Person {{name: 'Person_{i}'}}) ON MATCH SET n.visited = 1"
+            )
+        elapsed = time.time() - start
+        print(f"  Merge-match 100 of 500 people (sequential): {elapsed*1000:.1f}ms "
+              f"({elapsed*10:.2f}ms/op)")
+
+
+class TestCypherMutationCombined:
+    """Benchmarks for realistic mutation workflows."""
+
+    def test_create_set_delete_lifecycle(self):
+        """Full lifecycle: CREATE -> SET -> DELETE."""
+        graph = _build_cypher_bench_graph(200)
+        times = {}
+
+        # CREATE
+        start = time.time()
+        graph.cypher("CREATE (n:TempNode {name: 'temp', val: 42})")
+        times['create'] = time.time() - start
+
+        # SET
+        start = time.time()
+        graph.cypher("""
+            MATCH (n:TempNode) WHERE n.name = 'temp'
+            SET n.val = 100, n.extra = 'data'
+        """)
+        times['set'] = time.time() - start
+
+        # DELETE
+        start = time.time()
+        graph.cypher("MATCH (n:TempNode) DETACH DELETE n")
+        times['delete'] = time.time() - start
+
+        for op, t in times.items():
+            print(f"  {op}: {t*1000:.2f}ms")
+
+    def test_merge_then_remove(self):
+        """MERGE + REMOVE workflow — idempotent upsert then cleanup."""
+        graph = _build_cypher_bench_graph(500)
+
+        start = time.time()
+        graph.cypher(
+            "MERGE (n:Person {name: 'Person_0'}) ON MATCH SET n.temp_flag = 'processing'"
+        )
+        merge_time = time.time() - start
+
+        start = time.time()
+        graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Person_0'
+            REMOVE n.temp_flag
+        """)
+        remove_time = time.time() - start
+
+        print(f"  Merge+SET: {merge_time*1000:.2f}ms, REMOVE: {remove_time*1000:.2f}ms")
+
+    @pytest.mark.parametrize("n", [100, 500, 1000])
+    def test_full_mutation_pipeline(self, n):
+        """MATCH -> CREATE edges -> DELETE old edges — graph restructuring."""
+        graph = _build_cypher_bench_graph(n, n // 5)
+
+        # Delete all WORKS_AT edges
+        start = time.time()
+        result = graph.cypher("MATCH ()-[r:WORKS_AT]->() DELETE r")
+        delete_time = time.time() - start
+        deleted = result['stats']['relationships_deleted']
+
+        # Re-create edges with different assignments
+        start = time.time()
+        for i in range(min(n, 100)):
+            company = (i + 1) % (n // 5)
+            graph.cypher(f"""
+                MATCH (p:Person {{name: 'Person_{i}'}}), (c:Company {{name: 'Company_{company}'}})
+                CREATE (p)-[:WORKS_AT]->(c)
+            """)
+        create_time = time.time() - start
+        created = min(n, 100)
+
+        print(f"  Pipeline {n} nodes: delete {deleted} edges={delete_time*1000:.1f}ms, "
+              f"create {created} edges={create_time*1000:.1f}ms")

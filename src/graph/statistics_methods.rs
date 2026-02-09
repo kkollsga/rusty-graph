@@ -71,23 +71,12 @@ impl PropertyStats {
     fn new(parent_idx: Option<NodeIndex>, graph: &DirGraph, property: &str) -> Self {
         let (parent_type, parent_title, parent_id) = parent_idx
             .and_then(|idx| graph.get_node(idx))
-            .map(|node| match node {
-                NodeData::Regular {
-                    node_type,
-                    title,
-                    id,
-                    ..
-                }
-                | NodeData::Schema {
-                    node_type,
-                    title,
-                    id,
-                    ..
-                } => (
-                    Some(node_type.clone()),
-                    Some(title.clone()),
-                    Some(id.clone()),
-                ),
+            .map(|node| {
+                (
+                    Some(node.node_type.clone()),
+                    Some(node.title.clone()),
+                    Some(node.id.clone()),
+                )
             })
             .unwrap_or((None, None, None));
 
@@ -217,9 +206,5 @@ fn try_convert_to_float(value: &Value) -> Option<f64> {
 }
 
 fn get_node_property<'a>(node: &'a NodeData, property: &str) -> Option<&'a Value> {
-    match node {
-        NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-            properties.get(property)
-        }
-    }
+    node.properties.get(property)
 }

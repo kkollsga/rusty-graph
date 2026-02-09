@@ -1,6 +1,6 @@
 // src/graph/data_retrieval.rs
 use crate::datatypes::values::{format_value, Value};
-use crate::graph::schema::{CurrentSelection, DirGraph, NodeData, NodeInfo};
+use crate::graph::schema::{CurrentSelection, DirGraph, NodeInfo};
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
@@ -33,12 +33,11 @@ pub fn get_nodes(
         for &index in idx {
             if let Some(node_idx) = NodeIndex::new(index).into() {
                 if let Some(node) = graph.get_node(node_idx) {
-                    if let Some(node_info) = node.to_node_info() {
-                        direct_nodes.push(node_info);
-                        if let Some(max) = max_nodes {
-                            if direct_nodes.len() >= max {
-                                break;
-                            }
+                    let node_info = node.to_node_info();
+                    direct_nodes.push(node_info);
+                    if let Some(max) = max_nodes {
+                        if direct_nodes.len() >= max {
+                            break;
                         }
                     }
                 }
@@ -79,15 +78,11 @@ pub fn get_nodes(
         let mut all_nodes = Vec::new();
         for node_idx in graph.graph.node_indices() {
             if let Some(node) = graph.get_node(node_idx) {
-                // Only include Regular nodes, not Schema nodes
-                if let NodeData::Regular { .. } = node {
-                    if let Some(node_info) = node.to_node_info() {
-                        all_nodes.push(node_info);
-                        if let Some(max) = max_nodes {
-                            if all_nodes.len() >= max {
-                                break;
-                            }
-                        }
+                let node_info = node.to_node_info();
+                all_nodes.push(node_info);
+                if let Some(max) = max_nodes {
+                    if all_nodes.len() >= max {
+                        break;
                     }
                 }
             }
@@ -114,12 +109,11 @@ pub fn get_nodes(
 
             for &child_idx in children {
                 if let Some(node) = graph.get_node(child_idx) {
-                    if let Some(node_info) = node.to_node_info() {
-                        nodes.push(node_info);
-                        if let Some(max) = max_nodes {
-                            if nodes.len() >= max {
-                                break;
-                            }
+                    let node_info = node.to_node_info();
+                    nodes.push(node_info);
+                    if let Some(max) = max_nodes {
+                        if nodes.len() >= max {
+                            break;
                         }
                     }
                 }
@@ -137,7 +131,7 @@ pub fn get_nodes(
                                 })
                                 .unwrap_or_else(|| "Unknown".to_string()),
                             node.get_field_ref("id").cloned(),
-                            node.get_node_type_ref().map(|s| s.to_string()),
+                            Some(node.get_node_type_ref().to_string()),
                         )
                     } else {
                         ("Unknown".to_string(), None, None)
@@ -438,15 +432,9 @@ pub fn get_connections(
             let mut level_connections = Vec::new();
 
             for node_idx in children {
-                if let Some(NodeData::Regular {
-                    id,
-                    title,
-                    node_type,
-                    ..
-                }) = graph.get_node(node_idx)
-                {
-                    let title_str = match title {
-                        Value::String(ref s) => s.clone(),
+                if let Some(node) = graph.get_node(node_idx) {
+                    let title_str = match &node.title {
+                        Value::String(s) => s.clone(),
                         _ => "Unknown".to_string(),
                     };
 
@@ -461,12 +449,7 @@ pub fn get_connections(
                         if let Some(source_node) = graph.get_node(edge_ref.source()) {
                             let edge_data = edge_ref.weight();
                             let node_props = if include_node_properties {
-                                match source_node {
-                                    NodeData::Regular { properties, .. } => {
-                                        Some(properties.clone())
-                                    }
-                                    _ => Some(HashMap::new()),
-                                }
+                                Some(source_node.properties.clone())
                             } else {
                                 None
                             };
@@ -494,12 +477,7 @@ pub fn get_connections(
                         if let Some(target_node) = graph.get_node(edge_ref.target()) {
                             let edge_data = edge_ref.weight();
                             let node_props = if include_node_properties {
-                                match target_node {
-                                    NodeData::Regular { properties, .. } => {
-                                        Some(properties.clone())
-                                    }
-                                    _ => Some(HashMap::new()),
-                                }
+                                Some(target_node.properties.clone())
                             } else {
                                 None
                             };
@@ -521,9 +499,9 @@ pub fn get_connections(
 
                     if !incoming.is_empty() || !outgoing.is_empty() {
                         level_connections.push(ConnectionInfo {
-                            node_id: id.clone(),
+                            node_id: node.id.clone(),
                             node_title: title_str,
-                            node_type: node_type.clone(),
+                            node_type: node.node_type.clone(),
                             incoming,
                             outgoing,
                         });
@@ -546,7 +524,7 @@ pub fn get_connections(
                                     })
                                     .unwrap_or_else(|| "Unknown".to_string()),
                                 node.get_field_ref("id").cloned(),
-                                node.get_node_type_ref().map(|s| s.to_string()),
+                                Some(node.get_node_type_ref().to_string()),
                             )
                         } else {
                             ("Unknown".to_string(), None, None)

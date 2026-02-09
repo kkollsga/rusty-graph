@@ -2,7 +2,7 @@
 //! Export graph data to various visualization formats
 
 use crate::datatypes::values::Value;
-use crate::graph::schema::{CurrentSelection, DirGraph, NodeData};
+use crate::graph::schema::{CurrentSelection, DirGraph};
 use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
 
@@ -51,47 +51,28 @@ pub fn to_graphml(
         graph.graph.node_indices().collect()
     };
 
-    // Filter to only Regular nodes
-    let regular_indices: Vec<_> = node_indices
-        .iter()
-        .filter(|&&idx| {
-            graph
-                .graph
-                .node_weight(idx)
-                .map(|n| n.is_regular())
-                .unwrap_or(false)
-        })
-        .copied()
-        .collect();
+    let node_set: std::collections::HashSet<_> = node_indices.iter().copied().collect();
 
-    let node_set: std::collections::HashSet<_> = regular_indices.iter().copied().collect();
-
-    // Export nodes (only Regular nodes, skip Schema metadata nodes)
-    for &idx in &regular_indices {
-        if let Some(NodeData::Regular {
-            node_type,
-            id,
-            title,
-            properties,
-        }) = graph.graph.node_weight(idx)
-        {
+    // Export nodes
+    for &idx in &node_indices {
+        if let Some(node) = graph.graph.node_weight(idx) {
             xml.push_str(&format!("    <node id=\"n{}\">\n", idx.index()));
             xml.push_str(&format!(
                 "      <data key=\"node_type\">{}</data>\n",
-                escape_xml(node_type)
+                escape_xml(&node.node_type)
             ));
             xml.push_str(&format!(
                 "      <data key=\"node_title\">{}</data>\n",
-                escape_xml(&value_to_string(title))
+                escape_xml(&value_to_string(&node.title))
             ));
             xml.push_str(&format!(
                 "      <data key=\"node_id\">{}</data>\n",
-                escape_xml(&value_to_string(id))
+                escape_xml(&value_to_string(&node.id))
             ));
 
             // Serialize properties as JSON
-            if !properties.is_empty() {
-                let props_json = properties_to_json(properties);
+            if !node.properties.is_empty() {
+                let props_json = properties_to_json(&node.properties);
                 xml.push_str(&format!(
                     "      <data key=\"node_properties\">{}</data>\n",
                     escape_xml(&props_json)
@@ -100,12 +81,11 @@ pub fn to_graphml(
 
             xml.push_str("    </node>\n");
         }
-        // Skip Schema nodes - they're metadata, not data
     }
 
-    // Export edges (only between selected regular nodes)
+    // Export edges (only between selected nodes)
     let mut edge_id = 0;
-    for &source_idx in &regular_indices {
+    for &source_idx in &node_indices {
         for edge in graph.graph.edges(source_idx) {
             let target_idx = edge.target();
 
@@ -162,44 +142,25 @@ pub fn to_d3_json(
         graph.graph.node_indices().collect()
     };
 
-    // Filter to only Regular nodes and build index mapping
-    let regular_indices: Vec<_> = node_indices
-        .iter()
-        .filter(|&&idx| {
-            graph
-                .graph
-                .node_weight(idx)
-                .map(|n| n.is_regular())
-                .unwrap_or(false)
-        })
-        .copied()
-        .collect();
-
-    let node_set: std::collections::HashSet<_> = regular_indices.iter().copied().collect();
+    let node_set: std::collections::HashSet<_> = node_indices.iter().copied().collect();
 
     // Build index mapping (old index -> array position)
-    let mut index_map: HashMap<usize, usize> = HashMap::with_capacity(regular_indices.len());
-    for (pos, &idx) in regular_indices.iter().enumerate() {
+    let mut index_map: HashMap<usize, usize> = HashMap::with_capacity(node_indices.len());
+    for (pos, &idx) in node_indices.iter().enumerate() {
         index_map.insert(idx.index(), pos);
     }
 
-    // Build nodes array (only Regular nodes, skip Schema metadata nodes)
-    let mut nodes_json = Vec::with_capacity(regular_indices.len());
-    for &idx in &regular_indices {
-        if let Some(NodeData::Regular {
-            node_type,
-            id,
-            title,
-            properties,
-        }) = graph.graph.node_weight(idx)
-        {
+    // Build nodes array
+    let mut nodes_json = Vec::with_capacity(node_indices.len());
+    for &idx in &node_indices {
+        if let Some(node) = graph.graph.node_weight(idx) {
             let mut obj = String::from("{");
-            obj.push_str(&format!("\"id\":{},", json_value(id)));
-            obj.push_str(&format!("\"type\":{},", json_string(node_type)));
-            obj.push_str(&format!("\"title\":{}", json_value(title)));
+            obj.push_str(&format!("\"id\":{},", json_value(&node.id)));
+            obj.push_str(&format!("\"type\":{},", json_string(&node.node_type)));
+            obj.push_str(&format!("\"title\":{}", json_value(&node.title)));
 
             // Add select properties (not all to keep output clean)
-            for (key, value) in properties {
+            for (key, value) in &node.properties {
                 if key != "id" && key != "title" && key != "type" {
                     obj.push_str(&format!(",{}:{}", json_string(key), json_value(value)));
                 }
@@ -208,12 +169,11 @@ pub fn to_d3_json(
             obj.push('}');
             nodes_json.push(obj);
         }
-        // Skip Schema nodes - they're metadata, not data
     }
 
     // Build links array
     let mut links_json = Vec::new();
-    for &source_idx in &regular_indices {
+    for &source_idx in &node_indices {
         for edge in graph.graph.edges(source_idx) {
             let target_idx = edge.target();
 
@@ -295,29 +255,13 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
         graph.graph.node_indices().collect()
     };
 
-    // Filter to only Regular nodes
-    let regular_indices: Vec<_> = node_indices
-        .iter()
-        .filter(|&&idx| {
-            graph
-                .graph
-                .node_weight(idx)
-                .map(|n| n.is_regular())
-                .unwrap_or(false)
-        })
-        .copied()
-        .collect();
+    let node_set: std::collections::HashSet<_> = node_indices.iter().copied().collect();
 
-    let node_set: std::collections::HashSet<_> = regular_indices.iter().copied().collect();
-
-    // Export nodes (only Regular nodes)
+    // Export nodes
     xml.push_str("    <nodes>\n");
-    for &idx in &regular_indices {
-        if let Some(NodeData::Regular {
-            node_type, title, ..
-        }) = graph.graph.node_weight(idx)
-        {
-            let title_str = value_to_string(title);
+    for &idx in &node_indices {
+        if let Some(node) = graph.graph.node_weight(idx) {
+            let title_str = value_to_string(&node.title);
             xml.push_str(&format!(
                 "      <node id=\"{}\" label=\"{}\">\n",
                 idx.index(),
@@ -326,7 +270,7 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
             xml.push_str("        <attvalues>\n");
             xml.push_str(&format!(
                 "          <attvalue for=\"0\" value=\"{}\"/>\n",
-                escape_xml(node_type)
+                escape_xml(&node.node_type)
             ));
             xml.push_str(&format!(
                 "          <attvalue for=\"1\" value=\"{}\"/>\n",
@@ -341,7 +285,7 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
     // Export edges
     xml.push_str("    <edges>\n");
     let mut edge_id = 0;
-    for &source_idx in &regular_indices {
+    for &source_idx in &node_indices {
         for edge in graph.graph.edges(source_idx) {
             let target_idx = edge.target();
 
@@ -390,40 +334,24 @@ pub fn to_csv(
         graph.graph.node_indices().collect()
     };
 
-    // Filter to only Regular nodes
-    let regular_indices: Vec<_> = node_indices
-        .iter()
-        .filter(|&&idx| {
-            graph
-                .graph
-                .node_weight(idx)
-                .map(|n| n.is_regular())
-                .unwrap_or(false)
-        })
-        .copied()
-        .collect();
+    let node_set: std::collections::HashSet<_> = node_indices.iter().copied().collect();
 
-    let node_set: std::collections::HashSet<_> = regular_indices.iter().copied().collect();
-
-    // Build nodes CSV (only Regular nodes)
+    // Build nodes CSV
     let mut nodes_csv = String::from("id,type,title\n");
-    for &idx in &regular_indices {
-        if let Some(NodeData::Regular {
-            node_type, title, ..
-        }) = graph.graph.node_weight(idx)
-        {
+    for &idx in &node_indices {
+        if let Some(node) = graph.graph.node_weight(idx) {
             nodes_csv.push_str(&format!(
                 "{},{},{}\n",
                 idx.index(),
-                escape_csv(node_type),
-                escape_csv(&value_to_string(title))
+                escape_csv(&node.node_type),
+                escape_csv(&value_to_string(&node.title))
             ));
         }
     }
 
     // Build edges CSV
     let mut edges_csv = String::from("source,target,type\n");
-    for &source_idx in &regular_indices {
+    for &source_idx in &node_indices {
         for edge in graph.graph.edges(source_idx) {
             let target_idx = edge.target();
 

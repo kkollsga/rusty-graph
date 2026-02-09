@@ -32,6 +32,9 @@ pub enum CypherToken {
     Set,
     Delete,
     Detach,
+    Merge,
+    Remove,
+    On,
     Asc,
     Desc,
     StartsWith,
@@ -353,6 +356,9 @@ fn identifier_to_token(ident: String) -> CypherToken {
         "SET" => CypherToken::Set,
         "DELETE" => CypherToken::Delete,
         "DETACH" => CypherToken::Detach,
+        "MERGE" => CypherToken::Merge,
+        "REMOVE" => CypherToken::Remove,
+        "ON" => CypherToken::On,
         "ASC" | "ASCENDING" => CypherToken::Asc,
         "DESC" | "DESCENDING" => CypherToken::Desc,
         "CASE" => CypherToken::Case,
@@ -568,5 +574,13 @@ mod tests {
     fn test_parameter_empty_name_error() {
         let result = tokenize_cypher("$");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_merge_remove_on_tokens() {
+        let tokens = tokenize_cypher("MERGE REMOVE ON").unwrap();
+        assert_eq!(tokens[0], CypherToken::Merge);
+        assert_eq!(tokens[1], CypherToken::Remove);
+        assert_eq!(tokens[2], CypherToken::On);
     }
 }

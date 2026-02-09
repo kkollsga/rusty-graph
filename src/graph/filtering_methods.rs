@@ -150,15 +150,7 @@ fn filter_nodes_by_conditions(
     // Find nodes by their node_type first, then check for indexed properties
     let node_types: HashSet<String> = nodes
         .iter()
-        .filter_map(|&idx| {
-            graph.get_node(idx).and_then(|n| {
-                if let crate::graph::schema::NodeData::Regular { node_type, .. } = n {
-                    Some(node_type.clone())
-                } else {
-                    None
-                }
-            })
-        })
+        .filter_map(|&idx| graph.get_node(idx).map(|n| n.node_type.clone()))
         .collect();
 
     // Collect equality conditions that could use a composite index
@@ -424,12 +416,7 @@ pub fn filter_nodes(
         // Regular processing with capacity hint
         let estimated_capacity = graph.graph.node_count() / 2;
         let mut all_nodes = Vec::with_capacity(estimated_capacity);
-        all_nodes.extend(
-            graph
-                .graph
-                .node_indices()
-                .filter(|&idx| graph.get_node(idx).is_some_and(|n| n.is_regular())),
-        );
+        all_nodes.extend(graph.graph.node_indices());
 
         let processed = process_nodes(
             graph,
@@ -486,12 +473,7 @@ pub fn sort_nodes(
 
     if level.selections.is_empty() {
         let mut all_nodes = Vec::with_capacity(graph.graph.node_count() / 2);
-        all_nodes.extend(
-            graph
-                .graph
-                .node_indices()
-                .filter(|&idx| graph.get_node(idx).is_some_and(|n| n.is_regular())),
-        );
+        all_nodes.extend(graph.graph.node_indices());
 
         let sorted = sort_nodes_by_fields(graph, all_nodes, &sort_fields);
         if !sorted.is_empty() {
@@ -526,13 +508,7 @@ pub fn limit_nodes_per_group(
 
     if level.selections.is_empty() {
         let mut all_nodes = Vec::with_capacity(graph.graph.node_count().min(max_per_group));
-        all_nodes.extend(
-            graph
-                .graph
-                .node_indices()
-                .filter(|&idx| graph.get_node(idx).is_some_and(|n| n.is_regular()))
-                .take(max_per_group),
-        );
+        all_nodes.extend(graph.graph.node_indices().take(max_per_group));
 
         if !all_nodes.is_empty() {
             level.add_selection(None, all_nodes);
@@ -582,11 +558,10 @@ pub fn filter_orphan_nodes(
     };
 
     if level.selections.is_empty() {
-        // Start with all regular nodes
+        // Start with all nodes
         let nodes = graph
             .graph
             .node_indices()
-            .filter(|&idx| graph.get_node(idx).is_some_and(|n| n.is_regular()))
             .filter(|&idx| include_orphans == is_orphan(idx))
             .collect::<Vec<_>>();
 

@@ -13,26 +13,16 @@ use std::collections::HashMap;
 /// This is faster than to_node_info() + nodeinfo_to_pydict() because it avoids
 /// cloning the properties HashMap.
 pub fn nodedata_to_pydict(py: Python, node: &NodeData) -> PyResult<Option<Py<PyAny>>> {
-    match node {
-        NodeData::Regular {
-            id,
-            title,
-            node_type,
-            properties,
-        } => {
-            let dict = PyDict::new(py);
-            dict.set_item("id", value_to_py(py, id)?)?;
-            dict.set_item("title", value_to_py(py, title)?)?;
-            dict.set_item("type", node_type)?;
+    let dict = PyDict::new(py);
+    dict.set_item("id", value_to_py(py, &node.id)?)?;
+    dict.set_item("title", value_to_py(py, &node.title)?)?;
+    dict.set_item("type", &node.node_type)?;
 
-            for (k, v) in properties {
-                dict.set_item(k, value_to_py(py, v)?)?;
-            }
-
-            Ok(Some(dict.into()))
-        }
-        NodeData::Schema { .. } => Ok(None),
+    for (k, v) in &node.properties {
+        dict.set_item(k, value_to_py(py, v)?)?;
     }
+
+    Ok(Some(dict.into()))
 }
 
 pub fn nodeinfo_to_pydict(py: Python, node: &NodeInfo) -> PyResult<Py<PyAny>> {

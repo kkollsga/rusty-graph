@@ -7,7 +7,7 @@ use petgraph::graph::NodeIndex;
 use wkt::TryFromWkt;
 
 use crate::datatypes::values::Value;
-use crate::graph::schema::{CurrentSelection, DirGraph, NodeData};
+use crate::graph::schema::{CurrentSelection, DirGraph};
 
 /// Filter nodes that fall within a geographic bounding box
 ///
@@ -48,13 +48,8 @@ pub fn within_bounds(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            let (lat, lon) = match node {
-                NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-                    let lat = properties.get(lat_field).and_then(value_to_f64);
-                    let lon = properties.get(lon_field).and_then(value_to_f64);
-                    (lat, lon)
-                }
-            };
+            let lat = node.properties.get(lat_field).and_then(value_to_f64);
+            let lon = node.properties.get(lon_field).and_then(value_to_f64);
 
             if let (Some(lat), Some(lon)) = (lat, lon) {
                 // Use simple numeric comparison
@@ -106,13 +101,8 @@ pub fn near_point(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            let (lat, lon) = match node {
-                NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-                    let lat = properties.get(lat_field).and_then(value_to_f64);
-                    let lon = properties.get(lon_field).and_then(value_to_f64);
-                    (lat, lon)
-                }
-            };
+            let lat = node.properties.get(lat_field).and_then(value_to_f64);
+            let lon = node.properties.get(lon_field).and_then(value_to_f64);
 
             if let (Some(lat), Some(lon)) = (lat, lon) {
                 // Simple Euclidean distance in degrees
@@ -186,13 +176,8 @@ pub fn near_point_km(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            let (lat, lon) = match node {
-                NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-                    let lat = properties.get(lat_field).and_then(value_to_f64);
-                    let lon = properties.get(lon_field).and_then(value_to_f64);
-                    (lat, lon)
-                }
-            };
+            let lat = node.properties.get(lat_field).and_then(value_to_f64);
+            let lon = node.properties.get(lon_field).and_then(value_to_f64);
 
             if let (Some(lat), Some(lon)) = (lat, lon) {
                 let distance = haversine_distance(center_lat, center_lon, lat, lon);
@@ -269,11 +254,7 @@ pub fn near_point_km_from_geometry(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            let wkt_value = match node {
-                NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-                    properties.get(geometry_field)
-                }
-            };
+            let wkt_value = node.properties.get(geometry_field);
 
             if let Some(Value::String(wkt_str)) = wkt_value {
                 if let Ok((lat, lon)) = wkt_centroid(wkt_str) {
@@ -321,11 +302,7 @@ pub fn contains_point(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            let wkt_value = match node {
-                NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-                    properties.get(geometry_field)
-                }
-            };
+            let wkt_value = node.properties.get(geometry_field);
 
             if let Some(Value::String(wkt_str)) = wkt_value {
                 if let Ok(geometry) = parse_wkt(wkt_str) {
@@ -376,11 +353,7 @@ pub fn intersects_geometry(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            let wkt_value = match node {
-                NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-                    properties.get(geometry_field)
-                }
-            };
+            let wkt_value = node.properties.get(geometry_field);
 
             if let Some(Value::String(wkt_str)) = wkt_value {
                 if let Ok(node_geometry) = parse_wkt(wkt_str) {
@@ -468,13 +441,8 @@ pub fn calculate_centroid(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            let (lat, lon) = match node {
-                NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-                    let lat = properties.get(lat_field).and_then(value_to_f64);
-                    let lon = properties.get(lon_field).and_then(value_to_f64);
-                    (lat, lon)
-                }
-            };
+            let lat = node.properties.get(lat_field).and_then(value_to_f64);
+            let lon = node.properties.get(lon_field).and_then(value_to_f64);
 
             if let (Some(lat), Some(lon)) = (lat, lon) {
                 sum_lat += lat;
@@ -516,13 +484,8 @@ pub fn get_bounds(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            let (lat, lon) = match node {
-                NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => {
-                    let lat = properties.get(lat_field).and_then(value_to_f64);
-                    let lon = properties.get(lon_field).and_then(value_to_f64);
-                    (lat, lon)
-                }
-            };
+            let lat = node.properties.get(lat_field).and_then(value_to_f64);
+            let lon = node.properties.get(lon_field).and_then(value_to_f64);
 
             if let (Some(lat), Some(lon)) = (lat, lon) {
                 min_lat = min_lat.min(lat);

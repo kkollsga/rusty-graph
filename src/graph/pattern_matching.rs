@@ -857,38 +857,27 @@ impl<'a> PatternExecutor<'a> {
         props: &HashMap<String, PropertyMatcher>,
     ) -> bool {
         if let Some(node) = self.graph.graph.node_weight(idx) {
-            use crate::graph::schema::NodeData;
-            match node {
-                NodeData::Regular {
-                    properties,
-                    title,
-                    id,
-                    ..
-                } => {
-                    for (key, matcher) in props {
-                        // Check special fields first: name/title maps to title, id maps to id
-                        // Use references to avoid cloning
-                        let value: Option<&Value> = if key == "name" || key == "title" {
-                            Some(title)
-                        } else if key == "id" {
-                            Some(id)
-                        } else {
-                            properties.get(key)
-                        };
+            for (key, matcher) in props {
+                // Check special fields first: name/title maps to title, id maps to id
+                // Use references to avoid cloning
+                let value: Option<&Value> = if key == "name" || key == "title" {
+                    Some(&node.title)
+                } else if key == "id" {
+                    Some(&node.id)
+                } else {
+                    node.properties.get(key)
+                };
 
-                        match value {
-                            Some(v) => {
-                                if !self.value_matches(v, matcher) {
-                                    return false;
-                                }
-                            }
-                            None => return false,
+                match value {
+                    Some(v) => {
+                        if !self.value_matches(v, matcher) {
+                            return false;
                         }
                     }
-                    true
+                    None => return false,
                 }
-                _ => false,
             }
+            true
         } else {
             false
         }
@@ -958,14 +947,8 @@ impl<'a> PatternExecutor<'a> {
                 // Check if target matches node pattern
                 if let Some(ref node_type) = node_pattern.node_type {
                     if let Some(node) = self.graph.graph.node_weight(target) {
-                        use crate::graph::schema::NodeData;
-                        match node {
-                            NodeData::Regular { node_type: nt, .. } => {
-                                if nt != node_type {
-                                    continue;
-                                }
-                            }
-                            _ => continue,
+                        if &node.node_type != node_type {
+                            continue;
                         }
                     } else {
                         continue;
@@ -1089,11 +1072,7 @@ impl<'a> PatternExecutor<'a> {
                 if new_depth >= min_hops {
                     let node_matches = if let Some(ref node_type) = node_pattern.node_type {
                         if let Some(node) = self.graph.graph.node_weight(target) {
-                            use crate::graph::schema::NodeData;
-                            match node {
-                                NodeData::Regular { node_type: nt, .. } => nt == node_type,
-                                _ => false,
-                            }
+                            &node.node_type == node_type
                         } else {
                             false
                         }
@@ -1137,35 +1116,19 @@ impl<'a> PatternExecutor<'a> {
     /// Convert a node to a binding
     fn node_to_binding(&self, idx: NodeIndex) -> MatchBinding {
         if let Some(node) = self.graph.graph.node_weight(idx) {
-            use crate::graph::schema::NodeData;
-            match node {
-                NodeData::Regular {
-                    node_type,
-                    id,
-                    title,
-                    properties,
-                }
-                | NodeData::Schema {
-                    node_type,
-                    id,
-                    title,
-                    properties,
-                } => {
-                    let title_str = match title {
-                        Value::String(s) => s.clone(),
-                        Value::Int64(i) => i.to_string(),
-                        Value::Float64(f) => f.to_string(),
-                        Value::UniqueId(u) => u.to_string(),
-                        _ => format!("{:?}", title),
-                    };
-                    MatchBinding::Node {
-                        index: idx,
-                        node_type: node_type.clone(),
-                        title: title_str,
-                        id: id.clone(),
-                        properties: properties.clone(),
-                    }
-                }
+            let title_str = match &node.title {
+                Value::String(s) => s.clone(),
+                Value::Int64(i) => i.to_string(),
+                Value::Float64(f) => f.to_string(),
+                Value::UniqueId(u) => u.to_string(),
+                _ => format!("{:?}", node.title),
+            };
+            MatchBinding::Node {
+                index: idx,
+                node_type: node.node_type.clone(),
+                title: title_str,
+                id: node.id.clone(),
+                properties: node.properties.clone(),
             }
         } else {
             MatchBinding::Node {

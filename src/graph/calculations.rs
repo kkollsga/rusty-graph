@@ -128,9 +128,9 @@ pub fn process_equation(
             if !level.is_empty() {
                 // Get a sample node to determine node type
                 if let Some(sample_node_idx) = level.iter_node_indices().next() {
-                    if let Some(NodeData::Regular { node_type, .. }) =
-                        graph.get_node(sample_node_idx)
-                    {
+                    if let Some(sample_node) = graph.get_node(sample_node_idx) {
+                        let node_type = &sample_node.node_type;
+
                         // Check if schema node exists for this type
                         let schema_lookup =
                             match TypeLookup::new(&graph.graph, "SchemaNode".to_string()) {
@@ -143,9 +143,8 @@ pub fn process_equation(
                         let schema_title = Value::String(node_type.clone());
 
                         if let Some(schema_idx) = schema_lookup.check_title(&schema_title) {
-                            if let Some(NodeData::Schema { properties, .. }) =
-                                graph.get_node(schema_idx)
-                            {
+                            if let Some(schema_node) = graph.get_node(schema_idx) {
+                                let properties = &schema_node.properties;
                                 // Validate each variable against schema properties
                                 // Don't check reserved field names like 'id', 'title', 'type'
                                 for var in &variables {
@@ -543,9 +542,7 @@ fn has_aggregation(expr: &Expr) -> bool {
 }
 
 fn convert_node_to_object(node: &NodeData) -> HashMap<String, Value> {
-    let properties = match node {
-        NodeData::Regular { properties, .. } | NodeData::Schema { properties, .. } => properties,
-    };
+    let properties = &node.properties;
 
     // Pre-allocate HashMap with exact capacity to avoid reallocations
     let mut object = HashMap::with_capacity(properties.len());

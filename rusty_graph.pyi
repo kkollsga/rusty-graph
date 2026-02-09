@@ -388,6 +388,75 @@ class KnowledgeGraph:
         """
         ...
 
+    # Graph Maintenance
+    # -----------------
+
+    def reindex(self) -> None:
+        """Rebuild all indexes from the current graph state.
+
+        Reconstructs type_indices, property_indices, and composite_indices by
+        scanning all live nodes. Clears lazy caches (id_indices, connection_types)
+        so they rebuild on next access.
+
+        Use after bulk mutations (especially Cypher DELETE/REMOVE) to ensure
+        index consistency.
+
+        Example::
+
+            graph.reindex()
+        """
+        ...
+
+    def vacuum(self) -> dict[str, int]:
+        """Compact the graph by removing tombstones left by node/edge deletions.
+
+        With StableDiGraph, deletions leave holes in the internal storage.
+        Over time, this wastes memory and degrades iteration performance.
+        ``vacuum()`` rebuilds the graph with contiguous indices, then rebuilds
+        all indexes.
+
+        **Important**: This resets the current selection since node indices change.
+        Call this between query chains, not in the middle of one.
+
+        Returns:
+            dict with keys:
+                - ``nodes_remapped``: Number of nodes that were remapped
+                - ``tombstones_removed``: Number of tombstone slots reclaimed
+
+        Example::
+
+            info = graph.graph_info()
+            if info['fragmentation_ratio'] > 0.3:
+                result = graph.vacuum()
+                print(f"Reclaimed {result['tombstones_removed']} slots")
+        """
+        ...
+
+    def graph_info(self) -> dict[str, Any]:
+        """Get diagnostic information about graph storage health.
+
+        Returns a dictionary with storage metrics useful for deciding when
+        to call :meth:`vacuum` or :meth:`reindex`.
+
+        Returns:
+            dict with keys:
+                - ``node_count``: Number of live nodes
+                - ``node_capacity``: Upper bound of node indices (includes tombstones)
+                - ``node_tombstones``: Number of wasted slots from deletions
+                - ``edge_count``: Number of live edges
+                - ``fragmentation_ratio``: Ratio of wasted storage (0.0 = clean)
+                - ``type_count``: Number of distinct node types
+                - ``property_index_count``: Number of single-property indexes
+                - ``composite_index_count``: Number of composite indexes
+
+        Example::
+
+            info = graph.graph_info()
+            if info['fragmentation_ratio'] > 0.3:
+                graph.vacuum()
+        """
+        ...
+
     def get_connections(
         self,
         indices: Optional[list[int]] = None,
@@ -1007,6 +1076,9 @@ class KnowledgeGraph:
     def create_index(self, node_type: str, property: str) -> dict[str, Any]:
         """Create an index on a property for O(1) equality filter lookups.
 
+        Indexes are automatically maintained by Cypher mutations
+        (CREATE, SET, REMOVE, DELETE, MERGE).
+
         Args:
             node_type: Node type to index.
             property: Property name to index.
@@ -1109,11 +1181,18 @@ class KnowledgeGraph:
         """Execute a Cypher query.
 
         Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, WITH,
-        OPTIONAL MATCH, UNWIND, UNION, CREATE, SET, CASE expressions,
+        OPTIONAL MATCH, UNWIND, UNION, CREATE, SET, DELETE, DETACH DELETE,
+        REMOVE, MERGE (with ON CREATE SET / ON MATCH SET), CASE expressions,
         parameters ($param), and aggregation functions.
 
-        Mutation queries (CREATE, SET) return a ``stats`` key with
-        ``nodes_created``, ``relationships_created``, ``properties_set``.
+        Mutation queries (CREATE, SET, DELETE, REMOVE, MERGE) return a
+        ``stats`` key with ``nodes_created``, ``relationships_created``,
+        ``properties_set``, ``nodes_deleted``, ``relationships_deleted``,
+        ``properties_removed``.
+
+        Each call is atomic: if any clause fails, the graph is unchanged.
+        Property and composite indexes are automatically maintained by all
+        mutation operations.
 
         Args:
             query: Cypher query string.
@@ -1151,6 +1230,21 @@ class KnowledgeGraph:
             result = graph.cypher('''
                 MATCH (n:Person) WHERE n.name = 'Alice'
                 SET n.city = 'Oslo', n.age = 31
+            ''')
+
+            # DELETE / DETACH DELETE
+            graph.cypher("MATCH (n:Person) WHERE n.name = 'Alice' DETACH DELETE n")
+            graph.cypher("MATCH (a)-[r:KNOWS]->(b) DELETE r")
+
+            # REMOVE properties
+            graph.cypher("MATCH (n:Person) WHERE n.name = 'Bob' REMOVE n.city")
+
+            # MERGE (match or create)
+            graph.cypher("MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.age = 30")
+            graph.cypher('''
+                MATCH (a:Person), (b:Person)
+                WHERE a.name = 'Alice' AND b.name = 'Bob'
+                MERGE (a)-[:KNOWS]->(b) ON CREATE SET r.since = 2024
             ''')
         """
         ...

@@ -1,5 +1,9 @@
 # Rusty Graph
 
+[![PyPI version](https://img.shields.io/pypi/v/rusty-graph)](https://pypi.org/project/rusty-graph/)
+[![Python versions](https://img.shields.io/pypi/pyversions/rusty-graph)](https://pypi.org/project/rusty-graph/)
+[![License: MIT](https://img.shields.io/pypi/l/rusty-graph)](https://github.com/kkollsga/rusty-graph/blob/main/LICENSE)
+
 A high-performance graph database library for Python, written in Rust.
 
 ```bash
@@ -41,15 +45,16 @@ df = graph.cypher("MATCH (u:User) RETURN u.name, u.age ORDER BY u.age", to_df=Tr
 
 - [Data Management](#data-management) — Adding nodes, connections, dates, batch updates
 - [Querying](#querying) — Filtering, traversal, set operations
-- [Cypher Queries](#cypher-queries) — Full Cypher query language with WHERE, RETURN, ORDER BY, CREATE, SET, aggregation
+- [Cypher Queries](#cypher-queries) — Full Cypher query language with MATCH, CREATE, SET, DELETE, REMOVE, MERGE, aggregation
 - [When to Use What](#when-to-use-what) — Choosing between Cypher, fluent API, and pattern matching
 - [Pattern Matching](#pattern-matching) — Cypher-like pattern syntax for multi-hop traversals
-- [Graph Algorithms](#graph-algorithms) — Shortest path, all paths, connected components
+- [Graph Algorithms](#graph-algorithms) — Shortest path, all paths, connected components, centrality
 - [Spatial Operations](#spatial-operations) — Bounding box, distance, WKT geometry, point-in-polygon
 - [Analytics](#analytics) — Statistics, calculations, connection aggregation
 - [Schema and Indexes](#schema-and-indexes) — Schema definition, validation, index management
 - [Import and Export](#import-and-export) — Save/load, GraphML, GEXF, D3 JSON, CSV, subgraphs
 - [Performance](#performance) — Tips, lightweight methods, performance model
+- [Graph Maintenance](#graph-maintenance) — Reindex, vacuum, graph health diagnostics
 - [Operation Reports](#operation-reports) — Tracking graph mutations
 
 ---
@@ -207,7 +212,7 @@ graph.type_filter('Product').sort('price', ascending=False)
 graph.type_filter('Product').sort([('stock', False), ('price', True)])
 
 # Sorting works in filter, type_filter, traverse, filter_orphans
-graph.type_filter('Product').filter({'stock': {'>': 10}}, sort_spec='price')
+graph.type_filter('Product').filter({'stock': {'>': 10}}, sort='price')
 ```
 
 ### Limiting Results
@@ -261,7 +266,7 @@ selection_a.union(selection_b).intersection(selection_c)
 
 ## Cypher Queries
 
-Query the graph using Cypher — the standard graph query language. Supports `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `ORDER BY`, `SKIP`, `LIMIT`, `WITH`, `CREATE`, `SET`, aggregation functions, and arithmetic expressions.
+Query the graph using Cypher — the standard graph query language. Supports `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `ORDER BY`, `SKIP`, `LIMIT`, `WITH`, `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, aggregation functions, and arithmetic expressions.
 
 ```python
 result = graph.cypher("""
@@ -448,7 +453,7 @@ graph.cypher("MATCH (a:Person)-[:KNOWS*2]->(b:Person) RETURN a.name, b.name")
 ```python
 # Create a node
 result = graph.cypher("CREATE (n:Person {name: 'Alice', age: 30, city: 'Oslo'})")
-print(result['stats'])  # {'nodes_created': 1, 'relationships_created': 0, 'properties_set': 0}
+print(result['stats']['nodes_created'])  # 1
 
 # Create a full path (nodes + edge)
 graph.cypher("CREATE (a:Team {name: 'Alpha'})-[:MEMBER]->(b:Team {name: 'Beta'})")
@@ -484,6 +489,77 @@ print(result['stats']['properties_set'])  # 2
 graph.cypher("MATCH (n:Person) WHERE n.name = 'Alice' SET n.age = 30 + 1")
 ```
 
+### DELETE / DETACH DELETE — Remove Nodes and Edges
+
+```python
+# Delete a node with no connections
+graph.cypher("MATCH (n:Person) WHERE n.name = 'Alice' DELETE n")
+
+# DETACH DELETE removes the node and all its connections
+graph.cypher("MATCH (n:Person) WHERE n.name = 'Alice' DETACH DELETE n")
+result = graph.cypher("MATCH (n:Person) DETACH DELETE n")
+print(result['stats']['nodes_deleted'])       # 5
+print(result['stats']['relationships_deleted'])  # 3
+
+# Delete a relationship only
+graph.cypher("MATCH (a:Person)-[r:KNOWS]->(b:Person) WHERE a.name = 'Alice' DELETE r")
+```
+
+### REMOVE — Remove Properties
+
+```python
+# Remove a property from nodes
+graph.cypher("MATCH (n:Person) WHERE n.name = 'Alice' REMOVE n.city")
+
+# Remove multiple properties
+result = graph.cypher("MATCH (n:Person) REMOVE n.city, n.age")
+print(result['stats']['properties_removed'])  # 2
+```
+
+### MERGE — Match or Create
+
+```python
+# Create a node only if it doesn't exist
+graph.cypher("MERGE (n:Person {name: 'Alice'})")
+
+# ON CREATE SET — set properties only when creating
+graph.cypher("MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.age = 30, n.city = 'Oslo'")
+
+# ON MATCH SET — set properties only when matching existing
+graph.cypher("MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.visits = 1")
+
+# Both ON CREATE and ON MATCH
+graph.cypher("""
+    MERGE (n:Person {name: 'Alice'})
+    ON CREATE SET n.created = 'today'
+    ON MATCH SET n.updated = 'today'
+""")
+
+# Merge a relationship between existing nodes
+graph.cypher("""
+    MATCH (a:Person) WHERE a.name = 'Alice'
+    MATCH (b:Person) WHERE b.name = 'Bob'
+    MERGE (a)-[:KNOWS]->(b)
+""")
+```
+
+### Mutation Semantics
+
+**Atomicity**: Each `cypher()` call is atomic at the statement level.
+If any clause fails, the graph remains unchanged. Internally, mutations
+operate on a copy-on-write snapshot that is only committed on success.
+
+**Index Maintenance**: Property and composite indexes are maintained
+automatically by all mutation operations:
+
+| Operation | Index behaviour |
+|-----------|----------------|
+| CREATE    | New node added to all matching indexes |
+| SET       | Old value removed, new value inserted |
+| REMOVE    | Old value removed from affected indexes |
+| DELETE    | Node removed from all indexes |
+| MERGE     | Delegates to CREATE/SET |
+
 ### DataFrame Output
 
 Pass `to_df=True` to get results as a pandas DataFrame instead of a dict:
@@ -514,15 +590,15 @@ The Cypher executor uses several optimizations:
 
 | Category | Supported |
 |----------|-----------|
-| **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`, `UNION ALL`, `CREATE`, `SET` |
+| **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`, `UNION ALL`, `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE` |
 | **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, inline properties `{key: val}` |
 | **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH` |
 | **RETURN** | Property access `n.prop`, aliases `AS`, `DISTINCT`, arithmetic `+`, `-`, `*`, `/` |
 | **Aggregation** | `count(*)`, `count(expr)`, `sum`, `avg`/`mean`, `min`, `max`, `collect`, `std` |
 | **Expressions** | `CASE WHEN ... THEN ... ELSE ... END`, parameters `$param` |
 | **Scalar functions** | `toUpper`/`upper`, `toLower`/`lower`, `toString`, `toInteger`/`toInt`, `toFloat`, `size`/`length`, `type`, `id`, `labels`, `coalesce` |
-| **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr` |
-| **Not supported** | `DELETE`, `MERGE`, `REMOVE`, `CALL`, subqueries, list comprehensions |
+| **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE n`, `DETACH DELETE n`, `REMOVE n.prop`, `MERGE (n:Label {props})`, `ON CREATE SET`, `ON MATCH SET` |
+| **Not supported** | `CALL`, subqueries, list comprehensions, `SET n:Label` (label mutation), `REMOVE n:Label` |
 
 ---
 
@@ -594,6 +670,36 @@ paths = graph.all_paths(
 ```python
 components = graph.connected_components()
 print(f"Found {len(components)} connected components")
+
+# Check if two specific nodes are connected
+graph.are_connected(source_type='Person', source_id=1, target_type='Person', target_id=100)
+```
+
+### Centrality Algorithms
+
+All centrality methods return a list of dicts with `node_type`, `title`, `id`, and `score` keys, sorted by score descending. Use `top_k` to limit results.
+
+```python
+# Betweenness — identifies bridges/brokers
+graph.betweenness_centrality(top_k=10)
+graph.betweenness_centrality(normalized=True, sample_size=500)  # approximate for large graphs
+
+# PageRank — importance based on incoming link structure
+graph.pagerank(top_k=10, damping_factor=0.85)
+
+# Degree — number of connections
+graph.degree_centrality(top_k=10)
+
+# Closeness — how quickly a node can reach all others
+graph.closeness_centrality(top_k=10)
+```
+
+### Node Degrees
+
+```python
+# Get degree (connection count) for each node in the current selection
+degrees = graph.type_filter('Person').get_degrees()
+# Returns: {'Alice': 5, 'Bob': 3, ...}
 ```
 
 ---
@@ -621,9 +727,9 @@ graph.type_filter('Wellbore').near_point_km(
 ### WKT Geometry Intersection
 
 ```python
-graph.type_filter('Field').intersects(
-    geometry_field='wkt_geometry',
-    wkt='POLYGON((1 58, 5 58, 5 62, 1 62, 1 58))'
+graph.type_filter('Field').intersects_geometry(
+    'POLYGON((1 58, 5 58, 5 62, 1 62, 1 58))',
+    geometry_field='wkt_geometry'
 )
 ```
 
@@ -674,7 +780,7 @@ graph.type_filter('User').traverse('PURCHASED').count(store_as='product_count', 
 graph.type_filter('User').traverse('PURCHASED').children_properties_to_list(
     property='title',
     filter={'price': {'<': 500.0}},
-    sort_spec='price',
+    sort='price',
     max_nodes=5,
     store_as='purchased_products'
 )
@@ -803,6 +909,50 @@ Lightweight path methods: `shortest_path_length()`, `shortest_path_indices()`, `
 Rusty Graph is optimized for **knowledge graph workloads** — complex multi-step queries on heterogeneous, property-rich graphs. Operations have overhead compared to raw graph algorithms because they build selections, materialize Python dicts, and support the full query API (explain, undo, reports).
 
 For benchmarking, use engine-only methods (`node_count()`, `indices()`, `explain()`) to measure pure graph traversal speed. Use end-to-end methods (`get_nodes()`, `get_properties()`) when measuring the full Python-facing workload.
+
+---
+
+## Graph Maintenance
+
+After heavy mutation workloads (DELETE, REMOVE), the internal graph storage accumulates tombstones — empty slots left by deleted nodes. Use `graph_info()` to monitor storage health and `vacuum()` / `reindex()` to maintain performance.
+
+### Diagnostics
+
+```python
+info = graph.graph_info()
+# {'node_count': 950, 'node_capacity': 1000, 'node_tombstones': 50,
+#  'edge_count': 2800, 'fragmentation_ratio': 0.05,
+#  'type_count': 3, 'property_index_count': 2, 'composite_index_count': 0}
+```
+
+### Vacuum — Compact Storage
+
+```python
+if info['fragmentation_ratio'] > 0.3:
+    result = graph.vacuum()
+    print(f"Reclaimed {result['tombstones_removed']} slots, remapped {result['nodes_remapped']} nodes")
+```
+
+`vacuum()` rebuilds the graph with contiguous indices and rebuilds all indexes. **Resets the current selection** — call between query chains, not mid-chain.
+
+### Reindex — Rebuild Indexes
+
+```python
+graph.reindex()  # Rebuilds type, property, and composite indexes from graph state
+```
+
+Lighter than `vacuum()` — only rebuilds index structures without compacting storage. Use after bulk mutations when you suspect index drift.
+
+### Recommended Workflow
+
+```python
+# After a batch of DELETE/REMOVE operations:
+info = graph.graph_info()
+if info['fragmentation_ratio'] > 0.3:
+    graph.vacuum()    # Compact + reindex (heavy)
+elif info['node_tombstones'] > 0:
+    graph.reindex()   # Just fix indexes (light)
+```
 
 ---
 

@@ -5,7 +5,7 @@ use crate::graph::batch_operations::{
 };
 use crate::graph::lookups::{CombinedTypeLookup, TypeLookup};
 use crate::graph::reporting::{ConnectionOperationReport, NodeOperationReport};
-use crate::graph::schema::{CurrentSelection, DirGraph, NodeData};
+use crate::graph::schema::{CurrentSelection, DirGraph};
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 
@@ -58,58 +58,24 @@ pub fn add_nodes(
     // Track errors
     let mut errors = Vec::new();
 
-    let schema_lookup = TypeLookup::new(&graph.graph, "SchemaNode".to_string())?;
-    let schema_title = Value::String(node_type.clone());
-    let schema_node_idx = schema_lookup.check_title(&schema_title);
-
     let df_column_types = get_column_types(&df_data);
-    let df_schema_properties: HashMap<String, Value> = df_column_types
-        .into_iter()
-        .map(|(k, v)| (k, Value::String(v)))
-        .collect();
 
-    // Check for type mismatches if schema already exists
-    if let Some(idx) = schema_node_idx {
-        if let Some(NodeData::Schema { properties, .. }) = graph.get_node(idx) {
-            for (col_name, col_type_val) in &df_schema_properties {
-                if let Some(existing_type) = properties.get(col_name) {
-                    // Since Value doesn't implement Display, use pattern matching to compare
-                    if let (Value::String(existing), Value::String(new)) =
-                        (existing_type, col_type_val)
-                    {
-                        if existing != new {
-                            errors.push(format!(
-                                "Type mismatch for property '{}': existing schema has '{}', but data has '{}'",
-                                col_name, existing, new
-                            ));
-                        }
-                    }
+    // Check for type mismatches if metadata already exists
+    if let Some(existing_meta) = graph.get_node_type_metadata(&node_type) {
+        for (col_name, col_type) in &df_column_types {
+            if let Some(existing_type) = existing_meta.get(col_name) {
+                if existing_type != col_type {
+                    errors.push(format!(
+                        "Type mismatch for property '{}': existing schema has '{}', but data has '{}'",
+                        col_name, existing_type, col_type
+                    ));
                 }
             }
         }
     }
 
-    // Rest of the original function remains the same
-    match schema_node_idx {
-        Some(idx) => {
-            if let Some(NodeData::Schema { properties, .. }) = graph.get_node_mut(idx) {
-                for (col_name, col_type) in &df_schema_properties {
-                    if !properties.contains_key(col_name) {
-                        properties.insert(col_name.clone(), col_type.clone());
-                    }
-                }
-            }
-        }
-        None => {
-            let schema_node_data = NodeData::Schema {
-                id: Value::String(node_type.clone()),
-                title: Value::String(node_type.clone()),
-                node_type: "SchemaNode".to_string(),
-                properties: df_schema_properties,
-            };
-            graph.graph.add_node(schema_node_data);
-        }
-    }
+    // Upsert node type metadata (merges new column types into existing)
+    graph.upsert_node_type_metadata(&node_type, df_column_types);
 
     let type_lookup = TypeLookup::new(&graph.graph, node_type.clone())?;
     let id_idx = df_data
@@ -443,22 +409,14 @@ fn update_node_titles(
     if let Some(title_idx) = source_title_idx {
         if let Some(title) = df_data.get_value_by_index(row_idx, title_idx) {
             if let Some(node) = graph.get_node_mut(source_idx) {
-                match node {
-                    NodeData::Regular { title: t, .. } | NodeData::Schema { title: t, .. } => {
-                        *t = title;
-                    }
-                }
+                node.title = title;
             }
         }
     }
     if let Some(title_idx) = target_title_idx {
         if let Some(title) = df_data.get_value_by_index(row_idx, title_idx) {
             if let Some(node) = graph.get_node_mut(target_idx) {
-                match node {
-                    NodeData::Regular { title: t, .. } | NodeData::Schema { title: t, .. } => {
-                        *t = title;
-                    }
-                }
+                node.title = title;
             }
         }
     }
@@ -485,60 +443,13 @@ fn update_schema_node(
         ));
     }
 
-    let schema_title = Value::String(connection_type.to_string());
-    let schema_lookup = TypeLookup::new(&graph.graph, "SchemaNode".to_string())?;
+    // Build property type map — all connection properties default to "Unknown"
+    let prop_types: HashMap<String, String> = properties
+        .iter()
+        .map(|prop| (prop.clone(), "Unknown".to_string()))
+        .collect();
 
-    match schema_lookup.check_title(&schema_title) {
-        Some(idx) => {
-            if let Some(NodeData::Schema {
-                properties: schema_props,
-                ..
-            }) = graph.get_node_mut(idx)
-            {
-                for prop in properties {
-                    if !schema_props.contains_key(prop) {
-                        schema_props.insert(prop.clone(), Value::String("Unknown".to_string()));
-                    }
-                }
-                schema_props.insert(
-                    "source_type".to_string(),
-                    Value::String(source_type.to_string()),
-                );
-                schema_props.insert(
-                    "target_type".to_string(),
-                    Value::String(target_type.to_string()),
-                );
-            } else {
-                return Err(format!(
-                    "Invalid schema node found for connection type '{}'",
-                    connection_type
-                ));
-            }
-        }
-        None => {
-            let mut schema_properties: HashMap<String, Value> = properties
-                .iter()
-                .map(|prop| (prop.clone(), Value::String("Unknown".to_string())))
-                .collect();
-
-            schema_properties.insert(
-                "source_type".to_string(),
-                Value::String(source_type.to_string()),
-            );
-            schema_properties.insert(
-                "target_type".to_string(),
-                Value::String(target_type.to_string()),
-            );
-
-            let schema_node_data = NodeData::Schema {
-                id: Value::String(connection_type.to_string()),
-                title: schema_title,
-                node_type: "SchemaNode".to_string(),
-                properties: schema_properties,
-            };
-            graph.graph.add_node(schema_node_data);
-        }
-    }
+    graph.upsert_connection_type_metadata(connection_type, source_type, target_type, prop_types);
     Ok(())
 }
 
@@ -590,15 +501,15 @@ pub fn selection_to_new_connections(
     for (parent_opt, children) in level.iter_groups() {
         if let Some(parent) = parent_opt {
             if source_type.is_none() {
-                if let Some(NodeData::Regular { node_type, .. }) = graph.get_node(*parent) {
-                    source_type = Some(node_type.clone());
+                if let Some(node) = graph.get_node(*parent) {
+                    source_type = Some(node.node_type.clone());
                 }
             }
 
             for &child in children {
                 if target_type.is_none() {
-                    if let Some(NodeData::Regular { node_type, .. }) = graph.get_node(child) {
-                        target_type = Some(node_type.clone());
+                    if let Some(node) = graph.get_node(child) {
+                        target_type = Some(node.node_type.clone());
                     }
                 }
 
@@ -669,26 +580,18 @@ pub fn update_node_properties(
     for (node_idx_opt, value) in nodes {
         if let Some(node_idx) = node_idx_opt {
             if let Some(node) = graph.get_node(*node_idx) {
-                match node {
-                    NodeData::Regular { node_type, .. } => {
-                        // Track node type and count for each node
-                        *node_types.entry(node_type.clone()).or_insert(0) += 1;
+                // Track node type and count for each node
+                *node_types.entry(node.node_type.clone()).or_insert(0) += 1;
 
-                        // Capture type of first value for schema
-                        if first_value_type.is_none() {
-                            first_value_type = Some(match value {
-                                Value::Int64(_) => "Int64",
-                                Value::Float64(_) => "Float64",
-                                Value::String(_) => "String",
-                                Value::UniqueId(_) => "UniqueId",
-                                _ => "Unknown",
-                            });
-                        }
-                    }
-                    _ => {
-                        // Skip schema nodes
-                        skipped_count += 1;
-                    }
+                // Capture type of first value for schema
+                if first_value_type.is_none() {
+                    first_value_type = Some(match value {
+                        Value::Int64(_) => "Int64",
+                        Value::Float64(_) => "Float64",
+                        Value::String(_) => "String",
+                        Value::UniqueId(_) => "UniqueId",
+                        _ => "Unknown",
+                    });
                 }
             } else {
                 skipped_count += 1;
@@ -699,73 +602,27 @@ pub fn update_node_properties(
         }
     }
 
-    // Step 2: Update schema nodes for each node type
-    let schema_lookup = match TypeLookup::new(&graph.graph, "SchemaNode".to_string()) {
-        Ok(lookup) => lookup,
-        Err(e) => {
-            errors.push(format!("Failed to access schema nodes: {}", e));
-            return Err(format!("Failed to access schema nodes: {}", e));
-        }
-    };
+    // Step 2: Update node type metadata for each affected node type
+    let type_string = first_value_type
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| "Calculated".to_string());
 
     for (node_type, _count) in node_types.iter() {
-        let schema_title = Value::String(node_type.clone());
-
-        match schema_lookup.check_title(&schema_title) {
-            Some(schema_idx) => {
-                // Schema exists, update it
-                if let Some(NodeData::Schema { properties, .. }) = graph.get_node_mut(schema_idx) {
-                    if !properties.contains_key(&property_string) {
-                        let type_value = first_value_type
-                            .map(|t| Value::String(t.to_string()))
-                            .unwrap_or_else(|| Value::String("Calculated".to_string()));
-
-                        properties.insert(property_string.clone(), type_value);
-                    } else {
-                        // Check for type mismatch
-                        if let Some(existing_type) = properties.get(&property_string) {
-                            let new_type = first_value_type
-                                .map(|t| Value::String(t.to_string()))
-                                .unwrap_or_else(|| Value::String("Calculated".to_string()));
-
-                            if let (Value::String(existing), Value::String(new_str)) =
-                                (existing_type, &new_type)
-                            {
-                                if existing != new_str {
-                                    errors.push(format!(
-                                        "Type mismatch for property '{}': existing schema has '{}', but data has '{}'",
-                                        property_string, existing, new_str
-                                    ));
-                                }
-                            } else {
-                                // Handle case where one or both values aren't strings
-                                errors.push(format!(
-                                    "Type mismatch for property '{}': incompatible types in schema",
-                                    property_string
-                                ));
-                            }
-                        }
-                    }
+        // Check for type mismatch with existing metadata
+        if let Some(existing_meta) = graph.get_node_type_metadata(node_type) {
+            if let Some(existing_type) = existing_meta.get(&property_string) {
+                if existing_type != &type_string {
+                    errors.push(format!(
+                        "Type mismatch for property '{}': existing schema has '{}', but data has '{}'",
+                        property_string, existing_type, type_string
+                    ));
                 }
             }
-            None => {
-                // Schema doesn't exist, create it
-                let mut properties = HashMap::new();
-                let type_value = first_value_type
-                    .map(|t| Value::String(t.to_string()))
-                    .unwrap_or_else(|| Value::String("Calculated".to_string()));
-
-                properties.insert(property_string.clone(), type_value);
-
-                let schema_node_data = NodeData::Schema {
-                    id: Value::String(node_type.clone()),
-                    title: schema_title,
-                    node_type: "SchemaNode".to_string(),
-                    properties,
-                };
-                graph.graph.add_node(schema_node_data);
-            }
         }
+
+        let mut new_prop_types = HashMap::new();
+        new_prop_types.insert(property_string.clone(), type_string.clone());
+        graph.upsert_node_type_metadata(node_type, new_prop_types);
     }
 
     // Step 3: Prepare batch updates for nodes
@@ -775,7 +632,7 @@ pub fn update_node_properties(
     for (node_idx_opt, value) in nodes {
         if let Some(node_idx) = node_idx_opt {
             // Only add valid nodes to batch
-            if node_idx.index() < graph.graph.node_count() {
+            if graph.graph.node_weight(*node_idx).is_some() {
                 let mut properties = HashMap::new();
                 properties.insert(property_string.clone(), value.clone());
 

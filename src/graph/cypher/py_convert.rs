@@ -73,6 +73,9 @@ pub fn cypher_result_to_py(py: Python<'_>, result: &CypherResult) -> PyResult<Py
         stats_dict.set_item("nodes_created", stats.nodes_created)?;
         stats_dict.set_item("relationships_created", stats.relationships_created)?;
         stats_dict.set_item("properties_set", stats.properties_set)?;
+        stats_dict.set_item("nodes_deleted", stats.nodes_deleted)?;
+        stats_dict.set_item("relationships_deleted", stats.relationships_deleted)?;
+        stats_dict.set_item("properties_removed", stats.properties_removed)?;
         result_dict.set_item("stats", stats_dict)?;
     }
 

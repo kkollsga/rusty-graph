@@ -182,51 +182,42 @@ impl BatchProcessor {
         // Process updates in current chunk
         for update in self.updates.drain(..) {
             if let Some(node) = graph.get_node_mut(update.node_idx) {
-                match node {
-                    NodeData::Regular {
-                        title, properties, ..
+                match update.conflict_mode {
+                    ConflictHandling::Skip => {
+                        // Skip this node entirely
+                        continue;
                     }
-                    | NodeData::Schema {
-                        title, properties, ..
-                    } => {
-                        match update.conflict_mode {
-                            ConflictHandling::Skip => {
-                                // Skip this node entirely
-                                continue;
-                            }
-                            ConflictHandling::Replace => {
-                                // Current behavior - complete replacement
-                                if let Some(new_title) = update.title {
-                                    *title = new_title;
-                                }
-                                *properties = update.properties;
-                            }
-                            ConflictHandling::Update => {
-                                // Update only if provided
-                                if let Some(new_title) = update.title {
-                                    *title = new_title;
-                                }
-                                // Merge properties with preference to new values
-                                for (k, v) in update.properties {
-                                    properties.insert(k, v);
-                                }
-                            }
-                            ConflictHandling::Preserve => {
-                                // Update only if provided, but preserve existing values
-                                if let Some(new_title) = update.title {
-                                    if title == &Value::Null {
-                                        *title = new_title;
-                                    }
-                                }
-                                // Merge properties with preference to existing values
-                                for (k, v) in update.properties {
-                                    properties.entry(k).or_insert(v);
-                                }
+                    ConflictHandling::Replace => {
+                        // Current behavior - complete replacement
+                        if let Some(new_title) = update.title {
+                            node.title = new_title;
+                        }
+                        node.properties = update.properties;
+                    }
+                    ConflictHandling::Update => {
+                        // Update only if provided
+                        if let Some(new_title) = update.title {
+                            node.title = new_title;
+                        }
+                        // Merge properties with preference to new values
+                        for (k, v) in update.properties {
+                            node.properties.insert(k, v);
+                        }
+                    }
+                    ConflictHandling::Preserve => {
+                        // Update only if provided, but preserve existing values
+                        if let Some(new_title) = update.title {
+                            if node.title == Value::Null {
+                                node.title = new_title;
                             }
                         }
-                        stats.updates += 1;
+                        // Merge properties with preference to existing values
+                        for (k, v) in update.properties {
+                            node.properties.entry(k).or_insert(v);
+                        }
                     }
                 }
+                stats.updates += 1;
             }
         }
 

@@ -1,95 +1,64 @@
 // src/graph/debugging.rs
 use crate::datatypes::values::Value;
-use crate::graph::schema::{CurrentSelection, DirGraph, NodeData, SelectionOperation};
+use crate::graph::schema::{CurrentSelection, DirGraph, SelectionOperation};
 
 pub fn get_schema_string(graph: &DirGraph) -> String {
     let mut schema_string = String::from("Graph Schema:\n");
-    let mut schema_nodes = Vec::new();
+    let mut has_metadata = false;
 
-    for i in graph.graph.node_indices() {
-        if let Some(node_data) = graph.get_node(i) {
-            match node_data {
-                NodeData::Regular { node_type, .. } | NodeData::Schema { node_type, .. } => {
-                    if node_type == "SchemaNode" {
-                        schema_nodes.push(i);
+    // ── Node type metadata ──────────────────────────────────────────────
+    let mut node_types: Vec<&String> = graph.node_type_metadata.keys().collect();
+    node_types.sort();
+
+    for node_type in node_types {
+        has_metadata = true;
+        schema_string.push_str(&format!("  Node Type: {}\n", node_type));
+
+        if let Some(props) = graph.node_type_metadata.get(node_type.as_str()) {
+            if !props.is_empty() {
+                schema_string.push_str("    Properties:\n");
+                let mut prop_keys: Vec<&String> = props.keys().collect();
+                prop_keys.sort();
+                for key in prop_keys {
+                    if let Some(type_name) = props.get(key.as_str()) {
+                        schema_string.push_str(&format!("      - {}: {}\n", key, type_name));
                     }
                 }
             }
         }
+        schema_string.push('\n');
     }
 
-    if schema_nodes.is_empty() {
-        schema_string.push_str("  No schema nodes found.\n");
-        return schema_string;
-    }
+    // ── Connection type metadata ────────────────────────────────────────
+    let mut conn_types: Vec<&String> = graph.connection_type_metadata.keys().collect();
+    conn_types.sort();
 
-    for &node_index in &schema_nodes {
-        if let Some(node_data) = graph.get_node(node_index) {
-            if let NodeData::Schema {
-                title, properties, ..
-            } = node_data
-            {
-                if properties.contains_key("source_type") && properties.contains_key("target_type")
-                {
-                    // Connection schema
-                    let source_type = properties
-                        .get("source_type")
-                        .and_then(|v| v.as_string())
-                        .unwrap_or_else(|| "Unknown".to_string());
+    for conn_type in conn_types {
+        has_metadata = true;
+        if let Some(info) = graph.connection_type_metadata.get(conn_type.as_str()) {
+            schema_string.push_str(&format!(
+                "  Connection Type: {} ({} -> {})\n",
+                conn_type, info.source_type, info.target_type
+            ));
 
-                    let target_type = properties
-                        .get("target_type")
-                        .and_then(|v| v.as_string())
-                        .unwrap_or_else(|| "Unknown".to_string());
-
-                    let connection_type = match title {
-                        Value::String(s) => s.clone(),
-                        _ => "Unknown".to_string(),
-                    };
-
-                    schema_string.push_str(&format!(
-                        "  Connection Type: {} ({} -> {})\n",
-                        connection_type, source_type, target_type
-                    ));
-
-                    // Filter out source_type and target_type from properties
-                    let filtered_properties: Vec<(&String, &Value)> = properties
-                        .iter()
-                        .filter(|(k, _)| *k != "source_type" && *k != "target_type")
-                        .collect();
-
-                    if !filtered_properties.is_empty() {
-                        schema_string.push_str("    Properties:\n");
-                        for (key, value) in filtered_properties {
-                            if let Value::String(type_name) = value {
-                                schema_string
-                                    .push_str(&format!("      - {}: {}\n", key, type_name));
-                            }
-                        }
-                    }
-                } else {
-                    // Node schema
-                    let node_type = match title {
-                        Value::String(s) => s.clone(),
-                        _ => "Unknown".to_string(),
-                    };
-
-                    schema_string.push_str(&format!("  Node Type: {}\n", node_type));
-
-                    if !properties.is_empty() {
-                        schema_string.push_str("    Properties:\n");
-                        for (key, value) in properties {
-                            if let Value::String(type_name) = value {
-                                schema_string
-                                    .push_str(&format!("      - {}: {}\n", key, type_name));
-                            }
-                        }
+            if !info.property_types.is_empty() {
+                schema_string.push_str("    Properties:\n");
+                let mut prop_keys: Vec<&String> = info.property_types.keys().collect();
+                prop_keys.sort();
+                for key in prop_keys {
+                    if let Some(type_name) = info.property_types.get(key.as_str()) {
+                        schema_string.push_str(&format!("      - {}: {}\n", key, type_name));
                     }
                 }
             }
             schema_string.push('\n');
         }
     }
+
+    if !has_metadata {
+        schema_string.push_str("  No schema metadata found.\n");
+    }
+
     schema_string
 }
 
@@ -164,25 +133,16 @@ pub fn get_selection_string(graph: &DirGraph, selection: &CurrentSelection) -> S
             match parent {
                 Some(parent_idx) => {
                     if let Some(parent_node) = graph.get_node(*parent_idx) {
-                        match parent_node {
-                            NodeData::Regular {
-                                node_type, title, ..
-                            }
-                            | NodeData::Schema {
-                                node_type, title, ..
-                            } => {
-                                let title_str = match title {
-                                    Value::String(s) => s.clone(),
-                                    _ => format!("{:?}", title),
-                                };
-                                output.push_str(&format!(
-                                    "        Parent [{}]: {} - {}\n",
-                                    parent_idx.index(),
-                                    node_type,
-                                    title_str
-                                ));
-                            }
-                        }
+                        let title_str = match &parent_node.title {
+                            Value::String(s) => s.clone(),
+                            _ => format!("{:?}", parent_node.title),
+                        };
+                        output.push_str(&format!(
+                            "        Parent [{}]: {} - {}\n",
+                            parent_idx.index(),
+                            parent_node.node_type,
+                            title_str
+                        ));
                     }
                 }
                 None => output.push_str("        Root Selection\n"),
@@ -191,11 +151,7 @@ pub fn get_selection_string(graph: &DirGraph, selection: &CurrentSelection) -> S
             // Add children info with node type if available
             if !children.is_empty() {
                 let first_child = graph.get_node(children[0]);
-                let child_type = first_child.map(|node| match node {
-                    NodeData::Regular { node_type, .. } | NodeData::Schema { node_type, .. } => {
-                        node_type
-                    }
-                });
+                let child_type = first_child.map(|node| &node.node_type);
 
                 let indices: Vec<String> = children
                     .iter()

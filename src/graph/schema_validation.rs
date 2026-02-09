@@ -2,10 +2,8 @@
 //! Schema validation module for validating graph data against a defined schema.
 
 use crate::datatypes::values::Value;
-use crate::graph::schema::{
-    DirGraph, NodeData, NodeSchemaDefinition, SchemaDefinition, ValidationError,
-};
-use petgraph::visit::EdgeRef;
+use crate::graph::schema::{DirGraph, NodeSchemaDefinition, SchemaDefinition, ValidationError};
+use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use std::collections::HashMap;
 
 /// Validate the graph against the provided schema definition
@@ -47,10 +45,6 @@ fn validate_nodes(
     // Check for undefined node types (strict mode)
     if strict {
         for (node_type, node_indices) in &graph.type_indices {
-            // Skip SchemaNode type (internal)
-            if node_type == "SchemaNode" {
-                continue;
-            }
             if !schema.node_schemas.contains_key(node_type) {
                 errors.push(ValidationError::UndefinedNodeType {
                     node_type: node_type.clone(),
@@ -65,24 +59,17 @@ fn validate_nodes(
 
 /// Validate a single node against its schema
 fn validate_single_node(
-    node: &NodeData,
+    node: &crate::graph::schema::NodeData,
     node_type: &str,
     schema: &NodeSchemaDefinition,
 ) -> Vec<ValidationError> {
     let mut errors = Vec::new();
 
-    let (title, properties) = match node {
-        NodeData::Regular {
-            title, properties, ..
-        } => {
-            let title_str = match title {
-                Value::String(s) => s.clone(),
-                _ => format!("{:?}", title),
-            };
-            (title_str, properties)
-        }
-        NodeData::Schema { .. } => return errors, // Skip schema nodes
+    let title = match &node.title {
+        Value::String(s) => s.clone(),
+        _ => format!("{:?}", node.title),
     };
+    let properties = &node.properties;
 
     // Check required fields
     for required_field in &schema.required_fields {
@@ -200,23 +187,12 @@ fn validate_connections(
 /// Get node type and title from a node index
 fn get_node_info(graph: &DirGraph, node_idx: petgraph::graph::NodeIndex) -> (String, String) {
     match graph.get_node(node_idx) {
-        Some(NodeData::Regular {
-            node_type, title, ..
-        }) => {
-            let title_str = match title {
+        Some(node) => {
+            let title_str = match &node.title {
                 Value::String(s) => s.clone(),
-                _ => format!("{:?}", title),
+                _ => format!("{:?}", node.title),
             };
-            (node_type.clone(), title_str)
-        }
-        Some(NodeData::Schema {
-            node_type, title, ..
-        }) => {
-            let title_str = match title {
-                Value::String(s) => s.clone(),
-                _ => format!("{:?}", title),
-            };
-            (node_type.clone(), title_str)
+            (node.node_type.clone(), title_str)
         }
         None => ("Unknown".to_string(), "Unknown".to_string()),
     }
