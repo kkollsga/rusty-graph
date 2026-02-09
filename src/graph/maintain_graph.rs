@@ -122,13 +122,16 @@ pub fn add_nodes(
             .get_value_by_index(row_idx, title_idx)
             .unwrap_or(Value::Null);
 
-        // OPTIMIZATION: Use pre-computed indices for direct column access
+        // OPTIMIZATION: Use pre-computed indices for direct column access.
+        // Skip null values — property access returns Null for missing keys anyway.
         let mut properties = HashMap::with_capacity(property_count);
         for (col_name, col_idx) in &property_columns {
             let value = df_data
                 .get_value_by_index(row_idx, *col_idx)
                 .unwrap_or(Value::Null);
-            properties.insert(col_name.clone(), value);
+            if !matches!(value, Value::Null) {
+                properties.insert(col_name.clone(), value);
+            }
         }
 
         let action = match type_lookup.check_uid(&id) {
@@ -334,14 +337,14 @@ pub fn add_connections(
             &df_data,
         )?;
 
-        // Use pre-computed property columns (avoids get_column_names() call per row)
+        // Use pre-computed property columns (avoids get_column_names() call per row).
+        // Skip null values — property access returns Null for missing keys anyway.
         let mut properties = HashMap::with_capacity(property_columns.len());
         for col_name in &property_columns {
-            // Always include the property, even if it's None/Null
             if let Some(value) = df_data.get_value(row_idx, col_name) {
-                properties.insert(col_name.clone(), value);
-            } else {
-                properties.insert(col_name.clone(), Value::Null);
+                if !matches!(value, Value::Null) {
+                    properties.insert(col_name.clone(), value);
+                }
             }
         }
 

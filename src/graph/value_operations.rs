@@ -165,6 +165,26 @@ pub fn format_value_compact(val: &Value) -> String {
     }
 }
 
+/// Write a compact value representation into an existing buffer (avoids allocation).
+pub fn format_value_compact_into(buf: &mut String, val: &Value) {
+    use std::fmt::Write;
+    match val {
+        Value::UniqueId(v) => write!(buf, "{}", v).unwrap(),
+        Value::Int64(v) => write!(buf, "{}", v).unwrap(),
+        Value::Float64(v) => {
+            if v.fract() == 0.0 {
+                write!(buf, "{:.1}", v).unwrap();
+            } else {
+                write!(buf, "{}", v).unwrap();
+            }
+        }
+        Value::String(v) => buf.push_str(v),
+        Value::Boolean(v) => write!(buf, "{}", v).unwrap(),
+        Value::DateTime(v) => write!(buf, "{}", v.format("%Y-%m-%d")).unwrap(),
+        Value::Null => buf.push_str("null"),
+    }
+}
+
 /// Parse a value from its compact string representation.
 pub fn parse_value_string(s: &str) -> Value {
     if s == "null" {

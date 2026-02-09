@@ -661,6 +661,9 @@ pub struct PatternExecutor<'a> {
     graph: &'a DirGraph,
     max_matches: Option<usize>,
     pre_bindings: HashMap<String, NodeIndex>,
+    /// When true, node_to_binding() and edge bindings skip cloning
+    /// properties/title/id (the Cypher executor only uses `index`).
+    lightweight: bool,
 }
 
 impl<'a> PatternExecutor<'a> {
@@ -669,6 +672,18 @@ impl<'a> PatternExecutor<'a> {
             graph,
             max_matches,
             pre_bindings: HashMap::new(),
+            lightweight: false,
+        }
+    }
+
+    /// Lightweight executor for Cypher: skips cloning node properties/title/id
+    /// since the Cypher executor only uses `index` from MatchBinding::Node.
+    pub fn new_lightweight(graph: &'a DirGraph, max_matches: Option<usize>) -> Self {
+        PatternExecutor {
+            graph,
+            max_matches,
+            pre_bindings: HashMap::new(),
+            lightweight: true,
         }
     }
 
@@ -681,6 +696,7 @@ impl<'a> PatternExecutor<'a> {
             graph,
             max_matches,
             pre_bindings,
+            lightweight: true,
         }
     }
 
@@ -1164,8 +1180,19 @@ impl<'a> PatternExecutor<'a> {
         Ok(results)
     }
 
-    /// Convert a node to a binding
+    /// Convert a node to a binding.
+    /// In lightweight mode (Cypher executor path), only `index` is populated
+    /// since the executor resolves node data on demand via graph lookups.
     fn node_to_binding(&self, idx: NodeIndex) -> MatchBinding {
+        if self.lightweight {
+            return MatchBinding::Node {
+                index: idx,
+                node_type: String::new(),
+                title: String::new(),
+                id: Value::Null,
+                properties: HashMap::new(),
+            };
+        }
         if let Some(node) = self.graph.graph.node_weight(idx) {
             let title_str = match &node.title {
                 Value::String(s) => s.clone(),

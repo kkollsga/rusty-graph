@@ -89,7 +89,7 @@ impl<'a> CypherExecutor<'a> {
             let mut all_rows = Vec::new();
 
             for pattern in &clause.patterns {
-                let executor = PatternExecutor::new(self.graph, None);
+                let executor = PatternExecutor::new_lightweight(self.graph, None);
                 let matches = executor.execute(pattern)?;
 
                 if all_rows.is_empty() {
@@ -174,7 +174,7 @@ impl<'a> CypherExecutor<'a> {
         };
 
         // Find matching source and target nodes
-        let executor = PatternExecutor::new(self.graph, None);
+        let executor = PatternExecutor::new_lightweight(self.graph, None);
         let source_nodes = executor.find_matching_nodes_pub(source_pattern)?;
         let target_nodes = executor.find_matching_nodes_pub(target_pattern)?;
 
@@ -242,7 +242,8 @@ impl<'a> CypherExecutor<'a> {
 
     /// Convert a PatternMatch to a lightweight ResultRow
     fn pattern_match_to_row(&self, m: PatternMatch) -> ResultRow {
-        let mut row = ResultRow::new();
+        let binding_count = m.bindings.len();
+        let mut row = ResultRow::with_capacity(binding_count, binding_count / 2, 0);
 
         for (var, binding) in m.bindings {
             match binding {
@@ -685,6 +686,26 @@ impl<'a> CypherExecutor<'a> {
             }
 
             Expression::IndexAccess { expr, index } => {
+                // Fast path: labels(n)[0] — bypass JSON round-trip
+                if let Expression::FunctionCall { name, args, .. } = expr.as_ref() {
+                    if name.eq_ignore_ascii_case("labels") {
+                        if let Some(Expression::Variable(var)) = args.first() {
+                            if let Expression::Literal(Value::Int64(lit_idx)) = index.as_ref() {
+                                if *lit_idx == 0 {
+                                    if let Some(&node_idx) = row.node_bindings.get(var.as_str()) {
+                                        if let Some(node) = self.graph.graph.node_weight(node_idx) {
+                                            return Ok(Value::String(
+                                                node.get_node_type_ref().to_string(),
+                                            ));
+                                        }
+                                    }
+                                }
+                                return Ok(Value::Null);
+                            }
+                        }
+                    }
+                }
+
                 let list_val = self.evaluate_expression(expr, row)?;
                 let idx_val = self.evaluate_expression(index, row)?;
 
@@ -1019,9 +1040,10 @@ impl<'a> CypherExecutor<'a> {
             });
         }
 
-        // Group rows by grouping key values
+        // Group rows by grouping key values (single composite string key to reduce allocations)
         let mut groups: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
-        let mut group_index_map: HashMap<Vec<String>, usize> = HashMap::new();
+        let mut group_index_map: HashMap<String, usize> = HashMap::new();
+        let mut key_buf = String::with_capacity(64);
 
         for (row_idx, row) in result_set.rows.iter().enumerate() {
             let key_values: Vec<Value> = group_key_indices
@@ -1032,13 +1054,19 @@ impl<'a> CypherExecutor<'a> {
                 })
                 .collect();
 
-            let key_strings: Vec<String> = key_values.iter().map(format_value_compact).collect();
+            key_buf.clear();
+            for (i, val) in key_values.iter().enumerate() {
+                if i > 0 {
+                    key_buf.push('\x1F');
+                }
+                value_operations::format_value_compact_into(&mut key_buf, val);
+            }
 
-            if let Some(&group_idx) = group_index_map.get(&key_strings) {
+            if let Some(&group_idx) = group_index_map.get(&key_buf) {
                 groups[group_idx].1.push(row_idx);
             } else {
                 let group_idx = groups.len();
-                group_index_map.insert(key_strings, group_idx);
+                group_index_map.insert(key_buf.clone(), group_idx);
                 groups.push((key_values, vec![row_idx]));
             }
         }

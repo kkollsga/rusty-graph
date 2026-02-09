@@ -1382,6 +1382,17 @@ impl KnowledgeGraph {
         })
     }
 
+    /// Returns a dict of {node_type: count} using the type index (O(type_count)).
+    fn node_type_counts(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            for (node_type, indices) in &self.inner.type_indices {
+                dict.set_item(node_type, indices.len())?;
+            }
+            Ok(dict.into())
+        })
+    }
+
     #[pyo3(signature = (indices=None, parent_info=None, include_node_properties=None,
                         flatten_single_parent=true))]
     fn get_connections(

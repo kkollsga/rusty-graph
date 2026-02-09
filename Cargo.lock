@@ -529,7 +529,7 @@ checksum = "f7c45b9784283f1b2e7fb61b42047c2fd678ef0960d4f6f1eba131594cc369d4"
 
 [[package]]
 name = "rusty_graph"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "bincode",
  "chrono",

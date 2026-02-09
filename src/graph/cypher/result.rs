@@ -57,6 +57,16 @@ impl ResultRow {
         }
     }
 
+    /// Pre-sized constructor to avoid HashMap reallocation.
+    pub fn with_capacity(nodes: usize, edges: usize, projected: usize) -> Self {
+        ResultRow {
+            node_bindings: HashMap::with_capacity(nodes),
+            edge_bindings: HashMap::with_capacity(edges),
+            path_bindings: HashMap::new(),
+            projected: HashMap::with_capacity(projected),
+        }
+    }
+
     /// Create a row with only projected values (for aggregation results)
     pub fn from_projected(projected: HashMap<String, Value>) -> Self {
         ResultRow {
