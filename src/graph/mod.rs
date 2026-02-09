@@ -71,7 +71,6 @@ fn get_graph_mut(arc: &mut Arc<DirGraph>) -> &mut DirGraph {
     Arc::make_mut(arc)
 }
 
-
 /// Helper to convert centrality results to Python list
 fn centrality_results_to_py(
     py: Python<'_>,
