@@ -224,7 +224,7 @@ pub type CompositeIndexKey = (String, Vec<String>);
 pub struct CompositeValue(pub Vec<Value>);
 
 /// Metadata stamped into saved files for version tracking and portability warnings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SaveMetadata {
     /// Format version — incremented when DirGraph layout changes.
     /// 0 = files saved before this field existed (via serde default).
@@ -232,15 +232,6 @@ pub struct SaveMetadata {
     pub format_version: u32,
     /// Library version at save time, e.g. "0.4.7".
     pub library_version: String,
-}
-
-impl Default for SaveMetadata {
-    fn default() -> Self {
-        SaveMetadata {
-            format_version: 0,
-            library_version: String::new(),
-        }
-    }
 }
 
 impl SaveMetadata {
