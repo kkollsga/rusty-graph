@@ -121,24 +121,25 @@ class TestShortestPathFunctions:
         assert result['rows'][0]['length(p)'] == 2
 
     def test_nodes_function(self, chain_graph):
-        """nodes(p) returns list of node representations."""
+        """nodes(p) returns list of node dicts."""
         result = chain_graph.cypher(
             "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
             "RETURN nodes(p)"
         )
-        nodes_str = result['rows'][0]['nodes(p)']
-        assert 'Alice' in nodes_str
-        assert 'Bob' in nodes_str
-        assert 'Charlie' in nodes_str
+        nodes = result['rows'][0]['nodes(p)']
+        assert isinstance(nodes, list)
+        titles = [n['title'] for n in nodes]
+        assert titles == ['Alice', 'Bob', 'Charlie']
 
     def test_relationships_function(self, chain_graph):
-        """relationships(p) returns list of relationship types."""
+        """relationships(p) returns list of relationship type strings."""
         result = chain_graph.cypher(
             "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
             "RETURN relationships(p)"
         )
-        rels_str = result['rows'][0]['relationships(p)']
-        assert ':KNOWS' in rels_str
+        rels = result['rows'][0]['relationships(p)']
+        assert isinstance(rels, list)
+        assert rels == ['KNOWS', 'KNOWS']
 
     def test_all_path_functions_together(self, chain_graph):
         """All path functions work in the same RETURN."""
@@ -148,9 +149,13 @@ class TestShortestPathFunctions:
         )
         row = result['rows'][0]
         assert row['length(p)'] == 3
-        assert 'Alice' in row['nodes(p)']
-        assert 'Dave' in row['nodes(p)']
-        assert ':KNOWS' in row['relationships(p)']
+        nodes = row['nodes(p)']
+        assert isinstance(nodes, list)
+        titles = [n['title'] for n in nodes]
+        assert 'Alice' in titles and 'Dave' in titles
+        rels = row['relationships(p)']
+        assert isinstance(rels, list)
+        assert all(r == 'KNOWS' for r in rels)
 
     def test_source_target_variables(self, chain_graph):
         """Source and target node variables are accessible."""

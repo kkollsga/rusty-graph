@@ -633,7 +633,7 @@ impl<'a> CypherExecutor<'a> {
                     .map(|item| self.evaluate_expression(item, row))
                     .collect();
                 let vals = values?;
-                let formatted: Vec<String> = vals.iter().map(format_value_compact).collect();
+                let formatted: Vec<String> = vals.iter().map(format_value_json).collect();
                 Ok(Value::String(format!("[{}]", formatted.join(", "))))
             }
             Expression::Case {
@@ -677,10 +677,34 @@ impl<'a> CypherExecutor<'a> {
                         item
                     };
 
-                    results.push(format_value_compact(&result));
+                    results.push(format_value_json(&result));
                 }
 
                 Ok(Value::String(format!("[{}]", results.join(", "))))
+            }
+
+            Expression::IndexAccess { expr, index } => {
+                let list_val = self.evaluate_expression(expr, row)?;
+                let idx_val = self.evaluate_expression(index, row)?;
+
+                let idx = match &idx_val {
+                    Value::Int64(i) => *i,
+                    Value::Float64(f) => *f as i64,
+                    _ => return Err(format!("Index must be an integer, got {:?}", idx_val)),
+                };
+
+                // Parse the list (JSON-formatted string like "[\"Person\"]" or "[1, 2, 3]")
+                let items = parse_list_value(&list_val);
+
+                // Support negative indexing
+                let len = items.len() as i64;
+                let actual_idx = if idx < 0 { len + idx } else { idx };
+
+                if actual_idx >= 0 && (actual_idx as usize) < items.len() {
+                    Ok(items[actual_idx as usize].clone())
+                } else {
+                    Ok(Value::Null)
+                }
             }
         }
     }
@@ -817,30 +841,35 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "nodes" => {
-                // nodes(p) returns list of nodes in a path
+                // nodes(p) returns list of node dicts in a path (JSON array)
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(path) = row.path_bindings.get(var) {
-                        let mut node_strs = Vec::new();
+                        let mut entries = Vec::new();
                         for (node_idx, _) in &path.path {
                             if let Some(node) = self.graph.graph.node_weight(*node_idx) {
-                                node_strs.push(format_value_compact(&node_to_map_value(node)));
+                                let mut props = Vec::new();
+                                props.push(format!("\"id\": {}", format_value_compact(&node.id)));
+                                props.push(format!(
+                                    "\"title\": \"{}\"",
+                                    format_value_compact(&node.title).replace('"', "\\\"")
+                                ));
+                                props.push(format!("\"type\": \"{}\"", node.node_type));
+                                entries.push(format!("{{{}}}", props.join(", ")));
                             }
                         }
-                        return Ok(Value::String(format!("[{}]", node_strs.join(", "))));
+                        return Ok(Value::String(format!("[{}]", entries.join(", "))));
                     }
                 }
                 Ok(Value::Null)
             }
             "relationships" | "rels" => {
-                // relationships(p) returns list of relationships in a path
+                // relationships(p) returns list of relationship types in a path (JSON array)
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(path) = row.path_bindings.get(var) {
                         let mut rel_strs = Vec::new();
-                        // path.path has (node_idx, connection_type) pairs
-                        // The connection_type at index i is the edge FROM node[i] TO node[i+1]
                         for (i, (_, conn_type)) in path.path.iter().enumerate() {
                             if !conn_type.is_empty() && i < path.path.len() - 1 {
-                                rel_strs.push(format!(":{}", conn_type));
+                                rel_strs.push(format!("\"{}\"", conn_type));
                             }
                         }
                         return Ok(Value::String(format!("[{}]", rel_strs.join(", "))));
@@ -869,11 +898,15 @@ impl<'a> CypherExecutor<'a> {
                 Ok(Value::Null)
             }
             "labels" => {
-                // labels(n) returns node type
+                // labels(n) returns list of node labels (as JSON list)
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(&idx) = row.node_bindings.get(var) {
                         if let Some(node) = self.graph.graph.node_weight(idx) {
-                            return Ok(resolve_node_property(node, "type"));
+                            let node_type = node.get_node_type_ref();
+                            return Ok(Value::String(format!(
+                                "[\"{}\"]",
+                                node_type.replace('\\', "\\\\").replace('"', "\\\"")
+                            )));
                         }
                     }
                 }
@@ -1034,7 +1067,24 @@ impl<'a> CypherExecutor<'a> {
                 projected.insert(key, val);
             }
 
-            result_rows.push(ResultRow::from_projected(projected));
+            // Preserve node/edge bindings from the first row in the group
+            // for variables that appear in the grouping keys.
+            // This ensures subsequent MATCH/OPTIONAL MATCH clauses can
+            // constrain patterns to the correct nodes.
+            let first_row = &result_set.rows[row_indices[0]];
+            let mut row = ResultRow::from_projected(projected);
+            for &item_idx in &group_key_indices {
+                let expr = &clause.items[item_idx].expression;
+                if let Expression::Variable(var) = expr {
+                    if let Some(&idx) = first_row.node_bindings.get(var) {
+                        row.node_bindings.insert(var.clone(), idx);
+                    }
+                    if let Some(edge) = first_row.edge_bindings.get(var) {
+                        row.edge_bindings.insert(var.clone(), edge.clone());
+                    }
+                }
+            }
+            result_rows.push(row);
         }
 
         // Handle DISTINCT
@@ -1168,7 +1218,7 @@ impl<'a> CypherExecutor<'a> {
                                     continue;
                                 }
                             }
-                            values.push(format_value_compact(&val));
+                            values.push(format_value_json(&val));
                         }
                     }
                     Ok(Value::String(format!("[{}]", values.join(", "))))
@@ -2394,6 +2444,9 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
                     .as_ref()
                     .is_some_and(|e| is_aggregate_expression(e))
         }
+        Expression::IndexAccess { expr, index } => {
+            is_aggregate_expression(expr) || is_aggregate_expression(index)
+        }
         _ => false,
     }
 }
@@ -2460,6 +2513,13 @@ fn expression_to_string(expr: &Expression) -> String {
             }
             result.push(']');
             result
+        }
+        Expression::IndexAccess { expr, index } => {
+            format!(
+                "{}[{}]",
+                expression_to_string(expr),
+                expression_to_string(index)
+            )
         }
     }
 }
@@ -2556,6 +2616,16 @@ fn parse_list_value(val: &Value) -> Vec<Value> {
 // Delegate to shared value_operations module
 fn format_value_compact(val: &Value) -> String {
     value_operations::format_value_compact(val)
+}
+/// JSON-safe value formatting: strings are quoted, others are as-is.
+/// Used for list serialization so py_convert can parse via json.loads.
+fn format_value_json(val: &Value) -> String {
+    match val {
+        Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        Value::Null => "null".to_string(),
+        Value::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
+        _ => format_value_compact(val),
+    }
 }
 fn value_to_f64(val: &Value) -> Option<f64> {
     value_operations::value_to_f64(val)

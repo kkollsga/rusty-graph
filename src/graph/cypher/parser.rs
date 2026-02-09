@@ -708,13 +708,28 @@ impl CypherParser {
     }
 
     fn parse_unary_expression(&mut self) -> Result<Expression, String> {
-        if self.check(&CypherToken::Dash) {
+        let expr = if self.check(&CypherToken::Dash) {
             self.advance();
             let inner = self.parse_primary_expression()?;
-            Ok(Expression::Negate(Box::new(inner)))
+            Expression::Negate(Box::new(inner))
         } else {
-            self.parse_primary_expression()
+            self.parse_primary_expression()?
+        };
+        self.parse_postfix(expr)
+    }
+
+    /// Parse postfix operators: expr[index]
+    fn parse_postfix(&mut self, mut expr: Expression) -> Result<Expression, String> {
+        while self.check(&CypherToken::LBracket) {
+            self.advance(); // consume [
+            let index = self.parse_expression()?;
+            self.expect(&CypherToken::RBracket)?;
+            expr = Expression::IndexAccess {
+                expr: Box::new(expr),
+                index: Box::new(index),
+            };
         }
+        Ok(expr)
     }
 
     fn parse_primary_expression(&mut self) -> Result<Expression, String> {

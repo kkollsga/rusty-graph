@@ -3,8 +3,25 @@
 
 use super::result::CypherResult;
 use crate::datatypes::py_out;
+use crate::datatypes::values::Value;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+
+/// Convert a Cypher Value to Python, parsing JSON-formatted list strings
+/// (e.g. from nodes(p), relationships(p), collect(), list comprehensions)
+/// into native Python lists.
+fn cypher_value_to_py(py: Python<'_>, val: &Value) -> PyResult<Py<PyAny>> {
+    if let Value::String(s) = val {
+        if s.starts_with('[') && s.ends_with(']') {
+            // Try to parse as JSON array → Python list
+            let json = py.import("json")?;
+            if let Ok(parsed) = json.call_method1("loads", (s.as_str(),)) {
+                return Ok(parsed.unbind());
+            }
+        }
+    }
+    py_out::value_to_py(py, val)
+}
 
 /// Convert a CypherResult to a pandas DataFrame
 pub fn cypher_result_to_dataframe(py: Python<'_>, result: &CypherResult) -> PyResult<Py<PyAny>> {
@@ -16,7 +33,7 @@ pub fn cypher_result_to_dataframe(py: Python<'_>, result: &CypherResult) -> PyRe
         let col_list = PyList::empty(py);
         for row in &result.rows {
             if let Some(val) = row.get(i) {
-                col_list.append(py_out::value_to_py(py, val)?)?;
+                col_list.append(cypher_value_to_py(py, val)?)?;
             } else {
                 col_list.append(py.None())?;
             }
@@ -58,7 +75,7 @@ pub fn cypher_result_to_py(py: Python<'_>, result: &CypherResult) -> PyResult<Py
         let row_dict = PyDict::new(py);
         for (i, col) in result.columns.iter().enumerate() {
             if let Some(val) = row.get(i) {
-                row_dict.set_item(col, py_out::value_to_py(py, val)?)?;
+                row_dict.set_item(col, cypher_value_to_py(py, val)?)?;
             } else {
                 row_dict.set_item(col, py.None())?;
             }

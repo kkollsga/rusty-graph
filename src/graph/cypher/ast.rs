@@ -158,6 +158,11 @@ pub enum Expression {
         filter: Option<Box<Predicate>>,
         map_expr: Option<Box<Expression>>,
     },
+    /// Index access: expr[index]
+    IndexAccess {
+        expr: Box<Expression>,
+        index: Box<Expression>,
+    },
 }
 
 /// Condition in a CASE WHEN clause
