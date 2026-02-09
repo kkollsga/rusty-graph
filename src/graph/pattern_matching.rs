@@ -660,11 +660,28 @@ pub fn parse_pattern(input: &str) -> Result<Pattern, String> {
 pub struct PatternExecutor<'a> {
     graph: &'a DirGraph,
     max_matches: Option<usize>,
+    pre_bindings: HashMap<String, NodeIndex>,
 }
 
 impl<'a> PatternExecutor<'a> {
     pub fn new(graph: &'a DirGraph, max_matches: Option<usize>) -> Self {
-        PatternExecutor { graph, max_matches }
+        PatternExecutor {
+            graph,
+            max_matches,
+            pre_bindings: HashMap::new(),
+        }
+    }
+
+    pub fn with_bindings(
+        graph: &'a DirGraph,
+        max_matches: Option<usize>,
+        pre_bindings: HashMap<String, NodeIndex>,
+    ) -> Self {
+        PatternExecutor {
+            graph,
+            max_matches,
+            pre_bindings,
+        }
     }
 
     /// Execute the pattern and return all matches
@@ -750,6 +767,15 @@ impl<'a> PatternExecutor<'a> {
                         break;
                     }
 
+                    // Skip if target variable is pre-bound to a different node
+                    if let Some(ref var) = node_pattern.variable {
+                        if let Some(&bound_idx) = self.pre_bindings.get(var) {
+                            if target_idx != bound_idx {
+                                continue;
+                            }
+                        }
+                    }
+
                     let mut new_match = current_match.clone();
 
                     // Add edge binding if variable exists
@@ -784,6 +810,26 @@ impl<'a> PatternExecutor<'a> {
 
     /// Find all nodes matching a node pattern
     fn find_matching_nodes(&self, pattern: &NodePattern) -> Result<Vec<NodeIndex>, String> {
+        // If variable is pre-bound, return only that node (if it matches filters)
+        if let Some(ref var) = pattern.variable {
+            if let Some(&idx) = self.pre_bindings.get(var) {
+                if let Some(node) = self.graph.graph.node_weight(idx) {
+                    if let Some(ref node_type) = pattern.node_type {
+                        if &node.node_type != node_type {
+                            return Ok(vec![]);
+                        }
+                    }
+                    if let Some(ref props) = pattern.properties {
+                        if !self.node_matches_properties(idx, props) {
+                            return Ok(vec![]);
+                        }
+                    }
+                    return Ok(vec![idx]);
+                }
+                return Ok(vec![]);
+            }
+        }
+
         let candidates: Vec<NodeIndex> = if let Some(ref node_type) = pattern.node_type {
             // Try property index acceleration when we have both type and properties
             if let Some(ref props) = pattern.properties {

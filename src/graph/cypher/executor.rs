@@ -121,11 +121,11 @@ impl<'a> CypherExecutor<'a> {
 
             for row in &existing.rows {
                 for pattern in &clause.patterns {
-                    let executor = PatternExecutor::new(self.graph, None);
+                    let executor =
+                        PatternExecutor::with_bindings(self.graph, None, row.node_bindings.clone());
                     let matches = executor.execute(pattern)?;
 
                     for m in matches {
-                        // Only keep matches compatible with existing bindings
                         if !self.bindings_compatible(row, &m) {
                             continue;
                         }
@@ -350,11 +350,11 @@ impl<'a> CypherExecutor<'a> {
             let mut found_any = false;
 
             for pattern in &clause.patterns {
-                let executor = PatternExecutor::new(self.graph, None);
+                let executor =
+                    PatternExecutor::with_bindings(self.graph, None, row.node_bindings.clone());
                 let matches = executor.execute(pattern)?;
 
                 for m in &matches {
-                    // Only keep matches compatible with existing bindings
                     if !self.bindings_compatible(row, m) {
                         continue;
                     }
@@ -556,7 +556,8 @@ impl<'a> CypherExecutor<'a> {
                 // Execute each pattern and check if any match is compatible
                 // with the current row's bindings (outer variables must match)
                 for pattern in patterns {
-                    let executor = PatternExecutor::new(self.graph, None);
+                    let executor =
+                        PatternExecutor::with_bindings(self.graph, None, row.node_bindings.clone());
                     let matches = executor.execute(pattern)?;
                     let found = matches.iter().any(|m| self.bindings_compatible(row, m));
                     if !found {
