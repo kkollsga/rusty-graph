@@ -27,9 +27,7 @@ pub enum Clause {
     Limit(LimitClause),
     Unwind(UnwindClause),
     Union(UnionClause),
-    #[allow(dead_code)]
     Create(CreateClause),
-    #[allow(dead_code)]
     Set(SetClause),
     #[allow(dead_code)]
     Delete(DeleteClause),
@@ -229,26 +227,60 @@ pub struct UnionClause {
 }
 
 // ============================================================================
-// Mutation Clauses (Phase 3 - not yet implemented)
+// Mutation Clauses
 // ============================================================================
 
-/// CREATE clause
+/// CREATE clause with expression-aware patterns
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CreateClause {
-    pub patterns: Vec<Pattern>,
+    pub patterns: Vec<CreatePattern>,
+}
+
+/// A single CREATE path pattern: node (-edge-> node)*
+#[derive(Debug, Clone)]
+pub struct CreatePattern {
+    pub elements: Vec<CreateElement>,
+}
+
+/// Either a node or edge in a CREATE pattern
+#[derive(Debug, Clone)]
+pub enum CreateElement {
+    Node(CreateNodePattern),
+    Edge(CreateEdgePattern),
+}
+
+/// Node pattern in CREATE: (var:Label {key: expr, ...})
+#[derive(Debug, Clone)]
+pub struct CreateNodePattern {
+    pub variable: Option<String>,
+    pub label: Option<String>,
+    pub properties: Vec<(String, Expression)>,
+}
+
+/// Edge pattern in CREATE: -[var:TYPE {key: expr, ...}]->
+#[derive(Debug, Clone)]
+pub struct CreateEdgePattern {
+    pub variable: Option<String>,
+    pub connection_type: String,
+    pub direction: CreateEdgeDirection,
+    pub properties: Vec<(String, Expression)>,
+}
+
+/// Edge direction in CREATE
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CreateEdgeDirection {
+    Outgoing, // ->
+    Incoming, // <-
 }
 
 /// SET clause
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct SetClause {
     pub items: Vec<SetItem>,
 }
 
 /// Single SET item
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum SetItem {
     Property {
         variable: String,

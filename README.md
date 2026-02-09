@@ -41,7 +41,7 @@ df = graph.cypher("MATCH (u:User) RETURN u.name, u.age ORDER BY u.age", to_df=Tr
 
 - [Data Management](#data-management) — Adding nodes, connections, dates, batch updates
 - [Querying](#querying) — Filtering, traversal, set operations
-- [Cypher Queries](#cypher-queries) — Full Cypher query language with WHERE, RETURN, ORDER BY, aggregation
+- [Cypher Queries](#cypher-queries) — Full Cypher query language with WHERE, RETURN, ORDER BY, CREATE, SET, aggregation
 - [When to Use What](#when-to-use-what) — Choosing between Cypher, fluent API, and pattern matching
 - [Pattern Matching](#pattern-matching) — Cypher-like pattern syntax for multi-hop traversals
 - [Graph Algorithms](#graph-algorithms) — Shortest path, all paths, connected components
@@ -261,7 +261,7 @@ selection_a.union(selection_b).intersection(selection_c)
 
 ## Cypher Queries
 
-Query the graph using Cypher — the standard graph query language. Supports `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `ORDER BY`, `SKIP`, `LIMIT`, `WITH`, aggregation functions, and arithmetic expressions.
+Query the graph using Cypher — the standard graph query language. Supports `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `ORDER BY`, `SKIP`, `LIMIT`, `WITH`, `CREATE`, `SET`, aggregation functions, and arithmetic expressions.
 
 ```python
 result = graph.cypher("""
@@ -443,6 +443,47 @@ graph.cypher("MATCH (a:Person)-[:KNOWS*1..3]->(b:Person) WHERE a.name = 'Alice' 
 graph.cypher("MATCH (a:Person)-[:KNOWS*2]->(b:Person) RETURN a.name, b.name")
 ```
 
+### CREATE — Create Nodes and Edges
+
+```python
+# Create a node
+result = graph.cypher("CREATE (n:Person {name: 'Alice', age: 30, city: 'Oslo'})")
+print(result['stats'])  # {'nodes_created': 1, 'relationships_created': 0, 'properties_set': 0}
+
+# Create a full path (nodes + edge)
+graph.cypher("CREATE (a:Team {name: 'Alpha'})-[:MEMBER]->(b:Team {name: 'Beta'})")
+
+# Create an edge between existing nodes
+graph.cypher("""
+    MATCH (a:Person) WHERE a.name = 'Alice'
+    MATCH (b:Person) WHERE b.name = 'Bob'
+    CREATE (a)-[:KNOWS]->(b)
+""")
+
+# Use parameters
+graph.cypher("CREATE (n:Person {name: $name, age: $age})", params={'name': 'Eve', 'age': 28})
+
+# Return created data
+result = graph.cypher("CREATE (n:City {name: 'Bergen'}) RETURN n.name")
+```
+
+### SET — Update Properties
+
+```python
+# Update a property
+graph.cypher("MATCH (n:Person) WHERE n.name = 'Alice' SET n.city = 'Bergen'")
+
+# Update multiple properties
+result = graph.cypher("""
+    MATCH (n:Person) WHERE n.name = 'Bob'
+    SET n.age = 26, n.city = 'Stavanger'
+""")
+print(result['stats']['properties_set'])  # 2
+
+# Arithmetic expressions
+graph.cypher("MATCH (n:Person) WHERE n.name = 'Alice' SET n.age = 30 + 1")
+```
+
 ### DataFrame Output
 
 Pass `to_df=True` to get results as a pandas DataFrame instead of a dict:
@@ -473,14 +514,15 @@ The Cypher executor uses several optimizations:
 
 | Category | Supported |
 |----------|-----------|
-| **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`, `UNION ALL` |
+| **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`, `UNION ALL`, `CREATE`, `SET` |
 | **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, inline properties `{key: val}` |
 | **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH` |
 | **RETURN** | Property access `n.prop`, aliases `AS`, `DISTINCT`, arithmetic `+`, `-`, `*`, `/` |
 | **Aggregation** | `count(*)`, `count(expr)`, `sum`, `avg`/`mean`, `min`, `max`, `collect`, `std` |
 | **Expressions** | `CASE WHEN ... THEN ... ELSE ... END`, parameters `$param` |
 | **Scalar functions** | `toUpper`/`upper`, `toLower`/`lower`, `toString`, `toInteger`/`toInt`, `toFloat`, `size`/`length`, `type`, `id`, `labels`, `coalesce` |
-| **Not supported** | `CREATE`, `SET`, `DELETE`, `MERGE`, `CALL`, subqueries, list comprehensions |
+| **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr` |
+| **Not supported** | `DELETE`, `MERGE`, `REMOVE`, `CALL`, subqueries, list comprehensions |
 
 ---
 

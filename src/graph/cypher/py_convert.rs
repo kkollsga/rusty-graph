@@ -67,5 +67,14 @@ pub fn cypher_result_to_py(py: Python<'_>, result: &CypherResult) -> PyResult<Py
     }
     result_dict.set_item("rows", rows_list)?;
 
+    // Add mutation stats if present
+    if let Some(ref stats) = result.stats {
+        let stats_dict = PyDict::new(py);
+        stats_dict.set_item("nodes_created", stats.nodes_created)?;
+        stats_dict.set_item("relationships_created", stats.relationships_created)?;
+        stats_dict.set_item("properties_set", stats.properties_set)?;
+        result_dict.set_item("stats", stats_dict)?;
+    }
+
     Ok(result_dict.into_any().unbind())
 }

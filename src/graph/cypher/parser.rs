@@ -140,10 +140,10 @@ impl CypherParser {
                     clauses.push(self.parse_union_clause()?);
                 }
                 Some(CypherToken::Create) => {
-                    return Err("CREATE clause is not yet supported".to_string());
+                    clauses.push(self.parse_create_clause()?);
                 }
                 Some(CypherToken::Set) => {
-                    return Err("SET clause is not yet supported".to_string());
+                    clauses.push(self.parse_set_clause()?);
                 }
                 Some(CypherToken::Delete) | Some(CypherToken::Detach) => {
                     return Err("DELETE clause is not yet supported".to_string());
@@ -900,6 +900,258 @@ impl CypherParser {
             query: Box::new(query),
         }))
     }
+
+    // ========================================================================
+    // CREATE Clause
+    // ========================================================================
+
+    fn parse_create_clause(&mut self) -> Result<Clause, String> {
+        self.expect(&CypherToken::Create)?;
+        let mut patterns = Vec::new();
+
+        loop {
+            patterns.push(self.parse_create_pattern()?);
+            if self.check(&CypherToken::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        Ok(Clause::Create(CreateClause { patterns }))
+    }
+
+    /// Parse a single CREATE path pattern: (node)-[edge]->(node)...
+    fn parse_create_pattern(&mut self) -> Result<CreatePattern, String> {
+        let mut elements = Vec::new();
+        elements.push(CreateElement::Node(self.parse_create_node()?));
+
+        // Parse optional edge-node chains
+        while matches!(
+            self.peek(),
+            Some(CypherToken::Dash) | Some(CypherToken::LessThan)
+        ) {
+            elements.push(CreateElement::Edge(self.parse_create_edge()?));
+            elements.push(CreateElement::Node(self.parse_create_node()?));
+        }
+
+        Ok(CreatePattern { elements })
+    }
+
+    /// Parse a node in a CREATE pattern: (var:Label {key: expr, ...})
+    fn parse_create_node(&mut self) -> Result<CreateNodePattern, String> {
+        self.expect(&CypherToken::LParen)?;
+        let mut variable = None;
+        let mut label = None;
+        let mut properties = Vec::new();
+
+        // Parse optional variable name
+        if let Some(CypherToken::Identifier(_)) = self.peek() {
+            // It's a variable if followed by : or { or )
+            // (not a property access or function call)
+            if let Some(CypherToken::Identifier(name)) = self.peek().cloned() {
+                self.advance();
+                variable = Some(name);
+            }
+        }
+
+        // Parse optional :Label
+        if self.check(&CypherToken::Colon) {
+            self.advance();
+            if let Some(CypherToken::Identifier(name)) = self.peek().cloned() {
+                self.advance();
+                label = Some(name);
+            } else {
+                return Err("Expected label name after ':'".to_string());
+            }
+        }
+
+        // Parse optional {key: expr, ...}
+        if self.check(&CypherToken::LBrace) {
+            properties = self.parse_create_properties()?;
+        }
+
+        self.expect(&CypherToken::RParen)?;
+        Ok(CreateNodePattern {
+            variable,
+            label,
+            properties,
+        })
+    }
+
+    /// Parse CREATE properties: {key: expr, key: expr, ...}
+    fn parse_create_properties(&mut self) -> Result<Vec<(String, Expression)>, String> {
+        self.expect(&CypherToken::LBrace)?;
+        let mut props = Vec::new();
+
+        if !self.check(&CypherToken::RBrace) {
+            loop {
+                let key = match self.peek().cloned() {
+                    Some(CypherToken::Identifier(k)) => {
+                        self.advance();
+                        k
+                    }
+                    other => {
+                        return Err(format!("Expected property key, got {:?}", other));
+                    }
+                };
+                self.expect(&CypherToken::Colon)?;
+                let value_expr = self.parse_expression()?;
+                props.push((key, value_expr));
+
+                if self.check(&CypherToken::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        self.expect(&CypherToken::RBrace)?;
+        Ok(props)
+    }
+
+    /// Parse an edge in a CREATE pattern: -[var:TYPE {props}]-> or <-[var:TYPE {props}]-
+    fn parse_create_edge(&mut self) -> Result<CreateEdgePattern, String> {
+        // Handle direction prefix: <- means incoming
+        let incoming = if self.check(&CypherToken::LessThan) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        self.expect(&CypherToken::Dash)?;
+        self.expect(&CypherToken::LBracket)?;
+
+        let mut variable = None;
+        let mut connection_type = None;
+        let mut properties = Vec::new();
+
+        // Parse optional variable name
+        if let Some(CypherToken::Identifier(_)) = self.peek() {
+            // Check if followed by : (variable:TYPE) or ] (just variable)
+            if matches!(
+                self.peek_at(1),
+                Some(CypherToken::Colon) | Some(CypherToken::RBracket)
+            ) {
+                if let Some(CypherToken::Identifier(name)) = self.peek().cloned() {
+                    self.advance();
+                    variable = Some(name);
+                }
+            }
+        }
+
+        // Parse :TYPE (required for CREATE)
+        if self.check(&CypherToken::Colon) {
+            self.advance();
+            if let Some(CypherToken::Identifier(name)) = self.peek().cloned() {
+                self.advance();
+                connection_type = Some(name);
+            } else {
+                return Err("Expected relationship type after ':'".to_string());
+            }
+        }
+
+        let conn_type = connection_type
+            .ok_or_else(|| "CREATE requires a relationship type (e.g. [:KNOWS])".to_string())?;
+
+        // Parse optional properties
+        if self.check(&CypherToken::LBrace) {
+            properties = self.parse_create_properties()?;
+        }
+
+        self.expect(&CypherToken::RBracket)?;
+        self.expect(&CypherToken::Dash)?;
+
+        // Handle direction suffix
+        let direction = if self.check(&CypherToken::GreaterThan) {
+            self.advance();
+            if incoming {
+                return Err("Cannot have both < and > in CREATE edge pattern".to_string());
+            }
+            CreateEdgeDirection::Outgoing
+        } else if incoming {
+            CreateEdgeDirection::Incoming
+        } else {
+            return Err("CREATE edges must have a direction (-> or <-)".to_string());
+        };
+
+        Ok(CreateEdgePattern {
+            variable,
+            connection_type: conn_type,
+            direction,
+            properties,
+        })
+    }
+
+    // ========================================================================
+    // SET Clause
+    // ========================================================================
+
+    fn parse_set_clause(&mut self) -> Result<Clause, String> {
+        self.expect(&CypherToken::Set)?;
+        let mut items = Vec::new();
+
+        loop {
+            let var_name = match self.peek().cloned() {
+                Some(CypherToken::Identifier(name)) => {
+                    self.advance();
+                    name
+                }
+                other => {
+                    return Err(format!("Expected variable name in SET, got {:?}", other));
+                }
+            };
+
+            if self.check(&CypherToken::Dot) {
+                // Property assignment: var.prop = expr
+                self.advance(); // consume .
+                let prop_name = match self.peek().cloned() {
+                    Some(CypherToken::Identifier(name)) => {
+                        self.advance();
+                        name
+                    }
+                    other => {
+                        return Err(format!("Expected property name after '.', got {:?}", other));
+                    }
+                };
+                self.expect(&CypherToken::Equals)?;
+                let expression = self.parse_expression()?;
+                items.push(SetItem::Property {
+                    variable: var_name,
+                    property: prop_name,
+                    expression,
+                });
+            } else if self.check(&CypherToken::Colon) {
+                // Label assignment: var:Label
+                self.advance();
+                let label = match self.peek().cloned() {
+                    Some(CypherToken::Identifier(name)) => {
+                        self.advance();
+                        name
+                    }
+                    other => {
+                        return Err(format!("Expected label name after ':', got {:?}", other));
+                    }
+                };
+                items.push(SetItem::Label {
+                    variable: var_name,
+                    label,
+                });
+            } else {
+                return Err("Expected '.' or ':' after variable name in SET".to_string());
+            }
+
+            if self.check(&CypherToken::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        Ok(Clause::Set(SetClause { items }))
+    }
 }
 
 // ============================================================================
@@ -1266,5 +1518,151 @@ mod tests {
                 matches!(&r.items[1].expression, Expression::Parameter(name) if name == "label")
             );
         }
+    }
+
+    // ========================================================================
+    // CREATE Clause
+    // ========================================================================
+
+    #[test]
+    fn test_parse_create_node() {
+        let query = parse_cypher("CREATE (n:Person {name: 'Alice', age: 30})").unwrap();
+        assert_eq!(query.clauses.len(), 1);
+
+        if let Clause::Create(c) = &query.clauses[0] {
+            assert_eq!(c.patterns.len(), 1);
+            assert_eq!(c.patterns[0].elements.len(), 1);
+            if let CreateElement::Node(np) = &c.patterns[0].elements[0] {
+                assert_eq!(np.variable, Some("n".to_string()));
+                assert_eq!(np.label, Some("Person".to_string()));
+                assert_eq!(np.properties.len(), 2);
+                assert_eq!(np.properties[0].0, "name");
+                assert_eq!(np.properties[1].0, "age");
+            } else {
+                panic!("Expected node element");
+            }
+        } else {
+            panic!("Expected CREATE clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_edge() {
+        let query = parse_cypher("MATCH (a:Person), (b:Person) CREATE (a)-[:KNOWS]->(b)").unwrap();
+        assert_eq!(query.clauses.len(), 2);
+        assert!(matches!(&query.clauses[0], Clause::Match(_)));
+        assert!(matches!(&query.clauses[1], Clause::Create(_)));
+
+        if let Clause::Create(c) = &query.clauses[1] {
+            assert_eq!(c.patterns[0].elements.len(), 3); // node, edge, node
+            if let CreateElement::Edge(ep) = &c.patterns[0].elements[1] {
+                assert_eq!(ep.connection_type, "KNOWS");
+                assert_eq!(ep.direction, CreateEdgeDirection::Outgoing);
+            } else {
+                panic!("Expected edge element");
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_create_path() {
+        let query =
+            parse_cypher("CREATE (a:Person {name: 'A'})-[:KNOWS]->(b:Person {name: 'B'})").unwrap();
+
+        if let Clause::Create(c) = &query.clauses[0] {
+            assert_eq!(c.patterns[0].elements.len(), 3);
+            assert!(matches!(&c.patterns[0].elements[0], CreateElement::Node(_)));
+            assert!(matches!(&c.patterns[0].elements[1], CreateElement::Edge(_)));
+            assert!(matches!(&c.patterns[0].elements[2], CreateElement::Node(_)));
+        }
+    }
+
+    #[test]
+    fn test_parse_create_with_params() {
+        let query = parse_cypher("CREATE (n:Person {name: $name, age: $age})").unwrap();
+
+        if let Clause::Create(c) = &query.clauses[0] {
+            if let CreateElement::Node(np) = &c.patterns[0].elements[0] {
+                assert!(matches!(&np.properties[0].1, Expression::Parameter(n) if n == "name"));
+                assert!(matches!(&np.properties[1].1, Expression::Parameter(n) if n == "age"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_create_incoming_edge() {
+        let query =
+            parse_cypher("MATCH (a:Person), (b:Person) CREATE (a)<-[:FOLLOWS]-(b)").unwrap();
+
+        if let Clause::Create(c) = &query.clauses[1] {
+            if let CreateElement::Edge(ep) = &c.patterns[0].elements[1] {
+                assert_eq!(ep.connection_type, "FOLLOWS");
+                assert_eq!(ep.direction, CreateEdgeDirection::Incoming);
+            }
+        }
+    }
+
+    // ========================================================================
+    // SET Clause
+    // ========================================================================
+
+    #[test]
+    fn test_parse_set_property() {
+        let query = parse_cypher("MATCH (n:Person) SET n.age = 31").unwrap();
+        assert_eq!(query.clauses.len(), 2);
+        assert!(matches!(&query.clauses[1], Clause::Set(_)));
+
+        if let Clause::Set(s) = &query.clauses[1] {
+            assert_eq!(s.items.len(), 1);
+            if let SetItem::Property {
+                variable,
+                property,
+                expression,
+            } = &s.items[0]
+            {
+                assert_eq!(variable, "n");
+                assert_eq!(property, "age");
+                assert!(matches!(expression, Expression::Literal(Value::Int64(31))));
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_set_multiple() {
+        let query = parse_cypher("MATCH (n:Person) SET n.age = 31, n.city = 'Bergen'").unwrap();
+
+        if let Clause::Set(s) = &query.clauses[1] {
+            assert_eq!(s.items.len(), 2);
+            if let SetItem::Property { property, .. } = &s.items[0] {
+                assert_eq!(property, "age");
+            }
+            if let SetItem::Property { property, .. } = &s.items[1] {
+                assert_eq!(property, "city");
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_set_expression() {
+        let query = parse_cypher("MATCH (n:Person) SET n.salary = n.salary * 1.1").unwrap();
+
+        if let Clause::Set(s) = &query.clauses[1] {
+            if let SetItem::Property { expression, .. } = &s.items[0] {
+                assert!(matches!(expression, Expression::Multiply(_, _)));
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_match_create_set_return() {
+        let query = parse_cypher(
+            "MATCH (a:Person) CREATE (a)-[:RATED]->(r:Review {text: 'Great'}) SET a.reviews = a.reviews + 1 RETURN a, r",
+        ).unwrap();
+
+        assert_eq!(query.clauses.len(), 4);
+        assert!(matches!(&query.clauses[0], Clause::Match(_)));
+        assert!(matches!(&query.clauses[1], Clause::Create(_)));
+        assert!(matches!(&query.clauses[2], Clause::Set(_)));
+        assert!(matches!(&query.clauses[3], Clause::Return(_)));
     }
 }

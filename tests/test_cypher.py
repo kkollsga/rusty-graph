@@ -481,3 +481,174 @@ class TestExistingFeatures:
             ORDER BY city
         """)
         assert len(result['rows']) == 2  # Bergen and Oslo
+
+
+class TestCreateClause:
+    """Tests for CREATE clause — node and edge creation via Cypher."""
+
+    def test_create_node(self, cypher_graph):
+        """CREATE (n:City {name: 'Trondheim'}) creates a new node."""
+        before = cypher_graph.cypher("MATCH (n:City) RETURN count(*) AS cnt")
+        before_cnt = before['rows'][0]['cnt']
+
+        result = cypher_graph.cypher("CREATE (n:City {name: 'Trondheim'})")
+        assert 'stats' in result
+        assert result['stats']['nodes_created'] == 1
+
+        after = cypher_graph.cypher("MATCH (n:City) RETURN count(*) AS cnt")
+        assert after['rows'][0]['cnt'] == before_cnt + 1
+
+    def test_create_node_with_properties(self, cypher_graph):
+        """CREATE with multiple properties stores them on the node."""
+        cypher_graph.cypher(
+            "CREATE (n:Person {name: 'Frank', age: 45, city: 'Trondheim'})"
+        )
+        result = cypher_graph.cypher(
+            "MATCH (n:Person) WHERE n.name = 'Frank' RETURN n.name, n.age, n.city"
+        )
+        assert len(result['rows']) == 1
+        row = result['rows'][0]
+        assert row['n.name'] == 'Frank'
+        assert row['n.age'] == 45
+        assert row['n.city'] == 'Trondheim'
+
+    def test_create_edge_after_match(self, cypher_graph):
+        """MATCH (a) MATCH (b) CREATE (a)-[:REL]->(b) creates an edge."""
+        result = cypher_graph.cypher("""
+            MATCH (a:Person) WHERE a.name = 'Alice'
+            MATCH (b:Person) WHERE b.name = 'Eve'
+            CREATE (a)-[:FRIENDS]->(b)
+        """)
+        assert result['stats']['relationships_created'] == 1
+
+        # Verify the edge exists
+        check = cypher_graph.cypher("""
+            MATCH (a:Person)-[:FRIENDS]->(b:Person)
+            RETURN a.name AS src, b.name AS tgt
+        """)
+        assert len(check['rows']) == 1
+        assert check['rows'][0]['src'] == 'Alice'
+        assert check['rows'][0]['tgt'] == 'Eve'
+
+    def test_create_path(self, cypher_graph):
+        """CREATE (a:X)-[:R]->(b:Y) creates both nodes and the edge."""
+        result = cypher_graph.cypher(
+            "CREATE (a:Team {name: 'Alpha'})-[:MEMBER]->(b:Team {name: 'Beta'})"
+        )
+        assert result['stats']['nodes_created'] == 2
+        assert result['stats']['relationships_created'] == 1
+
+    def test_create_with_params(self, cypher_graph):
+        """CREATE with $param substitution for property values."""
+        result = cypher_graph.cypher(
+            "CREATE (n:Person {name: $name, age: $age})",
+            params={'name': 'Grace', 'age': 29}
+        )
+        assert result['stats']['nodes_created'] == 1
+
+        check = cypher_graph.cypher(
+            "MATCH (n:Person) WHERE n.name = 'Grace' RETURN n.age"
+        )
+        assert len(check['rows']) == 1
+        assert check['rows'][0]['n.age'] == 29
+
+    def test_create_return_created_node(self, cypher_graph):
+        """CREATE ... RETURN should return data about created nodes."""
+        result = cypher_graph.cypher(
+            "CREATE (n:Animal {name: 'Rex', species: 'Dog'}) RETURN n.name, n.species"
+        )
+        assert len(result['rows']) == 1
+        assert result['rows'][0]['n.name'] == 'Rex'
+        assert result['rows'][0]['n.species'] == 'Dog'
+
+
+class TestSetClause:
+    """Tests for SET clause — property updates via Cypher."""
+
+    def test_set_property(self, cypher_graph):
+        """SET n.prop = value updates a property."""
+        cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Alice'
+            SET n.city = 'Trondheim'
+        """)
+        result = cypher_graph.cypher(
+            "MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.city"
+        )
+        assert result['rows'][0]['n.city'] == 'Trondheim'
+
+    def test_set_multiple_properties(self, cypher_graph):
+        """SET n.a = x, n.b = y updates multiple properties."""
+        result = cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Bob'
+            SET n.city = 'Stavanger', n.age = 26
+        """)
+        assert result['stats']['properties_set'] == 2
+
+        check = cypher_graph.cypher(
+            "MATCH (n:Person) WHERE n.name = 'Bob' RETURN n.city, n.age"
+        )
+        row = check['rows'][0]
+        assert row['n.city'] == 'Stavanger'
+        assert row['n.age'] == 26
+
+    def test_set_title(self, cypher_graph):
+        """SET n.name = 'X' updates the node title."""
+        cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Charlie'
+            SET n.name = 'Charles'
+        """)
+        result = cypher_graph.cypher(
+            "MATCH (n:Person) WHERE n.name = 'Charles' RETURN n.name, n.title"
+        )
+        assert len(result['rows']) == 1
+        assert result['rows'][0]['n.name'] == 'Charles'
+        assert result['rows'][0]['n.title'] == 'Charles'
+
+    def test_set_id_error(self, cypher_graph):
+        """SET n.id = x should raise an error (id is immutable)."""
+        with pytest.raises(RuntimeError):
+            cypher_graph.cypher("""
+                MATCH (n:Person) WHERE n.name = 'Alice'
+                SET n.id = 999
+            """)
+
+    def test_set_with_expression(self, cypher_graph):
+        """SET n.prop = expression (arithmetic)."""
+        cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Alice'
+            SET n.age = 30 + 1
+        """)
+        result = cypher_graph.cypher(
+            "MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.age"
+        )
+        assert result['rows'][0]['n.age'] == 31
+
+
+class TestMutationStats:
+    """Tests that CREATE and SET return proper mutation statistics."""
+
+    def test_create_returns_stats(self, cypher_graph):
+        """CREATE result includes stats dict."""
+        result = cypher_graph.cypher(
+            "CREATE (a:X {name: 'A'})-[:R]->(b:X {name: 'B'})"
+        )
+        assert 'stats' in result
+        stats = result['stats']
+        assert stats['nodes_created'] == 2
+        assert stats['relationships_created'] == 1
+        assert stats['properties_set'] == 0  # properties on CREATE don't count as SET
+
+    def test_set_returns_stats(self, cypher_graph):
+        """SET result includes stats dict with properties_set count."""
+        result = cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Alice'
+            SET n.city = 'Drammen', n.salary = 75000
+        """)
+        assert 'stats' in result
+        assert result['stats']['properties_set'] == 2
+        assert result['stats']['nodes_created'] == 0
+
+    def test_read_query_no_stats(self, cypher_graph):
+        """Read-only queries should not have stats key."""
+        result = cypher_graph.cypher("MATCH (n:Person) RETURN n.name")
+        assert 'stats' not in result

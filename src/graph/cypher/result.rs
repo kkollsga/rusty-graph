@@ -89,11 +89,20 @@ impl ResultSet {
 // Final Output
 // ============================================================================
 
+/// Mutation statistics returned from CREATE/SET/DELETE queries
+#[derive(Debug, Clone, Default)]
+pub struct MutationStats {
+    pub nodes_created: usize,
+    pub relationships_created: usize,
+    pub properties_set: usize,
+}
+
 /// Final query result returned to Python
 #[derive(Debug)]
 pub struct CypherResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
+    pub stats: Option<MutationStats>,
 }
 
 impl CypherResult {
@@ -101,6 +110,7 @@ impl CypherResult {
         CypherResult {
             columns: Vec::new(),
             rows: Vec::new(),
+            stats: None,
         }
     }
 }

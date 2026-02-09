@@ -3592,7 +3592,7 @@ impl KnowledgeGraph {
     ///     ```
     #[pyo3(signature = (query, *, to_df=false, params=None))]
     fn cypher(
-        &self,
+        &mut self,
         py: Python<'_>,
         query: &str,
         to_df: bool,
@@ -3607,25 +3607,40 @@ impl KnowledgeGraph {
         cypher::optimize(&mut parsed, &self.inner);
 
         // Convert params dict to HashMap<String, Value>
-        let executor = if let Some(params_dict) = params {
-            let mut param_map = std::collections::HashMap::new();
+        let param_map = if let Some(params_dict) = params {
+            let mut map = std::collections::HashMap::new();
             for (key, val) in params_dict.iter() {
                 let key_str: String = key.extract()?;
                 let value = py_in::py_value_to_value(&val)?;
-                param_map.insert(key_str, value);
+                map.insert(key_str, value);
             }
-            cypher::CypherExecutor::with_params(&self.inner, param_map)
+            map
         } else {
-            cypher::CypherExecutor::new(&self.inner)
+            std::collections::HashMap::new()
         };
 
-        // Execute
-        let result = executor.execute(&parsed).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Cypher execution error: {}",
-                e
-            ))
-        })?;
+        // Check if this is a mutation query
+        let result = if cypher::is_mutation_query(&parsed) {
+            // Mutation path: extract graph, mutate, re-wrap in Arc
+            let mut graph = extract_or_clone_graph(&mut self.inner);
+            let result = cypher::execute_mutable(&mut graph, &parsed, param_map).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Cypher execution error: {}",
+                    e
+                ))
+            })?;
+            self.inner = Arc::new(graph);
+            result
+        } else {
+            // Read-only path: borrow immutably
+            let executor = cypher::CypherExecutor::with_params(&self.inner, &param_map);
+            executor.execute(&parsed).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Cypher execution error: {}",
+                    e
+                ))
+            })?
+        };
 
         // Convert to Python
         if to_df {

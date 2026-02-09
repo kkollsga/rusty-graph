@@ -6,7 +6,7 @@ use super::result::*;
 use crate::datatypes::values::Value;
 use crate::graph::filtering_methods;
 use crate::graph::pattern_matching::{MatchBinding, PatternExecutor, PatternMatch};
-use crate::graph::schema::{DirGraph, NodeData};
+use crate::graph::schema::{DirGraph, EdgeData, NodeData};
 use crate::graph::value_operations;
 use std::collections::{HashMap, HashSet};
 
@@ -16,47 +16,50 @@ use std::collections::{HashMap, HashSet};
 
 pub struct CypherExecutor<'a> {
     graph: &'a DirGraph,
-    params: HashMap<String, Value>,
+    params: &'a HashMap<String, Value>,
 }
 
 impl<'a> CypherExecutor<'a> {
-    pub fn new(graph: &'a DirGraph) -> Self {
-        CypherExecutor {
-            graph,
-            params: HashMap::new(),
-        }
-    }
-
-    pub fn with_params(graph: &'a DirGraph, params: HashMap<String, Value>) -> Self {
+    pub fn with_params(graph: &'a DirGraph, params: &'a HashMap<String, Value>) -> Self {
         CypherExecutor { graph, params }
     }
 
-    /// Execute a parsed Cypher query
+    /// Execute a parsed Cypher query (read-only)
     pub fn execute(&self, query: &CypherQuery) -> Result<CypherResult, String> {
         let mut result_set = ResultSet::new();
 
         for clause in &query.clauses {
-            result_set = match clause {
-                Clause::Match(m) => self.execute_match(m, result_set)?,
-                Clause::OptionalMatch(m) => self.execute_optional_match(m, result_set)?,
-                Clause::Where(w) => self.execute_where(w, result_set)?,
-                Clause::Return(r) => self.execute_return(r, result_set)?,
-                Clause::With(w) => self.execute_with(w, result_set)?,
-                Clause::OrderBy(o) => self.execute_order_by(o, result_set)?,
-                Clause::Limit(l) => self.execute_limit(l, result_set)?,
-                Clause::Skip(s) => self.execute_skip(s, result_set)?,
-                Clause::Unwind(u) => self.execute_unwind(u, result_set)?,
-                Clause::Union(u) => self.execute_union(u, result_set)?,
-                Clause::Create(_) | Clause::Set(_) | Clause::Delete(_) => {
-                    return Err(
-                        "Mutation queries (CREATE/SET/DELETE) are not yet supported".to_string()
-                    );
-                }
-            };
+            result_set = self.execute_single_clause(clause, result_set)?;
         }
 
         // Convert ResultSet to CypherResult
-        self.finalize_result(result_set)
+        let mut result = self.finalize_result(result_set)?;
+        result.stats = None;
+        Ok(result)
+    }
+
+    /// Execute a single clause, transforming the result set.
+    /// Public so execute_mutable can call it for read clauses.
+    pub fn execute_single_clause(
+        &self,
+        clause: &Clause,
+        result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
+        match clause {
+            Clause::Match(m) => self.execute_match(m, result_set),
+            Clause::OptionalMatch(m) => self.execute_optional_match(m, result_set),
+            Clause::Where(w) => self.execute_where(w, result_set),
+            Clause::Return(r) => self.execute_return(r, result_set),
+            Clause::With(w) => self.execute_with(w, result_set),
+            Clause::OrderBy(o) => self.execute_order_by(o, result_set),
+            Clause::Limit(l) => self.execute_limit(l, result_set),
+            Clause::Skip(s) => self.execute_skip(s, result_set),
+            Clause::Unwind(u) => self.execute_unwind(u, result_set),
+            Clause::Union(u) => self.execute_union(u, result_set),
+            Clause::Create(_) | Clause::Set(_) | Clause::Delete(_) => {
+                Err("Mutation clauses cannot be executed in read-only mode".to_string())
+            }
+        }
     }
 
     // ========================================================================
@@ -451,7 +454,11 @@ impl<'a> CypherExecutor<'a> {
     // ========================================================================
 
     /// Evaluate an expression against a row, resolving property access via NodeIndex
-    fn evaluate_expression(&self, expr: &Expression, row: &ResultRow) -> Result<Value, String> {
+    pub(crate) fn evaluate_expression(
+        &self,
+        expr: &Expression,
+        row: &ResultRow,
+    ) -> Result<Value, String> {
         match expr {
             Expression::PropertyAccess { variable, property } => {
                 self.resolve_property(variable, property, row)
@@ -1243,7 +1250,7 @@ impl<'a> CypherExecutor<'a> {
     // ========================================================================
 
     /// Convert the final ResultSet into a CypherResult for Python consumption
-    fn finalize_result(&self, result_set: ResultSet) -> Result<CypherResult, String> {
+    pub fn finalize_result(&self, result_set: ResultSet) -> Result<CypherResult, String> {
         if result_set.columns.is_empty() {
             // No RETURN clause - infer columns from available bindings
             if result_set.rows.is_empty() {
@@ -1287,7 +1294,11 @@ impl<'a> CypherExecutor<'a> {
                 })
                 .collect();
 
-            return Ok(CypherResult { columns, rows });
+            return Ok(CypherResult {
+                columns,
+                rows,
+                stats: None,
+            });
         }
 
         // RETURN was specified - use its columns
@@ -1306,8 +1317,330 @@ impl<'a> CypherExecutor<'a> {
         Ok(CypherResult {
             columns: result_set.columns,
             rows,
+            stats: None,
         })
     }
+}
+
+// ============================================================================
+// Mutation Execution
+// ============================================================================
+
+/// Check if a query contains any mutation clauses
+pub fn is_mutation_query(query: &CypherQuery) -> bool {
+    query
+        .clauses
+        .iter()
+        .any(|c| matches!(c, Clause::Create(_) | Clause::Set(_) | Clause::Delete(_)))
+}
+
+/// Execute a mutation query against a mutable graph.
+/// Called instead of CypherExecutor::execute() when the query contains CREATE/SET/DELETE.
+pub fn execute_mutable(
+    graph: &mut DirGraph,
+    query: &CypherQuery,
+    params: HashMap<String, Value>,
+) -> Result<CypherResult, String> {
+    let mut result_set = ResultSet::new();
+    let mut stats = MutationStats::default();
+
+    for clause in &query.clauses {
+        match clause {
+            // Write clauses: mutate graph directly
+            Clause::Create(create) => {
+                result_set = execute_create(graph, create, result_set, &params, &mut stats)?;
+            }
+            Clause::Set(set) => {
+                execute_set(graph, set, &result_set, &params, &mut stats)?;
+            }
+            Clause::Delete(_) => {
+                return Err("DELETE clause is not yet supported".to_string());
+            }
+            // Read clauses: create temporary immutable executor
+            _ => {
+                let executor = CypherExecutor::with_params(graph, &params);
+                result_set = executor.execute_single_clause(clause, result_set)?;
+            }
+        }
+    }
+
+    // Finalize: if RETURN was in the query, finalize with column projection
+    let has_return = query.clauses.iter().any(|c| matches!(c, Clause::Return(_)));
+
+    if has_return || !result_set.columns.is_empty() {
+        let executor = CypherExecutor::with_params(graph, &params);
+        let mut result = executor.finalize_result(result_set)?;
+        result.stats = Some(stats);
+        Ok(result)
+    } else {
+        // No RETURN: return empty result with stats
+        Ok(CypherResult {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            stats: Some(stats),
+        })
+    }
+}
+
+/// Execute a CREATE clause, creating nodes and edges in the graph.
+fn execute_create(
+    graph: &mut DirGraph,
+    create: &CreateClause,
+    existing: ResultSet,
+    params: &HashMap<String, Value>,
+    stats: &mut MutationStats,
+) -> Result<ResultSet, String> {
+    let source_rows = if existing.rows.is_empty() {
+        // No prior MATCH: execute once with an empty row
+        vec![ResultRow::new()]
+    } else {
+        existing.rows
+    };
+
+    let mut new_rows = Vec::with_capacity(source_rows.len());
+
+    for row in &source_rows {
+        let mut new_row = row.clone();
+
+        for pattern in &create.patterns {
+            // Collect variable -> NodeIndex mappings for this pattern
+            let mut pattern_vars: HashMap<String, petgraph::graph::NodeIndex> = HashMap::new();
+
+            // Seed with existing bindings from MATCH
+            for (var, &idx) in &row.node_bindings {
+                pattern_vars.insert(var.clone(), idx);
+            }
+
+            // First pass: create all new nodes
+            for element in &pattern.elements {
+                if let CreateElement::Node(node_pat) = element {
+                    // If variable already bound (from MATCH), skip creation
+                    if let Some(ref var) = node_pat.variable {
+                        if pattern_vars.contains_key(var) {
+                            continue;
+                        }
+                    }
+
+                    let node_idx = create_node(graph, node_pat, &new_row, params, stats)?;
+
+                    if let Some(ref var) = node_pat.variable {
+                        pattern_vars.insert(var.clone(), node_idx);
+                        new_row.node_bindings.insert(var.clone(), node_idx);
+                    }
+                }
+            }
+
+            // Second pass: create edges
+            // Elements are [Node, Edge, Node, Edge, Node, ...]
+            let mut i = 1;
+            while i < pattern.elements.len() {
+                if let CreateElement::Edge(edge_pat) = &pattern.elements[i] {
+                    let source_var = get_create_node_variable(&pattern.elements[i - 1]);
+                    let target_var = get_create_node_variable(&pattern.elements[i + 1]);
+
+                    let source_idx = resolve_create_node_idx(source_var, &pattern_vars)?;
+                    let target_idx = resolve_create_node_idx(target_var, &pattern_vars)?;
+
+                    // Determine actual source/target based on direction
+                    let (actual_source, actual_target) = match edge_pat.direction {
+                        CreateEdgeDirection::Outgoing => (source_idx, target_idx),
+                        CreateEdgeDirection::Incoming => (target_idx, source_idx),
+                    };
+
+                    // Evaluate edge properties
+                    let mut edge_props = HashMap::new();
+                    {
+                        let executor = CypherExecutor::with_params(graph, params);
+                        for (key, expr) in &edge_pat.properties {
+                            let val = executor.evaluate_expression(expr, &new_row)?;
+                            edge_props.insert(key.clone(), val);
+                        }
+                    }
+
+                    graph.register_connection_type(edge_pat.connection_type.clone());
+                    stats.relationships_created += 1;
+
+                    // Bind edge variable if named; avoid clone when not needed
+                    if let Some(ref var) = edge_pat.variable {
+                        let edge_data =
+                            EdgeData::new(edge_pat.connection_type.clone(), edge_props.clone());
+                        graph
+                            .graph
+                            .add_edge(actual_source, actual_target, edge_data);
+                        new_row.edge_bindings.insert(
+                            var.clone(),
+                            EdgeBinding {
+                                source: actual_source,
+                                target: actual_target,
+                                connection_type: edge_pat.connection_type.clone(),
+                                properties: edge_props,
+                            },
+                        );
+                    } else {
+                        let edge_data = EdgeData::new(edge_pat.connection_type.clone(), edge_props);
+                        graph
+                            .graph
+                            .add_edge(actual_source, actual_target, edge_data);
+                    }
+                }
+                i += 2; // Skip to next edge position
+            }
+        }
+
+        new_rows.push(new_row);
+    }
+
+    Ok(ResultSet {
+        rows: new_rows,
+        columns: existing.columns,
+    })
+}
+
+/// Create a single node from a CreateNodePattern
+fn create_node(
+    graph: &mut DirGraph,
+    node_pat: &CreateNodePattern,
+    row: &ResultRow,
+    params: &HashMap<String, Value>,
+    stats: &mut MutationStats,
+) -> Result<petgraph::graph::NodeIndex, String> {
+    // Evaluate property expressions (borrow graph immutably, then drop)
+    let mut properties = HashMap::new();
+    {
+        let executor = CypherExecutor::with_params(graph, params);
+        for (key, expr) in &node_pat.properties {
+            let val = executor.evaluate_expression(expr, row)?;
+            properties.insert(key.clone(), val);
+        }
+    }
+
+    // Generate ID
+    let id = Value::UniqueId(graph.graph.node_count() as u32);
+
+    // Determine title: use 'name' or 'title' property if present
+    let title = properties
+        .get("name")
+        .or_else(|| properties.get("title"))
+        .cloned()
+        .unwrap_or_else(|| {
+            let label = node_pat.label.as_deref().unwrap_or("Node");
+            Value::String(format!("{}_{}", label, graph.graph.node_count()))
+        });
+
+    let label = node_pat.label.clone().unwrap_or_else(|| "Node".to_string());
+
+    let node_data = NodeData::new(id, title, label.clone(), properties);
+
+    let node_idx = graph.graph.add_node(node_data);
+
+    // Update type_indices
+    graph
+        .type_indices
+        .entry(label.clone())
+        .or_default()
+        .push(node_idx);
+
+    // Invalidate id_indices for this type (lazy rebuild on next lookup)
+    graph.id_indices.remove(&label);
+
+    stats.nodes_created += 1;
+
+    Ok(node_idx)
+}
+
+/// Extract the variable name from a CreateElement::Node
+fn get_create_node_variable(element: &CreateElement) -> Option<&str> {
+    match element {
+        CreateElement::Node(np) => np.variable.as_deref(),
+        _ => None,
+    }
+}
+
+/// Resolve a variable name to a NodeIndex from the pattern vars map
+fn resolve_create_node_idx(
+    var: Option<&str>,
+    pattern_vars: &HashMap<String, petgraph::graph::NodeIndex>,
+) -> Result<petgraph::graph::NodeIndex, String> {
+    match var {
+        Some(name) => pattern_vars
+            .get(name)
+            .copied()
+            .ok_or_else(|| format!("Unbound variable '{}' in CREATE edge", name)),
+        None => Err("CREATE edge requires named source and target nodes".to_string()),
+    }
+}
+
+/// Execute a SET clause, modifying node properties in the graph.
+fn execute_set(
+    graph: &mut DirGraph,
+    set: &SetClause,
+    result_set: &ResultSet,
+    params: &HashMap<String, Value>,
+    stats: &mut MutationStats,
+) -> Result<(), String> {
+    for row in &result_set.rows {
+        for item in &set.items {
+            match item {
+                SetItem::Property {
+                    variable,
+                    property,
+                    expression,
+                } => {
+                    // Validate: cannot change id or type
+                    if property == "id" {
+                        return Err("Cannot SET node id — it is immutable".to_string());
+                    }
+                    if property == "type" || property == "node_type" || property == "label" {
+                        return Err("Cannot SET node type via property assignment".to_string());
+                    }
+
+                    // Resolve the node
+                    let node_idx = row.node_bindings.get(variable).ok_or_else(|| {
+                        format!("Variable '{}' not bound to a node in SET", variable)
+                    })?;
+
+                    // Evaluate the expression (borrows graph immutably)
+                    let value = {
+                        let executor = CypherExecutor::with_params(graph, params);
+                        executor.evaluate_expression(expression, row)?
+                    };
+
+                    // Apply the mutation (borrows graph mutably)
+                    if let Some(node) = graph.get_node_mut(*node_idx) {
+                        match node {
+                            NodeData::Regular {
+                                title, properties, ..
+                            }
+                            | NodeData::Schema {
+                                title, properties, ..
+                            } => match property.as_str() {
+                                "title" => {
+                                    *title = value;
+                                }
+                                "name" => {
+                                    // "name" maps to title in Cypher reads;
+                                    // update both title and properties for consistency
+                                    *title = value.clone();
+                                    properties.insert("name".to_string(), value);
+                                }
+                                _ => {
+                                    properties.insert(property.clone(), value);
+                                }
+                            },
+                        }
+                        stats.properties_set += 1;
+                    }
+                }
+                SetItem::Label { variable, label } => {
+                    return Err(format!(
+                        "SET label (SET {}:{}) is not yet supported",
+                        variable, label
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -1837,7 +2170,8 @@ mod tests {
     #[test]
     fn test_case_simple_form_evaluation() {
         let graph = DirGraph::new();
-        let executor = CypherExecutor::new(&graph);
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params);
         let row = ResultRow::new();
 
         // CASE 'Oslo' WHEN 'Oslo' THEN 'capital' ELSE 'other' END
@@ -1861,7 +2195,8 @@ mod tests {
     #[test]
     fn test_case_simple_form_else() {
         let graph = DirGraph::new();
-        let executor = CypherExecutor::new(&graph);
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params);
         let row = ResultRow::new();
 
         // CASE 'Bergen' WHEN 'Oslo' THEN 'capital' ELSE 'other' END
@@ -1885,7 +2220,8 @@ mod tests {
     #[test]
     fn test_case_no_else_returns_null() {
         let graph = DirGraph::new();
-        let executor = CypherExecutor::new(&graph);
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params);
         let row = ResultRow::new();
 
         // CASE 'Bergen' WHEN 'Oslo' THEN 'capital' END → null
@@ -1907,7 +2243,8 @@ mod tests {
     #[test]
     fn test_case_generic_form_evaluation() {
         let graph = DirGraph::new();
-        let executor = CypherExecutor::new(&graph);
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params);
         let mut row = ResultRow::new();
         row.projected.insert("val".to_string(), Value::Int64(25));
 
@@ -1942,7 +2279,7 @@ mod tests {
             ("name".to_string(), Value::String("Alice".to_string())),
             ("age".to_string(), Value::Int64(30)),
         ]);
-        let executor = CypherExecutor::with_params(&graph, params);
+        let executor = CypherExecutor::with_params(&graph, &params);
         let row = ResultRow::new();
 
         let result = executor
@@ -1959,7 +2296,8 @@ mod tests {
     #[test]
     fn test_parameter_missing_error() {
         let graph = DirGraph::new();
-        let executor = CypherExecutor::new(&graph);
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params);
         let row = ResultRow::new();
 
         let result =
@@ -1982,5 +2320,244 @@ mod tests {
     fn test_expression_to_string_parameter() {
         let expr = Expression::Parameter("foo".to_string());
         assert_eq!(expression_to_string(&expr), "$foo");
+    }
+
+    // ========================================================================
+    // CREATE / SET mutation tests
+    // ========================================================================
+
+    /// Helper: build a small test graph with 2 Person nodes and 1 KNOWS edge
+    fn build_test_graph() -> DirGraph {
+        let mut graph = DirGraph::new();
+        let alice = NodeData::new(
+            Value::UniqueId(1),
+            Value::String("Alice".to_string()),
+            "Person".to_string(),
+            HashMap::from([
+                ("name".to_string(), Value::String("Alice".to_string())),
+                ("age".to_string(), Value::Int64(30)),
+            ]),
+        );
+        let bob = NodeData::new(
+            Value::UniqueId(2),
+            Value::String("Bob".to_string()),
+            "Person".to_string(),
+            HashMap::from([
+                ("name".to_string(), Value::String("Bob".to_string())),
+                ("age".to_string(), Value::Int64(25)),
+            ]),
+        );
+        let alice_idx = graph.graph.add_node(alice);
+        let bob_idx = graph.graph.add_node(bob);
+        graph
+            .type_indices
+            .entry("Person".to_string())
+            .or_default()
+            .push(alice_idx);
+        graph
+            .type_indices
+            .entry("Person".to_string())
+            .or_default()
+            .push(bob_idx);
+
+        let edge = EdgeData::new("KNOWS".to_string(), HashMap::new());
+        graph.graph.add_edge(alice_idx, bob_idx, edge);
+        graph.register_connection_type("KNOWS".to_string());
+
+        graph
+    }
+
+    #[test]
+    fn test_create_single_node() {
+        let mut graph = DirGraph::new();
+        let query =
+            super::super::parser::parse_cypher("CREATE (n:Person {name: 'Alice', age: 30})")
+                .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        assert!(result.stats.is_some());
+        let stats = result.stats.unwrap();
+        assert_eq!(stats.nodes_created, 1);
+        assert_eq!(stats.relationships_created, 0);
+
+        // Verify node was created
+        assert_eq!(graph.graph.node_count(), 1);
+        let node = graph
+            .graph
+            .node_weight(petgraph::graph::NodeIndex::new(0))
+            .unwrap();
+        assert_eq!(
+            node.get_field_ref("name"),
+            Some(&Value::String("Alice".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_create_node_with_properties() {
+        let mut graph = DirGraph::new();
+        let query =
+            super::super::parser::parse_cypher("CREATE (n:Product {name: 'Laptop', price: 999})")
+                .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        assert_eq!(result.stats.as_ref().unwrap().nodes_created, 1);
+        let node = graph
+            .graph
+            .node_weight(petgraph::graph::NodeIndex::new(0))
+            .unwrap();
+        assert_eq!(node.get_field_ref("price"), Some(&Value::Int64(999)));
+        assert_eq!(node.get_node_type_ref(), Some("Product"));
+    }
+
+    #[test]
+    fn test_create_edge_between_matched() {
+        let mut graph = build_test_graph();
+        let query = super::super::parser::parse_cypher(
+            "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) CREATE (a)-[:FRIENDS]->(b)",
+        )
+        .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        let stats = result.stats.unwrap();
+        assert_eq!(stats.nodes_created, 0);
+        assert_eq!(stats.relationships_created, 1);
+
+        // Verify edge was created (graph should now have 2 edges: KNOWS + FRIENDS)
+        assert_eq!(graph.graph.edge_count(), 2);
+    }
+
+    #[test]
+    fn test_create_path() {
+        let mut graph = DirGraph::new();
+        let query = super::super::parser::parse_cypher(
+            "CREATE (a:Person {name: 'A'})-[:KNOWS]->(b:Person {name: 'B'})",
+        )
+        .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        let stats = result.stats.unwrap();
+        assert_eq!(stats.nodes_created, 2);
+        assert_eq!(stats.relationships_created, 1);
+        assert_eq!(graph.graph.node_count(), 2);
+        assert_eq!(graph.graph.edge_count(), 1);
+    }
+
+    #[test]
+    fn test_create_with_params() {
+        let mut graph = DirGraph::new();
+        let query =
+            super::super::parser::parse_cypher("CREATE (n:Person {name: $name, age: $age})")
+                .unwrap();
+        let params = HashMap::from([
+            ("name".to_string(), Value::String("Charlie".to_string())),
+            ("age".to_string(), Value::Int64(35)),
+        ]);
+        let result = execute_mutable(&mut graph, &query, params).unwrap();
+
+        assert_eq!(result.stats.as_ref().unwrap().nodes_created, 1);
+        let node = graph
+            .graph
+            .node_weight(petgraph::graph::NodeIndex::new(0))
+            .unwrap();
+        assert_eq!(
+            node.get_field_ref("name"),
+            Some(&Value::String("Charlie".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_create_return() {
+        let mut graph = DirGraph::new();
+        let query = super::super::parser::parse_cypher(
+            "CREATE (n:Person {name: 'Test'}) RETURN n.name AS name",
+        )
+        .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        assert_eq!(result.columns, vec!["name"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String("Test".to_string()));
+    }
+
+    #[test]
+    fn test_set_property() {
+        let mut graph = build_test_graph();
+        let query =
+            super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) SET n.age = 31")
+                .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        let stats = result.stats.unwrap();
+        assert_eq!(stats.properties_set, 1);
+
+        // Verify property was updated
+        let node = graph
+            .graph
+            .node_weight(petgraph::graph::NodeIndex::new(0))
+            .unwrap();
+        assert_eq!(node.get_field_ref("age"), Some(&Value::Int64(31)));
+    }
+
+    #[test]
+    fn test_set_title() {
+        let mut graph = build_test_graph();
+        let query = super::super::parser::parse_cypher(
+            "MATCH (n:Person {name: 'Alice'}) SET n.name = 'Alicia'",
+        )
+        .unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        // title is accessed via "name" or "title"
+        let node = graph
+            .graph
+            .node_weight(petgraph::graph::NodeIndex::new(0))
+            .unwrap();
+        assert_eq!(
+            node.get_field_ref("name"),
+            Some(&Value::String("Alicia".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_set_id_error() {
+        let mut graph = build_test_graph();
+        let query =
+            super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) SET n.id = 999")
+                .unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new());
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("immutable"));
+    }
+
+    #[test]
+    fn test_set_expression() {
+        let mut graph = build_test_graph();
+        // Alice has age 30, add 1
+        let query = super::super::parser::parse_cypher(
+            "MATCH (n:Person {name: 'Alice'}) SET n.age = n.age + 1",
+        )
+        .unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+
+        let node = graph
+            .graph
+            .node_weight(petgraph::graph::NodeIndex::new(0))
+            .unwrap();
+        assert_eq!(node.get_field_ref("age"), Some(&Value::Int64(31)));
+    }
+
+    #[test]
+    fn test_is_mutation_query() {
+        let read_query = super::super::parser::parse_cypher("MATCH (n:Person) RETURN n").unwrap();
+        assert!(!is_mutation_query(&read_query));
+
+        let create_query =
+            super::super::parser::parse_cypher("CREATE (n:Person {name: 'A'})").unwrap();
+        assert!(is_mutation_query(&create_query));
+
+        let set_query =
+            super::super::parser::parse_cypher("MATCH (n:Person) SET n.age = 30").unwrap();
+        assert!(is_mutation_query(&set_query));
     }
 }

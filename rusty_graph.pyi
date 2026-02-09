@@ -1109,8 +1109,11 @@ class KnowledgeGraph:
         """Execute a Cypher query.
 
         Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, WITH,
-        OPTIONAL MATCH, UNWIND, UNION, CASE expressions, parameters,
-        and aggregation functions.
+        OPTIONAL MATCH, UNWIND, UNION, CREATE, SET, CASE expressions,
+        parameters ($param), and aggregation functions.
+
+        Mutation queries (CREATE, SET) return a ``stats`` key with
+        ``nodes_created``, ``relationships_created``, ``properties_set``.
 
         Args:
             query: Cypher query string.
@@ -1138,6 +1141,16 @@ class KnowledgeGraph:
                 MATCH (n:Person)
                 RETURN n.name,
                        CASE WHEN n.age >= 18 THEN 'adult' ELSE 'minor' END AS category
+            ''')
+
+            # CREATE nodes and edges
+            result = graph.cypher("CREATE (n:Person {name: 'Alice', age: 30})")
+            print(result['stats']['nodes_created'])  # 1
+
+            # SET properties
+            result = graph.cypher('''
+                MATCH (n:Person) WHERE n.name = 'Alice'
+                SET n.city = 'Oslo', n.age = 31
             ''')
         """
         ...

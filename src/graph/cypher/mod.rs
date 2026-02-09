@@ -16,6 +16,6 @@ pub mod result;
 pub mod tokenizer;
 
 // Re-exports for convenience
-pub use executor::CypherExecutor;
+pub use executor::{execute_mutable, is_mutation_query, CypherExecutor};
 pub use parser::parse_cypher;
 pub use planner::optimize;
