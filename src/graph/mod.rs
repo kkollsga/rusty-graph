@@ -10,7 +10,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::{Bound, IntoPyObjectExt};
 use std::collections::HashMap;
-use std::mem;
 use std::sync::Arc;
 
 pub mod batch_operations;
@@ -64,23 +63,14 @@ impl KnowledgeGraph {
     }
 }
 
-/// Helper function to extract graph from Arc if possible or clone it
-fn extract_or_clone_graph(arc: &mut Arc<DirGraph>) -> DirGraph {
-    if Arc::strong_count(arc) == 1 {
-        // We're the only owner, we can modify in place by extracting
-        match Arc::try_unwrap(mem::replace(arc, Arc::new(DirGraph::new()))) {
-            Ok(graph) => graph,
-            Err(original_arc) => {
-                // This shouldn't happen, but recover if it does
-                *arc = original_arc;
-                (**arc).clone()
-            }
-        }
-    } else {
-        // Multiple references exist, need to clone
-        (**arc).clone()
-    }
+/// Helper function to get a mutable DirGraph from Arc.
+/// Uses Arc::make_mut which clones only if there are other references,
+/// otherwise gives a mutable reference in place. Callers mutate the graph
+/// through the returned reference — no extraction/replacement needed.
+fn get_graph_mut(arc: &mut Arc<DirGraph>) -> &mut DirGraph {
+    Arc::make_mut(arc)
 }
+
 
 /// Helper to convert centrality results to Python list
 fn centrality_results_to_py(
@@ -196,12 +186,10 @@ impl KnowledgeGraph {
             column_types,
         )?;
 
-        // Extract graph or clone it if needed
-        let mut graph = extract_or_clone_graph(&mut self.inner);
+        let graph = get_graph_mut(&mut self.inner);
 
-        // Call the maintain_graph function
         let result = maintain_graph::add_nodes(
-            &mut graph,
+            graph,
             df_result,
             node_type,
             unique_id_field,
@@ -210,8 +198,6 @@ impl KnowledgeGraph {
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
-        // Replace the Arc with the new graph
-        self.inner = Arc::new(graph);
         self.selection.clear();
 
         // Store the report
@@ -288,11 +274,10 @@ impl KnowledgeGraph {
             column_types,
         )?;
 
-        // Extract graph or clone it if needed
-        let mut graph = extract_or_clone_graph(&mut self.inner);
+        let graph = get_graph_mut(&mut self.inner);
 
         let result = maintain_graph::add_connections(
-            &mut graph,
+            graph,
             df_result,
             connection_type,
             source_type,
@@ -305,8 +290,6 @@ impl KnowledgeGraph {
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
-        // Replace the Arc with the new graph
-        self.inner = Arc::new(graph);
         self.selection.clear();
 
         // Store the report
@@ -425,10 +408,10 @@ impl KnowledgeGraph {
                 None,
             )?;
 
-            let mut graph = extract_or_clone_graph(&mut self.inner);
+            let graph = get_graph_mut(&mut self.inner);
 
             let report = maintain_graph::add_nodes(
-                &mut graph,
+                graph,
                 df_result,
                 node_type.clone(),
                 unique_id_field,
@@ -437,7 +420,6 @@ impl KnowledgeGraph {
             )
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
-            self.inner = Arc::new(graph);
             result_dict.set_item(&node_type, report.nodes_created + report.nodes_updated)?;
         }
 
@@ -596,10 +578,10 @@ impl KnowledgeGraph {
                 None,
             )?;
 
-            let mut graph = extract_or_clone_graph(&mut self.inner);
+            let graph = get_graph_mut(&mut self.inner);
 
             let report = maintain_graph::add_connections(
-                &mut graph,
+                graph,
                 df_result,
                 connection_name.clone(),
                 source_type,
@@ -612,7 +594,6 @@ impl KnowledgeGraph {
             )
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
-            self.inner = Arc::new(graph);
             result_dict.set_item(&connection_name, report.connections_created)?;
         }
 
@@ -913,29 +894,29 @@ impl KnowledgeGraph {
             ));
         }
 
-        // Extract graph for modification
-        let mut graph = extract_or_clone_graph(&mut self.inner);
-
-        // Track total updates
-        let mut total_updated = 0;
-        let mut errors = Vec::new();
-
-        // Update each property
+        // Pre-extract Python values before mutating the graph
+        let mut parsed_properties: Vec<(String, Value)> = Vec::new();
         for (key, value) in properties.iter() {
             let property_name: String = key.extract().map_err(|_| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Property names must be strings")
             })?;
-
             let property_value = py_in::py_value_to_value(&value)?;
+            parsed_properties.push((property_name, property_value));
+        }
 
-            // Build node-value pairs for this property
+        // Now mutate the graph — no ? operators from here to Arc creation
+        let graph = get_graph_mut(&mut self.inner);
+
+        let mut total_updated = 0;
+        let mut errors = Vec::new();
+
+        for (property_name, property_value) in &parsed_properties {
             let node_values: Vec<(Option<petgraph::graph::NodeIndex>, Value)> = nodes
                 .iter()
                 .map(|&idx| (Some(idx), property_value.clone()))
                 .collect();
 
-            // Update this property on all nodes
-            match maintain_graph::update_node_properties(&mut graph, &node_values, &property_name) {
+            match maintain_graph::update_node_properties(graph, &node_values, property_name) {
                 Ok(report) => {
                     total_updated += report.nodes_updated;
                     errors.extend(report.errors);
@@ -949,9 +930,9 @@ impl KnowledgeGraph {
             }
         }
 
-        // Create the result KnowledgeGraph
+        // Create the result KnowledgeGraph (clone the Arc for the new graph)
         let mut new_kg = KnowledgeGraph {
-            inner: Arc::new(graph),
+            inner: self.inner.clone(),
             selection: if keep_selection.unwrap_or(false) {
                 self.selection.clone()
             } else {
@@ -1343,13 +1324,11 @@ impl KnowledgeGraph {
     ///         print(f"Reclaimed {result['tombstones_removed']} slots")
     ///     ```
     fn vacuum(&mut self) -> PyResult<Py<PyAny>> {
-        let mut graph = extract_or_clone_graph(&mut self.inner);
+        let graph = get_graph_mut(&mut self.inner);
 
         let tombstones_before = graph.graph.node_bound() - graph.graph.node_count();
         let old_to_new = graph.vacuum();
         let nodes_remapped = old_to_new.len();
-
-        self.inner = Arc::new(graph);
 
         // Reset selection — indices have changed
         if nodes_remapped > 0 {
@@ -1515,14 +1494,10 @@ impl KnowledgeGraph {
         if let Some(target_property) = store_as {
             let nodes = data_retrieval::format_unique_values_for_storage(&values, max_length);
 
-            // Extract graph or clone it if needed
-            let mut graph = extract_or_clone_graph(&mut self.inner);
+            let graph = get_graph_mut(&mut self.inner);
 
-            maintain_graph::update_node_properties(&mut graph, &nodes, target_property)
+            maintain_graph::update_node_properties(graph, &nodes, target_property)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
-
-            // Replace the Arc with the updated graph
-            self.inner = Arc::new(graph);
 
             if !keep_selection.unwrap_or(false) {
                 self.selection.clear();
@@ -1607,20 +1582,18 @@ impl KnowledgeGraph {
         keep_selection: Option<bool>,
         conflict_handling: Option<String>,
     ) -> PyResult<Self> {
-        // Extract graph or clone it if needed
-        let mut graph = extract_or_clone_graph(&mut self.inner);
+        let graph = get_graph_mut(&mut self.inner);
 
         let result = maintain_graph::selection_to_new_connections(
-            &mut graph,
+            graph,
             &self.selection,
             connection_type,
             conflict_handling,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
-        // Create new graph with the updated data
         let mut new_kg = KnowledgeGraph {
-            inner: Arc::new(graph),
+            inner: self.inner.clone(),
             selection: if keep_selection.unwrap_or(false) {
                 self.selection.clone()
             } else {
@@ -1705,16 +1678,13 @@ impl KnowledgeGraph {
         // Format for storage
         let nodes = traversal_methods::format_for_storage(&property_groups, max_length);
 
-        // Extract graph or clone it if needed
-        let mut graph = extract_or_clone_graph(&mut self.inner);
+        let graph = get_graph_mut(&mut self.inner);
 
-        // Update parent properties
-        let result = maintain_graph::update_node_properties(&mut graph, &nodes, store_as.unwrap())
+        let result = maintain_graph::update_node_properties(graph, &nodes, store_as.unwrap())
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
-        // Create a new graph with the updated data
         let mut new_kg = KnowledgeGraph {
-            inner: Arc::new(graph),
+            inner: self.inner.clone(),
             selection: if keep_selection.unwrap_or(false) {
                 self.selection.clone()
             } else {
@@ -1747,12 +1717,10 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         // If we're storing results, we'll need a mutable graph
         if let Some(target_property) = store_as {
-            // Extract graph or clone it if needed
-            let mut graph = extract_or_clone_graph(&mut self.inner);
+            let graph = get_graph_mut(&mut self.inner);
 
-            // Process the expression
             let process_result = calculations::process_equation(
-                &mut graph,
+                graph,
                 &self.selection,
                 expression,
                 level_index,
@@ -1760,12 +1728,10 @@ impl KnowledgeGraph {
                 aggregate_connections,
             );
 
-            // Handle errors
             match process_result {
                 Ok(calculations::EvaluationResult::Stored(report)) => {
-                    // Create a new graph with the updated data
                     let mut new_kg = KnowledgeGraph {
-                        inner: Arc::new(graph),
+                        inner: self.inner.clone(),
                         selection: if keep_selection.unwrap_or(false) {
                             self.selection.clone()
                         } else {
@@ -1855,12 +1821,10 @@ impl KnowledgeGraph {
         let use_grouping = group_by_parent.unwrap_or(has_multiple_levels);
 
         if let Some(target_property) = store_as {
-            // Extract graph or clone it if needed
-            let mut graph = extract_or_clone_graph(&mut self.inner);
+            let graph = get_graph_mut(&mut self.inner);
 
-            // Store count results as node properties and get report
             let result = match calculations::store_count_results(
-                &mut graph,
+                graph,
                 &self.selection,
                 level_index,
                 use_grouping,
@@ -1870,12 +1834,8 @@ impl KnowledgeGraph {
                 Err(e) => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(e)),
             };
 
-            // Replace the Arc with updated graph
-            self.inner = Arc::new(graph);
-
-            // Create a new graph with the updated data
             let mut new_kg = KnowledgeGraph {
-                inner: Arc::clone(&self.inner),
+                inner: self.inner.clone(),
                 selection: if keep_selection.unwrap_or(false) {
                     self.selection.clone()
                 } else {
@@ -2267,10 +2227,7 @@ impl KnowledgeGraph {
             }
         }
 
-        // Store the schema in the graph
-        let mut graph = extract_or_clone_graph(&mut self.inner);
-        graph.set_schema(schema);
-        self.inner = Arc::new(graph);
+        get_graph_mut(&mut self.inner).set_schema(schema);
 
         Ok(self.clone())
     }
@@ -2383,9 +2340,7 @@ impl KnowledgeGraph {
 
     /// Clear the schema definition from the graph
     fn clear_schema(&mut self) -> PyResult<Self> {
-        let mut graph = extract_or_clone_graph(&mut self.inner);
-        graph.clear_schema();
-        self.inner = Arc::new(graph);
+        get_graph_mut(&mut self.inner).clear_schema();
         Ok(self.clone())
     }
 
@@ -3417,9 +3372,8 @@ impl KnowledgeGraph {
         node_type: &str,
         property: &str,
     ) -> PyResult<Py<PyAny>> {
-        let mut graph = extract_or_clone_graph(&mut self.inner);
+        let graph = get_graph_mut(&mut self.inner);
         let unique_values = graph.create_index(node_type, property);
-        self.inner = Arc::new(graph);
 
         let result_dict = PyDict::new(py);
         result_dict.set_item("node_type", node_type)?;
@@ -3439,9 +3393,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     True if index existed and was removed, False otherwise
     fn drop_index(&mut self, node_type: &str, property: &str) -> PyResult<bool> {
-        let mut graph = extract_or_clone_graph(&mut self.inner);
-        let removed = graph.drop_index(node_type, property);
-        self.inner = Arc::new(graph);
+        let removed = get_graph_mut(&mut self.inner).drop_index(node_type, property);
         Ok(removed)
     }
 
@@ -3519,17 +3471,14 @@ impl KnowledgeGraph {
     /// Returns:
     ///     Number of indexes rebuilt
     fn rebuild_indexes(&mut self) -> PyResult<usize> {
-        let mut graph = extract_or_clone_graph(&mut self.inner);
+        let graph = get_graph_mut(&mut self.inner);
 
-        // Get list of current indexes
         let index_keys: Vec<_> = graph.property_indices.keys().cloned().collect();
 
-        // Rebuild each index
         for (node_type, property) in &index_keys {
             graph.create_index(node_type, property);
         }
 
-        self.inner = Arc::new(graph);
         Ok(index_keys.len())
     }
 
@@ -3566,15 +3515,10 @@ impl KnowledgeGraph {
         node_type: &str,
         properties: Vec<String>,
     ) -> PyResult<Py<PyAny>> {
-        let mut graph = extract_or_clone_graph(&mut self.inner);
+        let graph = get_graph_mut(&mut self.inner);
 
-        // Convert to slice of &str
         let props_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
         let unique_values = graph.create_composite_index(node_type, &props_refs);
-
-        self.inner = Arc::new(graph);
-
-        // Return info dict
         let result_dict = PyDict::new(py);
         result_dict.set_item("node_type", node_type)?;
         result_dict.set_item("properties", properties)?;
@@ -3592,9 +3536,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     True if index existed and was dropped, False otherwise
     fn drop_composite_index(&mut self, node_type: &str, properties: Vec<String>) -> PyResult<bool> {
-        let mut graph = extract_or_clone_graph(&mut self.inner);
-        let removed = graph.drop_composite_index(node_type, &properties);
-        self.inner = Arc::new(graph);
+        let removed = get_graph_mut(&mut self.inner).drop_composite_index(node_type, &properties);
         Ok(removed)
     }
 
@@ -3786,18 +3728,14 @@ impl KnowledgeGraph {
             std::collections::HashMap::new()
         };
 
-        // Check if this is a mutation query
         let result = if cypher::is_mutation_query(&parsed) {
-            // Mutation path: extract graph, mutate, re-wrap in Arc
-            let mut graph = extract_or_clone_graph(&mut self.inner);
-            let result = cypher::execute_mutable(&mut graph, &parsed, param_map).map_err(|e| {
+            let graph = get_graph_mut(&mut self.inner);
+            cypher::execute_mutable(graph, &parsed, param_map).map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                     "Cypher execution error: {}",
                     e
                 ))
-            })?;
-            self.inner = Arc::new(graph);
-            result
+            })?
         } else {
             // Read-only path: borrow immutably
             let executor = cypher::CypherExecutor::with_params(&self.inner, &param_map);
