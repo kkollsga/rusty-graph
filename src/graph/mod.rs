@@ -1011,6 +1011,110 @@ impl KnowledgeGraph {
         })
     }
 
+    /// Export the current selection as a pandas DataFrame.
+    ///
+    /// Each node becomes a row with columns for title, type, id, and all properties.
+    /// Nodes of different types may have different properties — missing values become None.
+    #[pyo3(signature = (*, include_type=true, include_id=true))]
+    fn to_df(&self, py: Python<'_>, include_type: bool, include_id: bool) -> PyResult<Py<PyAny>> {
+        // Collect nodes from the current selection
+        let mut nodes_data: Vec<(&str, &Value, &Value, &HashMap<String, Value>)> = Vec::new();
+        let mut prop_keys: Vec<String> = Vec::new();
+        let mut prop_keys_seen: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        for node_idx in self.selection.current_node_indices() {
+            if let Some(node) = self.inner.get_node(node_idx) {
+                match node {
+                    schema::NodeData::Regular {
+                        id,
+                        title,
+                        node_type,
+                        properties,
+                    } => {
+                        for key in properties.keys() {
+                            if prop_keys_seen.insert(key.clone()) {
+                                prop_keys.push(key.clone());
+                            }
+                        }
+                        nodes_data.push((node_type, id, title, properties));
+                    }
+                    schema::NodeData::Schema { .. } => continue,
+                }
+            }
+        }
+
+        prop_keys.sort();
+
+        // Build columnar dict-of-lists
+        let n = nodes_data.len();
+        let title_col = PyList::empty(py);
+        let type_col = if include_type {
+            Some(PyList::empty(py))
+        } else {
+            None
+        };
+        let id_col = if include_id {
+            Some(PyList::empty(py))
+        } else {
+            None
+        };
+
+        // Pre-create property column lists
+        let prop_cols: Vec<pyo3::Bound<'_, PyList>> = prop_keys
+            .iter()
+            .map(|_| PyList::empty(py))
+            .collect();
+
+        for (node_type, id, title, properties) in &nodes_data {
+            title_col.append(py_out::value_to_py(py, title)?)?;
+            if let Some(ref tc) = type_col {
+                tc.append(*node_type)?;
+            }
+            if let Some(ref ic) = id_col {
+                ic.append(py_out::value_to_py(py, id)?)?;
+            }
+            for (j, key) in prop_keys.iter().enumerate() {
+                let val = properties
+                    .get(key)
+                    .unwrap_or(&Value::Null);
+                prop_cols[j].append(py_out::value_to_py(py, val)?)?;
+            }
+        }
+
+        // Build the dict with ordered columns
+        let dict = PyDict::new(py);
+        let columns = PyList::empty(py);
+
+        dict.set_item("title", title_col)?;
+        columns.append("title")?;
+
+        if let Some(tc) = type_col {
+            dict.set_item("type", tc)?;
+            columns.append("type")?;
+        }
+        if let Some(ic) = id_col {
+            dict.set_item("id", ic)?;
+            columns.append("id")?;
+        }
+        for (j, key) in prop_keys.iter().enumerate() {
+            dict.set_item(key, &prop_cols[j])?;
+            columns.append(key)?;
+        }
+
+        let pd = py.import("pandas")?;
+
+        if n == 0 {
+            return pd.call_method0("DataFrame").map(|df| df.unbind());
+        }
+
+        // Create DataFrame with column order preserved
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("columns", columns)?;
+        let df = pd.call_method("DataFrame", (dict,), Some(&kwargs))?;
+        Ok(df.unbind())
+    }
+
     /// Returns the count of nodes in the current selection without materialization.
     /// Much faster than get_nodes() when you only need the count.
     ///
@@ -3490,8 +3594,8 @@ impl KnowledgeGraph {
     ///     for row in result['rows']:
     ///         print(f"{row['person']}: {row['friends']} friends")
     ///     ```
-    #[pyo3(signature = (query))]
-    fn cypher(&self, py: Python<'_>, query: &str) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (query, *, to_df=false))]
+    fn cypher(&self, py: Python<'_>, query: &str, to_df: bool) -> PyResult<Py<PyAny>> {
         // Parse the Cypher query
         let mut parsed = cypher::parse_cypher(query).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Cypher syntax error: {}", e))
@@ -3510,7 +3614,11 @@ impl KnowledgeGraph {
         })?;
 
         // Convert to Python
-        cypher::py_convert::cypher_result_to_py(py, &result)
+        if to_df {
+            cypher::py_convert::cypher_result_to_dataframe(py, &result)
+        } else {
+            cypher::py_convert::cypher_result_to_py(py, &result)
+        }
     }
 
     // ========================================================================

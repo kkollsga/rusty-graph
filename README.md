@@ -29,6 +29,12 @@ graph.add_nodes(
 )
 
 print(graph.get_schema())
+
+# Export selection to a pandas DataFrame
+df = graph.type_filter('User').filter({'age': {'>': 30}}).to_df()
+
+# Cypher queries return DataFrames too
+df = graph.cypher("MATCH (u:User) RETURN u.name, u.age ORDER BY u.age", to_df=True)
 ```
 
 ## Table of Contents
@@ -36,6 +42,7 @@ print(graph.get_schema())
 - [Data Management](#data-management) — Adding nodes, connections, dates, batch updates
 - [Querying](#querying) — Filtering, traversal, set operations
 - [Cypher Queries](#cypher-queries) — Full Cypher query language with WHERE, RETURN, ORDER BY, aggregation
+- [When to Use What](#when-to-use-what) — Choosing between Cypher, fluent API, and pattern matching
 - [Pattern Matching](#pattern-matching) — Cypher-like pattern syntax for multi-hop traversals
 - [Graph Algorithms](#graph-algorithms) — Shortest path, all paths, connected components
 - [Spatial Operations](#spatial-operations) — Bounding box, distance, WKT geometry, point-in-polygon
@@ -268,6 +275,9 @@ result = graph.cypher("""
 # Returns: {'columns': ['person', 'friend', 'age'], 'rows': [{'person': 'Alice', ...}, ...]}
 for row in result['rows']:
     print(f"{row['person']} knows {row['friend']}")
+
+# Or get results as a pandas DataFrame
+df = graph.cypher("MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age", to_df=True)
 ```
 
 ### WHERE Clause
@@ -356,6 +366,24 @@ Arithmetic expressions in RETURN:
 graph.cypher("MATCH (n:Product) RETURN n.title, n.price * 1.25 AS price_with_tax")
 ```
 
+### DataFrame Output
+
+Pass `to_df=True` to get results as a pandas DataFrame instead of a dict:
+
+```python
+df = graph.cypher("""
+    MATCH (p:Person)-[:KNOWS]->(f:Person)
+    WITH p, count(f) AS friends
+    RETURN p.name, p.city, friends
+    ORDER BY friends DESC
+""", to_df=True)
+
+print(df)
+#     p.name    p.city  friends
+# 0    Alice      Oslo        5
+# 1      Bob    Bergen        3
+```
+
 ### Optimization
 
 The Cypher executor uses several optimizations:
@@ -363,6 +391,34 @@ The Cypher executor uses several optimizations:
 - **Predicate pushdown**: WHERE equality conditions are moved into MATCH pattern properties for filtering during pattern matching
 - **Lazy binding**: Rows carry lightweight `NodeIndex` references during execution; properties are resolved on demand
 - **Short-circuit evaluation**: AND/OR predicates short-circuit naturally
+
+### Supported Cypher Subset
+
+| Category | Supported |
+|----------|-----------|
+| **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`, `UNION ALL` |
+| **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, inline properties `{key: val}` |
+| **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH` |
+| **RETURN** | Property access `n.prop`, aliases `AS`, `DISTINCT`, arithmetic `+`, `-`, `*`, `/` |
+| **Aggregation** | `count(*)`, `count(expr)`, `sum`, `avg`/`mean`, `min`, `max`, `collect`, `std` |
+| **Scalar functions** | `toUpper`/`upper`, `toLower`/`lower`, `toString`, `toInteger`/`toInt`, `toFloat`, `size`/`length`, `type`, `id`, `labels`, `coalesce` |
+| **Not supported** | `CREATE`, `SET`, `DELETE`, `MERGE`, `CALL`, subqueries, list comprehensions, `CASE` expressions |
+
+---
+
+## When to Use What
+
+rusty_graph offers three query interfaces. Pick the one that fits your task:
+
+| Need | Use | Why |
+|------|-----|-----|
+| Ad-hoc exploration, multi-hop joins, aggregation | `cypher()` | Declarative, familiar syntax, returns DataFrames |
+| Build pipelines, chain filters, store computed properties | Fluent API (`filter`, `traverse`, `calculate`, …) | Chainable, results stored on nodes, undo/explain |
+| Quick structural pattern check | `match_pattern()` | Lightweight, no WHERE/RETURN parsing overhead |
+
+**Cypher** is best for one-shot analytical queries — especially when you want a DataFrame back. **Fluent API** shines when you're building multi-step pipelines that compute and store intermediate results. **Pattern matching** is the fastest way to find structural patterns without extra clause overhead.
+
+All three share the same underlying graph engine, so performance characteristics are similar for the same data.
 
 ---
 
@@ -613,6 +669,7 @@ For performance-critical code, use methods that skip property materialization:
 | `id_values()` | List of ID values | Fast |
 | `get_ids()` | List of `{id, title, type}` dicts | Medium |
 | `get_nodes()` | List of full node dicts | Slowest |
+| `to_df()` | pandas DataFrame | Same as `get_nodes()` |
 
 ```python
 count = graph.type_filter('User').node_count()        # 50-1000x faster than len(get_nodes())

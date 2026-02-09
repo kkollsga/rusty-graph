@@ -6,6 +6,41 @@ use crate::datatypes::py_out;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
+/// Convert a CypherResult to a pandas DataFrame
+pub fn cypher_result_to_dataframe(py: Python<'_>, result: &CypherResult) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    let col_order = PyList::empty(py);
+
+    // Build columnar dict-of-lists
+    for (i, col) in result.columns.iter().enumerate() {
+        let col_list = PyList::empty(py);
+        for row in &result.rows {
+            if let Some(val) = row.get(i) {
+                col_list.append(py_out::value_to_py(py, val)?)?;
+            } else {
+                col_list.append(py.None())?;
+            }
+        }
+        dict.set_item(col, col_list)?;
+        col_order.append(col)?;
+    }
+
+    let pd = py.import("pandas")?;
+
+    if result.rows.is_empty() {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("columns", col_order)?;
+        return pd
+            .call_method("DataFrame", (), Some(&kwargs))
+            .map(|df| df.unbind());
+    }
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("columns", col_order)?;
+    pd.call_method("DataFrame", (dict,), Some(&kwargs))
+        .map(|df| df.unbind())
+}
+
 /// Convert a CypherResult to a Python dict with 'columns' and 'rows' keys
 pub fn cypher_result_to_py(py: Python<'_>, result: &CypherResult) -> PyResult<Py<PyAny>> {
     let result_dict = PyDict::new(py);

@@ -323,6 +323,26 @@ class KnowledgeGraph:
         """
         ...
 
+    def to_df(
+        self,
+        *,
+        include_type: bool = True,
+        include_id: bool = True,
+    ) -> pd.DataFrame:
+        """Export current selection as a pandas DataFrame.
+
+        Each node becomes a row with columns for title, type, id, and all
+        properties. Missing properties across different node types become None.
+
+        Args:
+            include_type: Include ``type`` column. Default ``True``.
+            include_id: Include ``id`` column. Default ``True``.
+
+        Returns:
+            DataFrame with one row per selected node.
+        """
+        ...
+
     def node_count(self) -> int:
         """Count selected nodes without materialising them.
 
@@ -1079,7 +1099,12 @@ class KnowledgeGraph:
         """
         ...
 
-    def cypher(self, query: str) -> dict[str, Any]:
+    def cypher(
+        self,
+        query: str,
+        *,
+        to_df: bool = False,
+    ) -> Union[dict[str, Any], pd.DataFrame]:
         """Execute a Cypher query.
 
         Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, WITH,
@@ -1087,9 +1112,11 @@ class KnowledgeGraph:
 
         Args:
             query: Cypher query string.
+            to_df: If ``True``, return a pandas DataFrame instead of a dict.
 
         Returns:
-            Dict with ``columns`` (list of names) and ``rows`` (list of row dicts).
+            Dict with ``columns`` and ``rows`` by default, or a DataFrame
+            when ``to_df=True``.
 
         Example::
 
@@ -1099,6 +1126,9 @@ class KnowledgeGraph:
                 RETURN p.name, count(f) AS friends
                 ORDER BY friends DESC LIMIT 10
             ''')
+
+            # As DataFrame
+            df = graph.cypher('MATCH (n:Person) RETURN n.name, n.age', to_df=True)
         """
         ...
 
