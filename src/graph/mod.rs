@@ -3590,8 +3590,14 @@ impl KnowledgeGraph {
     ///     for row in result['rows']:
     ///         print(f"{row['person']}: {row['friends']} friends")
     ///     ```
-    #[pyo3(signature = (query, *, to_df=false))]
-    fn cypher(&self, py: Python<'_>, query: &str, to_df: bool) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (query, *, to_df=false, params=None))]
+    fn cypher(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        to_df: bool,
+        params: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
         // Parse the Cypher query
         let mut parsed = cypher::parse_cypher(query).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Cypher syntax error: {}", e))
@@ -3600,8 +3606,20 @@ impl KnowledgeGraph {
         // Optimize (predicate pushdown, etc.)
         cypher::optimize(&mut parsed, &self.inner);
 
+        // Convert params dict to HashMap<String, Value>
+        let executor = if let Some(params_dict) = params {
+            let mut param_map = std::collections::HashMap::new();
+            for (key, val) in params_dict.iter() {
+                let key_str: String = key.extract()?;
+                let value = py_in::py_value_to_value(&val)?;
+                param_map.insert(key_str, value);
+            }
+            cypher::CypherExecutor::with_params(&self.inner, param_map)
+        } else {
+            cypher::CypherExecutor::new(&self.inner)
+        };
+
         // Execute
-        let executor = cypher::CypherExecutor::new(&self.inner);
         let result = executor.execute(&parsed).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Cypher execution error: {}",

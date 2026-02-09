@@ -1104,15 +1104,18 @@ class KnowledgeGraph:
         query: str,
         *,
         to_df: bool = False,
+        params: Optional[dict[str, Any]] = None,
     ) -> Union[dict[str, Any], pd.DataFrame]:
         """Execute a Cypher query.
 
         Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, WITH,
-        OPTIONAL MATCH, UNWIND, UNION, and aggregation functions.
+        OPTIONAL MATCH, UNWIND, UNION, CASE expressions, parameters,
+        and aggregation functions.
 
         Args:
             query: Cypher query string.
             to_df: If ``True``, return a pandas DataFrame instead of a dict.
+            params: Optional parameter dict for ``$param`` substitution.
 
         Returns:
             Dict with ``columns`` and ``rows`` by default, or a DataFrame
@@ -1122,13 +1125,20 @@ class KnowledgeGraph:
 
             result = graph.cypher('''
                 MATCH (p:Person)-[:KNOWS]->(f:Person)
-                WHERE p.age > 25
+                WHERE p.age > $min_age
                 RETURN p.name, count(f) AS friends
                 ORDER BY friends DESC LIMIT 10
-            ''')
+            ''', params={'min_age': 25})
 
             # As DataFrame
             df = graph.cypher('MATCH (n:Person) RETURN n.name, n.age', to_df=True)
+
+            # CASE expression
+            result = graph.cypher('''
+                MATCH (n:Person)
+                RETURN n.name,
+                       CASE WHEN n.age >= 18 THEN 'adult' ELSE 'minor' END AS category
+            ''')
         """
         ...
 

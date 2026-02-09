@@ -302,3 +302,182 @@ class TestSyntaxErrors:
     def test_invalid_query(self, cypher_graph):
         with pytest.raises(ValueError):
             cypher_graph.cypher("NOT A VALID QUERY")
+
+
+class TestCaseExpressions:
+    """Tests for CASE WHEN ... THEN ... ELSE ... END expressions."""
+
+    def test_generic_case(self, cypher_graph):
+        """CASE WHEN predicate THEN result ELSE default END."""
+        result = cypher_graph.cypher("""
+            MATCH (n:Person)
+            RETURN n.name AS name,
+                   CASE WHEN n.age >= 30 THEN 'senior' ELSE 'junior' END AS level
+            ORDER BY n.name
+        """)
+        rows = result['rows']
+        assert len(rows) == 5
+        alice = next(r for r in rows if r['name'] == 'Alice')
+        assert alice['level'] == 'senior'  # age 30
+        bob = next(r for r in rows if r['name'] == 'Bob')
+        assert bob['level'] == 'junior'  # age 25
+
+    def test_simple_case(self, cypher_graph):
+        """CASE expr WHEN val THEN result ... END."""
+        result = cypher_graph.cypher("""
+            MATCH (n:Person)
+            RETURN n.name AS name,
+                   CASE n.city WHEN 'Oslo' THEN 'capital' WHEN 'Bergen' THEN 'west' ELSE 'other' END AS region
+            ORDER BY n.name
+        """)
+        rows = result['rows']
+        alice = next(r for r in rows if r['name'] == 'Alice')
+        assert alice['region'] == 'capital'
+        bob = next(r for r in rows if r['name'] == 'Bob')
+        assert bob['region'] == 'west'
+
+    def test_case_no_else_returns_null(self, cypher_graph):
+        """CASE without ELSE returns null when no match."""
+        result = cypher_graph.cypher("""
+            MATCH (n:Person)
+            RETURN n.name AS name,
+                   CASE n.city WHEN 'Trondheim' THEN 'found' END AS status
+            ORDER BY n.name
+        """)
+        rows = result['rows']
+        # No one lives in Trondheim, so all should be null
+        for row in rows:
+            assert row['status'] is None
+
+    def test_case_multiple_when(self, cypher_graph):
+        """CASE with multiple WHEN clauses — first match wins."""
+        result = cypher_graph.cypher("""
+            MATCH (n:Person)
+            RETURN n.name AS name,
+                   CASE
+                       WHEN n.age >= 40 THEN 'veteran'
+                       WHEN n.age >= 30 THEN 'experienced'
+                       ELSE 'newcomer'
+                   END AS tier
+            ORDER BY n.name
+        """)
+        rows = result['rows']
+        eve = next(r for r in rows if r['name'] == 'Eve')
+        assert eve['tier'] == 'veteran'  # age 40 — first match wins
+        alice = next(r for r in rows if r['name'] == 'Alice')
+        assert alice['tier'] == 'experienced'  # age 30
+        bob = next(r for r in rows if r['name'] == 'Bob')
+        assert bob['tier'] == 'newcomer'  # age 25
+
+
+class TestParameters:
+    """Tests for $param parameter substitution."""
+
+    def test_single_parameter(self, cypher_graph):
+        result = cypher_graph.cypher(
+            "MATCH (n:Person) WHERE n.age > $min_age RETURN n.name AS name ORDER BY n.name",
+            params={'min_age': 30}
+        )
+        names = [r['name'] for r in result['rows']]
+        assert 'Charlie' in names  # age 35
+        assert 'Eve' in names      # age 40
+        assert 'Alice' not in names  # age 30, not > 30
+        assert 'Bob' not in names    # age 25
+
+    def test_multiple_parameters(self, cypher_graph):
+        result = cypher_graph.cypher(
+            "MATCH (n:Person) WHERE n.city = $city AND n.age > $age RETURN n.name AS name",
+            params={'city': 'Oslo', 'age': 30}
+        )
+        names = [r['name'] for r in result['rows']]
+        assert 'Charlie' in names  # Oslo, age 35
+        assert 'Eve' in names      # Oslo, age 40
+        assert 'Alice' not in names  # Oslo, age 30 (not > 30)
+
+    def test_missing_parameter_error(self, cypher_graph):
+        with pytest.raises(RuntimeError, match="Missing parameter"):
+            cypher_graph.cypher(
+                "MATCH (n:Person) WHERE n.age > $nonexistent RETURN n.name"
+            )
+
+    def test_parameter_with_to_df(self, cypher_graph):
+        df = cypher_graph.cypher(
+            "MATCH (n:Person) WHERE n.age >= $min_age RETURN n.name AS name, n.age AS age ORDER BY n.age",
+            params={'min_age': 35}, to_df=True
+        )
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 2  # Charlie (35) and Eve (40)
+        assert list(df['name']) == ['Charlie', 'Eve']
+
+    def test_string_parameter(self, cypher_graph):
+        result = cypher_graph.cypher(
+            "MATCH (n:Person) WHERE n.city = $city RETURN n.name AS name ORDER BY n.name",
+            params={'city': 'Bergen'}
+        )
+        names = [r['name'] for r in result['rows']]
+        assert names == ['Bob', 'Diana']
+
+    def test_parameter_in_return(self, cypher_graph):
+        result = cypher_graph.cypher(
+            "MATCH (n:Person) RETURN n.name AS name, $label AS category ORDER BY n.name LIMIT 1",
+            params={'label': 'person'}
+        )
+        assert result['rows'][0]['category'] == 'person'
+
+
+class TestExistingFeatures:
+    """Tests for already-implemented features to ensure coverage."""
+
+    def test_unwind(self, cypher_graph):
+        result = cypher_graph.cypher("UNWIND [1, 2, 3] AS x RETURN x")
+        assert len(result['rows']) == 3
+
+    def test_union(self, cypher_graph):
+        result = cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.city = 'Oslo' RETURN n.name AS name
+            UNION
+            MATCH (n:Person) WHERE n.age > 35 RETURN n.name AS name
+        """)
+        names = {r['name'] for r in result['rows']}
+        # Oslo: Alice, Charlie, Eve; age > 35: Eve; UNION deduplicates
+        assert names == {'Alice', 'Charlie', 'Eve'}
+
+    def test_union_all(self, cypher_graph):
+        result = cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.city = 'Oslo' RETURN n.name AS name
+            UNION ALL
+            MATCH (n:Person) WHERE n.age > 35 RETURN n.name AS name
+        """)
+        names = [r['name'] for r in result['rows']]
+        # Oslo: Alice, Charlie, Eve; age > 35: Eve; UNION ALL keeps duplicates
+        assert len(names) == 4  # 3 + 1 (Eve appears twice)
+
+    def test_var_length_path(self, cypher_graph):
+        result = cypher_graph.cypher("""
+            MATCH (a:Person)-[:KNOWS*1..2]->(b:Person)
+            WHERE a.name = 'Alice'
+            RETURN DISTINCT b.name AS friend
+        """)
+        names = {r['friend'] for r in result['rows']}
+        # Alice->Bob, Alice->Charlie, Bob->Charlie, Charlie->Diana
+        assert 'Bob' in names
+        assert 'Charlie' in names
+
+    def test_coalesce_function(self, cypher_graph):
+        result = cypher_graph.cypher("""
+            MATCH (n:Person)
+            RETURN n.name AS name, coalesce(n.email, 'no email') AS contact
+            ORDER BY n.name
+        """)
+        bob = next(r for r in result['rows'] if r['name'] == 'Bob')
+        assert bob['contact'] == 'no email'
+        alice = next(r for r in result['rows'] if r['name'] == 'Alice')
+        assert alice['contact'] == 'alice@test.com'
+
+    def test_collect_aggregate(self, cypher_graph):
+        result = cypher_graph.cypher("""
+            MATCH (n:Person)
+            RETURN n.city AS city, collect(n.name) AS names
+            ORDER BY city
+        """)
+        assert len(result['rows']) == 2  # Bergen and Oslo

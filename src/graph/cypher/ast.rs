@@ -130,6 +130,25 @@ pub enum Expression {
     Star,
     /// List literal [1, 2, 3]
     ListLiteral(Vec<Expression>),
+    /// CASE expression
+    /// Generic form: CASE WHEN pred THEN result ... ELSE default END
+    /// Simple form:  CASE expr WHEN val THEN result ... ELSE default END
+    Case {
+        operand: Option<Box<Expression>>,
+        when_clauses: Vec<(CaseCondition, Expression)>,
+        else_expr: Option<Box<Expression>>,
+    },
+    /// Parameter reference: $param_name
+    Parameter(String),
+}
+
+/// Condition in a CASE WHEN clause
+#[derive(Debug, Clone)]
+pub enum CaseCondition {
+    /// Generic form: CASE WHEN predicate THEN ...
+    Predicate(Predicate),
+    /// Simple form: CASE expr WHEN value THEN ...
+    Expression(Expression),
 }
 
 // ============================================================================

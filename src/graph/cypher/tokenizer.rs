@@ -37,8 +37,16 @@ pub enum CypherToken {
     StartsWith,
     EndsWith,
     Contains,
+    Case,
+    When,
+    Then,
+    Else,
+    End,
     True,
     False,
+
+    // Parameters
+    Parameter(String), // $param_name
 
     // Symbols
     LParen,      // (
@@ -268,6 +276,23 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
                 }
             }
 
+            // Parameter: $name
+            '$' => {
+                i += 1; // consume $
+                let start = i;
+                while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                if i == start {
+                    return Err(format!(
+                        "Expected parameter name after '$' at position {}",
+                        start
+                    ));
+                }
+                let name: String = chars[start..i].iter().collect();
+                tokens.push(CypherToken::Parameter(name));
+            }
+
             // Identifiers and keywords
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let start = i;
@@ -330,6 +355,11 @@ fn identifier_to_token(ident: String) -> CypherToken {
         "DETACH" => CypherToken::Detach,
         "ASC" | "ASCENDING" => CypherToken::Asc,
         "DESC" | "DESCENDING" => CypherToken::Desc,
+        "CASE" => CypherToken::Case,
+        "WHEN" => CypherToken::When,
+        "THEN" => CypherToken::Then,
+        "ELSE" => CypherToken::Else,
+        "END" => CypherToken::End,
         "TRUE" => CypherToken::True,
         "FALSE" => CypherToken::False,
         "STARTS" => CypherToken::StartsWith,
@@ -502,5 +532,41 @@ mod tests {
         let tokens = tokenize_cypher("-[:KNOWS*1..3]->").unwrap();
         assert!(tokens.contains(&CypherToken::Star));
         assert!(tokens.contains(&CypherToken::DotDot));
+    }
+
+    #[test]
+    fn test_case_tokens() {
+        let tokens = tokenize_cypher("CASE WHEN x THEN 1 ELSE 0 END").unwrap();
+        assert_eq!(tokens[0], CypherToken::Case);
+        assert_eq!(tokens[1], CypherToken::When);
+        assert_eq!(tokens[3], CypherToken::Then);
+        assert_eq!(tokens[5], CypherToken::Else);
+        assert_eq!(tokens[7], CypherToken::End);
+    }
+
+    #[test]
+    fn test_case_insensitive_case() {
+        let tokens = tokenize_cypher("case when x then 1 else 0 end").unwrap();
+        assert_eq!(tokens[0], CypherToken::Case);
+        assert_eq!(tokens[1], CypherToken::When);
+    }
+
+    #[test]
+    fn test_parameter_token() {
+        let tokens = tokenize_cypher("$min_age").unwrap();
+        assert_eq!(tokens, vec![CypherToken::Parameter("min_age".to_string())]);
+    }
+
+    #[test]
+    fn test_parameter_in_query() {
+        let tokens = tokenize_cypher("WHERE n.age > $age AND n.city = $city").unwrap();
+        assert!(tokens.contains(&CypherToken::Parameter("age".to_string())));
+        assert!(tokens.contains(&CypherToken::Parameter("city".to_string())));
+    }
+
+    #[test]
+    fn test_parameter_empty_name_error() {
+        let result = tokenize_cypher("$");
+        assert!(result.is_err());
     }
 }

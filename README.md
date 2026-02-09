@@ -366,6 +366,83 @@ Arithmetic expressions in RETURN:
 graph.cypher("MATCH (n:Product) RETURN n.title, n.price * 1.25 AS price_with_tax")
 ```
 
+### CASE Expressions
+
+Conditional logic in RETURN and WHERE:
+
+```python
+# Generic form: CASE WHEN predicate THEN result
+graph.cypher("""
+    MATCH (n:Person)
+    RETURN n.name,
+           CASE WHEN n.age >= 18 THEN 'adult' ELSE 'minor' END AS category
+""")
+
+# Simple form: CASE expression WHEN value THEN result
+graph.cypher("""
+    MATCH (n:Person)
+    RETURN n.name,
+           CASE n.city WHEN 'Oslo' THEN 'capital' WHEN 'Bergen' THEN 'west coast' ELSE 'other' END AS region
+""")
+```
+
+### Parameters
+
+Use `$param` syntax for safe value substitution:
+
+```python
+# Parameterized queries
+graph.cypher(
+    "MATCH (n:Person) WHERE n.age > $min_age RETURN n.name, n.age",
+    params={'min_age': 25}
+)
+
+# Multiple parameters
+graph.cypher(
+    "MATCH (n:Person) WHERE n.city = $city AND n.age > $age RETURN n.name",
+    params={'city': 'Oslo', 'age': 30}
+)
+
+# Parameters with DataFrame output
+df = graph.cypher(
+    "MATCH (n:Person) WHERE n.age > $min_age RETURN n.name, n.age ORDER BY n.age",
+    params={'min_age': 20}, to_df=True
+)
+```
+
+### UNWIND
+
+Expand a list into rows:
+
+```python
+graph.cypher("UNWIND [1, 2, 3] AS x RETURN x, x * 2 AS doubled")
+```
+
+### UNION
+
+Combine results from multiple queries:
+
+```python
+# UNION removes duplicates; UNION ALL keeps them
+graph.cypher("""
+    MATCH (n:Person) WHERE n.city = 'Oslo' RETURN n.name AS name
+    UNION
+    MATCH (n:Person) WHERE n.age > 30 RETURN n.name AS name
+""")
+```
+
+### Variable-Length Paths
+
+Traverse relationships with hop ranges:
+
+```python
+# Friends-of-friends within 1 to 3 hops
+graph.cypher("MATCH (a:Person)-[:KNOWS*1..3]->(b:Person) WHERE a.name = 'Alice' RETURN b.name")
+
+# Exact 2 hops
+graph.cypher("MATCH (a:Person)-[:KNOWS*2]->(b:Person) RETURN a.name, b.name")
+```
+
 ### DataFrame Output
 
 Pass `to_df=True` to get results as a pandas DataFrame instead of a dict:
@@ -401,8 +478,9 @@ The Cypher executor uses several optimizations:
 | **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH` |
 | **RETURN** | Property access `n.prop`, aliases `AS`, `DISTINCT`, arithmetic `+`, `-`, `*`, `/` |
 | **Aggregation** | `count(*)`, `count(expr)`, `sum`, `avg`/`mean`, `min`, `max`, `collect`, `std` |
+| **Expressions** | `CASE WHEN ... THEN ... ELSE ... END`, parameters `$param` |
 | **Scalar functions** | `toUpper`/`upper`, `toLower`/`lower`, `toString`, `toInteger`/`toInt`, `toFloat`, `size`/`length`, `type`, `id`, `labels`, `coalesce` |
-| **Not supported** | `CREATE`, `SET`, `DELETE`, `MERGE`, `CALL`, subqueries, list comprehensions, `CASE` expressions |
+| **Not supported** | `CREATE`, `SET`, `DELETE`, `MERGE`, `CALL`, subqueries, list comprehensions |
 
 ---
 

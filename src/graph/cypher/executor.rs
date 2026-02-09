@@ -16,11 +16,19 @@ use std::collections::{HashMap, HashSet};
 
 pub struct CypherExecutor<'a> {
     graph: &'a DirGraph,
+    params: HashMap<String, Value>,
 }
 
 impl<'a> CypherExecutor<'a> {
     pub fn new(graph: &'a DirGraph) -> Self {
-        CypherExecutor { graph }
+        CypherExecutor {
+            graph,
+            params: HashMap::new(),
+        }
+    }
+
+    pub fn with_params(graph: &'a DirGraph, params: HashMap<String, Value>) -> Self {
+        CypherExecutor { graph, params }
     }
 
     /// Execute a parsed Cypher query
@@ -303,10 +311,15 @@ impl<'a> CypherExecutor<'a> {
         }
 
         // Apply full predicate evaluation for remaining/non-indexable conditions
-        result_set.rows.retain(|row| {
-            self.evaluate_predicate(&clause.predicate, row)
-                .unwrap_or(false)
-        });
+        let mut filtered_rows = Vec::new();
+        for row in result_set.rows {
+            match self.evaluate_predicate(&clause.predicate, &row) {
+                Ok(true) => filtered_rows.push(row),
+                Ok(false) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        result_set.rows = filtered_rows;
         Ok(result_set)
     }
 
@@ -497,6 +510,54 @@ impl<'a> CypherExecutor<'a> {
                 let formatted: Vec<String> = vals.iter().map(format_value_compact).collect();
                 Ok(Value::String(format!("[{}]", formatted.join(", "))))
             }
+            Expression::Case {
+                operand,
+                when_clauses,
+                else_expr,
+            } => self.evaluate_case(operand.as_deref(), when_clauses, else_expr.as_deref(), row),
+            Expression::Parameter(name) => self
+                .params
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("Missing parameter: ${}", name)),
+        }
+    }
+
+    /// Evaluate a CASE expression
+    fn evaluate_case(
+        &self,
+        operand: Option<&Expression>,
+        when_clauses: &[(CaseCondition, Expression)],
+        else_expr: Option<&Expression>,
+        row: &ResultRow,
+    ) -> Result<Value, String> {
+        if let Some(operand_expr) = operand {
+            // Simple form: CASE expr WHEN val THEN result ...
+            let operand_val = self.evaluate_expression(operand_expr, row)?;
+            for (condition, result) in when_clauses {
+                if let CaseCondition::Expression(cond_expr) = condition {
+                    let cond_val = self.evaluate_expression(cond_expr, row)?;
+                    if filtering_methods::values_equal(&operand_val, &cond_val) {
+                        return self.evaluate_expression(result, row);
+                    }
+                }
+            }
+        } else {
+            // Generic form: CASE WHEN predicate THEN result ...
+            for (condition, result) in when_clauses {
+                if let CaseCondition::Predicate(pred) = condition {
+                    if self.evaluate_predicate(pred, row)? {
+                        return self.evaluate_expression(result, row);
+                    }
+                }
+            }
+        }
+
+        // No match — evaluate ELSE or return null
+        if let Some(else_e) = else_expr {
+            self.evaluate_expression(else_e, row)
+        } else {
+            Ok(Value::Null)
         }
     }
 
@@ -1267,6 +1328,18 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
         | Expression::Multiply(l, r)
         | Expression::Divide(l, r) => is_aggregate_expression(l) || is_aggregate_expression(r),
         Expression::Negate(inner) => is_aggregate_expression(inner),
+        Expression::Case {
+            when_clauses,
+            else_expr,
+            ..
+        } => {
+            when_clauses
+                .iter()
+                .any(|(_, result)| is_aggregate_expression(result))
+                || else_expr
+                    .as_ref()
+                    .is_some_and(|e| is_aggregate_expression(e))
+        }
         _ => false,
     }
 }
@@ -1316,6 +1389,8 @@ fn expression_to_string(expr: &Expression) -> String {
             let items_str: Vec<String> = items.iter().map(expression_to_string).collect();
             format!("[{}]", items_str.join(", "))
         }
+        Expression::Case { .. } => "CASE".to_string(),
+        Expression::Parameter(name) => format!("${}", name),
     }
 }
 
@@ -1753,5 +1828,159 @@ mod tests {
         assert!(!is_aggregate_expression(&Expression::Variable(
             "x".to_string()
         )));
+    }
+
+    // ========================================================================
+    // CASE expression evaluation
+    // ========================================================================
+
+    #[test]
+    fn test_case_simple_form_evaluation() {
+        let graph = DirGraph::new();
+        let executor = CypherExecutor::new(&graph);
+        let row = ResultRow::new();
+
+        // CASE 'Oslo' WHEN 'Oslo' THEN 'capital' ELSE 'other' END
+        let expr = Expression::Case {
+            operand: Some(Box::new(Expression::Literal(Value::String(
+                "Oslo".to_string(),
+            )))),
+            when_clauses: vec![(
+                CaseCondition::Expression(Expression::Literal(Value::String("Oslo".to_string()))),
+                Expression::Literal(Value::String("capital".to_string())),
+            )],
+            else_expr: Some(Box::new(Expression::Literal(Value::String(
+                "other".to_string(),
+            )))),
+        };
+
+        let result = executor.evaluate_expression(&expr, &row).unwrap();
+        assert_eq!(result, Value::String("capital".to_string()));
+    }
+
+    #[test]
+    fn test_case_simple_form_else() {
+        let graph = DirGraph::new();
+        let executor = CypherExecutor::new(&graph);
+        let row = ResultRow::new();
+
+        // CASE 'Bergen' WHEN 'Oslo' THEN 'capital' ELSE 'other' END
+        let expr = Expression::Case {
+            operand: Some(Box::new(Expression::Literal(Value::String(
+                "Bergen".to_string(),
+            )))),
+            when_clauses: vec![(
+                CaseCondition::Expression(Expression::Literal(Value::String("Oslo".to_string()))),
+                Expression::Literal(Value::String("capital".to_string())),
+            )],
+            else_expr: Some(Box::new(Expression::Literal(Value::String(
+                "other".to_string(),
+            )))),
+        };
+
+        let result = executor.evaluate_expression(&expr, &row).unwrap();
+        assert_eq!(result, Value::String("other".to_string()));
+    }
+
+    #[test]
+    fn test_case_no_else_returns_null() {
+        let graph = DirGraph::new();
+        let executor = CypherExecutor::new(&graph);
+        let row = ResultRow::new();
+
+        // CASE 'Bergen' WHEN 'Oslo' THEN 'capital' END → null
+        let expr = Expression::Case {
+            operand: Some(Box::new(Expression::Literal(Value::String(
+                "Bergen".to_string(),
+            )))),
+            when_clauses: vec![(
+                CaseCondition::Expression(Expression::Literal(Value::String("Oslo".to_string()))),
+                Expression::Literal(Value::String("capital".to_string())),
+            )],
+            else_expr: None,
+        };
+
+        let result = executor.evaluate_expression(&expr, &row).unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_case_generic_form_evaluation() {
+        let graph = DirGraph::new();
+        let executor = CypherExecutor::new(&graph);
+        let mut row = ResultRow::new();
+        row.projected.insert("val".to_string(), Value::Int64(25));
+
+        // CASE WHEN val > 18 THEN 'adult' ELSE 'minor' END
+        let expr = Expression::Case {
+            operand: None,
+            when_clauses: vec![(
+                CaseCondition::Predicate(Predicate::Comparison {
+                    left: Expression::Variable("val".to_string()),
+                    operator: ComparisonOp::GreaterThan,
+                    right: Expression::Literal(Value::Int64(18)),
+                }),
+                Expression::Literal(Value::String("adult".to_string())),
+            )],
+            else_expr: Some(Box::new(Expression::Literal(Value::String(
+                "minor".to_string(),
+            )))),
+        };
+
+        let result = executor.evaluate_expression(&expr, &row).unwrap();
+        assert_eq!(result, Value::String("adult".to_string()));
+    }
+
+    // ========================================================================
+    // Parameter evaluation
+    // ========================================================================
+
+    #[test]
+    fn test_parameter_resolution() {
+        let graph = DirGraph::new();
+        let params = HashMap::from([
+            ("name".to_string(), Value::String("Alice".to_string())),
+            ("age".to_string(), Value::Int64(30)),
+        ]);
+        let executor = CypherExecutor::with_params(&graph, params);
+        let row = ResultRow::new();
+
+        let result = executor
+            .evaluate_expression(&Expression::Parameter("name".to_string()), &row)
+            .unwrap();
+        assert_eq!(result, Value::String("Alice".to_string()));
+
+        let result = executor
+            .evaluate_expression(&Expression::Parameter("age".to_string()), &row)
+            .unwrap();
+        assert_eq!(result, Value::Int64(30));
+    }
+
+    #[test]
+    fn test_parameter_missing_error() {
+        let graph = DirGraph::new();
+        let executor = CypherExecutor::new(&graph);
+        let row = ResultRow::new();
+
+        let result =
+            executor.evaluate_expression(&Expression::Parameter("missing".to_string()), &row);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing parameter"));
+    }
+
+    #[test]
+    fn test_expression_to_string_case() {
+        let expr = Expression::Case {
+            operand: None,
+            when_clauses: vec![],
+            else_expr: None,
+        };
+        assert_eq!(expression_to_string(&expr), "CASE");
+    }
+
+    #[test]
+    fn test_expression_to_string_parameter() {
+        let expr = Expression::Parameter("foo".to_string());
+        assert_eq!(expression_to_string(&expr), "$foo");
     }
 }

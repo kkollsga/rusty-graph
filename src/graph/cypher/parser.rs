@@ -603,6 +603,18 @@ impl CypherParser {
                 Ok(Expression::ListLiteral(items))
             }
 
+            // CASE expression
+            Some(CypherToken::Case) => {
+                self.advance();
+                self.parse_case_expression()
+            }
+
+            // Parameter: $name
+            Some(CypherToken::Parameter(name)) => {
+                self.advance();
+                Ok(Expression::Parameter(name))
+            }
+
             // Identifier: could be variable, property access, or function call
             Some(CypherToken::Identifier(name)) => {
                 self.advance();
@@ -660,6 +672,61 @@ impl CypherParser {
             name,
             args,
             distinct,
+        })
+    }
+
+    // ========================================================================
+    // CASE Expression
+    // ========================================================================
+
+    /// Parse CASE expression (CASE token already consumed)
+    /// Generic form: CASE WHEN predicate THEN result [WHEN ...] [ELSE default] END
+    /// Simple form:  CASE operand WHEN value THEN result [WHEN ...] [ELSE default] END
+    fn parse_case_expression(&mut self) -> Result<Expression, String> {
+        // Determine form: if next token is WHEN, it's generic; otherwise parse operand
+        let operand = if self.check(&CypherToken::When) {
+            None
+        } else {
+            Some(Box::new(self.parse_expression()?))
+        };
+
+        let mut when_clauses = Vec::new();
+
+        // Parse WHEN ... THEN ... pairs
+        while self.check(&CypherToken::When) {
+            self.advance(); // consume WHEN
+
+            let condition = if operand.is_some() {
+                // Simple form: WHEN value — compare against operand
+                CaseCondition::Expression(self.parse_expression()?)
+            } else {
+                // Generic form: WHEN predicate — evaluated as boolean
+                CaseCondition::Predicate(self.parse_predicate()?)
+            };
+
+            self.expect(&CypherToken::Then)?;
+            let result = self.parse_expression()?;
+            when_clauses.push((condition, result));
+        }
+
+        if when_clauses.is_empty() {
+            return Err("CASE expression requires at least one WHEN clause".to_string());
+        }
+
+        // Optional ELSE
+        let else_expr = if self.check(&CypherToken::Else) {
+            self.advance();
+            Some(Box::new(self.parse_expression()?))
+        } else {
+            None
+        };
+
+        self.expect(&CypherToken::End)?;
+
+        Ok(Expression::Case {
+            operand,
+            when_clauses,
+            else_expr,
         })
     }
 
@@ -1120,6 +1187,84 @@ mod tests {
         assert!(matches!(&query.clauses[0], Clause::Unwind(_)));
         if let Clause::Unwind(u) = &query.clauses[0] {
             assert_eq!(u.alias, "x");
+        }
+    }
+
+    #[test]
+    fn test_case_generic_form() {
+        let query = parse_cypher(
+            "MATCH (n:Person) RETURN CASE WHEN n.age > 18 THEN 'adult' ELSE 'minor' END AS category",
+        )
+        .unwrap();
+
+        if let Clause::Return(r) = &query.clauses[1] {
+            assert!(
+                matches!(&r.items[0].expression, Expression::Case { operand, .. } if operand.is_none())
+            );
+            assert_eq!(r.items[0].alias, Some("category".to_string()));
+        } else {
+            panic!("Expected RETURN clause");
+        }
+    }
+
+    #[test]
+    fn test_case_simple_form() {
+        let query = parse_cypher(
+            "MATCH (n:Person) RETURN CASE n.city WHEN 'Oslo' THEN 'capital' WHEN 'Bergen' THEN 'west' ELSE 'other' END",
+        )
+        .unwrap();
+
+        if let Clause::Return(r) = &query.clauses[1] {
+            if let Expression::Case {
+                operand,
+                when_clauses,
+                else_expr,
+            } = &r.items[0].expression
+            {
+                assert!(operand.is_some());
+                assert_eq!(when_clauses.len(), 2);
+                assert!(else_expr.is_some());
+            } else {
+                panic!("Expected CASE expression");
+            }
+        }
+    }
+
+    #[test]
+    fn test_case_no_else() {
+        let query =
+            parse_cypher("MATCH (n:Person) RETURN CASE WHEN n.age > 18 THEN 'adult' END").unwrap();
+
+        if let Clause::Return(r) = &query.clauses[1] {
+            if let Expression::Case { else_expr, .. } = &r.items[0].expression {
+                assert!(else_expr.is_none());
+            } else {
+                panic!("Expected CASE expression");
+            }
+        }
+    }
+
+    #[test]
+    fn test_parameter_in_expression() {
+        let query = parse_cypher("MATCH (n:Person) WHERE n.age > $min_age RETURN n.name").unwrap();
+
+        if let Clause::Where(w) = &query.clauses[1] {
+            if let Predicate::Comparison { right, .. } = &w.predicate {
+                assert!(matches!(right, Expression::Parameter(name) if name == "min_age"));
+            } else {
+                panic!("Expected comparison predicate");
+            }
+        }
+    }
+
+    #[test]
+    fn test_parameter_in_return() {
+        let query = parse_cypher("MATCH (n:Person) RETURN n.name, $label AS label").unwrap();
+
+        if let Clause::Return(r) = &query.clauses[1] {
+            assert!(
+                matches!(&r.items[1].expression, Expression::Parameter(name) if name == "label")
+            );
         }
     }
 }
