@@ -1398,6 +1398,8 @@ impl KnowledgeGraph {
             dict.set_item("type_count", info.type_count)?;
             dict.set_item("property_index_count", info.property_index_count)?;
             dict.set_item("composite_index_count", info.composite_index_count)?;
+            dict.set_item("format_version", self.inner.save_metadata.format_version)?;
+            dict.set_item("library_version", &self.inner.save_metadata.library_version)?;
             Ok(dict.into())
         })
     }
@@ -1915,8 +1917,8 @@ impl KnowledgeGraph {
         Ok(())
     }
 
-    fn save(&self, path: &str) -> PyResult<()> {
-        save_to_file(&self.inner, path)
+    fn save(&mut self, path: &str) -> PyResult<()> {
+        save_to_file(&mut self.inner, path)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))
     }
 

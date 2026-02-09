@@ -223,6 +223,35 @@ pub type CompositeIndexKey = (String, Vec<String>);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CompositeValue(pub Vec<Value>);
 
+/// Metadata stamped into saved files for version tracking and portability warnings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveMetadata {
+    /// Format version — incremented when DirGraph layout changes.
+    /// 0 = files saved before this field existed (via serde default).
+    /// 1 = first versioned format.
+    pub format_version: u32,
+    /// Library version at save time, e.g. "0.4.7".
+    pub library_version: String,
+}
+
+impl Default for SaveMetadata {
+    fn default() -> Self {
+        SaveMetadata {
+            format_version: 0,
+            library_version: String::new(),
+        }
+    }
+}
+
+impl SaveMetadata {
+    pub fn current() -> Self {
+        SaveMetadata {
+            format_version: 1,
+            library_version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+}
+
 /// Metadata about a connection type: which node types it connects and what properties it carries.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConnectionTypeInfo {
@@ -261,6 +290,10 @@ pub struct DirGraph {
     /// Replaces SchemaNode graph nodes for connections — persisted via serde/bincode.
     #[serde(default)]
     pub(crate) connection_type_metadata: HashMap<String, ConnectionTypeInfo>,
+    /// Version and library info stamped at save time.
+    /// Old files without this field deserialize to SaveMetadata::default() (format_version=0).
+    #[serde(default)]
+    pub(crate) save_metadata: SaveMetadata,
 }
 
 impl DirGraph {
@@ -275,6 +308,7 @@ impl DirGraph {
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: HashMap::new(),
             connection_type_metadata: HashMap::new(),
+            save_metadata: SaveMetadata::current(),
         }
     }
 

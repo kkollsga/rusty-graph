@@ -943,7 +943,7 @@ graph.save("my_graph.bin")
 loaded_graph = rusty_graph.load("my_graph.bin")
 ```
 
-> **Portability:** Save files use bincode serialization and are **not guaranteed portable** across OS, CPU architecture, or library versions. Always re-export via a portable format (GraphML, CSV) when sharing across machines. There is no version marker in the save format — if the internal data structures change between releases, old files may fail to load.
+> **Portability:** Save files use bincode serialization and are **not guaranteed portable** across OS, CPU architecture, or library versions. Always re-export via a portable format (GraphML, CSV) when sharing across machines. Each file includes a format version and the library version that wrote it — check with `graph_info()['format_version']` and `graph_info()['library_version']` after loading. If the internal data structures change between releases, loading will fail with a clear version mismatch error rather than silent corruption.
 
 ### Export Formats
 
