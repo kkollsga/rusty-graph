@@ -597,9 +597,19 @@ impl CypherParser {
                 Ok(expr)
             }
 
-            // List literal [...]
+            // List literal [...] or list comprehension [x IN list WHERE ... | expr]
             Some(CypherToken::LBracket) => {
-                self.advance();
+                self.advance(); // consume [
+
+                // Check for list comprehension: [x IN list ...]
+                // Look for: Identifier IN
+                if matches!(self.peek(), Some(CypherToken::Identifier(_)))
+                    && self.peek_at(1) == Some(&CypherToken::In)
+                {
+                    return self.parse_list_comprehension();
+                }
+
+                // Otherwise: list literal [expr, expr, ...]
                 let mut items = Vec::new();
                 if !self.check(&CypherToken::RBracket) {
                     items.push(self.parse_expression()?);
@@ -736,6 +746,44 @@ impl CypherParser {
             operand,
             when_clauses,
             else_expr,
+        })
+    }
+
+    /// Parse list comprehension: x IN list_expr WHERE predicate | map_expr ]
+    /// Opening [ already consumed.
+    fn parse_list_comprehension(&mut self) -> Result<Expression, String> {
+        // Variable name
+        let variable = match self.advance() {
+            Some(CypherToken::Identifier(name)) => name.clone(),
+            _ => return Err("Expected variable name in list comprehension".to_string()),
+        };
+
+        self.expect(&CypherToken::In)?;
+        let list_expr = self.parse_expression()?;
+
+        // Optional WHERE filter
+        let filter = if self.check(&CypherToken::Where) {
+            self.advance();
+            Some(Box::new(self.parse_predicate()?))
+        } else {
+            None
+        };
+
+        // Optional | map_expr
+        let map_expr = if self.check(&CypherToken::Pipe) {
+            self.advance();
+            Some(Box::new(self.parse_expression()?))
+        } else {
+            None
+        };
+
+        self.expect(&CypherToken::RBracket)?;
+
+        Ok(Expression::ListComprehension {
+            variable,
+            list_expr: Box::new(list_expr),
+            filter,
+            map_expr,
         })
     }
 

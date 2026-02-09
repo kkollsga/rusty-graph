@@ -139,6 +139,13 @@ pub enum Expression {
     },
     /// Parameter reference: $param_name
     Parameter(String),
+    /// List comprehension: [x IN list WHERE predicate | map_expr]
+    ListComprehension {
+        variable: String,
+        list_expr: Box<Expression>,
+        filter: Option<Box<Predicate>>,
+        map_expr: Option<Box<Expression>>,
+    },
 }
 
 /// Condition in a CASE WHEN clause

@@ -528,6 +528,42 @@ impl<'a> CypherExecutor<'a> {
                 .get(name)
                 .cloned()
                 .ok_or_else(|| format!("Missing parameter: ${}", name)),
+            Expression::ListComprehension {
+                variable,
+                list_expr,
+                filter,
+                map_expr,
+            } => {
+                // Evaluate the list expression
+                let list_val = self.evaluate_expression(list_expr, row)?;
+                // Parse list value (currently stored as "[a, b, c]" string)
+                let items = parse_list_value(&list_val);
+
+                let mut results = Vec::new();
+                for item in items {
+                    // Create a temporary row with the variable bound
+                    let mut temp_row = row.clone();
+                    temp_row.projected.insert(variable.clone(), item.clone());
+
+                    // Apply filter if present
+                    if let Some(ref pred) = filter {
+                        if !self.evaluate_predicate(pred, &temp_row)? {
+                            continue;
+                        }
+                    }
+
+                    // Apply map expression or use the item itself
+                    let result = if let Some(ref expr) = map_expr {
+                        self.evaluate_expression(expr, &temp_row)?
+                    } else {
+                        item
+                    };
+
+                    results.push(format_value_compact(&result));
+                }
+
+                Ok(Value::String(format!("[{}]", results.join(", "))))
+            }
         }
     }
 
@@ -2185,6 +2221,11 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
                     .as_ref()
                     .is_some_and(|e| is_aggregate_expression(e))
         }
+        Expression::ListComprehension {
+            list_expr,
+            map_expr,
+            ..
+        } => is_aggregate_expression(list_expr) || map_expr.as_ref().is_some_and(|e| is_aggregate_expression(e)),
         _ => false,
     }
 }
@@ -2236,6 +2277,22 @@ fn expression_to_string(expr: &Expression) -> String {
         }
         Expression::Case { .. } => "CASE".to_string(),
         Expression::Parameter(name) => format!("${}", name),
+        Expression::ListComprehension {
+            variable,
+            list_expr,
+            filter,
+            map_expr,
+        } => {
+            let mut result = format!("[{} IN {}", variable, expression_to_string(list_expr));
+            if filter.is_some() {
+                result.push_str(" WHERE ...");
+            }
+            if let Some(ref expr) = map_expr {
+                result.push_str(&format!(" | {}", expression_to_string(expr)));
+            }
+            result.push(']');
+            result
+        }
     }
 }
 
@@ -2290,6 +2347,42 @@ fn resolve_edge_property(edge: &EdgeBinding, property: &str) -> Value {
 /// Convert a NodeData to a representative Value (title string)
 fn node_to_map_value(node: &NodeData) -> Value {
     node.title.clone()
+}
+
+// Parse a list value from string format "[a, b, c]"
+// This is a simple parser for the string representation of lists
+fn parse_list_value(val: &Value) -> Vec<Value> {
+    match val {
+        Value::String(s) => {
+            let trimmed = s.trim();
+            if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+                return vec![];
+            }
+            let inner = &trimmed[1..trimmed.len() - 1];
+            if inner.is_empty() {
+                return vec![];
+            }
+            // Simple split by comma - doesn't handle nested lists or quoted strings properly
+            // but sufficient for basic list comprehensions
+            inner
+                .split(',')
+                .map(|item| {
+                    let trimmed_item = item.trim();
+                    // Try to parse as int, float, or keep as string
+                    if let Ok(i) = trimmed_item.parse::<i64>() {
+                        Value::Int64(i)
+                    } else if let Ok(f) = trimmed_item.parse::<f64>() {
+                        Value::Float64(f)
+                    } else {
+                        // Remove quotes if present
+                        let unquoted = trimmed_item.trim_matches(|c| c == '"' || c == '\'');
+                        Value::String(unquoted.to_string())
+                    }
+                })
+                .collect()
+        }
+        _ => vec![],
+    }
 }
 
 // Delegate to shared value_operations module

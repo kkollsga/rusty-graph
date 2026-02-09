@@ -15,38 +15,41 @@ pip install rusty-graph --upgrade  # upgrade
 
 ```python
 import rusty_graph
-import pandas as pd
 
 graph = rusty_graph.KnowledgeGraph()
 
-users_df = pd.DataFrame({
-    'user_id': [1001, 1002, 1003],
-    'name': ['Alice', 'Bob', 'Charlie'],
-    'age': [28, 35, 42]
-})
+# Create nodes with Cypher
+graph.cypher("CREATE (:Person {name: 'Alice', age: 28, city: 'Oslo'})")
+graph.cypher("CREATE (:Person {name: 'Bob', age: 35, city: 'Bergen'})")
+graph.cypher("CREATE (:Person {name: 'Charlie', age: 42, city: 'Oslo'})")
 
-graph.add_nodes(
-    data=users_df,
-    node_type='User',
-    unique_id_field='user_id',
-    node_title_field='name'
-)
+# Create relationships
+graph.cypher("""
+    MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
+    CREATE (a)-[:KNOWS]->(b)
+""")
 
-print(graph.get_schema())
+# Query with filters, aggregation, and sorting
+result = graph.cypher("""
+    MATCH (p:Person)
+    WHERE p.age > 30
+    RETURN p.name, p.city, p.age
+    ORDER BY p.age DESC
+""")
 
-# Export selection to a pandas DataFrame
-df = graph.type_filter('User').filter({'age': {'>': 30}}).to_df()
+for row in result['rows']:
+    print(f"{row['p.name']}, {row['p.age']}, {row['p.city']}")
 
-# Cypher queries return DataFrames too
-df = graph.cypher("MATCH (u:User) RETURN u.name, u.age ORDER BY u.age", to_df=True)
+# Get results as a pandas DataFrame
+df = graph.cypher("MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age", to_df=True)
 ```
 
 ## Table of Contents
 
-- [Data Management](#data-management) — Adding nodes, connections, dates, batch updates
-- [Querying](#querying) — Filtering, traversal, set operations
-- [Cypher Queries](#cypher-queries) — Full Cypher query language with MATCH, CREATE, SET, DELETE, REMOVE, MERGE, aggregation
+- [Cypher Queries](#cypher-queries) — Full Cypher query language with MATCH, CREATE, SET, DELETE, REMOVE, MERGE, aggregation (recommended API)
 - [When to Use What](#when-to-use-what) — Choosing between Cypher, fluent API, and pattern matching
+- [Advanced API: Data Management](#advanced-api-data-management) — Adding nodes, connections, dates, batch updates (fluent/native API)
+- [Advanced API: Querying](#advanced-api-querying) — Filtering, traversal, set operations (fluent/native API)
 - [Pattern Matching](#pattern-matching) — Cypher-like pattern syntax for multi-hop traversals
 - [Graph Algorithms](#graph-algorithms) — Shortest path, all paths, connected components, centrality
 - [Spatial Operations](#spatial-operations) — Bounding box, distance, WKT geometry, point-in-polygon
@@ -56,211 +59,6 @@ df = graph.cypher("MATCH (u:User) RETURN u.name, u.age ORDER BY u.age", to_df=Tr
 - [Performance](#performance) — Tips, lightweight methods, performance model
 - [Graph Maintenance](#graph-maintenance) — Reindex, vacuum, graph health diagnostics
 - [Operation Reports](#operation-reports) — Tracking graph mutations
-
----
-
-## Data Management
-
-### Adding Nodes
-
-```python
-products_df = pd.DataFrame({
-    'product_id': [101, 102, 103],
-    'title': ['Laptop', 'Phone', 'Tablet'],
-    'price': [999.99, 699.99, 349.99],
-    'stock': [45, 120, 30]
-})
-
-graph.add_nodes(
-    data=products_df,
-    node_type='Product',
-    unique_id_field='product_id',
-    node_title_field='title',
-    columns=['product_id', 'title', 'price', 'stock'],          # optional: which columns to include
-    conflict_handling='update'  # 'update' | 'replace' | 'skip' | 'preserve'
-)
-```
-
-### Property Mapping
-
-When adding nodes, `unique_id_field` and `node_title_field` are **renamed** to `id` and `title`. The original column names no longer exist as properties.
-
-| Your DataFrame Column | Stored As | Why |
-|-----------------------|-----------|-----|
-| `unique_id_field` (e.g., `user_id`) | `id` | Canonical identifier |
-| `node_title_field` (e.g., `name`) | `title` | Display/label field |
-| All other columns | Same name | Preserved as-is |
-
-```python
-# Adding with unique_id_field='user_id', node_title_field='name'
-# Stored as: {'id': 1001, 'title': 'Alice', 'type': 'User', 'age': 28}
-
-graph.type_filter('User').filter({'user_id': 1001})  # WRONG - returns 0 nodes
-graph.type_filter('User').filter({'id': 1001})        # CORRECT
-```
-
-Use `explain()` to verify node counts at each step:
-
-```python
-result = graph.type_filter('User').filter({'id': 1001})
-print(result.explain())
-# TYPE_FILTER User (1000 nodes) -> FILTER (1 nodes)
-```
-
-### Retrieving Nodes
-
-```python
-products = graph.type_filter('Product')
-products.get_nodes()                       # all properties
-products.get_properties(['price', 'stock'])  # specific properties
-products.get_titles()                       # just titles
-```
-
-### Working with Dates
-
-Specify date columns with `column_types` for date-based filtering:
-
-```python
-graph.add_nodes(
-    data=estimates_df,
-    node_type='Estimate',
-    unique_id_field='estimate_id',
-    node_title_field='name',
-    column_types={'valid_from': 'datetime', 'valid_to': 'datetime'}
-)
-
-# Date comparisons with ISO format strings
-graph.type_filter('Estimate').filter({'valid_from': {'>=': '2020-06-01'}})
-
-# Temporal queries: find entities valid at a point in time
-graph.type_filter('Estimate').valid_at('2020-06-15')
-graph.type_filter('Contract').valid_at('2021-03-01', date_from_field='start_date', date_to_field='end_date')
-
-# Find entities with overlapping validity periods
-graph.type_filter('Estimate').valid_during('2020-01-01', '2020-06-30')
-```
-
-### Creating Connections
-
-```python
-purchases_df = pd.DataFrame({
-    'user_id': [1001, 1001, 1002],
-    'product_id': [101, 103, 102],
-    'date': ['2023-01-15', '2023-02-10', '2023-01-20'],
-    'quantity': [1, 2, 1]
-})
-
-graph.add_connections(
-    data=purchases_df,
-    connection_type='PURCHASED',
-    source_type='User',
-    source_id_field='user_id',
-    target_type='Product',
-    target_id_field='product_id',
-    columns=['date', 'quantity']
-)
-```
-
-### Batch Property Updates
-
-```python
-result = graph.type_filter('Prospect').filter({'status': 'Inactive'}).update({
-    'is_active': False,
-    'deactivation_reason': 'status_inactive'
-})
-
-updated_graph = result['graph']
-print(f"Updated {result['nodes_updated']} nodes")
-
-# Preserve selection for chaining
-result = selection.update({'processed': True}, keep_selection=True)
-```
-
----
-
-## Querying
-
-### Filtering
-
-```python
-# Exact match
-graph.type_filter('Product').filter({'price': 999.99})
-
-# Comparison operators
-graph.type_filter('Product').filter({'price': {'<': 500.0}, 'stock': {'>': 50}})
-
-# IN operator
-graph.type_filter('Product').filter({'id': {'in': [101, 103]}})
-
-# Null checks
-graph.type_filter('Product').filter({'category': {'is_null': True}})
-graph.type_filter('Product').filter({'category': {'is_not_null': True}})
-
-# Orphan nodes (no connections)
-graph.filter_orphans(include_orphans=True)
-graph.filter_orphans(include_orphans=False)
-```
-
-### Sorting
-
-```python
-# Single field
-graph.type_filter('Product').sort('price')
-graph.type_filter('Product').sort('price', ascending=False)
-
-# Multi-field: list of (field, ascending) tuples
-graph.type_filter('Product').sort([('stock', False), ('price', True)])
-
-# Sorting works in filter, type_filter, traverse, filter_orphans
-graph.type_filter('Product').filter({'stock': {'>': 10}}, sort='price')
-```
-
-### Limiting Results
-
-```python
-graph.type_filter('Product').max_nodes(5)
-```
-
-### Traversing the Graph
-
-```python
-alice = graph.type_filter('User').filter({'title': 'Alice'})
-alice_products = alice.traverse(connection_type='PURCHASED', direction='outgoing')
-
-# Filter and sort traversal targets
-expensive_purchases = alice.traverse(
-    connection_type='PURCHASED',
-    filter_target={'price': {'>=': 500.0}},
-    sort_target='price',
-    max_nodes=10
-)
-
-# Filter on connection properties
-graph.type_filter('Discovery').traverse(
-    connection_type='EXTENDS_INTO',
-    filter_connection={'share_pct': {'>=': 50.0}}
-)
-
-# Get connection information
-alice.get_connections(include_node_properties=True)
-```
-
-### Set Operations
-
-Combine, intersect, or subtract selections:
-
-```python
-n3 = graph.type_filter('Prospect').filter({'geoprovince': 'N3'})
-m3 = graph.type_filter('Prospect').filter({'geoprovince': 'M3'})
-
-n3.union(m3)                    # all nodes from both (OR)
-n3.intersection(m3)             # nodes in both (AND)
-n3.difference(m3)               # nodes in n3 but not m3
-n3.symmetric_difference(m3)     # nodes in exactly one (XOR)
-
-# Chaining
-selection_a.union(selection_b).intersection(selection_c)
-```
 
 ---
 
@@ -304,6 +102,30 @@ graph.cypher("MATCH (n:Person) WHERE n.name CONTAINS 'ali' RETURN n.name")
 
 # IN lists
 graph.cypher("MATCH (n:Person) WHERE n.city IN ['Oslo', 'Bergen'] RETURN n.name")
+```
+
+### Relationship Properties
+
+Relationships (edges) can have properties just like nodes. Access them with `r.property` syntax:
+
+```python
+# Create relationships with properties
+graph.cypher("""
+    MATCH (p:Person {name: 'Alice'}), (m:Movie {title: 'Inception'})
+    CREATE (p)-[:RATED {score: 5, comment: 'Excellent', date: '2023-01-15'}]->(m)
+""")
+
+# Access relationship properties in RETURN
+graph.cypher("MATCH (p)-[r:RATED]->(m) RETURN p.name, r.score, r.comment, type(r)")
+
+# Filter by relationship properties
+graph.cypher("MATCH (p)-[r:RATED]->(m) WHERE r.score >= 4 RETURN p.name, m.title")
+
+# Aggregate relationship properties
+graph.cypher("MATCH (p:Person)-[r:RATED]->(m:Movie) RETURN avg(r.score) AS avg_rating")
+
+# Sort by relationship properties
+graph.cypher("MATCH ()-[r:RATED]->(m) RETURN m.title, r.score ORDER BY r.score DESC")
 ```
 
 ### Aggregation
@@ -388,6 +210,39 @@ graph.cypher("""
     MATCH (n:Person)
     RETURN n.name,
            CASE n.city WHEN 'Oslo' THEN 'capital' WHEN 'Bergen' THEN 'west coast' ELSE 'other' END AS region
+""")
+```
+
+### List Comprehensions
+
+Transform and filter lists inline with `[x IN list WHERE predicate | expression]` syntax:
+
+```python
+# Basic map: double each number
+graph.cypher("UNWIND [1] AS _ RETURN [x IN [1, 2, 3, 4, 5] | x * 2] AS doubled")
+# Result: [2, 4, 6, 8, 10]
+
+# Filter only: numbers greater than 3
+graph.cypher("UNWIND [1] AS _ RETURN [x IN [1, 2, 3, 4, 5] WHERE x > 3] AS filtered")
+# Result: [4, 5]
+
+# Combined filter and map
+graph.cypher("UNWIND [1] AS _ RETURN [x IN [1, 2, 3, 4, 5] WHERE x > 3 | x * 2] AS result")
+# Result: [8, 10]
+
+# With collect() — transform aggregated values
+graph.cypher("""
+    MATCH (p:Person)
+    WITH collect(p.name) AS names
+    RETURN [x IN names | toUpper(x)] AS upper_names
+""")
+
+# Multiple comprehensions
+graph.cypher("""
+    UNWIND [1] AS _
+    RETURN
+        [x IN [1, 2, 3] | x * 2] AS doubled,
+        [x IN [1, 2, 3] WHERE x > 1] AS filtered
 """)
 ```
 
@@ -593,28 +448,237 @@ The Cypher executor uses several optimizations:
 | **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`, `UNION ALL`, `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE` |
 | **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, inline properties `{key: val}` |
 | **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH` |
-| **RETURN** | Property access `n.prop`, aliases `AS`, `DISTINCT`, arithmetic `+`, `-`, `*`, `/` |
+| **RETURN** | Property access `n.prop`, relationship properties `r.prop`, aliases `AS`, `DISTINCT`, arithmetic `+`, `-`, `*`, `/` |
 | **Aggregation** | `count(*)`, `count(expr)`, `sum`, `avg`/`mean`, `min`, `max`, `collect`, `std` |
-| **Expressions** | `CASE WHEN ... THEN ... ELSE ... END`, parameters `$param` |
+| **Expressions** | `CASE WHEN ... THEN ... ELSE ... END`, parameters `$param`, list comprehensions `[x IN list WHERE ... \| expr]` |
 | **Scalar functions** | `toUpper`/`upper`, `toLower`/`lower`, `toString`, `toInteger`/`toInt`, `toFloat`, `size`/`length`, `type`, `id`, `labels`, `coalesce` |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE n`, `DETACH DELETE n`, `REMOVE n.prop`, `MERGE (n:Label {props})`, `ON CREATE SET`, `ON MATCH SET` |
-| **Not supported** | `CALL`, subqueries, list comprehensions, `SET n:Label` (label mutation), `REMOVE n:Label` |
+| **Not supported** | `CALL`, subqueries, `SET n:Label` (label mutation), `REMOVE n:Label` |
 
 ---
 
 ## When to Use What
 
-rusty_graph offers three query interfaces. Pick the one that fits your task:
+rusty_graph offers three query interfaces:
 
-| Need | Use | Why |
-|------|-----|-----|
-| Ad-hoc exploration, multi-hop joins, aggregation | `cypher()` | Declarative, familiar syntax, returns DataFrames |
-| Build pipelines, chain filters, store computed properties | Fluent API (`filter`, `traverse`, `calculate`, …) | Chainable, results stored on nodes, undo/explain |
-| Quick structural pattern check | `match_pattern()` | Lightweight, no WHERE/RETURN parsing overhead |
+| Interface | Best For | Key Benefits |
+|-----------|----------|--------------|
+| **Cypher** (recommended) | Ad-hoc queries, exploration, analytics, mutations | Standard syntax, declarative, returns DataFrames, familiar to Neo4j users |
+| **Fluent API** (advanced) | Bulk loading from DataFrames, multi-step pipelines with stored intermediate results | Chainable operations, `explain()`, computed properties stored on nodes |
+| **Pattern matching** (specialized) | Quick structural checks without full Cypher overhead | Lightweight, minimal parsing |
 
-**Cypher** is best for one-shot analytical queries — especially when you want a DataFrame back. **Fluent API** shines when you're building multi-step pipelines that compute and store intermediate results. **Pattern matching** is the fastest way to find structural patterns without extra clause overhead.
+**Start with Cypher** for most tasks — it's the most expressive and widely understood interface. Use the fluent API when you need to load data from pandas DataFrames or build complex pipelines that store intermediate computed properties. Use pattern matching for simple structural queries where you don't need WHERE/RETURN clauses.
 
-All three share the same underlying graph engine, so performance characteristics are similar for the same data.
+All three interfaces share the same underlying graph engine and have similar performance characteristics.
+
+---
+
+## Advanced API: Data Management
+
+> **Note:** For most use cases, use [Cypher queries](#cypher-queries) for data manipulation. The fluent API below is useful for bulk operations from DataFrames or when building complex data pipelines.
+
+### Adding Nodes
+
+```python
+products_df = pd.DataFrame({
+    'product_id': [101, 102, 103],
+    'title': ['Laptop', 'Phone', 'Tablet'],
+    'price': [999.99, 699.99, 349.99],
+    'stock': [45, 120, 30]
+})
+
+graph.add_nodes(
+    data=products_df,
+    node_type='Product',
+    unique_id_field='product_id',
+    node_title_field='title',
+    columns=['product_id', 'title', 'price', 'stock'],          # optional: which columns to include
+    conflict_handling='update'  # 'update' | 'replace' | 'skip' | 'preserve'
+)
+```
+
+### Property Mapping
+
+When adding nodes, `unique_id_field` and `node_title_field` are **renamed** to `id` and `title`. The original column names no longer exist as properties.
+
+| Your DataFrame Column | Stored As | Why |
+|-----------------------|-----------|-----|
+| `unique_id_field` (e.g., `user_id`) | `id` | Canonical identifier |
+| `node_title_field` (e.g., `name`) | `title` | Display/label field |
+| All other columns | Same name | Preserved as-is |
+
+```python
+# Adding with unique_id_field='user_id', node_title_field='name'
+# Stored as: {'id': 1001, 'title': 'Alice', 'type': 'User', 'age': 28}
+
+graph.type_filter('User').filter({'user_id': 1001})  # WRONG - returns 0 nodes
+graph.type_filter('User').filter({'id': 1001})        # CORRECT
+```
+
+Use `explain()` to verify node counts at each step:
+
+```python
+result = graph.type_filter('User').filter({'id': 1001})
+print(result.explain())
+# TYPE_FILTER User (1000 nodes) -> FILTER (1 nodes)
+```
+
+### Retrieving Nodes
+
+```python
+products = graph.type_filter('Product')
+products.get_nodes()                       # all properties
+products.get_properties(['price', 'stock'])  # specific properties
+products.get_titles()                       # just titles
+```
+
+### Working with Dates
+
+Specify date columns with `column_types` for date-based filtering:
+
+```python
+graph.add_nodes(
+    data=estimates_df,
+    node_type='Estimate',
+    unique_id_field='estimate_id',
+    node_title_field='name',
+    column_types={'valid_from': 'datetime', 'valid_to': 'datetime'}
+)
+
+# Date comparisons with ISO format strings
+graph.type_filter('Estimate').filter({'valid_from': {'>=': '2020-06-01'}})
+
+# Temporal queries: find entities valid at a point in time
+graph.type_filter('Estimate').valid_at('2020-06-15')
+graph.type_filter('Contract').valid_at('2021-03-01', date_from_field='start_date', date_to_field='end_date')
+
+# Find entities with overlapping validity periods
+graph.type_filter('Estimate').valid_during('2020-01-01', '2020-06-30')
+```
+
+### Creating Connections
+
+```python
+purchases_df = pd.DataFrame({
+    'user_id': [1001, 1001, 1002],
+    'product_id': [101, 103, 102],
+    'date': ['2023-01-15', '2023-02-10', '2023-01-20'],
+    'quantity': [1, 2, 1]
+})
+
+graph.add_connections(
+    data=purchases_df,
+    connection_type='PURCHASED',
+    source_type='User',
+    source_id_field='user_id',
+    target_type='Product',
+    target_id_field='product_id',
+    columns=['date', 'quantity']
+)
+```
+
+### Batch Property Updates
+
+```python
+result = graph.type_filter('Prospect').filter({'status': 'Inactive'}).update({
+    'is_active': False,
+    'deactivation_reason': 'status_inactive'
+})
+
+updated_graph = result['graph']
+print(f"Updated {result['nodes_updated']} nodes")
+
+# Preserve selection for chaining
+result = selection.update({'processed': True}, keep_selection=True)
+```
+
+---
+
+## Advanced API: Querying
+
+> **Note:** For most queries, prefer [Cypher](#cypher-queries) for clarity and SQL-like syntax. The fluent API below is useful for building reusable query chains or when you need the `explain()` and selection-based workflows.
+
+### Filtering
+
+```python
+# Exact match
+graph.type_filter('Product').filter({'price': 999.99})
+
+# Comparison operators
+graph.type_filter('Product').filter({'price': {'<': 500.0}, 'stock': {'>': 50}})
+
+# IN operator
+graph.type_filter('Product').filter({'id': {'in': [101, 103]}})
+
+# Null checks
+graph.type_filter('Product').filter({'category': {'is_null': True}})
+graph.type_filter('Product').filter({'category': {'is_not_null': True}})
+
+# Orphan nodes (no connections)
+graph.filter_orphans(include_orphans=True)
+graph.filter_orphans(include_orphans=False)
+```
+
+### Sorting
+
+```python
+# Single field
+graph.type_filter('Product').sort('price')
+graph.type_filter('Product').sort('price', ascending=False)
+
+# Multi-field: list of (field, ascending) tuples
+graph.type_filter('Product').sort([('stock', False), ('price', True)])
+
+# Sorting works in filter, type_filter, traverse, filter_orphans
+graph.type_filter('Product').filter({'stock': {'>': 10}}, sort='price')
+```
+
+### Limiting Results
+
+```python
+graph.type_filter('Product').max_nodes(5)
+```
+
+### Traversing the Graph
+
+```python
+alice = graph.type_filter('User').filter({'title': 'Alice'})
+alice_products = alice.traverse(connection_type='PURCHASED', direction='outgoing')
+
+# Filter and sort traversal targets
+expensive_purchases = alice.traverse(
+    connection_type='PURCHASED',
+    filter_target={'price': {'>=': 500.0}},
+    sort_target='price',
+    max_nodes=10
+)
+
+# Filter on connection properties
+graph.type_filter('Discovery').traverse(
+    connection_type='EXTENDS_INTO',
+    filter_connection={'share_pct': {'>=': 50.0}}
+)
+
+# Get connection information
+alice.get_connections(include_node_properties=True)
+```
+
+### Set Operations
+
+Combine, intersect, or subtract selections:
+
+```python
+n3 = graph.type_filter('Prospect').filter({'geoprovince': 'N3'})
+m3 = graph.type_filter('Prospect').filter({'geoprovince': 'M3'})
+
+n3.union(m3)                    # all nodes from both (OR)
+n3.intersection(m3)             # nodes in both (AND)
+n3.difference(m3)               # nodes in n3 but not m3
+n3.symmetric_difference(m3)     # nodes in exactly one (XOR)
+
+# Chaining
+selection_a.union(selection_b).intersection(selection_c)
+```
 
 ---
 

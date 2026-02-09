@@ -77,6 +77,7 @@ pub enum CypherToken {
     // Arithmetic
     Plus,  // +
     Slash, // /
+    Pipe,  // |
 
     // Literals and identifiers
     Identifier(String),
@@ -159,6 +160,10 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
             }
             '/' => {
                 tokens.push(CypherToken::Slash);
+                i += 1;
+            }
+            '|' => {
+                tokens.push(CypherToken::Pipe);
                 i += 1;
             }
             '=' => {
