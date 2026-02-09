@@ -1061,10 +1061,8 @@ impl KnowledgeGraph {
         };
 
         // Pre-create property column lists
-        let prop_cols: Vec<pyo3::Bound<'_, PyList>> = prop_keys
-            .iter()
-            .map(|_| PyList::empty(py))
-            .collect();
+        let prop_cols: Vec<pyo3::Bound<'_, PyList>> =
+            prop_keys.iter().map(|_| PyList::empty(py)).collect();
 
         for (node_type, id, title, properties) in &nodes_data {
             title_col.append(py_out::value_to_py(py, title)?)?;
@@ -1075,9 +1073,7 @@ impl KnowledgeGraph {
                 ic.append(py_out::value_to_py(py, id)?)?;
             }
             for (j, key) in prop_keys.iter().enumerate() {
-                let val = properties
-                    .get(key)
-                    .unwrap_or(&Value::Null);
+                let val = properties.get(key).unwrap_or(&Value::Null);
                 prop_cols[j].append(py_out::value_to_py(py, val)?)?;
             }
         }
