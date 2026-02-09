@@ -43,16 +43,45 @@ graph.cypher("""
 result = graph.cypher("""
     MATCH (p:Person)
     WHERE p.age > 30
-    RETURN p.name, p.city, p.age
-    ORDER BY p.age DESC
+    RETURN p.name AS name, p.city AS city, p.age AS age
+    ORDER BY age DESC
 """)
 
 for row in result['rows']:
-    print(f"{row['p.name']}, {row['p.age']}, {row['p.city']}")
+    print(f"{row['name']}, {row['age']}, {row['city']}")
 
 # Get results as a pandas DataFrame
-df = graph.cypher("MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age", to_df=True)
+df = graph.cypher("MATCH (p:Person) RETURN p.name AS name, p.age AS age ORDER BY age", to_df=True)
 ```
+
+### Loading Data from DataFrames
+
+For bulk loading (thousands of rows), use the fluent API:
+
+```python
+import pandas as pd
+
+users_df = pd.DataFrame({
+    'user_id': [1001, 1002, 1003],
+    'name': ['Alice', 'Bob', 'Charlie'],
+    'age': [28, 35, 42]
+})
+
+graph.add_nodes(data=users_df, node_type='User', unique_id_field='user_id', node_title_field='name')
+
+edges_df = pd.DataFrame({'source_id': [1001, 1002], 'target_id': [1002, 1003]})
+graph.add_connections(data=edges_df, connection_type='KNOWS', source_type='User',
+                      source_id_field='source_id', target_type='User', target_id_field='target_id')
+
+# Now query with Cypher
+graph.cypher("MATCH (u:User) WHERE u.age > 30 RETURN u.name, u.age")
+```
+
+### Key Semantics
+
+- **Atomic mutations** — each `cypher()` call is all-or-nothing; failures leave the graph unchanged
+- **Indexes maintained automatically** — CREATE/SET/DELETE/REMOVE keep property indexes in sync
+- **Deletes create tombstones** — after heavy deletion, use `graph.vacuum()` when `fragmentation_ratio > 0.3`
 
 ## Table of Contents
 
@@ -148,26 +177,6 @@ subgraph = (
 subgraph.export('alice_network.graphml', format='graphml')
 ```
 
-### Bulk Load from DataFrame
-
-```python
-import pandas as pd
-
-# Load 10k nodes efficiently
-users_df = pd.DataFrame({
-    'user_id': range(10000),
-    'name': [f'User{i}' for i in range(10000)],
-    'age': [20 + (i % 50) for i in range(10000)]
-})
-
-graph.add_nodes(
-    data=users_df,
-    node_type='User',
-    unique_id_field='user_id',
-    node_title_field='name'
-)
-```
-
 ### Create Index for Speed
 
 ```python
@@ -189,6 +198,16 @@ graph.cypher("""
 """)
 ```
 
+### Parameterized Queries
+
+```python
+# Safe value substitution — prevents injection, enables reuse
+graph.cypher(
+    "MATCH (p:Person) WHERE p.city = $city AND p.age > $min_age RETURN p.name",
+    params={'city': 'Oslo', 'min_age': 25}
+)
+```
+
 ### Aggregation with Relationship Properties
 
 ```python
@@ -204,7 +223,7 @@ graph.cypher("""
 
 ## Cypher Queries
 
-Query the graph using Cypher — the standard graph query language. Supports `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `ORDER BY`, `SKIP`, `LIMIT`, `WITH`, `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, aggregation functions, and arithmetic expressions.
+A substantial Cypher subset covering most day-to-day querying and mutation. See the [Supported Cypher Subset](#supported-cypher-subset) table for exact coverage.
 
 ```python
 result = graph.cypher("""
@@ -1013,7 +1032,7 @@ schema = graph.get_schema()  # returns formatted string
 
 ### Indexes
 
-Create indexes for faster equality filtering (~3.3x speedup):
+Create indexes for faster equality filtering (~3x speedup):
 
 ```python
 graph.create_index('Prospect', 'prospect_geoprovince')
