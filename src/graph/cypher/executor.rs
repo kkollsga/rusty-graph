@@ -2225,7 +2225,12 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
             list_expr,
             map_expr,
             ..
-        } => is_aggregate_expression(list_expr) || map_expr.as_ref().is_some_and(|e| is_aggregate_expression(e)),
+        } => {
+            is_aggregate_expression(list_expr)
+                || map_expr
+                    .as_ref()
+                    .is_some_and(|e| is_aggregate_expression(e))
+        }
         _ => false,
     }
 }
