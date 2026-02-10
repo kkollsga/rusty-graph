@@ -804,13 +804,8 @@ impl<'a> CypherExecutor<'a> {
         property: &str,
         row: &ResultRow,
     ) -> Result<Value, String> {
-        // Check projected values first (from WITH)
-        if let Some(val) = row.projected.get(variable) {
-            // Projected values are flat - property access not applicable
-            return Ok(val.clone());
-        }
-
-        // Node variable
+        // Check node bindings first — these carry full property data
+        // and must take priority over projected scalars (e.g. after WITH)
         if let Some(&idx) = row.node_bindings.get(variable) {
             if let Some(node) = self.graph.graph.node_weight(idx) {
                 return Ok(resolve_node_property(node, property));
@@ -829,6 +824,11 @@ impl<'a> CypherExecutor<'a> {
                 "length" | "hops" => Ok(Value::Int64(path.hops as i64)),
                 _ => Ok(Value::Null),
             };
+        }
+
+        // Fall back to projected values (scalar aliases from WITH)
+        if let Some(val) = row.projected.get(variable) {
+            return Ok(val.clone());
         }
 
         // Variable not found - might be OPTIONAL MATCH null

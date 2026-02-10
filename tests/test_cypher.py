@@ -939,3 +939,103 @@ class TestParamInMatchPatterns:
             params={'age': 30, 'city': 'Oslo'}
         )
         assert result == [{'name': 'Alice'}]
+
+
+# ============================================================================
+# WITH clause property access regression (v0.4.17)
+# ============================================================================
+
+class TestWithPropertyAccess:
+    """Node properties must survive WITH clause — regression test for v0.4.17."""
+
+    def test_with_aggregation_preserves_properties(self):
+        """WITH p, count(x) AS c then RETURN p.prop should return correct values."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice', age: 30, city: 'Oslo'})")
+        g.cypher("CREATE (:Person {name: 'Bob', age: 25, city: 'Bergen'})")
+        g.cypher("""
+            MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
+            CREATE (a)-[:KNOWS]->(b)
+        """)
+        result = g.cypher("""
+            MATCH (p:Person)-[:KNOWS]->(other:Person)
+            WITH p, count(other) AS friends
+            RETURN p.name AS name, p.age AS age, p.city AS city, friends
+        """)
+        assert len(result) == 1
+        assert result[0]['name'] == 'Alice'
+        assert result[0]['age'] == 30
+        assert result[0]['city'] == 'Oslo'
+        assert result[0]['friends'] == 1
+
+    def test_with_passthrough_preserves_properties(self):
+        """WITH p (no aggregation) then RETURN p.prop should work."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice', age: 30, city: 'Oslo'})")
+        result = g.cypher("""
+            MATCH (p:Person)
+            WITH p
+            RETURN p.name AS name, p.age AS age, p.city AS city
+        """)
+        assert len(result) == 1
+        assert result[0]['name'] == 'Alice'
+        assert result[0]['age'] == 30
+        assert result[0]['city'] == 'Oslo'
+
+    def test_double_with_preserves_properties(self):
+        """Node passing through two WITH clauses retains all properties."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Law {title: 'Criminal Code', law_id: 'LOV-2005', dept: 'Justice'})")
+        g.cypher("CREATE (:CourtDecision {title: 'Case-1'})")
+        g.cypher("CREATE (:Regulation {title: 'Reg-1'})")
+        g.cypher("""
+            MATCH (cd:CourtDecision {title: 'Case-1'}), (l:Law {title: 'Criminal Code'})
+            CREATE (cd)-[:CITES_LAW]->(l)
+        """)
+        g.cypher("""
+            MATCH (r:Regulation {title: 'Reg-1'}), (l:Law {title: 'Criminal Code'})
+            CREATE (r)-[:LEGAL_BASIS]->(l)
+        """)
+        result = g.cypher("""
+            MATCH (l:Law)
+            OPTIONAL MATCH (cd:CourtDecision)-[:CITES_LAW]->(l)
+            WITH l, count(cd) AS case_cites
+            OPTIONAL MATCH (r:Regulation)-[:LEGAL_BASIS]->(l)
+            WITH l, case_cites, count(r) AS reg_basis
+            RETURN l.title AS law, l.law_id AS law_id, l.dept AS dept, case_cites, reg_basis
+        """)
+        assert len(result) == 1
+        assert result[0]['law'] == 'Criminal Code'
+        assert result[0]['law_id'] == 'LOV-2005'
+        assert result[0]['dept'] == 'Justice'
+        assert result[0]['case_cites'] == 1
+        assert result[0]['reg_basis'] == 1
+
+    def test_with_where_on_node_property(self):
+        """WHERE on node property after WITH still works."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
+        g.cypher("CREATE (:Person {name: 'Bob', age: 25})")
+        g.cypher("CREATE (:Person {name: 'Charlie', age: 40})")
+        g.cypher("""
+            MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
+            CREATE (a)-[:KNOWS]->(b)
+        """)
+        g.cypher("""
+            MATCH (a:Person {name: 'Alice'}), (c:Person {name: 'Charlie'})
+            CREATE (a)-[:KNOWS]->(c)
+        """)
+        g.cypher("""
+            MATCH (a:Person {name: 'Bob'}), (c:Person {name: 'Charlie'})
+            CREATE (a)-[:KNOWS]->(c)
+        """)
+        result = g.cypher("""
+            MATCH (p:Person)-[:KNOWS]->(other:Person)
+            WITH p, count(other) AS friends
+            WHERE friends >= 2
+            RETURN p.name AS name, p.age AS age, friends
+        """)
+        assert len(result) == 1
+        assert result[0]['name'] == 'Alice'
+        assert result[0]['age'] == 30
+        assert result[0]['friends'] == 2
