@@ -47,16 +47,16 @@ class TestEdgePropertyAccess:
             RETURN r.score, r.comment, type(r)
         """)
 
-        assert len(result['rows']) == 4
-        assert 'r.score' in result['columns']
-        assert 'r.comment' in result['columns']
-        assert 'type(r)' in result['columns']
+        assert len(result) == 4
+        assert 'r.score' in result[0]
+        assert 'r.comment' in result[0]
+        assert 'type(r)' in result[0]
 
         # Check that type(r) returns the relationship type
-        assert all(row['type(r)'] == 'RATED' for row in result['rows'])
+        assert all(row['type(r)'] == 'RATED' for row in result)
 
         # Check scores
-        scores = [row['r.score'] for row in result['rows']]
+        scores = [row['r.score'] for row in result]
         assert set(scores) == {3, 4, 5}
 
     def test_where_edge_property_filter(self, graph_with_edge_props):
@@ -67,8 +67,8 @@ class TestEdgePropertyAccess:
             RETURN p.name, m.title, r.score
         """)
 
-        assert len(result['rows']) == 3  # Alice (2x) and Bob rated > 3
-        scores = [row['r.score'] for row in result['rows']]
+        assert len(result) == 3  # Alice (2x) and Bob rated > 3
+        scores = [row['r.score'] for row in result]
         assert all(s > 3 for s in scores)
 
     def test_where_edge_property_equals(self, graph_with_edge_props):
@@ -79,8 +79,8 @@ class TestEdgePropertyAccess:
             RETURN p.name, m.title
         """)
 
-        assert len(result['rows']) == 2  # Alice rated both movies with 5
-        names = [row['p.name'] for row in result['rows']]
+        assert len(result) == 2  # Alice rated both movies with 5
+        names = [row['p.name'] for row in result]
         assert all(name == 'Alice' for name in names)
 
     def test_order_by_edge_property(self, graph_with_edge_props):
@@ -91,7 +91,7 @@ class TestEdgePropertyAccess:
             ORDER BY r.score DESC
         """)
 
-        scores = [row['r.score'] for row in result['rows']]
+        scores = [row['r.score'] for row in result]
         assert scores == sorted(scores, reverse=True)
         assert scores[0] == 5  # Highest score first
 
@@ -102,8 +102,8 @@ class TestEdgePropertyAccess:
             RETURN avg(r.score) AS avg_score, min(r.score) AS min_score, max(r.score) AS max_score
         """)
 
-        assert len(result['rows']) == 1
-        row = result['rows'][0]
+        assert len(result) == 1
+        row = result[0]
         assert row['avg_score'] == 4.25  # (5+4+5+3)/4
         assert row['min_score'] == 3
         assert row['max_score'] == 5
@@ -116,18 +116,18 @@ class TestEdgePropertyAccess:
             ORDER BY p.name
         """)
 
-        assert len(result['rows']) == 3  # Alice, Bob, Charlie
+        assert len(result) == 3  # Alice, Bob, Charlie
 
         # Alice rated 2 movies with 5 → avg = 5.0
-        alice = [row for row in result['rows'] if row['p.name'] == 'Alice'][0]
+        alice = [row for row in result if row['p.name'] == 'Alice'][0]
         assert alice['avg_score'] == 5.0
 
         # Bob rated 1 movie with 4 → avg = 4.0
-        bob = [row for row in result['rows'] if row['p.name'] == 'Bob'][0]
+        bob = [row for row in result if row['p.name'] == 'Bob'][0]
         assert bob['avg_score'] == 4.0
 
         # Charlie rated 1 movie with 3 → avg = 3.0
-        charlie = [row for row in result['rows'] if row['p.name'] == 'Charlie'][0]
+        charlie = [row for row in result if row['p.name'] == 'Charlie'][0]
         assert charlie['avg_score'] == 3.0
 
     def test_edge_property_with_multiple_conditions(self, graph_with_edge_props):
@@ -140,8 +140,8 @@ class TestEdgePropertyAccess:
         """)
 
         # Alice (Inception, 5) and Bob (Inception, 4)
-        assert len(result['rows']) == 2
-        scores = [row['r.score'] for row in result['rows']]
+        assert len(result) == 2
+        scores = [row['r.score'] for row in result]
         assert scores == [5, 4]
 
     def test_edge_string_property_filter(self, graph_with_edge_props):
@@ -152,9 +152,9 @@ class TestEdgePropertyAccess:
             RETURN p.name, m.title
         """)
 
-        assert len(result['rows']) == 1
-        assert result['rows'][0]['p.name'] == 'Alice'
-        assert result['rows'][0]['m.title'] == 'Inception'
+        assert len(result) == 1
+        assert result[0]['p.name'] == 'Alice'
+        assert result[0]['m.title'] == 'Inception'
 
     def test_return_both_node_and_edge_properties(self, graph_with_edge_props):
         """Mix node and edge properties in RETURN."""
@@ -164,8 +164,8 @@ class TestEdgePropertyAccess:
             WHERE r.score = 5
         """)
 
-        assert len(result['rows']) == 2
-        for row in result['rows']:
+        assert len(result) == 2
+        for row in result:
             assert row['p.name'] == 'Alice'
             assert row['p.age'] == 30
             assert row['r.score'] == 5

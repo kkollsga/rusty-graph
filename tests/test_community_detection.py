@@ -260,5 +260,5 @@ class TestLabelPropagation:
             assert isinstance(members, list)
             for node in members:
                 assert 'title' in node
-                assert 'node_type' in node
+                assert 'type' in node
                 assert 'id' in node

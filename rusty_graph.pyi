@@ -41,6 +41,16 @@ class KnowledgeGraph:
         """List of node type names present in the graph."""
         ...
 
+    @property
+    def last_mutation_stats(self) -> Optional[dict[str, int]]:
+        """Mutation statistics from the last Cypher mutation query.
+
+        Returns ``None`` if no mutation has been executed yet.
+        Keys: ``nodes_created``, ``relationships_created``, ``properties_set``,
+        ``nodes_deleted``, ``relationships_deleted``, ``properties_removed``.
+        """
+        ...
+
     # ====================================================================
     # Data Loading
     # ====================================================================
@@ -58,19 +68,24 @@ class KnowledgeGraph:
     ) -> dict[str, Any]:
         """Add nodes from a DataFrame.
 
+        String and integer IDs are auto-detected from the DataFrame dtype.
+        Non-contiguous DataFrame indexes (e.g. from filtering) are handled
+        automatically.
+
         Args:
             data: DataFrame containing node data.
             node_type: Label for this set of nodes (e.g. ``'Person'``).
             unique_id_field: Column used as unique identifier.
             node_title_field: Column used as display title. Defaults to ``unique_id_field``.
             columns: Whitelist of columns to include. ``None`` = all.
-            conflict_handling: ``'update'``, ``'skip'``, or ``None`` (error on duplicate).
+            conflict_handling: ``'update'`` (default), ``'replace'``, ``'skip'``, or ``'preserve'``.
             skip_columns: Columns to exclude.
-            column_types: Override column dtypes ``{'col': 'string'|'integer'|'float'|'datetime'}``.
+            column_types: Override column dtypes ``{'col': 'string'|'integer'|'float'|'datetime'|'uniqueid'}``.
 
         Returns:
-            Operation report dict with keys ``operation``, ``nodes_created``,
-            ``nodes_updated``, ``nodes_skipped``, ``processing_time_ms``, etc.
+            Operation report dict with keys ``nodes_created``,
+            ``nodes_updated``, ``nodes_skipped``, ``processing_time_ms``,
+            ``has_errors``, and optionally ``errors`` with skip reasons.
         """
         ...
 
@@ -388,6 +403,14 @@ class KnowledgeGraph:
         """
         ...
 
+    def node_type_counts(self) -> dict[str, int]:
+        """Get node counts per type without materialising nodes.
+
+        Returns:
+            Dict mapping node type name to count.
+        """
+        ...
+
     # Graph Maintenance
     # -----------------
 
@@ -473,7 +496,7 @@ class KnowledgeGraph:
             flatten_single_parent: Flatten when only one parent. Default ``True``.
 
         Returns:
-            Nested dict ``{title: {node_id, node_type, incoming, outgoing}}``.
+            Nested dict ``{title: {node_id, type, incoming, outgoing}}``.
         """
         ...
 
@@ -945,7 +968,7 @@ class KnowledgeGraph:
             top_k: Return only the top *K* nodes.
 
         Returns:
-            List of dicts with ``node_type``, ``title``, ``id``, ``score``,
+            List of dicts with ``type``, ``title``, ``id``, ``score``,
             sorted by score descending.
         """
         ...
@@ -966,7 +989,7 @@ class KnowledgeGraph:
             top_k: Return only the top *K* nodes.
 
         Returns:
-            List of dicts with ``node_type``, ``title``, ``id``, ``score``.
+            List of dicts with ``type``, ``title``, ``id``, ``score``.
         """
         ...
 
@@ -982,7 +1005,7 @@ class KnowledgeGraph:
             top_k: Return only the top *K* nodes.
 
         Returns:
-            List of dicts with ``node_type``, ``title``, ``id``, ``score``.
+            List of dicts with ``type``, ``title``, ``id``, ``score``.
         """
         ...
 
@@ -998,7 +1021,42 @@ class KnowledgeGraph:
             top_k: Return only the top *K* nodes.
 
         Returns:
-            List of dicts with ``node_type``, ``title``, ``id``, ``score``.
+            List of dicts with ``type``, ``title``, ``id``, ``score``.
+        """
+        ...
+
+    # ====================================================================
+    # Community Detection
+    # ====================================================================
+
+    def louvain_communities(
+        self,
+        resolution: Optional[float] = None,
+        max_iterations: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Detect communities using the Louvain algorithm.
+
+        Args:
+            resolution: Resolution parameter (higher = more communities). Default ``1.0``.
+            max_iterations: Maximum iterations. Default ``100``.
+
+        Returns:
+            Dict with ``communities`` (dict of community_id to member list),
+            ``modularity``, and ``num_communities``.
+        """
+        ...
+
+    def label_propagation(
+        self,
+        max_iterations: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Detect communities using label propagation.
+
+        Args:
+            max_iterations: Maximum iterations. Default ``100``.
+
+        Returns:
+            Dict with ``communities``, ``modularity``, and ``num_communities``.
         """
         ...
 
@@ -1084,7 +1142,7 @@ class KnowledgeGraph:
             property: Property name to index.
 
         Returns:
-            Dict with ``node_type``, ``property``, ``unique_values``, ``created``.
+            Dict with ``type``, ``property``, ``unique_values``, ``created``.
         """
         ...
 
@@ -1093,7 +1151,7 @@ class KnowledgeGraph:
         ...
 
     def list_indexes(self) -> list[dict[str, str]]:
-        """List all indexes. Each dict has ``node_type`` and ``property``."""
+        """List all indexes. Each dict has ``type`` and ``property``."""
         ...
 
     def has_index(self, node_type: str, property: str) -> bool:
@@ -1124,7 +1182,7 @@ class KnowledgeGraph:
             properties: List of property names for the composite key.
 
         Returns:
-            Dict with ``node_type``, ``properties``, ``unique_combinations``.
+            Dict with ``type``, ``properties``, ``unique_combinations``.
         """
         ...
 
@@ -1177,74 +1235,53 @@ class KnowledgeGraph:
         *,
         to_df: bool = False,
         params: Optional[dict[str, Any]] = None,
-    ) -> Union[dict[str, Any], pd.DataFrame]:
+    ) -> Union[list[dict[str, Any]], pd.DataFrame]:
         """Execute a Cypher query.
 
         Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, WITH,
         OPTIONAL MATCH, UNWIND, UNION, CREATE, SET, DELETE, DETACH DELETE,
         REMOVE, MERGE (with ON CREATE SET / ON MATCH SET), CASE expressions,
-        parameters ($param), and aggregation functions.
+        WHERE EXISTS, shortestPath(), list comprehensions,
+        parameters ($param), ``!=`` operator, and aggregation functions.
 
-        Mutation queries (CREATE, SET, DELETE, REMOVE, MERGE) return a
-        ``stats`` key with ``nodes_created``, ``relationships_created``,
-        ``properties_set``, ``nodes_deleted``, ``relationships_deleted``,
-        ``properties_removed``.
+        Mutation queries (CREATE, SET, DELETE, REMOVE, MERGE) store
+        statistics on ``graph.last_mutation_stats`` with keys
+        ``nodes_created``, ``relationships_created``, ``properties_set``,
+        ``nodes_deleted``, ``relationships_deleted``, ``properties_removed``.
 
         Each call is atomic: if any clause fails, the graph is unchanged.
-        Property and composite indexes are automatically maintained by all
-        mutation operations.
+        Property and composite indexes are automatically maintained.
 
         Args:
             query: Cypher query string.
-            to_df: If ``True``, return a pandas DataFrame instead of a dict.
+            to_df: If ``True``, return a pandas DataFrame.
             params: Optional parameter dict for ``$param`` substitution.
 
         Returns:
-            Dict with ``columns`` and ``rows`` by default, or a DataFrame
-            when ``to_df=True``.
+            List of row dicts by default, or a DataFrame when ``to_df=True``.
 
         Example::
 
-            result = graph.cypher('''
+            rows = graph.cypher('''
                 MATCH (p:Person)-[:KNOWS]->(f:Person)
                 WHERE p.age > $min_age
                 RETURN p.name, count(f) AS friends
                 ORDER BY friends DESC LIMIT 10
             ''', params={'min_age': 25})
+            for row in rows:
+                print(row['name'], row['friends'])
 
             # As DataFrame
             df = graph.cypher('MATCH (n:Person) RETURN n.name, n.age', to_df=True)
 
-            # CASE expression
-            result = graph.cypher('''
-                MATCH (n:Person)
-                RETURN n.name,
-                       CASE WHEN n.age >= 18 THEN 'adult' ELSE 'minor' END AS category
-            ''')
-
             # CREATE nodes and edges
-            result = graph.cypher("CREATE (n:Person {name: 'Alice', age: 30})")
-            print(result['stats']['nodes_created'])  # 1
+            graph.cypher("CREATE (n:Person {name: 'Alice', age: 30})")
+            print(graph.last_mutation_stats['nodes_created'])  # 1
 
             # SET properties
-            result = graph.cypher('''
+            graph.cypher('''
                 MATCH (n:Person) WHERE n.name = 'Alice'
                 SET n.city = 'Oslo', n.age = 31
-            ''')
-
-            # DELETE / DETACH DELETE
-            graph.cypher("MATCH (n:Person) WHERE n.name = 'Alice' DETACH DELETE n")
-            graph.cypher("MATCH (a)-[r:KNOWS]->(b) DELETE r")
-
-            # REMOVE properties
-            graph.cypher("MATCH (n:Person) WHERE n.name = 'Bob' REMOVE n.city")
-
-            # MERGE (match or create)
-            graph.cypher("MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.age = 30")
-            graph.cypher('''
-                MATCH (a:Person), (b:Person)
-                WHERE a.name = 'Alice' AND b.name = 'Bob'
-                MERGE (a)-[:KNOWS]->(b) ON CREATE SET r.since = 2024
             ''')
         """
         ...

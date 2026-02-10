@@ -104,16 +104,20 @@ pub fn add_nodes(
     let property_count = property_columns.len();
     let mut batch = BatchProcessor::new(df_data.row_count());
     let mut skipped_count = 0;
+    let mut skipped_null_id = 0;
+    let mut skipped_parse_fail = 0;
 
     for row_idx in 0..df_data.row_count() {
         let id = match df_data.get_value_by_index(row_idx, id_idx) {
             Some(Value::Null) => {
                 skipped_count += 1;
+                skipped_null_id += 1;
                 continue;
             }
             Some(id) => id,
             None => {
                 skipped_count += 1;
+                skipped_parse_fail += 1;
                 continue;
             }
         };
@@ -158,6 +162,21 @@ pub fn add_nodes(
             },
         };
         batch.add_action(action, graph)?;
+    }
+
+    // Report skip reasons
+    if skipped_null_id > 0 {
+        errors.push(format!(
+            "Skipped {} rows: null values in ID field '{}'",
+            skipped_null_id, unique_id_field
+        ));
+    }
+    if skipped_parse_fail > 0 {
+        errors.push(format!(
+            "Skipped {} rows: could not parse ID field '{}'. If IDs are strings, pass column_types={{'{}'
+: 'string'}}",
+            skipped_parse_fail, unique_id_field, unique_id_field
+        ));
     }
 
     // Execute the batch and get the statistics
@@ -263,6 +282,8 @@ pub fn add_connections(
     batch.set_conflict_mode(conflict_mode);
 
     let mut skipped_count = 0;
+    let mut skipped_null_source = 0;
+    let mut skipped_null_target = 0;
     // Instead of tracking ids directly, track counts of missing items
     let mut missing_source_count = 0;
     let mut missing_target_count = 0;
@@ -286,16 +307,28 @@ pub fn add_connections(
 
     for row_idx in 0..df_data.row_count() {
         let source_id = match df_data.get_value_by_index(row_idx, source_id_idx) {
-            Some(Value::Null) | None => {
+            Some(Value::Null) => {
                 skipped_count += 1;
+                skipped_null_source += 1;
+                continue;
+            }
+            None => {
+                skipped_count += 1;
+                skipped_null_source += 1;
                 continue;
             }
             Some(id) => id,
         };
 
         let target_id = match df_data.get_value_by_index(row_idx, target_id_idx) {
-            Some(Value::Null) | None => {
+            Some(Value::Null) => {
                 skipped_count += 1;
+                skipped_null_target += 1;
+                continue;
+            }
+            None => {
+                skipped_count += 1;
+                skipped_null_target += 1;
                 continue;
             }
             Some(id) => id,
@@ -358,17 +391,29 @@ pub fn add_connections(
         }
     }
 
-    // Add missing nodes as errors
+    // Report skip reasons
+    if skipped_null_source > 0 {
+        errors.push(format!(
+            "Skipped {} rows: null values in source ID field '{}'",
+            skipped_null_source, source_id_field
+        ));
+    }
+    if skipped_null_target > 0 {
+        errors.push(format!(
+            "Skipped {} rows: null values in target ID field '{}'",
+            skipped_null_target, target_id_field
+        ));
+    }
     if missing_source_count > 0 {
         errors.push(format!(
-            "Missing source nodes: {} occurrences",
-            missing_source_count
+            "Skipped {} rows: source node not found in type '{}'",
+            missing_source_count, source_type
         ));
     }
     if missing_target_count > 0 {
         errors.push(format!(
-            "Missing target nodes: {} occurrences",
-            missing_target_count
+            "Skipped {} rows: target node not found in type '{}'",
+            missing_target_count, target_type
         ));
     }
 

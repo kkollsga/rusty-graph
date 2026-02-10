@@ -12,8 +12,8 @@ class TestListComprehensions:
         graph = KnowledgeGraph()
         result = graph.cypher("UNWIND [1] AS dummy RETURN [x IN [1, 2, 3, 4, 5] | x * 2] AS doubled")
 
-        assert len(result['rows']) == 1
-        doubled = result['rows'][0]['doubled']
+        assert len(result) == 1
+        doubled = result[0]['doubled']
         assert isinstance(doubled, list)
         assert doubled == [2, 4, 6, 8, 10]
 
@@ -22,8 +22,8 @@ class TestListComprehensions:
         graph = KnowledgeGraph()
         result = graph.cypher("UNWIND [1] AS dummy RETURN [x IN [1, 2, 3, 4, 5] WHERE x > 3] AS filtered")
 
-        assert len(result['rows']) == 1
-        filtered = result['rows'][0]['filtered']
+        assert len(result) == 1
+        filtered = result[0]['filtered']
         assert isinstance(filtered, list)
         assert filtered == [4, 5]
 
@@ -32,8 +32,8 @@ class TestListComprehensions:
         graph = KnowledgeGraph()
         result = graph.cypher("UNWIND [1] AS dummy RETURN [x IN [1, 2, 3, 4, 5] WHERE x > 3 | x * 2] AS result")
 
-        assert len(result['rows']) == 1
-        result_val = result['rows'][0]['result']
+        assert len(result) == 1
+        result_val = result[0]['result']
         assert isinstance(result_val, list)
         assert result_val == [8, 10]
 
@@ -42,8 +42,8 @@ class TestListComprehensions:
         graph = KnowledgeGraph()
         result = graph.cypher("UNWIND [1] AS dummy RETURN [x IN [1, 2, 3]] AS identity")
 
-        assert len(result['rows']) == 1
-        identity = result['rows'][0]['identity']
+        assert len(result) == 1
+        identity = result[0]['identity']
         assert isinstance(identity, list)
         assert identity == [1, 2, 3]
 
@@ -52,8 +52,8 @@ class TestListComprehensions:
         graph = KnowledgeGraph()
         result = graph.cypher("UNWIND [1] AS dummy RETURN [x IN [1, 2, 3] WHERE x > 10] AS empty")
 
-        assert len(result['rows']) == 1
-        empty = result['rows'][0]['empty']
+        assert len(result) == 1
+        empty = result[0]['empty']
         assert isinstance(empty, list)
         assert empty == []
 
@@ -63,8 +63,8 @@ class TestListComprehensions:
         # Note: Need to escape quotes properly
         result = graph.cypher("UNWIND [1] AS dummy RETURN [x IN ['a', 'b', 'c'] WHERE x <> 'b'] AS result")
 
-        assert len(result['rows']) == 1
-        result_val = result['rows'][0]['result']
+        assert len(result) == 1
+        result_val = result[0]['result']
         assert isinstance(result_val, list)
         assert 'a' in result_val and 'c' in result_val
         assert 'b' not in result_val
@@ -74,8 +74,8 @@ class TestListComprehensions:
         graph = KnowledgeGraph()
         result = graph.cypher("UNWIND [1] AS dummy RETURN [x IN [1, 2, 3, 4, 5] WHERE x * x > 10] AS result")
 
-        assert len(result['rows']) == 1
-        result_val = result['rows'][0]['result']
+        assert len(result) == 1
+        result_val = result[0]['result']
         assert isinstance(result_val, list)
         assert result_val == [4, 5]
 
@@ -84,8 +84,8 @@ class TestListComprehensions:
         graph = KnowledgeGraph()
         result = graph.cypher("UNWIND [1] AS dummy RETURN [x IN [1, 2, 3] | x * 2 + 1] AS result")
 
-        assert len(result['rows']) == 1
-        result_val = result['rows'][0]['result']
+        assert len(result) == 1
+        result_val = result[0]['result']
         assert isinstance(result_val, list)
         assert result_val == [3, 5, 7]
 
@@ -106,8 +106,8 @@ class TestListComprehensionIntegration:
             UNWIND [1] AS dummy RETURN [x IN names | toUpper(x)] AS upper_names
         """)
 
-        assert len(result['rows']) == 1
-        upper_names = result['rows'][0]['upper_names']
+        assert len(result) == 1
+        upper_names = result[0]['upper_names']
         assert isinstance(upper_names, list)
         # Should contain uppercase versions
         assert 'ALICE' in upper_names
@@ -125,8 +125,8 @@ class TestListComprehensionIntegration:
             UNWIND [1] AS dummy RETURN [x IN prices WHERE x >= 20] AS expensive_prices
         """)
 
-        assert len(result['rows']) == 1
-        expensive = result['rows'][0]['expensive_prices']
+        assert len(result) == 1
+        expensive = result[0]['expensive_prices']
         assert isinstance(expensive, list)
         assert 20 in expensive and 30 in expensive
         assert 10 not in expensive
@@ -141,7 +141,7 @@ class TestListComprehensionIntegration:
                 [x IN [1, 2, 3] WHERE x > 1] AS filtered
         """)
 
-        assert len(result['rows']) == 1
-        row = result['rows'][0]
+        assert len(result) == 1
+        row = result[0]
         assert row['doubled'] == [2, 4, 6]
         assert row['filtered'] == [2, 3]

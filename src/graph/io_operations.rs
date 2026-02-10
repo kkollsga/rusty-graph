@@ -47,5 +47,6 @@ pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
         inner: Arc::new(dir_graph),
         selection: CowSelection::new(),
         reports: OperationReports::new(),
+        last_mutation_stats: None,
     })
 }

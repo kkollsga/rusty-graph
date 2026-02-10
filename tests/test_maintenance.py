@@ -166,7 +166,7 @@ class TestVacuum:
         result = graph_with_data.cypher(
             "MATCH (p:Person) RETURN p.name ORDER BY p.name"
         )
-        names = sorted([row['p.name'] for row in result['rows']])
+        names = sorted([row['p.name'] for row in result])
         expected = sorted([f'Person_{i}' for i in range(1, 11) if i != 5])
         assert names == expected
 
@@ -194,7 +194,7 @@ class TestVacuum:
 
         # Cypher MATCH should work
         result = graph_with_data.cypher("MATCH (p:Person) RETURN count(p) as cnt")
-        assert result['rows'][0]['cnt'] == 9
+        assert result[0]['cnt'] == 9
 
     def test_vacuum_resets_selection(self, graph_with_data):
         """vacuum() should reset the selection since indices change."""
@@ -215,17 +215,17 @@ class TestVacuum:
         graph_with_data.vacuum()
 
         # Create a new node
-        result = graph_with_data.cypher(
+        graph_with_data.cypher(
             "CREATE (p:Person {name: 'NewPerson', age: 99})"
         )
-        assert result['stats']['nodes_created'] == 1
+        assert graph_with_data.last_mutation_stats['nodes_created'] == 1
 
         # Verify the new node exists
         result = graph_with_data.cypher(
             "MATCH (p:Person {name: 'NewPerson'}) RETURN p.age"
         )
-        assert len(result['rows']) == 1
-        assert result['rows'][0]['p.age'] == 99
+        assert len(result) == 1
+        assert result[0]['p.age'] == 99
 
     def test_vacuum_heavy_fragmentation(self):
         """vacuum() should handle heavy fragmentation (50% deleted)."""
@@ -306,7 +306,7 @@ class TestVacuum:
         # Create new node and edge
         graph.cypher("CREATE (p:Person {name: 'Dave', age: 30})")
         result = graph.cypher("MATCH (p:Person) RETURN p.name ORDER BY p.name")
-        names = sorted([row['p.name'] for row in result['rows']])
+        names = sorted([row['p.name'] for row in result])
         assert names == ['Alice', 'Charlie', 'Dave']
 
 

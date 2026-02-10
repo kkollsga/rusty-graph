@@ -58,18 +58,8 @@ pub fn cypher_result_to_dataframe(py: Python<'_>, result: &CypherResult) -> PyRe
         .map(|df| df.unbind())
 }
 
-/// Convert a CypherResult to a Python dict with 'columns' and 'rows' keys
+/// Convert a CypherResult to a Python list of row dicts
 pub fn cypher_result_to_py(py: Python<'_>, result: &CypherResult) -> PyResult<Py<PyAny>> {
-    let result_dict = PyDict::new(py);
-
-    // Columns list
-    let cols = PyList::empty(py);
-    for col in &result.columns {
-        cols.append(col)?;
-    }
-    result_dict.set_item("columns", cols)?;
-
-    // Rows as list of dicts
     let rows_list = PyList::empty(py);
     for row in &result.rows {
         let row_dict = PyDict::new(py);
@@ -82,19 +72,5 @@ pub fn cypher_result_to_py(py: Python<'_>, result: &CypherResult) -> PyResult<Py
         }
         rows_list.append(row_dict)?;
     }
-    result_dict.set_item("rows", rows_list)?;
-
-    // Add mutation stats if present
-    if let Some(ref stats) = result.stats {
-        let stats_dict = PyDict::new(py);
-        stats_dict.set_item("nodes_created", stats.nodes_created)?;
-        stats_dict.set_item("relationships_created", stats.relationships_created)?;
-        stats_dict.set_item("properties_set", stats.properties_set)?;
-        stats_dict.set_item("nodes_deleted", stats.nodes_deleted)?;
-        stats_dict.set_item("relationships_deleted", stats.relationships_deleted)?;
-        stats_dict.set_item("properties_removed", stats.properties_removed)?;
-        result_dict.set_item("stats", stats_dict)?;
-    }
-
-    Ok(result_dict.into_any().unbind())
+    Ok(rows_list.into_any().unbind())
 }

@@ -49,7 +49,7 @@ class TestAddNodesErrorResilience:
         assert g.graph_info()["type_count"] == 1
 
         result = g.cypher("MATCH (p:Person) RETURN p.name ORDER BY p.name")
-        names = [row["p.name"] for row in result["rows"]]
+        names = [row["p.name"] for row in result]
         assert names == ["Alice", "Bob", "Charlie"]
 
     def test_failed_add_nodes_preserves_connections(self, graph_with_data):
@@ -117,7 +117,7 @@ class TestCypherErrorResilience:
 
         g.cypher("MATCH (p:Person {name: 'Dave'}) SET p.city = 'Oslo'")
         result = g.cypher("MATCH (p:Person {name: 'Dave'}) RETURN p.city")
-        assert result["rows"][0]["p.city"] == "Oslo"
+        assert result[0]["p.city"] == "Oslo"
 
         g.cypher("MATCH (p:Person {name: 'Dave'}) DETACH DELETE p")
         assert g.graph_info()["node_count"] == 3

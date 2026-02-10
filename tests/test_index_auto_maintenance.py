@@ -180,7 +180,7 @@ class TestTypeMetadata:
 
         # No SchemaNode graph nodes should exist — MATCH returns nothing
         result = graph.cypher("MATCH (s:SchemaNode) RETURN s.name")
-        assert len(result['rows']) == 0
+        assert len(result) == 0
 
 
 class TestCompositeIndexMaintenance:
@@ -205,11 +205,11 @@ class TestCompositeIndexMaintenance:
         result = graph.cypher(
             "MATCH (p:Person) WHERE p.city = 'Bergen' AND p.age = 28 RETURN p.name"
         )
-        names = [row['p.name'] for row in result['rows']]
+        names = [row['p.name'] for row in result]
         assert 'Alice' in names
 
         # Verify old combo is gone — no one has Oslo+28 anymore
         result_old = graph.cypher(
             "MATCH (p:Person) WHERE p.city = 'Oslo' AND p.age = 28 RETURN p.name"
         )
-        assert len(result_old['rows']) == 0
+        assert len(result_old) == 0

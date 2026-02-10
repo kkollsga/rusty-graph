@@ -71,7 +71,7 @@ class TestCrossFeatureWorkflows:
         cypher_result = social_graph.cypher(
             "MATCH (a:Person)-[:WORKS_AT]->(c:Company) RETURN a.title, c.title"
         )
-        assert len(pattern_results) == len(cypher_result['rows'])
+        assert len(pattern_results) == len(cypher_result)
 
     def test_full_pipeline(self, petroleum_graph):
         """Full workflow: filter -> traverse -> aggregate -> export."""

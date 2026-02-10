@@ -62,7 +62,7 @@ class TestWhereExists:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result['rows']]
+        names = [row['p.name'] for row in result]
         assert names == ['Alice', 'Bob']
 
     def test_exists_with_label_filter(self, social_graph):
@@ -74,7 +74,7 @@ class TestWhereExists:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result['rows']]
+        names = [row['p.name'] for row in result]
         assert names == ['Alice', 'Bob']
 
     def test_exists_no_match(self, social_graph):
@@ -85,7 +85,7 @@ class TestWhereExists:
             RETURN p.name
         """)
 
-        assert len(result['rows']) == 0
+        assert len(result) == 0
 
     def test_not_exists(self, social_graph):
         """NOT EXISTS — find people who don't know anyone."""
@@ -96,7 +96,7 @@ class TestWhereExists:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result['rows']]
+        names = [row['p.name'] for row in result]
         assert names == ['Charlie', 'Diana']
 
     def test_not_exists_purchase(self, social_graph):
@@ -108,7 +108,7 @@ class TestWhereExists:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result['rows']]
+        names = [row['p.name'] for row in result]
         assert names == ['Charlie', 'Diana']
 
     def test_exists_with_property_filter(self, social_graph):
@@ -121,7 +121,7 @@ class TestWhereExists:
         """)
 
         # Alice knows Charlie (Oslo), Bob knows Charlie (Oslo)
-        names = [row['p.name'] for row in result['rows']]
+        names = [row['p.name'] for row in result]
         assert names == ['Alice', 'Bob']
 
     def test_exists_with_specific_target(self, social_graph):
@@ -132,8 +132,8 @@ class TestWhereExists:
             RETURN p.name
         """)
 
-        assert len(result['rows']) == 1
-        assert result['rows'][0]['p.name'] == 'Alice'
+        assert len(result) == 1
+        assert result[0]['p.name'] == 'Alice'
 
     def test_exists_and_other_conditions(self, social_graph):
         """EXISTS combined with other WHERE conditions."""
@@ -144,8 +144,8 @@ class TestWhereExists:
         """)
 
         # Alice is in Oslo and knows people
-        assert len(result['rows']) == 1
-        assert result['rows'][0]['p.name'] == 'Alice'
+        assert len(result) == 1
+        assert result[0]['p.name'] == 'Alice'
 
     def test_exists_or_condition(self, social_graph):
         """EXISTS combined with OR."""
@@ -157,7 +157,7 @@ class TestWhereExists:
         """)
 
         # Alice and Bob know people, Diana is in Stavanger
-        names = [row['p.name'] for row in result['rows']]
+        names = [row['p.name'] for row in result]
         assert names == ['Alice', 'Bob', 'Diana']
 
     def test_exists_incoming_relationship(self, social_graph):
@@ -170,7 +170,7 @@ class TestWhereExists:
         """)
 
         # Bob is known by Alice, Charlie is known by Alice and Bob
-        names = [row['p.name'] for row in result['rows']]
+        names = [row['p.name'] for row in result]
         assert names == ['Bob', 'Charlie']
 
 
@@ -188,7 +188,7 @@ class TestWhereExistsEdgeCases:
             RETURN p.name
         """)
 
-        assert len(result['rows']) == 0
+        assert len(result) == 0
 
     def test_exists_different_variables(self):
         """EXISTS with distinct source and target variables."""
@@ -207,8 +207,8 @@ class TestWhereExistsEdgeCases:
             RETURN p.name
         """)
 
-        assert len(result['rows']) == 1
-        assert result['rows'][0]['p.name'] == 'Alice'
+        assert len(result) == 1
+        assert result[0]['p.name'] == 'Alice'
 
     def test_exists_multiple_relationship_types(self, social_graph):
         """EXISTS checking for multiple relationship types."""
@@ -220,7 +220,7 @@ class TestWhereExistsEdgeCases:
         """)
 
         # Only Alice and Bob know people AND purchased something
-        names = [row['p.name'] for row in result['rows']]
+        names = [row['p.name'] for row in result]
         assert names == ['Alice', 'Bob']
 
     def test_not_exists_with_multiple_conditions(self, social_graph):
@@ -233,5 +233,5 @@ class TestWhereExistsEdgeCases:
         """)
 
         # Charlie and Diana don't know anyone and haven't purchased anything
-        names = [row['p.name'] for row in result['rows']]
+        names = [row['p.name'] for row in result]
         assert names == ['Charlie', 'Diana']

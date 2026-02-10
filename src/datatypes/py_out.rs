@@ -347,7 +347,7 @@ pub fn level_connections_to_pydict(
         for conn in &level.connections {
             let node_dict = PyDict::new(py);
             node_dict.set_item("node_id", value_to_py(py, &conn.node_id)?)?;
-            node_dict.set_item("node_type", &conn.node_type)?;
+            node_dict.set_item("type", &conn.node_type)?;
 
             let incoming_dict = PyDict::new(py);
             for (conn_type, id, title, conn_props, node_props) in &conn.incoming {
@@ -425,7 +425,7 @@ pub fn level_connections_to_pydict(
         for conn in &level.connections {
             let node_dict = PyDict::new(py);
             node_dict.set_item("node_id", value_to_py(py, &conn.node_id)?)?;
-            node_dict.set_item("node_type", &conn.node_type)?;
+            node_dict.set_item("type", &conn.node_type)?;
 
             let incoming_dict = PyDict::new(py);
             for (conn_type, id, title, conn_props, node_props) in &conn.incoming {

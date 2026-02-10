@@ -89,21 +89,30 @@ impl<'a> CypherExecutor<'a> {
             let mut all_rows = Vec::new();
 
             for pattern in &clause.patterns {
-                let executor = PatternExecutor::new_lightweight(self.graph, None);
-                let matches = executor.execute(pattern)?;
-
                 if all_rows.is_empty() {
                     // First pattern - create initial rows
+                    let executor = PatternExecutor::new_lightweight(self.graph, None);
+                    let matches = executor.execute(pattern)?;
                     for m in matches {
                         all_rows.push(self.pattern_match_to_row(m));
                     }
                 } else {
-                    // Cross-product with existing rows
-                    let mut new_rows = Vec::with_capacity(all_rows.len() * matches.len());
+                    // Subsequent patterns: use shared-variable join
+                    // Pass existing node bindings as pre-bindings to constrain the pattern
+                    let mut new_rows = Vec::new();
                     for existing_row in &all_rows {
-                        for m in &matches {
+                        let executor = PatternExecutor::with_bindings(
+                            self.graph,
+                            None,
+                            existing_row.node_bindings.clone(),
+                        );
+                        let matches = executor.execute(pattern)?;
+                        for m in matches {
+                            if !self.bindings_compatible(existing_row, &m) {
+                                continue;
+                            }
                             let mut new_row = existing_row.clone();
-                            self.merge_match_into_row(&mut new_row, m);
+                            self.merge_match_into_row(&mut new_row, &m);
                             new_rows.push(new_row);
                         }
                     }

@@ -183,6 +183,12 @@ pub fn pandas_to_dataframe(
     column_names: &[String],
     column_types: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<DataFrame> {
+    // Reset index to ensure contiguous positional access.
+    // Handles filtered/deduped DataFrames with non-contiguous indexes.
+    let kwargs = pyo3::types::PyDict::new(df.py());
+    kwargs.set_item("drop", true)?;
+    let df = df.call_method("reset_index", (), Some(&kwargs))?;
+
     let df_columns = df.getattr("columns")?;
     let all_column_names: Vec<String> = df_columns.extract()?;
 
@@ -228,13 +234,24 @@ pub fn pandas_to_dataframe(
                         }
                     }
                 } else if unique_id_fields.contains(col_name) {
-                    ColumnType::UniqueId
+                    // Auto-detect: string/object columns keep String type rather than
+                    // forcing UniqueId (which silently drops non-numeric string IDs)
+                    let detected = determine_column_type(&series, col_name)?;
+                    match detected {
+                        ColumnType::String => ColumnType::String,
+                        _ => ColumnType::UniqueId,
+                    }
                 } else {
                     // Fall back to auto-detection if not in custom mapping
                     determine_column_type(&series, col_name)?
                 }
             } else if unique_id_fields.contains(col_name) {
-                ColumnType::UniqueId
+                // Auto-detect: string/object columns keep String type
+                let detected = determine_column_type(&series, col_name)?;
+                match detected {
+                    ColumnType::String => ColumnType::String,
+                    _ => ColumnType::UniqueId,
+                }
             } else {
                 // No custom mapping provided, use auto-detection
                 determine_column_type(&series, col_name)?

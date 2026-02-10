@@ -202,6 +202,18 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
                 }
             }
 
+            '!' => {
+                if i + 1 < len && chars[i + 1] == '=' {
+                    tokens.push(CypherToken::NotEquals);
+                    i += 2;
+                } else {
+                    return Err(format!(
+                        "Unexpected character '!' at position {}. Did you mean '!='?",
+                        i
+                    ));
+                }
+            }
+
             '.' => {
                 if i + 1 < len && chars[i + 1] == '.' {
                     tokens.push(CypherToken::DotDot);

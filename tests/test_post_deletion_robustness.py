@@ -301,17 +301,17 @@ class TestAddNodesAfterDelete:
 
     def test_cypher_create_after_delete(self, chain_with_deletion):
         """Cypher CREATE after DELETE should generate valid IDs."""
-        result = chain_with_deletion.cypher(
+        chain_with_deletion.cypher(
             "CREATE (n:Person {name: 'Frank', age: 28})"
         )
-        assert result['stats']['nodes_created'] == 1
+        assert chain_with_deletion.last_mutation_stats['nodes_created'] == 1
 
         # Verify node exists and has no collision with surviving nodes
         check = chain_with_deletion.cypher(
             "MATCH (n:Person {name: 'Frank'}) RETURN n.age"
         )
-        assert len(check['rows']) == 1
-        assert check['rows'][0]['n.age'] == 28
+        assert len(check) == 1
+        assert check[0]['n.age'] == 28
 
     def test_add_connections_after_delete(self, chain_with_deletion):
         """add_connections should work after deletion."""
@@ -340,21 +340,21 @@ class TestCypherAfterDelete:
     def test_match_all_after_delete(self, chain_with_deletion):
         """MATCH all nodes should skip deleted nodes."""
         result = chain_with_deletion.cypher("MATCH (n:Person) RETURN count(*) AS cnt")
-        assert result['rows'][0]['cnt'] == 4
+        assert result[0]['cnt'] == 4
 
     def test_match_deleted_node_returns_empty(self, chain_with_deletion):
         """MATCH for a deleted node should return empty."""
         result = chain_with_deletion.cypher(
             "MATCH (n:Person {name: 'Charlie'}) RETURN n.name"
         )
-        assert len(result['rows']) == 0
+        assert len(result) == 0
 
     def test_match_with_relationship_after_delete(self, chain_with_deletion):
         """MATCH relationship pattern should skip deleted endpoints."""
         result = chain_with_deletion.cypher(
             "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name"
         )
-        names = [(r['a.name'], r['b.name']) for r in result['rows']]
+        names = [(r['a.name'], r['b.name']) for r in result]
         # Only A->B and D->E should remain
         assert ('Alice', 'Bob') in names
         assert ('Dave', 'Eve') in names
@@ -365,7 +365,7 @@ class TestCypherAfterDelete:
         result = chain_with_deletion.cypher(
             "MATCH (n:Person) WHERE n.age > 30 RETURN n.name ORDER BY n.name"
         )
-        names = [r['n.name'] for r in result['rows']]
+        names = [r['n.name'] for r in result]
         # Charlie (35) deleted, Dave (40) and Eve (45) remain
         assert 'Charlie' not in names
         assert 'Dave' in names
@@ -646,7 +646,7 @@ class TestFullWorkflowAfterDelete:
 
         # Cypher MATCH
         result = graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")
-        assert result['rows'][0]['cnt'] == 7
+        assert result[0]['cnt'] == 7
 
         # Traversal
         p1 = graph.type_filter('Person').filter({'title': 'P_1'})
@@ -664,7 +664,7 @@ class TestFullWorkflowAfterDelete:
         # Add new node with tombstones present
         graph.cypher("CREATE (n:Person {name: 'New1', age: 99, city: 'Oslo'})")
         result = graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")
-        assert result['rows'][0]['cnt'] == 8
+        assert result[0]['cnt'] == 8
 
         # --- Vacuum ---
         vacuum_result = graph.vacuum()
@@ -676,7 +676,7 @@ class TestFullWorkflowAfterDelete:
 
         # Everything still works
         result = graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")
-        assert result['rows'][0]['cnt'] == 8
+        assert result[0]['cnt'] == 8
 
         components = graph.connected_components()
         assert len(components) >= 1

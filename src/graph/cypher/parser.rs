@@ -429,6 +429,13 @@ impl CypherParser {
                 CypherToken::FloatLit(f) => parts.push(f.to_string()),
                 CypherToken::True => parts.push("true".to_string()),
                 CypherToken::False => parts.push("false".to_string()),
+                CypherToken::Parameter(name) => {
+                    return Err(format!(
+                        "Parameters (${}) are not yet supported in MATCH patterns. \
+                         Use WHERE clause instead: MATCH (n:Label) WHERE n.prop = ${}",
+                        name, name
+                    ));
+                }
                 _ => {
                     return Err(format!("Unexpected token in MATCH pattern: {:?}", token));
                 }

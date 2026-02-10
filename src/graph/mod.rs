@@ -45,6 +45,7 @@ pub struct KnowledgeGraph {
     inner: Arc<DirGraph>,
     selection: CowSelection, // Using Cow wrapper for copy-on-write semantics
     reports: OperationReports,
+    last_mutation_stats: Option<cypher::result::MutationStats>,
 }
 
 impl Clone for KnowledgeGraph {
@@ -53,6 +54,7 @@ impl Clone for KnowledgeGraph {
             inner: Arc::clone(&self.inner),
             selection: self.selection.clone(), // Arc clone - O(1), shares data
             reports: self.reports.clone(),
+            last_mutation_stats: self.last_mutation_stats.clone(),
         }
     }
 }
@@ -85,7 +87,7 @@ fn centrality_results_to_py(
     for result in results.into_iter().take(limit) {
         if let Some(info) = graph_algorithms::get_node_info(graph, result.node_idx) {
             let node_dict = PyDict::new(py);
-            node_dict.set_item("node_type", &info.node_type)?;
+            node_dict.set_item("type", &info.node_type)?;
             node_dict.set_item("title", &info.title)?;
             node_dict.set_item("id", py_out::value_to_py(py, &info.id)?)?;
             node_dict.set_item("score", result.score)?;
@@ -116,7 +118,7 @@ fn community_results_to_py(
         for &node_idx in members {
             if let Some(info) = graph_algorithms::get_node_info(graph, node_idx) {
                 let node_dict = PyDict::new(py);
-                node_dict.set_item("node_type", &info.node_type)?;
+                node_dict.set_item("type", &info.node_type)?;
                 node_dict.set_item("title", &info.title)?;
                 node_dict.set_item("id", py_out::value_to_py(py, &info.id)?)?;
                 member_list.append(node_dict)?;
@@ -140,9 +142,26 @@ impl KnowledgeGraph {
             inner: Arc::new(DirGraph::new()),
             selection: CowSelection::new(),
             reports: OperationReports::new(),
+            last_mutation_stats: None,
         }
     }
 
+    /// Add nodes from a pandas DataFrame.
+    ///
+    /// Args:
+    ///     data: DataFrame containing node data.
+    ///     node_type: Label for this set of nodes (e.g. 'Person').
+    ///     unique_id_field: Column used as unique identifier. String and integer IDs
+    ///         are auto-detected from the DataFrame dtype.
+    ///     node_title_field: Column used as display title. Defaults to unique_id_field.
+    ///     columns: Whitelist of columns to include. None = all.
+    ///     conflict_handling: 'update' (default), 'replace', 'skip', or 'preserve'.
+    ///     skip_columns: Columns to exclude from properties.
+    ///     column_types: Override column type detection: {'col': 'string'|'integer'|'float'|'datetime'|'uniqueid'}.
+    ///
+    /// Returns:
+    ///     dict with 'nodes_created', 'nodes_updated', 'nodes_skipped',
+    ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
     #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_nodes(
@@ -212,18 +231,36 @@ impl KnowledgeGraph {
             report_dict.set_item("nodes_skipped", result.nodes_skipped)?;
             report_dict.set_item("processing_time_ms", result.processing_time_ms)?;
 
-            // Add errors array if there are any
+            // has_errors is true when there are errors OR rows were skipped
+            let has_errors = !result.errors.is_empty() || result.nodes_skipped > 0;
             if !result.errors.is_empty() {
                 report_dict.set_item("errors", &result.errors)?;
-                report_dict.set_item("has_errors", true)?;
-            } else {
-                report_dict.set_item("has_errors", false)?;
             }
+            report_dict.set_item("has_errors", has_errors)?;
 
             Ok(report_dict.into())
         })
     }
 
+    /// Add connections (edges) from a pandas DataFrame.
+    ///
+    /// Args:
+    ///     data: DataFrame containing connection data.
+    ///     connection_type: Label for this connection type (e.g. 'KNOWS').
+    ///     source_type: Node type of the source nodes.
+    ///     source_id_field: Column containing source node IDs.
+    ///     target_type: Node type of the target nodes.
+    ///     target_id_field: Column containing target node IDs.
+    ///     source_title_field: Optional column to update source node titles.
+    ///     target_title_field: Optional column to update target node titles.
+    ///     columns: Whitelist of columns to include as edge properties.
+    ///     skip_columns: Columns to exclude from edge properties.
+    ///     conflict_handling: 'update' (default), 'replace', 'skip', or 'preserve'.
+    ///     column_types: Override column type detection.
+    ///
+    /// Returns:
+    ///     dict with 'connections_created', 'connections_skipped',
+    ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
     #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_connections(
@@ -304,13 +341,12 @@ impl KnowledgeGraph {
             report_dict.set_item("property_fields_tracked", result.property_fields_tracked)?;
             report_dict.set_item("processing_time_ms", result.processing_time_ms)?;
 
-            // Add errors array if there are any
+            // has_errors is true when there are errors OR connections were skipped
+            let has_errors = !result.errors.is_empty() || result.connections_skipped > 0;
             if !result.errors.is_empty() {
                 report_dict.set_item("errors", &result.errors)?;
-                report_dict.set_item("has_errors", true)?;
-            } else {
-                report_dict.set_item("has_errors", false)?;
             }
+            report_dict.set_item("has_errors", has_errors)?;
 
             Ok(report_dict.into())
         })
@@ -938,6 +974,7 @@ impl KnowledgeGraph {
                 CowSelection::new()
             },
             reports: self.reports.clone(),
+            last_mutation_stats: None,
         };
 
         // Create and add a report
@@ -1610,6 +1647,7 @@ impl KnowledgeGraph {
                 CowSelection::new()
             },
             reports: self.reports.clone(), // Copy over existing reports
+            last_mutation_stats: None,
         };
 
         // Store the report in the new graph
@@ -1701,6 +1739,7 @@ impl KnowledgeGraph {
                 CowSelection::new()
             },
             reports: self.reports.clone(),
+            last_mutation_stats: None,
         };
 
         // Store the report
@@ -1748,6 +1787,7 @@ impl KnowledgeGraph {
                             CowSelection::new()
                         },
                         reports: self.reports.clone(), // Copy existing reports
+                        last_mutation_stats: None,
                     };
 
                     // Store the calculation report
@@ -1852,6 +1892,7 @@ impl KnowledgeGraph {
                     CowSelection::new()
                 },
                 reports: self.reports.clone(), // Copy existing reports
+                last_mutation_stats: None,
             };
 
             // Add the report
@@ -3154,6 +3195,7 @@ impl KnowledgeGraph {
             inner: Arc::new(extracted),
             selection: CowSelection::new(),
             reports: OperationReports::new(), // Fresh reports for new graph
+            last_mutation_stats: None,
         })
     }
 
@@ -3386,7 +3428,7 @@ impl KnowledgeGraph {
         let unique_values = graph.create_index(node_type, property);
 
         let result_dict = PyDict::new(py);
-        result_dict.set_item("node_type", node_type)?;
+        result_dict.set_item("type", node_type)?;
         result_dict.set_item("property", property)?;
         result_dict.set_item("unique_values", unique_values)?;
         result_dict.set_item("created", true)?;
@@ -3410,13 +3452,13 @@ impl KnowledgeGraph {
     /// List all existing indexes.
     ///
     /// Returns:
-    ///     List of dictionaries with 'node_type' and 'property' keys
+    ///     List of dictionaries with 'type' and 'property' keys
     ///
     /// Example:
     ///     ```python
     ///     indexes = graph.list_indexes()
     ///     for idx in indexes:
-    ///         print(f"{idx['node_type']}.{idx['property']}")
+    ///         print(f"{idx['type']}.{idx['property']}")
     ///     ```
     fn list_indexes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let indexes = self.inner.list_indexes();
@@ -3424,7 +3466,7 @@ impl KnowledgeGraph {
         let result_list = pyo3::types::PyList::empty(py);
         for (node_type, property) in indexes {
             let idx_dict = PyDict::new(py);
-            idx_dict.set_item("node_type", node_type)?;
+            idx_dict.set_item("type", node_type)?;
             idx_dict.set_item("property", property)?;
             result_list.append(idx_dict)?;
         }
@@ -3463,7 +3505,7 @@ impl KnowledgeGraph {
         match self.inner.get_index_stats(node_type, property) {
             Some(stats) => {
                 let result_dict = PyDict::new(py);
-                result_dict.set_item("node_type", node_type)?;
+                result_dict.set_item("type", node_type)?;
                 result_dict.set_item("property", property)?;
                 result_dict.set_item("unique_values", stats.unique_values)?;
                 result_dict.set_item("total_entries", stats.total_entries)?;
@@ -3530,7 +3572,7 @@ impl KnowledgeGraph {
         let props_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
         let unique_values = graph.create_composite_index(node_type, &props_refs);
         let result_dict = PyDict::new(py);
-        result_dict.set_item("node_type", node_type)?;
+        result_dict.set_item("type", node_type)?;
         result_dict.set_item("properties", properties)?;
         result_dict.set_item("unique_combinations", unique_values)?;
 
@@ -3553,14 +3595,14 @@ impl KnowledgeGraph {
     /// List all composite indexes in the graph.
     ///
     /// Returns:
-    ///     A list of dicts with 'node_type' and 'properties' keys
+    ///     A list of dicts with 'type' and 'properties' keys
     fn list_composite_indexes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let indexes = self.inner.list_composite_indexes();
 
         let result_list = pyo3::types::PyList::empty(py);
         for (node_type, properties) in indexes {
             let idx_dict = PyDict::new(py);
-            idx_dict.set_item("node_type", node_type)?;
+            idx_dict.set_item("type", node_type)?;
             idx_dict.set_item("properties", properties)?;
             result_list.append(idx_dict)?;
         }
@@ -3597,7 +3639,7 @@ impl KnowledgeGraph {
         match self.inner.get_composite_index_stats(node_type, &properties) {
             Some(stats) => {
                 let result_dict = PyDict::new(py);
-                result_dict.set_item("node_type", node_type)?;
+                result_dict.set_item("type", node_type)?;
                 result_dict.set_item("properties", properties)?;
                 result_dict.set_item("unique_combinations", stats.unique_values)?;
                 result_dict.set_item("total_entries", stats.total_entries)?;
@@ -3706,7 +3748,7 @@ impl KnowledgeGraph {
     ///         ORDER BY friends DESC
     ///         LIMIT 10
     ///     ''')
-    ///     for row in result['rows']:
+    ///     for row in result:
     ///         print(f"{row['person']}: {row['friends']} friends")
     ///     ```
     #[pyo3(signature = (query, *, to_df=false, params=None))]
@@ -3757,11 +3799,36 @@ impl KnowledgeGraph {
             })?
         };
 
+        // Store mutation stats if present
+        if let Some(ref stats) = result.stats {
+            self.last_mutation_stats = Some(stats.clone());
+        }
+
         // Convert to Python
         if to_df {
             cypher::py_convert::cypher_result_to_dataframe(py, &result)
         } else {
             cypher::py_convert::cypher_result_to_py(py, &result)
+        }
+    }
+
+    /// Mutation statistics from the last Cypher mutation query (CREATE/SET/DELETE/REMOVE/MERGE).
+    ///
+    /// Returns None if no mutation has been executed yet.
+    #[getter]
+    fn last_mutation_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.last_mutation_stats {
+            Some(stats) => {
+                let dict = PyDict::new(py);
+                dict.set_item("nodes_created", stats.nodes_created)?;
+                dict.set_item("relationships_created", stats.relationships_created)?;
+                dict.set_item("properties_set", stats.properties_set)?;
+                dict.set_item("nodes_deleted", stats.nodes_deleted)?;
+                dict.set_item("relationships_deleted", stats.relationships_deleted)?;
+                dict.set_item("properties_removed", stats.properties_removed)?;
+                Ok(dict.into())
+            }
+            None => Ok(py.None()),
         }
     }
 
