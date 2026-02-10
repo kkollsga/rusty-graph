@@ -5,11 +5,14 @@ use super::ast::*;
 use super::result::*;
 use crate::datatypes::values::Value;
 use crate::graph::filtering_methods;
-use crate::graph::pattern_matching::{MatchBinding, PatternElement, PatternExecutor, PatternMatch};
+use crate::graph::pattern_matching::{
+    EdgeDirection, MatchBinding, PatternElement, PatternExecutor, PatternMatch,
+};
 use crate::graph::schema::{DirGraph, EdgeData, NodeData};
 use crate::graph::value_operations;
 use petgraph::graph::NodeIndex;
-use petgraph::visit::NodeIndexable;
+use petgraph::visit::{EdgeRef, NodeIndexable};
+use petgraph::Direction;
 use std::collections::{HashMap, HashSet};
 
 // ============================================================================
@@ -88,7 +91,7 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
-        if existing.rows.is_empty() {
+        let mut result_rows = if existing.rows.is_empty() {
             // First MATCH: execute patterns to produce initial bindings
             let mut all_rows = Vec::new();
 
@@ -128,11 +131,7 @@ impl<'a> CypherExecutor<'a> {
                     all_rows = new_rows;
                 }
             }
-
-            Ok(ResultSet {
-                rows: all_rows,
-                columns: existing.columns,
-            })
+            all_rows
         } else {
             // Subsequent MATCH: expand each existing row with new patterns
             let mut new_rows = Vec::new();
@@ -157,12 +156,34 @@ impl<'a> CypherExecutor<'a> {
                     }
                 }
             }
+            new_rows
+        };
 
-            Ok(ResultSet {
-                rows: new_rows,
-                columns: existing.columns,
-            })
+        // Propagate path bindings for non-shortestPath path assignments.
+        // For `MATCH p = (a)-[r:REL*1..3]->(b)`, alias the edge's
+        // VariableLengthPath binding under the path variable `p`.
+        for pa in &clause.path_assignments {
+            if pa.is_shortest_path {
+                continue;
+            }
+            for row in &mut result_rows {
+                // Find the first VariableLengthPath binding in this row
+                // (from the named edge variable or synthetic __anon_vlpath_*)
+                let path_binding = row
+                    .path_bindings
+                    .iter()
+                    .find(|(_, _)| true) // any path binding from this pattern
+                    .map(|(_, pb)| pb.clone());
+                if let Some(pb) = path_binding {
+                    row.path_bindings.insert(pa.variable.clone(), pb);
+                }
+            }
         }
+
+        Ok(ResultSet {
+            rows: result_rows,
+            columns: existing.columns,
+        })
     }
 
     /// Execute a shortestPath MATCH: find shortest path between anchored endpoints
@@ -405,6 +426,114 @@ impl<'a> CypherExecutor<'a> {
         })
     }
 
+    /// Fast-path count for simple node-edge-node patterns when one end is pre-bound.
+    /// Returns Some(count) if the fast-path applies, None to fall back to PatternExecutor.
+    ///
+    /// For pattern `(a:Type)-[:REL]->(b)` where `b` is already bound in the row:
+    /// Instead of scanning all Type nodes and checking edges (O(|Type|)),
+    /// traverse edges directly from the bound node (O(degree)).
+    fn try_count_simple_pattern(
+        &self,
+        pattern: &crate::graph::pattern_matching::Pattern,
+        bindings: &HashMap<String, NodeIndex>,
+    ) -> Option<i64> {
+        // Only handle simple 3-element patterns: Node-Edge-Node
+        if pattern.elements.len() != 3 {
+            return None;
+        }
+
+        let node_a = match &pattern.elements[0] {
+            PatternElement::Node(np) => np,
+            _ => return None,
+        };
+        let edge = match &pattern.elements[1] {
+            PatternElement::Edge(ep) => ep,
+            _ => return None,
+        };
+        let node_b = match &pattern.elements[2] {
+            PatternElement::Node(np) => np,
+            _ => return None,
+        };
+
+        // Don't use fast-path for variable-length edges or edge property filters
+        if edge.var_length.is_some() || edge.properties.is_some() {
+            return None;
+        }
+
+        // Don't use fast-path if either node has inline property filters
+        // (type filtering is fine, property filtering needs the full executor)
+        if node_a.properties.is_some() || node_b.properties.is_some() {
+            return None;
+        }
+
+        // Determine which end is bound
+        let a_bound = node_a
+            .variable
+            .as_ref()
+            .and_then(|v| bindings.get(v).copied());
+        let b_bound = node_b
+            .variable
+            .as_ref()
+            .and_then(|v| bindings.get(v).copied());
+
+        // We need exactly one end bound for the fast-path to help
+        let (bound_idx, other_type, traverse_dir) = match (a_bound, b_bound) {
+            (None, Some(b_idx)) => {
+                // b is bound — traverse from b
+                let dir = match edge.direction {
+                    EdgeDirection::Outgoing => Direction::Incoming, // (a)->b means b has incoming
+                    EdgeDirection::Incoming => Direction::Outgoing, // (a)<-b means b has outgoing
+                    EdgeDirection::Both => return None, // undirected needs both dirs, fall back
+                };
+                (b_idx, &node_a.node_type, dir)
+            }
+            (Some(a_idx), None) => {
+                // a is bound — traverse from a
+                let dir = match edge.direction {
+                    EdgeDirection::Outgoing => Direction::Outgoing,
+                    EdgeDirection::Incoming => Direction::Incoming,
+                    EdgeDirection::Both => return None,
+                };
+                (a_idx, &node_b.node_type, dir)
+            }
+            _ => return None, // both bound or neither bound — fall back
+        };
+
+        let conn_type = edge.connection_type.as_deref();
+        let mut count: i64 = 0;
+
+        for edge_ref in self.graph.graph.edges_directed(bound_idx, traverse_dir) {
+            // Check connection type
+            if let Some(ct) = conn_type {
+                if edge_ref.weight().connection_type != ct {
+                    continue;
+                }
+            }
+
+            // Get the other node (the one that's NOT bound_idx)
+            let other_idx = if traverse_dir == Direction::Outgoing {
+                edge_ref.target()
+            } else {
+                edge_ref.source()
+            };
+
+            // Check the other node's type
+            if let Some(ref required_type) = other_type {
+                if let Some(node) = self.graph.graph.node_weight(other_idx) {
+                    if &node.node_type != required_type {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+
+            count += 1;
+        }
+
+        Some(count)
+    }
+
     /// Fused OPTIONAL MATCH + WITH count() execution.
     /// Instead of expanding each input row into N matched rows then aggregating,
     /// count compatible matches directly per input row — O(N×degree) with zero
@@ -438,17 +567,24 @@ impl<'a> CypherExecutor<'a> {
             let mut match_count: i64 = 0;
 
             for pattern in &match_clause.patterns {
-                let executor = PatternExecutor::with_bindings_and_params(
-                    self.graph,
-                    None,
-                    row.node_bindings.clone(),
-                    self.params.clone(),
-                );
-                let matches = executor.execute(pattern)?;
+                // Fast-path: direct edge traversal when one end is pre-bound
+                if let Some(fast_count) = self.try_count_simple_pattern(pattern, &row.node_bindings)
+                {
+                    match_count += fast_count;
+                } else {
+                    // Fall back to full PatternExecutor
+                    let executor = PatternExecutor::with_bindings_and_params(
+                        self.graph,
+                        None,
+                        row.node_bindings.clone(),
+                        self.params.clone(),
+                    );
+                    let matches = executor.execute(pattern)?;
 
-                for m in &matches {
-                    if self.bindings_compatible(row, m) {
-                        match_count += 1;
+                    for m in &matches {
+                        if self.bindings_compatible(row, m) {
+                            match_count += 1;
+                        }
                     }
                 }
             }
@@ -1444,8 +1580,14 @@ impl<'a> CypherExecutor<'a> {
     fn execute_with(
         &self,
         clause: &WithClause,
-        result_set: ResultSet,
+        mut result_set: ResultSet,
     ) -> Result<ResultSet, String> {
+        // Seed WITH-as-first-clause: if no prior rows exist, provide one
+        // empty row so standalone expressions (e.g. [1,2,3]) can be evaluated.
+        if result_set.rows.is_empty() {
+            result_set.rows.push(ResultRow::new());
+        }
+
         // WITH is essentially RETURN that continues the pipeline
         let return_clause = ReturnClause {
             items: clause.items.clone(),

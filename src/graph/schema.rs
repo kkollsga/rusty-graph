@@ -255,6 +255,8 @@ pub struct ConnectionTypeInfo {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DirGraph {
     pub(crate) graph: Graph,
+    /// Skipped during serialization — rebuilt from graph on load via `rebuild_type_indices()`.
+    #[serde(skip)]
     pub(crate) type_indices: HashMap<String, Vec<NodeIndex>>,
     /// Optional schema definition for validation
     #[serde(default)]
@@ -976,8 +978,9 @@ impl DirGraph {
     ///
     /// Use after bulk mutations to ensure index consistency, or when you suspect
     /// indexes have drifted from the actual graph state.
-    pub fn reindex(&mut self) {
-        // 1. Rebuild type_indices from scratch
+    /// Rebuild type_indices from the live graph.
+    /// Called after deserialization (type_indices is `#[serde(skip)]`) and by `reindex()`.
+    pub fn rebuild_type_indices(&mut self) {
         let mut new_type_indices: HashMap<String, Vec<NodeIndex>> = HashMap::new();
         for node_idx in self.graph.node_indices() {
             if let Some(node) = self.graph.node_weight(node_idx) {
@@ -988,6 +991,11 @@ impl DirGraph {
             }
         }
         self.type_indices = new_type_indices;
+    }
+
+    pub fn reindex(&mut self) {
+        // 1. Rebuild type_indices from scratch
+        self.rebuild_type_indices();
 
         // 2. Clear lazy caches — they'll rebuild on next access
         self.id_indices.clear();

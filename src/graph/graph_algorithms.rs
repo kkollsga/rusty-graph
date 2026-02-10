@@ -1250,8 +1250,7 @@ pub fn label_propagation(graph: &DirGraph, max_iterations: usize) -> CommunityRe
 
     let total_weight = graph.graph.edge_count() as f64;
     let num_communities = id_map.len();
-    let modularity =
-        compute_modularity(graph, &labels_bound, &node_exists, total_weight, None);
+    let modularity = compute_modularity(graph, &labels_bound, &node_exists, total_weight, None);
 
     CommunityResult {
         assignments,

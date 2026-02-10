@@ -858,9 +858,14 @@ impl<'a> PatternExecutor<'a> {
 
                     let mut new_match = current_match.clone();
 
-                    // Add edge binding if variable exists
+                    // Add edge binding if variable exists, or under synthetic key
+                    // for anonymous variable-length paths (needed for path assignments)
                     if let Some(ref var) = edge_pattern.variable {
                         new_match.bindings.insert(var.clone(), edge_binding);
+                    } else if matches!(edge_binding, MatchBinding::VariableLengthPath { .. }) {
+                        new_match
+                            .bindings
+                            .insert(format!("__anon_vlpath_{}", i), edge_binding);
                     }
 
                     // Add node binding if variable exists

@@ -22,7 +22,7 @@ pub fn save_to_file(graph: &mut Arc<DirGraph>, path: &str) -> io::Result<()> {
 
     let file = File::create(path)?;
     let writer = BufWriter::new(file);
-    let gz = GzEncoder::new(writer, Compression::fast());
+    let gz = GzEncoder::new(writer, Compression::new(3));
     bincode::serialize_into(gz, &**graph).map_err(io::Error::other)?;
 
     Ok(())
@@ -59,6 +59,7 @@ pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
     }
 
     // Rebuild skipped caches after deserialization
+    dir_graph.rebuild_type_indices();
     dir_graph.build_connection_types_cache();
     // Rebuild property/composite indices from persisted keys
     dir_graph.rebuild_indices_from_keys();
