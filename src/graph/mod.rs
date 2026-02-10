@@ -110,7 +110,7 @@ fn centrality_results_to_py(
 }
 
 /// Lightweight centrality result conversion: returns {title: score} dict.
-/// Creates ONE Python dict instead of N dicts — same format as NetworkX.
+/// Creates ONE Python dict instead of N dicts — returns {title: score} format.
 /// ~3-4x faster PyO3 serialization for large graphs.
 fn centrality_results_to_py_dict(
     py: Python<'_>,

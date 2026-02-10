@@ -855,7 +855,7 @@ pub fn closeness_centrality(graph: &DirGraph, normalized: bool) -> Vec<Centralit
     }
 
     // Pre-build incoming adjacency list: for closeness centrality on directed graphs,
-    // we BFS via incoming edges (NetworkX convention: d(v, u) = how easy for v to reach u)
+    // we BFS via incoming edges (convention: d(v, u) = how easy for v to reach u)
     let mut adj_incoming: Vec<Vec<usize>> = vec![Vec::new(); n];
     for edge in graph.graph.edge_references() {
         let src_i = node_to_idx[edge.source().index()];

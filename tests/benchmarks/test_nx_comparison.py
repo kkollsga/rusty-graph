@@ -15,9 +15,10 @@ import tempfile
 import time
 from collections import defaultdict
 
-import networkx as nx
 import pandas as pd
 import pytest
+
+nx = pytest.importorskip("networkx", reason="networkx required for comparison benchmarks")
 
 from rusty_graph import KnowledgeGraph
 
