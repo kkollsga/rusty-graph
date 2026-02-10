@@ -58,6 +58,10 @@ impl<'a> CypherExecutor<'a> {
             Clause::Skip(s) => self.execute_skip(s, result_set),
             Clause::Unwind(u) => self.execute_unwind(u, result_set),
             Clause::Union(u) => self.execute_union(u, result_set),
+            Clause::FusedOptionalMatchAggregate {
+                match_clause,
+                with_clause,
+            } => self.execute_fused_optional_match_aggregate(match_clause, with_clause, result_set),
             Clause::Create(_)
             | Clause::Set(_)
             | Clause::Delete(_)
@@ -399,6 +403,107 @@ impl<'a> CypherExecutor<'a> {
             rows: new_rows,
             columns: existing.columns,
         })
+    }
+
+    /// Fused OPTIONAL MATCH + WITH count() execution.
+    /// Instead of expanding each input row into N matched rows then aggregating,
+    /// count compatible matches directly per input row — O(N×degree) with zero
+    /// intermediate row allocation.
+    fn execute_fused_optional_match_aggregate(
+        &self,
+        match_clause: &MatchClause,
+        with_clause: &WithClause,
+        existing: ResultSet,
+    ) -> Result<ResultSet, String> {
+        if existing.rows.is_empty() {
+            return Ok(existing);
+        }
+
+        // Identify which WITH items are group keys (variables) vs aggregates (count)
+        let mut group_key_indices = Vec::new();
+        let mut count_items: Vec<(usize, &ReturnItem)> = Vec::new();
+
+        for (i, item) in with_clause.items.iter().enumerate() {
+            if is_aggregate_expression(&item.expression) {
+                count_items.push((i, item));
+            } else {
+                group_key_indices.push(i);
+            }
+        }
+
+        let mut result_rows = Vec::with_capacity(existing.rows.len());
+
+        for row in &existing.rows {
+            // Count compatible matches for each pattern without materializing rows
+            let mut match_count: i64 = 0;
+
+            for pattern in &match_clause.patterns {
+                let executor = PatternExecutor::with_bindings_and_params(
+                    self.graph,
+                    None,
+                    row.node_bindings.clone(),
+                    self.params.clone(),
+                );
+                let matches = executor.execute(pattern)?;
+
+                for m in &matches {
+                    if self.bindings_compatible(row, m) {
+                        match_count += 1;
+                    }
+                }
+            }
+
+            // Build projected values for this row
+            let mut projected = HashMap::new();
+
+            // Group key pass-throughs
+            for &idx in &group_key_indices {
+                let item = &with_clause.items[idx];
+                let key = return_item_column_name(item);
+                let val = self.evaluate_expression(&item.expression, row)?;
+                projected.insert(key, val);
+            }
+
+            // Count aggregates
+            for &(_, item) in &count_items {
+                let key = return_item_column_name(item);
+
+                // count(*) counts all, count(var) counts non-null matches
+                // For OPTIONAL MATCH fusion, match_count already reflects compatible matches
+                // count(*) = match_count, count(var) = match_count (matched vars are non-null)
+                projected.insert(key, Value::Int64(match_count));
+            }
+
+            // Create result row preserving bindings for group-key variables
+            let mut new_row = ResultRow::from_projected(projected);
+            for &idx in &group_key_indices {
+                if let Expression::Variable(var) = &with_clause.items[idx].expression {
+                    if let Some(&node_idx) = row.node_bindings.get(var) {
+                        new_row.node_bindings.insert(var.clone(), node_idx);
+                    }
+                    if let Some(edge) = row.edge_bindings.get(var) {
+                        new_row.edge_bindings.insert(var.clone(), edge.clone());
+                    }
+                    if let Some(path) = row.path_bindings.get(var) {
+                        new_row.path_bindings.insert(var.clone(), path.clone());
+                    }
+                }
+            }
+
+            result_rows.push(new_row);
+        }
+
+        let mut result = ResultSet {
+            rows: result_rows,
+            columns: existing.columns,
+        };
+
+        // Apply optional WHERE on the aggregated rows (e.g. WHERE cnt > 3)
+        if let Some(ref where_clause) = with_clause.where_clause {
+            result = self.execute_where(where_clause, result)?;
+        }
+
+        Ok(result)
     }
 
     /// Check if a pattern match is compatible with existing bindings in a row.
@@ -1137,6 +1242,9 @@ impl<'a> CypherExecutor<'a> {
                     }
                     if let Some(edge) = first_row.edge_bindings.get(var) {
                         row.edge_bindings.insert(var.clone(), edge.clone());
+                    }
+                    if let Some(path) = first_row.path_bindings.get(var) {
+                        row.path_bindings.insert(var.clone(), path.clone());
                     }
                 }
             }
@@ -2599,6 +2707,18 @@ fn evaluate_comparison(left: &Value, op: &ComparisonOp, right: &Value) -> bool {
             filtering_methods::compare_values(left, right),
             Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
         ),
+        ComparisonOp::RegexMatch => {
+            // left =~ right: left must be a string, right must be a regex pattern string
+            match (left, right) {
+                (Value::String(text), Value::String(pattern)) => {
+                    match regex::Regex::new(pattern) {
+                        Ok(re) => re.is_match(text),
+                        Err(_) => false, // invalid regex → no match
+                    }
+                }
+                _ => false,
+            }
+        }
     }
 }
 

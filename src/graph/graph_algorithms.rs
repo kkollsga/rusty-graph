@@ -37,6 +37,140 @@ pub fn shortest_path(graph: &DirGraph, source: NodeIndex, target: NodeIndex) -> 
     Some(PathResult { path, cost })
 }
 
+/// Find the shortest path LENGTH between two nodes using undirected BFS.
+/// Only returns the hop count, avoiding parent tracking and path reconstruction.
+/// Uses level-by-level BFS to avoid per-node distance tracking.
+pub fn shortest_path_cost(graph: &DirGraph, source: NodeIndex, target: NodeIndex) -> Option<usize> {
+    if source == target {
+        return Some(0);
+    }
+
+    let node_bound = graph.graph.node_bound();
+    let mut visited: Vec<bool> = vec![false; node_bound];
+
+    let target_idx = target.index();
+
+    // Level-by-level BFS using two alternating vectors (avoids VecDeque overhead)
+    let mut current_level: Vec<usize> = vec![source.index()];
+    let mut next_level: Vec<usize> = Vec::new();
+    visited[source.index()] = true;
+    let mut depth: usize = 0;
+
+    while !current_level.is_empty() {
+        depth += 1;
+        next_level.clear();
+
+        for &current_idx in &current_level {
+            let current = NodeIndex::new(current_idx);
+
+            for neighbor in graph.graph.neighbors_undirected(current) {
+                let neighbor_idx = neighbor.index();
+                if !visited[neighbor_idx] {
+                    if neighbor_idx == target_idx {
+                        return Some(depth);
+                    }
+                    visited[neighbor_idx] = true;
+                    next_level.push(neighbor_idx);
+                }
+            }
+        }
+
+        std::mem::swap(&mut current_level, &mut next_level);
+    }
+
+    None
+}
+
+/// Batch shortest path cost — reuses visited Vec and adjacency list across multiple pairs.
+/// Much faster than calling shortest_path_cost N times for large graphs.
+pub fn shortest_path_cost_batch(
+    graph: &DirGraph,
+    pairs: &[(NodeIndex, NodeIndex)],
+) -> Vec<Option<usize>> {
+    let node_bound = graph.graph.node_bound();
+
+    // Pre-build undirected adjacency list ONCE for all queries
+    let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+    let n = nodes.len();
+    let mut node_to_idx = vec![usize::MAX; node_bound];
+    for (i, &node) in nodes.iter().enumerate() {
+        node_to_idx[node.index()] = i;
+    }
+
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for edge in graph.graph.edge_references() {
+        let src_i = node_to_idx[edge.source().index()];
+        let tgt_i = node_to_idx[edge.target().index()];
+        if src_i != usize::MAX && tgt_i != usize::MAX {
+            adj[src_i].push(tgt_i);
+            adj[tgt_i].push(src_i);
+        }
+    }
+
+    // Reusable visited array — cleared between queries
+    let mut visited: Vec<bool> = vec![false; n];
+    let mut current_level: Vec<usize> = Vec::new();
+    let mut next_level: Vec<usize> = Vec::new();
+
+    let mut results = Vec::with_capacity(pairs.len());
+
+    for &(source, target) in pairs {
+        if source == target {
+            results.push(Some(0));
+            continue;
+        }
+
+        let src_i = node_to_idx[source.index()];
+        let tgt_i = node_to_idx[target.index()];
+        if src_i == usize::MAX || tgt_i == usize::MAX {
+            results.push(None);
+            continue;
+        }
+
+        // Clear visited (only reset nodes we actually touched)
+        // Use a generation counter instead of clearing — much faster
+        // But for simplicity, track touched nodes
+        let mut touched: Vec<usize> = Vec::new();
+
+        current_level.clear();
+        current_level.push(src_i);
+        visited[src_i] = true;
+        touched.push(src_i);
+        let mut depth: usize = 0;
+        let mut found = false;
+
+        'bfs: while !current_level.is_empty() {
+            depth += 1;
+            next_level.clear();
+
+            for &current_idx in &current_level {
+                for &neighbor_idx in &adj[current_idx] {
+                    if !visited[neighbor_idx] {
+                        if neighbor_idx == tgt_i {
+                            found = true;
+                            break 'bfs;
+                        }
+                        visited[neighbor_idx] = true;
+                        touched.push(neighbor_idx);
+                        next_level.push(neighbor_idx);
+                    }
+                }
+            }
+
+            std::mem::swap(&mut current_level, &mut next_level);
+        }
+
+        results.push(if found { Some(depth) } else { None });
+
+        // Reset only touched nodes (much faster than clearing entire array)
+        for &idx in &touched {
+            visited[idx] = false;
+        }
+    }
+
+    results
+}
+
 /// Reconstruct path using BFS with Vec-based tracking for O(1) operations.
 /// Uses Vec<bool> for visited and Vec<u32> for parent tracking instead of HashMap/HashSet.
 fn reconstruct_path_bfs(
@@ -236,47 +370,71 @@ pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
 
 /// Find weakly connected components (treating graph as undirected).
 /// This is often more useful for knowledge graphs.
-/// Optimized to use Vec<bool> for O(1) visited tracking.
+/// Uses Union-Find (disjoint set) for optimal performance — O(E * α(V)) ≈ O(E).
 pub fn weakly_connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
-    use std::collections::VecDeque;
+    let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+    let n = nodes.len();
+
+    if n == 0 {
+        return Vec::new();
+    }
 
     // Use node_bound() not node_count() — StableDiGraph indices can have gaps
-    let node_bound = graph.graph.node_bound();
-    // Use Vec<bool> for O(1) visited tracking instead of HashSet
-    let mut visited: Vec<bool> = vec![false; node_bound];
-    let mut components = Vec::new();
-    let mut visited_count = 0;
+    let bound = graph.graph.node_bound();
 
-    for node in graph.graph.node_indices() {
-        let node_idx = node.index();
-        if visited[node_idx] {
-            continue;
-        }
-
-        // BFS to find all connected nodes - estimate component size
-        let remaining = graph.graph.node_count() - visited_count;
-        let mut component = Vec::with_capacity(remaining.min(100)); // Cap initial estimate
-        let mut queue = VecDeque::with_capacity(remaining.min(100));
-        queue.push_back(node);
-        visited[node_idx] = true;
-        visited_count += 1;
-
-        while let Some(current) = queue.pop_front() {
-            component.push(current);
-
-            // Add all neighbors (treating as undirected)
-            for neighbor in graph.graph.neighbors_undirected(current) {
-                let neighbor_idx = neighbor.index();
-                if !visited[neighbor_idx] {
-                    visited[neighbor_idx] = true;
-                    visited_count += 1;
-                    queue.push_back(neighbor);
-                }
-            }
-        }
-
-        components.push(component);
+    // Build compact index mapping: graph NodeIndex → contiguous 0..n
+    let mut node_to_idx = vec![0usize; bound];
+    for (i, &node) in nodes.iter().enumerate() {
+        node_to_idx[node.index()] = i;
     }
+
+    // Union-Find with path compression + union by rank
+    let mut parent: Vec<usize> = (0..n).collect();
+    let mut rank: Vec<u8> = vec![0; n];
+
+    // Find with path compression (iterative)
+    #[inline]
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]]; // path halving
+            x = parent[x];
+        }
+        x
+    }
+
+    // Union by rank
+    #[inline]
+    fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra == rb {
+            return;
+        }
+        if rank[ra] < rank[rb] {
+            parent[ra] = rb;
+        } else if rank[ra] > rank[rb] {
+            parent[rb] = ra;
+        } else {
+            parent[rb] = ra;
+            rank[ra] += 1;
+        }
+    }
+
+    // Process all edges — single pass, no adjacency list needed
+    for edge in graph.graph.edge_references() {
+        let src_i = node_to_idx[edge.source().index()];
+        let tgt_i = node_to_idx[edge.target().index()];
+        union(&mut parent, &mut rank, src_i, tgt_i);
+    }
+
+    // Collect components by root
+    let mut component_map: HashMap<usize, Vec<NodeIndex>> = HashMap::new();
+    for (i, &node) in nodes.iter().enumerate() {
+        let root = find(&mut parent, i);
+        component_map.entry(root).or_default().push(node);
+    }
+
+    let mut components: Vec<Vec<NodeIndex>> = component_map.into_values().collect();
 
     // Sort components by size (largest first)
     components.sort_by_key(|b| std::cmp::Reverse(b.len()));
@@ -385,12 +543,20 @@ pub fn betweenness_centrality(
             .collect();
     }
 
-    // Create node index mapping for O(1) lookup (NodeIndex -> array index)
-    let node_to_idx: HashMap<NodeIndex, usize> = nodes
-        .iter()
-        .enumerate()
-        .map(|(i, &node)| (node, i))
-        .collect();
+    // Use Vec-based index mapping for O(1) lookup (vs HashMap)
+    let bound = graph.graph.node_bound();
+    let mut node_to_idx = vec![0usize; bound];
+    for (i, &node) in nodes.iter().enumerate() {
+        node_to_idx[node.index()] = i;
+    }
+
+    // Pre-build outgoing adjacency list for fast BFS
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for edge in graph.graph.edge_references() {
+        let src_i = node_to_idx[edge.source().index()];
+        let tgt_i = node_to_idx[edge.target().index()];
+        adj[src_i].push(tgt_i);
+    }
 
     // Initialize betweenness scores using Vec for O(1) access
     let mut betweenness: Vec<f64> = vec![0.0; n];
@@ -428,16 +594,12 @@ pub fn betweenness_centrality(
         dist[s_idx] = 0;
         queue.push_back(s_idx);
 
-        // BFS phase
+        // BFS phase using pre-built adjacency list (no graph traversal)
         while let Some(v_idx) = queue.pop_front() {
             stack.push(v_idx);
             let v_dist = dist[v_idx];
-            let v_node = nodes[v_idx];
 
-            // Traverse all neighbors
-            for w_node in graph.graph.neighbors_undirected(v_node) {
-                let w_idx = node_to_idx[&w_node];
-
+            for &w_idx in &adj[v_idx] {
                 // First visit?
                 if dist[w_idx] < 0 {
                     dist[w_idx] = v_dist + 1;
@@ -464,8 +626,10 @@ pub fn betweenness_centrality(
     }
 
     // Normalize if requested
+    // For directed graphs, the normalization factor is 1/((n-1)*(n-2))
+    // (undirected would be 2/((n-1)*(n-2)) since each pair is counted once)
     if normalized && n > 2 {
-        let scale = 2.0 / ((n - 1) as f64 * (n - 2) as f64);
+        let scale = 1.0 / ((n - 1) as f64 * (n - 2) as f64);
         for score in betweenness.iter_mut() {
             *score *= scale;
         }
@@ -492,7 +656,7 @@ pub fn betweenness_centrality(
         .collect();
 
     // Sort by score descending
-    results.sort_by(|a, b| {
+    results.sort_unstable_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -524,59 +688,78 @@ pub fn pagerank(
         return Vec::new();
     }
 
-    // Create node index mapping for efficient lookup
-    let node_to_idx: HashMap<NodeIndex, usize> =
-        nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+    // Use Vec-based index mapping for O(1) lookup (vs HashMap)
+    let bound = graph.graph.node_bound();
+    let mut node_to_idx = vec![0usize; bound];
+    for (i, &node) in nodes.iter().enumerate() {
+        node_to_idx[node.index()] = i;
+    }
+
+    // Pre-build adjacency list: for each node i, store list of target indices
+    // This avoids graph traversal in the hot loop
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut out_degrees: Vec<usize> = vec![0; n];
+    for edge in graph.graph.edge_references() {
+        let src_i = node_to_idx[edge.source().index()];
+        let tgt_i = node_to_idx[edge.target().index()];
+        adj[src_i].push(tgt_i);
+        out_degrees[src_i] += 1;
+    }
 
     // Initialize PageRank scores (uniform distribution)
     let mut pr: Vec<f64> = vec![1.0 / n as f64; n];
     let mut new_pr: Vec<f64> = vec![0.0; n];
 
-    // Precompute out-degrees
-    let out_degrees: Vec<usize> = nodes
+    // Precompute inverse out-degree (multiply instead of divide in hot loop)
+    let inv_out_degrees: Vec<f64> = out_degrees
         .iter()
-        .map(|&node| graph.graph.neighbors_undirected(node).count())
+        .map(|&d| {
+            if d > 0 {
+                damping_factor / d as f64
+            } else {
+                0.0
+            }
+        })
         .collect();
 
-    // Identify dangling nodes (no outgoing links)
-    let dangling_nodes: Vec<usize> = out_degrees
-        .iter()
-        .enumerate()
-        .filter(|(_, &deg)| deg == 0)
-        .map(|(i, _)| i)
-        .collect();
+    // Identify dangling nodes (no outgoing links) — store as bitmask for fast sum
+    let is_dangling: Vec<bool> = out_degrees.iter().map(|&d| d == 0).collect();
 
     let teleport = (1.0 - damping_factor) / n as f64;
+    let inv_n = 1.0 / n as f64;
 
     // Iterative computation
     for _iteration in 0..max_iterations {
-        // Calculate dangling node contribution
-        let dangling_sum: f64 = dangling_nodes.iter().map(|&i| pr[i]).sum();
-        let dangling_contrib = damping_factor * dangling_sum / n as f64;
+        // Calculate dangling node contribution (vectorized over bitmask)
+        let mut dangling_sum: f64 = 0.0;
+        for i in 0..n {
+            if is_dangling[i] {
+                dangling_sum += pr[i];
+            }
+        }
+        let base_score = teleport + damping_factor * dangling_sum * inv_n;
 
-        // Reset new_pr
+        // Reset new_pr to base score (teleport + dangling contribution)
         for score in new_pr.iter_mut() {
-            *score = teleport + dangling_contrib;
+            *score = base_score;
         }
 
-        // Add contributions from incoming links
-        for (i, &node) in nodes.iter().enumerate() {
-            if out_degrees[i] > 0 {
-                let contrib = damping_factor * pr[i] / out_degrees[i] as f64;
-                for neighbor in graph.graph.neighbors_undirected(node) {
-                    if let Some(&j) = node_to_idx.get(&neighbor) {
-                        new_pr[j] += contrib;
-                    }
+        // Add contributions from outgoing links
+        // Using precomputed inv_out_degrees avoids division in hot loop
+        for i in 0..n {
+            let contrib = inv_out_degrees[i] * pr[i];
+            if contrib > 0.0 {
+                for &j in &adj[i] {
+                    new_pr[j] += contrib;
                 }
             }
         }
 
-        // Check for convergence
-        let diff: f64 = pr
-            .iter()
-            .zip(new_pr.iter())
-            .map(|(old, new)| (old - new).abs())
-            .sum();
+        // Check for convergence (L1 norm)
+        let mut diff: f64 = 0.0;
+        for i in 0..n {
+            diff += (pr[i] - new_pr[i]).abs();
+        }
 
         std::mem::swap(&mut pr, &mut new_pr);
 
@@ -595,7 +778,7 @@ pub fn pagerank(
         })
         .collect();
 
-    results.sort_by(|a, b| {
+    results.sort_unstable_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -612,24 +795,33 @@ pub fn degree_centrality(graph: &DirGraph, normalized: bool) -> Vec<CentralityRe
     let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
     let n = nodes.len();
 
+    if n == 0 {
+        return Vec::new();
+    }
+
     let scale = if normalized && n > 1 {
         1.0 / (n - 1) as f64
     } else {
         1.0
     };
 
+    // Compute all degrees in a single pass over edges instead of per-node traversal
+    let bound = graph.graph.node_bound();
+    let mut degrees = vec![0usize; bound];
+    for edge in graph.graph.edge_references() {
+        degrees[edge.source().index()] += 1; // out-degree
+        degrees[edge.target().index()] += 1; // in-degree
+    }
+
     let mut results: Vec<CentralityResult> = nodes
         .iter()
-        .map(|&node_idx| {
-            let degree = node_degree(graph, node_idx);
-            CentralityResult {
-                node_idx,
-                score: degree as f64 * scale,
-            }
+        .map(|&node_idx| CentralityResult {
+            node_idx,
+            score: degrees[node_idx.index()] as f64 * scale,
         })
         .collect();
 
-    results.sort_by(|a, b| {
+    results.sort_unstable_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -655,12 +847,23 @@ pub fn closeness_centrality(graph: &DirGraph, normalized: bool) -> Vec<Centralit
         return Vec::new();
     }
 
-    // Create node index mapping for O(1) lookup (NodeIndex -> array index)
-    let node_to_idx: HashMap<NodeIndex, usize> = nodes
-        .iter()
-        .enumerate()
-        .map(|(i, &node)| (node, i))
-        .collect();
+    // Use Vec-based index mapping for O(1) lookup (vs HashMap)
+    let bound = graph.graph.node_bound();
+    let mut node_to_idx = vec![0usize; bound];
+    for (i, &node) in nodes.iter().enumerate() {
+        node_to_idx[node.index()] = i;
+    }
+
+    // Pre-build incoming adjacency list: for closeness centrality on directed graphs,
+    // we BFS via incoming edges (NetworkX convention: d(v, u) = how easy for v to reach u)
+    let mut adj_incoming: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for edge in graph.graph.edge_references() {
+        let src_i = node_to_idx[edge.source().index()];
+        let tgt_i = node_to_idx[edge.target().index()];
+        // For incoming BFS from node u: follow edges pointing INTO u
+        // edge: src -> tgt, so tgt has incoming edge from src
+        adj_incoming[tgt_i].push(src_i);
+    }
 
     let mut results = Vec::with_capacity(n);
 
@@ -676,16 +879,14 @@ pub fn closeness_centrality(graph: &DirGraph, normalized: bool) -> Vec<Centralit
             *d = -1;
         }
 
-        // BFS to find distances to all reachable nodes
+        // BFS via incoming edges to find distances
         queue.push_back(s_idx);
         dist[s_idx] = 0;
 
         while let Some(current_idx) = queue.pop_front() {
             let current_dist = dist[current_idx];
-            let current_node = nodes[current_idx];
 
-            for neighbor in graph.graph.neighbors_undirected(current_node) {
-                let neighbor_idx = node_to_idx[&neighbor];
+            for &neighbor_idx in &adj_incoming[current_idx] {
                 if dist[neighbor_idx] < 0 {
                     dist[neighbor_idx] = current_dist + 1;
                     queue.push_back(neighbor_idx);
@@ -725,7 +926,7 @@ pub fn closeness_centrality(graph: &DirGraph, normalized: bool) -> Vec<Centralit
         }
     }
 
-    results.sort_by(|a, b| {
+    results.sort_unstable_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -756,13 +957,16 @@ pub struct CommunityResult {
 /// Each node starts in its own community. Iteratively moves nodes to the
 /// neighboring community that yields the largest modularity gain, until
 /// no improvement is found.
+/// Optimized with pre-built adjacency list and Vec-based community weight tracking.
 pub fn louvain_communities(
     graph: &DirGraph,
     weight_property: Option<&str>,
     resolution: f64,
 ) -> CommunityResult {
-    let bound = graph.graph.node_bound();
-    if bound == 0 {
+    let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+    let n = nodes.len();
+
+    if n == 0 {
         return CommunityResult {
             assignments: Vec::new(),
             num_communities: 0,
@@ -770,111 +974,99 @@ pub fn louvain_communities(
         };
     }
 
-    // Build adjacency with weights
-    // community[i] = community id for node at index i
-    let mut community: Vec<usize> = vec![0; bound];
-    let mut node_exists: Vec<bool> = vec![false; bound];
-
-    // Initialize: each node in its own community
-    let mut next_id = 0usize;
-    for node_idx in graph.graph.node_indices() {
-        let i = node_idx.index();
-        community[i] = next_id;
-        node_exists[i] = true;
-        next_id += 1;
+    // Build compact index mapping
+    let bound = graph.graph.node_bound();
+    let mut node_to_idx = vec![0usize; bound];
+    for (i, &node) in nodes.iter().enumerate() {
+        node_to_idx[node.index()] = i;
     }
 
-    // Compute total edge weight (2m)
+    // Pre-build undirected weighted adjacency list
+    // adj[i] = Vec<(neighbor_compact_idx, weight)>
+    let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
     let mut total_weight = 0.0f64;
     for edge in graph.graph.edge_references() {
         let w = edge_weight(graph, edge.id(), weight_property);
+        let src_i = node_to_idx[edge.source().index()];
+        let tgt_i = node_to_idx[edge.target().index()];
+        adj[src_i].push((tgt_i, w));
+        adj[tgt_i].push((src_i, w));
         total_weight += w;
     }
 
     if total_weight == 0.0 {
         // No edges — each node is its own community
-        let assignments: Vec<CommunityAssignment> = graph
-            .graph
-            .node_indices()
-            .map(|idx| CommunityAssignment {
+        let assignments: Vec<CommunityAssignment> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, &idx)| CommunityAssignment {
                 node_idx: idx,
-                community_id: community[idx.index()],
+                community_id: i,
             })
             .collect();
-        let num_communities = assignments.len();
         return CommunityResult {
             assignments,
-            num_communities,
+            num_communities: n,
             modularity: 0.0,
         };
     }
 
+    // community[i] = community id for compact node i
+    let mut community: Vec<usize> = (0..n).collect();
+
     // Precompute node degrees (undirected: sum of all edge weights touching the node)
-    let mut degree: Vec<f64> = vec![0.0; bound];
-    for edge in graph.graph.edge_references() {
-        let w = edge_weight(graph, edge.id(), weight_property);
-        degree[edge.source().index()] += w;
-        degree[edge.target().index()] += w;
+    let mut degree: Vec<f64> = vec![0.0; n];
+    for i in 0..n {
+        for &(_, w) in &adj[i] {
+            degree[i] += w;
+        }
     }
 
     // Precompute sum of degrees per community (sigma_tot)
-    let mut sigma_tot: Vec<f64> = vec![0.0; next_id];
-    for node_idx in graph.graph.node_indices() {
-        sigma_tot[community[node_idx.index()]] += degree[node_idx.index()];
-    }
+    let mut sigma_tot: Vec<f64> = vec![0.0; n];
+    sigma_tot[..n].copy_from_slice(&degree[..n]);
 
-    // m = total edge weight (each edge counted once)
     let m = total_weight;
     let two_m = 2.0 * m;
+
+    // Vec-based community weight tracking (reused across iterations)
+    let mut comm_weight: Vec<f64> = vec![0.0; n];
+    let mut touched_comms: Vec<usize> = Vec::with_capacity(64);
 
     // Iterative optimization
     let max_iterations = 100;
     for _ in 0..max_iterations {
         let mut improved = false;
 
-        for node_idx in graph.graph.node_indices() {
-            let i = node_idx.index();
+        for i in 0..n {
             let current_community = community[i];
             let k_i = degree[i];
 
-            // Compute weight from node i to each neighboring community (undirected)
-            let mut community_weights: HashMap<usize, f64> = HashMap::new();
-
-            for edge in graph.graph.edges(node_idx) {
-                let neighbor = edge.target();
-                let w = edge_weight(graph, edge.id(), weight_property);
-                *community_weights
-                    .entry(community[neighbor.index()])
-                    .or_default() += w;
-            }
-            for edge in graph
-                .graph
-                .edges_directed(node_idx, petgraph::Direction::Incoming)
-            {
-                let neighbor = edge.source();
-                let w = edge_weight(graph, edge.id(), weight_property);
-                *community_weights
-                    .entry(community[neighbor.index()])
-                    .or_default() += w;
+            // Compute weight from node i to each neighboring community
+            touched_comms.clear();
+            for &(neighbor, w) in &adj[i] {
+                let c = community[neighbor];
+                if comm_weight[c] == 0.0 {
+                    touched_comms.push(c);
+                }
+                comm_weight[c] += w;
             }
 
-            // Weight from i into its own community (excluding self)
-            let k_i_in_current = *community_weights.get(&current_community).unwrap_or(&0.0);
+            // Weight from i into its own community
+            let k_i_in_current = comm_weight[current_community];
 
             // Find best community to move to
             let mut best_community = current_community;
             let mut best_delta = 0.0f64;
 
-            for (&cand_community, &k_i_in_cand) in &community_weights {
+            for &cand_community in &touched_comms {
                 if cand_community == current_community {
                     continue;
                 }
 
-                // Standard Louvain modularity gain formula:
-                // delta_Q = k_i_in_cand/m - resolution * sigma_tot_cand * k_i / (2m^2)
-                //         - (- k_i_in_current/m + resolution * (sigma_tot_current - k_i) * k_i / (2m^2))
+                let k_i_in_cand = comm_weight[cand_community];
                 let sigma_cand = sigma_tot[cand_community];
-                let sigma_curr = sigma_tot[current_community] - k_i; // exclude node i
+                let sigma_curr = sigma_tot[current_community] - k_i;
 
                 let gain_add = k_i_in_cand / m - resolution * sigma_cand * k_i / (two_m * two_m);
                 let loss_remove =
@@ -887,8 +1079,12 @@ pub fn louvain_communities(
                 }
             }
 
+            // Reset community weights (only touched entries)
+            for &c in &touched_comms {
+                comm_weight[c] = 0.0;
+            }
+
             if best_community != current_community {
-                // Update sigma_tot
                 sigma_tot[current_community] -= k_i;
                 sigma_tot[best_community] += k_i;
                 community[i] = best_community;
@@ -901,27 +1097,34 @@ pub fn louvain_communities(
         }
     }
 
+    // Convert compact community to bound-sized array for modularity computation
+    let mut community_bound: Vec<usize> = vec![0; bound];
+    let mut node_exists: Vec<bool> = vec![false; bound];
+    for (i, &node) in nodes.iter().enumerate() {
+        community_bound[node.index()] = community[i];
+        node_exists[node.index()] = true;
+    }
+
     // Renumber communities to be contiguous 0..n
     let mut id_map: HashMap<usize, usize> = HashMap::new();
-    for node_idx in graph.graph.node_indices() {
-        let c = community[node_idx.index()];
+    for &c in &community {
         let next_id = id_map.len();
         id_map.entry(c).or_insert(next_id);
     }
 
-    let assignments: Vec<CommunityAssignment> = graph
-        .graph
-        .node_indices()
-        .map(|idx| CommunityAssignment {
+    let assignments: Vec<CommunityAssignment> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, &idx)| CommunityAssignment {
             node_idx: idx,
-            community_id: *id_map.get(&community[idx.index()]).unwrap(),
+            community_id: *id_map.get(&community[i]).unwrap(),
         })
         .collect();
 
     let num_communities = id_map.len();
     let modularity = compute_modularity(
         graph,
-        &community,
+        &community_bound,
         &node_exists,
         total_weight,
         weight_property,
@@ -938,9 +1141,12 @@ pub fn louvain_communities(
 ///
 /// Each node adopts the most frequent label among its neighbors.
 /// Converges when no node changes its label.
+/// Optimized with pre-built adjacency list and Vec-based label counting.
 pub fn label_propagation(graph: &DirGraph, max_iterations: usize) -> CommunityResult {
-    let bound = graph.graph.node_bound();
-    if bound == 0 {
+    let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+    let n = nodes.len();
+
+    if n == 0 {
         return CommunityResult {
             assignments: Vec::new(),
             num_communities: 0,
@@ -948,42 +1154,67 @@ pub fn label_propagation(graph: &DirGraph, max_iterations: usize) -> CommunityRe
         };
     }
 
-    let mut labels: Vec<usize> = vec![0; bound];
-    let mut node_exists: Vec<bool> = vec![false; bound];
-
-    // Initialize: each node gets a unique label
-    for (i, node_idx) in graph.graph.node_indices().enumerate() {
-        labels[node_idx.index()] = i;
-        node_exists[node_idx.index()] = true;
+    // Build compact index mapping
+    let bound = graph.graph.node_bound();
+    let mut node_to_idx = vec![0usize; bound];
+    for (i, &node) in nodes.iter().enumerate() {
+        node_to_idx[node.index()] = i;
     }
 
-    // Collect node indices for iteration
-    let node_indices: Vec<NodeIndex> = graph.graph.node_indices().collect();
+    // Pre-build undirected adjacency list (both directions)
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for edge in graph.graph.edge_references() {
+        let src_i = node_to_idx[edge.source().index()];
+        let tgt_i = node_to_idx[edge.target().index()];
+        adj[src_i].push(tgt_i);
+        adj[tgt_i].push(src_i);
+    }
+
+    // Initialize: each node gets a unique label (0..n)
+    let mut labels: Vec<usize> = (0..n).collect();
+
+    // Vec-based label counting (reused across iterations)
+    // label_count[label] = count for that label among neighbors
+    // We use a sparse approach: track which labels were touched and reset only those
+    let mut label_count: Vec<usize> = vec![0; n];
+    let mut touched_labels: Vec<usize> = Vec::with_capacity(64);
 
     for _ in 0..max_iterations {
         let mut changed = false;
 
-        for &node_idx in &node_indices {
-            // Count neighbor labels
-            let mut label_counts: HashMap<usize, usize> = HashMap::new();
-
-            for neighbor in graph.graph.neighbors_undirected(node_idx) {
-                *label_counts.entry(labels[neighbor.index()]).or_default() += 1;
-            }
-
-            if label_counts.is_empty() {
+        for i in 0..n {
+            let neighbors = &adj[i];
+            if neighbors.is_empty() {
                 continue; // isolated node keeps its label
             }
 
-            // Find most frequent label
-            let &best_label = label_counts
-                .iter()
-                .max_by_key(|&(_, count)| count)
-                .map(|(label, _)| label)
-                .unwrap();
+            // Count neighbor labels using Vec (O(1) per access)
+            touched_labels.clear();
+            for &neighbor in neighbors {
+                let lbl = labels[neighbor];
+                if label_count[lbl] == 0 {
+                    touched_labels.push(lbl);
+                }
+                label_count[lbl] += 1;
+            }
 
-            if best_label != labels[node_idx.index()] {
-                labels[node_idx.index()] = best_label;
+            // Find most frequent label
+            let mut best_label = labels[i];
+            let mut best_count = 0;
+            for &lbl in &touched_labels {
+                if label_count[lbl] > best_count {
+                    best_count = label_count[lbl];
+                    best_label = lbl;
+                }
+            }
+
+            // Reset counts for next node (only touched entries)
+            for &lbl in &touched_labels {
+                label_count[lbl] = 0;
+            }
+
+            if best_label != labels[i] {
+                labels[i] = best_label;
                 changed = true;
             }
         }
@@ -993,30 +1224,34 @@ pub fn label_propagation(graph: &DirGraph, max_iterations: usize) -> CommunityRe
         }
     }
 
-    // Renumber labels to be contiguous
-    let mut id_map: HashMap<usize, usize> = HashMap::new();
-    for &node_idx in &node_indices {
-        let l = labels[node_idx.index()];
-        let next_id = id_map.len();
-        id_map.entry(l).or_insert(next_id);
+    // Convert compact labels back to bound-sized array for modularity computation
+    let mut labels_bound: Vec<usize> = vec![0; bound];
+    let mut node_exists: Vec<bool> = vec![false; bound];
+    for (i, &node) in nodes.iter().enumerate() {
+        labels_bound[node.index()] = labels[i];
+        node_exists[node.index()] = true;
     }
 
-    let assignments: Vec<CommunityAssignment> = node_indices
+    // Renumber labels to be contiguous
+    let mut id_map: HashMap<usize, usize> = HashMap::new();
+    for &lbl in &labels {
+        let next_id = id_map.len();
+        id_map.entry(lbl).or_insert(next_id);
+    }
+
+    let assignments: Vec<CommunityAssignment> = nodes
         .iter()
-        .map(|&idx| CommunityAssignment {
+        .enumerate()
+        .map(|(i, &idx)| CommunityAssignment {
             node_idx: idx,
-            community_id: *id_map.get(&labels[idx.index()]).unwrap(),
+            community_id: *id_map.get(&labels[i]).unwrap(),
         })
         .collect();
 
-    // Compute modularity for result
-    let mut total_weight = 0.0f64;
-    for _ in graph.graph.edge_references() {
-        total_weight += 1.0;
-    }
-
+    let total_weight = graph.graph.edge_count() as f64;
     let num_communities = id_map.len();
-    let modularity = compute_modularity(graph, &labels, &node_exists, total_weight, None);
+    let modularity =
+        compute_modularity(graph, &labels_bound, &node_exists, total_weight, None);
 
     CommunityResult {
         assignments,

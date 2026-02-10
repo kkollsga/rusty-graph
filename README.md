@@ -262,6 +262,10 @@ graph.cypher("MATCH (n:Person) WHERE n.name CONTAINS 'ali' RETURN n.name")
 
 # IN lists
 graph.cypher("MATCH (n:Person) WHERE n.city IN ['Oslo', 'Bergen'] RETURN n.name")
+
+# Regex matching with =~
+graph.cypher("MATCH (n:Person) WHERE n.name =~ '(?i)^ali.*' RETURN n.name")
+graph.cypher("MATCH (n:Person) WHERE n.email =~ '.*@example\\.com$' RETURN n.name")
 ```
 
 ### Relationship Properties
@@ -437,10 +441,15 @@ graph.cypher("MATCH (a:Person)-[:KNOWS*2]->(b:Person) RETURN a.name, b.name")
 
 ### WHERE EXISTS
 
-Check for subpattern existence. The outer variable (`p`) is bound from MATCH:
+Check for subpattern existence. The outer variable (`p`) is bound from MATCH.
+Both brace `{ }` and parenthesis `(( ))` syntax are supported:
 
 ```python
+# Brace syntax
 graph.cypher("MATCH (p:Person) WHERE EXISTS { (p)-[:KNOWS]->(:Person) } RETURN p.name")
+
+# Parenthesis syntax (equivalent)
+graph.cypher("MATCH (p:Person) WHERE EXISTS((p)-[:KNOWS]->(:Person)) RETURN p.name")
 
 # Negation
 graph.cypher("""
@@ -524,13 +533,35 @@ df = graph.cypher("""
 """, to_df=True)
 ```
 
+### EXPLAIN
+
+Prefix any Cypher query with `EXPLAIN` to see the query plan without executing it:
+
+```python
+plan = graph.cypher("""
+    EXPLAIN
+    MATCH (p:Person)
+    OPTIONAL MATCH (p)-[:KNOWS]->(f:Person)
+    WITH p, count(f) AS friends
+    RETURN p.name, friends
+""")
+print(plan)
+# Query Plan:
+#   1. NodeScan (MATCH) :Person
+#   2. FusedOptionalMatchAggregate (optimized OPTIONAL MATCH + count)
+#   3. Projection (RETURN) [p.name, friends]
+# Optimizations: optional_match_fusion=1
+```
+
+Returns a string (not data). Mutation queries with `EXPLAIN` are not executed.
+
 ### Supported Cypher Subset
 
 | Category | Supported |
 |----------|-----------|
-| **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE` |
+| **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN` |
 | **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val}`, `p = shortestPath(...)` |
-| **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern }` |
+| **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern }`, `EXISTS(( pattern ))` |
 | **RETURN** | `n.prop`, `r.prop`, `AS` aliases, `DISTINCT`, arithmetic `+`/`-`/`*`/`/` |
 | **Aggregation** | `count(*)`, `count(expr)`, `sum`, `avg`/`mean`, `min`, `max`, `collect`, `std` |
 | **Expressions** | `CASE WHEN...THEN...ELSE...END`, `$param`, `[x IN list WHERE ... \| expr]` |

@@ -13,6 +13,7 @@ use std::collections::HashMap;
 pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<String, Value>) {
     push_where_into_match(query, params);
     push_limit_into_match(query, graph);
+    fuse_optional_match_aggregate(query);
 }
 
 /// Push simple equality predicates from WHERE into MATCH pattern properties.
@@ -87,6 +88,91 @@ fn push_limit_into_match(_query: &mut CypherQuery, _graph: &DirGraph) {
     // This optimization is deferred - it requires passing hints to PatternExecutor
     // which needs additional infrastructure. For now, LIMIT is applied post-execution.
     // The framework is here for future implementation.
+}
+
+/// Fuse consecutive OPTIONAL MATCH + WITH (containing count aggregation) into
+/// a single `FusedOptionalMatchAggregate` clause. This avoids materializing
+/// N×M intermediate rows when only the count is needed.
+///
+/// Criteria for fusion:
+/// 1. `clauses[i]` is `OptionalMatch` and `clauses[i+1]` is `With`
+/// 2. The WITH has at least one `count(variable)` aggregate
+/// 3. All non-aggregate items in the WITH are simple variable pass-throughs
+/// 4. The count variable comes from the OPTIONAL MATCH pattern
+fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
+    let mut i = 0;
+    while i + 1 < query.clauses.len() {
+        let can_fuse = matches!(
+            (&query.clauses[i], &query.clauses[i + 1]),
+            (Clause::OptionalMatch(_), Clause::With(_))
+        );
+
+        if !can_fuse {
+            i += 1;
+            continue;
+        }
+
+        // Check that the WITH contains count() aggregation and simple pass-through group keys
+        let fusable = if let Clause::With(w) = &query.clauses[i + 1] {
+            is_fusable_with_clause(w)
+        } else {
+            false
+        };
+
+        if !fusable {
+            i += 1;
+            continue;
+        }
+
+        // Extract both clauses and replace with fused variant
+        let with_clause = if let Clause::With(w) = query.clauses.remove(i + 1) {
+            w
+        } else {
+            unreachable!()
+        };
+        let match_clause = if let Clause::OptionalMatch(m) = query.clauses.remove(i) {
+            m
+        } else {
+            unreachable!()
+        };
+
+        query.clauses.insert(
+            i,
+            Clause::FusedOptionalMatchAggregate {
+                match_clause,
+                with_clause,
+            },
+        );
+
+        i += 1;
+    }
+}
+
+/// Check if a WITH clause is eligible for fusion with an OPTIONAL MATCH.
+/// Must have: simple variable group keys + count() aggregates only.
+fn is_fusable_with_clause(with: &WithClause) -> bool {
+    use super::executor::is_aggregate_expression;
+
+    let mut has_count = false;
+
+    for item in &with.items {
+        if is_aggregate_expression(&item.expression) {
+            // Only fuse for count() — not sum/collect/avg etc.
+            match &item.expression {
+                Expression::FunctionCall { name, .. } if name.eq_ignore_ascii_case("count") => {
+                    has_count = true;
+                }
+                _ => return false, // Non-count aggregate → bail
+            }
+        } else {
+            // Group key must be a simple variable pass-through
+            if !matches!(&item.expression, Expression::Variable(_)) {
+                return false;
+            }
+        }
+    }
+
+    has_count
 }
 
 /// Collect variable names and their node types from patterns

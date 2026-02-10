@@ -48,6 +48,7 @@ pub enum CypherToken {
     True,
     False,
     Exists,
+    Explain,
 
     // Parameters
     Parameter(String), // $param_name
@@ -74,6 +75,9 @@ pub enum CypherToken {
     NotEquals,         // <>
     LessThanEquals,    // <=
     GreaterThanEquals, // >=
+
+    // Regex
+    RegexMatch, // =~
 
     // Arithmetic
     Plus,  // +
@@ -168,8 +172,13 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
                 i += 1;
             }
             '=' => {
-                tokens.push(CypherToken::Equals);
-                i += 1;
+                if i + 1 < chars.len() && chars[i + 1] == '~' {
+                    tokens.push(CypherToken::RegexMatch);
+                    i += 2;
+                } else {
+                    tokens.push(CypherToken::Equals);
+                    i += 1;
+                }
             }
 
             '-' => {
@@ -390,6 +399,7 @@ fn identifier_to_token(ident: String) -> CypherToken {
         "ENDS" => CypherToken::EndsWith,
         "CONTAINS" => CypherToken::Contains,
         "EXISTS" => CypherToken::Exists,
+        "EXPLAIN" => CypherToken::Explain,
         _ => CypherToken::Identifier(ident),
     }
 }

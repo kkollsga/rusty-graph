@@ -208,6 +208,42 @@ class TestShortestPathEdgeCases:
         assert len(result) == 1
         assert set(result[0].keys()) == {'length(p)', 'nodes(p)', 'relationships(p)'}
 
+
+class TestShortestPathWithClause:
+    """Regression tests for path_bindings surviving WITH clauses."""
+
+    def test_length_after_with(self, chain_graph):
+        """length(p) works after path passes through WITH."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
+            "WITH p "
+            "RETURN length(p)"
+        )
+        assert len(result) == 1
+        assert result[0]['length(p)'] == 2
+
+    def test_nodes_after_with(self, chain_graph):
+        """nodes(p) works after path passes through WITH."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
+            "WITH p "
+            "RETURN nodes(p)"
+        )
+        nodes = result[0]['nodes(p)']
+        titles = [n['title'] for n in nodes]
+        assert titles == ['Alice', 'Bob', 'Charlie']
+
+    def test_path_with_aggregation(self, chain_graph):
+        """length(p) works after WITH that includes aggregation."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Eve'})) "
+            "WITH p, 1 AS dummy "
+            "RETURN length(p), dummy"
+        )
+        assert len(result) == 1
+        assert result[0]['length(p)'] == 4
+        assert result[0]['dummy'] == 1
+
     def test_empty_graph(self):
         """shortestPath on empty graph returns no rows."""
         graph = KnowledgeGraph()

@@ -260,12 +260,20 @@ pub struct DirGraph {
     #[serde(default)]
     pub(crate) schema_definition: Option<SchemaDefinition>,
     /// Single-property indexes for fast lookups: (node_type, property) -> value -> [node_indices]
-    #[serde(default)]
+    /// Skipped during serialization — rebuilt from `property_index_keys` on load.
+    #[serde(skip)]
     pub(crate) property_indices: HashMap<IndexKey, HashMap<Value, Vec<NodeIndex>>>,
     /// Composite indexes for multi-field queries: (node_type, [properties]) -> composite_value -> [node_indices]
-    #[serde(default)]
+    /// Skipped during serialization — rebuilt from `composite_index_keys` on load.
+    #[serde(skip)]
     pub(crate) composite_indices:
         HashMap<CompositeIndexKey, HashMap<CompositeValue, Vec<NodeIndex>>>,
+    /// Persisted list of property index keys so indexes can be rebuilt on load
+    #[serde(default)]
+    pub(crate) property_index_keys: Vec<IndexKey>,
+    /// Persisted list of composite index keys so indexes can be rebuilt on load
+    #[serde(default)]
+    pub(crate) composite_index_keys: Vec<CompositeIndexKey>,
     /// Fast O(1) lookup by node ID: node_type -> (id_value -> NodeIndex)
     /// Lazily built on first use for each node type, skipped during serialization
     #[serde(skip)]
@@ -295,6 +303,8 @@ impl DirGraph {
             schema_definition: None,
             property_indices: HashMap::new(),
             composite_indices: HashMap::new(),
+            property_index_keys: Vec::new(),
+            composite_index_keys: Vec::new(),
             id_indices: HashMap::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: HashMap::new(),
@@ -924,6 +934,34 @@ impl DirGraph {
                 }
             }
         }
+    }
+
+    // ========================================================================
+    // Serialization helpers
+    // ========================================================================
+
+    /// Snapshot which property/composite indexes exist so they survive serialization.
+    /// Called automatically before save.
+    pub fn populate_index_keys(&mut self) {
+        self.property_index_keys = self.property_indices.keys().cloned().collect();
+        self.composite_index_keys = self.composite_indices.keys().cloned().collect();
+    }
+
+    /// Rebuild property and composite indexes from the persisted key lists.
+    /// Called automatically after load.
+    pub fn rebuild_indices_from_keys(&mut self) {
+        let prop_keys: Vec<IndexKey> = std::mem::take(&mut self.property_index_keys);
+        for (node_type, property) in &prop_keys {
+            self.create_index(node_type, property);
+        }
+        self.property_index_keys = prop_keys;
+
+        let comp_keys: Vec<CompositeIndexKey> = std::mem::take(&mut self.composite_index_keys);
+        for (node_type, properties) in &comp_keys {
+            let prop_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
+            self.create_composite_index(node_type, &prop_refs);
+        }
+        self.composite_index_keys = comp_keys;
     }
 
     // ========================================================================

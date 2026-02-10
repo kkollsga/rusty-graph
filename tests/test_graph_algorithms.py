@@ -119,6 +119,22 @@ class TestCentrality:
         assert result is not None
         assert len(result) > 0
 
+    def test_pagerank_directed_ranking(self):
+        """PageRank on a directed chain A->B->C: C should rank highest (most indirectly linked)."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Node {name: 'A'})")
+        g.cypher("CREATE (:Node {name: 'B'})")
+        g.cypher("CREATE (:Node {name: 'C'})")
+        g.cypher("MATCH (a:Node {name: 'A'}), (b:Node {name: 'B'}) CREATE (a)-[:LINK]->(b)")
+        g.cypher("MATCH (b:Node {name: 'B'}), (c:Node {name: 'C'}) CREATE (b)-[:LINK]->(c)")
+
+        result = g.pagerank()
+        scores = {r['title']: r['score'] for r in result}
+        # In directed PageRank: C receives rank from B, B receives from A, A is a dangling start
+        # C should have highest score, A lowest
+        assert scores['C'] > scores['B']
+        assert scores['B'] > scores['A']
+
     def test_closeness_centrality(self, social_graph):
         result = social_graph.closeness_centrality()
         assert result is not None

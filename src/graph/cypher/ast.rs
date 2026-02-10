@@ -12,6 +12,7 @@ use crate::graph::pattern_matching::Pattern;
 #[derive(Debug, Clone)]
 pub struct CypherQuery {
     pub clauses: Vec<Clause>,
+    pub explain: bool,
 }
 
 /// Each clause in the query pipeline
@@ -32,6 +33,12 @@ pub enum Clause {
     Delete(DeleteClause),
     Remove(RemoveClause),
     Merge(MergeClause),
+    /// Optimizer-generated: fuse OPTIONAL MATCH + WITH count(...) into a single pass.
+    /// Instead of expanding rows then aggregating, count matches directly per input row.
+    FusedOptionalMatchAggregate {
+        match_clause: MatchClause,
+        with_clause: WithClause,
+    },
 }
 
 // ============================================================================
@@ -106,6 +113,7 @@ pub enum ComparisonOp {
     LessThanEq,    // <=
     GreaterThan,   // >
     GreaterThanEq, // >=
+    RegexMatch,    // =~
 }
 
 // ============================================================================

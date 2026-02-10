@@ -96,6 +96,14 @@ impl CypherParser {
     // ========================================================================
 
     pub fn parse_query(&mut self) -> Result<CypherQuery, String> {
+        // Check for EXPLAIN prefix
+        let explain = if self.check(&CypherToken::Explain) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
         let mut clauses = Vec::new();
 
         while self.has_tokens() {
@@ -168,7 +176,7 @@ impl CypherParser {
             return Err("Empty query".to_string());
         }
 
-        Ok(CypherQuery { clauses })
+        Ok(CypherQuery { clauses, explain })
     }
 
     // ========================================================================
@@ -498,11 +506,27 @@ impl CypherParser {
         // Check for EXISTS { pattern }
         if self.check(&CypherToken::Exists) {
             self.advance(); // consume EXISTS
-            self.expect(&CypherToken::LBrace)?;
-            // Parse the pattern(s) inside braces by collecting tokens up to RBrace
-            let patterns = self.parse_exists_patterns()?;
-            self.expect(&CypherToken::RBrace)?;
-            return Ok(Predicate::Exists { patterns });
+            if self.check(&CypherToken::LBrace) {
+                self.advance(); // consume {
+                let patterns = self.parse_exists_patterns()?;
+                self.expect(&CypherToken::RBrace)?;
+                return Ok(Predicate::Exists { patterns });
+            } else if self.check(&CypherToken::LParen) {
+                self.advance(); // consume outer (
+                                // Support EXISTS((...)) — inner parens are the pattern
+                if self.check(&CypherToken::LParen) {
+                    let pattern_str = self.extract_pattern_string()?;
+                    let pattern = crate::graph::pattern_matching::parse_pattern(&pattern_str)?;
+                    self.expect(&CypherToken::RParen)?; // consume outer )
+                    return Ok(Predicate::Exists {
+                        patterns: vec![pattern],
+                    });
+                } else {
+                    return Err("EXISTS(...) requires a pattern in parentheses, e.g. EXISTS((n)-[:REL]->())".to_string());
+                }
+            } else {
+                return Err("Expected '{' or '(' after EXISTS".to_string());
+            }
         }
 
         // Check for parenthesized predicate
@@ -582,6 +606,7 @@ impl CypherParser {
             Some(CypherToken::LessThanEquals) => ComparisonOp::LessThanEq,
             Some(CypherToken::GreaterThan) => ComparisonOp::GreaterThan,
             Some(CypherToken::GreaterThanEquals) => ComparisonOp::GreaterThanEq,
+            Some(CypherToken::RegexMatch) => ComparisonOp::RegexMatch,
             _ => {
                 // No operator - the expression itself is a boolean predicate
                 // Convert expression to a comparison: expr <> false (truthy check)

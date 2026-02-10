@@ -235,3 +235,57 @@ class TestWhereExistsEdgeCases:
         # Charlie and Diana don't know anyone and haven't purchased anything
         names = [row['p.name'] for row in result]
         assert names == ['Charlie', 'Diana']
+
+
+class TestExistsParenSyntax:
+    """Tests for EXISTS((...)) parenthesis syntax (alternative to brace syntax)."""
+
+    def test_exists_paren_basic(self, social_graph):
+        """EXISTS((...)) returns same results as EXISTS { ... }."""
+        brace_result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE EXISTS { (p)-[:KNOWS]->(:Person) }
+            RETURN p.name
+            ORDER BY p.name
+        """)
+
+        paren_result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE EXISTS((p)-[:KNOWS]->(:Person))
+            RETURN p.name
+            ORDER BY p.name
+        """)
+
+        assert brace_result == paren_result
+
+    def test_not_exists_paren(self, social_graph):
+        """NOT EXISTS((...)) works correctly."""
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE NOT EXISTS((p)-[:KNOWS]->(:Person))
+            RETURN p.name
+            ORDER BY p.name
+        """)
+
+        names = [row['p.name'] for row in result]
+        # Same result as brace syntax
+        brace_result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE NOT EXISTS { (p)-[:KNOWS]->(:Person) }
+            RETURN p.name
+            ORDER BY p.name
+        """)
+        assert names == [row['p.name'] for row in brace_result]
+
+    def test_exists_paren_with_label(self, social_graph):
+        """EXISTS((...)) with specific edge type."""
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE EXISTS((p)-[:PURCHASED]->(:Product))
+            RETURN p.name
+            ORDER BY p.name
+        """)
+
+        assert len(result) > 0
+        for row in result:
+            assert isinstance(row['p.name'], str)
