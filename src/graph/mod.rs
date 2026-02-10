@@ -3764,10 +3764,7 @@ impl KnowledgeGraph {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Cypher syntax error: {}", e))
         })?;
 
-        // Optimize (predicate pushdown, etc.)
-        cypher::optimize(&mut parsed, &self.inner);
-
-        // Convert params dict to HashMap<String, Value>
+        // Convert params dict to HashMap<String, Value> (before optimize so pushdown can resolve params)
         let param_map = if let Some(params_dict) = params {
             let mut map = std::collections::HashMap::new();
             for (key, val) in params_dict.iter() {
@@ -3779,6 +3776,9 @@ impl KnowledgeGraph {
         } else {
             std::collections::HashMap::new()
         };
+
+        // Optimize (predicate pushdown, etc.) — needs params to resolve $param in WHERE
+        cypher::optimize(&mut parsed, &self.inner, &param_map);
 
         let result = if cypher::is_mutation_query(&parsed) {
             let graph = get_graph_mut(&mut self.inner);
@@ -3808,7 +3808,7 @@ impl KnowledgeGraph {
         if to_df {
             cypher::py_convert::cypher_result_to_dataframe(py, &result)
         } else {
-            cypher::py_convert::cypher_result_to_py(py, &result)
+            cypher::py_convert::cypher_result_to_py_auto(py, &result)
         }
     }
 

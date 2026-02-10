@@ -55,13 +55,13 @@ graph.cypher("""
     CREATE (a)-[:KNOWS]->(b)
 """)
 
-# Query — returns dict with 'columns' and 'rows'
+# Query — returns list[dict]
 result = graph.cypher("""
     MATCH (p:Person) WHERE p.age > 30
     RETURN p.name AS name, p.city AS city
     ORDER BY p.age DESC
 """)
-for row in result['rows']:
+for row in result:
     print(row['name'], row['city'])
 
 # Or get a pandas DataFrame
@@ -70,6 +70,9 @@ df = graph.cypher("MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age", to_df=
 # Mutations return stats
 result = graph.cypher("CREATE (:Person {name: 'Dave', age: 22})")
 print(result['stats'])  # {'nodes_created': 1, 'relationships_created': 0, ...}
+
+# Check graph size
+print(graph.graph_info())  # {'node_count': 4, 'edge_count': 1, ...}
 
 # Persist to disk and reload
 graph.save("my_graph.bin")
@@ -106,7 +109,7 @@ graph.cypher("MATCH (u:User) WHERE u.age > 30 RETURN u.name, u.age")
 
 **Relationships** connect two nodes with a type (e.g., `:KNOWS`) and optional properties. The Cypher API calls them "relationships"; the fluent API calls them "connections" — they're the same thing.
 
-**Return shape.** Read queries return `{'columns': [...], 'rows': [{...}, ...]}`. Mutation queries (CREATE, SET, DELETE, REMOVE, MERGE) additionally include a `'stats'` key with counts like `nodes_created`, `properties_set`, etc. Pass `to_df=True` to get a pandas DataFrame instead.
+**Return shape.** Read queries return `list[dict]` — each dict is one row keyed by column alias. Mutation queries (CREATE, SET, DELETE, REMOVE, MERGE) return `{'stats': {...}}` with counts like `nodes_created`, `properties_set`, etc. Mutations with a RETURN clause return `{'rows': [...], 'stats': {...}}`. Pass `to_df=True` to get a pandas DataFrame instead (read queries only).
 
 **Atomicity.** Each `cypher()` call is atomic at the statement level — if any clause fails, the graph remains unchanged (copy-on-write internally). There are no multi-statement transactions: two separate `cypher()` calls are independent. Durability only via explicit `save()`.
 
@@ -234,8 +237,8 @@ result = graph.cypher("""
     LIMIT 10
 """)
 
-# Read queries → {'columns': [...], 'rows': [{...}, ...]}
-for row in result['rows']:
+# Read queries → list[dict]
+for row in result:
     print(f"{row['person']} knows {row['friend']}")
 
 # Pass to_df=True for a DataFrame
@@ -391,6 +394,12 @@ graph.cypher(
     params={'min_age': 25}
 )
 
+# Parameters in inline pattern properties
+graph.cypher(
+    "MATCH (n:Person {name: $name}) RETURN n.age",
+    params={'name': 'Alice'}
+)
+
 # Parameters with DataFrame output
 df = graph.cypher(
     "MATCH (n:Person) WHERE n.age > $min_age RETURN n.name, n.age ORDER BY n.age",
@@ -457,9 +466,9 @@ result = graph.cypher("""
     MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Dave'}))
     RETURN length(p), nodes(p), relationships(p), a.name, b.name
 """)
-# {'columns': ['length(p)', ...], 'rows': [{'length(p)': 3, ...}]}
+# [{'length(p)': 3, 'nodes(p)': [...], ...}]
 
-# No path → empty rows (not an error)
+# No path → empty list (not an error)
 ```
 
 **Path functions:** `length(p)` returns hop count, `nodes(p)` returns node list, `relationships(p)` returns edge type list.
@@ -554,6 +563,7 @@ graph.add_nodes(
     unique_id_field='product_id',
     node_title_field='title',
     columns=['product_id', 'title', 'price', 'stock'],
+    column_types={'launch_date': 'datetime'},  # explicit type hints (see Working with Dates)
     conflict_handling='update'  # 'update' | 'replace' | 'skip' | 'preserve'
 )
 ```
@@ -627,6 +637,8 @@ graph.add_connections(
     columns=['date', 'quantity']
 )
 ```
+
+> **Note:** `source_type` and `target_type` each refer to a single node type. To connect nodes of the same type, set both to the same value (e.g., `source_type='Person', target_type='Person'`).
 
 ### Batch Property Updates
 
@@ -741,7 +753,7 @@ graph.match_pattern('(a:Person)-[:KNOWS]->(b:Person)', max_matches=100)
 ```python
 path = graph.shortest_path(source_type='Person', source_id=1, target_type='Person', target_id=100)
 for node in path:
-    print(f"{node['node_type']}: {node['title']}")
+    print(f"{node['type']}: {node['title']}")
 ```
 
 ### All Paths
@@ -758,14 +770,16 @@ paths = graph.all_paths(
 
 ```python
 components = graph.connected_components()
+# Returns list of lists: [[node_indices...], [node_indices...], ...]
 print(f"Found {len(components)} connected components")
+print(f"Largest component: {len(components[0])} nodes")
 
 graph.are_connected(source_type='Person', source_id=1, target_type='Person', target_id=100)
 ```
 
 ### Centrality Algorithms
 
-All centrality methods return a list of dicts with `node_type`, `title`, `id`, and `score` keys, sorted by score descending.
+All centrality methods return a list of dicts with `type`, `title`, `id`, and `score` keys, sorted by score descending.
 
 ```python
 graph.betweenness_centrality(top_k=10)
@@ -782,7 +796,7 @@ Identify clusters of densely connected nodes.
 ```python
 # Louvain modularity optimization (recommended)
 result = graph.louvain_communities()
-# {'communities': {0: [{title, node_type, id}, ...], 1: [...]},
+# {'communities': {0: [{title, type, id}, ...], 1: [...]},
 #  'modularity': 0.45, 'num_communities': 2}
 
 for comm_id, members in result['communities'].items():

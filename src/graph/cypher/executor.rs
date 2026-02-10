@@ -91,7 +91,11 @@ impl<'a> CypherExecutor<'a> {
             for pattern in &clause.patterns {
                 if all_rows.is_empty() {
                     // First pattern - create initial rows
-                    let executor = PatternExecutor::new_lightweight(self.graph, None);
+                    let executor = PatternExecutor::new_lightweight_with_params(
+                        self.graph,
+                        None,
+                        self.params.clone(),
+                    );
                     let matches = executor.execute(pattern)?;
                     for m in matches {
                         all_rows.push(self.pattern_match_to_row(m));
@@ -101,10 +105,11 @@ impl<'a> CypherExecutor<'a> {
                     // Pass existing node bindings as pre-bindings to constrain the pattern
                     let mut new_rows = Vec::new();
                     for existing_row in &all_rows {
-                        let executor = PatternExecutor::with_bindings(
+                        let executor = PatternExecutor::with_bindings_and_params(
                             self.graph,
                             None,
                             existing_row.node_bindings.clone(),
+                            self.params.clone(),
                         );
                         let matches = executor.execute(pattern)?;
                         for m in matches {
@@ -130,8 +135,12 @@ impl<'a> CypherExecutor<'a> {
 
             for row in &existing.rows {
                 for pattern in &clause.patterns {
-                    let executor =
-                        PatternExecutor::with_bindings(self.graph, None, row.node_bindings.clone());
+                    let executor = PatternExecutor::with_bindings_and_params(
+                        self.graph,
+                        None,
+                        row.node_bindings.clone(),
+                        self.params.clone(),
+                    );
                     let matches = executor.execute(pattern)?;
 
                     for m in matches {
@@ -183,7 +192,8 @@ impl<'a> CypherExecutor<'a> {
         };
 
         // Find matching source and target nodes
-        let executor = PatternExecutor::new_lightweight(self.graph, None);
+        let executor =
+            PatternExecutor::new_lightweight_with_params(self.graph, None, self.params.clone());
         let source_nodes = executor.find_matching_nodes_pub(source_pattern)?;
         let target_nodes = executor.find_matching_nodes_pub(target_pattern)?;
 
@@ -360,8 +370,12 @@ impl<'a> CypherExecutor<'a> {
             let mut found_any = false;
 
             for pattern in &clause.patterns {
-                let executor =
-                    PatternExecutor::with_bindings(self.graph, None, row.node_bindings.clone());
+                let executor = PatternExecutor::with_bindings_and_params(
+                    self.graph,
+                    None,
+                    row.node_bindings.clone(),
+                    self.params.clone(),
+                );
                 let matches = executor.execute(pattern)?;
 
                 for m in &matches {
@@ -566,8 +580,12 @@ impl<'a> CypherExecutor<'a> {
                 // Execute each pattern and check if any match is compatible
                 // with the current row's bindings (outer variables must match)
                 for pattern in patterns {
-                    let executor =
-                        PatternExecutor::with_bindings(self.graph, None, row.node_bindings.clone());
+                    let executor = PatternExecutor::with_bindings_and_params(
+                        self.graph,
+                        None,
+                        row.node_bindings.clone(),
+                        self.params.clone(),
+                    );
                     let matches = executor.execute(pattern)?;
                     let found = matches.iter().any(|m| self.bindings_compatible(row, m));
                     if !found {

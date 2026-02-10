@@ -74,3 +74,43 @@ pub fn cypher_result_to_py(py: Python<'_>, result: &CypherResult) -> PyResult<Py
     }
     Ok(rows_list.into_any().unbind())
 }
+
+fn stats_to_py<'py>(
+    py: Python<'py>,
+    stats: &super::result::MutationStats,
+) -> PyResult<Bound<'py, PyDict>> {
+    let stats_dict = PyDict::new(py);
+    stats_dict.set_item("nodes_created", stats.nodes_created)?;
+    stats_dict.set_item("relationships_created", stats.relationships_created)?;
+    stats_dict.set_item("properties_set", stats.properties_set)?;
+    stats_dict.set_item("nodes_deleted", stats.nodes_deleted)?;
+    stats_dict.set_item("relationships_deleted", stats.relationships_deleted)?;
+    stats_dict.set_item("properties_removed", stats.properties_removed)?;
+    Ok(stats_dict)
+}
+
+/// Convert a CypherResult to Python, including mutation stats when present.
+/// - Read queries → list[dict]
+/// - Mutations without RETURN → {'stats': {...}}
+/// - Mutations with RETURN → {'rows': list[dict], 'stats': {...}}
+pub fn cypher_result_to_py_auto(py: Python<'_>, result: &CypherResult) -> PyResult<Py<PyAny>> {
+    match &result.stats {
+        Some(stats) if result.rows.is_empty() => {
+            // Mutation with no RETURN → {'stats': {...}}
+            let dict = PyDict::new(py);
+            dict.set_item("stats", stats_to_py(py, stats)?)?;
+            Ok(dict.into_any().unbind())
+        }
+        Some(stats) => {
+            // Mutation WITH RETURN → {'rows': [...], 'stats': {...}}
+            let dict = PyDict::new(py);
+            dict.set_item("rows", cypher_result_to_py(py, result)?)?;
+            dict.set_item("stats", stats_to_py(py, stats)?)?;
+            Ok(dict.into_any().unbind())
+        }
+        None => {
+            // Read query → bare list[dict]
+            cypher_result_to_py(py, result)
+        }
+    }
+}

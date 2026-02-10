@@ -128,7 +128,7 @@ class TestCypherPerformance:
         start = time.time()
         result = graph.cypher("MATCH (n:Person) RETURN n.title")
         elapsed = time.time() - start
-        assert len(result['rows']) == 500
+        assert len(result) == 500
         print(f"  Cypher simple match 500 nodes: {elapsed*1000:.1f}ms")
 
     def test_where_filter(self):
@@ -139,8 +139,8 @@ class TestCypherPerformance:
             "MATCH (n:Person) WHERE n.age > 40 RETURN n.title, n.age"
         )
         elapsed = time.time() - start
-        assert len(result['rows']) > 0
-        print(f"  Cypher WHERE filter 500 nodes: {elapsed*1000:.1f}ms, {len(result['rows'])} rows")
+        assert len(result) > 0
+        print(f"  Cypher WHERE filter 500 nodes: {elapsed*1000:.1f}ms, {len(result)} rows")
 
     def test_edge_traversal(self):
         """MATCH (a)-[:KNOWS]->(b) — single-hop edge pattern."""
@@ -150,8 +150,8 @@ class TestCypherPerformance:
             "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.title, b.title"
         )
         elapsed = time.time() - start
-        assert len(result['rows']) > 0
-        print(f"  Cypher edge traversal 200 nodes: {elapsed*1000:.1f}ms, {len(result['rows'])} rows")
+        assert len(result) > 0
+        print(f"  Cypher edge traversal 200 nodes: {elapsed*1000:.1f}ms, {len(result)} rows")
 
     def test_cross_type_join(self):
         """MATCH (p:Person)-[:WORKS_AT]->(c:Company) — cross-type join."""
@@ -161,7 +161,7 @@ class TestCypherPerformance:
             "MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN p.title, c.title"
         )
         elapsed = time.time() - start
-        assert len(result['rows']) == 500
+        assert len(result) == 500
         print(f"  Cypher cross-type join 500 people -> 50 companies: {elapsed*1000:.1f}ms")
 
     def test_aggregation(self):
@@ -172,8 +172,8 @@ class TestCypherPerformance:
             "MATCH (n:Person) RETURN n.city AS city, count(*) AS cnt, avg(n.salary) AS avg_salary"
         )
         elapsed = time.time() - start
-        assert len(result['rows']) > 0
-        print(f"  Cypher aggregation 500 nodes: {elapsed*1000:.1f}ms, {len(result['rows'])} groups")
+        assert len(result) > 0
+        print(f"  Cypher aggregation 500 nodes: {elapsed*1000:.1f}ms, {len(result)} groups")
 
     def test_order_limit(self):
         """ORDER BY + LIMIT — sorting and pagination."""
@@ -183,8 +183,8 @@ class TestCypherPerformance:
             "MATCH (n:Person) RETURN n.title, n.salary ORDER BY n.salary DESC LIMIT 10"
         )
         elapsed = time.time() - start
-        assert len(result['rows']) == 10
-        salaries = [r['n.salary'] for r in result['rows']]
+        assert len(result) == 10
+        salaries = [r['n.salary'] for r in result]
         assert salaries == sorted(salaries, reverse=True)
         print(f"  Cypher ORDER BY + LIMIT 500 nodes: {elapsed*1000:.1f}ms")
 
@@ -199,8 +199,8 @@ class TestCypherPerformance:
             ORDER BY headcount DESC
         """)
         elapsed = time.time() - start
-        assert len(result['rows']) > 0
-        print(f"  Cypher complex query 200 nodes: {elapsed*1000:.1f}ms, {len(result['rows'])} rows")
+        assert len(result) > 0
+        print(f"  Cypher complex query 200 nodes: {elapsed*1000:.1f}ms, {len(result)} rows")
 
     def test_cypher_vs_fluent_api(self):
         """Compare Cypher vs fluent API for the same operation."""
@@ -218,9 +218,9 @@ class TestCypherPerformance:
         fluent_result = graph.type_filter('Person').filter({'age': {'>': 40}}).get_nodes()
         fluent_time = time.time() - start
 
-        assert len(cypher_result['rows']) == len(fluent_result)
+        assert len(cypher_result) == len(fluent_result)
         print(f"  Cypher: {cypher_time*1000:.1f}ms vs Fluent API: {fluent_time*1000:.1f}ms "
-              f"({len(cypher_result['rows'])} results)")
+              f"({len(cypher_result)} results)")
 
     def test_cypher_indexed_vs_unindexed(self):
         """Compare Cypher WHERE with and without property index."""
@@ -238,11 +238,11 @@ class TestCypherPerformance:
         result_idx = graph.cypher(query)
         idx_time = time.time() - start
 
-        assert len(result_no_idx['rows']) == len(result_idx['rows'])
-        assert len(result_idx['rows']) == 50  # 500 people / 10 cities
+        assert len(result_no_idx) == len(result_idx)
+        assert len(result_idx) == 50  # 500 people / 10 cities
         print(f"  Cypher WHERE no index: {no_idx_time*1000:.1f}ms, "
               f"with index: {idx_time*1000:.1f}ms "
-              f"({len(result_idx['rows'])} results)")
+              f"({len(result_idx)} results)")
 
     @pytest.mark.parametrize("n", [100, 500, 1000])
     def test_cypher_scaling(self, n):
@@ -253,8 +253,8 @@ class TestCypherPerformance:
             "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.age > 30 RETURN a.title, b.title"
         )
         elapsed = time.time() - start
-        assert len(result['rows']) > 0
-        print(f"  Cypher scaling {n} nodes: {elapsed*1000:.1f}ms, {len(result['rows'])} rows")
+        assert len(result) > 0
+        print(f"  Cypher scaling {n} nodes: {elapsed*1000:.1f}ms, {len(result)} rows")
 
 
 class TestCypherMutationPerformance:

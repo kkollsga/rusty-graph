@@ -551,9 +551,13 @@ class TestCreateClause:
 
     def test_create_return_created_node(self, cypher_graph):
         """CREATE ... RETURN should return data about created nodes."""
-        rows = cypher_graph.cypher(
+        result = cypher_graph.cypher(
             "CREATE (n:Animal {name: 'Rex', species: 'Dog'}) RETURN n.name, n.species"
         )
+        assert isinstance(result, dict)
+        assert 'rows' in result
+        assert 'stats' in result
+        rows = result['rows']
         assert len(rows) == 1
         assert rows[0]['n.name'] == 'Rex'
         assert rows[0]['n.species'] == 'Dog'
@@ -823,3 +827,115 @@ class TestMergeClause:
             MERGE (a)-[r:FRIENDS]->(b)
         """)
         assert cypher_graph.last_mutation_stats['relationships_created'] == 1
+
+
+# ============================================================================
+# Mutation stats return format
+# ============================================================================
+
+class TestMutationStatsReturn:
+    """Mutation queries return stats directly (not just via last_mutation_stats)."""
+
+    def test_create_returns_stats_dict(self):
+        """CREATE returns {'stats': {...}} with node count."""
+        g = KnowledgeGraph()
+        result = g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
+        assert isinstance(result, dict)
+        assert 'stats' in result
+        assert result['stats']['nodes_created'] == 1
+
+    def test_set_returns_stats_dict(self):
+        """SET returns {'stats': {...}} with properties_set count."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
+        result = g.cypher("MATCH (p:Person {name: 'Alice'}) SET p.age = 31")
+        assert isinstance(result, dict)
+        assert result['stats']['properties_set'] >= 1
+
+    def test_delete_returns_stats_dict(self):
+        """DETACH DELETE returns {'stats': {...}} with nodes_deleted count."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice'})")
+        result = g.cypher("MATCH (p:Person {name: 'Alice'}) DETACH DELETE p")
+        assert isinstance(result, dict)
+        assert result['stats']['nodes_deleted'] == 1
+
+    def test_mutation_with_return_has_rows_and_stats(self):
+        """CREATE ... RETURN returns {'rows': [...], 'stats': {...}}."""
+        g = KnowledgeGraph()
+        result = g.cypher("CREATE (n:Person {name: 'Bob', age: 25}) RETURN n.name AS name")
+        assert isinstance(result, dict)
+        assert 'rows' in result
+        assert 'stats' in result
+        assert result['stats']['nodes_created'] == 1
+        assert len(result['rows']) == 1
+        assert result['rows'][0]['name'] == 'Bob'
+
+    def test_read_query_returns_list(self):
+        """Read query returns list[dict], not dict with stats."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
+        result = g.cypher("MATCH (p:Person) RETURN p.name AS name")
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0]['name'] == 'Alice'
+
+    def test_last_mutation_stats_backwards_compat(self):
+        """last_mutation_stats property still works."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice'})")
+        stats = g.last_mutation_stats
+        assert stats is not None
+        assert stats['nodes_created'] == 1
+
+
+# ============================================================================
+# Parameter in MATCH inline properties
+# ============================================================================
+
+class TestParamInMatchPatterns:
+    """$param in MATCH (n:Type {prop: $param}) inline properties."""
+
+    def test_string_param_in_match(self):
+        """MATCH (n:Person {name: $name}) resolves string parameter."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
+        g.cypher("CREATE (:Person {name: 'Bob', age: 25})")
+        result = g.cypher(
+            "MATCH (p:Person {name: $name}) RETURN p.age AS age",
+            params={'name': 'Alice'}
+        )
+        assert result == [{'age': 30}]
+
+    def test_integer_param_in_match(self):
+        """MATCH (n:Person {age: $age}) resolves integer parameter."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
+        g.cypher("CREATE (:Person {name: 'Bob', age: 25})")
+        result = g.cypher(
+            "MATCH (p:Person {age: $age}) RETURN p.name AS name",
+            params={'age': 30}
+        )
+        assert result == [{'name': 'Alice'}]
+
+    def test_param_in_where_predicate_pushdown(self):
+        """WHERE p.name = $name is pushed into MATCH for index acceleration."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
+        g.cypher("CREATE (:Person {name: 'Bob', age: 25})")
+        result = g.cypher(
+            "MATCH (p:Person) WHERE p.name = $name RETURN p.age AS age",
+            params={'name': 'Alice'}
+        )
+        assert result == [{'age': 30}]
+
+    def test_multiple_params_in_match(self):
+        """Multiple $params in same MATCH pattern."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice', age: 30, city: 'Oslo'})")
+        g.cypher("CREATE (:Person {name: 'Bob', age: 30, city: 'Bergen'})")
+        result = g.cypher(
+            "MATCH (p:Person {age: $age}) WHERE p.city = $city RETURN p.name AS name",
+            params={'age': 30, 'city': 'Oslo'}
+        )
+        assert result == [{'name': 'Alice'}]

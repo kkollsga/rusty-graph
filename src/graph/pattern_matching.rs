@@ -59,10 +59,12 @@ pub enum EdgeDirection {
     Both,     // -[]-
 }
 
-/// Property value matcher (currently only equality)
+/// Property value matcher
 #[derive(Debug, Clone)]
 pub enum PropertyMatcher {
     Equals(Value),
+    /// Deferred parameter resolution: matched at execution time from params map
+    EqualsParam(String),
 }
 
 // ============================================================================
@@ -126,6 +128,7 @@ pub enum Token {
     IntLit(i64),
     FloatLit(f64),
     BoolLit(bool),
+    Parameter(String), // $param_name
 }
 
 pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
@@ -287,6 +290,22 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     _ => tokens.push(Token::Identifier(ident)),
                 }
             }
+            '$' => {
+                chars.next(); // consume $
+                let mut name = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_ascii_alphanumeric() || c == '_' {
+                        name.push(c);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if name.is_empty() {
+                    return Err("Expected parameter name after '$'".to_string());
+                }
+                tokens.push(Token::Parameter(name));
+            }
             _ => return Err(format!(
                 "Unexpected character '{}' in pattern. Valid pattern syntax: (node)-[:EDGE]->(node). \
                 Use () for nodes, [] for edges, : for types, {{}} for properties.",
@@ -357,6 +376,7 @@ impl Parser {
             Token::IntLit(_) => "number",
             Token::FloatLit(_) => "decimal",
             Token::BoolLit(_) => "boolean",
+            Token::Parameter(_) => "parameter",
         }
     }
 
@@ -619,8 +639,15 @@ impl Parser {
 
                     self.expect(&Token::Colon)?;
 
-                    let value = self.parse_value()?;
-                    props.insert(key, PropertyMatcher::Equals(value));
+                    // Check if next token is a parameter reference
+                    if let Some(Token::Parameter(_)) = self.peek() {
+                        if let Some(Token::Parameter(name)) = self.advance().cloned() {
+                            props.insert(key, PropertyMatcher::EqualsParam(name));
+                        }
+                    } else {
+                        let value = self.parse_value()?;
+                        props.insert(key, PropertyMatcher::Equals(value));
+                    }
 
                     // Check for comma or end
                     if let Some(Token::Comma) = self.peek() {
@@ -664,6 +691,8 @@ pub struct PatternExecutor<'a> {
     /// When true, node_to_binding() and edge bindings skip cloning
     /// properties/title/id (the Cypher executor only uses `index`).
     lightweight: bool,
+    /// Query parameters for resolving $param references in inline properties
+    params: HashMap<String, Value>,
 }
 
 impl<'a> PatternExecutor<'a> {
@@ -673,20 +702,39 @@ impl<'a> PatternExecutor<'a> {
             max_matches,
             pre_bindings: HashMap::new(),
             lightweight: false,
+            params: HashMap::new(),
         }
     }
 
     /// Lightweight executor for Cypher: skips cloning node properties/title/id
     /// since the Cypher executor only uses `index` from MatchBinding::Node.
+    #[allow(dead_code)]
     pub fn new_lightweight(graph: &'a DirGraph, max_matches: Option<usize>) -> Self {
         PatternExecutor {
             graph,
             max_matches,
             pre_bindings: HashMap::new(),
             lightweight: true,
+            params: HashMap::new(),
         }
     }
 
+    /// Lightweight executor with query parameters for resolving $param in inline properties
+    pub fn new_lightweight_with_params(
+        graph: &'a DirGraph,
+        max_matches: Option<usize>,
+        params: HashMap<String, Value>,
+    ) -> Self {
+        PatternExecutor {
+            graph,
+            max_matches,
+            pre_bindings: HashMap::new(),
+            lightweight: true,
+            params,
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn with_bindings(
         graph: &'a DirGraph,
         max_matches: Option<usize>,
@@ -697,6 +745,22 @@ impl<'a> PatternExecutor<'a> {
             max_matches,
             pre_bindings,
             lightweight: true,
+            params: HashMap::new(),
+        }
+    }
+
+    pub fn with_bindings_and_params(
+        graph: &'a DirGraph,
+        max_matches: Option<usize>,
+        pre_bindings: HashMap<String, NodeIndex>,
+        params: HashMap<String, Value>,
+    ) -> Self {
+        PatternExecutor {
+            graph,
+            max_matches,
+            pre_bindings,
+            lightweight: true,
+            params,
         }
     }
 
@@ -884,11 +948,14 @@ impl<'a> PatternExecutor<'a> {
         node_type: &str,
         props: &HashMap<String, PropertyMatcher>,
     ) -> Option<Vec<NodeIndex>> {
-        // Extract equality values from PropertyMatcher::Equals
+        // Extract equality values from PropertyMatcher (resolve params)
         let equality_props: Vec<(&String, &Value)> = props
             .iter()
-            .map(|(k, v)| match v {
-                PropertyMatcher::Equals(val) => (k, val),
+            .filter_map(|(k, v)| match v {
+                PropertyMatcher::Equals(val) => Some((k, val)),
+                PropertyMatcher::EqualsParam(name) => {
+                    self.params.get(name.as_str()).map(|val| (k, val))
+                }
             })
             .collect();
 
@@ -954,6 +1021,7 @@ impl<'a> PatternExecutor<'a> {
     fn value_matches(&self, value: &Value, matcher: &PropertyMatcher) -> bool {
         match matcher {
             PropertyMatcher::Equals(expected) => value == expected,
+            PropertyMatcher::EqualsParam(name) => self.params.get(name.as_str()) == Some(value),
         }
     }
 

@@ -5,10 +5,13 @@ use super::ast::*;
 use crate::datatypes::values::Value;
 use crate::graph::pattern_matching::{PatternElement, PropertyMatcher};
 use crate::graph::schema::DirGraph;
+use std::collections::HashMap;
 
-/// Optimize a parsed Cypher query before execution
-pub fn optimize(query: &mut CypherQuery, graph: &DirGraph) {
-    push_where_into_match(query);
+/// Optimize a parsed Cypher query before execution.
+/// Accepts query parameters so that `WHERE n.prop = $param` can be pushed
+/// into MATCH patterns the same way literal equalities are.
+pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<String, Value>) {
+    push_where_into_match(query, params);
     push_limit_into_match(query, graph);
 }
 
@@ -17,7 +20,11 @@ pub fn optimize(query: &mut CypherQuery, graph: &DirGraph) {
 ///
 /// Example: MATCH (n:Person) WHERE n.age = 30
 /// Becomes: MATCH (n:Person {age: 30}) (WHERE removed if fully consumed)
-fn push_where_into_match(query: &mut CypherQuery) {
+///
+/// Also handles parameterized equalities:
+/// MATCH (n:Person) WHERE n.age = $min_age  (with params = {min_age: 30})
+/// Becomes: MATCH (n:Person {age: 30})
+fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<String, Value>) {
     let mut i = 0;
     while i + 1 < query.clauses.len() {
         let can_push = matches!(
@@ -48,7 +55,7 @@ fn push_where_into_match(query: &mut CypherQuery) {
         };
 
         // Split predicate into pushable equality conditions and remainder
-        let (pushable, remaining) = extract_pushable_equalities(&where_pred, &match_vars);
+        let (pushable, remaining) = extract_pushable_equalities(&where_pred, &match_vars, params);
 
         // Apply pushable conditions to MATCH patterns
         if !pushable.is_empty() {
@@ -102,14 +109,18 @@ fn collect_pattern_variables(
 /// Extract simple equality predicates that can be pushed into MATCH patterns.
 /// Returns (pushable_conditions, remaining_predicate).
 ///
-/// Only pushes conditions of the form: variable.property = literal_value
-/// where the variable is defined in MATCH.
+/// Pushes conditions of the form:
+/// - `variable.property = literal_value`
+/// - `variable.property = $param` (resolved from params map)
+///
+/// The variable must be defined in MATCH.
 fn extract_pushable_equalities(
     pred: &Predicate,
     match_vars: &[(String, Option<String>)],
+    params: &HashMap<String, Value>,
 ) -> (Vec<(String, String, Value)>, Option<Predicate>) {
     let mut pushable = Vec::new();
-    let remaining = extract_from_predicate(pred, match_vars, &mut pushable);
+    let remaining = extract_from_predicate(pred, match_vars, params, &mut pushable);
     (pushable, remaining)
 }
 
@@ -118,6 +129,7 @@ fn extract_pushable_equalities(
 fn extract_from_predicate(
     pred: &Predicate,
     match_vars: &[(String, Option<String>)],
+    params: &HashMap<String, Value>,
     pushable: &mut Vec<(String, String, Value)>,
 ) -> Option<Predicate> {
     match pred {
@@ -126,8 +138,8 @@ fn extract_from_predicate(
             operator: ComparisonOp::Equals,
             right,
         } => {
-            // Check if this is variable.property = literal
-            if let Some((var, prop, val)) = try_extract_equality(left, right, match_vars) {
+            // Check if this is variable.property = literal or variable.property = $param
+            if let Some((var, prop, val)) = try_extract_equality(left, right, match_vars, params) {
                 pushable.push((var, prop, val));
                 None // Fully consumed
             } else {
@@ -135,8 +147,8 @@ fn extract_from_predicate(
             }
         }
         Predicate::And(left, right) => {
-            let left_remaining = extract_from_predicate(left, match_vars, pushable);
-            let right_remaining = extract_from_predicate(right, match_vars, pushable);
+            let left_remaining = extract_from_predicate(left, match_vars, params, pushable);
+            let right_remaining = extract_from_predicate(right, match_vars, params, pushable);
 
             match (left_remaining, right_remaining) {
                 (None, None) => None,
@@ -150,11 +162,12 @@ fn extract_from_predicate(
     }
 }
 
-/// Try to extract a simple equality: variable.property = literal
+/// Try to extract a simple equality: variable.property = literal_or_param
 fn try_extract_equality(
     left: &Expression,
     right: &Expression,
     match_vars: &[(String, Option<String>)],
+    params: &HashMap<String, Value>,
 ) -> Option<(String, String, Value)> {
     // Left is property access, right is literal
     if let (Expression::PropertyAccess { variable, property }, Expression::Literal(val)) =
@@ -171,6 +184,28 @@ fn try_extract_equality(
     {
         if match_vars.iter().any(|(v, _)| v == variable) {
             return Some((variable.clone(), property.clone(), val.clone()));
+        }
+    }
+
+    // Left is property access, right is parameter (resolve from params)
+    if let (Expression::PropertyAccess { variable, property }, Expression::Parameter(name)) =
+        (left, right)
+    {
+        if let Some(val) = params.get(name.as_str()) {
+            if match_vars.iter().any(|(v, _)| v == variable) {
+                return Some((variable.clone(), property.clone(), val.clone()));
+            }
+        }
+    }
+
+    // Right is property access, left is parameter (commutative)
+    if let (Expression::Parameter(name), Expression::PropertyAccess { variable, property }) =
+        (left, right)
+    {
+        if let Some(val) = params.get(name.as_str()) {
+            if match_vars.iter().any(|(v, _)| v == variable) {
+                return Some((variable.clone(), property.clone(), val.clone()));
+            }
         }
     }
 
@@ -211,7 +246,8 @@ mod tests {
         let mut query = parse_cypher("MATCH (n:Person) WHERE n.age = 30 RETURN n").unwrap();
 
         let graph = DirGraph::new();
-        optimize(&mut query, &graph);
+        let params = HashMap::new();
+        optimize(&mut query, &graph, &params);
 
         // WHERE should be removed (fully consumed)
         assert_eq!(query.clauses.len(), 2); // MATCH + RETURN
@@ -236,7 +272,8 @@ mod tests {
             parse_cypher("MATCH (n:Person) WHERE n.age = 30 AND n.score > 100 RETURN n").unwrap();
 
         let graph = DirGraph::new();
-        optimize(&mut query, &graph);
+        let params = HashMap::new();
+        optimize(&mut query, &graph, &params);
 
         // n.age = 30 should be pushed, n.score > 100 should remain
         assert_eq!(query.clauses.len(), 3); // MATCH + WHERE + RETURN
@@ -259,9 +296,54 @@ mod tests {
         let mut query = parse_cypher("MATCH (n:Person) WHERE n.age > 30 RETURN n").unwrap();
 
         let graph = DirGraph::new();
-        optimize(&mut query, &graph);
+        let params = HashMap::new();
+        optimize(&mut query, &graph, &params);
 
         // No pushdown - WHERE should remain
+        assert_eq!(query.clauses.len(), 3); // MATCH + WHERE + RETURN
+    }
+
+    #[test]
+    fn test_predicate_pushdown_parameter() {
+        let mut query = parse_cypher("MATCH (n:Person) WHERE n.name = $name RETURN n").unwrap();
+
+        let graph = DirGraph::new();
+        let mut params = HashMap::new();
+        params.insert("name".to_string(), Value::String("Alice".to_string()));
+        optimize(&mut query, &graph, &params);
+
+        // WHERE should be removed (parameter resolved and pushed)
+        assert_eq!(query.clauses.len(), 2); // MATCH + RETURN
+
+        // The MATCH pattern should now have {name: 'Alice'} as a property
+        if let Clause::Match(m) = &query.clauses[0] {
+            if let PatternElement::Node(np) = &m.patterns[0].elements[0] {
+                assert!(np.properties.is_some());
+                let props = np.properties.as_ref().unwrap();
+                assert!(props.contains_key("name"));
+                assert!(matches!(
+                    props.get("name"),
+                    Some(PropertyMatcher::Equals(Value::String(s))) if s == "Alice"
+                ));
+            } else {
+                panic!("Expected node pattern");
+            }
+        }
+    }
+
+    #[test]
+    fn test_predicate_pushdown_parameter_partial() {
+        let mut query =
+            parse_cypher("MATCH (n:Person) WHERE n.name = $name AND n.age > $min_age RETURN n")
+                .unwrap();
+
+        let graph = DirGraph::new();
+        let mut params = HashMap::new();
+        params.insert("name".to_string(), Value::String("Alice".to_string()));
+        params.insert("min_age".to_string(), Value::Int64(25));
+        optimize(&mut query, &graph, &params);
+
+        // n.name = $name should be pushed, n.age > $min_age should remain (not equality)
         assert_eq!(query.clauses.len(), 3); // MATCH + WHERE + RETURN
     }
 }
