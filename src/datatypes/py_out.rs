@@ -14,9 +14,9 @@ use std::collections::HashMap;
 /// cloning the properties HashMap.
 pub fn nodedata_to_pydict(py: Python, node: &NodeData) -> PyResult<Option<Py<PyAny>>> {
     let dict = PyDict::new(py);
-    dict.set_item("id", value_to_py(py, &node.id)?)?;
-    dict.set_item("title", value_to_py(py, &node.title)?)?;
     dict.set_item("type", &node.node_type)?;
+    dict.set_item("title", value_to_py(py, &node.title)?)?;
+    dict.set_item("id", value_to_py(py, &node.id)?)?;
 
     for (k, v) in &node.properties {
         dict.set_item(k, value_to_py(py, v)?)?;
@@ -27,9 +27,9 @@ pub fn nodedata_to_pydict(py: Python, node: &NodeData) -> PyResult<Option<Py<PyA
 
 pub fn nodeinfo_to_pydict(py: Python, node: &NodeInfo) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
-    dict.set_item("id", value_to_py(py, &node.id)?)?;
-    dict.set_item("title", value_to_py(py, &node.title)?)?;
     dict.set_item("type", &node.node_type)?;
+    dict.set_item("title", value_to_py(py, &node.title)?)?;
+    dict.set_item("id", value_to_py(py, &node.id)?)?;
 
     // Always merge properties directly into the main dictionary
     for (k, v) in &node.properties {
@@ -167,12 +167,12 @@ pub fn level_nodes_to_pydict(
             // When parent info is requested, still return a dict but with a simpler structure
             let parent_dict = PyDict::new(py);
 
-            if let Some(ref id) = group.parent_id {
-                parent_dict.set_item("id", value_to_py(py, id)?)?;
-            }
-            parent_dict.set_item("title", &group.parent_title)?;
             if let Some(ref type_str) = group.parent_type {
                 parent_dict.set_item("type", type_str)?;
+            }
+            parent_dict.set_item("title", &group.parent_title)?;
+            if let Some(ref id) = group.parent_id {
+                parent_dict.set_item("id", value_to_py(py, id)?)?;
             }
 
             let nodes: Vec<Py<PyAny>> = group
@@ -243,12 +243,12 @@ pub fn level_nodes_to_pydict(
         let value: Py<PyAny> = if parent_info.unwrap_or(false) && group.parent_idx.is_some() {
             let parent_dict = PyDict::new(py);
 
-            if let Some(ref id) = group.parent_id {
-                parent_dict.set_item("id", value_to_py(py, id)?)?;
-            }
-            parent_dict.set_item("title", &group.parent_title)?;
             if let Some(ref type_str) = group.parent_type {
                 parent_dict.set_item("type", type_str)?;
+            }
+            parent_dict.set_item("title", &group.parent_title)?;
+            if let Some(ref id) = group.parent_id {
+                parent_dict.set_item("id", value_to_py(py, id)?)?;
             }
 
             let nodes: Vec<Py<PyAny>> = group
@@ -274,7 +274,30 @@ pub fn level_nodes_to_pydict(
     Ok(result.into())
 }
 
-pub fn level_values_to_pydict(py: Python, level_values: &[LevelValues]) -> PyResult<Py<PyAny>> {
+pub fn level_values_to_pydict(
+    py: Python,
+    level_values: &[LevelValues],
+    flatten_single_parent: Option<bool>,
+) -> PyResult<Py<PyAny>> {
+    let should_flatten = flatten_single_parent.unwrap_or(true);
+
+    // If single parent and flatten requested, return flat list of tuples
+    if should_flatten && level_values.len() == 1 {
+        let group = &level_values[0];
+        let values: Vec<Py<PyAny>> = group
+            .values
+            .iter()
+            .map(|vec_values| {
+                let tuple_values: Vec<Py<PyAny>> = vec_values
+                    .iter()
+                    .map(|v| value_to_py(py, v))
+                    .collect::<PyResult<_>>()?;
+                Ok(PyTuple::new(py, &tuple_values)?.into())
+            })
+            .collect::<PyResult<_>>()?;
+        return Ok(PyList::new(py, values)?.into());
+    }
+
     let result = PyDict::new(py);
 
     for group in level_values {
@@ -299,7 +322,21 @@ pub fn level_values_to_pydict(py: Python, level_values: &[LevelValues]) -> PyRes
 pub fn level_single_values_to_pydict(
     py: Python,
     level_values: &[LevelValues],
+    flatten_single_parent: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
+    let should_flatten = flatten_single_parent.unwrap_or(true);
+
+    // If single parent and flatten requested, return flat list
+    if should_flatten && level_values.len() == 1 {
+        let group = &level_values[0];
+        let values: Vec<Py<PyAny>> = group
+            .values
+            .iter()
+            .map(|vec_values| value_to_py(py, &vec_values[0]))
+            .collect::<PyResult<_>>()?;
+        return Ok(PyList::new(py, values)?.into());
+    }
+
     let result = PyDict::new(py);
 
     for group in level_values {

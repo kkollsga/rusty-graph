@@ -123,11 +123,8 @@ fn centrality_results_to_py_dict(
 
     for result in results.into_iter().take(limit) {
         if let Some(node) = graph.get_node(result.node_idx) {
-            let title_str = match &node.title {
-                Value::String(s) => s.as_str(),
-                _ => "",
-            };
-            scores_dict.set_item(title_str, result.score)?;
+            let id_py = py_out::value_to_py(py, &node.id)?;
+            scores_dict.set_item(id_py, result.score)?;
         }
     }
 
@@ -1208,17 +1205,16 @@ impl KnowledgeGraph {
             }
         }
 
-        // Build the dict with ordered columns
+        // Build the dict with ordered columns: type, title, id, ...properties
         let dict = PyDict::new(py);
         let columns = PyList::empty(py);
-
-        dict.set_item("title", title_col)?;
-        columns.append("title")?;
 
         if let Some(tc) = type_col {
             dict.set_item("type", tc)?;
             columns.append("type")?;
         }
+        dict.set_item("title", title_col)?;
+        columns.append("title")?;
         if let Some(ic) = id_col {
             dict.set_item("id", ic)?;
             columns.append("id")?;
@@ -1284,14 +1280,17 @@ impl KnowledgeGraph {
     ///     ```
     fn get_ids(&self) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {
+            let key_type = pyo3::intern!(py, "type");
+            let key_title = pyo3::intern!(py, "title");
+            let key_id = pyo3::intern!(py, "id");
             let result = PyList::empty(py);
 
             for node_idx in self.selection.current_node_indices() {
                 if let Some(node) = self.inner.get_node(node_idx) {
                     let dict = PyDict::new(py);
-                    dict.set_item("id", py_out::value_to_py(py, &node.id)?)?;
-                    dict.set_item("title", py_out::value_to_py(py, &node.title)?)?;
-                    dict.set_item("type", &node.node_type)?;
+                    dict.set_item(key_type, &node.node_type)?;
+                    dict.set_item(key_title, py_out::value_to_py(py, &node.title)?)?;
+                    dict.set_item(key_id, py_out::value_to_py(py, &node.id)?)?;
                     result.append(dict)?;
                 }
             }
@@ -1547,11 +1546,12 @@ impl KnowledgeGraph {
         })
     }
 
-    #[pyo3(signature = (max_nodes=None, indices=None))]
+    #[pyo3(signature = (max_nodes=None, indices=None, flatten_single_parent=None))]
     fn get_titles(
         &self,
         max_nodes: Option<usize>,
         indices: Option<Vec<usize>>,
+        flatten_single_parent: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let values = data_retrieval::get_property_values(
             &self.inner,
@@ -1561,7 +1561,9 @@ impl KnowledgeGraph {
             indices.as_deref(),
             max_nodes,
         );
-        Python::attach(|py| py_out::level_single_values_to_pydict(py, &values))
+        Python::attach(|py| {
+            py_out::level_single_values_to_pydict(py, &values, flatten_single_parent)
+        })
     }
 
     /// Returns a string representation of the query execution plan.
@@ -1590,12 +1592,13 @@ impl KnowledgeGraph {
         Ok(steps.join(" -> "))
     }
 
-    #[pyo3(signature = (properties, max_nodes=None, indices=None))]
+    #[pyo3(signature = (properties, max_nodes=None, indices=None, flatten_single_parent=None))]
     fn get_properties(
         &self,
         properties: Vec<String>,
         max_nodes: Option<usize>,
         indices: Option<Vec<usize>>,
+        flatten_single_parent: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let property_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
         let values = data_retrieval::get_property_values(
@@ -1606,7 +1609,7 @@ impl KnowledgeGraph {
             indices.as_deref(),
             max_nodes,
         );
-        Python::attach(|py| py_out::level_values_to_pydict(py, &values))
+        Python::attach(|py| py_out::level_values_to_pydict(py, &values, flatten_single_parent))
     }
 
     #[allow(clippy::too_many_arguments)]

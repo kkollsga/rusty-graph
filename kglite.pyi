@@ -504,11 +504,18 @@ class KnowledgeGraph:
         self,
         max_nodes: Optional[int] = None,
         indices: Optional[list[int]] = None,
-    ) -> dict[str, list[str]]:
-        """Get titles of selected nodes grouped by parent.
+        flatten_single_parent: Optional[bool] = None,
+    ) -> Union[list[str], dict[str, list[str]]]:
+        """Get titles of selected nodes.
+
+        Without traversal (single parent group), returns a flat list of titles.
+        After traversal (multiple parent groups), returns ``{parent_title: [titles]}``.
+
+        Args:
+            flatten_single_parent: Flatten single-group results to a list. Default ``True``.
 
         Returns:
-            ``{parent_key: [titles]}``.
+            ``list[str]`` when flattened, ``dict[str, list[str]]`` when grouped.
         """
         ...
 
@@ -526,16 +533,21 @@ class KnowledgeGraph:
         properties: list[str],
         max_nodes: Optional[int] = None,
         indices: Optional[list[int]] = None,
-    ) -> dict[str, list[tuple[Any, ...]]]:
+        flatten_single_parent: Optional[bool] = None,
+    ) -> Union[list[tuple[Any, ...]], dict[str, list[tuple[Any, ...]]]]:
         """Get specific properties for selected nodes.
+
+        Without traversal (single parent group), returns a flat list of tuples.
+        After traversal (multiple parent groups), returns ``{parent_title: [tuples]}``.
 
         Args:
             properties: List of property names to retrieve.
             max_nodes: Maximum number of nodes.
             indices: Specific node indices.
+            flatten_single_parent: Flatten single-group results to a list. Default ``True``.
 
         Returns:
-            ``{parent_key: [(val1, val2, ...), ...]}``.
+            ``list[tuple]`` when flattened, ``dict[str, list[tuple]]`` when grouped.
         """
         ...
 
@@ -1001,7 +1013,7 @@ class KnowledgeGraph:
             normalized: Normalise scores to ``[0, 1]``. Default ``True``.
             sample_size: Sample source nodes for faster computation on large graphs.
             top_k: Return only the top *K* nodes.
-            as_dict: Return ``{title: score}`` dict instead of list of dicts.
+            as_dict: Return ``{id: score}`` dict instead of list of dicts.
             timeout_ms: Abort after this many milliseconds, returning partial results.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
@@ -1028,7 +1040,7 @@ class KnowledgeGraph:
             max_iterations: Maximum iterations. Default ``100``.
             tolerance: Convergence threshold. Default ``1e-6``.
             top_k: Return only the top *K* nodes.
-            as_dict: Return ``{title: score}`` dict instead of list of dicts.
+            as_dict: Return ``{id: score}`` dict instead of list of dicts.
             timeout_ms: Abort after this many milliseconds, returning partial results.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
@@ -1051,7 +1063,7 @@ class KnowledgeGraph:
         Args:
             normalized: Normalise by ``(n-1)``. Default ``True``.
             top_k: Return only the top *K* nodes.
-            as_dict: Return ``{title: score}`` dict instead of list of dicts.
+            as_dict: Return ``{id: score}`` dict instead of list of dicts.
             timeout_ms: Abort after this many milliseconds, returning partial results.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
@@ -1074,7 +1086,7 @@ class KnowledgeGraph:
         Args:
             normalized: Adjust for disconnected components. Default ``True``.
             top_k: Return only the top *K* nodes.
-            as_dict: Return ``{title: score}`` dict instead of list of dicts.
+            as_dict: Return ``{id: score}`` dict instead of list of dicts.
             timeout_ms: Abort after this many milliseconds, returning partial results.
             to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 

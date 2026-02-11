@@ -87,11 +87,11 @@ class TestToDF:
         assert person_rows['industry'].isna().all()
 
     def test_column_order(self, small_graph):
-        """title, type, id should always come first."""
+        """type, title, id should always come first."""
         df = small_graph.type_filter('Person').to_df()
         cols = list(df.columns)
-        assert cols[0] == 'title'
-        assert cols[1] == 'type'
+        assert cols[0] == 'type'
+        assert cols[1] == 'title'
         assert cols[2] == 'id'
 
     def test_values_correct(self, small_graph):

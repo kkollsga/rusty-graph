@@ -4,10 +4,9 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/kglite)](https://pypi.org/project/kglite/)
 [![License: MIT](https://img.shields.io/pypi/l/kglite)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
 
-An embedded knowledge graph engine for Python.
+An embedded knowledge graph engine for Python. Import and go — no server, no setup.
 
-**Use it for:** local analytics, ETL pipelines, notebooks, embedding in apps, fast prototyping.
-**Not for:** multi-user server deployments, cross-call transactions, HA/replication.
+> **For AI agents:** see [`kglite.pyi`](kglite.pyi) for full type stubs with signatures and docstrings.
 
 | | |
 |---|---|
@@ -22,20 +21,6 @@ An embedded knowledge graph engine for Python.
 ```bash
 pip install kglite
 ```
-
-## Feature Matrix
-
-| Feature | Status |
-|---------|--------|
-| Embedded / in-process | Yes |
-| Cypher queries (MATCH, CREATE, SET, DELETE, MERGE, ...) | Yes |
-| DataFrame output (`to_df=True`) | Yes |
-| Graph algorithms (shortest path, centrality, communities) | Yes |
-| Persistence (binary snapshots) | Yes |
-| Multi-label nodes | No |
-| Transactions across calls | No |
-| Concurrency / thread safety | No |
-| Server mode | No |
 
 ---
 
@@ -66,13 +51,6 @@ for row in result:
 
 # Or get a pandas DataFrame
 df = graph.cypher("MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age", to_df=True)
-
-# Mutations return stats
-result = graph.cypher("CREATE (:Person {name: 'Dave', age: 22})")
-print(result['stats'])  # {'nodes_created': 1, 'relationships_created': 0, ...}
-
-# Check graph size
-print(graph.graph_info())  # {'node_count': 4, 'edge_count': 1, ...}
 
 # Persist to disk and reload
 graph.save("my_graph.kgl")
@@ -105,119 +83,133 @@ graph.cypher("MATCH (u:User) WHERE u.age > 30 RETURN u.name, u.age")
 
 ## Core Concepts
 
-**Nodes** have four built-in fields: `id` (unique within type), `title` (display name), `type` (label), plus arbitrary properties. Each node has exactly one type — `labels(n)` returns a string, not a list.
+**Nodes** have three built-in fields — `type` (label), `title` (display name), `id` (unique within type) — plus arbitrary properties. Each node has exactly one type.
 
-**Relationships** connect two nodes with a type (e.g., `:KNOWS`) and optional properties. The Cypher API calls them "relationships"; the fluent API calls them "connections" — they're the same thing.
+**Relationships** connect two nodes with a type (e.g., `:KNOWS`) and optional properties. The Cypher API calls them "relationships"; the fluent API calls them "connections" — same thing.
 
-**Return shape.** Read queries return `list[dict]` — each dict is one row keyed by column alias. Mutation queries (CREATE, SET, DELETE, REMOVE, MERGE) return `{'stats': {...}}` with counts like `nodes_created`, `properties_set`, etc. Mutations with a RETURN clause return `{'rows': [...], 'stats': {...}}`. Pass `to_df=True` to get a pandas DataFrame instead (read queries only).
+**Selections** (fluent API) are lightweight views — a set of node indices that flow through chained operations like `type_filter().filter().traverse()`. They don't copy data.
 
-**Atomicity.** Each `cypher()` call is atomic at the statement level — if any clause fails, the graph remains unchanged (copy-on-write internally). There are no multi-statement transactions: two separate `cypher()` calls are independent. Durability only via explicit `save()`.
-
-**Selections** (fluent API only) are lightweight views — a set of node indices that flow through chained operations like `type_filter().filter().traverse()`. They don't copy data. Use `explain()` to see the pipeline.
-
-**Tombstones.** `DELETE` leaves empty slots in the internal graph storage. After heavy deletion, check `graph.graph_info()['fragmentation_ratio']` and call `graph.vacuum()` if it exceeds 0.3 (see [Graph Maintenance](#graph-maintenance)).
+**Atomicity.** Each `cypher()` call is atomic — if any clause fails, the graph remains unchanged. There are no multi-statement transactions. Durability only via explicit `save()`.
 
 ---
 
-## Table of Contents
+## Return Types
 
-- [Cypher Queries](#cypher-queries) — MATCH, CREATE, SET, DELETE, MERGE, aggregation, shortestPath
-- [Common Recipes](#common-recipes) — Quick copy/paste snippets
-- [Advanced API: Data Management](#advanced-api-data-management) | [Querying](#advanced-api-querying) | [Pattern Matching](#pattern-matching)
-- [Graph Algorithms](#graph-algorithms) | [Spatial Operations](#spatial-operations) | [Analytics](#analytics)
-- [Schema and Indexes](#schema-and-indexes) | [Import and Export](#import-and-export) | [Performance](#performance) | [Graph Maintenance](#graph-maintenance)
+All node-related methods use a consistent key order: **`type`, `title`, `id`**, then other properties.
+
+### Cypher
+
+| Query type | Returns |
+|-----------|---------|
+| Read (`MATCH...RETURN`) | `list[dict]` — one dict per row, keyed by column alias |
+| Read with `to_df=True` | `pandas.DataFrame` |
+| Mutation (`CREATE`, `SET`, `DELETE`, `MERGE`) | `{'stats': {'nodes_created': int, ...}}` |
+| Mutation with `RETURN` | `{'rows': [...], 'stats': {...}}` |
+| `EXPLAIN` prefix | `str` (query plan, not executed) |
+
+### Node dicts
+
+Every method that returns node data uses the same dict shape:
+
+```python
+{'type': 'Person', 'title': 'Alice', 'id': 1, 'age': 28, 'city': 'Oslo'}
+#  ^^^^             ^^^^^             ^^^       ^^^ other properties
+```
+
+### Retrieval methods (cheapest to most expensive)
+
+| Method | Returns | Notes |
+|--------|---------|-------|
+| `node_count()` | `int` | No materialization |
+| `indices()` | `list[int]` | Raw graph indices |
+| `id_values()` | `list[Any]` | Flat list of IDs |
+| `get_ids()` | `list[{type, title, id}]` | Identification only |
+| `get_titles()` | `list[str]` | Flat list (see below) |
+| `get_properties(['a','b'])` | `list[tuple]` | Flat list (see below) |
+| `get_nodes()` | `list[dict]` | Full node dicts |
+| `to_df()` | `DataFrame` | Columns: `type, title, id, ...props` |
+| `get_node_by_id(type, id)` | `dict \| None` | O(1) hash lookup |
+
+### Flat vs. grouped results
+
+`get_titles()`, `get_properties()`, and `get_nodes()` automatically flatten when there is only one parent group (the common case). After a traversal with multiple parent groups, they return grouped dicts instead:
+
+```python
+# No traversal (single group) → flat list
+graph.type_filter('Person').get_titles()
+# ['Alice', 'Bob', 'Charlie']
+
+# After traversal (multiple groups) → grouped dict
+graph.type_filter('Person').traverse('KNOWS').get_titles()
+# {'Alice': ['Bob'], 'Bob': ['Charlie']}
+
+# Override with flatten_single_parent=False to always get grouped
+graph.type_filter('Person').get_titles(flatten_single_parent=False)
+# {'Root': ['Alice', 'Bob', 'Charlie']}
+```
+
+### Centrality methods
+
+All centrality methods (`pagerank`, `betweenness_centrality`, `closeness_centrality`, `degree_centrality`) return:
+
+| Mode | Returns |
+|------|---------|
+| Default | `list[{type, title, id, score}]` sorted by score desc |
+| `as_dict=True` | `{id: score}` — keyed by node ID (unique per type) |
+| `to_df=True` | `DataFrame` with columns `type, title, id, score` |
 
 ---
 
-## When to Use What
+## API Quick Reference
 
-| Interface | Best For | Key Benefits |
-|-----------|----------|--------------|
-| **Cypher** (recommended) | Ad-hoc queries, exploration, analytics, mutations | Standard syntax, declarative, familiar to Neo4j users |
-| **Fluent API** (advanced) | Bulk loading from DataFrames, multi-step pipelines | Chainable operations, `explain()`, computed properties |
-| **Pattern matching** (specialized) | Quick structural checks without full Cypher overhead | Lightweight, minimal parsing |
-
-**Start with Cypher** for most tasks. Use the fluent API when bulk-loading from pandas DataFrames or building pipelines that store intermediate computed properties. Use pattern matching for simple structural queries where you don't need WHERE/RETURN clauses.
-
----
-
-## Common Recipes
-
-### Upsert with MERGE
+### Graph lifecycle
 
 ```python
-graph.cypher("""
-    MERGE (p:Person {email: 'alice@example.com'})
-    ON CREATE SET p.created = '2024-01-01', p.name = 'Alice'
-    ON MATCH SET p.last_seen = '2024-01-15'
-""")
+graph = kglite.KnowledgeGraph()     # create
+graph.save("file.kgl")              # persist
+graph = kglite.load("file.kgl")     # reload
+graph.graph_info()                   # → dict with node_count, edge_count, fragmentation_ratio, ...
+graph.get_schema()                   # → str summary of types and connections
+graph.node_types                     # → ['Person', 'Product', ...]
 ```
 
-### Top-K Nodes by Centrality
+### Cypher (recommended for most tasks)
 
 ```python
-top_nodes = graph.pagerank(top_k=10)
-for node in top_nodes:
-    print(f"{node['title']}: {node['score']:.3f}")
+graph.cypher("MATCH (n:Person) RETURN n.name")                          # → list[dict]
+graph.cypher("MATCH (n:Person) RETURN n.name", to_df=True)              # → DataFrame
+graph.cypher("MATCH (n:Person) RETURN n.name", params={'x': 1})         # parameterized
+graph.cypher("CREATE (:Person {name: 'Alice'})")                        # → {'stats': {...}}
 ```
 
-### 2-Hop Neighborhood
+### Data loading (fluent API)
 
 ```python
-graph.cypher("""
-    MATCH (me:Person {name: 'Alice'})-[:KNOWS*2]-(fof:Person)
-    WHERE fof <> me
-    RETURN DISTINCT fof.name
-""")
+graph.add_nodes(data=df, node_type='T', unique_id_field='id')           # → report dict
+graph.add_connections(data=df, connection_type='REL',
+    source_type='A', source_id_field='src',
+    target_type='B', target_id_field='tgt')                              # → report dict
 ```
 
-### Export Subgraph
+### Selection chain (fluent API)
 
 ```python
-subgraph = (
-    graph.type_filter('Person')
-    .filter({'name': 'Alice'})
-    .expand(hops=2)
-    .to_subgraph()
-)
-subgraph.export('alice_network.graphml', format='graphml')
+graph.type_filter('Person')                        # select by type → KnowledgeGraph
+    .filter({'age': {'>': 25}})                    # filter → KnowledgeGraph
+    .sort('age', ascending=False)                  # sort → KnowledgeGraph
+    .traverse('KNOWS', direction='outgoing')       # traverse → KnowledgeGraph
+    .get_nodes()                                   # materialize → list[dict]
 ```
 
-### Create Index for Speed
+### Algorithms
 
 ```python
-graph.create_index('Product', 'category')
-
-# ~3x faster on 100k+ node graphs (equality only; depends on selectivity)
-result = graph.cypher("MATCH (p:Product) WHERE p.category = 'Electronics' RETURN p.name")
-```
-
-### Parameterized Queries
-
-```python
-graph.cypher(
-    "MATCH (p:Person) WHERE p.city = $city AND p.age > $min_age RETURN p.name",
-    params={'city': 'Oslo', 'min_age': 25}
-)
-```
-
-### Delete Subgraph
-
-```python
-graph.cypher("""
-    MATCH (u:User) WHERE u.status = 'inactive'
-    DETACH DELETE u
-""")
-```
-
-### Aggregation with Relationship Properties
-
-```python
-graph.cypher("""
-    MATCH (p:Person)-[r:RATED]->(m:Movie)
-    RETURN p.name, avg(r.score) AS avg_rating, count(m) AS movies_rated
-    ORDER BY avg_rating DESC
-""")
+graph.shortest_path(source_type, source_id, target_type, target_id)  # → {path, connections, length} | None
+graph.all_paths(source_type, source_id, target_type, target_id)      # → list[{path, connections, length}]
+graph.pagerank(top_k=10)                                             # → list[{type, title, id, score}]
+graph.betweenness_centrality(top_k=10)                               # → list[{type, title, id, score}]
+graph.louvain_communities()                                          # → {communities, modularity, num_communities}
+graph.connected_components()                                         # → list[list[node_dict]]
 ```
 
 ---
@@ -404,7 +396,6 @@ graph.cypher("""
     MATCH (p:Person)-[:WORKS_AT]->(c:Company)
     RETURN p {.name, .age, company: c.name} AS info
 """)
-# [{'info': {'name': 'Alice', 'age': 30, 'company': 'Acme'}}, ...]
 
 # System properties (id, type) work too
 graph.cypher("MATCH (p:Person) RETURN p {.name, .type, .id} AS info LIMIT 1")
@@ -462,8 +453,7 @@ graph.cypher("MATCH (a:Person)-[:KNOWS*2]->(b:Person) RETURN a.name, b.name")
 
 ### WHERE EXISTS
 
-Check for subpattern existence. The outer variable (`p`) is bound from MATCH.
-Both brace `{ }` and parenthesis `(( ))` syntax are supported:
+Check for subpattern existence. Both brace `{ }` and parenthesis `(( ))` syntax are supported:
 
 ```python
 # Brace syntax
@@ -476,13 +466,6 @@ graph.cypher("MATCH (p:Person) WHERE EXISTS((p)-[:KNOWS]->(:Person)) RETURN p.na
 graph.cypher("""
     MATCH (p:Person)
     WHERE NOT EXISTS { (p)-[:PURCHASED]->(:Product) }
-    RETURN p.name
-""")
-
-# With property filter in inner pattern
-graph.cypher("""
-    MATCH (p:Person)
-    WHERE EXISTS { (p)-[:KNOWS]->(:Person {city: 'Oslo'}) }
     RETURN p.name
 """)
 ```
@@ -540,15 +523,6 @@ graph.cypher("""
 """)
 ```
 
-**Error example:** `DELETE` on a node with relationships returns:
-`"Cannot delete node with existing relationships. Use DETACH DELETE to remove the node and all its relationships."`
-
-### Mutation Semantics
-
-**Atomicity:** Each `cypher()` call is atomic at the statement level — if any clause fails, the graph remains unchanged (copy-on-write internally). There are no multi-statement transactions; two separate `cypher()` calls are independent. Durability only via explicit `save()`.
-
-**Index maintenance:** Property and composite indexes are updated automatically by all mutation operations (CREATE, SET, DELETE, REMOVE, MERGE).
-
 ### DataFrame Output
 
 ```python
@@ -580,8 +554,6 @@ print(plan)
 # Optimizations: optional_match_fusion=1
 ```
 
-Returns a string (not data). Mutation queries with `EXPLAIN` are not executed.
-
 ### Supported Cypher Subset
 
 | Category | Supported |
@@ -598,12 +570,9 @@ Returns a string (not data). Mutation queries with `EXPLAIN` are not executed.
 
 ---
 
-## Advanced API: Data Management
+## Fluent API: Data Loading
 
-<details>
-<summary>Expand section</summary>
-
-> For most use cases, use [Cypher queries](#cypher-queries). The fluent API below is for bulk operations from DataFrames or complex data pipelines.
+> For most use cases, use [Cypher queries](#cypher-queries). The fluent API is for bulk operations from DataFrames or complex data pipelines.
 
 ### Adding Nodes
 
@@ -615,15 +584,16 @@ products_df = pd.DataFrame({
     'stock': [45, 120, 30]
 })
 
-graph.add_nodes(
+report = graph.add_nodes(
     data=products_df,
     node_type='Product',
     unique_id_field='product_id',
     node_title_field='title',
-    columns=['product_id', 'title', 'price', 'stock'],
-    column_types={'launch_date': 'datetime'},  # explicit type hints (see Working with Dates)
+    columns=['product_id', 'title', 'price', 'stock'],       # whitelist columns (None = all)
+    column_types={'launch_date': 'datetime'},                  # explicit type hints
     conflict_handling='update'  # 'update' | 'replace' | 'skip' | 'preserve'
 )
+print(f"Created {report['nodes_created']} nodes in {report['processing_time_ms']}ms")
 ```
 
 ### Property Mapping
@@ -640,39 +610,6 @@ When adding nodes, `unique_id_field` and `node_title_field` are **renamed** to `
 # After adding with unique_id_field='user_id', node_title_field='name':
 graph.type_filter('User').filter({'user_id': 1001})  # WRONG — field was renamed
 graph.type_filter('User').filter({'id': 1001})        # CORRECT
-```
-
-Use `explain()` to verify node counts at each step:
-
-```python
-result = graph.type_filter('User').filter({'id': 1001})
-print(result.explain())
-# TYPE_FILTER User (1000 nodes) -> FILTER (1 nodes)
-```
-
-### Retrieving Nodes
-
-```python
-products = graph.type_filter('Product')
-products.get_nodes()                       # all properties
-products.get_properties(['price', 'stock'])  # specific properties
-products.get_titles()                       # just titles
-```
-
-### Working with Dates
-
-```python
-graph.add_nodes(
-    data=estimates_df,
-    node_type='Estimate',
-    unique_id_field='estimate_id',
-    node_title_field='name',
-    column_types={'valid_from': 'datetime', 'valid_to': 'datetime'}
-)
-
-graph.type_filter('Estimate').filter({'valid_from': {'>=': '2020-06-01'}})
-graph.type_filter('Estimate').valid_at('2020-06-15')
-graph.type_filter('Estimate').valid_during('2020-01-01', '2020-06-30')
 ```
 
 ### Creating Connections
@@ -696,7 +633,23 @@ graph.add_connections(
 )
 ```
 
-> **Note:** `source_type` and `target_type` each refer to a single node type. To connect nodes of the same type, set both to the same value (e.g., `source_type='Person', target_type='Person'`).
+> `source_type` and `target_type` each refer to a single node type. To connect nodes of the same type, set both to the same value (e.g., `source_type='Person', target_type='Person'`).
+
+### Working with Dates
+
+```python
+graph.add_nodes(
+    data=estimates_df,
+    node_type='Estimate',
+    unique_id_field='estimate_id',
+    node_title_field='name',
+    column_types={'valid_from': 'datetime', 'valid_to': 'datetime'}
+)
+
+graph.type_filter('Estimate').filter({'valid_from': {'>=': '2020-06-01'}})
+graph.type_filter('Estimate').valid_at('2020-06-15')
+graph.type_filter('Estimate').valid_during('2020-01-01', '2020-06-30')
+```
 
 ### Batch Property Updates
 
@@ -710,16 +663,25 @@ updated_graph = result['graph']
 print(f"Updated {result['nodes_updated']} nodes")
 ```
 
-</details>
+### Operation Reports
+
+Operations that modify the graph return detailed reports:
+
+```python
+report = graph.add_nodes(data=df, node_type='Product', unique_id_field='product_id')
+# report keys: operation, timestamp, nodes_created, nodes_updated, nodes_skipped,
+#              processing_time_ms, has_errors, errors
+
+graph.get_last_report()       # most recent operation report
+graph.get_operation_index()   # sequential index of last operation
+graph.get_report_history()    # all reports
+```
 
 ---
 
-## Advanced API: Querying
+## Fluent API: Querying
 
-<details>
-<summary>Expand section</summary>
-
-> For most queries, prefer [Cypher](#cypher-queries). The fluent API below is for building reusable query chains or when you need `explain()` and selection-based workflows.
+> For most queries, prefer [Cypher](#cypher-queries). The fluent API is for building reusable query chains or when you need `explain()` and selection-based workflows.
 
 ### Filtering
 
@@ -771,14 +733,38 @@ n3.difference(m3)               # nodes in n3 but not m3
 n3.symmetric_difference(m3)     # nodes in exactly one (XOR)
 ```
 
-</details>
+### Retrieving Results
 
----
+```python
+people = graph.type_filter('Person')
 
-## Pattern Matching
+# Lightweight (no property materialization)
+people.node_count()                     # → 3
+people.indices()                        # → [0, 1, 2]
+people.id_values()                      # → [1, 2, 3]
 
-<details>
-<summary>Expand section</summary>
+# Medium (partial materialization)
+people.get_ids()                        # → [{'type': 'Person', 'title': 'Alice', 'id': 1}, ...]
+people.get_titles()                     # → ['Alice', 'Bob', 'Charlie']
+people.get_properties(['age', 'city'])  # → [(28, 'Oslo'), (35, 'Bergen'), (42, 'Oslo')]
+
+# Full materialization
+people.get_nodes()                      # → [{'type': 'Person', 'title': 'Alice', 'id': 1, 'age': 28, ...}, ...]
+people.to_df()                          # → DataFrame with columns type, title, id, age, city, ...
+
+# Single node lookup (O(1))
+graph.get_node_by_id('Person', 1)       # → {'type': 'Person', 'title': 'Alice', ...} or None
+```
+
+### Debugging Selections
+
+```python
+result = graph.type_filter('User').filter({'id': 1001})
+print(result.explain())
+# TYPE_FILTER User (1000 nodes) -> FILTER (1 nodes)
+```
+
+### Pattern Matching
 
 For simpler pattern-based queries without full Cypher clause support:
 
@@ -797,14 +783,9 @@ graph.match_pattern('(u:User)-[:PURCHASED]->(p:Product {category: "Electronics"}
 graph.match_pattern('(a:Person)-[:KNOWS]->(b:Person)', max_matches=100)
 ```
 
-</details>
-
 ---
 
 ## Graph Algorithms
-
-<details>
-<summary>Expand section</summary>
 
 ### Shortest Path
 
@@ -816,6 +797,16 @@ if result:
     print(f"Connections: {result['connections']}")
     print(f"Path length: {result['length']}")
 ```
+
+Lightweight variants when you don't need full path data:
+
+```python
+graph.shortest_path_length(...)    # → int | None (hop count only)
+graph.shortest_path_ids(...)       # → list[id] | None (node IDs along path)
+graph.shortest_path_indices(...)   # → list[int] | None (raw graph indices, fastest)
+```
+
+All path methods support `connection_types`, `via_types`, and `timeout_ms` for filtering and safety.
 
 ### All Paths
 
@@ -832,7 +823,7 @@ paths = graph.all_paths(
 
 ```python
 components = graph.connected_components()
-# Returns list of lists: [[node_indices...], [node_indices...], ...]
+# Returns list of lists: [[node_dicts...], [node_dicts...], ...]
 print(f"Found {len(components)} connected components")
 print(f"Largest component: {len(components[0])} nodes")
 
@@ -841,7 +832,7 @@ graph.are_connected(source_type='Person', source_id=1, target_type='Person', tar
 
 ### Centrality Algorithms
 
-All centrality methods return a list of dicts with `type`, `title`, `id`, and `score` keys, sorted by score descending.
+All centrality methods return `list[{type, title, id, score}]`, sorted by score descending.
 
 ```python
 graph.betweenness_centrality(top_k=10)
@@ -849,16 +840,18 @@ graph.betweenness_centrality(normalized=True, sample_size=500)
 graph.pagerank(top_k=10, damping_factor=0.85)
 graph.degree_centrality(top_k=10)
 graph.closeness_centrality(top_k=10)
+
+# Alternative output formats
+graph.pagerank(as_dict=True)      # → {1: 0.45, 2: 0.32, ...} (keyed by id)
+graph.pagerank(to_df=True)        # → DataFrame with type, title, id, score columns
 ```
 
 ### Community Detection
 
-Identify clusters of densely connected nodes.
-
 ```python
 # Louvain modularity optimization (recommended)
 result = graph.louvain_communities()
-# {'communities': {0: [{title, type, id}, ...], 1: [...]},
+# {'communities': {0: [{type, title, id}, ...], 1: [...]},
 #  'modularity': 0.45, 'num_communities': 2}
 
 for comm_id, members in result['communities'].items():
@@ -879,14 +872,9 @@ degrees = graph.type_filter('Person').get_degrees()
 # Returns: {'Alice': 5, 'Bob': 3, ...}
 ```
 
-</details>
-
 ---
 
 ## Spatial Operations
-
-<details>
-<summary>Expand section</summary>
 
 ### Bounding Box
 
@@ -921,14 +909,9 @@ graph.type_filter('Field').intersects_geometry(
 graph.type_filter('Block').contains_point(lat=60.5, lon=3.2, geometry_field='wkt_geometry')
 ```
 
-</details>
-
 ---
 
 ## Analytics
-
-<details>
-<summary>Expand section</summary>
 
 ### Statistics
 
@@ -960,14 +943,9 @@ graph.type_filter('Discovery').traverse('EXTENDS_INTO').calculate(
 
 Supported: `sum`, `avg`/`mean`, `min`, `max`, `count`, `std`.
 
-</details>
-
 ---
 
 ## Schema and Indexes
-
-<details>
-<summary>Expand section</summary>
 
 ### Schema Definition
 
@@ -1003,14 +981,9 @@ graph.drop_index('Prospect', 'prospect_geoprovince')
 
 Indexes are maintained automatically by all mutation operations.
 
-</details>
-
 ---
 
 ## Import and Export
-
-<details>
-<summary>Expand section</summary>
 
 ### Saving and Loading
 
@@ -1019,7 +992,7 @@ graph.save("my_graph.kgl")
 loaded_graph = kglite.load("my_graph.kgl")
 ```
 
-> **Portability:** Save files use bincode serialization and are **not guaranteed portable** across OS, CPU architecture, or library versions. Always re-export via a portable format (GraphML, CSV) when sharing across machines. Each file includes a format version and the library version that wrote it — check with `graph_info()['format_version']` and `graph_info()['library_version']` after loading. If the internal data structures change between releases, loading will fail with a clear version mismatch error rather than silent corruption.
+> **Portability:** Save files use bincode serialization and are **not guaranteed portable** across OS, CPU architecture, or library versions. Always re-export via a portable format (GraphML, CSV) when sharing across machines.
 
 ### Export Formats
 
@@ -1044,69 +1017,35 @@ subgraph = (
 subgraph.export('acme_network.graphml', format='graphml')
 ```
 
-</details>
-
 ---
 
 ## Performance
-
-<details>
-<summary>Expand section</summary>
 
 ### Tips
 
 1. **Batch operations** — add nodes/connections in batches, not individually
 2. **Specify columns** — only include columns you need to reduce memory
 3. **Filter by type first** — `type_filter()` before `filter()` for narrower scans
-4. **Create indexes** — on frequently filtered equality conditions (~3x on 100k+ nodes; depends on selectivity)
+4. **Create indexes** — on frequently filtered equality conditions (~3x on 100k+ nodes)
 5. **Use lightweight methods** — `node_count()`, `indices()`, `get_node_by_id()` skip property materialization
 6. **Cypher LIMIT** — use `LIMIT` to avoid scanning entire result sets
-
-### Lightweight Methods
-
-| Method | Returns | Speed |
-|--------|---------|-------|
-| `node_count()` | Integer count (total graph if no filter, selection count after filter) | Fastest |
-| `indices()` | List of node indices | Fast |
-| `id_values()` | List of ID values | Fast |
-| `get_ids()` | List of `{id, title, type}` dicts | Medium |
-| `get_nodes()` | List of full node dicts | Slowest |
-
-Lightweight path methods: `shortest_path_length()`, `shortest_path_indices()`, `shortest_path_ids()`.
-
-### Performance Model
-
-kglite is optimized for **knowledge graph workloads** — complex multi-step queries on heterogeneous, property-rich graphs. Operations have overhead compared to raw graph algorithms because they build selections, materialize Python dicts, and support the full query API.
-
-**Speed claims caveat:** The "~3x" index speedup was measured on equality-filtered queries over 100k+ node graphs. Actual improvement depends on graph size, selectivity, and property cardinality. On small graphs (<1k nodes) the overhead of index lookup may not be noticeable. Always benchmark on your own data.
 
 ### Threading
 
 Designed for single-threaded use. The Rust code does not release the Python GIL during operations. If you share a graph instance across threads, guard access with your own lock.
 
-</details>
-
 ---
 
 ## Graph Maintenance
 
-<details>
-<summary>Expand section</summary>
-
-After heavy mutation workloads (DELETE, REMOVE), the internal graph storage accumulates tombstones. Use `graph_info()` to monitor storage health.
-
-### Diagnostics
+After heavy mutation workloads (DELETE, REMOVE), internal storage accumulates tombstones. Monitor with `graph_info()`.
 
 ```python
 info = graph.graph_info()
 # {'node_count': 950, 'node_capacity': 1000, 'node_tombstones': 50,
 #  'edge_count': 2800, 'fragmentation_ratio': 0.05,
 #  'type_count': 3, 'property_index_count': 2, 'composite_index_count': 0}
-```
 
-### Vacuum — Compact Storage
-
-```python
 if info['fragmentation_ratio'] > 0.3:
     result = graph.vacuum()
     print(f"Reclaimed {result['tombstones_removed']} slots, remapped {result['nodes_remapped']} nodes")
@@ -1114,49 +1053,76 @@ if info['fragmentation_ratio'] > 0.3:
 
 `vacuum()` rebuilds the graph with contiguous indices and rebuilds all indexes. **Resets the current selection** — call between query chains.
 
-### Reindex — Rebuild Indexes
-
-```python
-graph.reindex()
-```
-
-Recovery tool, not routine maintenance. Indexes are maintained automatically by all mutations. Use `reindex()` only if you suspect corruption (e.g., after a crash during `save()`).
-
-### Recommended Workflow
-
-```python
-info = graph.graph_info()
-if info['fragmentation_ratio'] > 0.3:
-    graph.vacuum()
-```
-
-</details>
+`reindex()` rebuilds indexes only. Recovery tool, not routine maintenance — indexes are maintained automatically by all mutations.
 
 ---
 
-## Operation Reports
+## Common Recipes
 
-<details>
-<summary>Expand section</summary>
-
-Operations that modify the graph return detailed reports:
+### Upsert with MERGE
 
 ```python
-report = graph.add_nodes(data=df, node_type='Product', unique_id_field='product_id')
-print(f"Created {report['nodes_created']} nodes in {report['processing_time_ms']}ms")
-
-if report['has_errors']:
-    print(f"Errors: {report['errors']}")
+graph.cypher("""
+    MERGE (p:Person {email: 'alice@example.com'})
+    ON CREATE SET p.created = '2024-01-01', p.name = 'Alice'
+    ON MATCH SET p.last_seen = '2024-01-15'
+""")
 ```
 
-**Node report fields:** `operation`, `timestamp`, `nodes_created`, `nodes_updated`, `nodes_skipped`, `processing_time_ms`, `has_errors`, `errors`.
-
-**Connection report fields:** `connections_created`, `connections_skipped`, `property_fields_tracked`.
+### Top-K Nodes by Centrality
 
 ```python
-graph.get_last_report()
-graph.get_operation_index()
-graph.get_report_history()
+top_nodes = graph.pagerank(top_k=10)
+for node in top_nodes:
+    print(f"{node['title']}: {node['score']:.3f}")
 ```
 
-</details>
+### 2-Hop Neighborhood
+
+```python
+graph.cypher("""
+    MATCH (me:Person {name: 'Alice'})-[:KNOWS*2]-(fof:Person)
+    WHERE fof <> me
+    RETURN DISTINCT fof.name
+""")
+```
+
+### Export Subgraph
+
+```python
+subgraph = (
+    graph.type_filter('Person')
+    .filter({'name': 'Alice'})
+    .expand(hops=2)
+    .to_subgraph()
+)
+subgraph.export('alice_network.graphml', format='graphml')
+```
+
+### Parameterized Queries
+
+```python
+graph.cypher(
+    "MATCH (p:Person) WHERE p.city = $city AND p.age > $min_age RETURN p.name",
+    params={'city': 'Oslo', 'min_age': 25}
+)
+```
+
+### Delete Subgraph
+
+```python
+graph.cypher("""
+    MATCH (u:User) WHERE u.status = 'inactive'
+    DETACH DELETE u
+""")
+```
+
+### Aggregation with Relationship Properties
+
+```python
+graph.cypher("""
+    MATCH (p:Person)-[r:RATED]->(m:Movie)
+    RETURN p.name, avg(r.score) AS avg_rating, count(m) AS movies_rated
+    ORDER BY avg_rating DESC
+""")
+```

@@ -108,13 +108,10 @@ class TestRetrieveNodes:
         assert count == 3
 
     def test_get_titles(self, small_graph):
-        # get_titles returns {parent_key: [titles]}
+        # get_titles returns flat list when no traversal (single parent)
         titles = small_graph.type_filter('Person').get_titles()
-        # Root is the parent key for top-level selections
-        all_titles = []
-        for title_list in titles.values():
-            all_titles.extend(title_list)
-        assert set(all_titles) == {'Alice', 'Bob', 'Charlie'}
+        assert isinstance(titles, list)
+        assert set(titles) == {'Alice', 'Bob', 'Charlie'}
 
     def test_get_ids(self, small_graph):
         ids = small_graph.type_filter('Person').get_ids()
@@ -133,13 +130,11 @@ class TestRetrieveNodes:
         assert len(indices) == 3
 
     def test_get_properties(self, small_graph):
-        # get_properties returns {parent_key: [(val1, val2), ...]}
+        # get_properties returns flat list when no traversal (single parent)
         props = small_graph.type_filter('Person').get_properties(['age', 'city'])
-        all_rows = []
-        for row_list in props.values():
-            all_rows.extend(row_list)
-        assert len(all_rows) == 3
-        for row in all_rows:
+        assert isinstance(props, list)
+        assert len(props) == 3
+        for row in props:
             assert len(row) == 2  # (age, city)
 
     def test_get_node_by_id(self, small_graph):
