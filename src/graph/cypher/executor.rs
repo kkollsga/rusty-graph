@@ -259,17 +259,20 @@ impl<'a> CypherExecutor<'a> {
             _ => return Err("shortestPath pattern must end with a node".to_string()),
         };
 
-        // Extract edge direction from the pattern
-        let edge_direction = elements
+        // Extract edge direction and connection type from the pattern
+        let (edge_direction, edge_connection_type) = elements
             .iter()
             .find_map(|elem| {
                 if let PatternElement::Edge(ep) = elem {
-                    Some(ep.direction)
+                    Some((ep.direction, ep.connection_type.clone()))
                 } else {
                     None
                 }
             })
-            .unwrap_or(EdgeDirection::Outgoing);
+            .unwrap_or((EdgeDirection::Both, None));
+
+        let connection_types_vec: Option<Vec<String>> = edge_connection_type.map(|ct| vec![ct]);
+        let connection_types: Option<&[String]> = connection_types_vec.as_deref();
 
         // Find matching source and target nodes
         let executor =
@@ -290,19 +293,34 @@ impl<'a> CypherExecutor<'a> {
                     EdgeDirection::Both => {
                         // Undirected BFS — same behavior as fluent API shortest_path()
                         graph_algorithms::shortest_path(
-                            self.graph, source_idx, target_idx, None, None, None,
+                            self.graph,
+                            source_idx,
+                            target_idx,
+                            connection_types,
+                            None,
+                            None,
                         )
                     }
                     EdgeDirection::Outgoing => {
                         // Directed BFS — only follow outgoing edges
                         graph_algorithms::shortest_path_directed(
-                            self.graph, source_idx, target_idx, None, None, None,
+                            self.graph,
+                            source_idx,
+                            target_idx,
+                            connection_types,
+                            None,
+                            None,
                         )
                     }
                     EdgeDirection::Incoming => {
                         // Reverse source/target and follow outgoing, then reverse path
                         graph_algorithms::shortest_path_directed(
-                            self.graph, target_idx, source_idx, None, None, None,
+                            self.graph,
+                            target_idx,
+                            source_idx,
+                            connection_types,
+                            None,
+                            None,
                         )
                         .map(|mut pr| {
                             pr.path.reverse();
