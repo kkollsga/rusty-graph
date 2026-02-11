@@ -1674,7 +1674,7 @@ mod tests {
     #[test]
     fn test_shortest_path_not_found() {
         let (graph, indices) = build_disconnected_graph();
-        let result = shortest_path(&graph, indices[0], indices[2], None, None, None, None);
+        let result = shortest_path(&graph, indices[0], indices[2], None, None, None);
         assert!(result.is_none());
     }
 
@@ -1769,7 +1769,7 @@ mod tests {
         );
 
         // Without filter: shortest path is A->C via SKIP (1 hop)
-        let result = shortest_path(&graph, indices[0], indices[2], None, None, None, None);
+        let result = shortest_path(&graph, indices[0], indices[2], None, None, None);
         assert_eq!(result.unwrap().cost, 1);
 
         // With NEXT filter: must go A->B->C (2 hops)
