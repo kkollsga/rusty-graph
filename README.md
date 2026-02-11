@@ -4,7 +4,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/kglite)](https://pypi.org/project/kglite/)
 [![License: MIT](https://img.shields.io/pypi/l/kglite)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
 
-An embedded knowledge graph engine for Python. Like SQLite, but for graphs.
+An embedded knowledge graph engine for Python.
 
 **Use it for:** local analytics, ETL pipelines, notebooks, embedding in apps, fast prototyping.
 **Not for:** multi-user server deployments, cross-call transactions, HA/replication.
