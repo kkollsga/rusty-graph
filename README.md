@@ -489,14 +489,20 @@ graph.cypher("""
 
 ### shortestPath()
 
-Directed BFS shortest path between two nodes:
+BFS shortest path between two nodes. Supports directed (`->`) and undirected (`-`) syntax:
 
 ```python
+# Directed — only follows edges in their defined direction
 result = graph.cypher("""
     MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Dave'}))
     RETURN length(p), nodes(p), relationships(p), a.name, b.name
 """)
-# [{'length(p)': 3, 'nodes(p)': [...], ...}]
+
+# Undirected — traverses edges in both directions (same as fluent API)
+result = graph.cypher("""
+    MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]-(b:Person {name: 'Dave'}))
+    RETURN length(p), nodes(p), relationships(p)
+""")
 
 # No path → empty list (not an error)
 ```
@@ -803,9 +809,12 @@ graph.match_pattern('(a:Person)-[:KNOWS]->(b:Person)', max_matches=100)
 ### Shortest Path
 
 ```python
-path = graph.shortest_path(source_type='Person', source_id=1, target_type='Person', target_id=100)
-for node in path:
-    print(f"{node['type']}: {node['title']}")
+result = graph.shortest_path(source_type='Person', source_id=1, target_type='Person', target_id=100)
+if result:
+    for node in result["path"]:
+        print(f"{node['type']}: {node['title']}")
+    print(f"Connections: {result['connections']}")
+    print(f"Path length: {result['length']}")
 ```
 
 ### All Paths
@@ -814,7 +823,8 @@ for node in path:
 paths = graph.all_paths(
     source_type='Play', source_id=1,
     target_type='Wellbore', target_id=100,
-    max_hops=4
+    max_hops=4,
+    max_results=100  # Prevent OOM on dense graphs
 )
 ```
 

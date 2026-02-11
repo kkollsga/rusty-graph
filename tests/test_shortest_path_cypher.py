@@ -256,6 +256,49 @@ class TestShortestPathWithClause:
         assert len(result) == 0
 
 
+class TestShortestPathUndirected:
+    """Tests for undirected shortestPath using -[]- syntax."""
+
+    def test_undirected_finds_reverse_path(self, chain_graph):
+        """Undirected -[]- syntax should find path even against edge direction."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Eve'})-[:KNOWS*..10]-(b:Person {name: 'Alice'})) "
+            "RETURN length(p)"
+        )
+        assert len(result) == 1
+        assert result[0]['length(p)'] == 4
+
+    def test_directed_still_respects_direction(self, chain_graph):
+        """Directed -[]-> syntax should still require edge direction."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Eve'})-[:KNOWS*..10]->(b:Person {name: 'Alice'})) "
+            "RETURN length(p)"
+        )
+        assert len(result) == 0  # No path in reverse direction
+
+    def test_undirected_nodes_function(self, chain_graph):
+        """nodes(p) works correctly with undirected shortestPath."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Eve'})-[:KNOWS*..10]-(b:Person {name: 'Alice'})) "
+            "RETURN nodes(p), length(p)"
+        )
+        assert len(result) == 1
+        nodes = result[0]['nodes(p)']
+        assert len(nodes) == 5
+        titles = [n['title'] for n in nodes]
+        assert titles[0] == 'Eve'
+        assert titles[-1] == 'Alice'
+
+    def test_undirected_forward_also_works(self, chain_graph):
+        """Undirected syntax also works in the forward direction."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]-(b:Person {name: 'Eve'})) "
+            "RETURN length(p)"
+        )
+        assert len(result) == 1
+        assert result[0]['length(p)'] == 4
+
+
 class TestNormalMatchNotBroken:
     """Ensure normal MATCH patterns still work after shortestPath changes."""
 

@@ -7,7 +7,75 @@ use crate::graph::value_operations;
 use petgraph::algo::kosaraju_scc;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::{EdgeRef, IntoEdgeReferences, NodeIndexable};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+
+// ============================================================================
+// Path Filtering Helpers
+// ============================================================================
+
+/// Get undirected neighbors filtered by edge connection type.
+/// When connection_types is None, returns all neighbors (equivalent to neighbors_undirected).
+fn filtered_neighbors_undirected(
+    graph: &DirGraph,
+    node: NodeIndex,
+    connection_types: Option<&[String]>,
+) -> Vec<NodeIndex> {
+    use petgraph::Direction;
+    match connection_types {
+        None => graph.graph.neighbors_undirected(node).collect(),
+        Some(types) => {
+            let mut neighbors = Vec::new();
+            for edge in graph.graph.edges_directed(node, Direction::Outgoing) {
+                if types.iter().any(|t| t == &edge.weight().connection_type) {
+                    neighbors.push(edge.target());
+                }
+            }
+            for edge in graph.graph.edges_directed(node, Direction::Incoming) {
+                if types.iter().any(|t| t == &edge.weight().connection_type) {
+                    neighbors.push(edge.source());
+                }
+            }
+            neighbors
+        }
+    }
+}
+
+/// Get directed (outgoing only) neighbors filtered by edge connection type.
+fn filtered_neighbors_outgoing(
+    graph: &DirGraph,
+    node: NodeIndex,
+    connection_types: Option<&[String]>,
+) -> Vec<NodeIndex> {
+    use petgraph::Direction;
+    match connection_types {
+        None => graph
+            .graph
+            .neighbors_directed(node, Direction::Outgoing)
+            .collect(),
+        Some(types) => graph
+            .graph
+            .edges_directed(node, Direction::Outgoing)
+            .filter(|e| types.iter().any(|t| t == &e.weight().connection_type))
+            .map(|e| e.target())
+            .collect(),
+    }
+}
+
+/// Check if a node passes the via_types filter.
+/// Source and target should be excluded from this check by the caller.
+fn node_passes_via_filter(graph: &DirGraph, node: NodeIndex, via_types: &Option<HashSet<&str>>) -> bool {
+    match via_types {
+        None => true,
+        Some(types) => {
+            if let Some(node_data) = graph.graph.node_weight(node) {
+                types.contains(node_data.node_type.as_str())
+            } else {
+                false
+            }
+        }
+    }
+}
 
 /// Result of a path finding operation
 #[derive(Debug, Clone)]
@@ -29,10 +97,22 @@ pub struct PathNodeInfo {
 /// Find the shortest path between two nodes using undirected BFS.
 /// This treats the graph as undirected, finding connections in either direction.
 /// Returns None if no path exists.
-pub fn shortest_path(graph: &DirGraph, source: NodeIndex, target: NodeIndex) -> Option<PathResult> {
-    // Use BFS for undirected path finding (more appropriate for knowledge graphs)
-    let path = reconstruct_path_bfs(graph, source, target)?;
-    let cost = path.len().saturating_sub(1); // Cost is number of edges
+///
+/// # Arguments
+/// * `connection_types` - Only traverse edges of these types (None = all)
+/// * `via_types` - Only traverse through nodes of these types (None = all)
+pub fn shortest_path(
+    graph: &DirGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+    connection_types: Option<&[String]>,
+    via_types: Option<&[String]>,
+    deadline: Option<Instant>,
+) -> Option<PathResult> {
+    let via_set: Option<HashSet<&str>> =
+        via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
+    let path = reconstruct_path_bfs(graph, source, target, connection_types, &via_set, deadline)?;
+    let cost = path.len().saturating_sub(1);
 
     Some(PathResult { path, cost })
 }
@@ -177,6 +257,9 @@ fn reconstruct_path_bfs(
     graph: &DirGraph,
     source: NodeIndex,
     target: NodeIndex,
+    connection_types: Option<&[String]>,
+    via_types: &Option<HashSet<&str>>,
+    deadline: Option<Instant>,
 ) -> Option<Vec<NodeIndex>> {
     use std::collections::VecDeque;
 
@@ -184,14 +267,8 @@ fn reconstruct_path_bfs(
         return Some(vec![source]);
     }
 
-    // Use node_bound() not node_count() — with StableDiGraph, deleted nodes leave
-    // holes so indices can exceed node_count(). node_bound() is the upper bound.
     let node_bound = graph.graph.node_bound();
-
-    // Use Vec instead of HashSet/HashMap for O(1) direct indexing
-    // visited[i] = true if node i has been visited
     let mut visited: Vec<bool> = vec![false; node_bound];
-    // parent[i] = parent node index of node i (u32::MAX means no parent/source)
     let mut parent: Vec<u32> = vec![u32::MAX; node_bound];
 
     let mut queue = VecDeque::with_capacity(node_bound / 4);
@@ -202,14 +279,34 @@ fn reconstruct_path_bfs(
     queue.push_back(source_idx);
     visited[source_idx] = true;
 
+    let mut visit_count = 0u32;
+
     while let Some(current_idx) = queue.pop_front() {
+        // Periodic timeout check (every 1000 nodes)
+        visit_count += 1;
+        if visit_count % 1000 == 0 {
+            if let Some(dl) = deadline {
+                if Instant::now() > dl {
+                    return None;
+                }
+            }
+        }
+
         let current = NodeIndex::new(current_idx);
 
         // Check all neighbors (both directions for undirected path finding)
-        for neighbor in graph.graph.neighbors_undirected(current) {
+        let neighbors = filtered_neighbors_undirected(graph, current, connection_types);
+        for neighbor in neighbors {
             let neighbor_idx = neighbor.index();
 
             if !visited[neighbor_idx] {
+                // Apply via_types filter (skip if not target and doesn't match)
+                if neighbor_idx != target_idx
+                    && !node_passes_via_filter(graph, neighbor, via_types)
+                {
+                    continue;
+                }
+
                 visited[neighbor_idx] = true;
                 parent[neighbor_idx] = current_idx as u32;
                 queue.push_back(neighbor_idx);
@@ -236,12 +333,18 @@ fn reconstruct_path_bfs(
 
 /// Directed BFS shortest path — only follows outgoing edges.
 /// Used by Cypher shortestPath() which respects edge direction.
+///
+/// # Arguments
+/// * `connection_types` - Only traverse edges of these types (None = all)
+/// * `via_types` - Only traverse through nodes of these types (None = all)
 pub fn shortest_path_directed(
     graph: &DirGraph,
     source: NodeIndex,
     target: NodeIndex,
+    connection_types: Option<&[String]>,
+    via_types: Option<&[String]>,
+    deadline: Option<Instant>,
 ) -> Option<PathResult> {
-    use petgraph::Direction;
     use std::collections::VecDeque;
 
     if source == target {
@@ -250,6 +353,9 @@ pub fn shortest_path_directed(
             cost: 0,
         });
     }
+
+    let via_set: Option<HashSet<&str>> =
+        via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
 
     let node_bound = graph.graph.node_bound();
     let mut visited: Vec<bool> = vec![false; node_bound];
@@ -262,14 +368,34 @@ pub fn shortest_path_directed(
     queue.push_back(source_idx);
     visited[source_idx] = true;
 
+    let mut visit_count = 0u32;
+
     while let Some(current_idx) = queue.pop_front() {
+        // Periodic timeout check
+        visit_count += 1;
+        if visit_count % 1000 == 0 {
+            if let Some(dl) = deadline {
+                if Instant::now() > dl {
+                    return None;
+                }
+            }
+        }
+
         let current = NodeIndex::new(current_idx);
 
         // Only follow outgoing edges
-        for neighbor in graph.graph.neighbors_directed(current, Direction::Outgoing) {
+        let neighbors = filtered_neighbors_outgoing(graph, current, connection_types);
+        for neighbor in neighbors {
             let neighbor_idx = neighbor.index();
 
             if !visited[neighbor_idx] {
+                // Apply via_types filter (skip if not target and doesn't match)
+                if neighbor_idx != target_idx
+                    && !node_passes_via_filter(graph, neighbor, &via_set)
+                {
+                    continue;
+                }
+
                 visited[neighbor_idx] = true;
                 parent[neighbor_idx] = current_idx as u32;
                 queue.push_back(neighbor_idx);
@@ -297,15 +423,26 @@ pub fn shortest_path_directed(
 
 /// Find all paths between two nodes up to a maximum number of hops.
 /// Warning: This can be expensive for graphs with many paths!
+///
+/// # Arguments
+/// * `max_results` - Stop after finding this many paths (prevents OOM on dense graphs)
+/// * `connection_types` - Only traverse edges of these types (None = all)
+/// * `via_types` - Only traverse through nodes of these types (None = all)
 pub fn all_paths(
     graph: &DirGraph,
     source: NodeIndex,
     target: NodeIndex,
     max_hops: usize,
+    max_results: Option<usize>,
+    connection_types: Option<&[String]>,
+    via_types: Option<&[String]>,
+    deadline: Option<Instant>,
 ) -> Vec<Vec<NodeIndex>> {
+    let via_set: Option<HashSet<&str>> =
+        via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
     let mut results = Vec::new();
     let mut current_path = vec![source];
-    let mut visited = std::collections::HashSet::new();
+    let mut visited = HashSet::new();
     visited.insert(source);
 
     find_all_paths_recursive(
@@ -316,6 +453,10 @@ pub fn all_paths(
         &mut current_path,
         &mut visited,
         &mut results,
+        max_results,
+        connection_types,
+        &via_set,
+        deadline,
     );
 
     results
@@ -328,9 +469,27 @@ fn find_all_paths_recursive(
     target: NodeIndex,
     remaining_hops: usize,
     current_path: &mut Vec<NodeIndex>,
-    visited: &mut std::collections::HashSet<NodeIndex>,
+    visited: &mut HashSet<NodeIndex>,
     results: &mut Vec<Vec<NodeIndex>>,
+    max_results: Option<usize>,
+    connection_types: Option<&[String]>,
+    via_types: &Option<HashSet<&str>>,
+    deadline: Option<Instant>,
 ) {
+    // Early termination when result limit is hit
+    if let Some(max) = max_results {
+        if results.len() >= max {
+            return;
+        }
+    }
+
+    // Timeout check at each recursive entry
+    if let Some(dl) = deadline {
+        if Instant::now() > dl {
+            return;
+        }
+    }
+
     if current == target {
         results.push(current_path.clone());
         return;
@@ -340,9 +499,22 @@ fn find_all_paths_recursive(
         return;
     }
 
-    // Explore all neighbors (undirected)
-    for neighbor in graph.graph.neighbors_undirected(current) {
+    // Explore all neighbors (undirected), filtered by connection type
+    let neighbors = filtered_neighbors_undirected(graph, current, connection_types);
+    for neighbor in neighbors {
+        // Check limit before exploring deeper
+        if let Some(max) = max_results {
+            if results.len() >= max {
+                return;
+            }
+        }
+
         if !visited.contains(&neighbor) {
+            // Apply via_types filter (skip if not target and doesn't match)
+            if neighbor != target && !node_passes_via_filter(graph, neighbor, via_types) {
+                continue;
+            }
+
             visited.insert(neighbor);
             current_path.push(neighbor);
 
@@ -354,6 +526,10 @@ fn find_all_paths_recursive(
                 current_path,
                 visited,
                 results,
+                max_results,
+                connection_types,
+                via_types,
+                deadline,
             );
 
             current_path.pop();
@@ -487,7 +663,7 @@ pub fn get_path_connections(graph: &DirGraph, path: &[NodeIndex]) -> Vec<Option<
 
 /// Check if two nodes are connected (directly or indirectly)
 pub fn are_connected(graph: &DirGraph, source: NodeIndex, target: NodeIndex) -> bool {
-    shortest_path(graph, source, target).is_some()
+    shortest_path(graph, source, target, None, None, None).is_some()
 }
 
 /// Calculate the degree (number of connections) for a node
@@ -527,6 +703,7 @@ pub fn betweenness_centrality(
     graph: &DirGraph,
     normalized: bool,
     sample_size: Option<usize>,
+    deadline: Option<Instant>,
 ) -> Vec<CentralityResult> {
     use std::collections::VecDeque;
 
@@ -578,7 +755,16 @@ pub fn betweenness_centrality(
     let mut queue: VecDeque<usize> = VecDeque::with_capacity(n);
 
     // Brandes' algorithm - process each source
-    for &s_idx in &source_indices {
+    for (source_counter, &s_idx) in source_indices.iter().enumerate() {
+        // Periodic timeout check (every 10 source nodes)
+        if source_counter % 10 == 0 {
+            if let Some(dl) = deadline {
+                if Instant::now() > dl {
+                    break;
+                }
+            }
+        }
+
         // Reset data structures (much faster than re-allocating)
         stack.clear();
         queue.clear();
@@ -680,6 +866,7 @@ pub fn pagerank(
     damping_factor: f64,
     max_iterations: usize,
     tolerance: f64,
+    deadline: Option<Instant>,
 ) -> Vec<CentralityResult> {
     let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
     let n = nodes.len();
@@ -730,6 +917,13 @@ pub fn pagerank(
 
     // Iterative computation
     for _iteration in 0..max_iterations {
+        // Timeout check each iteration
+        if let Some(dl) = deadline {
+            if Instant::now() > dl {
+                break;
+            }
+        }
+
         // Calculate dangling node contribution (vectorized over bitmask)
         let mut dangling_sum: f64 = 0.0;
         for i in 0..n {
@@ -791,7 +985,7 @@ pub fn pagerank(
 ///
 /// Simply counts the number of connections each node has.
 /// Optionally normalized by (n-1) to get values between 0 and 1.
-pub fn degree_centrality(graph: &DirGraph, normalized: bool) -> Vec<CentralityResult> {
+pub fn degree_centrality(graph: &DirGraph, normalized: bool, _deadline: Option<Instant>) -> Vec<CentralityResult> {
     let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
     let n = nodes.len();
 
@@ -837,7 +1031,7 @@ pub fn degree_centrality(graph: &DirGraph, normalized: bool) -> Vec<CentralityRe
 ///
 /// Note: For disconnected graphs, only reachable nodes are considered.
 /// Optimized to use Vec instead of HashMap for O(1) direct indexing.
-pub fn closeness_centrality(graph: &DirGraph, normalized: bool) -> Vec<CentralityResult> {
+pub fn closeness_centrality(graph: &DirGraph, normalized: bool, deadline: Option<Instant>) -> Vec<CentralityResult> {
     use std::collections::VecDeque;
 
     let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
@@ -873,6 +1067,15 @@ pub fn closeness_centrality(graph: &DirGraph, normalized: bool) -> Vec<Centralit
     let mut queue: VecDeque<usize> = VecDeque::with_capacity(n);
 
     for (s_idx, &source) in nodes.iter().enumerate() {
+        // Periodic timeout check (every 10 source nodes)
+        if s_idx % 10 == 0 {
+            if let Some(dl) = deadline {
+                if Instant::now() > dl {
+                    break;
+                }
+            }
+        }
+
         // Reset data structures (much faster than re-allocating)
         queue.clear();
         for d in dist.iter_mut() {
@@ -962,6 +1165,7 @@ pub fn louvain_communities(
     graph: &DirGraph,
     weight_property: Option<&str>,
     resolution: f64,
+    deadline: Option<Instant>,
 ) -> CommunityResult {
     let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
     let n = nodes.len();
@@ -1036,6 +1240,13 @@ pub fn louvain_communities(
     // Iterative optimization
     let max_iterations = 100;
     for _ in 0..max_iterations {
+        // Timeout check each iteration
+        if let Some(dl) = deadline {
+            if Instant::now() > dl {
+                break;
+            }
+        }
+
         let mut improved = false;
 
         for i in 0..n {
@@ -1142,7 +1353,7 @@ pub fn louvain_communities(
 /// Each node adopts the most frequent label among its neighbors.
 /// Converges when no node changes its label.
 /// Optimized with pre-built adjacency list and Vec-based label counting.
-pub fn label_propagation(graph: &DirGraph, max_iterations: usize) -> CommunityResult {
+pub fn label_propagation(graph: &DirGraph, max_iterations: usize, deadline: Option<Instant>) -> CommunityResult {
     let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
     let n = nodes.len();
 
@@ -1180,6 +1391,13 @@ pub fn label_propagation(graph: &DirGraph, max_iterations: usize) -> CommunityRe
     let mut touched_labels: Vec<usize> = Vec::with_capacity(64);
 
     for _ in 0..max_iterations {
+        // Timeout check each iteration
+        if let Some(dl) = deadline {
+            if Instant::now() > dl {
+                break;
+            }
+        }
+
         let mut changed = false;
 
         for i in 0..n {
@@ -1426,7 +1644,7 @@ mod tests {
     #[test]
     fn test_shortest_path_adjacent() {
         let (graph, indices) = build_chain_graph();
-        let result = shortest_path(&graph, indices[0], indices[1]);
+        let result = shortest_path(&graph, indices[0], indices[1], None, None, None);
         assert!(result.is_some());
         let path = result.unwrap();
         assert_eq!(path.cost, 1);
@@ -1436,7 +1654,7 @@ mod tests {
     #[test]
     fn test_shortest_path_multi_hop() {
         let (graph, indices) = build_chain_graph();
-        let result = shortest_path(&graph, indices[0], indices[4]);
+        let result = shortest_path(&graph, indices[0], indices[4], None, None, None);
         assert!(result.is_some());
         let path = result.unwrap();
         assert_eq!(path.cost, 4);
@@ -1446,7 +1664,7 @@ mod tests {
     #[test]
     fn test_shortest_path_same_node() {
         let (graph, indices) = build_chain_graph();
-        let result = shortest_path(&graph, indices[0], indices[0]);
+        let result = shortest_path(&graph, indices[0], indices[0], None, None, None);
         assert!(result.is_some());
         let path = result.unwrap();
         assert_eq!(path.cost, 0);
@@ -1456,7 +1674,7 @@ mod tests {
     #[test]
     fn test_shortest_path_not_found() {
         let (graph, indices) = build_disconnected_graph();
-        let result = shortest_path(&graph, indices[0], indices[2]);
+        let result = shortest_path(&graph, indices[0], indices[2], None, None, None, None);
         assert!(result.is_none());
     }
 
@@ -1464,7 +1682,7 @@ mod tests {
     fn test_shortest_path_reverse_direction() {
         // BFS is undirected, so B -> A should find a path even though edge is A -> B
         let (graph, indices) = build_chain_graph();
-        let result = shortest_path(&graph, indices[4], indices[0]);
+        let result = shortest_path(&graph, indices[4], indices[0], None, None, None);
         assert!(result.is_some());
         assert_eq!(result.unwrap().cost, 4);
     }
@@ -1476,7 +1694,7 @@ mod tests {
     #[test]
     fn test_all_paths_basic() {
         let (graph, indices) = build_chain_graph();
-        let paths = all_paths(&graph, indices[0], indices[2], 5);
+        let paths = all_paths(&graph, indices[0], indices[2], 5, None, None, None, None);
         assert!(!paths.is_empty());
         // There should be a path of length 2: A -> B -> C
         assert!(paths.iter().any(|p| p.len() == 3));
@@ -1486,16 +1704,83 @@ mod tests {
     fn test_all_paths_limited_hops() {
         let (graph, indices) = build_chain_graph();
         // With max_hops=1, can only reach adjacent node
-        let paths = all_paths(&graph, indices[0], indices[2], 1);
+        let paths = all_paths(&graph, indices[0], indices[2], 1, None, None, None, None);
         assert!(paths.is_empty()); // Can't reach C in 1 hop
     }
 
     #[test]
     fn test_all_paths_triangle() {
         let (graph, indices) = build_triangle_graph();
-        let paths = all_paths(&graph, indices[0], indices[2], 3);
+        let paths = all_paths(&graph, indices[0], indices[2], 3, None, None, None, None);
         // Multiple paths possible in a triangle
         assert!(!paths.is_empty());
+    }
+
+    #[test]
+    fn test_all_paths_max_results() {
+        let (graph, indices) = build_triangle_graph();
+        // Triangle has multiple paths — limit to 1
+        let paths = all_paths(&graph, indices[0], indices[2], 3, Some(1), None, None, None);
+        assert_eq!(paths.len(), 1);
+    }
+
+    #[test]
+    fn test_all_paths_max_results_none_unlimited() {
+        let (graph, indices) = build_triangle_graph();
+        let limited = all_paths(&graph, indices[0], indices[2], 3, Some(1), None, None, None);
+        let unlimited = all_paths(&graph, indices[0], indices[2], 3, None, None, None, None);
+        assert!(unlimited.len() >= limited.len());
+    }
+
+    #[test]
+    fn test_shortest_path_connection_type_filter() {
+        // Build graph with two edge types: A -NEXT-> B -NEXT-> C and A -SKIP-> C
+        let mut graph = DirGraph::new();
+        let mut indices = Vec::new();
+        for i in 0..3 {
+            let node = NodeData::new(
+                Value::Int64(i),
+                Value::String(format!("Node_{}", i)),
+                "Test".to_string(),
+                HashMap::new(),
+            );
+            let idx = graph.graph.add_node(node);
+            graph
+                .type_indices
+                .entry("Test".to_string())
+                .or_default()
+                .push(idx);
+            indices.push(idx);
+        }
+        graph.graph.add_edge(
+            indices[0],
+            indices[1],
+            EdgeData::new("NEXT".to_string(), HashMap::new()),
+        );
+        graph.graph.add_edge(
+            indices[1],
+            indices[2],
+            EdgeData::new("NEXT".to_string(), HashMap::new()),
+        );
+        graph.graph.add_edge(
+            indices[0],
+            indices[2],
+            EdgeData::new("SKIP".to_string(), HashMap::new()),
+        );
+
+        // Without filter: shortest path is A->C via SKIP (1 hop)
+        let result = shortest_path(&graph, indices[0], indices[2], None, None, None, None);
+        assert_eq!(result.unwrap().cost, 1);
+
+        // With NEXT filter: must go A->B->C (2 hops)
+        let next_only = vec!["NEXT".to_string()];
+        let result = shortest_path(&graph, indices[0], indices[2], Some(&next_only), None, None);
+        assert_eq!(result.unwrap().cost, 2);
+
+        // With SKIP filter: A->C (1 hop)
+        let skip_only = vec!["SKIP".to_string()];
+        let result = shortest_path(&graph, indices[0], indices[2], Some(&skip_only), None, None);
+        assert_eq!(result.unwrap().cost, 1);
     }
 
     // ========================================================================

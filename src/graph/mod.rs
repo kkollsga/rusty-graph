@@ -134,6 +134,45 @@ fn centrality_results_to_py_dict(
     Ok(scores_dict.into())
 }
 
+/// Convert centrality results to a pandas DataFrame with columns:
+/// type, title, id, score — sorted by score descending.
+fn centrality_results_to_dataframe(
+    py: Python<'_>,
+    graph: &DirGraph,
+    results: Vec<graph_algorithms::CentralityResult>,
+    top_k: Option<usize>,
+) -> PyResult<Py<PyAny>> {
+    let limit = top_k.unwrap_or(results.len());
+
+    let mut types: Vec<&str> = Vec::with_capacity(limit);
+    let mut titles: Vec<String> = Vec::with_capacity(limit);
+    let mut ids: Vec<Py<PyAny>> = Vec::with_capacity(limit);
+    let mut scores: Vec<f64> = Vec::with_capacity(limit);
+
+    for result in results.into_iter().take(limit) {
+        if let Some(node) = graph.get_node(result.node_idx) {
+            types.push(&node.node_type);
+            let title_str = match &node.title {
+                Value::String(s) => s.clone(),
+                _ => String::new(),
+            };
+            titles.push(title_str);
+            ids.push(py_out::value_to_py(py, &node.id)?);
+            scores.push(result.score);
+        }
+    }
+
+    let pd = py.import("pandas")?;
+    let data = PyDict::new(py);
+    data.set_item("type", PyList::new(py, &types)?)?;
+    data.set_item("title", PyList::new(py, &titles)?)?;
+    data.set_item("id", PyList::new(py, &ids)?)?;
+    data.set_item("score", PyList::new(py, &scores)?)?;
+
+    let df = pd.call_method1("DataFrame", (data,))?;
+    Ok(df.unbind())
+}
+
 /// Helper to convert community detection results to Python dict.
 /// Accesses node data directly and uses interned keys for faster dict construction.
 fn community_results_to_py(
@@ -2521,6 +2560,7 @@ impl KnowledgeGraph {
     ///         - 'connections': List of connection types between nodes
     ///         - 'length': Number of hops in the path
     ///     Returns None if no path exists.
+    #[pyo3(signature = (source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None))]
     fn shortest_path(
         &self,
         py: Python<'_>,
@@ -2528,6 +2568,9 @@ impl KnowledgeGraph {
         source_id: &Bound<'_, PyAny>,
         target_type: &str,
         target_id: &Bound<'_, PyAny>,
+        connection_types: Option<Vec<String>>,
+        via_types: Option<Vec<String>>,
+        timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         // Look up source node
         let source_lookup = lookups::TypeLookup::new(&self.inner.graph, source_type.to_string())
@@ -2558,7 +2601,15 @@ impl KnowledgeGraph {
         })?;
 
         // Find shortest path
-        let result = graph_algorithms::shortest_path(&self.inner, source_idx, target_idx);
+        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let result = graph_algorithms::shortest_path(
+            &self.inner,
+            source_idx,
+            target_idx,
+            connection_types.as_deref(),
+            via_types.as_deref(),
+            deadline,
+        );
 
         match result {
             Some(path_result) => {
@@ -2720,6 +2771,7 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     A list of node IDs along the path, or None if no path exists.
+    #[pyo3(signature = (source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None))]
     fn shortest_path_ids(
         &self,
         py: Python<'_>,
@@ -2727,6 +2779,9 @@ impl KnowledgeGraph {
         source_id: &Bound<'_, PyAny>,
         target_type: &str,
         target_id: &Bound<'_, PyAny>,
+        connection_types: Option<Vec<String>>,
+        via_types: Option<Vec<String>>,
+        timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         // Use O(1) direct lookup from id_indices (populated during add_nodes)
         let source_value = py_in::py_value_to_value(source_id)?;
@@ -2752,7 +2807,15 @@ impl KnowledgeGraph {
             })?;
 
         // Find shortest path
-        match graph_algorithms::shortest_path(&self.inner, source_idx, target_idx) {
+        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        match graph_algorithms::shortest_path(
+            &self.inner,
+            source_idx,
+            target_idx,
+            connection_types.as_deref(),
+            via_types.as_deref(),
+            deadline,
+        ) {
             Some(path_result) => {
                 // Extract just the IDs - no PyDict creation per node
                 let ids: Vec<Py<PyAny>> = path_result
@@ -2785,6 +2848,7 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     A list of integer node indices along the path, or None if no path exists.
+    #[pyo3(signature = (source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None))]
     fn shortest_path_indices(
         &self,
         py: Python<'_>,
@@ -2792,6 +2856,9 @@ impl KnowledgeGraph {
         source_id: &Bound<'_, PyAny>,
         target_type: &str,
         target_id: &Bound<'_, PyAny>,
+        connection_types: Option<Vec<String>>,
+        via_types: Option<Vec<String>>,
+        timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         // Use O(1) direct lookup from id_indices (populated during add_nodes)
         let source_value = py_in::py_value_to_value(source_id)?;
@@ -2816,8 +2883,17 @@ impl KnowledgeGraph {
                 ))
             })?;
 
+        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+
         // Find shortest path and return raw indices
-        match graph_algorithms::shortest_path(&self.inner, source_idx, target_idx) {
+        match graph_algorithms::shortest_path(
+            &self.inner,
+            source_idx,
+            target_idx,
+            connection_types.as_deref(),
+            via_types.as_deref(),
+            deadline,
+        ) {
             Some(path_result) => {
                 let indices: Vec<usize> = path_result.path.iter().map(|idx| idx.index()).collect();
                 Ok(PyList::new(py, indices)?.into())
@@ -2834,11 +2910,12 @@ impl KnowledgeGraph {
     ///     target_type: The node type of the target node
     ///     target_id: The unique ID of the target node
     ///     max_hops: Maximum path length to search (default: 5)
+    ///     max_results: Stop after finding this many paths (default: unlimited).
+    ///                  Use this to prevent OOM on dense graphs.
     ///
     /// Returns:
     ///     A list of path dictionaries, each with 'path', 'connections', and 'length'
-    ///
-    /// Warning: This can be expensive for graphs with many paths!
+    #[pyo3(signature = (source_type, source_id, target_type, target_id, max_hops=None, max_results=None, connection_types=None, via_types=None, timeout_ms=None))]
     fn all_paths(
         &self,
         py: Python<'_>,
@@ -2847,6 +2924,10 @@ impl KnowledgeGraph {
         target_type: &str,
         target_id: &Bound<'_, PyAny>,
         max_hops: Option<usize>,
+        max_results: Option<usize>,
+        connection_types: Option<Vec<String>>,
+        via_types: Option<Vec<String>>,
+        timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         let max_hops = max_hops.unwrap_or(5);
 
@@ -2878,8 +2959,19 @@ impl KnowledgeGraph {
             ))
         })?;
 
+        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+
         // Find all paths
-        let paths = graph_algorithms::all_paths(&self.inner, source_idx, target_idx, max_hops);
+        let paths = graph_algorithms::all_paths(
+            &self.inner,
+            source_idx,
+            target_idx,
+            max_hops,
+            max_results,
+            connection_types.as_deref(),
+            via_types.as_deref(),
+            deadline,
+        );
 
         // Convert to Python output
         let result_list = PyList::empty(py);
@@ -3092,7 +3184,7 @@ impl KnowledgeGraph {
     ///     for node in central_nodes:
     ///         print(f"{node['title']}: {node['score']:.4f}")
     ///     ```
-    #[pyo3(signature = (normalized=None, sample_size=None, top_k=None, as_dict=None))]
+    #[pyo3(signature = (normalized=None, sample_size=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
     fn betweenness_centrality(
         &self,
         py: Python<'_>,
@@ -3100,13 +3192,18 @@ impl KnowledgeGraph {
         sample_size: Option<usize>,
         top_k: Option<usize>,
         as_dict: Option<bool>,
+        timeout_ms: Option<u64>,
+        to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let normalized = normalized.unwrap_or(true);
+        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         let results =
-            graph_algorithms::betweenness_centrality(&self.inner, normalized, sample_size);
+            graph_algorithms::betweenness_centrality(&self.inner, normalized, sample_size, deadline);
 
-        if as_dict.unwrap_or(false) {
+        if to_df.unwrap_or(false) {
+            centrality_results_to_dataframe(py, &self.inner, results, top_k)
+        } else if as_dict.unwrap_or(false) {
             centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
             centrality_results_to_py(py, &self.inner, results, top_k)
@@ -3135,7 +3232,7 @@ impl KnowledgeGraph {
     ///     for node in important_nodes:
     ///         print(f"{node['title']}: {node['score']:.6f}")
     ///     ```
-    #[pyo3(signature = (damping_factor=None, max_iterations=None, tolerance=None, top_k=None, as_dict=None))]
+    #[pyo3(signature = (damping_factor=None, max_iterations=None, tolerance=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
     fn pagerank(
         &self,
         py: Python<'_>,
@@ -3144,14 +3241,19 @@ impl KnowledgeGraph {
         tolerance: Option<f64>,
         top_k: Option<usize>,
         as_dict: Option<bool>,
+        timeout_ms: Option<u64>,
+        to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let damping = damping_factor.unwrap_or(0.85);
         let max_iter = max_iterations.unwrap_or(100);
         let tol = tolerance.unwrap_or(1e-6);
+        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
-        let results = graph_algorithms::pagerank(&self.inner, damping, max_iter, tol);
+        let results = graph_algorithms::pagerank(&self.inner, damping, max_iter, tol, deadline);
 
-        if as_dict.unwrap_or(false) {
+        if to_df.unwrap_or(false) {
+            centrality_results_to_dataframe(py, &self.inner, results, top_k)
+        } else if as_dict.unwrap_or(false) {
             centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
             centrality_results_to_py(py, &self.inner, results, top_k)
@@ -3176,19 +3278,24 @@ impl KnowledgeGraph {
     ///     # Find the most connected nodes
     ///     connected_nodes = graph.degree_centrality(top_k=10)
     ///     ```
-    #[pyo3(signature = (normalized=None, top_k=None, as_dict=None))]
+    #[pyo3(signature = (normalized=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
     fn degree_centrality(
         &self,
         py: Python<'_>,
         normalized: Option<bool>,
         top_k: Option<usize>,
         as_dict: Option<bool>,
+        timeout_ms: Option<u64>,
+        to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let normalized = normalized.unwrap_or(true);
+        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
-        let results = graph_algorithms::degree_centrality(&self.inner, normalized);
+        let results = graph_algorithms::degree_centrality(&self.inner, normalized, deadline);
 
-        if as_dict.unwrap_or(false) {
+        if to_df.unwrap_or(false) {
+            centrality_results_to_dataframe(py, &self.inner, results, top_k)
+        } else if as_dict.unwrap_or(false) {
             centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
             centrality_results_to_py(py, &self.inner, results, top_k)
@@ -3214,19 +3321,24 @@ impl KnowledgeGraph {
     ///     # Find nodes that are "closest" to all others
     ///     close_nodes = graph.closeness_centrality(top_k=10)
     ///     ```
-    #[pyo3(signature = (normalized=None, top_k=None, as_dict=None))]
+    #[pyo3(signature = (normalized=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
     fn closeness_centrality(
         &self,
         py: Python<'_>,
         normalized: Option<bool>,
         top_k: Option<usize>,
         as_dict: Option<bool>,
+        timeout_ms: Option<u64>,
+        to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let normalized = normalized.unwrap_or(true);
+        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
-        let results = graph_algorithms::closeness_centrality(&self.inner, normalized);
+        let results = graph_algorithms::closeness_centrality(&self.inner, normalized, deadline);
 
-        if as_dict.unwrap_or(false) {
+        if to_df.unwrap_or(false) {
+            centrality_results_to_dataframe(py, &self.inner, results, top_k)
+        } else if as_dict.unwrap_or(false) {
             centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
             centrality_results_to_py(py, &self.inner, results, top_k)
@@ -3246,16 +3358,18 @@ impl KnowledgeGraph {
     /// Returns:
     ///     dict with 'communities' (dict mapping community_id -> list of node dicts),
     ///     'modularity' (float), and 'num_communities' (int)
-    #[pyo3(signature = (weight_property=None, resolution=None))]
+    #[pyo3(signature = (weight_property=None, resolution=None, timeout_ms=None))]
     fn louvain_communities(
         &self,
         py: Python<'_>,
         weight_property: Option<String>,
         resolution: Option<f64>,
+        timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         let res = resolution.unwrap_or(1.0);
+        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
         let result =
-            graph_algorithms::louvain_communities(&self.inner, weight_property.as_deref(), res);
+            graph_algorithms::louvain_communities(&self.inner, weight_property.as_deref(), res, deadline);
         community_results_to_py(py, &self.inner, result)
     }
 
@@ -3269,14 +3383,16 @@ impl KnowledgeGraph {
     /// Returns:
     ///     dict with 'communities' (dict mapping community_id -> list of node dicts),
     ///     'modularity' (float), and 'num_communities' (int)
-    #[pyo3(signature = (max_iterations=None))]
+    #[pyo3(signature = (max_iterations=None, timeout_ms=None))]
     fn label_propagation(
         &self,
         py: Python<'_>,
         max_iterations: Option<usize>,
+        timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         let max_iter = max_iterations.unwrap_or(100);
-        let result = graph_algorithms::label_propagation(&self.inner, max_iter);
+        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let result = graph_algorithms::label_propagation(&self.inner, max_iter, deadline);
         community_results_to_py(py, &self.inner, result)
     }
 

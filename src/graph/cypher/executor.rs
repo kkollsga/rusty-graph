@@ -259,6 +259,15 @@ impl<'a> CypherExecutor<'a> {
             _ => return Err("shortestPath pattern must end with a node".to_string()),
         };
 
+        // Extract edge direction from the pattern
+        let edge_direction = elements.iter().find_map(|elem| {
+            if let PatternElement::Edge(ep) = elem {
+                Some(ep.direction)
+            } else {
+                None
+            }
+        }).unwrap_or(EdgeDirection::Outgoing);
+
         // Find matching source and target nodes
         let executor =
             PatternExecutor::new_lightweight_with_params(self.graph, None, self.params.clone());
@@ -273,9 +282,33 @@ impl<'a> CypherExecutor<'a> {
                     continue;
                 }
 
-                if let Some(path_result) =
-                    graph_algorithms::shortest_path_directed(self.graph, source_idx, target_idx)
-                {
+                // Dispatch based on edge direction in the pattern
+                let path_result = match edge_direction {
+                    EdgeDirection::Both => {
+                        // Undirected BFS — same behavior as fluent API shortest_path()
+                        graph_algorithms::shortest_path(
+                            self.graph, source_idx, target_idx, None, None, None,
+                        )
+                    }
+                    EdgeDirection::Outgoing => {
+                        // Directed BFS — only follow outgoing edges
+                        graph_algorithms::shortest_path_directed(
+                            self.graph, source_idx, target_idx, None, None, None,
+                        )
+                    }
+                    EdgeDirection::Incoming => {
+                        // Reverse source/target and follow outgoing, then reverse path
+                        graph_algorithms::shortest_path_directed(
+                            self.graph, target_idx, source_idx, None, None, None,
+                        )
+                        .map(|mut pr| {
+                            pr.path.reverse();
+                            pr
+                        })
+                    }
+                };
+
+                if let Some(path_result) = path_result {
                     let mut row = ResultRow::new();
 
                     // Bind source variable

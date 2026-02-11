@@ -836,6 +836,9 @@ class KnowledgeGraph:
         source_id: Any,
         target_type: str,
         target_id: Any,
+        connection_types: Optional[list[str]] = None,
+        via_types: Optional[list[str]] = None,
+        timeout_ms: Optional[int] = None,
     ) -> Optional[dict[str, Any]]:
         """Find the shortest path between two nodes.
 
@@ -844,11 +847,14 @@ class KnowledgeGraph:
             source_id: Source node ID.
             target_type: Target node type.
             target_id: Target node ID.
+            connection_types: Only traverse edges of these types. Default all.
+            via_types: Only traverse through nodes of these types. Default all.
+            timeout_ms: Abort after this many milliseconds and return ``None``.
 
         Returns:
             Dict with ``path`` (list of node info dicts), ``connections``
             (list of edge types), and ``length`` (hop count).
-            ``None`` if no path exists.
+            ``None`` if no path exists or timeout is reached.
         """
         ...
 
@@ -862,6 +868,7 @@ class KnowledgeGraph:
         """Get just the hop count of the shortest path.
 
         Faster than :meth:`shortest_path` when you only need the distance.
+        Does not support ``connection_types`` or ``via_types`` filtering.
 
         Returns:
             Number of hops, or ``None`` if no path exists.
@@ -874,11 +881,19 @@ class KnowledgeGraph:
         source_id: Any,
         target_type: str,
         target_id: Any,
+        connection_types: Optional[list[str]] = None,
+        via_types: Optional[list[str]] = None,
+        timeout_ms: Optional[int] = None,
     ) -> Optional[list[Any]]:
         """Get node IDs along the shortest path.
 
+        Args:
+            connection_types: Only traverse edges of these types. Default all.
+            via_types: Only traverse through nodes of these types. Default all.
+            timeout_ms: Abort after this many milliseconds and return ``None``.
+
         Returns:
-            List of node IDs, or ``None`` if no path exists.
+            List of node IDs, or ``None`` if no path exists or timeout is reached.
         """
         ...
 
@@ -888,13 +903,21 @@ class KnowledgeGraph:
         source_id: Any,
         target_type: str,
         target_id: Any,
+        connection_types: Optional[list[str]] = None,
+        via_types: Optional[list[str]] = None,
+        timeout_ms: Optional[int] = None,
     ) -> Optional[list[int]]:
         """Get raw graph indices along the shortest path.
 
         Fastest path query — no node data lookup.
 
+        Args:
+            connection_types: Only traverse edges of these types. Default all.
+            via_types: Only traverse through nodes of these types. Default all.
+            timeout_ms: Abort after this many milliseconds and return ``None``.
+
         Returns:
-            List of integer indices, or ``None`` if no path exists.
+            List of integer indices, or ``None`` if no path exists or timeout is reached.
         """
         ...
 
@@ -905,6 +928,10 @@ class KnowledgeGraph:
         target_type: str,
         target_id: Any,
         max_hops: Optional[int] = None,
+        max_results: Optional[int] = None,
+        connection_types: Optional[list[str]] = None,
+        via_types: Optional[list[str]] = None,
+        timeout_ms: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         """Find all paths between two nodes.
 
@@ -914,6 +941,11 @@ class KnowledgeGraph:
             target_type: Target node type.
             target_id: Target node ID.
             max_hops: Maximum path length. Default ``5``.
+            max_results: Stop after finding this many paths. Default unlimited.
+                Use to prevent OOM on dense graphs.
+            connection_types: Only traverse edges of these types. Default all.
+            via_types: Only traverse through nodes of these types. Default all.
+            timeout_ms: Abort after this many milliseconds, returning partial results.
 
         Returns:
             List of path dicts, each with ``path``, ``connections``, ``length``.
@@ -959,17 +991,23 @@ class KnowledgeGraph:
         normalized: Optional[bool] = None,
         sample_size: Optional[int] = None,
         top_k: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
+        as_dict: Optional[bool] = None,
+        timeout_ms: Optional[int] = None,
+        to_df: Optional[bool] = None,
+    ) -> Union[list[dict[str, Any]], "pd.DataFrame"]:
         """Calculate betweenness centrality.
 
         Args:
             normalized: Normalise scores to ``[0, 1]``. Default ``True``.
             sample_size: Sample source nodes for faster computation on large graphs.
             top_k: Return only the top *K* nodes.
+            as_dict: Return ``{title: score}`` dict instead of list of dicts.
+            timeout_ms: Abort after this many milliseconds, returning partial results.
+            to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
         Returns:
             List of dicts with ``type``, ``title``, ``id``, ``score``,
-            sorted by score descending.
+            sorted by score descending. Or a DataFrame if ``to_df=True``.
         """
         ...
 
@@ -979,7 +1017,10 @@ class KnowledgeGraph:
         max_iterations: Optional[int] = None,
         tolerance: Optional[float] = None,
         top_k: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
+        as_dict: Optional[bool] = None,
+        timeout_ms: Optional[int] = None,
+        to_df: Optional[bool] = None,
+    ) -> Union[list[dict[str, Any]], "pd.DataFrame"]:
         """Calculate PageRank centrality.
 
         Args:
@@ -987,9 +1028,13 @@ class KnowledgeGraph:
             max_iterations: Maximum iterations. Default ``100``.
             tolerance: Convergence threshold. Default ``1e-6``.
             top_k: Return only the top *K* nodes.
+            as_dict: Return ``{title: score}`` dict instead of list of dicts.
+            timeout_ms: Abort after this many milliseconds, returning partial results.
+            to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
         Returns:
             List of dicts with ``type``, ``title``, ``id``, ``score``.
+            Or a DataFrame if ``to_df=True``.
         """
         ...
 
@@ -997,15 +1042,22 @@ class KnowledgeGraph:
         self,
         normalized: Optional[bool] = None,
         top_k: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
+        as_dict: Optional[bool] = None,
+        timeout_ms: Optional[int] = None,
+        to_df: Optional[bool] = None,
+    ) -> Union[list[dict[str, Any]], "pd.DataFrame"]:
         """Calculate degree centrality.
 
         Args:
             normalized: Normalise by ``(n-1)``. Default ``True``.
             top_k: Return only the top *K* nodes.
+            as_dict: Return ``{title: score}`` dict instead of list of dicts.
+            timeout_ms: Abort after this many milliseconds, returning partial results.
+            to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
         Returns:
             List of dicts with ``type``, ``title``, ``id``, ``score``.
+            Or a DataFrame if ``to_df=True``.
         """
         ...
 
@@ -1013,12 +1065,18 @@ class KnowledgeGraph:
         self,
         normalized: Optional[bool] = None,
         top_k: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
+        as_dict: Optional[bool] = None,
+        timeout_ms: Optional[int] = None,
+        to_df: Optional[bool] = None,
+    ) -> Union[list[dict[str, Any]], "pd.DataFrame"]:
         """Calculate closeness centrality.
 
         Args:
             normalized: Adjust for disconnected components. Default ``True``.
             top_k: Return only the top *K* nodes.
+            as_dict: Return ``{title: score}`` dict instead of list of dicts.
+            timeout_ms: Abort after this many milliseconds, returning partial results.
+            to_df: Return a pandas DataFrame with columns ``type``, ``title``, ``id``, ``score``.
 
         Returns:
             List of dicts with ``type``, ``title``, ``id``, ``score``.
@@ -1031,14 +1089,16 @@ class KnowledgeGraph:
 
     def louvain_communities(
         self,
+        weight_property: Optional[str] = None,
         resolution: Optional[float] = None,
-        max_iterations: Optional[int] = None,
+        timeout_ms: Optional[int] = None,
     ) -> dict[str, Any]:
         """Detect communities using the Louvain algorithm.
 
         Args:
+            weight_property: Edge property to use as weight. Default all edges weight ``1.0``.
             resolution: Resolution parameter (higher = more communities). Default ``1.0``.
-            max_iterations: Maximum iterations. Default ``100``.
+            timeout_ms: Abort after this many milliseconds, returning partial results.
 
         Returns:
             Dict with ``communities`` (dict of community_id to member list),
@@ -1049,11 +1109,13 @@ class KnowledgeGraph:
     def label_propagation(
         self,
         max_iterations: Optional[int] = None,
+        timeout_ms: Optional[int] = None,
     ) -> dict[str, Any]:
         """Detect communities using label propagation.
 
         Args:
             max_iterations: Maximum iterations. Default ``100``.
+            timeout_ms: Abort after this many milliseconds, returning partial results.
 
         Returns:
             Dict with ``communities``, ``modularity``, and ``num_communities``.
