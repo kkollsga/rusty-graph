@@ -2561,6 +2561,7 @@ impl KnowledgeGraph {
     ///         - 'length': Number of hops in the path
     ///     Returns None if no path exists.
     #[pyo3(signature = (source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None))]
+    #[allow(clippy::too_many_arguments)]
     fn shortest_path(
         &self,
         py: Python<'_>,
@@ -2601,7 +2602,8 @@ impl KnowledgeGraph {
         })?;
 
         // Find shortest path
-        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
         let result = graph_algorithms::shortest_path(
             &self.inner,
             source_idx,
@@ -2772,6 +2774,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     A list of node IDs along the path, or None if no path exists.
     #[pyo3(signature = (source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None))]
+    #[allow(clippy::too_many_arguments)]
     fn shortest_path_ids(
         &self,
         py: Python<'_>,
@@ -2807,7 +2810,8 @@ impl KnowledgeGraph {
             })?;
 
         // Find shortest path
-        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
         match graph_algorithms::shortest_path(
             &self.inner,
             source_idx,
@@ -2849,6 +2853,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     A list of integer node indices along the path, or None if no path exists.
     #[pyo3(signature = (source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None))]
+    #[allow(clippy::too_many_arguments)]
     fn shortest_path_indices(
         &self,
         py: Python<'_>,
@@ -2883,7 +2888,8 @@ impl KnowledgeGraph {
                 ))
             })?;
 
-        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         // Find shortest path and return raw indices
         match graph_algorithms::shortest_path(
@@ -2916,6 +2922,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     A list of path dictionaries, each with 'path', 'connections', and 'length'
     #[pyo3(signature = (source_type, source_id, target_type, target_id, max_hops=None, max_results=None, connection_types=None, via_types=None, timeout_ms=None))]
+    #[allow(clippy::too_many_arguments)]
     fn all_paths(
         &self,
         py: Python<'_>,
@@ -2959,7 +2966,8 @@ impl KnowledgeGraph {
             ))
         })?;
 
-        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         // Find all paths
         let paths = graph_algorithms::all_paths(
@@ -3185,6 +3193,7 @@ impl KnowledgeGraph {
     ///         print(f"{node['title']}: {node['score']:.4f}")
     ///     ```
     #[pyo3(signature = (normalized=None, sample_size=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
+    #[allow(clippy::too_many_arguments)]
     fn betweenness_centrality(
         &self,
         py: Python<'_>,
@@ -3196,10 +3205,15 @@ impl KnowledgeGraph {
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let normalized = normalized.unwrap_or(true);
-        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
-        let results =
-            graph_algorithms::betweenness_centrality(&self.inner, normalized, sample_size, deadline);
+        let results = graph_algorithms::betweenness_centrality(
+            &self.inner,
+            normalized,
+            sample_size,
+            deadline,
+        );
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -3233,6 +3247,7 @@ impl KnowledgeGraph {
     ///         print(f"{node['title']}: {node['score']:.6f}")
     ///     ```
     #[pyo3(signature = (damping_factor=None, max_iterations=None, tolerance=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
+    #[allow(clippy::too_many_arguments)]
     fn pagerank(
         &self,
         py: Python<'_>,
@@ -3247,7 +3262,8 @@ impl KnowledgeGraph {
         let damping = damping_factor.unwrap_or(0.85);
         let max_iter = max_iterations.unwrap_or(100);
         let tol = tolerance.unwrap_or(1e-6);
-        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         let results = graph_algorithms::pagerank(&self.inner, damping, max_iter, tol, deadline);
 
@@ -3289,7 +3305,8 @@ impl KnowledgeGraph {
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let normalized = normalized.unwrap_or(true);
-        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         let results = graph_algorithms::degree_centrality(&self.inner, normalized, deadline);
 
@@ -3332,7 +3349,8 @@ impl KnowledgeGraph {
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let normalized = normalized.unwrap_or(true);
-        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         let results = graph_algorithms::closeness_centrality(&self.inner, normalized, deadline);
 
@@ -3367,9 +3385,14 @@ impl KnowledgeGraph {
         timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         let res = resolution.unwrap_or(1.0);
-        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
-        let result =
-            graph_algorithms::louvain_communities(&self.inner, weight_property.as_deref(), res, deadline);
+        let deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let result = graph_algorithms::louvain_communities(
+            &self.inner,
+            weight_property.as_deref(),
+            res,
+            deadline,
+        );
         community_results_to_py(py, &self.inner, result)
     }
 
@@ -3391,7 +3414,8 @@ impl KnowledgeGraph {
         timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         let max_iter = max_iterations.unwrap_or(100);
-        let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
         let result = graph_algorithms::label_propagation(&self.inner, max_iter, deadline);
         community_results_to_py(py, &self.inner, result)
     }

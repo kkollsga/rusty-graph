@@ -260,13 +260,16 @@ impl<'a> CypherExecutor<'a> {
         };
 
         // Extract edge direction from the pattern
-        let edge_direction = elements.iter().find_map(|elem| {
-            if let PatternElement::Edge(ep) = elem {
-                Some(ep.direction)
-            } else {
-                None
-            }
-        }).unwrap_or(EdgeDirection::Outgoing);
+        let edge_direction = elements
+            .iter()
+            .find_map(|elem| {
+                if let PatternElement::Edge(ep) = elem {
+                    Some(ep.direction)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(EdgeDirection::Outgoing);
 
         // Find matching source and target nodes
         let executor =

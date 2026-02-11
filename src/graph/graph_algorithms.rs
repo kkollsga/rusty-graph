@@ -64,7 +64,11 @@ fn filtered_neighbors_outgoing(
 
 /// Check if a node passes the via_types filter.
 /// Source and target should be excluded from this check by the caller.
-fn node_passes_via_filter(graph: &DirGraph, node: NodeIndex, via_types: &Option<HashSet<&str>>) -> bool {
+fn node_passes_via_filter(
+    graph: &DirGraph,
+    node: NodeIndex,
+    via_types: &Option<HashSet<&str>>,
+) -> bool {
     match via_types {
         None => true,
         Some(types) => {
@@ -284,7 +288,7 @@ fn reconstruct_path_bfs(
     while let Some(current_idx) = queue.pop_front() {
         // Periodic timeout check (every 1000 nodes)
         visit_count += 1;
-        if visit_count % 1000 == 0 {
+        if visit_count.is_multiple_of(1000) {
             if let Some(dl) = deadline {
                 if Instant::now() > dl {
                     return None;
@@ -301,8 +305,7 @@ fn reconstruct_path_bfs(
 
             if !visited[neighbor_idx] {
                 // Apply via_types filter (skip if not target and doesn't match)
-                if neighbor_idx != target_idx
-                    && !node_passes_via_filter(graph, neighbor, via_types)
+                if neighbor_idx != target_idx && !node_passes_via_filter(graph, neighbor, via_types)
                 {
                     continue;
                 }
@@ -373,7 +376,7 @@ pub fn shortest_path_directed(
     while let Some(current_idx) = queue.pop_front() {
         // Periodic timeout check
         visit_count += 1;
-        if visit_count % 1000 == 0 {
+        if visit_count.is_multiple_of(1000) {
             if let Some(dl) = deadline {
                 if Instant::now() > dl {
                     return None;
@@ -390,8 +393,7 @@ pub fn shortest_path_directed(
 
             if !visited[neighbor_idx] {
                 // Apply via_types filter (skip if not target and doesn't match)
-                if neighbor_idx != target_idx
-                    && !node_passes_via_filter(graph, neighbor, &via_set)
+                if neighbor_idx != target_idx && !node_passes_via_filter(graph, neighbor, &via_set)
                 {
                     continue;
                 }
@@ -428,6 +430,7 @@ pub fn shortest_path_directed(
 /// * `max_results` - Stop after finding this many paths (prevents OOM on dense graphs)
 /// * `connection_types` - Only traverse edges of these types (None = all)
 /// * `via_types` - Only traverse through nodes of these types (None = all)
+#[allow(clippy::too_many_arguments)]
 pub fn all_paths(
     graph: &DirGraph,
     source: NodeIndex,
@@ -462,7 +465,7 @@ pub fn all_paths(
     results
 }
 
-#[allow(clippy::only_used_in_recursion)]
+#[allow(clippy::only_used_in_recursion, clippy::too_many_arguments)]
 fn find_all_paths_recursive(
     graph: &DirGraph,
     current: NodeIndex,
@@ -757,7 +760,7 @@ pub fn betweenness_centrality(
     // Brandes' algorithm - process each source
     for (source_counter, &s_idx) in source_indices.iter().enumerate() {
         // Periodic timeout check (every 10 source nodes)
-        if source_counter % 10 == 0 {
+        if source_counter.is_multiple_of(10) {
             if let Some(dl) = deadline {
                 if Instant::now() > dl {
                     break;
@@ -985,7 +988,11 @@ pub fn pagerank(
 ///
 /// Simply counts the number of connections each node has.
 /// Optionally normalized by (n-1) to get values between 0 and 1.
-pub fn degree_centrality(graph: &DirGraph, normalized: bool, _deadline: Option<Instant>) -> Vec<CentralityResult> {
+pub fn degree_centrality(
+    graph: &DirGraph,
+    normalized: bool,
+    _deadline: Option<Instant>,
+) -> Vec<CentralityResult> {
     let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
     let n = nodes.len();
 
@@ -1031,7 +1038,11 @@ pub fn degree_centrality(graph: &DirGraph, normalized: bool, _deadline: Option<I
 ///
 /// Note: For disconnected graphs, only reachable nodes are considered.
 /// Optimized to use Vec instead of HashMap for O(1) direct indexing.
-pub fn closeness_centrality(graph: &DirGraph, normalized: bool, deadline: Option<Instant>) -> Vec<CentralityResult> {
+pub fn closeness_centrality(
+    graph: &DirGraph,
+    normalized: bool,
+    deadline: Option<Instant>,
+) -> Vec<CentralityResult> {
     use std::collections::VecDeque;
 
     let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
@@ -1068,7 +1079,7 @@ pub fn closeness_centrality(graph: &DirGraph, normalized: bool, deadline: Option
 
     for (s_idx, &source) in nodes.iter().enumerate() {
         // Periodic timeout check (every 10 source nodes)
-        if s_idx % 10 == 0 {
+        if s_idx.is_multiple_of(10) {
             if let Some(dl) = deadline {
                 if Instant::now() > dl {
                     break;
@@ -1353,7 +1364,11 @@ pub fn louvain_communities(
 /// Each node adopts the most frequent label among its neighbors.
 /// Converges when no node changes its label.
 /// Optimized with pre-built adjacency list and Vec-based label counting.
-pub fn label_propagation(graph: &DirGraph, max_iterations: usize, deadline: Option<Instant>) -> CommunityResult {
+pub fn label_propagation(
+    graph: &DirGraph,
+    max_iterations: usize,
+    deadline: Option<Instant>,
+) -> CommunityResult {
     let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
     let n = nodes.len();
 
@@ -1850,7 +1865,7 @@ mod tests {
     #[test]
     fn test_betweenness_centrality_chain() {
         let (graph, indices) = build_chain_graph();
-        let results = betweenness_centrality(&graph, false, None);
+        let results = betweenness_centrality(&graph, false, None, None);
         assert_eq!(results.len(), 5);
         // Middle node (index 2) should have highest betweenness in a chain
         let middle_score = results
@@ -1869,7 +1884,7 @@ mod tests {
     #[test]
     fn test_degree_centrality() {
         let (graph, indices) = build_chain_graph();
-        let results = degree_centrality(&graph, false);
+        let results = degree_centrality(&graph, false, None);
         assert_eq!(results.len(), 5);
         // Middle nodes should have degree 2, end nodes degree 1
         let middle = results.iter().find(|r| r.node_idx == indices[2]).unwrap();
@@ -1881,7 +1896,7 @@ mod tests {
     #[test]
     fn test_pagerank_basic() {
         let (graph, _) = build_triangle_graph();
-        let results = pagerank(&graph, 0.85, 100, 1e-6);
+        let results = pagerank(&graph, 0.85, 100, 1e-6, None);
         assert_eq!(results.len(), 3);
         // All nodes in a symmetric triangle should have roughly equal PageRank
         let scores: Vec<f64> = results.iter().map(|r| r.score).collect();
@@ -1896,7 +1911,7 @@ mod tests {
     #[test]
     fn test_closeness_centrality_chain() {
         let (graph, indices) = build_chain_graph();
-        let results = closeness_centrality(&graph, false);
+        let results = closeness_centrality(&graph, false, None);
         assert_eq!(results.len(), 5);
         // Middle node should have highest closeness
         let middle = results
@@ -1915,7 +1930,7 @@ mod tests {
     #[test]
     fn test_pagerank_empty_graph() {
         let graph = DirGraph::new();
-        let results = pagerank(&graph, 0.85, 100, 1e-6);
+        let results = pagerank(&graph, 0.85, 100, 1e-6, None);
         assert!(results.is_empty());
     }
 
