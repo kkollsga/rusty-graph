@@ -6,6 +6,32 @@ on:
   workflow_dispatch: # Allow manual triggering
 
 jobs:
+  ci-gate:
+    name: Wait for CI to pass
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for CI workflow
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'Rust checks'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+      - name: Wait for Python tests (3.10)
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'Python tests (py3.10)'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+      - name: Wait for Python tests (3.12)
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'Python tests (py3.12)'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+
   version:
     name: Extract version
     runs-on: ubuntu-latest
@@ -23,7 +49,7 @@ jobs:
 
   build:
     name: Build wheels - ${{ matrix.os }} - ${{ matrix.target }} - py${{ matrix.python-version }}
-    needs: version
+    needs: [ci-gate, version]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
