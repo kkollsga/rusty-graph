@@ -2080,8 +2080,9 @@ impl KnowledgeGraph {
     }
 
     /// Return property statistics for a node type.
-    fn properties(&self, node_type: &str) -> PyResult<Py<PyAny>> {
-        let stats = introspection::compute_property_stats(&self.inner, node_type)
+    #[pyo3(signature = (node_type, max_values=20))]
+    fn properties(&self, node_type: &str, max_values: usize) -> PyResult<Py<PyAny>> {
+        let stats = introspection::compute_property_stats(&self.inner, node_type, max_values)
             .map_err(PyErr::new::<pyo3::exceptions::PyKeyError, _>)?;
         Python::attach(|py| {
             let result = PyDict::new(py);

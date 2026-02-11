@@ -758,18 +758,22 @@ class KnowledgeGraph:
         """
         ...
 
-    def properties(self, node_type: str) -> dict[str, dict[str, Any]]:
+    def properties(self, node_type: str, max_values: int = 20) -> dict[str, dict[str, Any]]:
         """Return property statistics for a node type.
+
+        Only properties that exist on at least one node are included.
 
         Args:
             node_type: The node type to inspect.
+            max_values: Include ``values`` list when unique count <= this
+                threshold. Set to 0 to never include values. Default: 20.
 
         Returns:
             Dict mapping property name to stats dict with keys:
                 - ``type``: type string (e.g. ``'str'``, ``'int'``, ``'float'``)
                 - ``non_null``: count of non-null values
                 - ``unique``: count of distinct values
-                - ``values``: (optional) list of values when unique count <= 20
+                - ``values``: (optional) sorted list of values when unique count <= max_values
 
         Raises:
             KeyError: If node_type does not exist.

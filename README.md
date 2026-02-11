@@ -207,6 +207,7 @@ graph.type_filter('Person')                        # select by type → Knowledg
 graph.schema()                                # → full graph overview (types, counts, connections, indexes)
 graph.connection_types()                      # → list of edge types with counts and endpoint types
 graph.properties('Person')                    # → per-property stats (type, non_null, unique, values)
+graph.properties('Person', max_values=50)     # → include values list for up to 50 unique values
 graph.neighbors_schema('Person')              # → outgoing/incoming connection topology
 graph.sample('Person', n=5)                   # → first N nodes as dicts
 graph.indexes()                               # → all indexes with type info
@@ -258,9 +259,9 @@ graph.connection_types()
 # ]
 ```
 
-### `properties(node_type)` — Property details
+### `properties(node_type, max_values=20)` — Property details
 
-Per-property statistics for a single node type. Includes `values` list when unique count is 20 or fewer (low cardinality).
+Per-property statistics for a single node type. Only properties that exist on at least one node are included. The `values` list is included when the unique count is at or below `max_values` (default 20). Set `max_values=0` to never include values, or raise it to see more (e.g., `max_values=100`).
 
 ```python
 graph.properties('Person')
@@ -272,6 +273,9 @@ graph.properties('Person')
 #   'age':   {'type': 'int', 'non_null': 500, 'unique': 45},
 #   'email': {'type': 'str', 'non_null': 250, 'unique': 250},
 # }
+
+# See all values even for higher-cardinality properties
+graph.properties('Person', max_values=100)
 ```
 
 Raises `KeyError` if the node type doesn't exist.

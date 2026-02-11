@@ -9,8 +9,6 @@ use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use petgraph::Direction;
 use std::collections::{HashMap, HashSet};
 
-const LOW_CARDINALITY_THRESHOLD: usize = 20;
-
 // ── Return types ────────────────────────────────────────────────────────────
 
 pub struct ConnectionTypeStats {
@@ -158,9 +156,11 @@ fn value_type_name(v: &Value) -> &'static str {
 }
 
 /// Property stats for one node type. Scans all nodes of that type.
+/// `max_values`: include `values` list when unique count ≤ this threshold (0 = never).
 pub fn compute_property_stats(
     graph: &DirGraph,
     node_type: &str,
+    max_values: usize,
 ) -> Result<Vec<PropertyStatInfo>, String> {
     let node_indices = graph
         .type_indices
@@ -179,22 +179,14 @@ pub fn compute_property_stats(
         }
     }
 
-    // Build ordered property list: built-ins first, then discovered, then metadata-only
+    // Build ordered property list: built-ins first, then discovered from actual nodes
+    // (metadata-only properties with no actual values are excluded)
     let mut property_names: Vec<String> =
         vec!["type".to_string(), "title".to_string(), "id".to_string()];
     // Add discovered properties (sorted for determinism)
     let mut discovered: Vec<String> = all_props.into_iter().collect();
     discovered.sort();
     property_names.extend(discovered);
-
-    // Also include metadata-only properties not yet seen
-    if let Some(meta) = graph.node_type_metadata.get(node_type) {
-        for key in meta.keys() {
-            if !property_names.contains(key) {
-                property_names.push(key.clone());
-            }
-        }
-    }
 
     let mut results = Vec::new();
 
@@ -244,7 +236,7 @@ pub fn compute_property_stats(
             .unwrap_or_else(|| first_type.unwrap_or("unknown").to_string());
 
         let unique = value_set.len();
-        let values = if unique <= LOW_CARDINALITY_THRESHOLD && unique > 0 {
+        let values = if max_values > 0 && unique <= max_values && unique > 0 {
             let mut vals: Vec<Value> = value_set.into_iter().collect();
             vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             Some(vals)

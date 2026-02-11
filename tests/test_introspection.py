@@ -147,6 +147,35 @@ class TestProperties:
         assert 'type' in props['age']
         assert props['city']['type'] in ('str', 'String')
 
+    def test_ghost_property_suppressed(self):
+        """Properties in metadata but absent on all nodes should not appear."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Item {name: 'A', color: 'red'})")
+        # SET a new property, then REMOVE it from the only node
+        g.cypher("MATCH (n:Item) SET n.temp = 99")
+        g.cypher("MATCH (n:Item) REMOVE n.temp")
+        props = g.properties('Item')
+        # temp was removed from the node — non_null would be 0, so it should be excluded
+        assert 'temp' not in props
+        assert 'color' in props
+
+    def test_max_values_default(self, small_graph):
+        """Default max_values=20 includes values for low-cardinality props."""
+        props = small_graph.properties('Person')
+        assert 'values' in props['city']
+
+    def test_max_values_zero_suppresses(self, small_graph):
+        """max_values=0 should never include the values list."""
+        props = small_graph.properties('Person', max_values=0)
+        assert 'values' not in props['city']
+        assert 'values' not in props['id']
+
+    def test_max_values_custom(self, small_graph):
+        """max_values=1 excludes city (2 unique) but includes type (1 unique)."""
+        props = small_graph.properties('Person', max_values=1)
+        assert 'values' not in props['city']  # 2 unique > 1
+        assert 'values' in props['type']       # 1 unique <= 1
+
 
 # ── neighbors_schema() ──────────────────────────────────────────────────────
 
