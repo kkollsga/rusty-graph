@@ -731,6 +731,95 @@ class KnowledgeGraph:
         ...
 
     # ====================================================================
+    # Schema Introspection
+    # ====================================================================
+
+    def schema(self) -> dict[str, Any]:
+        """Return a full schema overview of the graph.
+
+        Returns:
+            Dict with keys:
+                - ``node_types``: ``{type_name: {count, properties: {name: type_str}}}``
+                - ``connection_types``: ``{conn_name: {count, source_types: list, target_types: list}}``
+                - ``indexes``: list of ``"Type.property"`` strings
+                - ``node_count``: total nodes
+                - ``edge_count``: total edges
+
+        Note:
+            Scans all edges once (O(m)) to compute accurate connection type stats.
+        """
+        ...
+
+    def connection_types(self) -> list[dict[str, Any]]:
+        """Return all connection types with counts and endpoint type sets.
+
+        Returns:
+            List of dicts with ``type``, ``count``, ``source_types``, ``target_types``.
+        """
+        ...
+
+    def properties(self, node_type: str) -> dict[str, dict[str, Any]]:
+        """Return property statistics for a node type.
+
+        Args:
+            node_type: The node type to inspect.
+
+        Returns:
+            Dict mapping property name to stats dict with keys:
+                - ``type``: type string (e.g. ``'str'``, ``'int'``, ``'float'``)
+                - ``non_null``: count of non-null values
+                - ``unique``: count of distinct values
+                - ``values``: (optional) list of values when unique count <= 20
+
+        Raises:
+            KeyError: If node_type does not exist.
+        """
+        ...
+
+    def neighbors_schema(self, node_type: str) -> dict[str, list[dict[str, Any]]]:
+        """Return connection topology for a node type.
+
+        Args:
+            node_type: The node type to inspect.
+
+        Returns:
+            Dict with:
+                - ``outgoing``: list of ``{connection_type, target_type, count}``
+                - ``incoming``: list of ``{connection_type, source_type, count}``
+
+        Raises:
+            KeyError: If node_type does not exist.
+        """
+        ...
+
+    def sample(self, node_type: str, n: int = 5) -> list[dict[str, Any]]:
+        """Return a quick sample of nodes for a given type.
+
+        Args:
+            node_type: The node type to sample.
+            n: Number of nodes to return. Default ``5``.
+
+        Returns:
+            List of node dicts (same format as :meth:`get_nodes`).
+
+        Raises:
+            KeyError: If node_type does not exist.
+        """
+        ...
+
+    def indexes(self) -> list[dict[str, Any]]:
+        """Return a unified list of all indexes.
+
+        Returns:
+            List of dicts, each with:
+                - ``node_type``: the indexed node type
+                - ``property``: property name (for equality indexes)
+                - ``properties``: list of property names (for composite indexes)
+                - ``type``: ``'equality'`` or ``'composite'``
+        """
+        ...
+
+    # ====================================================================
     # Persistence
     # ====================================================================
 

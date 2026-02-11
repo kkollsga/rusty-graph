@@ -201,6 +201,17 @@ graph.type_filter('Person')                        # select by type → Knowledg
     .get_nodes()                                   # materialize → list[dict]
 ```
 
+### Introspection
+
+```python
+graph.schema()                                # → full graph overview (types, counts, connections, indexes)
+graph.connection_types()                      # → list of edge types with counts and endpoint types
+graph.properties('Person')                    # → per-property stats (type, non_null, unique, values)
+graph.neighbors_schema('Person')              # → outgoing/incoming connection topology
+graph.sample('Person', n=5)                   # → first N nodes as dicts
+graph.indexes()                               # → all indexes with type info
+```
+
 ### Algorithms
 
 ```python
@@ -210,6 +221,103 @@ graph.pagerank(top_k=10)                                             # → list[
 graph.betweenness_centrality(top_k=10)                               # → list[{type, title, id, score}]
 graph.louvain_communities()                                          # → {communities, modularity, num_communities}
 graph.connected_components()                                         # → list[list[node_dict]]
+```
+
+---
+
+## Schema Introspection
+
+Methods for exploring graph structure — what types exist, what properties they have, and how they connect. Useful for discovering an unfamiliar graph or building dynamic UIs.
+
+### `schema()` — Full graph overview
+
+```python
+s = graph.schema()
+# {
+#   'node_types': {
+#     'Person': {'count': 500, 'properties': {'age': 'Int64', 'city': 'String'}},
+#     'Company': {'count': 50, 'properties': {'founded': 'Int64'}},
+#   },
+#   'connection_types': {
+#     'KNOWS': {'count': 1200, 'source_types': ['Person'], 'target_types': ['Person']},
+#     'WORKS_AT': {'count': 500, 'source_types': ['Person'], 'target_types': ['Company']},
+#   },
+#   'indexes': ['Person.city', 'Person.(city, age)'],
+#   'node_count': 550,
+#   'edge_count': 1700,
+# }
+```
+
+### `connection_types()` — Edge type inventory
+
+```python
+graph.connection_types()
+# [
+#   {'type': 'KNOWS', 'count': 1200, 'source_types': ['Person'], 'target_types': ['Person']},
+#   {'type': 'WORKS_AT', 'count': 500, 'source_types': ['Person'], 'target_types': ['Company']},
+# ]
+```
+
+### `properties(node_type)` — Property details
+
+Per-property statistics for a single node type. Includes `values` list when unique count is 20 or fewer (low cardinality).
+
+```python
+graph.properties('Person')
+# {
+#   'type':  {'type': 'str', 'non_null': 500, 'unique': 1, 'values': ['Person']},
+#   'title': {'type': 'str', 'non_null': 500, 'unique': 500},
+#   'id':    {'type': 'int', 'non_null': 500, 'unique': 500},
+#   'city':  {'type': 'str', 'non_null': 500, 'unique': 3, 'values': ['Bergen', 'Oslo', 'Stavanger']},
+#   'age':   {'type': 'int', 'non_null': 500, 'unique': 45},
+#   'email': {'type': 'str', 'non_null': 250, 'unique': 250},
+# }
+```
+
+Raises `KeyError` if the node type doesn't exist.
+
+### `neighbors_schema(node_type)` — Connection topology
+
+Outgoing and incoming connections grouped by (connection type, endpoint type):
+
+```python
+graph.neighbors_schema('Person')
+# {
+#   'outgoing': [
+#     {'connection_type': 'KNOWS', 'target_type': 'Person', 'count': 1200},
+#     {'connection_type': 'WORKS_AT', 'target_type': 'Company', 'count': 500},
+#   ],
+#   'incoming': [
+#     {'connection_type': 'KNOWS', 'source_type': 'Person', 'count': 1200},
+#   ],
+# }
+```
+
+Raises `KeyError` if the node type doesn't exist.
+
+### `sample(node_type, n=5)` — Quick data peek
+
+Returns the first N nodes of a type as full dicts:
+
+```python
+graph.sample('Person', n=3)
+# [
+#   {'type': 'Person', 'title': 'Alice', 'id': 1, 'age': 28, 'city': 'Oslo'},
+#   {'type': 'Person', 'title': 'Bob', 'id': 2, 'age': 35, 'city': 'Bergen'},
+#   {'type': 'Person', 'title': 'Charlie', 'id': 3, 'age': 42, 'city': 'Oslo'},
+# ]
+```
+
+Returns fewer than N if the type has fewer nodes. Raises `KeyError` if the node type doesn't exist.
+
+### `indexes()` — Unified index list
+
+```python
+graph.indexes()
+# [
+#   {'node_type': 'Person', 'property': 'city', 'type': 'equality'},
+#   {'node_type': 'Person', 'properties': ['city', 'age'], 'type': 'composite'},
+# ]
 ```
 
 ---

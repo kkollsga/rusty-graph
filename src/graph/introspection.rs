@@ -1,0 +1,349 @@
+// src/graph/introspection.rs
+//
+// Schema introspection functions for exploring graph structure.
+// All functions take &DirGraph and return Rust structs — PyO3 conversion in mod.rs.
+
+use crate::datatypes::values::Value;
+use crate::graph::schema::{DirGraph, NodeData};
+use petgraph::visit::{EdgeRef, IntoEdgeReferences};
+use petgraph::Direction;
+use std::collections::{HashMap, HashSet};
+
+const LOW_CARDINALITY_THRESHOLD: usize = 20;
+
+// ── Return types ────────────────────────────────────────────────────────────
+
+pub struct ConnectionTypeStats {
+    pub connection_type: String,
+    pub count: usize,
+    pub source_types: Vec<String>,
+    pub target_types: Vec<String>,
+}
+
+pub struct NodeTypeOverview {
+    pub count: usize,
+    pub properties: HashMap<String, String>,
+}
+
+pub struct SchemaOverview {
+    pub node_types: Vec<(String, NodeTypeOverview)>,
+    pub connection_types: Vec<ConnectionTypeStats>,
+    pub indexes: Vec<String>,
+    pub node_count: usize,
+    pub edge_count: usize,
+}
+
+pub struct PropertyStatInfo {
+    pub property_name: String,
+    pub type_string: String,
+    pub non_null: usize,
+    pub unique: usize,
+    pub values: Option<Vec<Value>>,
+}
+
+pub struct NeighborConnection {
+    pub connection_type: String,
+    pub other_type: String,
+    pub count: usize,
+}
+
+pub struct NeighborsSchema {
+    pub outgoing: Vec<NeighborConnection>,
+    pub incoming: Vec<NeighborConnection>,
+}
+
+// ── Core functions ──────────────────────────────────────────────────────────
+
+/// Scan all edges once to compute per-connection-type stats.
+pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStats> {
+    let mut stats: HashMap<String, (usize, HashSet<String>, HashSet<String>)> = HashMap::new();
+
+    for edge_ref in graph.graph.edge_references() {
+        let edge_data = edge_ref.weight();
+        let entry = stats
+            .entry(edge_data.connection_type.clone())
+            .or_insert_with(|| (0, HashSet::new(), HashSet::new()));
+        entry.0 += 1;
+
+        if let Some(source_node) = graph.get_node(edge_ref.source()) {
+            entry.1.insert(source_node.node_type.clone());
+        }
+        if let Some(target_node) = graph.get_node(edge_ref.target()) {
+            entry.2.insert(target_node.node_type.clone());
+        }
+    }
+
+    let mut result: Vec<ConnectionTypeStats> = stats
+        .into_iter()
+        .map(|(conn_type, (count, src_set, tgt_set))| {
+            let mut source_types: Vec<String> = src_set.into_iter().collect();
+            source_types.sort();
+            let mut target_types: Vec<String> = tgt_set.into_iter().collect();
+            target_types.sort();
+            ConnectionTypeStats {
+                connection_type: conn_type,
+                count,
+                source_types,
+                target_types,
+            }
+        })
+        .collect();
+    result.sort_by(|a, b| a.connection_type.cmp(&b.connection_type));
+    result
+}
+
+/// Full schema overview: node types, connection types, indexes, totals.
+pub fn compute_schema(graph: &DirGraph) -> SchemaOverview {
+    // Node types from type_indices
+    let mut node_types: Vec<(String, NodeTypeOverview)> = graph
+        .type_indices
+        .iter()
+        .map(|(nt, indices)| {
+            let properties = graph
+                .node_type_metadata
+                .get(nt)
+                .cloned()
+                .unwrap_or_default();
+            (
+                nt.clone(),
+                NodeTypeOverview {
+                    count: indices.len(),
+                    properties,
+                },
+            )
+        })
+        .collect();
+    node_types.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Connection types via edge scan
+    let connection_types = compute_connection_type_stats(graph);
+
+    // Indexes
+    let mut indexes: Vec<String> = Vec::new();
+    for (node_type, property) in graph.property_indices.keys() {
+        indexes.push(format!("{}.{}", node_type, property));
+    }
+    for (node_type, properties) in graph.composite_indices.keys() {
+        indexes.push(format!("{}.({})", node_type, properties.join(", ")));
+    }
+    indexes.sort();
+
+    SchemaOverview {
+        node_types,
+        connection_types,
+        indexes,
+        node_count: graph.graph.node_count(),
+        edge_count: graph.graph.edge_count(),
+    }
+}
+
+fn is_null_value(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::Float64(f) => f.is_nan(),
+        _ => false,
+    }
+}
+
+fn value_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::String(_) => "str",
+        Value::Int64(_) => "int",
+        Value::Float64(_) => "float",
+        Value::Boolean(_) => "bool",
+        Value::DateTime(_) => "datetime",
+        Value::UniqueId(_) => "uniqueid",
+        Value::Null => "unknown",
+    }
+}
+
+/// Property stats for one node type. Scans all nodes of that type.
+pub fn compute_property_stats(
+    graph: &DirGraph,
+    node_type: &str,
+) -> Result<Vec<PropertyStatInfo>, String> {
+    let node_indices = graph
+        .type_indices
+        .get(node_type)
+        .ok_or_else(|| format!("Node type '{}' not found", node_type))?;
+
+    let total_nodes = node_indices.len();
+
+    // First pass: discover all property names from actual nodes
+    let mut all_props: HashSet<String> = HashSet::new();
+    for &idx in node_indices {
+        if let Some(node) = graph.get_node(idx) {
+            for key in node.properties.keys() {
+                all_props.insert(key.clone());
+            }
+        }
+    }
+
+    // Build ordered property list: built-ins first, then discovered, then metadata-only
+    let mut property_names: Vec<String> =
+        vec!["type".to_string(), "title".to_string(), "id".to_string()];
+    // Add discovered properties (sorted for determinism)
+    let mut discovered: Vec<String> = all_props.into_iter().collect();
+    discovered.sort();
+    property_names.extend(discovered);
+
+    // Also include metadata-only properties not yet seen
+    if let Some(meta) = graph.node_type_metadata.get(node_type) {
+        for key in meta.keys() {
+            if !property_names.contains(key) {
+                property_names.push(key.clone());
+            }
+        }
+    }
+
+    let mut results = Vec::new();
+
+    for prop_name in &property_names {
+        // Handle "type" specially — always same value, always non-null
+        if prop_name == "type" {
+            results.push(PropertyStatInfo {
+                property_name: "type".to_string(),
+                type_string: "str".to_string(),
+                non_null: total_nodes,
+                unique: 1,
+                values: Some(vec![Value::String(node_type.to_string())]),
+            });
+            continue;
+        }
+
+        let mut non_null: usize = 0;
+        let mut value_set: HashSet<Value> = HashSet::new();
+        let mut first_type: Option<&'static str> = None;
+
+        for &idx in node_indices {
+            if let Some(node) = graph.get_node(idx) {
+                let val = match prop_name.as_str() {
+                    "id" => Some(&node.id),
+                    "title" => Some(&node.title),
+                    _ => node.properties.get(prop_name),
+                };
+
+                if let Some(v) = val {
+                    if !is_null_value(v) {
+                        non_null += 1;
+                        value_set.insert(v.clone());
+                        if first_type.is_none() {
+                            first_type = Some(value_type_name(v));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Determine type string: prefer metadata, fallback to inferred
+        let type_string = graph
+            .node_type_metadata
+            .get(node_type)
+            .and_then(|meta| meta.get(prop_name))
+            .cloned()
+            .unwrap_or_else(|| first_type.unwrap_or("unknown").to_string());
+
+        let unique = value_set.len();
+        let values = if unique <= LOW_CARDINALITY_THRESHOLD && unique > 0 {
+            let mut vals: Vec<Value> = value_set.into_iter().collect();
+            vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            Some(vals)
+        } else {
+            None
+        };
+
+        results.push(PropertyStatInfo {
+            property_name: prop_name.clone(),
+            type_string,
+            non_null,
+            unique,
+            values,
+        });
+    }
+
+    Ok(results)
+}
+
+/// Connection topology for one node type: outgoing and incoming grouped by (conn_type, other_type).
+pub fn compute_neighbors_schema(
+    graph: &DirGraph,
+    node_type: &str,
+) -> Result<NeighborsSchema, String> {
+    let node_indices = graph
+        .type_indices
+        .get(node_type)
+        .ok_or_else(|| format!("Node type '{}' not found", node_type))?;
+
+    let mut outgoing: HashMap<(String, String), usize> = HashMap::new();
+    let mut incoming: HashMap<(String, String), usize> = HashMap::new();
+
+    for &node_idx in node_indices {
+        for edge_ref in graph.graph.edges_directed(node_idx, Direction::Outgoing) {
+            if let Some(target_node) = graph.get_node(edge_ref.target()) {
+                let key = (
+                    edge_ref.weight().connection_type.clone(),
+                    target_node.node_type.clone(),
+                );
+                *outgoing.entry(key).or_insert(0) += 1;
+            }
+        }
+        for edge_ref in graph.graph.edges_directed(node_idx, Direction::Incoming) {
+            if let Some(source_node) = graph.get_node(edge_ref.source()) {
+                let key = (
+                    edge_ref.weight().connection_type.clone(),
+                    source_node.node_type.clone(),
+                );
+                *incoming.entry(key).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut outgoing_list: Vec<NeighborConnection> = outgoing
+        .into_iter()
+        .map(|((ct, ot), count)| NeighborConnection {
+            connection_type: ct,
+            other_type: ot,
+            count,
+        })
+        .collect();
+    outgoing_list.sort_by(|a, b| {
+        (&a.connection_type, &a.other_type).cmp(&(&b.connection_type, &b.other_type))
+    });
+
+    let mut incoming_list: Vec<NeighborConnection> = incoming
+        .into_iter()
+        .map(|((ct, ot), count)| NeighborConnection {
+            connection_type: ct,
+            other_type: ot,
+            count,
+        })
+        .collect();
+    incoming_list.sort_by(|a, b| {
+        (&a.connection_type, &a.other_type).cmp(&(&b.connection_type, &b.other_type))
+    });
+
+    Ok(NeighborsSchema {
+        outgoing: outgoing_list,
+        incoming: incoming_list,
+    })
+}
+
+/// Return first N nodes of a type for quick inspection.
+pub fn compute_sample<'a>(
+    graph: &'a DirGraph,
+    node_type: &str,
+    n: usize,
+) -> Result<Vec<&'a NodeData>, String> {
+    let node_indices = graph
+        .type_indices
+        .get(node_type)
+        .ok_or_else(|| format!("Node type '{}' not found", node_type))?;
+
+    let mut result = Vec::with_capacity(n.min(node_indices.len()));
+    for &idx in node_indices.iter().take(n) {
+        if let Some(node) = graph.get_node(idx) {
+            result.push(node);
+        }
+    }
+    Ok(result)
+}

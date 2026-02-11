@@ -21,6 +21,7 @@ pub mod equation_parser;
 pub mod export;
 pub mod filtering_methods;
 pub mod graph_algorithms;
+pub mod introspection;
 pub mod io_operations;
 pub mod lookups;
 pub mod maintain_graph;
@@ -2015,6 +2016,163 @@ impl KnowledgeGraph {
             &self.inner,
             &self.selection,
         ))
+    }
+
+    // ================================================================
+    // Schema Introspection
+    // ================================================================
+
+    /// Return a full schema overview of the graph.
+    fn schema(&self) -> PyResult<Py<PyAny>> {
+        let overview = introspection::compute_schema(&self.inner);
+        Python::attach(|py| {
+            let result = PyDict::new(py);
+
+            // node_types
+            let node_types_dict = PyDict::new(py);
+            for (nt, info) in &overview.node_types {
+                let type_dict = PyDict::new(py);
+                type_dict.set_item("count", info.count)?;
+                let props_dict = PyDict::new(py);
+                for (k, v) in &info.properties {
+                    props_dict.set_item(k.as_str(), v.as_str())?;
+                }
+                type_dict.set_item("properties", props_dict)?;
+                node_types_dict.set_item(nt.as_str(), type_dict)?;
+            }
+            result.set_item("node_types", node_types_dict)?;
+
+            // connection_types
+            let conn_dict = PyDict::new(py);
+            for ct in &overview.connection_types {
+                let ct_dict = PyDict::new(py);
+                ct_dict.set_item("count", ct.count)?;
+                ct_dict.set_item("source_types", &ct.source_types)?;
+                ct_dict.set_item("target_types", &ct.target_types)?;
+                conn_dict.set_item(ct.connection_type.as_str(), ct_dict)?;
+            }
+            result.set_item("connection_types", conn_dict)?;
+
+            result.set_item("indexes", &overview.indexes)?;
+            result.set_item("node_count", overview.node_count)?;
+            result.set_item("edge_count", overview.edge_count)?;
+
+            Ok(result.into())
+        })
+    }
+
+    /// Return all connection types with counts and endpoint type sets.
+    #[pyo3(name = "connection_types")]
+    fn connection_types_info(&self) -> PyResult<Py<PyAny>> {
+        let stats = introspection::compute_connection_type_stats(&self.inner);
+        Python::attach(|py| {
+            let result_list = PyList::empty(py);
+            for ct in &stats {
+                let ct_dict = PyDict::new(py);
+                ct_dict.set_item("type", ct.connection_type.as_str())?;
+                ct_dict.set_item("count", ct.count)?;
+                ct_dict.set_item("source_types", &ct.source_types)?;
+                ct_dict.set_item("target_types", &ct.target_types)?;
+                result_list.append(ct_dict)?;
+            }
+            Ok(result_list.into())
+        })
+    }
+
+    /// Return property statistics for a node type.
+    fn properties(&self, node_type: &str) -> PyResult<Py<PyAny>> {
+        let stats = introspection::compute_property_stats(&self.inner, node_type)
+            .map_err(PyErr::new::<pyo3::exceptions::PyKeyError, _>)?;
+        Python::attach(|py| {
+            let result = PyDict::new(py);
+            for prop in &stats {
+                let prop_dict = PyDict::new(py);
+                prop_dict.set_item("type", prop.type_string.as_str())?;
+                prop_dict.set_item("non_null", prop.non_null)?;
+                prop_dict.set_item("unique", prop.unique)?;
+                if let Some(ref vals) = prop.values {
+                    let py_vals = PyList::empty(py);
+                    for v in vals {
+                        py_vals.append(py_out::value_to_py(py, v)?)?;
+                    }
+                    prop_dict.set_item("values", py_vals)?;
+                }
+                result.set_item(prop.property_name.as_str(), prop_dict)?;
+            }
+            Ok(result.into())
+        })
+    }
+
+    /// Return connection topology for a node type (outgoing and incoming).
+    fn neighbors_schema(&self, node_type: &str) -> PyResult<Py<PyAny>> {
+        let ns = introspection::compute_neighbors_schema(&self.inner, node_type)
+            .map_err(PyErr::new::<pyo3::exceptions::PyKeyError, _>)?;
+        Python::attach(|py| {
+            let result = PyDict::new(py);
+
+            let out_list = PyList::empty(py);
+            for nc in &ns.outgoing {
+                let d = PyDict::new(py);
+                d.set_item("connection_type", nc.connection_type.as_str())?;
+                d.set_item("target_type", nc.other_type.as_str())?;
+                d.set_item("count", nc.count)?;
+                out_list.append(d)?;
+            }
+            result.set_item("outgoing", out_list)?;
+
+            let in_list = PyList::empty(py);
+            for nc in &ns.incoming {
+                let d = PyDict::new(py);
+                d.set_item("connection_type", nc.connection_type.as_str())?;
+                d.set_item("source_type", nc.other_type.as_str())?;
+                d.set_item("count", nc.count)?;
+                in_list.append(d)?;
+            }
+            result.set_item("incoming", in_list)?;
+
+            Ok(result.into())
+        })
+    }
+
+    /// Return a quick sample of nodes for a given type.
+    #[pyo3(signature = (node_type, n=5))]
+    fn sample(&self, node_type: &str, n: usize) -> PyResult<Py<PyAny>> {
+        let nodes = introspection::compute_sample(&self.inner, node_type, n)
+            .map_err(PyErr::new::<pyo3::exceptions::PyKeyError, _>)?;
+        Python::attach(|py| {
+            let result_list = PyList::empty(py);
+            for node in nodes {
+                if let Some(py_dict) = py_out::nodedata_to_pydict(py, node)? {
+                    result_list.append(py_dict)?;
+                }
+            }
+            Ok(result_list.into())
+        })
+    }
+
+    /// Return a unified list of all indexes (single-property and composite).
+    fn indexes(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            let result_list = PyList::empty(py);
+
+            for (node_type, property) in self.inner.property_indices.keys() {
+                let d = PyDict::new(py);
+                d.set_item("node_type", node_type.as_str())?;
+                d.set_item("property", property.as_str())?;
+                d.set_item("type", "equality")?;
+                result_list.append(d)?;
+            }
+
+            for (node_type, properties) in self.inner.composite_indices.keys() {
+                let d = PyDict::new(py);
+                d.set_item("node_type", node_type.as_str())?;
+                d.set_item("properties", properties)?;
+                d.set_item("type", "composite")?;
+                result_list.append(d)?;
+            }
+
+            Ok(result_list.into())
+        })
     }
 
     fn clear(&mut self) -> PyResult<()> {
