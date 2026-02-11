@@ -13,7 +13,7 @@ name = "rusty_graph"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.27"
+pyo3 = "0.22"
 petgraph = { version = "0.8.3", features = ["serde-1"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

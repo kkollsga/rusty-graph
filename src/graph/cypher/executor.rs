@@ -33,7 +33,17 @@ impl<'a> CypherExecutor<'a> {
     pub fn execute(&self, query: &CypherQuery) -> Result<CypherResult, String> {
         let mut result_set = ResultSet::new();
 
-        for clause in &query.clauses {
+        for (i, clause) in query.clauses.iter().enumerate() {
+            // Seed first-clause WITH/UNWIND with one empty row so standalone
+            // expressions (e.g. `WITH [1,2,3] AS l`) can be evaluated.
+            // Only for the very first clause — a WITH after an empty MATCH
+            // must stay empty.
+            if i == 0
+                && result_set.rows.is_empty()
+                && matches!(clause, Clause::With(_) | Clause::Unwind(_))
+            {
+                result_set.rows.push(ResultRow::new());
+            }
             result_set = self.execute_single_clause(clause, result_set)?;
         }
 
@@ -162,20 +172,53 @@ impl<'a> CypherExecutor<'a> {
         // Propagate path bindings for non-shortestPath path assignments.
         // For `MATCH p = (a)-[r:REL*1..3]->(b)`, alias the edge's
         // VariableLengthPath binding under the path variable `p`.
+        // For single-hop `MATCH p = (a)-[:REL]->(b)`, synthesize a PathBinding
+        // from the edge binding.
         for pa in &clause.path_assignments {
             if pa.is_shortest_path {
                 continue;
             }
             for row in &mut result_rows {
-                // Find the first VariableLengthPath binding in this row
-                // (from the named edge variable or synthetic __anon_vlpath_*)
+                // First try: find an existing VariableLengthPath binding
                 let path_binding = row
                     .path_bindings
                     .iter()
-                    .find(|(_, _)| true) // any path binding from this pattern
+                    .find(|(_, _)| true)
                     .map(|(_, pb)| pb.clone());
                 if let Some(pb) = path_binding {
                     row.path_bindings.insert(pa.variable.clone(), pb);
+                } else {
+                    // No var-length path found — synthesize from edge binding
+                    // for single-hop patterns like p = (a)-[:REL]->(b)
+                    if let Some(pattern) = clause.patterns.get(pa.pattern_index) {
+                        // Find first edge binding from this pattern
+                        for elem in &pattern.elements {
+                            if let PatternElement::Edge(ep) = elem {
+                                if let Some(ref var) = ep.variable {
+                                    if let Some(eb) = row.edge_bindings.get(var) {
+                                        row.path_bindings.insert(
+                                            pa.variable.clone(),
+                                            crate::graph::cypher::result::PathBinding {
+                                                source: eb.source,
+                                                target: eb.target,
+                                                hops: 1,
+                                                path: vec![(eb.target, eb.connection_type.clone())],
+                                            },
+                                        );
+                                        break;
+                                    }
+                                } else {
+                                    // Anonymous edge — find it in edge_bindings by
+                                    // matching the pattern's connection_type
+                                    let synth = self.synthesize_path_from_pattern(pattern, row);
+                                    if let Some(pb) = synth {
+                                        row.path_bindings.insert(pa.variable.clone(), pb);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -245,12 +288,15 @@ impl<'a> CypherExecutor<'a> {
                         row.node_bindings.insert(var.clone(), target_idx);
                     }
 
-                    // Build path with connection types
+                    // Build path with connection types.
+                    // Format: [(node, conn_type_leading_to_node), ...] — excludes source.
+                    // Source is stored separately in PathBinding.source.
                     let connections =
                         graph_algorithms::get_path_connections(self.graph, &path_result.path);
                     let path_nodes: Vec<(NodeIndex, String)> = path_result
                         .path
                         .iter()
+                        .skip(1) // Skip source — it's in PathBinding.source
                         .enumerate()
                         .map(|(i, &idx)| {
                             let conn_type = if i < connections.len() {
@@ -375,6 +421,42 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
+    /// Synthesize a PathBinding for a single-hop anonymous-edge pattern.
+    /// Looks at the pattern's node variables to find source and target in the row,
+    /// then finds the connecting edge.
+    fn synthesize_path_from_pattern(
+        &self,
+        pattern: &crate::graph::pattern_matching::Pattern,
+        row: &ResultRow,
+    ) -> Option<PathBinding> {
+        let mut node_vars: Vec<&str> = Vec::new();
+        let mut edge_type: Option<&str> = None;
+        for elem in &pattern.elements {
+            match elem {
+                PatternElement::Node(np) => {
+                    if let Some(ref v) = np.variable {
+                        node_vars.push(v);
+                    }
+                }
+                PatternElement::Edge(ep) => {
+                    edge_type = ep.connection_type.as_deref();
+                }
+            }
+        }
+        if node_vars.len() < 2 {
+            return None;
+        }
+        let source_idx = row.node_bindings.get(node_vars[0])?;
+        let target_idx = row.node_bindings.get(node_vars[node_vars.len() - 1])?;
+        let conn_type = edge_type.unwrap_or("").to_string();
+        Some(PathBinding {
+            source: *source_idx,
+            target: *target_idx,
+            hops: 1,
+            path: vec![(*target_idx, conn_type)],
+        })
+    }
+
     // ========================================================================
     // OPTIONAL MATCH
     // ========================================================================
@@ -385,8 +467,34 @@ impl<'a> CypherExecutor<'a> {
         existing: ResultSet,
     ) -> Result<ResultSet, String> {
         if existing.rows.is_empty() {
-            // OPTIONAL MATCH as first clause acts like regular MATCH
-            return self.execute_match(clause, existing);
+            // OPTIONAL MATCH as first clause: try regular match, but if
+            // nothing matches, return one row with all variables set to NULL
+            let columns = existing.columns.clone();
+            let result = self.execute_match(clause, existing)?;
+            if !result.rows.is_empty() {
+                return Ok(result);
+            }
+            let mut null_row = ResultRow::new();
+            for pattern in &clause.patterns {
+                for elem in &pattern.elements {
+                    match elem {
+                        PatternElement::Node(np) => {
+                            if let Some(ref var) = np.variable {
+                                null_row.projected.insert(var.clone(), Value::Null);
+                            }
+                        }
+                        PatternElement::Edge(ep) => {
+                            if let Some(ref var) = ep.variable {
+                                null_row.projected.insert(var.clone(), Value::Null);
+                            }
+                        }
+                    }
+                }
+            }
+            return Ok(ResultSet {
+                rows: vec![null_row],
+                columns,
+            });
         }
 
         let mut new_rows = Vec::new();
@@ -758,7 +866,7 @@ impl<'a> CypherExecutor<'a> {
             } => {
                 let left_val = self.evaluate_expression(left, row)?;
                 let right_val = self.evaluate_expression(right, row)?;
-                Ok(evaluate_comparison(&left_val, operator, &right_val))
+                evaluate_comparison(&left_val, operator, &right_val)
             }
             Predicate::And(left, right) => {
                 // Short-circuit: if left is false, skip right
@@ -1131,11 +1239,16 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "nodes" => {
-                // nodes(p) returns list of node dicts in a path (JSON array)
+                // nodes(p) returns list of node dicts in a path (source + intermediates + target)
+                // Path format is normalized: path.path excludes source, source is in path.source
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(path) = row.path_bindings.get(var) {
                         let mut entries = Vec::new();
+                        let mut node_indices = vec![path.source];
                         for (node_idx, _) in &path.path {
+                            node_indices.push(*node_idx);
+                        }
+                        for node_idx in &node_indices {
                             if let Some(node) = self.graph.graph.node_weight(*node_idx) {
                                 let mut props = Vec::new();
                                 props.push(format!("\"id\": {}", format_value_compact(&node.id)));
@@ -1157,8 +1270,8 @@ impl<'a> CypherExecutor<'a> {
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(path) = row.path_bindings.get(var) {
                         let mut rel_strs = Vec::new();
-                        for (i, (_, conn_type)) in path.path.iter().enumerate() {
-                            if !conn_type.is_empty() && i < path.path.len() - 1 {
+                        for (_, conn_type) in &path.path {
+                            if !conn_type.is_empty() {
                                 rel_strs.push(format!("\"{}\"", conn_type));
                             }
                         }
@@ -1580,14 +1693,8 @@ impl<'a> CypherExecutor<'a> {
     fn execute_with(
         &self,
         clause: &WithClause,
-        mut result_set: ResultSet,
+        result_set: ResultSet,
     ) -> Result<ResultSet, String> {
-        // Seed WITH-as-first-clause: if no prior rows exist, provide one
-        // empty row so standalone expressions (e.g. [1,2,3]) can be evaluated.
-        if result_set.rows.is_empty() {
-            result_set.rows.push(ResultRow::new());
-        }
-
         // WITH is essentially RETURN that continues the pipeline
         let return_clause = ReturnClause {
             items: clause.items.clone(),
@@ -1712,33 +1819,21 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<ResultSet, String> {
         let mut new_rows = Vec::new();
 
-        let source_rows = if result_set.rows.is_empty() {
-            // UNWIND as first clause - create a single empty row
-            vec![ResultRow::new()]
-        } else {
-            result_set.rows
-        };
+        let source_rows = result_set.rows;
 
         for row in &source_rows {
             let val = self.evaluate_expression(&clause.expression, row)?;
-            // Currently we only support list literals producing strings
-            // In the future, this should work with actual list types
             match val {
                 Value::String(s) if s.starts_with('[') && s.ends_with(']') => {
-                    // Parse the string list representation
-                    let inner = &s[1..s.len() - 1];
-                    if inner.is_empty() {
-                        continue;
-                    }
-                    for item in inner.split(", ") {
+                    let items = split_list_top_level(&s);
+                    for item_str in items {
                         let mut new_row = row.clone();
-                        let parsed_val = parse_value_string(item.trim());
+                        let parsed_val = parse_value_string(item_str.trim());
                         new_row.projected.insert(clause.alias.clone(), parsed_val);
                         new_rows.push(new_row);
                     }
                 }
                 _ => {
-                    // Single value - just add it
                     let mut new_row = row.clone();
                     new_row.projected.insert(clause.alias.clone(), val);
                     new_rows.push(new_row);
@@ -1906,7 +2001,14 @@ pub fn execute_mutable(
     let mut result_set = ResultSet::new();
     let mut stats = MutationStats::default();
 
-    for clause in &query.clauses {
+    for (i, clause) in query.clauses.iter().enumerate() {
+        // Seed first-clause WITH/UNWIND (same as read-only path)
+        if i == 0
+            && result_set.rows.is_empty()
+            && matches!(clause, Clause::With(_) | Clause::Unwind(_))
+        {
+            result_set.rows.push(ResultRow::new());
+        }
         match clause {
             // Write clauses: mutate graph directly
             Clause::Create(create) => {
@@ -2831,36 +2933,31 @@ fn expression_to_string(expr: &Expression) -> String {
 }
 
 /// Evaluate a comparison using existing filtering_methods infrastructure
-fn evaluate_comparison(left: &Value, op: &ComparisonOp, right: &Value) -> bool {
+fn evaluate_comparison(left: &Value, op: &ComparisonOp, right: &Value) -> Result<bool, String> {
     match op {
-        ComparisonOp::Equals => filtering_methods::values_equal(left, right),
-        ComparisonOp::NotEquals => !filtering_methods::values_equal(left, right),
+        ComparisonOp::Equals => Ok(filtering_methods::values_equal(left, right)),
+        ComparisonOp::NotEquals => Ok(!filtering_methods::values_equal(left, right)),
         ComparisonOp::LessThan => {
-            filtering_methods::compare_values(left, right) == Some(std::cmp::Ordering::Less)
+            Ok(filtering_methods::compare_values(left, right) == Some(std::cmp::Ordering::Less))
         }
-        ComparisonOp::LessThanEq => matches!(
+        ComparisonOp::LessThanEq => Ok(matches!(
             filtering_methods::compare_values(left, right),
             Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
-        ),
+        )),
         ComparisonOp::GreaterThan => {
-            filtering_methods::compare_values(left, right) == Some(std::cmp::Ordering::Greater)
+            Ok(filtering_methods::compare_values(left, right) == Some(std::cmp::Ordering::Greater))
         }
-        ComparisonOp::GreaterThanEq => matches!(
+        ComparisonOp::GreaterThanEq => Ok(matches!(
             filtering_methods::compare_values(left, right),
             Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
-        ),
-        ComparisonOp::RegexMatch => {
-            // left =~ right: left must be a string, right must be a regex pattern string
-            match (left, right) {
-                (Value::String(text), Value::String(pattern)) => {
-                    match regex::Regex::new(pattern) {
-                        Ok(re) => re.is_match(text),
-                        Err(_) => false, // invalid regex → no match
-                    }
-                }
-                _ => false,
-            }
-        }
+        )),
+        ComparisonOp::RegexMatch => match (left, right) {
+            (Value::String(text), Value::String(pattern)) => match regex::Regex::new(pattern) {
+                Ok(re) => Ok(re.is_match(text)),
+                Err(e) => Err(format!("Invalid regular expression '{}': {}", pattern, e)),
+            },
+            _ => Ok(false),
+        },
     }
 }
 
@@ -2973,10 +3070,62 @@ fn parse_value_string(s: &str) -> Value {
     value_operations::parse_value_string(s)
 }
 
+/// Split a list string like "[1, 2, [3, 4], 5]" into top-level items,
+/// respecting nested brackets and quoted strings. Returns inner items
+/// as string slices. Empty list "[]" returns empty vec.
+fn split_list_top_level(s: &str) -> Vec<&str> {
+    let inner = &s[1..s.len() - 1]; // strip outer []
+    if inner.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut items = Vec::new();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut start = 0;
+
+    for (i, ch) in inner.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => {
+                escape = true;
+            }
+            '"' | '\'' => {
+                in_string = !in_string;
+            }
+            '[' | '{' if !in_string => {
+                depth += 1;
+            }
+            ']' | '}' if !in_string => {
+                depth -= 1;
+            }
+            ',' if !in_string && depth == 0 => {
+                items.push(inner[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    // Last item
+    let last = inner[start..].trim();
+    if !last.is_empty() {
+        items.push(last);
+    }
+    items
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::datatypes::values::Value;
+
+    /// Test helper: unwraps evaluate_comparison Result for use in assert!()
+    fn cmp(left: &Value, op: &ComparisonOp, right: &Value) -> bool {
+        evaluate_comparison(left, op, right).unwrap()
+    }
 
     // ========================================================================
     // evaluate_comparison
@@ -2984,12 +3133,12 @@ mod tests {
 
     #[test]
     fn test_comparison_equals() {
-        assert!(evaluate_comparison(
+        assert!(cmp(
             &Value::Int64(5),
             &ComparisonOp::Equals,
             &Value::Int64(5)
         ));
-        assert!(!evaluate_comparison(
+        assert!(!cmp(
             &Value::Int64(5),
             &ComparisonOp::Equals,
             &Value::Int64(6)
@@ -2998,12 +3147,12 @@ mod tests {
 
     #[test]
     fn test_comparison_not_equals() {
-        assert!(evaluate_comparison(
+        assert!(cmp(
             &Value::Int64(5),
             &ComparisonOp::NotEquals,
             &Value::Int64(6)
         ));
-        assert!(!evaluate_comparison(
+        assert!(!cmp(
             &Value::Int64(5),
             &ComparisonOp::NotEquals,
             &Value::Int64(5)
@@ -3012,12 +3161,12 @@ mod tests {
 
     #[test]
     fn test_comparison_less_than() {
-        assert!(evaluate_comparison(
+        assert!(cmp(
             &Value::Int64(3),
             &ComparisonOp::LessThan,
             &Value::Int64(5)
         ));
-        assert!(!evaluate_comparison(
+        assert!(!cmp(
             &Value::Int64(5),
             &ComparisonOp::LessThan,
             &Value::Int64(5)
@@ -3026,17 +3175,17 @@ mod tests {
 
     #[test]
     fn test_comparison_less_than_eq() {
-        assert!(evaluate_comparison(
+        assert!(cmp(
             &Value::Int64(5),
             &ComparisonOp::LessThanEq,
             &Value::Int64(5)
         ));
-        assert!(evaluate_comparison(
+        assert!(cmp(
             &Value::Int64(3),
             &ComparisonOp::LessThanEq,
             &Value::Int64(5)
         ));
-        assert!(!evaluate_comparison(
+        assert!(!cmp(
             &Value::Int64(6),
             &ComparisonOp::LessThanEq,
             &Value::Int64(5)
@@ -3045,12 +3194,12 @@ mod tests {
 
     #[test]
     fn test_comparison_greater_than() {
-        assert!(evaluate_comparison(
+        assert!(cmp(
             &Value::Int64(7),
             &ComparisonOp::GreaterThan,
             &Value::Int64(5)
         ));
-        assert!(!evaluate_comparison(
+        assert!(!cmp(
             &Value::Int64(5),
             &ComparisonOp::GreaterThan,
             &Value::Int64(5)
@@ -3059,12 +3208,12 @@ mod tests {
 
     #[test]
     fn test_comparison_greater_than_eq() {
-        assert!(evaluate_comparison(
+        assert!(cmp(
             &Value::Int64(5),
             &ComparisonOp::GreaterThanEq,
             &Value::Int64(5)
         ));
-        assert!(evaluate_comparison(
+        assert!(cmp(
             &Value::Int64(7),
             &ComparisonOp::GreaterThanEq,
             &Value::Int64(5)
@@ -3074,12 +3223,12 @@ mod tests {
     #[test]
     fn test_comparison_cross_type() {
         // Int64 vs Float64
-        assert!(evaluate_comparison(
+        assert!(cmp(
             &Value::Int64(5),
             &ComparisonOp::Equals,
             &Value::Float64(5.0)
         ));
-        assert!(evaluate_comparison(
+        assert!(cmp(
             &Value::Int64(3),
             &ComparisonOp::LessThan,
             &Value::Float64(3.5)

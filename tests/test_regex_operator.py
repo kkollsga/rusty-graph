@@ -94,14 +94,15 @@ class TestRegexAdvanced:
         names = [r['p.name'] for r in result]
         assert names == ['Bob', 'Charlie']
 
-    def test_invalid_regex_returns_false(self, name_graph):
-        """Invalid regex pattern returns no matches (not an error)."""
-        result = name_graph.cypher("""
-            MATCH (p:Person)
-            WHERE p.name =~ '[invalid('
-            RETURN p.name
-        """)
-        assert len(result) == 0
+    def test_invalid_regex_raises_error(self, name_graph):
+        """Invalid regex pattern raises a RuntimeError."""
+        import pytest
+        with pytest.raises(RuntimeError, match="Invalid regular expression"):
+            name_graph.cypher("""
+                MATCH (p:Person)
+                WHERE p.name =~ '[invalid('
+                RETURN p.name
+            """)
 
     def test_regex_with_not(self, name_graph):
         """NOT combined with regex."""

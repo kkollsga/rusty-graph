@@ -981,12 +981,15 @@ impl DirGraph {
     /// Rebuild type_indices from the live graph.
     /// Called after deserialization (type_indices is `#[serde(skip)]`) and by `reindex()`.
     pub fn rebuild_type_indices(&mut self) {
-        let mut new_type_indices: HashMap<String, Vec<NodeIndex>> = HashMap::new();
+        let type_count = self.node_type_metadata.len().max(4);
+        let avg_per_type = self.graph.node_count() / type_count.max(1);
+        let mut new_type_indices: HashMap<String, Vec<NodeIndex>> =
+            HashMap::with_capacity(type_count);
         for node_idx in self.graph.node_indices() {
             if let Some(node) = self.graph.node_weight(node_idx) {
                 new_type_indices
                     .entry(node.node_type.clone())
-                    .or_default()
+                    .or_insert_with(|| Vec::with_capacity(avg_per_type))
                     .push(node_idx);
             }
         }
