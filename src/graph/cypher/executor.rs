@@ -2447,6 +2447,13 @@ fn execute_set(
                             &value_for_index,
                         );
                     }
+
+                    // Keep node_type_metadata in sync so schema() is accurate
+                    {
+                        let mut prop_type = HashMap::new();
+                        prop_type.insert(property.clone(), value_type_name(&value_for_index));
+                        graph.upsert_node_type_metadata(&node_type_str, prop_type);
+                    }
                 }
                 SetItem::Label { variable, label } => {
                     return Err(format!(
