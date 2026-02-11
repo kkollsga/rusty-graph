@@ -3,7 +3,7 @@
 import pytest
 import time
 import pandas as pd
-from rusty_graph import KnowledgeGraph
+from kglite import KnowledgeGraph
 
 
 pytestmark = pytest.mark.benchmark
@@ -416,7 +416,7 @@ class TestCypherMutationPerformance:
         elapsed = time.time() - start
         # Verify all created
         check = graph.cypher("MATCH (n:City) RETURN count(*) AS cnt")
-        assert check['rows'][0]['cnt'] == 100
+        assert check[0]['cnt'] == 100
         print(f"  Merge-create 100 cities (sequential): {elapsed*1000:.1f}ms "
               f"({elapsed*10:.2f}ms/op)")
 

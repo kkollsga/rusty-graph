@@ -1,5 +1,5 @@
 // src/graph/cypher/mod.rs
-// Cypher query language implementation for rusty_graph
+// Cypher query language implementation for kglite
 //
 // Architecture:
 //   Query String -> Tokenizer -> Parser -> AST -> Planner -> Executor -> Result

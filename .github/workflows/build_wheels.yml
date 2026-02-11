@@ -137,9 +137,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
-          # Using Trusted Publishing - no password needed
-          # Make sure to configure Trusted Publisher on PyPI:
-          # https://pypi.org/manage/project/rusty-graph/settings/publishing/
+          password: ${{ secrets.PYPI_API_TOKEN }}
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

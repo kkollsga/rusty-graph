@@ -4,8 +4,8 @@ import pytest
 import pandas as pd
 import tempfile
 import os
-from rusty_graph import KnowledgeGraph
-import rusty_graph
+from kglite import KnowledgeGraph
+import kglite
 
 
 class TestCrossFeatureWorkflows:
@@ -98,11 +98,11 @@ class TestCrossFeatureWorkflows:
         graph.create_index('Node', 'cat')
         graph.define_schema({'nodes': {'Node': {'required': ['id', 'title']}}})
 
-        with tempfile.NamedTemporaryFile(suffix='.bin', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix='.kgl', delete=False) as f:
             path = f.name
         try:
             graph.save(path)
-            loaded = rusty_graph.load(path)
+            loaded = kglite.load(path)
             assert loaded.type_filter('Node').node_count() == 10
             assert loaded.has_index('Node', 'cat')
             assert loaded.has_schema()

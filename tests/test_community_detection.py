@@ -1,7 +1,7 @@
 """Tests for community detection algorithms: Louvain and Label Propagation."""
 
 import pytest
-from rusty_graph import KnowledgeGraph
+from kglite import KnowledgeGraph
 
 
 @pytest.fixture

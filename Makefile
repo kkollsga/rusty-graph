@@ -1,4 +1,4 @@
-# rusty_graph development tasks
+# kglite development tasks
 # All targets handle CONDA_PREFIX and .venv activation automatically.
 
 SHELL := /bin/bash

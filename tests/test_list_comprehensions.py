@@ -1,7 +1,7 @@
 """Tests for list comprehension in Cypher queries."""
 
 import pytest
-from rusty_graph import KnowledgeGraph
+from kglite import KnowledgeGraph
 
 
 class TestListComprehensions:

@@ -227,7 +227,7 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
     xml.push_str("      xsi:schemaLocation=\"http://www.gexf.net/1.2draft http://www.gexf.net/1.2draft/gexf.xsd\"\n");
     xml.push_str("      version=\"1.2\">\n");
     xml.push_str("  <meta>\n");
-    xml.push_str("    <creator>rusty_graph</creator>\n");
+    xml.push_str("    <creator>kglite</creator>\n");
     xml.push_str("    <description>Exported from KnowledgeGraph</description>\n");
     xml.push_str("  </meta>\n");
     xml.push_str("  <graph mode=\"static\" defaultedgetype=\"directed\">\n");

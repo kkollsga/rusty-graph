@@ -11,7 +11,7 @@ fn load(path: String) -> PyResult<KnowledgeGraph> {
 }
 
 #[pymodule]
-fn rusty_graph(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn kglite(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
     m.add_class::<KnowledgeGraph>()?;

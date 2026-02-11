@@ -37,7 +37,7 @@ pub mod value_operations;
 
 use schema::{
     ConnectionSchemaDefinition, CowSelection, CurrentSelection, DirGraph, NodeSchemaDefinition,
-    PlanStep, SchemaDefinition,
+    PlanStep, SchemaDefinition, SelectionOperation,
 };
 
 #[pyclass]
@@ -546,7 +546,7 @@ impl KnowledgeGraph {
     /// both source and target node types exist in the graph.
     ///
     /// This enables data sources to provide ALL possible connections,
-    /// and rusty-graph selects only the valid ones based on loaded node types.
+    /// and kglite selects only the valid ones based on loaded node types.
     ///
     /// Args:
     ///     connections: List of dicts, each containing:
@@ -1203,14 +1203,20 @@ impl KnowledgeGraph {
     }
 
     /// Returns the count of nodes in the current selection without materialization.
+    /// If no selection/filter has been applied, returns the total graph node count.
     /// Much faster than get_nodes() when you only need the count.
     ///
     /// Example:
     ///     ```python
-    ///     count = graph.type_filter('User').node_count()
+    ///     count = graph.node_count()           # total nodes in graph
+    ///     count = graph.type_filter('User').node_count()  # filtered count
     ///     ```
     fn node_count(&self) -> usize {
-        self.selection.current_node_count()
+        if self.selection.has_active_selection() {
+            self.selection.current_node_count()
+        } else {
+            self.inner.graph.node_count()
+        }
     }
 
     /// Returns the raw node indices in the current selection.
@@ -3343,7 +3349,7 @@ impl KnowledgeGraph {
     ///         .to_subgraph()
     ///     )
     ///     # Save the subgraph for later use
-    ///     subgraph.save('north_sea_region.bin')
+    ///     subgraph.save('north_sea_region.kgl')
     ///     ```
     fn to_subgraph(&self) -> PyResult<Self> {
         let extracted = subgraph::extract_subgraph(&self.inner, &self.selection)
@@ -4053,7 +4059,12 @@ impl KnowledgeGraph {
         let mut new_kg = self.clone();
         new_kg.selection.clear(); // clear() already adds a fresh level
         if let Some(level) = new_kg.selection.get_level_mut(0) {
-            level.add_selection(None, matching_nodes.clone());
+            if !matching_nodes.is_empty() {
+                level.add_selection(None, matching_nodes.clone());
+            }
+            level
+                .operations
+                .push(SelectionOperation::Custom("within_bounds".to_string()));
         }
 
         // Record plan step
@@ -4120,7 +4131,12 @@ impl KnowledgeGraph {
         let mut new_kg = self.clone();
         new_kg.selection.clear(); // clear() already adds a fresh level
         if let Some(level) = new_kg.selection.get_level_mut(0) {
-            level.add_selection(None, matching_nodes.clone());
+            if !matching_nodes.is_empty() {
+                level.add_selection(None, matching_nodes.clone());
+            }
+            level
+                .operations
+                .push(SelectionOperation::Custom("near_point".to_string()));
         }
 
         // Record plan step
@@ -4183,7 +4199,12 @@ impl KnowledgeGraph {
         let mut new_kg = self.clone();
         new_kg.selection.clear(); // clear() already adds a fresh level
         if let Some(level) = new_kg.selection.get_level_mut(0) {
-            level.add_selection(None, matching_nodes.clone());
+            if !matching_nodes.is_empty() {
+                level.add_selection(None, matching_nodes.clone());
+            }
+            level
+                .operations
+                .push(SelectionOperation::Custom("near_point_km".to_string()));
         }
 
         // Record plan step
@@ -4243,7 +4264,12 @@ impl KnowledgeGraph {
         let mut new_kg = self.clone();
         new_kg.selection.clear();
         if let Some(level) = new_kg.selection.get_level_mut(0) {
-            level.add_selection(None, matching_nodes.clone());
+            if !matching_nodes.is_empty() {
+                level.add_selection(None, matching_nodes.clone());
+            }
+            level
+                .operations
+                .push(SelectionOperation::Custom("near_point_km_wkt".to_string()));
         }
 
         // Record plan step
@@ -4293,7 +4319,12 @@ impl KnowledgeGraph {
         let mut new_kg = self.clone();
         new_kg.selection.clear();
         if let Some(level) = new_kg.selection.get_level_mut(0) {
-            level.add_selection(None, matching_nodes.clone());
+            if !matching_nodes.is_empty() {
+                level.add_selection(None, matching_nodes.clone());
+            }
+            level
+                .operations
+                .push(SelectionOperation::Custom("contains_point".to_string()));
         }
 
         // Record plan step
@@ -4340,7 +4371,12 @@ impl KnowledgeGraph {
         let mut new_kg = self.clone();
         new_kg.selection.clear(); // clear() already adds a fresh level
         if let Some(level) = new_kg.selection.get_level_mut(0) {
-            level.add_selection(None, matching_nodes.clone());
+            if !matching_nodes.is_empty() {
+                level.add_selection(None, matching_nodes.clone());
+            }
+            level.operations.push(SelectionOperation::Custom(
+                "intersects_geometry".to_string(),
+            ));
         }
 
         // Record plan step

@@ -1,10 +1,10 @@
-# Rusty Graph
+# KGLite
 
-[![PyPI version](https://img.shields.io/pypi/v/rusty-graph)](https://pypi.org/project/rusty-graph/)
-[![Python versions](https://img.shields.io/pypi/pyversions/rusty-graph)](https://pypi.org/project/rusty-graph/)
-[![License: MIT](https://img.shields.io/pypi/l/rusty-graph)](https://github.com/kkollsga/rusty-graph/blob/main/LICENSE)
+[![PyPI version](https://img.shields.io/pypi/v/kglite)](https://pypi.org/project/kglite/)
+[![Python versions](https://img.shields.io/pypi/pyversions/kglite)](https://pypi.org/project/kglite/)
+[![License: MIT](https://img.shields.io/pypi/l/kglite)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
 
-An embedded graph engine for Python, written in Rust.
+An embedded knowledge graph engine for Python. Like SQLite, but for graphs.
 
 **Use it for:** local analytics, ETL pipelines, notebooks, embedding in apps, fast prototyping.
 **Not for:** multi-user server deployments, cross-call transactions, HA/replication.
@@ -20,7 +20,7 @@ An embedded graph engine for Python, written in Rust.
 **Requirements:** Python 3.10+ (CPython) | macOS (ARM/Intel), Linux (x86_64/aarch64), Windows (x86_64) | `pandas >= 1.5`
 
 ```bash
-pip install rusty-graph
+pip install kglite
 ```
 
 ## Feature Matrix
@@ -42,9 +42,9 @@ pip install rusty-graph
 ## Quick Start
 
 ```python
-import rusty_graph
+import kglite
 
-graph = rusty_graph.KnowledgeGraph()
+graph = kglite.KnowledgeGraph()
 
 # Create nodes and relationships
 graph.cypher("CREATE (:Person {name: 'Alice', age: 28, city: 'Oslo'})")
@@ -75,8 +75,8 @@ print(result['stats'])  # {'nodes_created': 1, 'relationships_created': 0, ...}
 print(graph.graph_info())  # {'node_count': 4, 'edge_count': 1, ...}
 
 # Persist to disk and reload
-graph.save("my_graph.bin")
-loaded = rusty_graph.load("my_graph.bin")
+graph.save("my_graph.kgl")
+loaded = kglite.load("my_graph.kgl")
 ```
 
 ### Loading Data from DataFrames
@@ -390,6 +390,27 @@ graph.cypher("""
 
 > **Note:** List comprehensions require at least one row in the pipeline. Use `UNWIND [1] AS _` or a preceding `MATCH`/`WITH` to provide the row context.
 
+### Map Projections
+
+`n {.prop1, .prop2, alias: expr}` syntax — select specific properties from a node:
+
+```python
+# Select only name and age (returns a dict per row)
+graph.cypher("MATCH (p:Person) RETURN p {.name, .age} AS info")
+# [{'info': {'name': 'Alice', 'age': 30}}, {'info': {'name': 'Bob', 'age': 25}}]
+
+# Mix shorthand properties with computed values
+graph.cypher("""
+    MATCH (p:Person)-[:WORKS_AT]->(c:Company)
+    RETURN p {.name, .age, company: c.name} AS info
+""")
+# [{'info': {'name': 'Alice', 'age': 30, 'company': 'Acme'}}, ...]
+
+# System properties (id, type) work too
+graph.cypher("MATCH (p:Person) RETURN p {.name, .type, .id} AS info LIMIT 1")
+# [{'info': {'name': 'Alice', 'type': 'Person', 'id': 1}}]
+```
+
 ### Parameters
 
 ```python
@@ -562,12 +583,12 @@ Returns a string (not data). Mutation queries with `EXPLAIN` are not executed.
 | **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN` |
 | **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val}`, `p = shortestPath(...)` |
 | **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern }`, `EXISTS(( pattern ))` |
-| **RETURN** | `n.prop`, `r.prop`, `AS` aliases, `DISTINCT`, arithmetic `+`/`-`/`*`/`/` |
+| **RETURN** | `n.prop`, `r.prop`, `AS` aliases, `DISTINCT`, arithmetic `+`/`-`/`*`/`/`, map projections `n {.prop1, .prop2}` |
 | **Aggregation** | `count(*)`, `count(expr)`, `sum`, `avg`/`mean`, `min`, `max`, `collect`, `std` |
 | **Expressions** | `CASE WHEN...THEN...ELSE...END`, `$param`, `[x IN list WHERE ... \| expr]` |
 | **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `length`, `type`, `id`, `labels`, `coalesce`, `nodes(p)`, `relationships(p)` |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
-| **Not supported** | `CALL`, subqueries, `SET n:Label` (label mutation), `REMOVE n:Label`, multi-label |
+| **Not supported** | `CALL`/stored procedures, `FOREACH`, subqueries, `SET n:Label` (label mutation), `REMOVE n:Label`, multi-label |
 
 ---
 
@@ -984,8 +1005,8 @@ Indexes are maintained automatically by all mutation operations.
 ### Saving and Loading
 
 ```python
-graph.save("my_graph.bin")
-loaded_graph = rusty_graph.load("my_graph.bin")
+graph.save("my_graph.kgl")
+loaded_graph = kglite.load("my_graph.kgl")
 ```
 
 > **Portability:** Save files use bincode serialization and are **not guaranteed portable** across OS, CPU architecture, or library versions. Always re-export via a portable format (GraphML, CSV) when sharing across machines. Each file includes a format version and the library version that wrote it — check with `graph_info()['format_version']` and `graph_info()['library_version']` after loading. If the internal data structures change between releases, loading will fail with a clear version mismatch error rather than silent corruption.
@@ -1035,7 +1056,7 @@ subgraph.export('acme_network.graphml', format='graphml')
 
 | Method | Returns | Speed |
 |--------|---------|-------|
-| `node_count()` | Integer count | Fastest |
+| `node_count()` | Integer count (total graph if no filter, selection count after filter) | Fastest |
 | `indices()` | List of node indices | Fast |
 | `id_values()` | List of ID values | Fast |
 | `get_ids()` | List of `{id, title, type}` dicts | Medium |
@@ -1045,7 +1066,7 @@ Lightweight path methods: `shortest_path_length()`, `shortest_path_indices()`, `
 
 ### Performance Model
 
-Rusty Graph is optimized for **knowledge graph workloads** — complex multi-step queries on heterogeneous, property-rich graphs. Operations have overhead compared to raw graph algorithms because they build selections, materialize Python dicts, and support the full query API.
+kglite is optimized for **knowledge graph workloads** — complex multi-step queries on heterogeneous, property-rich graphs. Operations have overhead compared to raw graph algorithms because they build selections, materialize Python dicts, and support the full query API.
 
 **Speed claims caveat:** The "~3x" index speedup was measured on equality-filtered queries over 100k+ node graphs. Actual improvement depends on graph size, selectivity, and property cardinality. On small graphs (<1k nodes) the overhead of index lookup may not be noticeable. Always benchmark on your own data.
 

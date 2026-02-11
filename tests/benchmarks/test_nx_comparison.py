@@ -1,6 +1,6 @@
 """NetworkX comparison benchmarks: accuracy and performance.
 
-Validates rusty_graph algorithms against NetworkX ground truth and measures
+Validates kglite algorithms against NetworkX ground truth and measures
 performance across graph scales (100 to 50K nodes).
 
 Run: pytest tests/benchmarks/test_nx_comparison.py -v -s
@@ -20,7 +20,7 @@ import pytest
 
 nx = pytest.importorskip("networkx", reason="networkx required for comparison benchmarks")
 
-from rusty_graph import KnowledgeGraph
+from kglite import KnowledgeGraph
 
 pytestmark = pytest.mark.benchmark
 
@@ -30,7 +30,7 @@ pytestmark = pytest.mark.benchmark
 
 
 def _build_paired_graphs(n_nodes, edge_factor=3, seed=42):
-    """Build identical graphs in rusty_graph and NetworkX.
+    """Build identical graphs in kglite and NetworkX.
 
     Returns (kg, nx_graph, node_names).
     Nodes have properties: name (str), value (float), group (int 1-5).
@@ -59,7 +59,7 @@ def _build_paired_graphs(n_nodes, edge_factor=3, seed=42):
     for s, t in edges:
         nx_g.add_edge(node_names[s], node_names[t])
 
-    # Build rusty_graph
+    # Build kglite
     kg = KnowledgeGraph()
     df_nodes = pd.DataFrame({
         "id": list(range(n_nodes)),
@@ -238,7 +238,7 @@ def _pearson_correlation(xs, ys):
 
 
 def _extract_rg_scores(kg, algo_name):
-    """Run algorithm on rusty_graph and return {name: score} dict.
+    """Run algorithm on kglite and return {name: score} dict.
 
     algo_name: 'pagerank', 'betweenness_centrality', 'closeness_centrality',
                'degree_centrality'
@@ -250,7 +250,7 @@ def _extract_rg_scores(kg, algo_name):
 
 def _compare_scores(rg_scores, nx_scores, node_names, algo_name,
                     min_corr=0.99, max_abs_err=0.01):
-    """Compare scores between rusty_graph and NetworkX.
+    """Compare scores between kglite and NetworkX.
 
     Returns (correlation, max_error, passed).
     """
@@ -352,7 +352,7 @@ class TestShortestPathAccuracy:
             except nx.NetworkXNoPath:
                 nx_len = None
 
-            # rusty_graph via Cypher
+            # kglite via Cypher
             try:
                 result = kg.cypher(
                     f"MATCH p = shortestPath((a:Node {{name: '{src_name}'}})"
@@ -434,7 +434,7 @@ class TestConnectedComponentsAccuracy:
         nx_components = list(nx.weakly_connected_components(nx_g))
         nx_sizes = sorted([len(c) for c in nx_components], reverse=True)
 
-        # rusty_graph
+        # kglite
         rg_components = kg.connected_components()
         rg_sizes = sorted([len(c) for c in rg_components], reverse=True)
 
@@ -533,7 +533,7 @@ class TestCommunityDetectionAccuracy:
         """Louvain should recover planted community structure."""
         kg, nx_g, names = _build_clusters(4, 50, inter_edges=3)
 
-        # rusty_graph
+        # kglite
         rg_result = kg.louvain_communities()
         rg_modularity = rg_result["modularity"]
         rg_n_comm = rg_result["num_communities"]
@@ -562,7 +562,7 @@ class TestCommunityDetectionAccuracy:
         """Label propagation should recover planted communities."""
         kg, nx_g, names = _build_clusters(4, 50, inter_edges=3)
 
-        # rusty_graph
+        # kglite
         rg_result = kg.label_propagation()
         rg_n_comm = rg_result["num_communities"]
 
@@ -681,7 +681,7 @@ class TestConstructionPerformance:
             nx_g.add_edge(node_names[s], node_names[t])
         nx_time = time.perf_counter() - t0
 
-        # rusty_graph (bulk)
+        # kglite (bulk)
         t0 = time.perf_counter()
         kg = KnowledgeGraph()
         df_nodes = pd.DataFrame({
@@ -1095,13 +1095,13 @@ class TestSerializationPerformance:
     def test_serialization(self, n):
         kg, nx_g, _ = _build_paired_graphs(n, edge_factor=3)
 
-        with tempfile.NamedTemporaryFile(suffix=".bin", delete=True) as f:
+        with tempfile.NamedTemporaryFile(suffix=".kgl", delete=True) as f:
             rg_path = f.name
         with tempfile.NamedTemporaryFile(suffix=".pkl", delete=True) as f:
             nx_path = f.name
 
         try:
-            # rusty_graph save
+            # kglite save
             t0 = time.perf_counter()
             kg.save(rg_path)
             rg_save_time = time.perf_counter() - t0

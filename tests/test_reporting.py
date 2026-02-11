@@ -2,7 +2,7 @@
 
 import pytest
 import pandas as pd
-from rusty_graph import KnowledgeGraph
+from kglite import KnowledgeGraph
 
 
 class TestExplain:

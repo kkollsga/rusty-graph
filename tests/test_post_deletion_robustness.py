@@ -15,8 +15,8 @@ import tempfile
 import os
 import json
 import pandas as pd
-from rusty_graph import KnowledgeGraph
-import rusty_graph
+from kglite import KnowledgeGraph
+import kglite
 
 
 @pytest.fixture
@@ -455,11 +455,11 @@ class TestSaveLoadAfterDelete:
 
     def test_save_load_with_tombstone(self, chain_with_deletion):
         """Save/load should preserve graph state with tombstones."""
-        with tempfile.NamedTemporaryFile(suffix='.bin', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix='.kgl', delete=False) as f:
             path = f.name
         try:
             chain_with_deletion.save(path)
-            loaded = rusty_graph.load(path)
+            loaded = kglite.load(path)
             filtered = loaded.type_filter('Person')
             assert filtered.node_count() == 4
 
@@ -471,11 +471,11 @@ class TestSaveLoadAfterDelete:
 
     def test_save_load_preserves_surviving_data(self, chain_with_deletion):
         """Surviving node data should be intact after save/load."""
-        with tempfile.NamedTemporaryFile(suffix='.bin', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix='.kgl', delete=False) as f:
             path = f.name
         try:
             chain_with_deletion.save(path)
-            loaded = rusty_graph.load(path)
+            loaded = kglite.load(path)
             alice = loaded.get_node_by_id('Person', 1)
             assert alice is not None
             assert alice['title'] == 'Alice'
@@ -485,11 +485,11 @@ class TestSaveLoadAfterDelete:
 
     def test_save_load_preserves_edges(self, chain_with_deletion):
         """Surviving edges should be intact after save/load."""
-        with tempfile.NamedTemporaryFile(suffix='.bin', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix='.kgl', delete=False) as f:
             path = f.name
         try:
             chain_with_deletion.save(path)
-            loaded = rusty_graph.load(path)
+            loaded = kglite.load(path)
             # D->E should still be connected
             path_result = loaded.shortest_path(
                 source_type='Person', source_id=4,
@@ -502,11 +502,11 @@ class TestSaveLoadAfterDelete:
     def test_save_load_after_vacuum(self, chain_with_deletion):
         """Save/load after vacuum should produce a clean graph."""
         chain_with_deletion.vacuum()
-        with tempfile.NamedTemporaryFile(suffix='.bin', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix='.kgl', delete=False) as f:
             path = f.name
         try:
             chain_with_deletion.save(path)
-            loaded = rusty_graph.load(path)
+            loaded = kglite.load(path)
             info = loaded.graph_info()
             assert info['node_tombstones'] == 0
         finally:

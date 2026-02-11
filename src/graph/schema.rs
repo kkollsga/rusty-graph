@@ -163,6 +163,15 @@ impl CurrentSelection {
         self.levels.last().map(|l| l.node_count()).unwrap_or(0)
     }
 
+    /// Returns true if any filtering/selection operation has been applied to the current level.
+    /// Used to distinguish "no filter applied" (pristine state) from "filter returned 0 results".
+    pub fn has_active_selection(&self) -> bool {
+        self.levels
+            .last()
+            .map(|l| !l.operations.is_empty())
+            .unwrap_or(false)
+    }
+
     /// Returns an iterator over node indices in the current (most recent) level.
     pub fn current_node_indices(&self) -> impl Iterator<Item = NodeIndex> + '_ {
         self.levels
@@ -237,7 +246,7 @@ pub struct SaveMetadata {
 impl SaveMetadata {
     pub fn current() -> Self {
         SaveMetadata {
-            format_version: 1,
+            format_version: 2,
             library_version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
@@ -312,6 +321,25 @@ impl DirGraph {
             node_type_metadata: HashMap::new(),
             connection_type_metadata: HashMap::new(),
             save_metadata: SaveMetadata::current(),
+        }
+    }
+
+    /// Create a DirGraph from a pre-existing graph (used by v2 loader).
+    /// All metadata fields start empty and are populated by the caller.
+    pub fn from_graph(graph: Graph) -> Self {
+        DirGraph {
+            graph,
+            type_indices: HashMap::new(),
+            schema_definition: None,
+            property_indices: HashMap::new(),
+            composite_indices: HashMap::new(),
+            property_index_keys: Vec::new(),
+            composite_index_keys: Vec::new(),
+            id_indices: HashMap::new(),
+            connection_types: std::collections::HashSet::new(),
+            node_type_metadata: HashMap::new(),
+            connection_type_metadata: HashMap::new(),
+            save_metadata: SaveMetadata::default(),
         }
     }
 
@@ -468,13 +496,24 @@ impl DirGraph {
         self.connection_types.insert(connection_type);
     }
 
-    /// Build the connection types cache by scanning all edges.
-    /// Called lazily after deserialization or when cache is needed.
+    /// Build the connection types cache.
+    /// Called after deserialization or when cache is needed.
+    /// Fast path: populate from connection_type_metadata (O(types), no edge scan).
+    /// Fallback: scan all edges (O(edges)) if metadata is empty.
     pub fn build_connection_types_cache(&mut self) {
         if !self.connection_types.is_empty() {
             return; // Already built
         }
 
+        // Fast path: metadata is serialized — use it instead of scanning edges
+        if !self.connection_type_metadata.is_empty() {
+            for key in self.connection_type_metadata.keys() {
+                self.connection_types.insert(key.clone());
+            }
+            return;
+        }
+
+        // Fallback: scan all edges (pre-metadata graphs)
         for edge in self.graph.edge_weights() {
             self.connection_types.insert(edge.connection_type.clone());
         }

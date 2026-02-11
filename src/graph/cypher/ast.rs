@@ -171,6 +171,20 @@ pub enum Expression {
         expr: Box<Expression>,
         index: Box<Expression>,
     },
+    /// Map projection: n {.prop1, .prop2, alias: expr}
+    MapProjection {
+        variable: String,
+        items: Vec<MapProjectionItem>,
+    },
+}
+
+/// A single item in a map projection.
+#[derive(Debug, Clone)]
+pub enum MapProjectionItem {
+    /// Shorthand property: .prop — projects node.prop as "prop"
+    Property(String),
+    /// Computed/aliased: key: expr
+    Alias { key: String, expr: Expression },
 }
 
 /// Condition in a CASE WHEN clause

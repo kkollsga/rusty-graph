@@ -3,7 +3,7 @@ requires = ["maturin>=1.4,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "rusty_graph"
+name = "kglite"
 description = "A high-performance graph database library with Python bindings written in Rust"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,13 +34,13 @@ dependencies = ["pandas>=1.5"]
 dynamic = ["version"]
 
 [project.urls]
-Homepage = "https://github.com/kkollsga/rusty-graph"
-Repository = "https://github.com/kkollsga/rusty-graph"
-Documentation = "https://github.com/kkollsga/rusty-graph#readme"
+Homepage = "https://github.com/kkollsga/kglite"
+Repository = "https://github.com/kkollsga/kglite"
+Documentation = "https://github.com/kkollsga/kglite#readme"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-include = ["rusty_graph.pyi", "py.typed"]
+include = ["kglite.pyi", "py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

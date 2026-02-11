@@ -2,7 +2,7 @@
 
 import pandas as pd
 import pytest
-from rusty_graph import KnowledgeGraph
+from kglite import KnowledgeGraph
 
 
 class TestToDF:

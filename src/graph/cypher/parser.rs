@@ -864,6 +864,10 @@ impl CypherParser {
                         }),
                         _ => Err("Expected property name after '.'".to_string()),
                     }
+                }
+                // Check for map projection: identifier { .prop1, .prop2, alias: expr }
+                else if self.check(&CypherToken::LBrace) {
+                    self.parse_map_projection(name)
                 } else {
                     Ok(Expression::Variable(name))
                 }
@@ -903,6 +907,53 @@ impl CypherParser {
             args,
             distinct,
         })
+    }
+
+    // ========================================================================
+    // Map Projection
+    // ========================================================================
+
+    /// Parse map projection: variable { .prop1, .prop2, alias: expr }
+    /// The variable name has already been consumed; LBrace is next.
+    fn parse_map_projection(&mut self, variable: String) -> Result<Expression, String> {
+        self.expect(&CypherToken::LBrace)?;
+
+        let mut items = Vec::new();
+
+        while !self.check(&CypherToken::RBrace) {
+            if !items.is_empty() {
+                self.expect(&CypherToken::Comma)?;
+            }
+
+            // Check for .property shorthand
+            if self.check(&CypherToken::Dot) {
+                self.advance(); // consume dot
+                match self.advance().cloned() {
+                    Some(CypherToken::Identifier(prop)) => {
+                        items.push(MapProjectionItem::Property(prop));
+                    }
+                    _ => return Err("Expected property name after '.' in map projection".into()),
+                }
+            } else {
+                // alias: expression
+                let key = match self.advance().cloned() {
+                    Some(CypherToken::Identifier(name)) => name,
+                    other => {
+                        return Err(format!(
+                            "Expected property name or .property in map projection, got {:?}",
+                            other
+                        ))
+                    }
+                };
+                self.expect(&CypherToken::Colon)?;
+                let expr = self.parse_expression()?;
+                items.push(MapProjectionItem::Alias { key, expr });
+            }
+        }
+
+        self.expect(&CypherToken::RBrace)?;
+
+        Ok(Expression::MapProjection { variable, items })
     }
 
     // ========================================================================

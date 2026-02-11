@@ -402,12 +402,12 @@ pub fn filter_nodes(
 
                         if !processed.is_empty() {
                             level.add_selection(None, processed);
-                            level
-                                .operations
-                                .push(SelectionOperation::Filter(conditions));
-                            return Ok(());
                         }
                     }
+                    // Always record the filter operation (even if 0 nodes matched)
+                    level
+                        .operations
+                        .push(SelectionOperation::Filter(conditions));
                     return Ok(());
                 }
             }

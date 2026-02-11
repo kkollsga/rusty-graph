@@ -7,13 +7,13 @@ the original graph data was lost.
 
 import pandas as pd
 import pytest
-import rusty_graph
+import kglite
 
 
 @pytest.fixture
 def graph_with_data():
     """Create a graph with some initial data to verify preservation."""
-    g = rusty_graph.KnowledgeGraph()
+    g = kglite.KnowledgeGraph()
     df = pd.DataFrame({
         "user_id": [1, 2, 3],
         "name": ["Alice", "Bob", "Charlie"],

@@ -4,7 +4,7 @@ Tests all known edge cases and validates semantics against Neo4j/openCypher
 specifications where applicable.
 """
 import pytest
-import rusty_graph as rg
+import kglite as rg
 
 
 @pytest.fixture

@@ -2,7 +2,7 @@
 
 import pytest
 import time
-from rusty_graph import KnowledgeGraph
+from kglite import KnowledgeGraph
 
 
 @pytest.fixture

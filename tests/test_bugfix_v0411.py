@@ -6,7 +6,7 @@ Bug 3: Multi-hop Cypher with OPTIONAL MATCH + chained WITH hung indefinitely
 """
 
 import pytest
-from rusty_graph import KnowledgeGraph
+from kglite import KnowledgeGraph
 
 
 @pytest.fixture

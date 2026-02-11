@@ -1061,6 +1061,37 @@ impl<'a> CypherExecutor<'a> {
                 Ok(Value::String(format!("[{}]", results.join(", "))))
             }
 
+            Expression::MapProjection { variable, items } => {
+                // Look up the node from bindings
+                if let Some(&node_idx) = row.node_bindings.get(variable.as_str()) {
+                    if let Some(node) = self.graph.graph.node_weight(node_idx) {
+                        let mut props = Vec::new();
+                        for item in items {
+                            match item {
+                                MapProjectionItem::Property(prop) => {
+                                    let val = resolve_node_property(node, prop);
+                                    props.push(format!(
+                                        "{}: {}",
+                                        format_value_json(&Value::String(prop.clone())),
+                                        format_value_json(&val)
+                                    ));
+                                }
+                                MapProjectionItem::Alias { key, expr } => {
+                                    let val = self.evaluate_expression(expr, row)?;
+                                    props.push(format!(
+                                        "{}: {}",
+                                        format_value_json(&Value::String(key.clone())),
+                                        format_value_json(&val)
+                                    ));
+                                }
+                            }
+                        }
+                        return Ok(Value::String(format!("{{{}}}", props.join(", "))));
+                    }
+                }
+                Ok(Value::Null)
+            }
+
             Expression::IndexAccess { expr, index } => {
                 // Fast path: labels(n)[0] — bypass JSON round-trip
                 if let Expression::FunctionCall { name, args, .. } = expr.as_ref() {
@@ -2596,7 +2627,7 @@ fn execute_remove(
                 }
                 RemoveItem::Label { variable, label } => {
                     return Err(format!(
-                        "REMOVE label (REMOVE {}:{}) is not supported — rusty_graph uses single node_type",
+                        "REMOVE label (REMOVE {}:{}) is not supported — kglite uses single node_type",
                         variable, label
                     ));
                 }
@@ -2855,6 +2886,13 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
         Expression::IndexAccess { expr, index } => {
             is_aggregate_expression(expr) || is_aggregate_expression(index)
         }
+        Expression::MapProjection { items, .. } => items.iter().any(|item| {
+            if let MapProjectionItem::Alias { expr, .. } = item {
+                is_aggregate_expression(expr)
+            } else {
+                false
+            }
+        }),
         _ => false,
     }
 }
@@ -2928,6 +2966,18 @@ fn expression_to_string(expr: &Expression) -> String {
                 expression_to_string(expr),
                 expression_to_string(index)
             )
+        }
+        Expression::MapProjection { variable, items } => {
+            let items_str: Vec<String> = items
+                .iter()
+                .map(|item| match item {
+                    MapProjectionItem::Property(prop) => format!(".{}", prop),
+                    MapProjectionItem::Alias { key, expr } => {
+                        format!("{}: {}", key, expression_to_string(expr))
+                    }
+                })
+                .collect();
+            format!("{} {{{}}}", variable, items_str.join(", "))
         }
     }
 }

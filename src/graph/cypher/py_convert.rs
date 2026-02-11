@@ -7,13 +7,13 @@ use crate::datatypes::values::Value;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-/// Convert a Cypher Value to Python, parsing JSON-formatted list strings
-/// (e.g. from nodes(p), relationships(p), collect(), list comprehensions)
-/// into native Python lists.
+/// Convert a Cypher Value to Python, parsing JSON-formatted strings
+/// (e.g. from nodes(p), relationships(p), collect(), list comprehensions, map projections)
+/// into native Python lists/dicts.
 fn cypher_value_to_py(py: Python<'_>, val: &Value) -> PyResult<Py<PyAny>> {
     if let Value::String(s) = val {
-        if s.starts_with('[') && s.ends_with(']') {
-            // Try to parse as JSON array → Python list
+        if (s.starts_with('[') && s.ends_with(']')) || (s.starts_with('{') && s.ends_with('}')) {
+            // Try to parse as JSON → Python list or dict
             let json = py.import("json")?;
             if let Ok(parsed) = json.call_method1("loads", (s.as_str(),)) {
                 return Ok(parsed.unbind());

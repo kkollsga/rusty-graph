@@ -2,14 +2,14 @@
 
 import pytest
 import pandas as pd
-from rusty_graph import KnowledgeGraph
-import rusty_graph
+from kglite import KnowledgeGraph
+import kglite
 
 
 class TestModuleAPI:
     def test_module_imports(self):
-        assert hasattr(rusty_graph, 'KnowledgeGraph')
-        assert hasattr(rusty_graph, 'load')
+        assert hasattr(kglite, 'KnowledgeGraph')
+        assert hasattr(kglite, 'load')
 
     def test_graph_creation(self):
         graph = KnowledgeGraph()

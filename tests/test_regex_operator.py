@@ -1,7 +1,7 @@
 """Tests for the =~ regex match operator in Cypher queries."""
 
 import pytest
-from rusty_graph import KnowledgeGraph
+from kglite import KnowledgeGraph
 
 
 @pytest.fixture

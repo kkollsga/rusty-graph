@@ -2,7 +2,7 @@
 
 import pytest
 import pandas as pd
-from rusty_graph import KnowledgeGraph
+from kglite import KnowledgeGraph
 
 
 @pytest.fixture
@@ -206,8 +206,10 @@ class TestVacuum:
         graph_with_data.cypher("MATCH (p:Person {name: 'Person_5'}) DETACH DELETE p")
         graph_with_data.vacuum()
 
-        # Selection on the vacuumed graph should be reset (empty)
-        assert graph_with_data.node_count() == 0  # Selection is cleared
+        # Selection is cleared; node_count() returns total graph count (9 remaining)
+        assert graph_with_data.node_count() == 9
+        # After re-filtering, we get the correct count
+        assert graph_with_data.type_filter('Person').node_count() == 9
 
     def test_vacuum_then_create(self, graph_with_data):
         """After vacuum, CREATE should still work correctly."""

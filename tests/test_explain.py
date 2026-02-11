@@ -1,7 +1,7 @@
 """Tests for EXPLAIN query plan output."""
 
 import pytest
-from rusty_graph import KnowledgeGraph
+from kglite import KnowledgeGraph
 
 
 @pytest.fixture

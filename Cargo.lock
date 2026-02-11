@@ -372,6 +372,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "kglite"
+version = "0.5.0"
+dependencies = [
+ "bincode",
+ "chrono",
+ "flate2",
+ "geo",
+ "petgraph",
+ "pyo3",
+ "regex",
+ "serde",
+ "serde_json",
+ "wkt",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.169"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -599,22 +615,6 @@ name = "rustversion"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f7c45b9784283f1b2e7fb61b42047c2fd678ef0960d4f6f1eba131594cc369d4"
-
-[[package]]
-name = "rusty_graph"
-version = "0.4.22"
-dependencies = [
- "bincode",
- "chrono",
- "flate2",
- "geo",
- "petgraph",
- "pyo3",
- "regex",
- "serde",
- "serde_json",
- "wkt",
-]
 
 [[package]]
 name = "serde"

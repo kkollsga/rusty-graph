@@ -1,4 +1,4 @@
-"""Type stubs for rusty_graph — a high-performance knowledge graph library."""
+"""Type stubs for kglite — a high-performance knowledge graph library."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ def load(path: str) -> KnowledgeGraph:
     """Load a graph from a binary file previously saved with ``save()``.
 
     Args:
-        path: Path to the ``.bin`` file.
+        path: Path to the ``.kgl`` file.
 
     Returns:
         A new KnowledgeGraph with the loaded data.
@@ -725,10 +725,10 @@ class KnowledgeGraph:
     def save(self, path: str) -> None:
         """Serialise the graph to a binary file.
 
-        Load it back with :func:`rusty_graph.load`.
+        Load it back with :func:`kglite.load`.
 
         Args:
-            path: Output file path (typically ``*.bin``).
+            path: Output file path (typically ``*.kgl``).
         """
         ...
 

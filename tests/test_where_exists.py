@@ -1,7 +1,7 @@
 """Tests for WHERE EXISTS { pattern } subpattern predicate in Cypher queries."""
 
 import pytest
-from rusty_graph import KnowledgeGraph
+from kglite import KnowledgeGraph
 
 
 @pytest.fixture

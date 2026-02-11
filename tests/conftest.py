@@ -1,8 +1,8 @@
-"""Shared fixtures for rusty_graph test suite."""
+"""Shared fixtures for kglite test suite."""
 
 import pytest
 import pandas as pd
-from rusty_graph import KnowledgeGraph
+from kglite import KnowledgeGraph
 
 
 @pytest.fixture
