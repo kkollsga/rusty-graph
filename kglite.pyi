@@ -8,6 +8,47 @@ import pandas as pd
 
 __version__: str
 
+
+class ResultIter:
+    """Iterator for ResultView. Converts one row per step."""
+
+    def __iter__(self) -> ResultIter: ...
+    def __next__(self) -> dict[str, Any]: ...
+
+
+class ResultView:
+    """Lazy result view — data stays in Rust until accessed.
+
+    Returned by ``cypher()``, centrality methods, ``get_nodes()`` (flat),
+    and ``sample()``. Supports ``len()``, indexing, iteration, ``to_list()``,
+    and ``to_df()``.
+    """
+
+    @property
+    def columns(self) -> list[str]:
+        """Column names."""
+        ...
+
+    @property
+    def stats(self) -> Optional[dict[str, int]]:
+        """Mutation statistics, or ``None`` for read queries / non-cypher results."""
+        ...
+
+    def to_list(self) -> list[dict[str, Any]]:
+        """Convert all rows to a Python list of dicts (full materialization)."""
+        ...
+
+    def to_df(self) -> pd.DataFrame:
+        """Convert to a pandas DataFrame."""
+        ...
+
+    def __len__(self) -> int: ...
+    def __bool__(self) -> bool: ...
+    def __getitem__(self, index: int) -> dict[str, Any]: ...
+    def __iter__(self) -> ResultIter: ...
+    def __repr__(self) -> str: ...
+
+
 def load(path: str) -> KnowledgeGraph:
     """Load a graph from a binary file previously saved with ``save()``.
 
@@ -322,8 +363,8 @@ class KnowledgeGraph:
         parent_type: Optional[str] = None,
         parent_info: Optional[bool] = None,
         flatten_single_parent: bool = True,
-    ) -> list[dict[str, Any]]:
-        """Materialise selected nodes as a list of property dicts.
+    ) -> Union[ResultView, dict[str, Any]]:
+        """Materialise selected nodes as a ResultView (flat) or grouped dict.
 
         Args:
             max_nodes: Maximum number of nodes to return.
@@ -833,7 +874,7 @@ class KnowledgeGraph:
         """
         ...
 
-    def sample(self, node_type: str, n: int = 5) -> list[dict[str, Any]]:
+    def sample(self, node_type: str, n: int = 5) -> ResultView:
         """Return a quick sample of nodes for a given type.
 
         Args:
@@ -1136,7 +1177,7 @@ class KnowledgeGraph:
         as_dict: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
         to_df: Optional[bool] = None,
-    ) -> Union[list[dict[str, Any]], "pd.DataFrame"]:
+    ) -> Union[ResultView, dict[Any, float], pd.DataFrame]:
         """Calculate betweenness centrality.
 
         Args:
@@ -1162,7 +1203,7 @@ class KnowledgeGraph:
         as_dict: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
         to_df: Optional[bool] = None,
-    ) -> Union[list[dict[str, Any]], "pd.DataFrame"]:
+    ) -> Union[ResultView, dict[Any, float], pd.DataFrame]:
         """Calculate PageRank centrality.
 
         Args:
@@ -1187,7 +1228,7 @@ class KnowledgeGraph:
         as_dict: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
         to_df: Optional[bool] = None,
-    ) -> Union[list[dict[str, Any]], "pd.DataFrame"]:
+    ) -> Union[ResultView, dict[Any, float], pd.DataFrame]:
         """Calculate degree centrality.
 
         Args:
@@ -1210,7 +1251,7 @@ class KnowledgeGraph:
         as_dict: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
         to_df: Optional[bool] = None,
-    ) -> Union[list[dict[str, Any]], "pd.DataFrame"]:
+    ) -> Union[ResultView, dict[Any, float], pd.DataFrame]:
         """Calculate closeness centrality.
 
         Args:
@@ -1467,7 +1508,7 @@ class KnowledgeGraph:
         *,
         to_df: bool = False,
         params: Optional[dict[str, Any]] = None,
-    ) -> Union[list[dict[str, Any]], pd.DataFrame]:
+    ) -> Union[ResultView, pd.DataFrame]:
         """Execute a Cypher query.
 
         Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, WITH,
@@ -1712,7 +1753,7 @@ class Transaction:
         query: str,
         params: dict[str, Any] | None = None,
         to_df: bool = False,
-    ) -> list[dict[str, Any]] | pd.DataFrame:
+    ) -> ResultView | pd.DataFrame:
         """Execute a Cypher query within this transaction.
 
         Same interface as :meth:`KnowledgeGraph.cypher` but operates on

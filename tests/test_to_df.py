@@ -2,6 +2,7 @@
 
 import pandas as pd
 import pytest
+import kglite
 from kglite import KnowledgeGraph
 
 
@@ -117,11 +118,11 @@ class TestCypherToDF:
         assert df.iloc[0]['name'] == 'Alice'
         assert df.iloc[0]['age'] == 28
 
-    def test_cypher_default_returns_list(self, small_graph):
+    def test_cypher_default_returns_result_view(self, small_graph):
         result = small_graph.cypher(
             "MATCH (n:Person) RETURN n.name AS name, n.age AS age"
         )
-        assert isinstance(result, list)
+        assert isinstance(result, kglite.ResultView)
         assert len(result) == 3
         assert 'name' in result[0]
         assert 'age' in result[0]

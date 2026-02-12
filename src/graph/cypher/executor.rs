@@ -13,7 +13,12 @@ use crate::graph::value_operations;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::{EdgeRef, NodeIndexable};
 use petgraph::Direction;
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+
+/// Minimum row count to switch from sequential to parallel iteration.
+/// Below this threshold, sequential is faster (avoids rayon thread pool overhead).
+const RAYON_THRESHOLD: usize = 256;
 
 // ============================================================================
 // Executor
@@ -125,7 +130,7 @@ impl<'a> CypherExecutor<'a> {
                         let executor = PatternExecutor::with_bindings_and_params(
                             self.graph,
                             None,
-                            existing_row.node_bindings.clone(),
+                            existing_row.node_bindings.to_hashmap(),
                             self.params.clone(),
                         );
                         let matches = executor.execute(pattern)?;
@@ -151,7 +156,7 @@ impl<'a> CypherExecutor<'a> {
                     let executor = PatternExecutor::with_bindings_and_params(
                         self.graph,
                         None,
-                        row.node_bindings.clone(),
+                        row.node_bindings.to_hashmap(),
                         self.params.clone(),
                     );
                     let matches = executor.execute(pattern)?;
@@ -196,13 +201,19 @@ impl<'a> CypherExecutor<'a> {
                             if let PatternElement::Edge(ep) = elem {
                                 if let Some(ref var) = ep.variable {
                                     if let Some(eb) = row.edge_bindings.get(var) {
+                                        let conn_type = self
+                                            .graph
+                                            .graph
+                                            .edge_weight(eb.edge_index)
+                                            .map(|ed| ed.connection_type.clone())
+                                            .unwrap_or_default();
                                         row.path_bindings.insert(
                                             pa.variable.clone(),
                                             crate::graph::cypher::result::PathBinding {
                                                 source: eb.source,
                                                 target: eb.target,
                                                 hops: 1,
-                                                path: vec![(eb.target, eb.connection_type.clone())],
+                                                path: vec![(eb.target, conn_type)],
                                             },
                                         );
                                         break;
@@ -391,22 +402,20 @@ impl<'a> CypherExecutor<'a> {
 
         for (var, binding) in m.bindings {
             match binding {
-                MatchBinding::Node { index, .. } => {
+                MatchBinding::Node { index, .. } | MatchBinding::NodeRef(index) => {
                     row.node_bindings.insert(var, index);
                 }
                 MatchBinding::Edge {
                     source,
                     target,
-                    connection_type,
-                    properties,
+                    edge_index,
                 } => {
                     row.edge_bindings.insert(
                         var,
                         EdgeBinding {
                             source,
                             target,
-                            connection_type,
-                            properties,
+                            edge_index,
                         },
                     );
                 }
@@ -436,22 +445,20 @@ impl<'a> CypherExecutor<'a> {
     fn merge_match_into_row(&self, row: &mut ResultRow, m: &PatternMatch) {
         for (var, binding) in &m.bindings {
             match binding {
-                MatchBinding::Node { index, .. } => {
+                MatchBinding::Node { index, .. } | MatchBinding::NodeRef(index) => {
                     row.node_bindings.insert(var.clone(), *index);
                 }
                 MatchBinding::Edge {
                     source,
                     target,
-                    connection_type,
-                    properties,
+                    edge_index,
                 } => {
                     row.edge_bindings.insert(
                         var.clone(),
                         EdgeBinding {
                             source: *source,
                             target: *target,
-                            connection_type: connection_type.clone(),
-                            properties: properties.clone(),
+                            edge_index: *edge_index,
                         },
                     );
                 }
@@ -560,7 +567,7 @@ impl<'a> CypherExecutor<'a> {
                 let executor = PatternExecutor::with_bindings_and_params(
                     self.graph,
                     None,
-                    row.node_bindings.clone(),
+                    row.node_bindings.to_hashmap(),
                     self.params.clone(),
                 );
                 let matches = executor.execute(pattern)?;
@@ -730,15 +737,15 @@ impl<'a> CypherExecutor<'a> {
 
             for pattern in &match_clause.patterns {
                 // Fast-path: direct edge traversal when one end is pre-bound
-                if let Some(fast_count) = self.try_count_simple_pattern(pattern, &row.node_bindings)
-                {
+                let node_map = row.node_bindings.to_hashmap();
+                if let Some(fast_count) = self.try_count_simple_pattern(pattern, &node_map) {
                     match_count += fast_count;
                 } else {
                     // Fall back to full PatternExecutor
                     let executor = PatternExecutor::with_bindings_and_params(
                         self.graph,
                         None,
-                        row.node_bindings.clone(),
+                        node_map,
                         self.params.clone(),
                     );
                     let matches = executor.execute(pattern)?;
@@ -752,7 +759,8 @@ impl<'a> CypherExecutor<'a> {
             }
 
             // Build projected values for this row
-            let mut projected = HashMap::new();
+            let mut projected =
+                Bindings::with_capacity(group_key_indices.len() + count_items.len());
 
             // Group key pass-throughs
             for &idx in &group_key_indices {
@@ -780,7 +788,7 @@ impl<'a> CypherExecutor<'a> {
                         new_row.node_bindings.insert(var.clone(), node_idx);
                     }
                     if let Some(edge) = row.edge_bindings.get(var) {
-                        new_row.edge_bindings.insert(var.clone(), edge.clone());
+                        new_row.edge_bindings.insert(var.clone(), *edge);
                     }
                     if let Some(path) = row.path_bindings.get(var) {
                         new_row.path_bindings.insert(var.clone(), path.clone());
@@ -811,7 +819,7 @@ impl<'a> CypherExecutor<'a> {
             if let Some(&existing_idx) = row.node_bindings.get(var) {
                 // Variable already bound - check it matches
                 match binding {
-                    MatchBinding::Node { index, .. } => {
+                    MatchBinding::Node { index, .. } | MatchBinding::NodeRef(index) => {
                         if *index != existing_idx {
                             return false;
                         }
@@ -851,14 +859,29 @@ impl<'a> CypherExecutor<'a> {
         }
 
         // Apply full predicate evaluation for remaining/non-indexable conditions
-        let mut filtered_rows = Vec::new();
-        for row in result_set.rows {
-            match self.evaluate_predicate(&clause.predicate, &row) {
-                Ok(true) => filtered_rows.push(row),
-                Ok(false) => {}
-                Err(e) => return Err(e),
+        let filtered_rows = if result_set.rows.len() >= RAYON_THRESHOLD {
+            result_set
+                .rows
+                .into_par_iter()
+                .filter_map(
+                    |row| match self.evaluate_predicate(&clause.predicate, &row) {
+                        Ok(true) => Some(Ok(row)),
+                        Ok(false) => None,
+                        Err(e) => Some(Err(e)),
+                    },
+                )
+                .collect::<Result<Vec<_>, String>>()?
+        } else {
+            let mut rows = Vec::new();
+            for row in result_set.rows {
+                match self.evaluate_predicate(&clause.predicate, &row) {
+                    Ok(true) => rows.push(row),
+                    Ok(false) => {}
+                    Err(e) => return Err(e),
+                }
             }
-        }
+            rows
+        };
         result_set.rows = filtered_rows;
         Ok(result_set)
     }
@@ -986,7 +1009,7 @@ impl<'a> CypherExecutor<'a> {
                     let executor = PatternExecutor::with_bindings_and_params(
                         self.graph,
                         None,
-                        row.node_bindings.clone(),
+                        row.node_bindings.to_hashmap(),
                         self.params.clone(),
                     );
                     let matches = executor.execute(pattern)?;
@@ -1249,7 +1272,7 @@ impl<'a> CypherExecutor<'a> {
 
         // Edge variable
         if let Some(edge) = row.edge_bindings.get(variable) {
-            return Ok(resolve_edge_property(edge, property));
+            return Ok(resolve_edge_property(self.graph, edge, property));
         }
 
         // Path variable
@@ -1369,7 +1392,9 @@ impl<'a> CypherExecutor<'a> {
                 // type(r) returns the relationship type
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(edge) = row.edge_bindings.get(var) {
-                        return Ok(Value::String(edge.connection_type.clone()));
+                        if let Some(edge_data) = self.graph.graph.edge_weight(edge.edge_index) {
+                            return Ok(Value::String(edge_data.connection_type.clone()));
+                        }
                     }
                 }
                 Ok(Value::Null)
@@ -1448,17 +1473,29 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<ResultSet, String> {
         let columns: Vec<String> = clause.items.iter().map(return_item_column_name).collect();
 
-        let mut rows = Vec::with_capacity(result_set.rows.len());
-
-        for row in &result_set.rows {
+        let project_row = |row: &ResultRow| -> Result<ResultRow, String> {
             let mut new_row = row.clone();
             for item in &clause.items {
                 let key = return_item_column_name(item);
                 let val = self.evaluate_expression(&item.expression, row)?;
                 new_row.projected.insert(key, val);
             }
-            rows.push(new_row);
-        }
+            Ok(new_row)
+        };
+
+        let mut rows = if result_set.rows.len() >= RAYON_THRESHOLD {
+            result_set
+                .rows
+                .par_iter()
+                .map(project_row)
+                .collect::<Result<Vec<_>, String>>()?
+        } else {
+            result_set
+                .rows
+                .iter()
+                .map(project_row)
+                .collect::<Result<Vec<_>, String>>()?
+        };
 
         // Handle DISTINCT
         if clause.distinct {
@@ -1494,7 +1531,7 @@ impl<'a> CypherExecutor<'a> {
 
         // Special case: no grouping keys = aggregate over all rows
         if group_key_indices.is_empty() {
-            let mut projected = HashMap::new();
+            let mut projected = Bindings::with_capacity(clause.items.len());
             for item in &clause.items {
                 let key = return_item_column_name(item);
                 let val = self.evaluate_aggregate(&item.expression, &result_set.rows)?;
@@ -1544,7 +1581,7 @@ impl<'a> CypherExecutor<'a> {
             let group_rows: Vec<&ResultRow> =
                 row_indices.iter().map(|&i| &result_set.rows[i]).collect();
 
-            let mut projected = HashMap::new();
+            let mut projected = Bindings::with_capacity(clause.items.len());
 
             // Add group key values
             for (ki, &item_idx) in group_key_indices.iter().enumerate() {
@@ -1575,7 +1612,7 @@ impl<'a> CypherExecutor<'a> {
                         row.node_bindings.insert(var.clone(), idx);
                     }
                     if let Some(edge) = first_row.edge_bindings.get(var) {
-                        row.edge_bindings.insert(var.clone(), edge.clone());
+                        row.edge_bindings.insert(var.clone(), *edge);
                     }
                     if let Some(path) = first_row.path_bindings.get(var) {
                         row.path_bindings.insert(var.clone(), path.clone());
@@ -1954,7 +1991,7 @@ impl<'a> CypherExecutor<'a> {
         // Convert right result back to ResultSet
         let mut combined_rows = result_set.rows;
         for row_values in right_result.rows {
-            let mut projected = HashMap::new();
+            let mut projected = Bindings::with_capacity(right_result.columns.len());
             for (i, col) in right_result.columns.iter().enumerate() {
                 if let Some(val) = row_values.get(i) {
                     projected.insert(col.clone(), val.clone());
@@ -2038,17 +2075,19 @@ impl<'a> CypherExecutor<'a> {
         }
 
         // RETURN was specified - use its columns
-        let rows: Vec<Vec<Value>> = result_set
-            .rows
-            .iter()
-            .map(|row| {
-                result_set
-                    .columns
-                    .iter()
-                    .map(|col| row.projected.get(col).cloned().unwrap_or(Value::Null))
-                    .collect()
-            })
-            .collect();
+        let extract_row = |row: &ResultRow| -> Vec<Value> {
+            result_set
+                .columns
+                .iter()
+                .map(|col| row.projected.get(col).cloned().unwrap_or(Value::Null))
+                .collect()
+        };
+
+        let rows: Vec<Vec<Value>> = if result_set.rows.len() >= RAYON_THRESHOLD {
+            result_set.rows.par_iter().map(extract_row).collect()
+        } else {
+            result_set.rows.iter().map(extract_row).collect()
+        };
 
         Ok(CypherResult {
             columns: result_set.columns,
@@ -2162,8 +2201,8 @@ fn execute_create(
             let mut pattern_vars: HashMap<String, petgraph::graph::NodeIndex> = HashMap::new();
 
             // Seed with existing bindings from MATCH
-            for (var, &idx) in &row.node_bindings {
-                pattern_vars.insert(var.clone(), idx);
+            for (var, idx) in row.node_bindings.iter() {
+                pattern_vars.insert(var.clone(), *idx);
             }
 
             // First pass: create all new nodes
@@ -2215,27 +2254,21 @@ fn execute_create(
                     graph.register_connection_type(edge_pat.connection_type.clone());
                     stats.relationships_created += 1;
 
-                    // Bind edge variable if named; avoid clone when not needed
+                    let edge_data = EdgeData::new(edge_pat.connection_type.clone(), edge_props);
+                    let edge_index = graph
+                        .graph
+                        .add_edge(actual_source, actual_target, edge_data);
+
+                    // Bind edge variable if named
                     if let Some(ref var) = edge_pat.variable {
-                        let edge_data =
-                            EdgeData::new(edge_pat.connection_type.clone(), edge_props.clone());
-                        graph
-                            .graph
-                            .add_edge(actual_source, actual_target, edge_data);
                         new_row.edge_bindings.insert(
                             var.clone(),
                             EdgeBinding {
                                 source: actual_source,
                                 target: actual_target,
-                                connection_type: edge_pat.connection_type.clone(),
-                                properties: edge_props,
+                                edge_index,
                             },
                         );
-                    } else {
-                        let edge_data = EdgeData::new(edge_pat.connection_type.clone(), edge_props);
-                        graph
-                            .graph
-                            .add_edge(actual_source, actual_target, edge_data);
                     }
                 }
                 i += 2; // Skip to next edge position
@@ -2478,13 +2511,8 @@ fn execute_delete(
     use std::collections::HashSet;
 
     let mut nodes_to_delete: HashSet<petgraph::graph::NodeIndex> = HashSet::new();
-    // For edge deletion we store (source, target, connection_type) tuples to identify edges
-    let mut edge_vars_to_delete: Vec<(
-        String,
-        petgraph::graph::NodeIndex,
-        petgraph::graph::NodeIndex,
-        String,
-    )> = Vec::new();
+    // For edge deletion we store edge indices directly — O(1) lookup
+    let mut edge_vars_to_delete: Vec<(String, petgraph::graph::EdgeIndex)> = Vec::new();
 
     // Phase 1: collect all nodes and edges to delete across all rows
     for row in &result_set.rows {
@@ -2497,12 +2525,7 @@ fn execute_delete(
             if let Some(&node_idx) = row.node_bindings.get(var_name) {
                 nodes_to_delete.insert(node_idx);
             } else if let Some(edge_binding) = row.edge_bindings.get(var_name) {
-                edge_vars_to_delete.push((
-                    var_name.clone(),
-                    edge_binding.source,
-                    edge_binding.target,
-                    edge_binding.connection_type.clone(),
-                ));
+                edge_vars_to_delete.push((var_name.clone(), edge_binding.edge_index));
             } else {
                 return Err(format!(
                     "Variable '{}' not bound to a node or relationship in DELETE",
@@ -2546,18 +2569,10 @@ fn execute_delete(
 
     // Phase 3: delete explicitly-requested edges (from edge variable bindings)
     let mut deleted_edges: HashSet<petgraph::graph::EdgeIndex> = HashSet::new();
-    for (_var, source, target, conn_type) in &edge_vars_to_delete {
-        // Find the edge by source, target, and connection type
-        let edge_idx = graph
-            .graph
-            .edges_directed(*source, petgraph::Direction::Outgoing)
-            .find(|e| e.target() == *target && e.weight().connection_type == *conn_type)
-            .map(|e| e.id());
-        if let Some(idx) = edge_idx {
-            if deleted_edges.insert(idx) {
-                graph.graph.remove_edge(idx);
-                stats.relationships_deleted += 1;
-            }
+    for (_var, edge_index) in &edge_vars_to_delete {
+        if deleted_edges.insert(*edge_index) {
+            graph.graph.remove_edge(*edge_index);
+            stats.relationships_deleted += 1;
         }
     }
 
@@ -2726,7 +2741,7 @@ fn execute_merge(
                 new_row.node_bindings.insert(var.clone(), *idx);
             }
             for (var, binding) in &bound_row.edge_bindings {
-                new_row.edge_bindings.insert(var.clone(), binding.clone());
+                new_row.edge_bindings.insert(var.clone(), *binding);
             }
 
             // Execute ON MATCH SET
@@ -2887,8 +2902,7 @@ fn try_match_merge_pattern(
                             EdgeBinding {
                                 source: actual_src,
                                 target: actual_tgt,
-                                connection_type: edge_ref.weight().connection_type.clone(),
-                                properties: edge_ref.weight().properties.clone(),
+                                edge_index: edge_ref.id(),
                             },
                         );
                     }
@@ -3088,15 +3102,19 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
     }
 }
 
-/// Resolve a property from an EdgeBinding
-fn resolve_edge_property(edge: &EdgeBinding, property: &str) -> Value {
-    match property {
-        "type" | "connection_type" => Value::String(edge.connection_type.clone()),
-        _ => edge
-            .properties
-            .get(property)
-            .cloned()
-            .unwrap_or(Value::Null),
+/// Resolve a property from an EdgeBinding by looking up the graph
+fn resolve_edge_property(graph: &DirGraph, edge: &EdgeBinding, property: &str) -> Value {
+    if let Some(edge_data) = graph.graph.edge_weight(edge.edge_index) {
+        match property {
+            "type" | "connection_type" => Value::String(edge_data.connection_type.clone()),
+            _ => edge_data
+                .properties
+                .get(property)
+                .cloned()
+                .unwrap_or(Value::Null),
+        }
+    } else {
+        Value::Null
     }
 }
 

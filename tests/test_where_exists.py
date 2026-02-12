@@ -256,7 +256,7 @@ class TestExistsParenSyntax:
             ORDER BY p.name
         """)
 
-        assert brace_result == paren_result
+        assert brace_result.to_list() == paren_result.to_list()
 
     def test_not_exists_paren(self, social_graph):
         """NOT EXISTS((...)) works correctly."""

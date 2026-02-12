@@ -4,10 +4,17 @@
 use crate::datatypes::values::Value;
 use crate::graph::filtering_methods::values_equal;
 use crate::graph::schema::DirGraph;
-use petgraph::graph::NodeIndex;
+use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
+use rayon::prelude::*;
 use std::collections::HashMap;
+
+/// Minimum match count to use parallel expansion via rayon.
+/// Set high: each expand_from_node does light work (a few edge iterations),
+/// so rayon overhead only pays off for very large match sets. Also avoids
+/// contention when multiple queries run concurrently (shared thread pool).
+const EXPANSION_RAYON_THRESHOLD: usize = 8192;
 
 // ============================================================================
 // AST Types
@@ -72,10 +79,12 @@ pub enum PropertyMatcher {
 // Match Results
 // ============================================================================
 
-/// A single pattern match with variable bindings
+/// A single pattern match with variable bindings.
+/// Uses Vec instead of HashMap — patterns add 1-6 unique variables,
+/// so linear search is faster than hashing and clone is a single memcpy.
 #[derive(Debug, Clone)]
 pub struct PatternMatch {
-    pub bindings: HashMap<String, MatchBinding>,
+    pub bindings: Vec<(String, MatchBinding)>,
 }
 
 /// A bound value (either node, edge, or variable-length path)
@@ -89,11 +98,13 @@ pub enum MatchBinding {
         id: Value,
         properties: HashMap<String, Value>,
     },
+    /// Lightweight node reference — stores only NodeIndex (4 bytes).
+    /// Used in Cypher executor path where node data is resolved on demand from graph.
+    NodeRef(NodeIndex),
     Edge {
         source: NodeIndex,
         target: NodeIndex,
-        connection_type: String,
-        properties: HashMap<String, Value>,
+        edge_index: EdgeIndex,
     },
     /// Variable-length path binding for patterns like -[:TYPE*1..3]->
     VariableLengthPath {
@@ -797,10 +808,10 @@ impl<'a> PatternExecutor<'a> {
             .iter()
             .map(|&idx| {
                 let mut pm = PatternMatch {
-                    bindings: HashMap::new(),
+                    bindings: Vec::new(),
                 };
                 if let Some(ref var) = first_node.variable {
-                    pm.bindings.insert(var.clone(), self.node_to_binding(idx));
+                    pm.bindings.push((var.clone(), self.node_to_binding(idx)));
                 }
                 pm
             })
@@ -832,53 +843,102 @@ impl<'a> PatternExecutor<'a> {
             };
 
             // Expand each current match
-            let mut new_matches = Vec::new();
-            let mut new_indices = Vec::new();
-
-            for (current_match, &source_idx) in matches.iter().zip(current_indices.iter()) {
-                if self.max_matches.is_some_and(|max| new_matches.len() >= max) {
-                    break;
-                }
-
-                // Find all valid expansions
-                let expansions = self.expand_from_node(source_idx, edge_pattern, node_pattern)?;
-
-                for (target_idx, edge_binding) in expansions {
-                    if self.max_matches.is_some_and(|max| new_matches.len() >= max) {
+            let (mut new_matches, mut new_indices) = if matches.len() >= EXPANSION_RAYON_THRESHOLD
+                && self.max_matches.is_none()
+            {
+                // Parallel expansion — each match's expand_from_node is independent
+                let results: Vec<(PatternMatch, NodeIndex)> = matches
+                    .par_iter()
+                    .zip(current_indices.par_iter())
+                    .flat_map(|(current_match, &source_idx)| {
+                        let expansions =
+                            match self.expand_from_node(source_idx, edge_pattern, node_pattern) {
+                                Ok(exp) => exp,
+                                Err(_) => return Vec::new(),
+                            };
+                        expansions
+                            .into_iter()
+                            .filter_map(|(target_idx, edge_binding)| {
+                                if let Some(ref var) = node_pattern.variable {
+                                    if let Some(&bound_idx) = self.pre_bindings.get(var) {
+                                        if target_idx != bound_idx {
+                                            return None;
+                                        }
+                                    }
+                                }
+                                let mut new_match = current_match.clone();
+                                if let Some(ref var) = edge_pattern.variable {
+                                    new_match.bindings.push((var.clone(), edge_binding));
+                                } else if matches!(
+                                    edge_binding,
+                                    MatchBinding::VariableLengthPath { .. }
+                                ) {
+                                    new_match
+                                        .bindings
+                                        .push((format!("__anon_vlpath_{}", i), edge_binding));
+                                }
+                                if let Some(ref var) = node_pattern.variable {
+                                    new_match
+                                        .bindings
+                                        .push((var.clone(), self.node_to_binding(target_idx)));
+                                }
+                                Some((new_match, target_idx))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                results.into_iter().unzip()
+            } else {
+                // Sequential expansion with max_matches early-exit
+                let mut new_matches_seq = Vec::new();
+                let mut new_indices_seq = Vec::new();
+                for (current_match, &source_idx) in matches.iter().zip(current_indices.iter()) {
+                    if self
+                        .max_matches
+                        .is_some_and(|max| new_matches_seq.len() >= max)
+                    {
                         break;
                     }
-
-                    // Skip if target variable is pre-bound to a different node
-                    if let Some(ref var) = node_pattern.variable {
-                        if let Some(&bound_idx) = self.pre_bindings.get(var) {
-                            if target_idx != bound_idx {
-                                continue;
+                    let expansions =
+                        self.expand_from_node(source_idx, edge_pattern, node_pattern)?;
+                    for (target_idx, edge_binding) in expansions {
+                        if self
+                            .max_matches
+                            .is_some_and(|max| new_matches_seq.len() >= max)
+                        {
+                            break;
+                        }
+                        if let Some(ref var) = node_pattern.variable {
+                            if let Some(&bound_idx) = self.pre_bindings.get(var) {
+                                if target_idx != bound_idx {
+                                    continue;
+                                }
                             }
                         }
+                        let mut new_match = current_match.clone();
+                        if let Some(ref var) = edge_pattern.variable {
+                            new_match.bindings.push((var.clone(), edge_binding));
+                        } else if matches!(edge_binding, MatchBinding::VariableLengthPath { .. }) {
+                            new_match
+                                .bindings
+                                .push((format!("__anon_vlpath_{}", i), edge_binding));
+                        }
+                        if let Some(ref var) = node_pattern.variable {
+                            new_match
+                                .bindings
+                                .push((var.clone(), self.node_to_binding(target_idx)));
+                        }
+                        new_matches_seq.push(new_match);
+                        new_indices_seq.push(target_idx);
                     }
-
-                    let mut new_match = current_match.clone();
-
-                    // Add edge binding if variable exists, or under synthetic key
-                    // for anonymous variable-length paths (needed for path assignments)
-                    if let Some(ref var) = edge_pattern.variable {
-                        new_match.bindings.insert(var.clone(), edge_binding);
-                    } else if matches!(edge_binding, MatchBinding::VariableLengthPath { .. }) {
-                        new_match
-                            .bindings
-                            .insert(format!("__anon_vlpath_{}", i), edge_binding);
-                    }
-
-                    // Add node binding if variable exists
-                    if let Some(ref var) = node_pattern.variable {
-                        new_match
-                            .bindings
-                            .insert(var.clone(), self.node_to_binding(target_idx));
-                    }
-
-                    new_matches.push(new_match);
-                    new_indices.push(target_idx);
                 }
+                (new_matches_seq, new_indices_seq)
+            };
+
+            // Apply max_matches truncation (for parallel path which can't early-exit)
+            if let Some(max) = self.max_matches {
+                new_matches.truncate(max);
+                new_indices.truncate(max);
             }
 
             matches = new_matches;
@@ -969,6 +1029,40 @@ impl<'a> PatternExecutor<'a> {
             return None;
         }
 
+        // Try ID index for {id: value} patterns — O(1) lookup
+        if equality_props.len() == 1 {
+            let (prop_name, value) = equality_props[0];
+            if prop_name == "id" {
+                if let Some(idx) = self.graph.lookup_by_id_readonly(node_type, value) {
+                    return Some(vec![idx]);
+                }
+                // Fall through: id_index not built yet, use scan below
+            }
+        }
+
+        // Try composite index for multi-property patterns
+        if equality_props.len() >= 2 {
+            let mut sorted: Vec<(&String, &Value)> = equality_props.clone();
+            sorted.sort_by(|a, b| a.0.cmp(b.0));
+            let names: Vec<String> = sorted.iter().map(|(k, _)| (*k).clone()).collect();
+            let values: Vec<Value> = sorted.iter().map(|(_, v)| (*v).clone()).collect();
+            if let Some(results) = self
+                .graph
+                .lookup_by_composite_index(node_type, &names, &values)
+            {
+                if equality_props.len() == props.len() {
+                    // Composite index covers all properties
+                    return Some(results);
+                }
+                // Filter remaining non-indexed properties
+                let filtered = results
+                    .into_iter()
+                    .filter(|&idx| self.node_matches_properties(idx, props))
+                    .collect();
+                return Some(filtered);
+            }
+        }
+
         // Try single property index
         for (prop, value) in &equality_props {
             if let Some(results) = self.graph.lookup_by_index(node_type, prop, value) {
@@ -1044,6 +1138,13 @@ impl<'a> PatternExecutor<'a> {
         edge_pattern: &EdgePattern,
         node_pattern: &NodePattern,
     ) -> Result<Vec<(NodeIndex, MatchBinding)>, String> {
+        // Early exit: if the specified connection type doesn't exist in the graph, skip all iteration
+        if let Some(ref conn_type) = edge_pattern.connection_type {
+            if !self.graph.has_connection_type(conn_type) {
+                return Ok(Vec::new());
+            }
+        }
+
         // Check for variable-length path
         if let Some((min_hops, max_hops)) = edge_pattern.var_length {
             return self.expand_var_length(source, edge_pattern, node_pattern, min_hops, max_hops);
@@ -1109,12 +1210,11 @@ impl<'a> PatternExecutor<'a> {
                     }
                 }
 
-                // Create edge binding
+                // Create edge binding — stores only indices, no cloned data
                 let edge_binding = MatchBinding::Edge {
                     source,
                     target,
-                    connection_type: edge_data.connection_type.clone(),
-                    properties: edge_data.properties.clone(),
+                    edge_index: edge.id(),
                 };
 
                 results.push((target, edge_binding));
@@ -1265,13 +1365,7 @@ impl<'a> PatternExecutor<'a> {
     /// since the executor resolves node data on demand via graph lookups.
     fn node_to_binding(&self, idx: NodeIndex) -> MatchBinding {
         if self.lightweight {
-            return MatchBinding::Node {
-                index: idx,
-                node_type: String::new(),
-                title: String::new(),
-                id: Value::Null,
-                properties: HashMap::new(),
-            };
+            return MatchBinding::NodeRef(idx);
         }
         if let Some(node) = self.graph.graph.node_weight(idx) {
             let title_str = match &node.title {

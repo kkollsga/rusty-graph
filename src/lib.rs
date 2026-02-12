@@ -2,6 +2,7 @@
 use pyo3::prelude::*;
 mod datatypes;
 mod graph;
+use graph::cypher::{ResultIter, ResultView};
 use graph::io_operations::load_file;
 use graph::{KnowledgeGraph, Transaction};
 
@@ -16,5 +17,7 @@ fn kglite(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(load, m)?)?;
     m.add_class::<KnowledgeGraph>()?;
     m.add_class::<Transaction>()?;
+    m.add_class::<ResultView>()?;
+    m.add_class::<ResultIter>()?;
     Ok(())
 }

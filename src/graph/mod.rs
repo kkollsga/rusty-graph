@@ -84,42 +84,6 @@ fn get_graph_mut(arc: &mut Arc<DirGraph>) -> &mut DirGraph {
     Arc::make_mut(arc)
 }
 
-/// Helper to convert centrality results to Python list of dicts (detailed format).
-/// Accesses node data directly and pre-interns dict keys for faster construction.
-fn centrality_results_to_py(
-    py: Python<'_>,
-    graph: &DirGraph,
-    results: Vec<graph_algorithms::CentralityResult>,
-    top_k: Option<usize>,
-) -> PyResult<Py<PyAny>> {
-    let limit = top_k.unwrap_or(results.len());
-
-    // Pre-intern the key strings (avoids repeated Python string creation)
-    let key_type = pyo3::intern!(py, "type");
-    let key_title = pyo3::intern!(py, "title");
-    let key_id = pyo3::intern!(py, "id");
-    let key_score = pyo3::intern!(py, "score");
-
-    let result_list = PyList::empty(py);
-
-    for result in results.into_iter().take(limit) {
-        if let Some(node) = graph.get_node(result.node_idx) {
-            let node_dict = PyDict::new(py);
-            node_dict.set_item(key_type, &node.node_type)?;
-            let title_str = match &node.title {
-                Value::String(s) => s.as_str(),
-                _ => "",
-            };
-            node_dict.set_item(key_title, title_str)?;
-            node_dict.set_item(key_id, py_out::value_to_py(py, &node.id)?)?;
-            node_dict.set_item(key_score, result.score)?;
-            result_list.append(node_dict)?;
-        }
-    }
-
-    Ok(result_list.into())
-}
-
 /// Lightweight centrality result conversion: returns {title: score} dict.
 /// Creates ONE Python dict instead of N dicts — returns {title: score} format.
 /// ~3-4x faster PyO3 serialization for large graphs.
@@ -1119,25 +1083,15 @@ impl KnowledgeGraph {
             && (selection_has_nodes || has_query_operations);
 
         if use_fast_path {
-            return Python::attach(|py| {
-                let result = PyList::empty(py);
-                let max = max_nodes.unwrap_or(usize::MAX);
-                let mut count = 0;
-
-                for node_idx in self.selection.current_node_indices() {
-                    if count >= max {
-                        break;
-                    }
-                    if let Some(node) = self.inner.get_node(node_idx) {
-                        if let Some(py_node) = py_out::nodedata_to_pydict(py, node)? {
-                            result.append(py_node)?;
-                            count += 1;
-                        }
-                    }
-                }
-
-                Ok(result.into())
-            });
+            let max = max_nodes.unwrap_or(usize::MAX);
+            let nodes: Vec<&schema::NodeData> = self
+                .selection
+                .current_node_indices()
+                .filter_map(|idx| self.inner.get_node(idx))
+                .take(max)
+                .collect();
+            let view = cypher::ResultView::from_nodes(nodes.into_iter());
+            return Python::attach(|py| Py::new(py, view).map(|v| v.into_any()));
         }
 
         // Full path: handles grouping by parent, filtering, etc.
@@ -2186,15 +2140,8 @@ impl KnowledgeGraph {
     fn sample(&self, node_type: &str, n: usize) -> PyResult<Py<PyAny>> {
         let nodes = introspection::compute_sample(&self.inner, node_type, n)
             .map_err(PyErr::new::<pyo3::exceptions::PyKeyError, _>)?;
-        Python::attach(|py| {
-            let result_list = PyList::empty(py);
-            for node in nodes {
-                if let Some(py_dict) = py_out::nodedata_to_pydict(py, node)? {
-                    result_list.append(py_dict)?;
-                }
-            }
-            Ok(result_list.into())
-        })
+        let view = cypher::ResultView::from_nodes(nodes.into_iter());
+        Python::attach(|py| Py::new(py, view).map(|v| v.into_any()))
     }
 
     /// Return a unified list of all indexes (single-property and composite).
@@ -3426,7 +3373,10 @@ impl KnowledgeGraph {
         } else if as_dict.unwrap_or(false) {
             centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
-            centrality_results_to_py(py, &self.inner, results, top_k)
+            {
+                let view = cypher::ResultView::from_centrality(&self.inner, results, top_k);
+                Py::new(py, view).map(|v| v.into_any())
+            }
         }
     }
 
@@ -3480,7 +3430,10 @@ impl KnowledgeGraph {
         } else if as_dict.unwrap_or(false) {
             centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
-            centrality_results_to_py(py, &self.inner, results, top_k)
+            {
+                let view = cypher::ResultView::from_centrality(&self.inner, results, top_k);
+                Py::new(py, view).map(|v| v.into_any())
+            }
         }
     }
 
@@ -3525,7 +3478,10 @@ impl KnowledgeGraph {
         } else if as_dict.unwrap_or(false) {
             centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
-            centrality_results_to_py(py, &self.inner, results, top_k)
+            {
+                let view = cypher::ResultView::from_centrality(&self.inner, results, top_k);
+                Py::new(py, view).map(|v| v.into_any())
+            }
         }
     }
 
@@ -3571,7 +3527,10 @@ impl KnowledgeGraph {
         } else if as_dict.unwrap_or(false) {
             centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
-            centrality_results_to_py(py, &self.inner, results, top_k)
+            {
+                let view = cypher::ResultView::from_centrality(&self.inner, results, top_k);
+                Py::new(py, view).map(|v| v.into_any())
+            }
         }
     }
 
@@ -4378,9 +4337,15 @@ impl KnowledgeGraph {
             }
             // Convert to Python
             if to_df {
-                cypher::py_convert::cypher_result_to_dataframe(py, &result)
+                let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
+                cypher::py_convert::preprocessed_result_to_dataframe(
+                    py,
+                    &result.columns,
+                    &preprocessed,
+                )
             } else {
-                cypher::py_convert::cypher_result_to_py_auto(py, &result)
+                let view = cypher::ResultView::from_cypher_result(result);
+                Py::new(py, view).map(|v| v.into_any())
             }
         } else {
             // Read-only path: shared borrow to clone Arc, then release borrow + GIL
@@ -4390,7 +4355,7 @@ impl KnowledgeGraph {
             };
             // Borrow released — multiple threads can now access concurrently
             // Execute query AND pre-parse JSON strings while GIL is released (pure Rust)
-            let (result, columns, preprocessed) = py.detach(move || {
+            let (columns, preprocessed, stats) = py.detach(move || {
                 let executor = cypher::CypherExecutor::with_params(&inner, &param_map);
                 let result = executor.execute(&parsed).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
@@ -4398,20 +4363,17 @@ impl KnowledgeGraph {
                         e
                     ))
                 })?;
-                let columns = result.columns.clone();
-                let preprocessed = cypher::py_convert::preprocess_result(&result);
-                Ok::<_, PyErr>((result, columns, preprocessed))
+                let columns = result.columns;
+                let stats = result.stats;
+                let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
+                Ok::<_, PyErr>((columns, preprocessed, stats))
             })?;
-            // GIL re-acquired — convert pre-parsed data to Python (no JSON parsing needed)
+            // GIL re-acquired — wrap in ResultView (O(1)) or build DataFrame
             if to_df {
                 cypher::py_convert::preprocessed_result_to_dataframe(py, &columns, &preprocessed)
             } else {
-                cypher::py_convert::preprocessed_result_to_py_auto(
-                    py,
-                    &result,
-                    &columns,
-                    &preprocessed,
-                )
+                let view = cypher::ResultView::from_preprocessed(columns, preprocessed, stats);
+                Py::new(py, view).map(|v| v.into_any())
             }
         }
     }
@@ -5038,9 +5000,11 @@ impl Transaction {
         };
 
         if to_df {
-            cypher::py_convert::cypher_result_to_dataframe(py, &result)
+            let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
+            cypher::py_convert::preprocessed_result_to_dataframe(py, &result.columns, &preprocessed)
         } else {
-            cypher::py_convert::cypher_result_to_py_auto(py, &result)
+            let view = cypher::ResultView::from_cypher_result(result);
+            Py::new(py, view).map(|v| v.into_any())
         }
     }
 

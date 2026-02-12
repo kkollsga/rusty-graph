@@ -2,28 +2,12 @@
 use super::values::Value;
 use crate::graph::calculations::StatResult;
 use crate::graph::data_retrieval::{LevelConnections, LevelNodes, LevelValues, UniqueValues};
-use crate::graph::schema::{NodeData, NodeInfo};
+use crate::graph::schema::NodeInfo;
 use crate::graph::statistics_methods::PropertyStats;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use pyo3::IntoPyObjectExt;
 use std::collections::HashMap;
-
-/// Convert NodeData directly to Python dict without intermediate NodeInfo clone.
-/// This is faster than to_node_info() + nodeinfo_to_pydict() because it avoids
-/// cloning the properties HashMap.
-pub fn nodedata_to_pydict(py: Python, node: &NodeData) -> PyResult<Option<Py<PyAny>>> {
-    let dict = PyDict::new(py);
-    dict.set_item("type", &node.node_type)?;
-    dict.set_item("title", value_to_py(py, &node.title)?)?;
-    dict.set_item("id", value_to_py(py, &node.id)?)?;
-
-    for (k, v) in &node.properties {
-        dict.set_item(k, value_to_py(py, v)?)?;
-    }
-
-    Ok(Some(dict.into()))
-}
 
 pub fn nodeinfo_to_pydict(py: Python, node: &NodeInfo) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
@@ -630,22 +614,17 @@ pub fn pattern_matches_to_pylist(
                     }
                     binding_dict.set_item("properties", props_dict)?;
                 }
+                MatchBinding::NodeRef(index) => {
+                    binding_dict.set_item("index", index.index())?;
+                }
                 MatchBinding::Edge {
-                    connection_type,
-                    properties,
                     source,
                     target,
+                    edge_index,
                 } => {
-                    binding_dict.set_item("connection_type", connection_type)?;
                     binding_dict.set_item("source_idx", source.index())?;
                     binding_dict.set_item("target_idx", target.index())?;
-
-                    // Add properties
-                    let props_dict = PyDict::new(py);
-                    for (key, value) in properties {
-                        props_dict.set_item(key, value_to_py(py, value)?)?;
-                    }
-                    binding_dict.set_item("properties", props_dict)?;
+                    binding_dict.set_item("edge_index", edge_index.index())?;
                 }
                 MatchBinding::VariableLengthPath {
                     source,

@@ -13,12 +13,14 @@ pub mod parser;
 pub mod planner;
 pub mod py_convert;
 pub mod result;
+pub mod result_view;
 pub mod tokenizer;
 
 // Re-exports for convenience
 pub use executor::{execute_mutable, is_mutation_query, CypherExecutor};
 pub use parser::parse_cypher;
 pub use planner::optimize;
+pub use result_view::{ResultIter, ResultView};
 
 use ast::*;
 

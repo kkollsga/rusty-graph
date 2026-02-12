@@ -554,13 +554,10 @@ class TestCreateClause:
         result = cypher_graph.cypher(
             "CREATE (n:Animal {name: 'Rex', species: 'Dog'}) RETURN n.name, n.species"
         )
-        assert isinstance(result, dict)
-        assert 'rows' in result
-        assert 'stats' in result
-        rows = result['rows']
-        assert len(rows) == 1
-        assert rows[0]['n.name'] == 'Rex'
-        assert rows[0]['n.species'] == 'Dog'
+        assert result.stats is not None
+        assert len(result) == 1
+        assert result[0]['n.name'] == 'Rex'
+        assert result[0]['n.species'] == 'Dog'
 
 
 class TestSetClause:
@@ -836,47 +833,45 @@ class TestMergeClause:
 class TestMutationStatsReturn:
     """Mutation queries return stats directly (not just via last_mutation_stats)."""
 
-    def test_create_returns_stats_dict(self):
-        """CREATE returns {'stats': {...}} with node count."""
+    def test_create_returns_stats(self):
+        """CREATE returns ResultView with stats."""
         g = KnowledgeGraph()
         result = g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
-        assert isinstance(result, dict)
-        assert 'stats' in result
-        assert result['stats']['nodes_created'] == 1
+        assert result.stats is not None
+        assert result.stats['nodes_created'] == 1
+        assert len(result) == 0
 
-    def test_set_returns_stats_dict(self):
-        """SET returns {'stats': {...}} with properties_set count."""
+    def test_set_returns_stats(self):
+        """SET returns ResultView with stats."""
         g = KnowledgeGraph()
         g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
         result = g.cypher("MATCH (p:Person {name: 'Alice'}) SET p.age = 31")
-        assert isinstance(result, dict)
-        assert result['stats']['properties_set'] >= 1
+        assert result.stats is not None
+        assert result.stats['properties_set'] >= 1
 
-    def test_delete_returns_stats_dict(self):
-        """DETACH DELETE returns {'stats': {...}} with nodes_deleted count."""
+    def test_delete_returns_stats(self):
+        """DETACH DELETE returns ResultView with stats."""
         g = KnowledgeGraph()
         g.cypher("CREATE (:Person {name: 'Alice'})")
         result = g.cypher("MATCH (p:Person {name: 'Alice'}) DETACH DELETE p")
-        assert isinstance(result, dict)
-        assert result['stats']['nodes_deleted'] == 1
+        assert result.stats is not None
+        assert result.stats['nodes_deleted'] == 1
 
     def test_mutation_with_return_has_rows_and_stats(self):
-        """CREATE ... RETURN returns {'rows': [...], 'stats': {...}}."""
+        """CREATE ... RETURN returns ResultView with both rows and stats."""
         g = KnowledgeGraph()
         result = g.cypher("CREATE (n:Person {name: 'Bob', age: 25}) RETURN n.name AS name")
-        assert isinstance(result, dict)
-        assert 'rows' in result
-        assert 'stats' in result
-        assert result['stats']['nodes_created'] == 1
-        assert len(result['rows']) == 1
-        assert result['rows'][0]['name'] == 'Bob'
+        assert result.stats is not None
+        assert result.stats['nodes_created'] == 1
+        assert len(result) == 1
+        assert result[0]['name'] == 'Bob'
 
-    def test_read_query_returns_list(self):
-        """Read query returns list[dict], not dict with stats."""
+    def test_read_query_returns_result_view(self):
+        """Read query returns ResultView with no stats."""
         g = KnowledgeGraph()
         g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
         result = g.cypher("MATCH (p:Person) RETURN p.name AS name")
-        assert isinstance(result, list)
+        assert result.stats is None
         assert len(result) == 1
         assert result[0]['name'] == 'Alice'
 
@@ -905,7 +900,8 @@ class TestParamInMatchPatterns:
             "MATCH (p:Person {name: $name}) RETURN p.age AS age",
             params={'name': 'Alice'}
         )
-        assert result == [{'age': 30}]
+        assert len(result) == 1
+        assert result[0] == {'age': 30}
 
     def test_integer_param_in_match(self):
         """MATCH (n:Person {age: $age}) resolves integer parameter."""
@@ -916,7 +912,8 @@ class TestParamInMatchPatterns:
             "MATCH (p:Person {age: $age}) RETURN p.name AS name",
             params={'age': 30}
         )
-        assert result == [{'name': 'Alice'}]
+        assert len(result) == 1
+        assert result[0] == {'name': 'Alice'}
 
     def test_param_in_where_predicate_pushdown(self):
         """WHERE p.name = $name is pushed into MATCH for index acceleration."""
@@ -927,7 +924,8 @@ class TestParamInMatchPatterns:
             "MATCH (p:Person) WHERE p.name = $name RETURN p.age AS age",
             params={'name': 'Alice'}
         )
-        assert result == [{'age': 30}]
+        assert len(result) == 1
+        assert result[0] == {'age': 30}
 
     def test_multiple_params_in_match(self):
         """Multiple $params in same MATCH pattern."""
@@ -938,7 +936,8 @@ class TestParamInMatchPatterns:
             "MATCH (p:Person {age: $age}) WHERE p.city = $city RETURN p.name AS name",
             params={'age': 30, 'city': 'Oslo'}
         )
-        assert result == [{'name': 'Alice'}]
+        assert len(result) == 1
+        assert result[0] == {'name': 'Alice'}
 
 
 # ============================================================================

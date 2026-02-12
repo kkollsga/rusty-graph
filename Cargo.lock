@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "kglite"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "bincode",
  "chrono",
@@ -381,6 +381,7 @@ dependencies = [
  "geo",
  "petgraph",
  "pyo3",
+ "rayon",
  "regex",
  "serde",
  "serde_json",
