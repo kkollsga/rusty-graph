@@ -3473,7 +3473,9 @@ impl KnowledgeGraph {
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
-        let results = graph_algorithms::pagerank(&self.inner, damping, max_iter, tol, deadline);
+        let inner = Arc::clone(&self.inner);
+        let results =
+            py.detach(move || graph_algorithms::pagerank(&inner, damping, max_iter, tol, deadline));
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -4314,13 +4316,13 @@ impl KnowledgeGraph {
     ///     ```
     #[pyo3(signature = (query, *, to_df=false, params=None))]
     fn cypher(
-        &mut self,
+        slf: &Bound<'_, Self>,
         py: Python<'_>,
         query: &str,
         to_df: bool,
         params: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        // Parse the Cypher query
+        // Parse the Cypher query (no borrow needed)
         let mut parsed = cypher::parse_cypher(query).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Cypher syntax error: {}", e))
         })?;
@@ -4338,8 +4340,11 @@ impl KnowledgeGraph {
             std::collections::HashMap::new()
         };
 
-        // Optimize (predicate pushdown, etc.) — needs params to resolve $param in WHERE
-        cypher::optimize(&mut parsed, &self.inner, &param_map);
+        // Optimize (predicate pushdown, etc.) — needs shared borrow of graph
+        {
+            let this = slf.borrow();
+            cypher::optimize(&mut parsed, &this.inner, &param_map);
+        }
 
         // EXPLAIN: return query plan as string without executing
         if parsed.explain {
@@ -4347,44 +4352,56 @@ impl KnowledgeGraph {
             return Ok(plan.into_pyobject(py)?.into_any().unbind());
         }
 
-        let result = if cypher::is_mutation_query(&parsed) {
-            let graph = get_graph_mut(&mut self.inner);
-            let r = cypher::execute_mutable(graph, &parsed, param_map).map_err(|e| {
+        if cypher::is_mutation_query(&parsed) {
+            // Mutation path: needs exclusive borrow
+            let mut this = slf.borrow_mut();
+            let graph = get_graph_mut(&mut this.inner);
+            let result = cypher::execute_mutable(graph, &parsed, param_map).map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                     "Cypher execution error: {}",
                     e
                 ))
             })?;
             // Auto-vacuum after deletions
-            if let Some(ref stats) = r.stats {
+            if let Some(ref stats) = result.stats {
                 if (stats.nodes_deleted > 0 || stats.relationships_deleted > 0)
                     && graph.check_auto_vacuum()
                 {
-                    self.selection = schema::CowSelection::new();
+                    this.selection = schema::CowSelection::new();
                 }
             }
-            r
+            // Store mutation stats
+            if let Some(ref stats) = result.stats {
+                this.last_mutation_stats = Some(stats.clone());
+            }
+            // Convert to Python
+            if to_df {
+                cypher::py_convert::cypher_result_to_dataframe(py, &result)
+            } else {
+                cypher::py_convert::cypher_result_to_py_auto(py, &result)
+            }
         } else {
-            // Read-only path: borrow immutably
-            let executor = cypher::CypherExecutor::with_params(&self.inner, &param_map);
-            executor.execute(&parsed).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Cypher execution error: {}",
-                    e
-                ))
-            })?
-        };
-
-        // Store mutation stats if present
-        if let Some(ref stats) = result.stats {
-            self.last_mutation_stats = Some(stats.clone());
-        }
-
-        // Convert to Python
-        if to_df {
-            cypher::py_convert::cypher_result_to_dataframe(py, &result)
-        } else {
-            cypher::py_convert::cypher_result_to_py_auto(py, &result)
+            // Read-only path: shared borrow to clone Arc, then release borrow + GIL
+            let inner = {
+                let this = slf.borrow();
+                Arc::clone(&this.inner)
+            };
+            // Borrow released — multiple threads can now access concurrently
+            let result = py.detach(move || {
+                let executor = cypher::CypherExecutor::with_params(&inner, &param_map);
+                executor.execute(&parsed).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Cypher execution error: {}",
+                        e
+                    ))
+                })
+            })?;
+            // GIL re-acquired — convert to Python
+            if to_df {
+                cypher::py_convert::cypher_result_to_dataframe(py, &result)
+            } else {
+                cypher::py_convert::cypher_result_to_py_auto(py, &result)
+            }
         }
     }
 
