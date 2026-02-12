@@ -285,6 +285,13 @@ pub struct DirGraph {
     /// Persisted list of composite index keys so indexes can be rebuilt on load
     #[serde(default)]
     pub(crate) composite_index_keys: Vec<CompositeIndexKey>,
+    /// B-Tree range indexes for ordered lookups: (node_type, property) -> BTreeMap<Value, [NodeIndex]>
+    /// Skipped during serialization — rebuilt from `range_index_keys` on load.
+    #[serde(skip)]
+    pub(crate) range_indices: HashMap<IndexKey, std::collections::BTreeMap<Value, Vec<NodeIndex>>>,
+    /// Persisted list of range index keys so indexes can be rebuilt on load
+    #[serde(default)]
+    pub(crate) range_index_keys: Vec<IndexKey>,
     /// Fast O(1) lookup by node ID: node_type -> (id_value -> NodeIndex)
     /// Lazily built on first use for each node type, skipped during serialization
     #[serde(skip)]
@@ -335,6 +342,8 @@ impl DirGraph {
             composite_indices: HashMap::new(),
             property_index_keys: Vec::new(),
             composite_index_keys: Vec::new(),
+            range_indices: HashMap::new(),
+            range_index_keys: Vec::new(),
             id_indices: HashMap::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: HashMap::new(),
@@ -357,6 +366,8 @@ impl DirGraph {
             composite_indices: HashMap::new(),
             property_index_keys: Vec::new(),
             composite_index_keys: Vec::new(),
+            range_indices: HashMap::new(),
+            range_index_keys: Vec::new(),
             id_indices: HashMap::new(),
             connection_types: std::collections::HashSet::new(),
             node_type_metadata: HashMap::new(),
@@ -726,6 +737,63 @@ impl DirGraph {
     }
 
     // ========================================================================
+    // Range Index Methods (B-Tree)
+    // ========================================================================
+
+    /// Create a range index (B-Tree) on a property for a specific node type.
+    /// Enables efficient range queries (>, >=, <, <=, BETWEEN).
+    /// Returns the number of unique values indexed.
+    pub fn create_range_index(&mut self, node_type: &str, property: &str) -> usize {
+        let key = (node_type.to_string(), property.to_string());
+        let mut index: std::collections::BTreeMap<Value, Vec<NodeIndex>> =
+            std::collections::BTreeMap::new();
+
+        if let Some(node_indices) = self.type_indices.get(node_type) {
+            for &idx in node_indices {
+                if let Some(node) = self.graph.node_weight(idx) {
+                    if let Some(value) = node.properties.get(property) {
+                        index.entry(value.clone()).or_default().push(idx);
+                    }
+                }
+            }
+        }
+
+        let count = index.len();
+        self.range_indices.insert(key, index);
+        count
+    }
+
+    /// Drop a range index. Returns true if it existed.
+    pub fn drop_range_index(&mut self, node_type: &str, property: &str) -> bool {
+        let key = (node_type.to_string(), property.to_string());
+        self.range_indices.remove(&key).is_some()
+    }
+
+    /// Check if a range index exists.
+    #[allow(dead_code)]
+    pub fn has_range_index(&self, node_type: &str, property: &str) -> bool {
+        let key = (node_type.to_string(), property.to_string());
+        self.range_indices.contains_key(&key)
+    }
+
+    /// Range lookup: returns node indices where property value falls in the given range.
+    pub fn lookup_range(
+        &self,
+        node_type: &str,
+        property: &str,
+        lower: std::ops::Bound<&Value>,
+        upper: std::ops::Bound<&Value>,
+    ) -> Option<Vec<NodeIndex>> {
+        let key = (node_type.to_string(), property.to_string());
+        self.range_indices.get(&key).map(|btree| {
+            btree
+                .range((lower, upper))
+                .flat_map(|(_, indices)| indices.iter().copied())
+                .collect()
+        })
+    }
+
+    // ========================================================================
     // Composite Index Methods
     // ========================================================================
 
@@ -860,7 +928,7 @@ impl DirGraph {
     // Incremental Index Maintenance (called by Cypher mutations)
     // ========================================================================
 
-    /// Update property and composite indices after a new node is added.
+    /// Update property, composite, and range indices after a new node is added.
     /// Only updates indices that already exist for this node_type.
     pub fn update_property_indices_for_add(&mut self, node_type: &str, node_idx: NodeIndex) {
         // Collect single-property index updates (immutable borrow of self.graph)
@@ -871,6 +939,7 @@ impl DirGraph {
             };
             self.property_indices
                 .keys()
+                .chain(self.range_indices.keys())
                 .filter(|(nt, _)| nt == node_type)
                 .filter_map(|key| {
                     node.properties
@@ -879,9 +948,12 @@ impl DirGraph {
                 })
                 .collect()
         };
-        for (key, value) in prop_updates {
-            if let Some(value_map) = self.property_indices.get_mut(&key) {
-                value_map.entry(value).or_default().push(node_idx);
+        for (key, value) in &prop_updates {
+            if let Some(value_map) = self.property_indices.get_mut(key) {
+                value_map.entry(value.clone()).or_default().push(node_idx);
+            }
+            if let Some(btree) = self.range_indices.get_mut(key) {
+                btree.entry(value.clone()).or_default().push(node_idx);
             }
         }
 
@@ -915,7 +987,7 @@ impl DirGraph {
         }
     }
 
-    /// Update property and composite indices after a property value is changed.
+    /// Update property, range, and composite indices after a property value is changed.
     /// Removes node from the old value bucket and adds to the new value bucket.
     pub fn update_property_indices_for_set(
         &mut self,
@@ -926,8 +998,8 @@ impl DirGraph {
         new_value: &Value,
     ) {
         let key = (node_type.to_string(), property.to_string());
+        // Update hash index
         if let Some(value_map) = self.property_indices.get_mut(&key) {
-            // Remove from old bucket
             if let Some(old_val) = old_value {
                 if let Some(indices) = value_map.get_mut(old_val) {
                     indices.retain(|&idx| idx != node_idx);
@@ -936,18 +1008,29 @@ impl DirGraph {
                     }
                 }
             }
-            // Add to new bucket
             value_map
                 .entry(new_value.clone())
                 .or_default()
                 .push(node_idx);
+        }
+        // Update range index
+        if let Some(btree) = self.range_indices.get_mut(&key) {
+            if let Some(old_val) = old_value {
+                if let Some(indices) = btree.get_mut(old_val) {
+                    indices.retain(|&idx| idx != node_idx);
+                    if indices.is_empty() {
+                        btree.remove(old_val);
+                    }
+                }
+            }
+            btree.entry(new_value.clone()).or_default().push(node_idx);
         }
 
         // Update any composite indices that include this property
         self.update_composite_indices_for_property_change(node_type, node_idx, property);
     }
 
-    /// Update property and composite indices after a property is removed.
+    /// Update property, range, and composite indices after a property is removed.
     pub fn update_property_indices_for_remove(
         &mut self,
         node_type: &str,
@@ -961,6 +1044,14 @@ impl DirGraph {
                 indices.retain(|&idx| idx != node_idx);
                 if indices.is_empty() {
                     value_map.remove(old_value);
+                }
+            }
+        }
+        if let Some(btree) = self.range_indices.get_mut(&key) {
+            if let Some(indices) = btree.get_mut(old_value) {
+                indices.retain(|&idx| idx != node_idx);
+                if indices.is_empty() {
+                    btree.remove(old_value);
                 }
             }
         }
@@ -1028,6 +1119,7 @@ impl DirGraph {
     pub fn populate_index_keys(&mut self) {
         self.property_index_keys = self.property_indices.keys().cloned().collect();
         self.composite_index_keys = self.composite_indices.keys().cloned().collect();
+        self.range_index_keys = self.range_indices.keys().cloned().collect();
     }
 
     /// Rebuild property and composite indexes from the persisted key lists.
@@ -1045,6 +1137,12 @@ impl DirGraph {
             self.create_composite_index(node_type, &prop_refs);
         }
         self.composite_index_keys = comp_keys;
+
+        let range_keys: Vec<IndexKey> = std::mem::take(&mut self.range_index_keys);
+        for (node_type, property) in &range_keys {
+            self.create_range_index(node_type, property);
+        }
+        self.range_index_keys = range_keys;
     }
 
     // ========================================================================
@@ -1097,6 +1195,12 @@ impl DirGraph {
         for (node_type, properties) in composite_keys {
             let prop_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
             self.create_composite_index(&node_type, &prop_refs);
+        }
+
+        // 5. Rebuild existing range_indices (preserve which indexes exist)
+        let range_keys: Vec<IndexKey> = self.range_indices.keys().cloned().collect();
+        for (node_type, property) in range_keys {
+            self.create_range_index(&node_type, &property);
         }
     }
 

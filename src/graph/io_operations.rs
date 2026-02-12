@@ -60,6 +60,9 @@ struct FileMetadata {
     /// Composite index keys to rebuild after load.
     #[serde(default)]
     composite_index_keys: Vec<CompositeIndexKey>,
+    /// Range index keys to rebuild after load.
+    #[serde(default)]
+    range_index_keys: Vec<IndexKey>,
     /// Node type metadata: node_type → { property_name → type_string }
     #[serde(default)]
     node_type_metadata: HashMap<String, HashMap<String, String>>,
@@ -97,6 +100,7 @@ pub fn save_to_file(graph: &mut Arc<DirGraph>, path: &str) -> io::Result<()> {
         schema_definition: g.schema_definition.clone(),
         property_index_keys: g.property_index_keys.clone(),
         composite_index_keys: g.composite_index_keys.clone(),
+        range_index_keys: g.range_index_keys.clone(),
         node_type_metadata: g.node_type_metadata.clone(),
         connection_type_metadata: g.connection_type_metadata.clone(),
         id_field_aliases: g.id_field_aliases.clone(),
@@ -189,6 +193,7 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
     dir_graph.schema_definition = metadata.schema_definition;
     dir_graph.property_index_keys = metadata.property_index_keys;
     dir_graph.composite_index_keys = metadata.composite_index_keys;
+    dir_graph.range_index_keys = metadata.range_index_keys;
     dir_graph.node_type_metadata = metadata.node_type_metadata;
     dir_graph.connection_type_metadata = metadata.connection_type_metadata;
     dir_graph.id_field_aliases = metadata.id_field_aliases;

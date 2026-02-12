@@ -22,7 +22,7 @@ pub enum FilterCondition {
     EndsWith(Value),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Value {
     UniqueId(u32),
     Int64(i64),
@@ -38,6 +38,54 @@ impl Eq for Value {
     // We need this empty impl because we already have PartialEq
     // and all variants can be exactly equal except Float64,
     // which we handle specially in PartialEq
+}
+
+// Manual PartialOrd + Ord for Value.
+// NaN sorts after all other floats; cross-variant ordering uses discriminant index.
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Value {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        // Helper to get discriminant order
+        fn disc(v: &Value) -> u8 {
+            match v {
+                Value::Null => 0,
+                Value::Boolean(_) => 1,
+                Value::UniqueId(_) => 2,
+                Value::Int64(_) => 3,
+                Value::Float64(_) => 4,
+                Value::String(_) => 5,
+                Value::DateTime(_) => 6,
+            }
+        }
+        match (self, other) {
+            // Same variant comparisons
+            (Value::Null, Value::Null) => Ordering::Equal,
+            (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
+            (Value::UniqueId(a), Value::UniqueId(b)) => a.cmp(b),
+            (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
+            (Value::Float64(a), Value::Float64(b)) => {
+                a.partial_cmp(b).unwrap_or_else(|| {
+                    // NaN handling: NaN sorts last
+                    match (a.is_nan(), b.is_nan()) {
+                        (true, true) => Ordering::Equal,
+                        (true, false) => Ordering::Greater,
+                        (false, true) => Ordering::Less,
+                        _ => unreachable!(),
+                    }
+                })
+            }
+            (Value::String(a), Value::String(b)) => a.cmp(b),
+            (Value::DateTime(a), Value::DateTime(b)) => a.cmp(b),
+            // Cross-variant: order by discriminant
+            _ => disc(self).cmp(&disc(other)),
+        }
+    }
 }
 
 // Implement Hash for Value

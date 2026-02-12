@@ -265,6 +265,55 @@ fn filter_nodes_by_conditions(
         }
     }
 
+    // Try range index for comparison conditions (GT, GTE, LT, LTE, Between)
+    for (property, condition) in conditions {
+        let bounds: Option<(std::ops::Bound<&Value>, std::ops::Bound<&Value>)> = match condition {
+            FilterCondition::GreaterThan(v) => {
+                Some((std::ops::Bound::Excluded(v), std::ops::Bound::Unbounded))
+            }
+            FilterCondition::GreaterThanEquals(v) => {
+                Some((std::ops::Bound::Included(v), std::ops::Bound::Unbounded))
+            }
+            FilterCondition::LessThan(v) => {
+                Some((std::ops::Bound::Unbounded, std::ops::Bound::Excluded(v)))
+            }
+            FilterCondition::LessThanEquals(v) => {
+                Some((std::ops::Bound::Unbounded, std::ops::Bound::Included(v)))
+            }
+            FilterCondition::Between(lo, hi) => {
+                Some((std::ops::Bound::Included(lo), std::ops::Bound::Included(hi)))
+            }
+            _ => None,
+        };
+
+        if let Some((lower, upper)) = bounds {
+            for node_type in &node_types {
+                if let Some(matching) = graph.lookup_range(node_type, property, lower, upper) {
+                    let indexed_set: HashSet<_> = matching.iter().copied().collect();
+                    let original_set: HashSet<_> = nodes.iter().copied().collect();
+                    let candidates: Vec<_> =
+                        indexed_set.intersection(&original_set).copied().collect();
+
+                    let remaining_conditions: HashMap<_, _> = conditions
+                        .iter()
+                        .filter(|(k, _)| *k != property)
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+
+                    if remaining_conditions.is_empty() {
+                        return candidates;
+                    } else {
+                        return filter_nodes_by_conditions(
+                            graph,
+                            candidates,
+                            &remaining_conditions,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // Cache field lookups for frequently accessed fields
     let estimated_cache_size = nodes.len() * conditions.len();
     let mut field_cache: HashMap<(NodeIndex, &str), Option<Value>> =

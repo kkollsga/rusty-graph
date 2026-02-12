@@ -4028,6 +4028,55 @@ impl KnowledgeGraph {
         }
     }
 
+    /// Create a range index (B-Tree) on a property for a specific node type.
+    ///
+    /// Range indexes enable efficient range queries (>, >=, <, <=, BETWEEN)
+    /// using ``filter()`` with comparison conditions.
+    ///
+    /// Args:
+    ///     node_type: The type of nodes to index.
+    ///     property: The property name to index.
+    ///
+    /// Returns:
+    ///     dict with keys: ``type``, ``property``, ``unique_values``, ``created``
+    ///
+    /// Example:
+    ///     ```python
+    ///     graph.create_range_index('Person', 'age')
+    ///     # Now range queries on age use the B-Tree index:
+    ///     result = graph.filter({'type': 'Person'}).filter({'age': {'>': 25}}).get_nodes()
+    ///     ```
+    fn create_range_index(
+        &mut self,
+        py: Python<'_>,
+        node_type: &str,
+        property: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let graph = get_graph_mut(&mut self.inner);
+        let unique_values = graph.create_range_index(node_type, property);
+
+        let result_dict = PyDict::new(py);
+        result_dict.set_item("type", node_type)?;
+        result_dict.set_item("property", property)?;
+        result_dict.set_item("unique_values", unique_values)?;
+        result_dict.set_item("created", true)?;
+
+        Ok(result_dict.into())
+    }
+
+    /// Drop a range index.
+    ///
+    /// Args:
+    ///     node_type: The type of nodes.
+    ///     property: The property name.
+    ///
+    /// Returns:
+    ///     True if index existed and was removed, False otherwise.
+    fn drop_range_index(&mut self, node_type: &str, property: &str) -> PyResult<bool> {
+        let removed = get_graph_mut(&mut self.inner).drop_range_index(node_type, property);
+        Ok(removed)
+    }
+
     /// Rebuild all indexes.
     ///
     /// Call this after batch updates to ensure indexes are current.

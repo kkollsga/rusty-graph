@@ -1371,6 +1371,34 @@ class KnowledgeGraph:
         ...
 
     # ====================================================================
+    # Range Indexes (B-Tree)
+    # ====================================================================
+
+    def create_range_index(self, node_type: str, property: str) -> dict[str, Any]:
+        """Create a range index (B-Tree) on a property for efficient range queries.
+
+        Enables fast ``>``, ``>=``, ``<``, ``<=``, and ``BETWEEN`` queries
+        in ``filter()`` calls.
+
+        Args:
+            node_type: Node type to index.
+            property: Property name to index.
+
+        Returns:
+            Dict with ``type``, ``property``, ``unique_values``, ``created``.
+
+        Example::
+
+            graph.create_range_index('Person', 'age')
+            old = graph.filter({'type': 'Person'}).filter({'age': {'>': 60}}).get_nodes()
+        """
+        ...
+
+    def drop_range_index(self, node_type: str, property: str) -> bool:
+        """Remove a range index. Returns ``True`` if it existed."""
+        ...
+
+    # ====================================================================
     # Composite Indexes
     # ====================================================================
 

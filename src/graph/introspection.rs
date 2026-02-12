@@ -124,6 +124,9 @@ pub fn compute_schema(graph: &DirGraph) -> SchemaOverview {
     for (node_type, properties) in graph.composite_indices.keys() {
         indexes.push(format!("{}.({})", node_type, properties.join(", ")));
     }
+    for (node_type, property) in graph.range_indices.keys() {
+        indexes.push(format!("{}.{} [range]", node_type, property));
+    }
     indexes.sort();
 
     SchemaOverview {
