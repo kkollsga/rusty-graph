@@ -49,6 +49,16 @@ pub struct KnowledgeGraph {
     last_mutation_stats: Option<cypher::result::MutationStats>,
 }
 
+#[pyclass]
+pub struct Transaction {
+    /// Back-reference to the owning KnowledgeGraph (for commit)
+    owner: Py<KnowledgeGraph>,
+    /// Mutable working copy of the graph
+    working: Option<DirGraph>,
+    /// Whether commit() was called
+    committed: bool,
+}
+
 impl Clone for KnowledgeGraph {
     fn clone(&self) -> Self {
         KnowledgeGraph {
@@ -4350,6 +4360,37 @@ impl KnowledgeGraph {
     }
 
     // ========================================================================
+    // Transaction Support
+    // ========================================================================
+
+    /// Begin a transaction — returns a Transaction object with a working copy of the graph.
+    ///
+    /// All mutations within the transaction are isolated until commit().
+    /// If the transaction is rolled back (or dropped without committing),
+    /// no changes are applied to the original graph.
+    ///
+    /// Can also be used as a context manager:
+    ///
+    /// Example:
+    ///     ```python
+    ///     with graph.begin() as tx:
+    ///         tx.cypher("CREATE (n:Person {name: 'Alice', age: 30})")
+    ///         tx.cypher("CREATE (n:Person {name: 'Bob', age: 25})")
+    ///         # auto-commits on success, auto-rollbacks on exception
+    ///     ```
+    fn begin(slf: Py<Self>) -> PyResult<Transaction> {
+        let working = Python::attach(|py| {
+            let kg = slf.borrow(py);
+            (*kg.inner).clone()
+        });
+        Ok(Transaction {
+            owner: slf,
+            working: Some(working),
+            committed: false,
+        })
+    }
+
+    // ========================================================================
     // Spatial/Geometry Methods
     // ========================================================================
 
@@ -4846,5 +4887,145 @@ impl KnowledgeGraph {
                 e
             ))),
         }
+    }
+}
+
+// ============================================================================
+// Transaction Implementation
+// ============================================================================
+
+#[pymethods]
+impl Transaction {
+    /// Execute a Cypher query within this transaction.
+    ///
+    /// Mutations are applied to the transaction's working copy, not the original graph.
+    /// Read queries also operate on the working copy (seeing uncommitted changes).
+    ///
+    /// Args:
+    ///     query: A Cypher query string.
+    ///     params: Optional dict of query parameters.
+    ///     to_df: If True, return a pandas DataFrame instead of list of dicts.
+    ///
+    /// Returns:
+    ///     Query results (same format as KnowledgeGraph.cypher).
+    #[pyo3(signature = (query, params=None, to_df=false))]
+    fn cypher(
+        &mut self,
+        py: Python<'_>,
+        query: &str,
+        params: Option<&Bound<'_, PyDict>>,
+        to_df: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let working = self.working.as_mut().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Transaction already committed or rolled back",
+            )
+        })?;
+
+        // Convert params
+        let param_map: HashMap<String, Value> = match params {
+            Some(d) => {
+                let mut map = HashMap::new();
+                for (k, v) in d.iter() {
+                    let key: String = k.extract()?;
+                    let val = py_in::py_value_to_value(&v)?;
+                    map.insert(key, val);
+                }
+                map
+            }
+            None => HashMap::new(),
+        };
+
+        // Parse and optimize
+        let mut parsed = cypher::parse_cypher(query).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Cypher parse error: {}", e))
+        })?;
+        cypher::optimize(&mut parsed, working, &param_map);
+
+        // Execute
+        let result = if cypher::is_mutation_query(&parsed) {
+            cypher::execute_mutable(working, &parsed, param_map).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Cypher execution error: {}",
+                    e
+                ))
+            })?
+        } else {
+            let executor = cypher::CypherExecutor::with_params(working, &param_map);
+            executor.execute(&parsed).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Cypher execution error: {}",
+                    e
+                ))
+            })?
+        };
+
+        if to_df {
+            cypher::py_convert::cypher_result_to_dataframe(py, &result)
+        } else {
+            cypher::py_convert::cypher_result_to_py_auto(py, &result)
+        }
+    }
+
+    /// Commit the transaction — apply all changes to the original graph.
+    ///
+    /// After commit, the transaction cannot be used again.
+    fn commit(&mut self) -> PyResult<()> {
+        let working = self.working.take().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Transaction already committed or rolled back",
+            )
+        })?;
+
+        Python::attach(|py| {
+            let mut kg = self.owner.borrow_mut(py);
+            kg.inner = Arc::new(working);
+            kg.selection = CowSelection::new();
+        });
+
+        self.committed = true;
+        Ok(())
+    }
+
+    /// Roll back the transaction — discard all changes.
+    ///
+    /// After rollback, the transaction cannot be used again.
+    fn rollback(&mut self) -> PyResult<()> {
+        if self.working.is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Transaction already committed or rolled back",
+            ));
+        }
+        self.working = None;
+        Ok(())
+    }
+
+    /// Context manager entry — returns self.
+    fn __enter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    /// Context manager exit — commits on success, rolls back on exception.
+    fn __exit__(
+        &mut self,
+        exc_type: Option<&Bound<'_, pyo3::types::PyAny>>,
+        _exc_val: Option<&Bound<'_, pyo3::types::PyAny>>,
+        _exc_tb: Option<&Bound<'_, pyo3::types::PyAny>>,
+    ) -> PyResult<bool> {
+        if self.working.is_none() {
+            // Already committed or rolled back
+            return Ok(false);
+        }
+
+        if exc_type.is_some() {
+            // Exception occurred — rollback
+            self.working = None;
+        } else {
+            // No exception — commit
+            self.commit()?;
+        }
+
+        // Return false = don't suppress exception
+        Ok(false)
     }
 }

@@ -1653,3 +1653,63 @@ class KnowledgeGraph:
             Dict with ``latitude`` and ``longitude``.
         """
         ...
+
+    def begin(self) -> Transaction:
+        """Begin a transaction — returns a Transaction with a working copy of the graph.
+
+        All mutations within the transaction are isolated until ``commit()``.
+        If rolled back (or dropped without committing), no changes are applied.
+
+        Can be used as a context manager::
+
+            with graph.begin() as tx:
+                tx.cypher("CREATE (n:Person {name: 'Alice', age: 30})")
+                tx.cypher("CREATE (n:Person {name: 'Bob', age: 25})")
+                # auto-commits on success, auto-rollbacks on exception
+        """
+        ...
+
+
+class Transaction:
+    """An isolated transaction on a KnowledgeGraph.
+
+    Created via :meth:`KnowledgeGraph.begin`. Mutations are applied to a
+    working copy and only become visible in the original graph after
+    :meth:`commit`. If an exception occurs (or :meth:`rollback` is called),
+    all changes are discarded.
+    """
+
+    def cypher(
+        self,
+        query: str,
+        params: dict[str, Any] | None = None,
+        to_df: bool = False,
+    ) -> list[dict[str, Any]] | pd.DataFrame:
+        """Execute a Cypher query within this transaction.
+
+        Same interface as :meth:`KnowledgeGraph.cypher` but operates on
+        the transaction's working copy.
+        """
+        ...
+
+    def commit(self) -> None:
+        """Commit the transaction — apply all changes to the original graph.
+
+        After commit, the transaction cannot be used again.
+        """
+        ...
+
+    def rollback(self) -> None:
+        """Roll back the transaction — discard all changes.
+
+        After rollback, the transaction cannot be used again.
+        """
+        ...
+
+    def __enter__(self) -> Transaction: ...
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any | None,
+    ) -> bool: ...

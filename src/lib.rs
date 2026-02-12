@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 mod datatypes;
 mod graph;
 use graph::io_operations::load_file;
-use graph::KnowledgeGraph;
+use graph::{KnowledgeGraph, Transaction};
 
 #[pyfunction]
 fn load(path: String) -> PyResult<KnowledgeGraph> {
@@ -15,5 +15,6 @@ fn kglite(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
     m.add_class::<KnowledgeGraph>()?;
+    m.add_class::<Transaction>()?;
     Ok(())
 }
