@@ -891,18 +891,34 @@ impl<'a> CypherExecutor<'a> {
                     Some(n) => n,
                     None => return false,
                 };
-                let lat = match node.properties.get(&spec.lat_prop).and_then(value_operations::value_to_f64) {
+                let lat = match node
+                    .properties
+                    .get(&spec.lat_prop)
+                    .and_then(value_operations::value_to_f64)
+                {
                     Some(v) => v,
                     None => return false,
                 };
-                let lon = match node.properties.get(&spec.lon_prop).and_then(value_operations::value_to_f64) {
+                let lon = match node
+                    .properties
+                    .get(&spec.lon_prop)
+                    .and_then(value_operations::value_to_f64)
+                {
                     Some(v) => v,
                     None => return false,
                 };
                 let dist = spatial::haversine_distance(lat, lon, spec.center_lat, spec.center_lon);
                 if spec.less_than {
-                    if spec.inclusive { dist <= spec.threshold_km } else { dist < spec.threshold_km }
-                } else if spec.inclusive { dist >= spec.threshold_km } else { dist > spec.threshold_km }
+                    if spec.inclusive {
+                        dist <= spec.threshold_km
+                    } else {
+                        dist < spec.threshold_km
+                    }
+                } else if spec.inclusive {
+                    dist >= spec.threshold_km
+                } else {
+                    dist > spec.threshold_km
+                }
             });
             // Apply remainder predicate if there were additional AND conditions
             if let Some(rest) = remainder {
@@ -924,13 +940,11 @@ impl<'a> CypherExecutor<'a> {
             result_set
                 .rows
                 .into_par_iter()
-                .filter_map(
-                    |row| match self.evaluate_predicate(&folded_pred, &row) {
-                        Ok(true) => Some(Ok(row)),
-                        Ok(false) => None,
-                        Err(e) => Some(Err(e)),
-                    },
-                )
+                .filter_map(|row| match self.evaluate_predicate(&folded_pred, &row) {
+                    Ok(true) => Some(Ok(row)),
+                    Ok(false) => None,
+                    Err(e) => Some(Err(e)),
+                })
                 .collect::<Result<Vec<_>, String>>()?
         } else {
             let mut rows = Vec::new();
@@ -1110,14 +1124,13 @@ impl<'a> CypherExecutor<'a> {
 
                 // threshold must be a literal number
                 let threshold_km = match threshold_expr {
-                    Expression::Literal(val) => {
-                        value_operations::value_to_f64(val)?
-                    }
+                    Expression::Literal(val) => value_operations::value_to_f64(val)?,
                     _ => return None,
                 };
 
                 // dist_expr must be distance(...)
-                let spec = Self::extract_distance_call(dist_expr, threshold_km, less_than, inclusive)?;
+                let spec =
+                    Self::extract_distance_call(dist_expr, threshold_km, less_than, inclusive)?;
                 Some((spec, None))
             }
             Predicate::And(left, right) => {
@@ -1296,7 +1309,11 @@ impl<'a> CypherExecutor<'a> {
         }
         // Recursively fold children
         match expr {
-            Expression::FunctionCall { name, args, distinct } => Expression::FunctionCall {
+            Expression::FunctionCall {
+                name,
+                args,
+                distinct,
+            } => Expression::FunctionCall {
                 name: name.clone(),
                 args: args.iter().map(|a| self.fold_constants_expr(a)).collect(),
                 distinct: *distinct,
@@ -1347,9 +1364,7 @@ impl<'a> CypherExecutor<'a> {
                 Box::new(self.fold_constants_pred(l)),
                 Box::new(self.fold_constants_pred(r)),
             ),
-            Predicate::Not(inner) => {
-                Predicate::Not(Box::new(self.fold_constants_pred(inner)))
-            }
+            Predicate::Not(inner) => Predicate::Not(Box::new(self.fold_constants_pred(inner))),
             Predicate::IsNull(e) => Predicate::IsNull(self.fold_constants_expr(e)),
             Predicate::IsNotNull(e) => Predicate::IsNotNull(self.fold_constants_expr(e)),
             Predicate::In { expr, list } => Predicate::In {
@@ -2093,10 +2108,7 @@ impl<'a> CypherExecutor<'a> {
         for (row_idx, row) in result_set.rows.iter().enumerate() {
             let key_values: Vec<Value> = folded_group_exprs
                 .iter()
-                .map(|expr| {
-                    self.evaluate_expression(expr, row)
-                        .unwrap_or(Value::Null)
-                })
+                .map(|expr| self.evaluate_expression(expr, row).unwrap_or(Value::Null))
                 .collect();
 
             key_buf.clear();
@@ -2397,10 +2409,7 @@ impl<'a> CypherExecutor<'a> {
             .map(|row| {
                 folded_sort_exprs
                     .iter()
-                    .map(|expr| {
-                        self.evaluate_expression(expr, row)
-                            .unwrap_or(Value::Null)
-                    })
+                    .map(|expr| self.evaluate_expression(expr, row).unwrap_or(Value::Null))
                     .collect()
             })
             .collect();

@@ -376,9 +376,7 @@ fn estimate_predicate_cost(pred: &Predicate) -> u32 {
         Predicate::Not(inner) => estimate_predicate_cost(inner) + 1,
         Predicate::IsNull(_) | Predicate::IsNotNull(_) => 2,
         Predicate::In { list, .. } => 3 + list.len() as u32,
-        Predicate::StartsWith { .. }
-        | Predicate::EndsWith { .. }
-        | Predicate::Contains { .. } => 5,
+        Predicate::StartsWith { .. } | Predicate::EndsWith { .. } | Predicate::Contains { .. } => 5,
         Predicate::Exists { .. } => 100, // Pattern existence checks are expensive
     }
 }
@@ -412,19 +410,24 @@ fn estimate_expression_cost(expr: &Expression) -> u32 {
         Expression::Add(l, r)
         | Expression::Subtract(l, r)
         | Expression::Multiply(l, r)
-        | Expression::Divide(l, r) => {
-            estimate_expression_cost(l) + estimate_expression_cost(r) + 1
-        }
+        | Expression::Divide(l, r) => estimate_expression_cost(l) + estimate_expression_cost(r) + 1,
         Expression::Negate(inner) => estimate_expression_cost(inner) + 1,
         Expression::ListLiteral(items) => {
             items.iter().map(estimate_expression_cost).sum::<u32>() + 1
         }
-        Expression::Case { when_clauses, else_expr, .. } => {
+        Expression::Case {
+            when_clauses,
+            else_expr,
+            ..
+        } => {
             let clause_cost: u32 = when_clauses
                 .iter()
                 .map(|(_, e)| estimate_expression_cost(e) + 2)
                 .sum();
-            clause_cost + else_expr.as_ref().map_or(0, |e| estimate_expression_cost(e))
+            clause_cost
+                + else_expr
+                    .as_ref()
+                    .map_or(0, |e| estimate_expression_cost(e))
         }
         Expression::IndexAccess { expr, index } => {
             estimate_expression_cost(expr) + estimate_expression_cost(index) + 1
