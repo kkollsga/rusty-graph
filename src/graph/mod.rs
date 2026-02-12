@@ -4348,27 +4348,20 @@ impl KnowledgeGraph {
                 Py::new(py, view).map(|v| v.into_any())
             }
         } else {
-            // Read-only path: shared borrow to clone Arc, then release borrow + GIL
-            let inner = {
+            // Read-only path: shared borrow for execution, then release
+            let result = {
                 let this = slf.borrow();
-                Arc::clone(&this.inner)
-            };
-            // Borrow released — multiple threads can now access concurrently
-            // Execute query AND pre-parse JSON strings while GIL is released (pure Rust)
-            let (columns, preprocessed, stats) = py.detach(move || {
-                let executor = cypher::CypherExecutor::with_params(&inner, &param_map);
-                let result = executor.execute(&parsed).map_err(|e| {
+                let executor = cypher::CypherExecutor::with_params(&this.inner, &param_map);
+                executor.execute(&parsed).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                         "Cypher execution error: {}",
                         e
                     ))
-                })?;
-                let columns = result.columns;
-                let stats = result.stats;
-                let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
-                Ok::<_, PyErr>((columns, preprocessed, stats))
-            })?;
-            // GIL re-acquired — wrap in ResultView (O(1)) or build DataFrame
+                })?
+            };
+            let columns = result.columns;
+            let stats = result.stats;
+            let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
             if to_df {
                 cypher::py_convert::preprocessed_result_to_dataframe(py, &columns, &preprocessed)
             } else {

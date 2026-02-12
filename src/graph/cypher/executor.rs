@@ -936,27 +936,16 @@ impl<'a> CypherExecutor<'a> {
         }
 
         // Apply full predicate evaluation for remaining/non-indexable conditions
-        let filtered_rows = if result_set.rows.len() >= RAYON_THRESHOLD {
-            result_set
-                .rows
-                .into_par_iter()
-                .filter_map(|row| match self.evaluate_predicate(&folded_pred, &row) {
-                    Ok(true) => Some(Ok(row)),
-                    Ok(false) => None,
-                    Err(e) => Some(Err(e)),
-                })
-                .collect::<Result<Vec<_>, String>>()?
-        } else {
-            let mut rows = Vec::new();
-            for row in result_set.rows {
-                match self.evaluate_predicate(&folded_pred, &row) {
-                    Ok(true) => rows.push(row),
-                    Ok(false) => {}
-                    Err(e) => return Err(e),
-                }
+        // Sequential: per-row predicate work is typically cheap (property lookup +
+        // comparison), so Rayon overhead outweighs parallelism benefits.
+        let mut filtered_rows = Vec::new();
+        for row in result_set.rows {
+            match self.evaluate_predicate(&folded_pred, &row) {
+                Ok(true) => filtered_rows.push(row),
+                Ok(false) => {}
+                Err(e) => return Err(e),
             }
-            rows
-        };
+        }
         result_set.rows = filtered_rows;
         Ok(result_set)
     }

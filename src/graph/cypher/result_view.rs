@@ -11,7 +11,7 @@ use crate::datatypes::values::Value;
 use crate::graph::graph_algorithms::CentralityResult;
 use crate::graph::schema::{DirGraph, NodeData};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PySlice};
 use pyo3::IntoPyObjectExt;
 use std::collections::HashSet;
 
@@ -160,17 +160,45 @@ impl ResultView {
         !self.rows.is_empty()
     }
 
-    fn __getitem__(&self, py: Python<'_>, idx: isize) -> PyResult<Py<PyAny>> {
-        let len = self.rows.len() as isize;
-        let actual = if idx < 0 { len + idx } else { idx };
-        if actual < 0 || actual >= len {
-            return Err(pyo3::exceptions::PyIndexError::new_err(format!(
-                "index {} out of range for ResultView with {} rows",
-                idx,
-                self.rows.len()
-            )));
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(idx) = key.extract::<isize>() {
+            // Integer indexing — returns a single row as dict
+            let len = self.rows.len() as isize;
+            let actual = if idx < 0 { len + idx } else { idx };
+            if actual < 0 || actual >= len {
+                return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                    "index {} out of range for ResultView with {} rows",
+                    idx,
+                    self.rows.len()
+                )));
+            }
+            self.row_to_py(py, actual as usize)
+        } else if let Ok(slice) = key.cast::<PySlice>() {
+            // Slice indexing — returns a new ResultView
+            let len = self.rows.len();
+            let indices = slice.indices(len as isize)?;
+            let mut sliced_rows = Vec::new();
+            let mut i = indices.start;
+            while (indices.step > 0 && i < indices.stop) || (indices.step < 0 && i > indices.stop) {
+                if i >= 0 && (i as usize) < len {
+                    sliced_rows.push(self.rows[i as usize].clone());
+                }
+                i += indices.step;
+            }
+            Py::new(
+                py,
+                ResultView {
+                    columns: self.columns.clone(),
+                    rows: sliced_rows,
+                    stats: None,
+                },
+            )
+            .map(|v| v.into_any())
+        } else {
+            Err(pyo3::exceptions::PyTypeError::new_err(
+                "indices must be integers or slices",
+            ))
         }
-        self.row_to_py(py, actual as usize)
     }
 
     fn __iter__(slf: Py<Self>) -> ResultIter {

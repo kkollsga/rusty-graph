@@ -109,10 +109,10 @@ class TestReadWriteIsolation:
 
 
 class TestGILReleasePerformance:
-    """GIL release should allow other Python code to run during queries."""
+    """GIL release should allow other Python code to run during heavy computations."""
 
-    def test_gil_released_during_read_query(self, large_graph):
-        """While a Cypher query runs, other Python threads can make progress."""
+    def test_gil_released_during_centrality(self, large_graph):
+        """While a centrality computation runs, other Python threads can make progress."""
         counter = {"value": 0}
         stop_event = threading.Event()
 
@@ -126,12 +126,12 @@ class TestGILReleasePerformance:
         counter_thread = threading.Thread(target=increment_counter, daemon=True)
         counter_thread.start()
 
-        # Run a query (should release GIL, allowing counter to increment)
-        large_graph.cypher("MATCH (n:Person)-[:KNOWS]->(m:Person) RETURN count(n) AS cnt")
+        # Run pagerank (releases GIL during computation, allowing counter to increment)
+        large_graph.pagerank()
 
         stop_event.set()
         counter_thread.join(timeout=2)
 
-        # The counter should have incremented at least once during the query
+        # The counter should have incremented at least once during the computation
         # (if GIL wasn't released, counter would stay at 0)
         assert counter["value"] > 0
