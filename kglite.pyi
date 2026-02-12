@@ -722,6 +722,24 @@ class KnowledgeGraph:
         """Return a text summary of the graph schema (node types, connections)."""
         ...
 
+    def agent_describe(self) -> str:
+        """Return a minimal XML string describing this graph for AI agents.
+
+        The output is a self-contained XML document covering:
+        - Graph structure: node types with counts and property schemas,
+          connection types with counts and endpoint types, indexes.
+        - Supported Cypher subset: clauses, patterns, operators, functions.
+        - Key API methods with signatures.
+
+        Designed to be included directly in an LLM prompt so an agent
+        can autonomously query the graph using ``cypher()``.
+
+        Example::
+
+            prompt = f"You have a knowledge graph:\\n{graph.agent_describe()}\\nAnswer the question."
+        """
+        ...
+
     def get_selection(self) -> str:
         """Return a text summary of the current selection state."""
         ...

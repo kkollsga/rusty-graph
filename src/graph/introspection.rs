@@ -339,3 +339,118 @@ pub fn compute_sample<'a>(
     }
     Ok(result)
 }
+
+// ── Agent description ──────────────────────────────────────────────────────
+
+/// Static XML fragment: API methods and Cypher reference (never changes per graph).
+const STATIC_XML: &str = r#"  <api>
+    <method sig="cypher(query, *, to_df=False, params=None)">Primary query interface. Returns list[dict] or DataFrame.</method>
+    <method sig="schema()">Returns dict: node_types, connection_types, indexes, node_count, edge_count.</method>
+    <method sig="properties(node_type, max_values=20)">Per-property stats: type, non_null, unique, values.</method>
+    <method sig="sample(node_type, n=5)">Returns first N nodes as list[dict].</method>
+    <method sig="save(path) / load(path)">Persist and reload the graph.</method>
+  </api>
+  <cypher_ref>
+    <clauses>MATCH, OPTIONAL MATCH, WHERE, RETURN, WITH, ORDER BY, SKIP, LIMIT, UNWIND, UNION, UNION ALL, CREATE, SET, DELETE, DETACH DELETE, REMOVE, MERGE, EXPLAIN</clauses>
+    <patterns>(n:Type), (n:Type {key: val}), -[:REL]-&gt;, &lt;-[:REL]-, -[:REL]-, -[:REL*1..3]-&gt;, p = shortestPath(...)</patterns>
+    <where>=, &lt;&gt;, &lt;, &gt;, &lt;=, &gt;=, =~ (regex), AND, OR, NOT, IS NULL, IS NOT NULL, IN [...], CONTAINS, STARTS WITH, ENDS WITH, EXISTS { pattern }, EXISTS(( pattern ))</where>
+    <return>n.prop, r.prop, AS alias, DISTINCT, arithmetic (+, -, *, /), map projections n {.prop1, .prop2}</return>
+    <aggregation>count(*), count(expr), sum, avg, min, max, collect, std</aggregation>
+    <expressions>CASE WHEN...THEN...ELSE...END, $param, [x IN list WHERE ... | expr]</expressions>
+    <functions>toUpper, toLower, toString, toInteger, toFloat, size, length, type, id, labels, coalesce, nodes(p), relationships(p)</functions>
+    <mutations>CREATE (n:Label {props}), CREATE (a)-[:TYPE]-&gt;(b), SET n.prop = expr, DELETE, DETACH DELETE, REMOVE n.prop, MERGE...ON CREATE SET...ON MATCH SET</mutations>
+    <not_supported>CALL/stored procedures, FOREACH, subqueries, SET n:Label, REMOVE n:Label, multi-label</not_supported>
+    <notes>
+      <note>Each node has exactly one type. labels(n) returns a string, not a list.</note>
+      <note>Built-in node fields: type, title, id. Access via n.type, n.title, n.id.</note>
+      <note>Each cypher() call is atomic. Params via $param syntax.</note>
+      <note>to_df=True returns a pandas DataFrame instead of list[dict].</note>
+    </notes>
+  </cypher_ref>"#;
+
+/// Minimal XML escaping for attribute values.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Build a minimal XML description of the graph for AI agents.
+pub fn compute_agent_description(graph: &DirGraph) -> String {
+    let overview = compute_schema(graph);
+    let mut xml = String::with_capacity(2048 + STATIC_XML.len());
+
+    xml.push_str(&format!(
+        "<kglite nodes=\"{}\" edges=\"{}\">\n",
+        overview.node_count, overview.edge_count
+    ));
+
+    // Node types
+    if overview.node_types.is_empty() {
+        xml.push_str("  <node_types/>\n");
+    } else {
+        xml.push_str("  <node_types>\n");
+        for (nt, info) in &overview.node_types {
+            if info.properties.is_empty() {
+                xml.push_str(&format!(
+                    "    <type name=\"{}\" count=\"{}\"/>\n",
+                    xml_escape(nt),
+                    info.count
+                ));
+            } else {
+                xml.push_str(&format!(
+                    "    <type name=\"{}\" count=\"{}\">\n",
+                    xml_escape(nt),
+                    info.count
+                ));
+                let mut props: Vec<(&String, &String)> = info.properties.iter().collect();
+                props.sort_by_key(|(k, _)| k.as_str());
+                for (pname, ptype) in props {
+                    xml.push_str(&format!(
+                        "      <prop name=\"{}\" type=\"{}\"/>\n",
+                        xml_escape(pname),
+                        xml_escape(ptype)
+                    ));
+                }
+                xml.push_str("    </type>\n");
+            }
+        }
+        xml.push_str("  </node_types>\n");
+    }
+
+    // Connections
+    if overview.connection_types.is_empty() {
+        xml.push_str("  <connections/>\n");
+    } else {
+        xml.push_str("  <connections>\n");
+        for ct in &overview.connection_types {
+            xml.push_str(&format!(
+                "    <conn type=\"{}\" count=\"{}\" from=\"{}\" to=\"{}\"/>\n",
+                xml_escape(&ct.connection_type),
+                ct.count,
+                ct.source_types.join(","),
+                ct.target_types.join(","),
+            ));
+        }
+        xml.push_str("  </connections>\n");
+    }
+
+    // Indexes
+    if overview.indexes.is_empty() {
+        xml.push_str("  <indexes/>\n");
+    } else {
+        xml.push_str("  <indexes>\n");
+        for idx in &overview.indexes {
+            xml.push_str(&format!("    <idx on=\"{}\"/>\n", xml_escape(idx)));
+        }
+        xml.push_str("  </indexes>\n");
+    }
+
+    // Static sections
+    xml.push_str(STATIC_XML);
+    xml.push('\n');
+    xml.push_str("</kglite>");
+
+    xml
+}

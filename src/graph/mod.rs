@@ -2011,6 +2011,11 @@ impl KnowledgeGraph {
         Ok(schema_string)
     }
 
+    /// Return a minimal XML string describing this graph for AI agents.
+    fn agent_describe(&self) -> PyResult<String> {
+        Ok(introspection::compute_agent_description(&self.inner))
+    }
+
     fn get_selection(&self) -> PyResult<String> {
         Ok(debugging::get_selection_string(
             &self.inner,

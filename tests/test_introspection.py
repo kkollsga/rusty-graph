@@ -270,3 +270,108 @@ class TestIndexes:
         assert len(idxs) == 2
         types = {i['type'] for i in idxs}
         assert types == {'equality', 'composite'}
+
+
+# ── agent_describe() ──────────────────────────────────────────────────────
+
+import xml.etree.ElementTree as ET
+
+
+class TestAgentDescribe:
+    def test_returns_string(self, small_graph):
+        result = small_graph.agent_describe()
+        assert isinstance(result, str)
+
+    def test_is_valid_xml(self, small_graph):
+        root = ET.fromstring(small_graph.agent_describe())
+        assert root.tag == 'kglite'
+
+    def test_root_attributes(self, small_graph):
+        root = ET.fromstring(small_graph.agent_describe())
+        assert root.attrib['nodes'] == '3'
+        assert root.attrib['edges'] == '3'
+
+    def test_node_types_present(self, small_graph):
+        root = ET.fromstring(small_graph.agent_describe())
+        types = root.findall('.//node_types/type')
+        assert len(types) == 1
+        assert types[0].attrib['name'] == 'Person'
+        assert types[0].attrib['count'] == '3'
+
+    def test_node_properties_listed(self, small_graph):
+        root = ET.fromstring(small_graph.agent_describe())
+        person = root.find(".//node_types/type[@name='Person']")
+        prop_names = {p.attrib['name'] for p in person.findall('prop')}
+        assert 'age' in prop_names
+        assert 'city' in prop_names
+
+    def test_builtin_fields_not_in_props(self, small_graph):
+        """Built-in fields (type, title, id) should be in notes, not per-type props."""
+        root = ET.fromstring(small_graph.agent_describe())
+        person = root.find(".//node_types/type[@name='Person']")
+        prop_names = {p.attrib['name'] for p in person.findall('prop')}
+        assert 'type' not in prop_names
+        assert 'title' not in prop_names
+        assert 'id' not in prop_names
+
+    def test_connections_present(self, small_graph):
+        root = ET.fromstring(small_graph.agent_describe())
+        conns = root.findall('.//connections/conn')
+        assert len(conns) == 1
+        assert conns[0].attrib['type'] == 'KNOWS'
+        assert conns[0].attrib['from'] == 'Person'
+        assert conns[0].attrib['to'] == 'Person'
+
+    def test_multiple_types(self, social_graph):
+        root = ET.fromstring(social_graph.agent_describe())
+        type_names = {t.attrib['name'] for t in root.findall('.//node_types/type')}
+        assert type_names == {'Person', 'Company'}
+
+    def test_multiple_connection_types(self, social_graph):
+        root = ET.fromstring(social_graph.agent_describe())
+        conn_types = {c.attrib['type'] for c in root.findall('.//connections/conn')}
+        assert conn_types == {'KNOWS', 'WORKS_AT'}
+
+    def test_indexes_section(self, small_graph):
+        small_graph.create_index('Person', 'city')
+        root = ET.fromstring(small_graph.agent_describe())
+        idxs = root.findall('.//indexes/idx')
+        assert len(idxs) == 1
+        assert idxs[0].attrib['on'] == 'Person.city'
+
+    def test_empty_graph(self):
+        g = KnowledgeGraph()
+        root = ET.fromstring(g.agent_describe())
+        assert root.attrib['nodes'] == '0'
+        assert root.attrib['edges'] == '0'
+        assert root.findall('.//node_types/type') == []
+
+    def test_cypher_ref_present(self, small_graph):
+        root = ET.fromstring(small_graph.agent_describe())
+        cypher_ref = root.find('cypher_ref')
+        assert cypher_ref is not None
+        assert cypher_ref.find('clauses') is not None
+        assert cypher_ref.find('functions') is not None
+        assert cypher_ref.find('not_supported') is not None
+
+    def test_api_section_present(self, small_graph):
+        root = ET.fromstring(small_graph.agent_describe())
+        api = root.find('api')
+        assert api is not None
+        sigs = [m.attrib['sig'] for m in api.findall('method')]
+        assert any('cypher' in s for s in sigs)
+
+    def test_static_sections_identical(self, small_graph, social_graph):
+        """The cypher_ref and api sections should be identical across graphs."""
+        root1 = ET.fromstring(small_graph.agent_describe())
+        root2 = ET.fromstring(social_graph.agent_describe())
+        ref1 = ET.tostring(root1.find('cypher_ref'), encoding='unicode')
+        ref2 = ET.tostring(root2.find('cypher_ref'), encoding='unicode')
+        assert ref1 == ref2
+
+    def test_notes_mention_builtins(self, small_graph):
+        root = ET.fromstring(small_graph.agent_describe())
+        notes_xml = ET.tostring(root.find('.//notes'), encoding='unicode')
+        assert 'type' in notes_xml
+        assert 'title' in notes_xml
+        assert 'id' in notes_xml

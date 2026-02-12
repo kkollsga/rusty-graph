@@ -211,6 +211,7 @@ graph.properties('Person', max_values=50)     # → include values list for up t
 graph.neighbors_schema('Person')              # → outgoing/incoming connection topology
 graph.sample('Person', n=5)                   # → first N nodes as dicts
 graph.indexes()                               # → all indexes with type info
+graph.agent_describe()                        # → XML string for LLM prompt context
 ```
 
 ### Algorithms
@@ -323,6 +324,20 @@ graph.indexes()
 #   {'node_type': 'Person', 'properties': ['city', 'age'], 'type': 'composite'},
 # ]
 ```
+
+### `agent_describe()` — AI agent context
+
+Returns a self-contained XML string summarizing the graph structure and supported Cypher syntax. Designed to be included directly in an LLM prompt:
+
+```python
+xml = graph.agent_describe()
+prompt = f"You have a knowledge graph:\n{xml}\nAnswer the user's question using cypher()."
+```
+
+The output includes:
+
+- **Dynamic** (per-graph): node types with counts and property schemas, connection types, indexes
+- **Static** (always the same): supported Cypher subset, key API methods, single-label model notes
 
 ---
 
