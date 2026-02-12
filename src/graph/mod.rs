@@ -3416,12 +3416,10 @@ impl KnowledgeGraph {
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
-        let results = graph_algorithms::betweenness_centrality(
-            &self.inner,
-            normalized,
-            sample_size,
-            deadline,
-        );
+        let inner = Arc::clone(&self.inner);
+        let results = py.detach(move || {
+            graph_algorithms::betweenness_centrality(&inner, normalized, sample_size, deadline)
+        });
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -3518,7 +3516,9 @@ impl KnowledgeGraph {
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
-        let results = graph_algorithms::degree_centrality(&self.inner, normalized, deadline);
+        let inner = Arc::clone(&self.inner);
+        let results =
+            py.detach(move || graph_algorithms::degree_centrality(&inner, normalized, deadline));
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -3562,7 +3562,9 @@ impl KnowledgeGraph {
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
-        let results = graph_algorithms::closeness_centrality(&self.inner, normalized, deadline);
+        let inner = Arc::clone(&self.inner);
+        let results =
+            py.detach(move || graph_algorithms::closeness_centrality(&inner, normalized, deadline));
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -4387,20 +4389,29 @@ impl KnowledgeGraph {
                 Arc::clone(&this.inner)
             };
             // Borrow released — multiple threads can now access concurrently
-            let result = py.detach(move || {
+            // Execute query AND pre-parse JSON strings while GIL is released (pure Rust)
+            let (result, columns, preprocessed) = py.detach(move || {
                 let executor = cypher::CypherExecutor::with_params(&inner, &param_map);
-                executor.execute(&parsed).map_err(|e| {
+                let result = executor.execute(&parsed).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                         "Cypher execution error: {}",
                         e
                     ))
-                })
+                })?;
+                let columns = result.columns.clone();
+                let preprocessed = cypher::py_convert::preprocess_result(&result);
+                Ok::<_, PyErr>((result, columns, preprocessed))
             })?;
-            // GIL re-acquired — convert to Python
+            // GIL re-acquired — convert pre-parsed data to Python (no JSON parsing needed)
             if to_df {
-                cypher::py_convert::cypher_result_to_dataframe(py, &result)
+                cypher::py_convert::preprocessed_result_to_dataframe(py, &columns, &preprocessed)
             } else {
-                cypher::py_convert::cypher_result_to_py_auto(py, &result)
+                cypher::py_convert::preprocessed_result_to_py_auto(
+                    py,
+                    &result,
+                    &columns,
+                    &preprocessed,
+                )
             }
         }
     }
