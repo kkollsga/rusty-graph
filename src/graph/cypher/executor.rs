@@ -1123,7 +1123,7 @@ impl<'a> CypherExecutor<'a> {
                         for item in items {
                             match item {
                                 MapProjectionItem::Property(prop) => {
-                                    let val = resolve_node_property(node, prop);
+                                    let val = resolve_node_property(node, prop, self.graph);
                                     props.push(format!(
                                         "{}: {}",
                                         format_value_json(&Value::String(prop.clone())),
@@ -1242,7 +1242,7 @@ impl<'a> CypherExecutor<'a> {
         // and must take priority over projected scalars (e.g. after WITH)
         if let Some(&idx) = row.node_bindings.get(variable) {
             if let Some(node) = self.graph.graph.node_weight(idx) {
-                return Ok(resolve_node_property(node, property));
+                return Ok(resolve_node_property(node, property, self.graph));
             }
             return Ok(Value::Null); // Node was deleted?
         }
@@ -1379,7 +1379,7 @@ impl<'a> CypherExecutor<'a> {
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(&idx) = row.node_bindings.get(var) {
                         if let Some(node) = self.graph.graph.node_weight(idx) {
-                            return Ok(resolve_node_property(node, "id"));
+                            return Ok(resolve_node_property(node, "id", self.graph));
                         }
                     }
                 }
@@ -3072,15 +3072,17 @@ fn evaluate_comparison(left: &Value, op: &ComparisonOp, right: &Value) -> Result
     }
 }
 
-/// Resolve a property from a NodeData
-fn resolve_node_property(node: &NodeData, property: &str) -> Value {
-    match property {
+/// Resolve a property from a NodeData.
+/// Checks field aliases so that original column names (e.g. "npdid") resolve to "id"/"title".
+fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> Value {
+    let resolved = graph.resolve_alias(&node.node_type, property);
+    match resolved {
         "id" => node.id.clone(),
         "title" | "name" => node.title.clone(),
         "type" | "node_type" | "label" => Value::String(node.node_type.clone()),
         _ => node
             .properties
-            .get(property)
+            .get(resolved)
             .cloned()
             .unwrap_or(Value::Null),
     }

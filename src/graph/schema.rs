@@ -304,6 +304,16 @@ pub struct DirGraph {
     /// Old files without this field deserialize to SaveMetadata::default() (format_version=0).
     #[serde(default)]
     pub(crate) save_metadata: SaveMetadata,
+    /// Original ID field name per node type (e.g. "Person" → "npdid").
+    /// Stored when the user-supplied unique_id_field differs from "id".
+    /// Used for alias resolution: querying by original column name maps to the `id` field.
+    #[serde(default)]
+    pub(crate) id_field_aliases: HashMap<String, String>,
+    /// Original title field name per node type (e.g. "Person" → "prospect_name").
+    /// Stored when the user-supplied node_title_field differs from "title".
+    /// Used for alias resolution: querying by original column name maps to the `title` field.
+    #[serde(default)]
+    pub(crate) title_field_aliases: HashMap<String, String>,
 }
 
 impl DirGraph {
@@ -321,6 +331,8 @@ impl DirGraph {
             node_type_metadata: HashMap::new(),
             connection_type_metadata: HashMap::new(),
             save_metadata: SaveMetadata::current(),
+            id_field_aliases: HashMap::new(),
+            title_field_aliases: HashMap::new(),
         }
     }
 
@@ -340,6 +352,8 @@ impl DirGraph {
             node_type_metadata: HashMap::new(),
             connection_type_metadata: HashMap::new(),
             save_metadata: SaveMetadata::default(),
+            id_field_aliases: HashMap::new(),
+            title_field_aliases: HashMap::new(),
         }
     }
 
@@ -588,6 +602,23 @@ impl DirGraph {
         }
 
         types.into_iter().collect()
+    }
+
+    /// Resolve a property name through field aliases.
+    /// If the property matches the original ID or title field name for this node type,
+    /// returns the canonical name ("id" or "title"). Otherwise returns the property unchanged.
+    pub fn resolve_alias<'a>(&'a self, node_type: &str, property: &'a str) -> &'a str {
+        if let Some(alias) = self.id_field_aliases.get(node_type) {
+            if alias == property {
+                return "id";
+            }
+        }
+        if let Some(alias) = self.title_field_aliases.get(node_type) {
+            if alias == property {
+                return "title";
+            }
+        }
+        property
     }
 
     pub fn get_node(&self, index: NodeIndex) -> Option<&NodeData> {

@@ -66,6 +66,12 @@ struct FileMetadata {
     /// Connection type metadata: connection_type → ConnectionTypeInfo
     #[serde(default)]
     connection_type_metadata: HashMap<String, ConnectionTypeInfo>,
+    /// Original ID field name per node type (for alias resolution)
+    #[serde(default)]
+    id_field_aliases: HashMap<String, String>,
+    /// Original title field name per node type (for alias resolution)
+    #[serde(default)]
+    title_field_aliases: HashMap<String, String>,
 }
 
 // ─── Save ────────────────────────────────────────────────────────────────────
@@ -86,6 +92,8 @@ pub fn save_to_file(graph: &mut Arc<DirGraph>, path: &str) -> io::Result<()> {
         composite_index_keys: g.composite_index_keys.clone(),
         node_type_metadata: g.node_type_metadata.clone(),
         connection_type_metadata: g.connection_type_metadata.clone(),
+        id_field_aliases: g.id_field_aliases.clone(),
+        title_field_aliases: g.title_field_aliases.clone(),
     };
 
     let metadata_json = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
@@ -175,6 +183,8 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
     dir_graph.composite_index_keys = metadata.composite_index_keys;
     dir_graph.node_type_metadata = metadata.node_type_metadata;
     dir_graph.connection_type_metadata = metadata.connection_type_metadata;
+    dir_graph.id_field_aliases = metadata.id_field_aliases;
+    dir_graph.title_field_aliases = metadata.title_field_aliases;
     dir_graph.save_metadata = SaveMetadata {
         format_version: 2,
         library_version: metadata.library_version,

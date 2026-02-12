@@ -275,9 +275,11 @@ fn filter_nodes_by_conditions(
         .filter(|&idx| {
             if let Some(node) = graph.get_node(idx) {
                 conditions.iter().all(|(key, condition)| {
-                    let value = field_cache
-                        .entry((idx, key.as_str()))
-                        .or_insert_with(|| node.get_field_ref(key).cloned());
+                    let value = field_cache.entry((idx, key.as_str())).or_insert_with(|| {
+                        // Resolve alias: original column name → canonical field
+                        let resolved = graph.resolve_alias(&node.node_type, key);
+                        node.get_field_ref(resolved).cloned()
+                    });
 
                     match value {
                         Some(v) => matches_condition(v, condition),

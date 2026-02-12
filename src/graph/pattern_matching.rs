@@ -2,6 +2,7 @@
 // Supports patterns like: (p:Play)-[:HAS_PROSPECT]->(pr:Prospect)-[:BECAME_DISCOVERY]->(d:Discovery)
 
 use crate::datatypes::values::Value;
+use crate::graph::filtering_methods::values_equal;
 use crate::graph::schema::DirGraph;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
@@ -997,14 +998,16 @@ impl<'a> PatternExecutor<'a> {
     ) -> bool {
         if let Some(node) = self.graph.graph.node_weight(idx) {
             for (key, matcher) in props {
+                // Resolve alias: original column name → canonical field
+                let resolved = self.graph.resolve_alias(&node.node_type, key);
                 // Check special fields first: name/title maps to title, id maps to id
                 // Use references to avoid cloning
-                let value: Option<&Value> = if key == "name" || key == "title" {
+                let value: Option<&Value> = if resolved == "name" || resolved == "title" {
                     Some(&node.title)
-                } else if key == "id" {
+                } else if resolved == "id" {
                     Some(&node.id)
                 } else {
-                    node.properties.get(key)
+                    node.properties.get(resolved)
                 };
 
                 match value {
@@ -1022,11 +1025,15 @@ impl<'a> PatternExecutor<'a> {
         }
     }
 
-    /// Check if a value matches a property matcher
+    /// Check if a value matches a property matcher.
+    /// Uses cross-type numeric comparison (Int64 <-> UniqueId <-> Float64).
     fn value_matches(&self, value: &Value, matcher: &PropertyMatcher) -> bool {
         match matcher {
-            PropertyMatcher::Equals(expected) => value == expected,
-            PropertyMatcher::EqualsParam(name) => self.params.get(name.as_str()) == Some(value),
+            PropertyMatcher::Equals(expected) => values_equal(value, expected),
+            PropertyMatcher::EqualsParam(name) => self
+                .params
+                .get(name.as_str())
+                .is_some_and(|expected| values_equal(value, expected)),
         }
     }
 

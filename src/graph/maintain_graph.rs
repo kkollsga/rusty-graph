@@ -77,6 +77,18 @@ pub fn add_nodes(
     // Upsert node type metadata (merges new column types into existing)
     graph.upsert_node_type_metadata(&node_type, df_column_types);
 
+    // Record original field name aliases so users can query by original column name
+    if unique_id_field != "id" {
+        graph
+            .id_field_aliases
+            .insert(node_type.clone(), unique_id_field.clone());
+    }
+    if title_field != "title" {
+        graph
+            .title_field_aliases
+            .insert(node_type.clone(), title_field.clone());
+    }
+
     let type_lookup = TypeLookup::new(&graph.graph, node_type.clone())?;
     let id_idx = df_data
         .get_column_index(&unique_id_field)

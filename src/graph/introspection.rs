@@ -363,6 +363,7 @@ const STATIC_XML: &str = r#"  <api>
     <notes>
       <note>Each node has exactly one type. labels(n) returns a string, not a list.</note>
       <note>Built-in node fields: type, title, id. Access via n.type, n.title, n.id.</note>
+      <note>If a node type has id_alias/title_alias attributes, the original column name also works as a property accessor (e.g. n.npdid resolves to n.id).</note>
       <note>Each cypher() call is atomic. Params via $param syntax.</note>
       <note>to_df=True returns a pandas DataFrame instead of list[dict].</note>
     </notes>
@@ -392,17 +393,28 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     } else {
         xml.push_str("  <node_types>\n");
         for (nt, info) in &overview.node_types {
+            // Build alias attributes if original field names differ from canonical
+            let mut alias_attrs = String::new();
+            if let Some(id_alias) = graph.id_field_aliases.get(nt) {
+                alias_attrs.push_str(&format!(" id_alias=\"{}\"", xml_escape(id_alias)));
+            }
+            if let Some(title_alias) = graph.title_field_aliases.get(nt) {
+                alias_attrs.push_str(&format!(" title_alias=\"{}\"", xml_escape(title_alias)));
+            }
+
             if info.properties.is_empty() {
                 xml.push_str(&format!(
-                    "    <type name=\"{}\" count=\"{}\"/>\n",
+                    "    <type name=\"{}\" count=\"{}\"{}/>\n",
                     xml_escape(nt),
-                    info.count
+                    info.count,
+                    alias_attrs
                 ));
             } else {
                 xml.push_str(&format!(
-                    "    <type name=\"{}\" count=\"{}\">\n",
+                    "    <type name=\"{}\" count=\"{}\"{}>\n",
                     xml_escape(nt),
-                    info.count
+                    info.count,
+                    alias_attrs
                 ));
                 let mut props: Vec<(&String, &String)> = info.properties.iter().collect();
                 props.sort_by_key(|(k, _)| k.as_str());
