@@ -30,6 +30,7 @@ pub enum Value {
     String(String),
     Boolean(bool),
     DateTime(NaiveDate),
+    Point { lat: f64, lon: f64 },
     Null,
 }
 
@@ -61,6 +62,7 @@ impl Ord for Value {
                 Value::Float64(_) => 4,
                 Value::String(_) => 5,
                 Value::DateTime(_) => 6,
+                Value::Point { .. } => 7,
             }
         }
         match (self, other) {
@@ -82,6 +84,19 @@ impl Ord for Value {
             }
             (Value::String(a), Value::String(b)) => a.cmp(b),
             (Value::DateTime(a), Value::DateTime(b)) => a.cmp(b),
+            (
+                Value::Point {
+                    lat: a_lat,
+                    lon: a_lon,
+                },
+                Value::Point {
+                    lat: b_lat,
+                    lon: b_lon,
+                },
+            ) => a_lat
+                .partial_cmp(b_lat)
+                .unwrap_or(Ordering::Equal)
+                .then(a_lon.partial_cmp(b_lon).unwrap_or(Ordering::Equal)),
             // Cross-variant: order by discriminant
             _ => disc(self).cmp(&disc(other)),
         }
@@ -115,6 +130,10 @@ impl Hash for Value {
             Value::String(v) => v.hash(state),
             Value::Boolean(v) => v.hash(state),
             Value::DateTime(v) => v.hash(state),
+            Value::Point { lat, lon } => {
+                lat.to_bits().hash(state);
+                lon.to_bits().hash(state);
+            }
             Value::Null => 0.hash(state),
         }
     }
@@ -393,6 +412,7 @@ pub fn format_value(value: &Value) -> String {
         Value::String(v) => format!("\"{}\"", v),
         Value::Boolean(v) => format!("{}", v),
         Value::DateTime(v) => format!("\"{}\"", v.format("%Y-%m-%d")),
+        Value::Point { lat, lon } => format!("point({}, {})", lat, lon),
         Value::Null => "NULL".to_string(),
     }
 }

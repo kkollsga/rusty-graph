@@ -209,6 +209,29 @@ impl ResultView {
         Ok(list.into_any().unbind())
     }
 
+    /// Return a new ResultView with the first n rows (default 5).
+    #[pyo3(signature = (n=5))]
+    fn head(&self, n: usize) -> Self {
+        let take = n.min(self.rows.len());
+        ResultView {
+            columns: self.columns.clone(),
+            rows: self.rows[..take].to_vec(),
+            stats: None,
+        }
+    }
+
+    /// Return a new ResultView with the last n rows (default 5).
+    #[pyo3(signature = (n=5))]
+    fn tail(&self, n: usize) -> Self {
+        let len = self.rows.len();
+        let start = len.saturating_sub(n);
+        ResultView {
+            columns: self.columns.clone(),
+            rows: self.rows[start..].to_vec(),
+            stats: None,
+        }
+    }
+
     /// Convert to a pandas DataFrame.
     fn to_df(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         preprocessed_result_to_dataframe(py, &self.columns, &self.rows)

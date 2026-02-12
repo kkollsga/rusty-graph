@@ -5,7 +5,7 @@ use petgraph::stable_graph::StableDiGraph;
 use petgraph::visit::NodeIndexable;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 #[derive(Clone, Debug)]
 pub struct NodeInfo {
@@ -326,6 +326,11 @@ pub struct DirGraph {
     /// Default: Some(0.3). Set to None to disable.
     #[serde(default = "default_auto_vacuum_threshold")]
     pub(crate) auto_vacuum_threshold: Option<f64>,
+    /// Graph-level WKT geometry cache — persists across queries.
+    /// Uses Arc<Geometry> to avoid cloning heavy geometry objects.
+    /// RwLock allows concurrent reads from parallel row evaluation.
+    #[serde(skip)]
+    pub(crate) wkt_cache: Arc<RwLock<HashMap<String, Arc<geo::Geometry<f64>>>>>,
 }
 
 fn default_auto_vacuum_threshold() -> Option<f64> {
@@ -352,6 +357,7 @@ impl DirGraph {
             id_field_aliases: HashMap::new(),
             title_field_aliases: HashMap::new(),
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
+            wkt_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -376,6 +382,7 @@ impl DirGraph {
             id_field_aliases: HashMap::new(),
             title_field_aliases: HashMap::new(),
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
+            wkt_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

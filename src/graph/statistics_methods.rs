@@ -156,6 +156,7 @@ fn calculate_stats_for_nodes(
                             Value::Boolean(_) => "boolean",
                             Value::DateTime(_) => "datetime",
                             Value::UniqueId(_) => "unique_id",
+                            Value::Point { .. } => "point",
                             Value::Null => "null",
                         });
                     }

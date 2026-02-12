@@ -398,6 +398,9 @@ pub fn get_children_properties(
                             Some(Value::Boolean(b)) => b.to_string(),
                             Some(Value::UniqueId(u)) => u.to_string(),
                             Some(Value::DateTime(d)) => d.format("%Y-%m-%d").to_string(),
+                            Some(Value::Point { lat, lon }) => {
+                                format!("point({}, {})", lat, lon)
+                            }
                             Some(Value::Null) => "null".to_string(),
                             None => continue,
                         };

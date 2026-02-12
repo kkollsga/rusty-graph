@@ -161,6 +161,7 @@ pub fn format_value_compact(val: &Value) -> String {
         Value::String(v) => v.clone(),
         Value::Boolean(v) => v.to_string(),
         Value::DateTime(v) => v.format("%Y-%m-%d").to_string(),
+        Value::Point { lat, lon } => format!("point({}, {})", lat, lon),
         Value::Null => "null".to_string(),
     }
 }
@@ -181,6 +182,7 @@ pub fn format_value_compact_into(buf: &mut String, val: &Value) {
         Value::String(v) => buf.push_str(v),
         Value::Boolean(v) => write!(buf, "{}", v).unwrap(),
         Value::DateTime(v) => write!(buf, "{}", v.format("%Y-%m-%d")).unwrap(),
+        Value::Point { lat, lon } => write!(buf, "point({}, {})", lat, lon).unwrap(),
         Value::Null => buf.push_str("null"),
     }
 }

@@ -31,6 +31,12 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
         Value::Boolean(b) => b.into_py_any(py),
         Value::UniqueId(u) => u.into_py_any(py),
         Value::DateTime(d) => d.format("%Y-%m-%d").to_string().into_py_any(py),
+        Value::Point { lat, lon } => {
+            let dict = PyDict::new(py);
+            dict.set_item("latitude", lat)?;
+            dict.set_item("longitude", lon)?;
+            Ok(dict.into_any().unbind())
+        }
         Value::Null => Ok(py.None()),
     }
 }

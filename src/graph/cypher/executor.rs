@@ -9,16 +9,34 @@ use crate::graph::pattern_matching::{
     EdgeDirection, MatchBinding, PatternElement, PatternExecutor, PatternMatch,
 };
 use crate::graph::schema::{DirGraph, EdgeData, NodeData};
+use crate::graph::spatial;
 use crate::graph::value_operations;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::{EdgeRef, NodeIndexable};
 use petgraph::Direction;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Minimum row count to switch from sequential to parallel iteration.
 /// Below this threshold, sequential is faster (avoids rayon thread pool overhead).
 const RAYON_THRESHOLD: usize = 256;
+
+// ============================================================================
+// Specialized Distance Filter Types
+// ============================================================================
+
+/// Extracted distance filter pattern for fast-path evaluation in WHERE clauses.
+struct DistanceFilterSpec {
+    variable: String,
+    lat_prop: String,
+    lon_prop: String,
+    center_lat: f64,
+    center_lon: f64,
+    threshold_km: f64,
+    less_than: bool,
+    inclusive: bool,
+}
 
 // ============================================================================
 // Executor
@@ -858,13 +876,56 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
+        // Fold constant sub-expressions once before row iteration
+        let folded_pred = self.fold_constants_pred(&clause.predicate);
+
+        // Fast path: specialized distance filter bypasses expression evaluator
+        if let Some((spec, remainder)) = Self::try_extract_distance_filter(&folded_pred) {
+            let graph = self.graph;
+            result_set.rows.retain(|row| {
+                let idx = match row.node_bindings.get(&spec.variable) {
+                    Some(&idx) => idx,
+                    None => return false,
+                };
+                let node = match graph.graph.node_weight(idx) {
+                    Some(n) => n,
+                    None => return false,
+                };
+                let lat = match node.properties.get(&spec.lat_prop).and_then(value_operations::value_to_f64) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let lon = match node.properties.get(&spec.lon_prop).and_then(value_operations::value_to_f64) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let dist = spatial::haversine_distance(lat, lon, spec.center_lat, spec.center_lon);
+                if spec.less_than {
+                    if spec.inclusive { dist <= spec.threshold_km } else { dist < spec.threshold_km }
+                } else if spec.inclusive { dist >= spec.threshold_km } else { dist > spec.threshold_km }
+            });
+            // Apply remainder predicate if there were additional AND conditions
+            if let Some(rest) = remainder {
+                let mut keep = Vec::with_capacity(result_set.rows.len());
+                for row in result_set.rows {
+                    match self.evaluate_predicate(rest, &row) {
+                        Ok(true) => keep.push(row),
+                        Ok(false) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                result_set.rows = keep;
+            }
+            return Ok(result_set);
+        }
+
         // Apply full predicate evaluation for remaining/non-indexable conditions
         let filtered_rows = if result_set.rows.len() >= RAYON_THRESHOLD {
             result_set
                 .rows
                 .into_par_iter()
                 .filter_map(
-                    |row| match self.evaluate_predicate(&clause.predicate, &row) {
+                    |row| match self.evaluate_predicate(&folded_pred, &row) {
                         Ok(true) => Some(Ok(row)),
                         Ok(false) => None,
                         Err(e) => Some(Err(e)),
@@ -874,7 +935,7 @@ impl<'a> CypherExecutor<'a> {
         } else {
             let mut rows = Vec::new();
             for row in result_set.rows {
-                match self.evaluate_predicate(&clause.predicate, &row) {
+                match self.evaluate_predicate(&folded_pred, &row) {
                     Ok(true) => rows.push(row),
                     Ok(false) => {}
                     Err(e) => return Err(e),
@@ -1020,6 +1081,294 @@ impl<'a> CypherExecutor<'a> {
                 }
                 Ok(true)
             }
+        }
+    }
+
+    // ========================================================================
+    // Specialized Distance Filter (Fast Path)
+    // ========================================================================
+
+    /// Try to extract a distance filter from a (folded) predicate.
+    /// Returns (spec, optional remainder predicate for other AND conditions).
+    fn try_extract_distance_filter(
+        pred: &Predicate,
+    ) -> Option<(DistanceFilterSpec, Option<&Predicate>)> {
+        match pred {
+            Predicate::Comparison {
+                left,
+                operator,
+                right,
+            } => {
+                // distance(...) < threshold  or  threshold > distance(...)
+                let (dist_expr, threshold_expr, less_than, inclusive) = match operator {
+                    ComparisonOp::LessThan => (left, right, true, false),
+                    ComparisonOp::LessThanEq => (left, right, true, true),
+                    ComparisonOp::GreaterThan => (right, left, true, false),
+                    ComparisonOp::GreaterThanEq => (right, left, true, true),
+                    _ => return None,
+                };
+
+                // threshold must be a literal number
+                let threshold_km = match threshold_expr {
+                    Expression::Literal(val) => {
+                        value_operations::value_to_f64(val)?
+                    }
+                    _ => return None,
+                };
+
+                // dist_expr must be distance(...)
+                let spec = Self::extract_distance_call(dist_expr, threshold_km, less_than, inclusive)?;
+                Some((spec, None))
+            }
+            Predicate::And(left, right) => {
+                // Try extracting from left side
+                if let Some((spec, None)) = Self::try_extract_distance_filter(left) {
+                    return Some((spec, Some(right)));
+                }
+                // Try extracting from right side
+                if let Some((spec, None)) = Self::try_extract_distance_filter(right) {
+                    return Some((spec, Some(left)));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract a DistanceFilterSpec from a `distance(...)` function call expression.
+    fn extract_distance_call(
+        expr: &Expression,
+        threshold_km: f64,
+        less_than: bool,
+        inclusive: bool,
+    ) -> Option<DistanceFilterSpec> {
+        if let Expression::FunctionCall { name, args, .. } = expr {
+            if name.to_lowercase() != "distance" {
+                return None;
+            }
+            match args.len() {
+                // 2-arg: distance(point(n.lat, n.lon), point(C1, C2))
+                2 => {
+                    let (var, lat_prop, lon_prop) = Self::extract_point_var_props(&args[0])?;
+                    let (center_lat, center_lon) = Self::extract_point_constants(&args[1])?;
+                    Some(DistanceFilterSpec {
+                        variable: var,
+                        lat_prop,
+                        lon_prop,
+                        center_lat,
+                        center_lon,
+                        threshold_km,
+                        less_than,
+                        inclusive,
+                    })
+                }
+                // 4-arg: distance(n.lat, n.lon, C1, C2)
+                4 => {
+                    let (var1, lat_prop) = Self::extract_prop_access(&args[0])?;
+                    let (var2, lon_prop) = Self::extract_prop_access(&args[1])?;
+                    if var1 != var2 {
+                        return None;
+                    }
+                    let center_lat = Self::extract_literal_f64(&args[2])?;
+                    let center_lon = Self::extract_literal_f64(&args[3])?;
+                    Some(DistanceFilterSpec {
+                        variable: var1,
+                        lat_prop,
+                        lon_prop,
+                        center_lat,
+                        center_lon,
+                        threshold_km,
+                        less_than,
+                        inclusive,
+                    })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Extract (variable, lat_prop, lon_prop) from point(n.lat, n.lon)
+    fn extract_point_var_props(expr: &Expression) -> Option<(String, String, String)> {
+        if let Expression::FunctionCall { name, args, .. } = expr {
+            if name.to_lowercase() != "point" || args.len() != 2 {
+                return None;
+            }
+            let (var1, lat_prop) = Self::extract_prop_access(&args[0])?;
+            let (var2, lon_prop) = Self::extract_prop_access(&args[1])?;
+            if var1 != var2 {
+                return None;
+            }
+            Some((var1, lat_prop, lon_prop))
+        } else {
+            None
+        }
+    }
+
+    /// Extract (center_lat, center_lon) from point(Literal, Literal)
+    /// or from a folded Literal(Point{lat, lon}).
+    fn extract_point_constants(expr: &Expression) -> Option<(f64, f64)> {
+        // After constant folding, point(59.91, 10.75) becomes Literal(Point{lat, lon})
+        if let Expression::Literal(Value::Point { lat, lon }) = expr {
+            return Some((*lat, *lon));
+        }
+        if let Expression::FunctionCall { name, args, .. } = expr {
+            if name.to_lowercase() != "point" || args.len() != 2 {
+                return None;
+            }
+            let lat = Self::extract_literal_f64(&args[0])?;
+            let lon = Self::extract_literal_f64(&args[1])?;
+            Some((lat, lon))
+        } else {
+            None
+        }
+    }
+
+    /// Extract (variable, property) from PropertyAccess
+    fn extract_prop_access(expr: &Expression) -> Option<(String, String)> {
+        if let Expression::PropertyAccess { variable, property } = expr {
+            Some((variable.clone(), property.clone()))
+        } else {
+            None
+        }
+    }
+
+    /// Extract f64 from a Literal expression
+    fn extract_literal_f64(expr: &Expression) -> Option<f64> {
+        if let Expression::Literal(val) = expr {
+            value_operations::value_to_f64(val)
+        } else {
+            None
+        }
+    }
+
+    // ========================================================================
+    // Constant Expression Folding
+    // ========================================================================
+
+    /// Check if an expression can be evaluated without any row bindings
+    /// (i.e., it contains no PropertyAccess, Variable, Star, or aggregate references).
+    fn is_row_independent(expr: &Expression) -> bool {
+        match expr {
+            Expression::Literal(_) | Expression::Parameter(_) => true,
+            Expression::PropertyAccess { .. } | Expression::Variable(_) | Expression::Star => false,
+            Expression::FunctionCall { name, args, .. } => {
+                // Aggregates depend on row groups, not individual rows
+                if is_aggregate_expression(expr) {
+                    return false;
+                }
+                // Check that the function name is a known scalar (not aggregate)
+                let _ = name;
+                args.iter().all(Self::is_row_independent)
+            }
+            Expression::Add(l, r)
+            | Expression::Subtract(l, r)
+            | Expression::Multiply(l, r)
+            | Expression::Divide(l, r) => {
+                Self::is_row_independent(l) && Self::is_row_independent(r)
+            }
+            Expression::Negate(inner) => Self::is_row_independent(inner),
+            Expression::ListLiteral(items) => items.iter().all(Self::is_row_independent),
+            // Conservative: skip complex expressions
+            Expression::Case { .. }
+            | Expression::ListComprehension { .. }
+            | Expression::IndexAccess { .. }
+            | Expression::MapProjection { .. } => false,
+        }
+    }
+
+    /// Fold constant sub-expressions in an expression tree into Literal values.
+    /// Returns a new expression with all row-independent sub-trees pre-evaluated.
+    fn fold_constants_expr(&self, expr: &Expression) -> Expression {
+        // Already a literal — nothing to fold
+        if matches!(expr, Expression::Literal(_)) {
+            return expr.clone();
+        }
+        // If the whole expression is row-independent, evaluate it once
+        if Self::is_row_independent(expr) {
+            let dummy = ResultRow::new();
+            if let Ok(val) = self.evaluate_expression(expr, &dummy) {
+                return Expression::Literal(val);
+            }
+            // If evaluation fails (e.g., missing parameter), keep original
+            return expr.clone();
+        }
+        // Recursively fold children
+        match expr {
+            Expression::FunctionCall { name, args, distinct } => Expression::FunctionCall {
+                name: name.clone(),
+                args: args.iter().map(|a| self.fold_constants_expr(a)).collect(),
+                distinct: *distinct,
+            },
+            Expression::Add(l, r) => Expression::Add(
+                Box::new(self.fold_constants_expr(l)),
+                Box::new(self.fold_constants_expr(r)),
+            ),
+            Expression::Subtract(l, r) => Expression::Subtract(
+                Box::new(self.fold_constants_expr(l)),
+                Box::new(self.fold_constants_expr(r)),
+            ),
+            Expression::Multiply(l, r) => Expression::Multiply(
+                Box::new(self.fold_constants_expr(l)),
+                Box::new(self.fold_constants_expr(r)),
+            ),
+            Expression::Divide(l, r) => Expression::Divide(
+                Box::new(self.fold_constants_expr(l)),
+                Box::new(self.fold_constants_expr(r)),
+            ),
+            Expression::Negate(inner) => {
+                Expression::Negate(Box::new(self.fold_constants_expr(inner)))
+            }
+            Expression::ListLiteral(items) => {
+                Expression::ListLiteral(items.iter().map(|i| self.fold_constants_expr(i)).collect())
+            }
+            _ => expr.clone(),
+        }
+    }
+
+    /// Fold constant sub-expressions in a predicate tree.
+    fn fold_constants_pred(&self, pred: &Predicate) -> Predicate {
+        match pred {
+            Predicate::Comparison {
+                left,
+                operator,
+                right,
+            } => Predicate::Comparison {
+                left: self.fold_constants_expr(left),
+                operator: operator.clone(),
+                right: self.fold_constants_expr(right),
+            },
+            Predicate::And(l, r) => Predicate::And(
+                Box::new(self.fold_constants_pred(l)),
+                Box::new(self.fold_constants_pred(r)),
+            ),
+            Predicate::Or(l, r) => Predicate::Or(
+                Box::new(self.fold_constants_pred(l)),
+                Box::new(self.fold_constants_pred(r)),
+            ),
+            Predicate::Not(inner) => {
+                Predicate::Not(Box::new(self.fold_constants_pred(inner)))
+            }
+            Predicate::IsNull(e) => Predicate::IsNull(self.fold_constants_expr(e)),
+            Predicate::IsNotNull(e) => Predicate::IsNotNull(self.fold_constants_expr(e)),
+            Predicate::In { expr, list } => Predicate::In {
+                expr: self.fold_constants_expr(expr),
+                list: list.iter().map(|i| self.fold_constants_expr(i)).collect(),
+            },
+            Predicate::StartsWith { expr, pattern } => Predicate::StartsWith {
+                expr: self.fold_constants_expr(expr),
+                pattern: self.fold_constants_expr(pattern),
+            },
+            Predicate::EndsWith { expr, pattern } => Predicate::EndsWith {
+                expr: self.fold_constants_expr(expr),
+                pattern: self.fold_constants_expr(pattern),
+            },
+            Predicate::Contains { expr, pattern } => Predicate::Contains {
+                expr: self.fold_constants_expr(expr),
+                pattern: self.fold_constants_expr(pattern),
+            },
+            Predicate::Exists { .. } => pred.clone(),
         }
     }
 
@@ -1292,6 +1641,25 @@ impl<'a> CypherExecutor<'a> {
         Ok(Value::Null)
     }
 
+    /// Parse a WKT string, using the graph-level cache to avoid redundant parsing.
+    /// Returns Arc<Geometry> — cheap to clone (just a refcount bump).
+    fn parse_wkt_cached(&self, wkt: &str) -> Result<Arc<geo::Geometry<f64>>, String> {
+        // Fast path: read lock for cache hit
+        {
+            let cache = self.graph.wkt_cache.read().unwrap();
+            if let Some(geom) = cache.get(wkt) {
+                return Ok(Arc::clone(geom));
+            }
+        }
+        // Slow path: parse + write lock
+        let geom = Arc::new(spatial::parse_wkt(wkt)?);
+        {
+            let mut cache = self.graph.wkt_cache.write().unwrap();
+            cache.insert(wkt.to_string(), Arc::clone(&geom));
+        }
+        Ok(geom)
+    }
+
     /// Evaluate scalar (non-aggregate) functions
     fn evaluate_scalar_function(
         &self,
@@ -1435,6 +1803,160 @@ impl<'a> CypherExecutor<'a> {
                 }
                 Ok(Value::Null)
             }
+            // ── Spatial functions ─────────────────────────────────
+            "point" => {
+                if args.len() != 2 {
+                    return Err("point() requires 2 arguments: lat, lon".into());
+                }
+                let lat = value_operations::value_to_f64(&self.evaluate_expression(&args[0], row)?)
+                    .ok_or("point(): lat must be numeric")?;
+                let lon = value_operations::value_to_f64(&self.evaluate_expression(&args[1], row)?)
+                    .ok_or("point(): lon must be numeric")?;
+                Ok(Value::Point { lat, lon })
+            }
+            "distance" => match args.len() {
+                2 => {
+                    let v1 = self.evaluate_expression(&args[0], row)?;
+                    let v2 = self.evaluate_expression(&args[1], row)?;
+                    match (&v1, &v2) {
+                        (
+                            Value::Point {
+                                lat: lat1,
+                                lon: lon1,
+                            },
+                            Value::Point {
+                                lat: lat2,
+                                lon: lon2,
+                            },
+                        ) => Ok(Value::Float64(spatial::haversine_distance(
+                            *lat1, *lon1, *lat2, *lon2,
+                        ))),
+                        _ => Err("distance() with 2 args requires Point values".into()),
+                    }
+                }
+                4 => {
+                    let lat1 =
+                        value_operations::value_to_f64(&self.evaluate_expression(&args[0], row)?)
+                            .ok_or("distance(): args must be numeric")?;
+                    let lon1 =
+                        value_operations::value_to_f64(&self.evaluate_expression(&args[1], row)?)
+                            .ok_or("distance(): args must be numeric")?;
+                    let lat2 =
+                        value_operations::value_to_f64(&self.evaluate_expression(&args[2], row)?)
+                            .ok_or("distance(): args must be numeric")?;
+                    let lon2 =
+                        value_operations::value_to_f64(&self.evaluate_expression(&args[3], row)?)
+                            .ok_or("distance(): args must be numeric")?;
+                    Ok(Value::Float64(spatial::haversine_distance(
+                        lat1, lon1, lat2, lon2,
+                    )))
+                }
+                _ => Err(
+                    "distance() requires 2 (Point, Point) or 4 (lat1, lon1, lat2, lon2) arguments"
+                        .into(),
+                ),
+            },
+            "wkt_contains" => {
+                let wkt_val = self.evaluate_expression(&args[0], row)?;
+                let wkt_str = match &wkt_val {
+                    Value::String(s) => s.clone(),
+                    _ => return Err("wkt_contains(): first arg must be a WKT string".into()),
+                };
+                let (lat, lon) = match args.len() {
+                    2 => match self.evaluate_expression(&args[1], row)? {
+                        Value::Point { lat, lon } => (lat, lon),
+                        _ => return Err("wkt_contains(): second arg must be a Point".into()),
+                    },
+                    3 => {
+                        let lat = value_operations::value_to_f64(
+                            &self.evaluate_expression(&args[1], row)?,
+                        )
+                        .ok_or("wkt_contains(): lat must be numeric")?;
+                        let lon = value_operations::value_to_f64(
+                            &self.evaluate_expression(&args[2], row)?,
+                        )
+                        .ok_or("wkt_contains(): lon must be numeric")?;
+                        (lat, lon)
+                    }
+                    _ => return Err("wkt_contains() requires 2 or 3 arguments".into()),
+                };
+                let geom = self.parse_wkt_cached(&wkt_str)?;
+                let point = geo::Point::new(lon, lat); // geo uses (x=lon, y=lat)
+                let contains = match &*geom {
+                    geo::Geometry::Polygon(p) => geo::Contains::contains(p, &point),
+                    geo::Geometry::MultiPolygon(mp) => geo::Contains::contains(mp, &point),
+                    geo::Geometry::Rect(r) => geo::Contains::contains(r, &point),
+                    _ => false,
+                };
+                Ok(Value::Boolean(contains))
+            }
+            "wkt_intersects" => {
+                if args.len() != 2 {
+                    return Err("wkt_intersects() requires 2 WKT string arguments".into());
+                }
+                let s1 = match self.evaluate_expression(&args[0], row)? {
+                    Value::String(s) => s,
+                    _ => return Err("wkt_intersects(): args must be strings".into()),
+                };
+                let s2 = match self.evaluate_expression(&args[1], row)? {
+                    Value::String(s) => s,
+                    _ => return Err("wkt_intersects(): args must be strings".into()),
+                };
+                let g1 = self.parse_wkt_cached(&s1)?;
+                let g2 = self.parse_wkt_cached(&s2)?;
+                Ok(Value::Boolean(spatial::geometries_intersect(&g1, &g2)))
+            }
+            "wkt_centroid" => {
+                if args.len() != 1 {
+                    return Err("wkt_centroid() requires 1 WKT string argument".into());
+                }
+                let s = match self.evaluate_expression(&args[0], row)? {
+                    Value::String(s) => s,
+                    _ => return Err("wkt_centroid(): arg must be a string".into()),
+                };
+                let geom = self.parse_wkt_cached(&s)?;
+                let centroid: Option<geo::Point<f64>> = match &*geom {
+                    geo::Geometry::Point(p) => Some(*p),
+                    geo::Geometry::Polygon(p) => {
+                        use geo::Centroid;
+                        p.centroid()
+                    }
+                    geo::Geometry::MultiPolygon(mp) => {
+                        use geo::Centroid;
+                        mp.centroid()
+                    }
+                    geo::Geometry::Rect(r) => {
+                        use geo::Centroid;
+                        Some(r.centroid())
+                    }
+                    _ => None,
+                };
+                match centroid {
+                    Some(pt) => Ok(Value::Point {
+                        lat: pt.y(),
+                        lon: pt.x(),
+                    }),
+                    None => Err("wkt_centroid(): geometry has no centroid".into()),
+                }
+            }
+            "latitude" => {
+                if args.len() != 1 {
+                    return Err("latitude() requires 1 argument".into());
+                }
+                match self.evaluate_expression(&args[0], row)? {
+                    Value::Point { lat, .. } => Ok(Value::Float64(lat)),
+                    _ => Err("latitude() requires a Point argument".into()),
+                }
+            }
+            "longitude" => {
+                if args.len() != 1 {
+                    return Err("longitude() requires 1 argument".into());
+                }
+                match self.evaluate_expression(&args[0], row)? {
+                    Value::Point { lon, .. } => Ok(Value::Float64(lon)),
+                    _ => Err("longitude() requires a Point argument".into()),
+                }
+            }
             // Aggregate functions should not be evaluated per-row
             "count" | "sum" | "avg" | "min" | "max" | "collect" | "mean" | "std" => Err(format!(
                 "Aggregate function '{}' cannot be used outside of RETURN/WITH",
@@ -1473,14 +1995,28 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<ResultSet, String> {
         let columns: Vec<String> = clause.items.iter().map(return_item_column_name).collect();
 
+        // Fold constant sub-expressions once before row iteration
+        let folded_exprs: Vec<Expression> = clause
+            .items
+            .iter()
+            .map(|item| self.fold_constants_expr(&item.expression))
+            .collect();
+
         let project_row = |row: &ResultRow| -> Result<ResultRow, String> {
-            let mut new_row = row.clone();
-            for item in &clause.items {
+            // Build output row preserving all bindings but fresh projected values
+            // (avoids cloning stale projected values from prior WITH stages).
+            let mut projected = Bindings::with_capacity(clause.items.len());
+            for (i, item) in clause.items.iter().enumerate() {
                 let key = return_item_column_name(item);
-                let val = self.evaluate_expression(&item.expression, row)?;
-                new_row.projected.insert(key, val);
+                let val = self.evaluate_expression(&folded_exprs[i], row)?;
+                projected.insert(key, val);
             }
-            Ok(new_row)
+            Ok(ResultRow {
+                node_bindings: row.node_bindings.clone(),
+                edge_bindings: row.edge_bindings.clone(),
+                path_bindings: row.path_bindings.clone(),
+                projected,
+            })
         };
 
         let mut rows = if result_set.rows.len() >= RAYON_THRESHOLD {
@@ -1543,16 +2079,22 @@ impl<'a> CypherExecutor<'a> {
             });
         }
 
+        // Fold constant sub-expressions in grouping key expressions
+        let folded_group_exprs: Vec<Expression> = group_key_indices
+            .iter()
+            .map(|&i| self.fold_constants_expr(&clause.items[i].expression))
+            .collect();
+
         // Group rows by grouping key values (single composite string key to reduce allocations)
         let mut groups: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
         let mut group_index_map: HashMap<String, usize> = HashMap::new();
         let mut key_buf = String::with_capacity(64);
 
         for (row_idx, row) in result_set.rows.iter().enumerate() {
-            let key_values: Vec<Value> = group_key_indices
+            let key_values: Vec<Value> = folded_group_exprs
                 .iter()
-                .map(|&i| {
-                    self.evaluate_expression(&clause.items[i].expression, row)
+                .map(|expr| {
+                    self.evaluate_expression(expr, row)
                         .unwrap_or(Value::Null)
                 })
                 .collect();
@@ -1841,16 +2383,22 @@ impl<'a> CypherExecutor<'a> {
         clause: &OrderByClause,
         mut result_set: ResultSet,
     ) -> Result<ResultSet, String> {
+        // Fold constant sub-expressions in sort key expressions
+        let folded_sort_exprs: Vec<Expression> = clause
+            .items
+            .iter()
+            .map(|item| self.fold_constants_expr(&item.expression))
+            .collect();
+
         // Pre-compute sort keys for each row to avoid repeated evaluation
         let sort_keys: Vec<Vec<Value>> = result_set
             .rows
             .iter()
             .map(|row| {
-                clause
-                    .items
+                folded_sort_exprs
                     .iter()
-                    .map(|item| {
-                        self.evaluate_expression(&item.expression, row)
+                    .map(|expr| {
+                        self.evaluate_expression(expr, row)
                             .unwrap_or(Value::Null)
                     })
                     .collect()
@@ -2372,6 +2920,7 @@ fn value_type_name(v: &Value) -> String {
         Value::Boolean(_) => "Boolean",
         Value::UniqueId(_) => "UniqueId",
         Value::DateTime(_) => "DateTime",
+        Value::Point { .. } => "Point",
         Value::Null => "Null",
     }
     .to_string()

@@ -6,13 +6,13 @@
 
 An embedded knowledge graph engine for Python. Import and go — no server, no setup.
 
-> **For AI agents:** see [`kglite.pyi`](kglite.pyi) for full type stubs with signatures and docstrings.
+> **For AI agents:** see [Using with AI Agents](#using-with-ai-agents) and [`kglite.pyi`](kglite.pyi) for type stubs.
 
 | | |
 |---|---|
 | Embedded, in-process | No server, no network; `import` and go |
 | In-memory | Persistence via `save()`/`load()` snapshots |
-| Cypher subset | Querying + mutations; returns `dict` or DataFrame |
+| Cypher subset | Querying + mutations; returns `ResultView` or DataFrame |
 | Single-label nodes | Each node has exactly one type |
 | Single-threaded | Designed for single-threaded use (see [Threading](#threading)) |
 
@@ -40,7 +40,7 @@ graph.cypher("""
     CREATE (a)-[:KNOWS]->(b)
 """)
 
-# Query — returns list[dict]
+# Query — returns a ResultView (lazy; data stays in Rust until accessed)
 result = graph.cypher("""
     MATCH (p:Person) WHERE p.age > 30
     RETURN p.name AS name, p.city AS city
@@ -48,6 +48,10 @@ result = graph.cypher("""
 """)
 for row in result:
     print(row['name'], row['city'])
+
+# Quick peek at first rows
+result.head()      # first 5 rows (returns a new ResultView)
+result.head(3)     # first 3 rows
 
 # Or get a pandas DataFrame
 df = graph.cypher("MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age", to_df=True)
@@ -89,7 +93,17 @@ graph.cypher("MATCH (u:User) WHERE u.age > 30 RETURN u.name, u.age")
 
 **Selections** (fluent API) are lightweight views — a set of node indices that flow through chained operations like `type_filter().filter().traverse()`. They don't copy data.
 
-**Atomicity.** Each `cypher()` call is atomic — if any clause fails, the graph remains unchanged. There are no multi-statement transactions. Durability only via explicit `save()`.
+**Atomicity.** Each `cypher()` call is atomic — if any clause fails, the graph remains unchanged. For multi-statement atomicity, use `graph.begin()` transactions. Durability only via explicit `save()`.
+
+---
+
+## How It Works
+
+KGLite stores nodes and relationships in a Rust graph structure ([petgraph](https://github.com/petgraph/petgraph)). Python only sees lightweight handles — data converts to Python objects on access, not on query.
+
+- **Cypher queries** parse, optimize, and execute entirely in Rust, then return a `ResultView` (lazy — rows convert to Python dicts only when accessed)
+- **Fluent API** chains build a *selection* (a set of node indices) — no data is copied until you call `get_nodes()`, `to_df()`, etc.
+- **Persistence** is via `save()`/`load()` binary snapshots — there is no WAL or auto-save
 
 ---
 
@@ -101,11 +115,39 @@ All node-related methods use a consistent key order: **`type`, `title`, `id`**, 
 
 | Query type | Returns |
 |-----------|---------|
-| Read (`MATCH...RETURN`) | `list[dict]` — one dict per row, keyed by column alias |
+| Read (`MATCH...RETURN`) | `ResultView` — lazy container, rows converted on access |
 | Read with `to_df=True` | `pandas.DataFrame` |
-| Mutation (`CREATE`, `SET`, `DELETE`, `MERGE`) | `{'stats': {'nodes_created': int, ...}}` |
-| Mutation with `RETURN` | `{'rows': [...], 'stats': {...}}` |
+| Mutation (`CREATE`, `SET`, `DELETE`, `MERGE`) | `ResultView` with `.stats` dict |
 | `EXPLAIN` prefix | `str` (query plan, not executed) |
+
+**Spatial return types:** `point()` values are returned as `{'latitude': float, 'longitude': float}` dicts.
+
+### ResultView
+
+`ResultView` is a lazy result container returned by `cypher()`, centrality methods, `get_nodes()`, and `sample()`. Data stays in Rust and is only converted to Python objects when you access it — making `cypher()` calls fast even for large result sets.
+
+```python
+result = graph.cypher("MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age")
+
+len(result)        # row count (O(1), no conversion)
+result[0]          # single row as dict (converts that row only)
+result[-1]         # negative indexing works
+
+for row in result: # iterate rows as dicts (one at a time)
+    print(row)
+
+result.head()      # first 5 rows → new ResultView
+result.head(3)     # first 3 rows → new ResultView
+result.tail(2)     # last 2 rows → new ResultView
+
+result.to_list()   # all rows as list[dict] (full conversion)
+result.to_df()     # pandas DataFrame (full conversion)
+
+result.columns     # column names: ['n.name', 'n.age']
+result.stats       # mutation stats (None for read queries)
+```
+
+Because `ResultView` supports iteration and indexing, it works anywhere you'd use a list of dicts — existing code that iterates over `cypher()` results continues to work unchanged.
 
 ### Node dicts
 
@@ -126,7 +168,7 @@ Every method that returns node data uses the same dict shape:
 | `get_ids()` | `list[{type, title, id}]` | Identification only |
 | `get_titles()` | `list[str]` | Flat list (see below) |
 | `get_properties(['a','b'])` | `list[tuple]` | Flat list (see below) |
-| `get_nodes()` | `list[dict]` | Full node dicts |
+| `get_nodes()` | `ResultView` or grouped dict | Full node dicts |
 | `to_df()` | `DataFrame` | Columns: `type, title, id, ...props` |
 | `get_node_by_id(type, id)` | `dict \| None` | O(1) hash lookup |
 
@@ -154,7 +196,7 @@ All centrality methods (`pagerank`, `betweenness_centrality`, `closeness_central
 
 | Mode | Returns |
 |------|---------|
-| Default | `list[{type, title, id, score}]` sorted by score desc |
+| Default | `ResultView` of `{type, title, id, score}` sorted by score desc |
 | `as_dict=True` | `{id: score}` — keyed by node ID (unique per type) |
 | `to_df=True` | `DataFrame` with columns `type, title, id, score` |
 
@@ -176,10 +218,10 @@ graph.node_types                     # → ['Person', 'Product', ...]
 ### Cypher (recommended for most tasks)
 
 ```python
-graph.cypher("MATCH (n:Person) RETURN n.name")                          # → list[dict]
+graph.cypher("MATCH (n:Person) RETURN n.name")                          # → ResultView
 graph.cypher("MATCH (n:Person) RETURN n.name", to_df=True)              # → DataFrame
 graph.cypher("MATCH (n:Person) RETURN n.name", params={'x': 1})         # parameterized
-graph.cypher("CREATE (:Person {name: 'Alice'})")                        # → {'stats': {...}}
+graph.cypher("CREATE (:Person {name: 'Alice'})")                        # → ResultView (.stats has counts)
 ```
 
 ### Data loading (fluent API)
@@ -198,7 +240,7 @@ graph.type_filter('Person')                        # select by type → Knowledg
     .filter({'age': {'>': 25}})                    # filter → KnowledgeGraph
     .sort('age', ascending=False)                  # sort → KnowledgeGraph
     .traverse('KNOWS', direction='outgoing')       # traverse → KnowledgeGraph
-    .get_nodes()                                   # materialize → list[dict]
+    .get_nodes()                                   # materialize → ResultView or grouped dict
 ```
 
 ### Introspection
@@ -209,7 +251,7 @@ graph.connection_types()                      # → list of edge types with coun
 graph.properties('Person')                    # → per-property stats (type, non_null, unique, values)
 graph.properties('Person', max_values=50)     # → include values list for up to 50 unique values
 graph.neighbors_schema('Person')              # → outgoing/incoming connection topology
-graph.sample('Person', n=5)                   # → first N nodes as dicts
+graph.sample('Person', n=5)                   # → first N nodes as ResultView
 graph.indexes()                               # → all indexes with type info
 graph.agent_describe()                        # → XML string for LLM prompt context
 ```
@@ -219,8 +261,8 @@ graph.agent_describe()                        # → XML string for LLM prompt co
 ```python
 graph.shortest_path(source_type, source_id, target_type, target_id)  # → {path, connections, length} | None
 graph.all_paths(source_type, source_id, target_type, target_id)      # → list[{path, connections, length}]
-graph.pagerank(top_k=10)                                             # → list[{type, title, id, score}]
-graph.betweenness_centrality(top_k=10)                               # → list[{type, title, id, score}]
+graph.pagerank(top_k=10)                                             # → ResultView of {type, title, id, score}
+graph.betweenness_centrality(top_k=10)                               # → ResultView of {type, title, id, score}
 graph.louvain_communities()                                          # → {communities, modularity, num_communities}
 graph.connected_components()                                         # → list[list[node_dict]]
 ```
@@ -302,15 +344,13 @@ Raises `KeyError` if the node type doesn't exist.
 
 ### `sample(node_type, n=5)` — Quick data peek
 
-Returns the first N nodes of a type as full dicts:
+Returns the first N nodes of a type as a `ResultView`:
 
 ```python
-graph.sample('Person', n=3)
-# [
-#   {'type': 'Person', 'title': 'Alice', 'id': 1, 'age': 28, 'city': 'Oslo'},
-#   {'type': 'Person', 'title': 'Bob', 'id': 2, 'age': 35, 'city': 'Bergen'},
-#   {'type': 'Person', 'title': 'Charlie', 'id': 3, 'age': 42, 'city': 'Oslo'},
-# ]
+result = graph.sample('Person', n=3)
+result[0]          # {'type': 'Person', 'title': 'Alice', 'id': 1, 'age': 28, 'city': 'Oslo'}
+result.to_list()   # all rows as list[dict]
+result.to_df()     # as DataFrame
 ```
 
 Returns fewer than N if the type has fewer nodes. Raises `KeyError` if the node type doesn't exist.
@@ -356,7 +396,7 @@ result = graph.cypher("""
     LIMIT 10
 """)
 
-# Read queries → list[dict]
+# Read queries → ResultView (iterate, index, or convert)
 for row in result:
     print(f"{row['person']} knows {row['friend']}")
 
@@ -457,6 +497,60 @@ graph.cypher("""
 | `length(p)` | Path hop count |
 | `nodes(p)` | Nodes in a path |
 | `relationships(p)` | Relationships in a path |
+| `point(lat, lon)` | Create a geographic point |
+| `distance(p1, p2)` | Haversine great-circle distance (km) |
+| `wkt_contains(wkt, point)` | Point-in-polygon test |
+| `wkt_intersects(wkt1, wkt2)` | Geometry intersection test |
+| `wkt_centroid(wkt)` | Centroid of WKT geometry |
+| `latitude(point)` | Extract latitude from point |
+| `longitude(point)` | Extract longitude from point |
+
+### Spatial Functions
+
+Built-in spatial functions for geographic queries using the Haversine formula:
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `point(lat, lon)` | Point | Create a geographic point |
+| `distance(p1, p2)` | Float (km) | Haversine great-circle distance between two points |
+| `distance(lat1, lon1, lat2, lon2)` | Float (km) | Haversine distance (4-arg shorthand) |
+| `wkt_contains(wkt, point)` | Boolean | Point-in-polygon test |
+| `wkt_contains(wkt, lat, lon)` | Boolean | Point-in-polygon (3-arg shorthand) |
+| `wkt_intersects(wkt1, wkt2)` | Boolean | Geometry intersection test |
+| `wkt_centroid(wkt)` | Point | Centroid of WKT geometry |
+| `latitude(point)` | Float | Extract latitude component |
+| `longitude(point)` | Float | Extract longitude component |
+
+```python
+# Distance filtering — cities within 100km of Oslo
+graph.cypher("""
+    MATCH (n:City)
+    WHERE distance(point(n.latitude, n.longitude), point(59.91, 10.75)) < 100.0
+    RETURN n.name, distance(n.latitude, n.longitude, 59.91, 10.75) AS dist_km
+    ORDER BY dist_km
+""")
+
+# Spatial + graph traversal
+graph.cypher("""
+    MATCH (a:City)-[:CONNECTED_TO]->(b:City)
+    WHERE distance(point(a.lat, a.lon), point(b.lat, b.lon)) < 50.0
+    RETURN a.name, b.name
+""")
+
+# Point-in-polygon with WKT
+graph.cypher("""
+    MATCH (c:City), (a:Area)
+    WHERE wkt_contains(a.geometry, point(c.latitude, c.longitude))
+    RETURN c.name, a.name
+""")
+
+# Aggregation with spatial
+graph.cypher("""
+    MATCH (n:City)
+    RETURN avg(distance(point(n.latitude, n.longitude), point(59.91, 10.75))) AS avg_dist,
+           min(distance(point(n.latitude, n.longitude), point(59.91, 10.75))) AS min_dist
+""")
+```
 
 ### Arithmetic
 
@@ -622,9 +716,9 @@ result = graph.cypher("""
 ### CREATE / SET / DELETE / REMOVE / MERGE
 
 ```python
-# CREATE — returns stats
+# CREATE — returns ResultView with .stats
 result = graph.cypher("CREATE (n:Person {name: 'Alice', age: 30, city: 'Oslo'})")
-print(result['stats']['nodes_created'])  # 1
+print(result.stats['nodes_created'])  # 1
 
 # CREATE relationship between existing nodes
 graph.cypher("""
@@ -634,7 +728,7 @@ graph.cypher("""
 
 # SET — update properties
 result = graph.cypher("MATCH (n:Person {name: 'Bob'}) SET n.age = 26, n.city = 'Stavanger'")
-print(result['stats']['properties_set'])  # 2
+print(result.stats['properties_set'])  # 2
 
 # DELETE — plain DELETE errors if node has relationships; DETACH removes all
 graph.cypher("MATCH (n:Person {name: 'Alice'}) DETACH DELETE n")
@@ -648,6 +742,27 @@ graph.cypher("""
     ON CREATE SET n.created = 'today'
     ON MATCH SET n.updated = 'today'
 """)
+```
+
+### Transactions
+
+Group multiple mutations into an atomic unit. On success, all changes apply; on exception, nothing changes.
+
+```python
+with graph.begin() as tx:
+    tx.cypher("CREATE (:Person {name: 'Alice', age: 30})")
+    tx.cypher("CREATE (:Person {name: 'Bob', age: 25})")
+    tx.cypher("""
+        MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
+        CREATE (a)-[:KNOWS]->(b)
+    """)
+    # Commits automatically when the block exits normally
+    # Rolls back if an exception occurs
+
+# Manual control:
+tx = graph.begin()
+tx.cypher("CREATE (:Person {name: 'Charlie'})")
+tx.commit()   # or tx.rollback()
 ```
 
 ### DataFrame Output
@@ -692,6 +807,7 @@ print(plan)
 | **Aggregation** | `count(*)`, `count(expr)`, `sum`, `avg`/`mean`, `min`, `max`, `collect`, `std` |
 | **Expressions** | `CASE WHEN...THEN...ELSE...END`, `$param`, `[x IN list WHERE ... \| expr]` |
 | **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `length`, `type`, `id`, `labels`, `coalesce`, `nodes(p)`, `relationships(p)` |
+| **Spatial** | `point(lat, lon)`, `distance(p1, p2)`, `wkt_contains(wkt, point)`, `wkt_intersects(wkt1, wkt2)`, `wkt_centroid(wkt)`, `latitude(point)`, `longitude(point)` |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
 | **Not supported** | `CALL`/stored procedures, `FOREACH`, subqueries, `SET n:Label` (label mutation), `REMOVE n:Label`, multi-label |
 
@@ -935,6 +1051,15 @@ graph.shortest_path_indices(...)   # → list[int] | None (raw graph indices, fa
 
 All path methods support `connection_types`, `via_types`, and `timeout_ms` for filtering and safety.
 
+Batch variant for computing many distances at once:
+
+```python
+distances = graph.shortest_path_lengths_batch('Person', [(1, 5), (2, 8), (3, 10)])
+# → [2, None, 5]  (None where no path exists, same order as input)
+```
+
+Much faster than calling `shortest_path_length` in a loop — builds the adjacency list once.
+
 ### All Paths
 
 ```python
@@ -959,7 +1084,7 @@ graph.are_connected(source_type='Person', source_id=1, target_type='Person', tar
 
 ### Centrality Algorithms
 
-All centrality methods return `list[{type, title, id, score}]`, sorted by score descending.
+All centrality methods return a `ResultView` of `{type, title, id, score}` rows, sorted by score descending.
 
 ```python
 graph.betweenness_centrality(top_k=10)
@@ -1002,6 +1127,8 @@ degrees = graph.type_filter('Person').get_degrees()
 ---
 
 ## Spatial Operations
+
+> Spatial queries are also available in Cypher via `point()`, `distance()`, `wkt_contains()`, `wkt_intersects()`, and `wkt_centroid()`. See [Spatial Functions](#spatial-functions).
 
 ### Bounding Box
 
@@ -1096,11 +1223,19 @@ schema = graph.get_schema()
 
 ### Indexes
 
-Indexes accelerate **equality lookups only** (`WHERE n.prop = value`). Range conditions (`<`, `>`, `<=`, `>=`) always scan.
+Two index types:
+
+| Method | Accelerates | Use for |
+|--------|-------------|---------|
+| `create_index()` | Equality (`= value`) | Exact lookups |
+| `create_range_index()` | Range (`>`, `<`, `>=`, `<=`) | Numeric/date filtering |
+
+Both also accelerate Cypher `WHERE` clauses. Composite indexes support multi-property equality.
 
 ```python
-graph.create_index('Prospect', 'prospect_geoprovince')
-graph.create_composite_index('Person', ['city', 'age'])
+graph.create_index('Prospect', 'prospect_geoprovince')        # equality index
+graph.create_range_index('Person', 'age')                      # B-Tree range index
+graph.create_composite_index('Person', ['city', 'age'])        # composite equality
 
 graph.list_indexes()
 graph.drop_index('Prospect', 'prospect_geoprovince')
@@ -1160,6 +1295,42 @@ subgraph.export('acme_network.graphml', format='graphml')
 ### Threading
 
 Designed for single-threaded use. The Rust code does not release the Python GIL during operations. If you share a graph instance across threads, guard access with your own lock.
+
+---
+
+## Common Gotchas
+
+- **Single-label only.** Each node has exactly one type. `labels(n)` returns a string, not a list. `SET n:OtherLabel` is not supported.
+- **`id` and `title` are renamed.** `add_nodes(unique_id_field='user_id')` stores the column as `id` — query with `n.id`, not `n.user_id`. Same for `node_title_field` → `title`.
+- **Save files aren't portable.** The binary format (bincode) may differ across OS, CPU architecture, or library versions. Use `export()` (GraphML, CSV) for sharing across machines.
+- **Indexes:** `create_index()` accelerates equality only (`=`). For range queries (`>`, `<`, `>=`, `<=`), use `create_range_index()`.
+- **Flat vs. grouped results.** After traversal with multiple parents, `get_titles()`, `get_nodes()`, and `get_properties()` return grouped dicts instead of flat lists. Use `flatten_single_parent=False` to always get grouped output.
+- **No auto-persistence.** The graph lives in memory. `save()` is manual — crashes lose unsaved work.
+
+---
+
+## Using with AI Agents
+
+### Quick setup
+
+```python
+xml = graph.agent_describe()  # graph structure + Cypher reference as XML
+prompt = f"You have a knowledge graph:\n{xml}\nAnswer the user's question using graph.cypher()."
+```
+
+### Tips for agent prompts
+
+1. **Start with `agent_describe()`** — gives the agent schema, types, property names, counts, and Cypher syntax in one XML string
+2. **Use `properties(type)`** for column discovery — shows types, nullability, unique counts, and sample values
+3. **Use `sample(type, n=3)`** before writing queries — lets the agent see real data shapes
+4. **Prefer Cypher** over the fluent API in agent contexts — closer to natural language, easier for LLMs to generate
+5. **Use parameters** (`params={'x': val}`) to prevent injection when passing user input to queries
+6. **ResultView is lazy** — agents can call `len(result)` to check row count without converting all rows
+
+### What `agent_describe()` returns
+
+- **Dynamic** (per-graph): node types with counts, property names and types, connection types with endpoints, indexes, field aliases
+- **Static** (always the same): supported Cypher clauses, WHERE operators, functions (including spatial), mutation syntax, single-label notes
 
 ---
 

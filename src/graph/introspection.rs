@@ -154,6 +154,7 @@ fn value_type_name(v: &Value) -> &'static str {
         Value::Boolean(_) => "bool",
         Value::DateTime(_) => "datetime",
         Value::UniqueId(_) => "uniqueid",
+        Value::Point { .. } => "point",
         Value::Null => "unknown",
     }
 }
@@ -347,10 +348,10 @@ pub fn compute_sample<'a>(
 
 /// Static XML fragment: API methods and Cypher reference (never changes per graph).
 const STATIC_XML: &str = r#"  <api>
-    <method sig="cypher(query, *, to_df=False, params=None)">Primary query interface. Returns list[dict] or DataFrame.</method>
+    <method sig="cypher(query, *, to_df=False, params=None)">Primary query interface. Returns ResultView (lazy) or DataFrame with to_df=True.</method>
     <method sig="schema()">Returns dict: node_types, connection_types, indexes, node_count, edge_count.</method>
     <method sig="properties(node_type, max_values=20)">Per-property stats: type, non_null, unique, values.</method>
-    <method sig="sample(node_type, n=5)">Returns first N nodes as list[dict].</method>
+    <method sig="sample(node_type, n=5)">Returns first N nodes as ResultView.</method>
     <method sig="save(path) / load(path)">Persist and reload the graph.</method>
   </api>
   <cypher_ref>
@@ -360,7 +361,7 @@ const STATIC_XML: &str = r#"  <api>
     <return>n.prop, r.prop, AS alias, DISTINCT, arithmetic (+, -, *, /), map projections n {.prop1, .prop2}</return>
     <aggregation>count(*), count(expr), sum, avg, min, max, collect, std</aggregation>
     <expressions>CASE WHEN...THEN...ELSE...END, $param, [x IN list WHERE ... | expr]</expressions>
-    <functions>toUpper, toLower, toString, toInteger, toFloat, size, length, type, id, labels, coalesce, nodes(p), relationships(p)</functions>
+    <functions>toUpper, toLower, toString, toInteger, toFloat, size, length, type, id, labels, coalesce, nodes(p), relationships(p), point, distance, wkt_contains, wkt_intersects, wkt_centroid, latitude, longitude</functions>
     <mutations>CREATE (n:Label {props}), CREATE (a)-[:TYPE]-&gt;(b), SET n.prop = expr, DELETE, DETACH DELETE, REMOVE n.prop, MERGE...ON CREATE SET...ON MATCH SET</mutations>
     <not_supported>CALL/stored procedures, FOREACH, subqueries, SET n:Label, REMOVE n:Label, multi-label</not_supported>
     <notes>
@@ -368,7 +369,7 @@ const STATIC_XML: &str = r#"  <api>
       <note>Built-in node fields: type, title, id. Access via n.type, n.title, n.id.</note>
       <note>If a node type has id_alias/title_alias attributes, the original column name also works as a property accessor (e.g. n.npdid resolves to n.id).</note>
       <note>Each cypher() call is atomic. Params via $param syntax.</note>
-      <note>to_df=True returns a pandas DataFrame instead of list[dict].</note>
+      <note>to_df=True returns a pandas DataFrame instead of ResultView.</note>
     </notes>
   </cypher_ref>"#;
 

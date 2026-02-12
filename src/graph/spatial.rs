@@ -126,7 +126,7 @@ const EARTH_RADIUS_KM: f64 = 6371.0;
 ///
 /// This gives the great-circle distance between two points on a sphere,
 /// which is more accurate than Euclidean distance for geographic coordinates.
-fn haversine_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+pub(crate) fn haversine_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let lat1_rad = lat1.to_radians();
     let lat2_rad = lat2.to_radians();
     let delta_lat = (lat2 - lat1).to_radians();
@@ -369,7 +369,7 @@ pub fn intersects_geometry(
 }
 
 /// Check if two geometries intersect
-fn geometries_intersect(a: &Geometry<f64>, b: &Geometry<f64>) -> bool {
+pub(crate) fn geometries_intersect(a: &Geometry<f64>, b: &Geometry<f64>) -> bool {
     match (a, b) {
         (Geometry::Point(p1), Geometry::Point(p2)) => p1 == p2,
         (Geometry::Point(p), Geometry::Polygon(poly))

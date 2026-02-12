@@ -226,6 +226,7 @@ fn get_value_type_name(value: &Value) -> String {
         Value::Boolean(_) => "boolean".to_string(),
         Value::DateTime(_) => "datetime".to_string(),
         Value::UniqueId(_) => "integer".to_string(),
+        Value::Point { .. } => "point".to_string(),
         Value::Null => "null".to_string(),
     }
 }

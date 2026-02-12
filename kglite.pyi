@@ -17,11 +17,26 @@ class ResultIter:
 
 
 class ResultView:
-    """Lazy result view — data stays in Rust until accessed.
+    """Lazy result container — data stays in Rust until accessed from Python.
 
     Returned by ``cypher()``, centrality methods, ``get_nodes()`` (flat),
-    and ``sample()``. Supports ``len()``, indexing, iteration, ``to_list()``,
-    and ``to_df()``.
+    and ``sample()``.
+
+    Data is only converted to Python objects when you actually access rows
+    (via iteration, indexing, ``to_list()``, or ``to_df()``). This makes
+    ``cypher()`` calls fast even for large result sets — the cost is deferred
+    to when you consume the data.
+
+    Supports:
+      - ``len(result)`` — row count (O(1), no conversion)
+      - ``bool(result)`` — True if non-empty
+      - ``result[i]`` — single row as dict (converts that row only)
+      - ``for row in result`` — iterate rows as dicts (one at a time)
+      - ``result.head(n)`` / ``result.tail(n)`` — first/last n rows as a new ResultView
+      - ``result.to_list()`` — all rows as ``list[dict]`` (full conversion)
+      - ``result.to_df()`` — pandas DataFrame (full conversion)
+      - ``result.columns`` — column names
+      - ``result.stats`` — mutation stats (CREATE/SET/DELETE queries only)
     """
 
     @property
@@ -32,6 +47,14 @@ class ResultView:
     @property
     def stats(self) -> Optional[dict[str, int]]:
         """Mutation statistics, or ``None`` for read queries / non-cypher results."""
+        ...
+
+    def head(self, n: int = 5) -> ResultView:
+        """Return a new ResultView with the first *n* rows (default 5)."""
+        ...
+
+    def tail(self, n: int = 5) -> ResultView:
+        """Return a new ResultView with the last *n* rows (default 5)."""
         ...
 
     def to_list(self) -> list[dict[str, Any]]:

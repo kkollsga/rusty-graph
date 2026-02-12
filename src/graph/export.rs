@@ -395,6 +395,7 @@ fn value_to_string(value: &Value) -> String {
         Value::Boolean(b) => b.to_string(),
         Value::DateTime(dt) => dt.to_string(),
         Value::UniqueId(id) => id.to_string(),
+        Value::Point { lat, lon } => format!("point({}, {})", lat, lon),
         Value::Null => String::new(),
     }
 }
@@ -422,6 +423,7 @@ fn json_value(value: &Value) -> String {
         Value::Boolean(b) => b.to_string(),
         Value::DateTime(dt) => json_string(&dt.to_string()),
         Value::UniqueId(id) => id.to_string(),
+        Value::Point { lat, lon } => format!("{{\"lat\":{},\"lon\":{}}}", lat, lon),
         Value::Null => "null".to_string(),
     }
 }
