@@ -314,6 +314,15 @@ pub struct DirGraph {
     /// Used for alias resolution: querying by original column name maps to the `title` field.
     #[serde(default)]
     pub(crate) title_field_aliases: HashMap<String, String>,
+    /// Auto-vacuum threshold: if Some(t), vacuum() is triggered automatically after
+    /// DELETE operations when fragmentation_ratio exceeds t and tombstones > 100.
+    /// Default: Some(0.3). Set to None to disable.
+    #[serde(default = "default_auto_vacuum_threshold")]
+    pub(crate) auto_vacuum_threshold: Option<f64>,
+}
+
+fn default_auto_vacuum_threshold() -> Option<f64> {
+    Some(0.3)
 }
 
 impl DirGraph {
@@ -333,6 +342,7 @@ impl DirGraph {
             save_metadata: SaveMetadata::current(),
             id_field_aliases: HashMap::new(),
             title_field_aliases: HashMap::new(),
+            auto_vacuum_threshold: default_auto_vacuum_threshold(),
         }
     }
 
@@ -354,6 +364,7 @@ impl DirGraph {
             save_metadata: SaveMetadata::default(),
             id_field_aliases: HashMap::new(),
             title_field_aliases: HashMap::new(),
+            auto_vacuum_threshold: default_auto_vacuum_threshold(),
         }
     }
 
@@ -1136,6 +1147,37 @@ impl DirGraph {
         self.reindex();
 
         old_to_new
+    }
+
+    /// Check if auto-vacuum should run and trigger it if so.
+    ///
+    /// Called after DELETE operations. Only vacuums if:
+    /// - `auto_vacuum_threshold` is Some(threshold)
+    /// - Tombstones exceed 100 (avoid overhead on tiny graphs)
+    /// - `fragmentation_ratio` exceeds the threshold
+    ///
+    /// Returns true if vacuum was triggered.
+    pub fn check_auto_vacuum(&mut self) -> bool {
+        let threshold = match self.auto_vacuum_threshold {
+            Some(t) => t,
+            None => return false,
+        };
+
+        let node_count = self.graph.node_count();
+        let node_bound = self.graph.node_bound();
+        let tombstones = node_bound - node_count;
+
+        if tombstones <= 100 {
+            return false;
+        }
+
+        let ratio = tombstones as f64 / node_bound as f64;
+        if ratio > threshold {
+            self.vacuum();
+            true
+        } else {
+            false
+        }
     }
 
     /// Return diagnostic information about graph storage health.

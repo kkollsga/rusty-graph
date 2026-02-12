@@ -72,6 +72,13 @@ struct FileMetadata {
     /// Original title field name per node type (for alias resolution)
     #[serde(default)]
     title_field_aliases: HashMap<String, String>,
+    /// Auto-vacuum threshold (None = disabled, default Some(0.3))
+    #[serde(default = "default_auto_vacuum_threshold")]
+    auto_vacuum_threshold: Option<f64>,
+}
+
+fn default_auto_vacuum_threshold() -> Option<f64> {
+    Some(0.3)
 }
 
 // ─── Save ────────────────────────────────────────────────────────────────────
@@ -94,6 +101,7 @@ pub fn save_to_file(graph: &mut Arc<DirGraph>, path: &str) -> io::Result<()> {
         connection_type_metadata: g.connection_type_metadata.clone(),
         id_field_aliases: g.id_field_aliases.clone(),
         title_field_aliases: g.title_field_aliases.clone(),
+        auto_vacuum_threshold: g.auto_vacuum_threshold,
     };
 
     let metadata_json = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
@@ -185,6 +193,7 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
     dir_graph.connection_type_metadata = metadata.connection_type_metadata;
     dir_graph.id_field_aliases = metadata.id_field_aliases;
     dir_graph.title_field_aliases = metadata.title_field_aliases;
+    dir_graph.auto_vacuum_threshold = metadata.auto_vacuum_threshold;
     dir_graph.save_metadata = SaveMetadata {
         format_version: 2,
         library_version: metadata.library_version,

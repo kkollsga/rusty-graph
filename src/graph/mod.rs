@@ -1510,6 +1510,37 @@ impl KnowledgeGraph {
         })
     }
 
+    /// Configure automatic vacuum after DELETE operations.
+    ///
+    /// When enabled, the graph automatically compacts itself after Cypher DELETE
+    /// operations if the fragmentation ratio exceeds the threshold and there are
+    /// more than 100 tombstones.
+    ///
+    /// Args:
+    ///     threshold: A float between 0.0 and 1.0, or None to disable.
+    ///         Default is 0.3 (30% fragmentation triggers vacuum).
+    ///         Set to None to disable auto-vacuum entirely.
+    ///
+    /// Example:
+    ///     ```python
+    ///     graph.set_auto_vacuum(0.2)   # more aggressive — vacuum at 20% fragmentation
+    ///     graph.set_auto_vacuum(None)  # disable auto-vacuum
+    ///     graph.set_auto_vacuum(0.3)   # restore default
+    ///     ```
+    #[pyo3(signature = (threshold))]
+    fn set_auto_vacuum(&mut self, threshold: Option<f64>) -> PyResult<()> {
+        if let Some(t) = threshold {
+            if !(0.0..=1.0).contains(&t) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "threshold must be between 0.0 and 1.0, or None to disable",
+                ));
+            }
+        }
+        let graph = get_graph_mut(&mut self.inner);
+        graph.auto_vacuum_threshold = threshold;
+        Ok(())
+    }
+
     /// Returns a dict of {node_type: count} using the type index (O(type_count)).
     fn node_type_counts(&self) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {
@@ -4259,12 +4290,21 @@ impl KnowledgeGraph {
 
         let result = if cypher::is_mutation_query(&parsed) {
             let graph = get_graph_mut(&mut self.inner);
-            cypher::execute_mutable(graph, &parsed, param_map).map_err(|e| {
+            let r = cypher::execute_mutable(graph, &parsed, param_map).map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                     "Cypher execution error: {}",
                     e
                 ))
-            })?
+            })?;
+            // Auto-vacuum after deletions
+            if let Some(ref stats) = r.stats {
+                if (stats.nodes_deleted > 0 || stats.relationships_deleted > 0)
+                    && graph.check_auto_vacuum()
+                {
+                    self.selection = schema::CowSelection::new();
+                }
+            }
+            r
         } else {
             // Read-only path: borrow immutably
             let executor = cypher::CypherExecutor::with_params(&self.inner, &param_map);

@@ -455,6 +455,25 @@ class KnowledgeGraph:
         """
         ...
 
+    def set_auto_vacuum(self, threshold: float | None) -> None:
+        """Configure automatic vacuum after DELETE operations.
+
+        When enabled, the graph automatically compacts itself after Cypher DELETE
+        operations if the fragmentation ratio exceeds the threshold and there are
+        more than 100 tombstones.
+
+        Args:
+            threshold: A float between 0.0 and 1.0, or ``None`` to disable.
+                Default is ``0.3`` (30% fragmentation triggers vacuum).
+
+        Example::
+
+            graph.set_auto_vacuum(0.2)   # more aggressive — vacuum at 20%
+            graph.set_auto_vacuum(None)  # disable auto-vacuum
+            graph.set_auto_vacuum(0.3)   # restore default
+        """
+        ...
+
     def graph_info(self) -> dict[str, Any]:
         """Get diagnostic information about graph storage health.
 
