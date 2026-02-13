@@ -5220,11 +5220,7 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     Dict mapping node IDs to embedding vectors (list of floats).
-    fn get_embeddings(
-        &self,
-        py: Python<'_>,
-        property_name: &str,
-    ) -> PyResult<Py<PyAny>> {
+    fn get_embeddings(&self, py: Python<'_>, property_name: &str) -> PyResult<Py<PyAny>> {
         let result = PyDict::new(py);
 
         let level_count = self.selection.get_level_count();

@@ -257,10 +257,7 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
             let gz = GzDecoder::new(emb_bytes);
             let embeddings: HashMap<(String, String), EmbeddingStore> =
                 bincode::deserialize_from(gz).map_err(|e| {
-                    io::Error::other(format!(
-                        "Failed to deserialize embedding data: {}",
-                        e
-                    ))
+                    io::Error::other(format!("Failed to deserialize embedding data: {}", e))
                 })?;
             dir_graph.embeddings = embeddings;
         }

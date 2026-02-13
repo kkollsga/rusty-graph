@@ -1978,13 +1978,19 @@ impl<'a> CypherExecutor<'a> {
                         Some(&idx) => idx,
                         None => return Ok(Value::Null),
                     },
-                    _ => return Err("vector_score(): first argument must be a node variable".into()),
+                    _ => {
+                        return Err("vector_score(): first argument must be a node variable".into())
+                    }
                 };
 
                 // Arg 1: embedding property name
                 let prop_name = match self.evaluate_expression(&args[1], row)? {
                     Value::String(s) => s,
-                    _ => return Err("vector_score(): second argument must be a string property name".into()),
+                    _ => {
+                        return Err(
+                            "vector_score(): second argument must be a string property name".into(),
+                        )
+                    }
                 };
 
                 // Arg 2: query vector — either a ListLiteral or a JSON string
@@ -2059,11 +2065,7 @@ impl<'a> CypherExecutor<'a> {
     }
 
     /// Extract a Vec<f32> from an expression that is either a ListLiteral or a JSON string.
-    fn extract_float_list(
-        &self,
-        expr: &Expression,
-        row: &ResultRow,
-    ) -> Result<Vec<f32>, String> {
+    fn extract_float_list(&self, expr: &Expression, row: &ResultRow) -> Result<Vec<f32>, String> {
         match expr {
             Expression::ListLiteral(items) => {
                 let mut result = Vec::with_capacity(items.len());

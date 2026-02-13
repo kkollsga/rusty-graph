@@ -1,13 +1,38 @@
 name: Build and Publish Python Wheels
 on:
   push:
-    paths:
-      - 'Cargo.toml'
+    branches: [main]
   workflow_dispatch: # Allow manual triggering
 
 jobs:
+  version-check:
+    name: Check if version needs publishing
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.check.outputs.should_publish }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check version against PyPI
+        id: check
+        run: |
+          VERSION=$(grep -m 1 "version" Cargo.toml | cut -d '"' -f 2)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Cargo.toml version: $VERSION"
+
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/kglite/$VERSION/json")
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "Version $VERSION already exists on PyPI — skipping build"
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+          else
+            echo "Version $VERSION not on PyPI — will build and publish"
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+          fi
+
   ci-gate:
     name: Wait for CI to pass
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Wait for CI workflow
@@ -32,24 +57,9 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 15
 
-  version:
-    name: Extract version
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.get_version.outputs.version }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Extract version from Cargo.toml
-        id: get_version
-        run: |
-          VERSION=$(grep -m 1 "version" Cargo.toml | cut -d '"' -f 2)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Package version: $VERSION"
-
   build:
     name: Build wheels - ${{ matrix.os }} - ${{ matrix.target }} - py${{ matrix.python-version }}
-    needs: [ci-gate, version]
+    needs: [ci-gate, version-check]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -145,7 +155,7 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [version, build]
+    needs: [version-check, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -169,6 +179,6 @@ jobs:
         with:
           files: dist/*.whl
           generate_release_notes: true
-          tag_name: v${{ needs.version.outputs.version }}
+          tag_name: v${{ needs.version-check.outputs.version }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

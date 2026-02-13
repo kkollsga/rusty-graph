@@ -478,7 +478,10 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
         let mut emb_keys: Vec<&(String, String)> = graph.embeddings.keys().collect();
         emb_keys.sort();
         for (node_type, prop_name) in emb_keys {
-            if let Some(store) = graph.embeddings.get(&(node_type.clone(), prop_name.clone())) {
+            if let Some(store) = graph
+                .embeddings
+                .get(&(node_type.clone(), prop_name.clone()))
+            {
                 xml.push_str(&format!(
                     "    <emb type=\"{}\" prop=\"{}\" dim=\"{}\" count=\"{}\"/>\n",
                     xml_escape(node_type),
@@ -525,7 +528,9 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     xml.push_str("      <note>Built-in node fields: type, title, id. Access via n.type, n.title, n.id.</note>\n");
     xml.push_str("      <note>If a node type has id_alias/title_alias attributes, the original column name also works as a property accessor (e.g. n.npdid resolves to n.id).</note>\n");
     xml.push_str("      <note>Each cypher() call is atomic. Params via $param syntax.</note>\n");
-    xml.push_str("      <note>to_df=True returns a pandas DataFrame instead of ResultView.</note>\n");
+    xml.push_str(
+        "      <note>to_df=True returns a pandas DataFrame instead of ResultView.</note>\n",
+    );
     if has_embeddings {
         xml.push_str("      <note>vector_score(n, 'prop', [f32,...]) computes cosine similarity in Cypher. Optional 4th arg: 'cosine', 'dot_product', 'euclidean'. Query vector can be a $param.</note>\n");
     }
