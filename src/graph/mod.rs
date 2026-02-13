@@ -2011,7 +2011,9 @@ impl KnowledgeGraph {
                         },
                         reports: self.reports.clone(), // Copy existing reports
                         last_mutation_stats: None,
-                        embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
+                        embedder: Python::attach(|py| {
+                            self.embedder.as_ref().map(|m| m.clone_ref(py))
+                        }),
                     };
 
                     // Store the calculation report
@@ -5418,9 +5420,7 @@ impl KnowledgeGraph {
             )
         })?;
         bound.getattr("embed").map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
-                "model must have an 'embed' method",
-            )
+            PyErr::new::<pyo3::exceptions::PyAttributeError, _>("model must have an 'embed' method")
         })?;
         self.embedder = Some(model);
         Ok(())
@@ -5464,16 +5464,15 @@ impl KnowledgeGraph {
         Self::try_load_embedder(&model)?;
 
         // Get model dimension
-        let dimension: usize =
-            match model.getattr("dimension").and_then(|d| d.extract()) {
-                Ok(dim) => dim,
-                Err(_) => {
-                    Self::try_unload_embedder(&model);
-                    return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
-                        "model must have an int 'dimension' attribute",
-                    ));
-                }
-            };
+        let dimension: usize = match model.getattr("dimension").and_then(|d| d.extract()) {
+            Ok(dim) => dim,
+            Err(_) => {
+                Self::try_unload_embedder(&model);
+                return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                    "model must have an int 'dimension' attribute",
+                ));
+            }
+        };
 
         // Collect (node_index, text) for nodes that need embedding
         let mut node_texts: Vec<(NodeIndex, String)> = Vec::new();
@@ -5540,14 +5539,10 @@ impl KnowledgeGraph {
                 .and_then(|tqdm_mod| {
                     let kwargs = PyDict::new(py);
                     let _ = kwargs.set_item("total", node_texts.len());
-                    let _ = kwargs.set_item(
-                        "desc",
-                        format!("Embedding {}.{}", node_type, text_column),
-                    );
+                    let _ =
+                        kwargs.set_item("desc", format!("Embedding {}.{}", node_type, text_column));
                     let _ = kwargs.set_item("unit", "text");
-                    tqdm_mod
-                        .call_method("tqdm", (), Some(&kwargs))
-                        .ok()
+                    tqdm_mod.call_method("tqdm", (), Some(&kwargs)).ok()
                 })
         } else {
             None
