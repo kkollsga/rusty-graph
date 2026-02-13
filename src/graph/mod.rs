@@ -42,6 +42,9 @@ use schema::{
     PlanStep, SchemaDefinition, SelectionOperation,
 };
 
+/// Embedding column data extracted from a DataFrame: `[(column_name, [(node_id, embedding)])]`
+type EmbeddingColumnData = Vec<(String, Vec<(Value, Vec<f32>)>)>;
+
 #[pyclass]
 pub struct KnowledgeGraph {
     inner: Arc<DirGraph>,
@@ -273,8 +276,7 @@ impl KnowledgeGraph {
         }
 
         // Extract embedding data before DataFrame conversion
-        let embedding_data: Vec<(String, Vec<(Value, Vec<f32>)>)> = if !embedding_columns.is_empty()
-        {
+        let embedding_data: EmbeddingColumnData = if !embedding_columns.is_empty() {
             let id_series = data.get_item(&unique_id_field)?;
             let nrows: usize = data.getattr("shape")?.get_item(0)?.extract()?;
             let mut result = Vec::new();
