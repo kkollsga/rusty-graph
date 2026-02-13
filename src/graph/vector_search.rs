@@ -132,13 +132,16 @@ fn get_similarity_fn(metric: DistanceMetric) -> SimilarityFn {
 }
 
 /// Cosine similarity between two f32 slices.
-/// Uses chunks_exact(8) for LLVM auto-vectorization (SSE2/AVX2/NEON).
+/// Uses 4 independent accumulators per metric for instruction-level parallelism,
+/// with chunks_exact(8) for LLVM auto-vectorization (SSE2/AVX2/NEON).
 /// Returns similarity in [-1.0, 1.0].
 #[inline]
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let mut dot = 0.0f32;
-    let mut norm_a = 0.0f32;
-    let mut norm_b = 0.0f32;
+    // 4 independent accumulators break the loop-carried dependency chain,
+    // allowing the CPU to pipeline multiply-add operations.
+    let (mut dot0, mut dot1, mut dot2, mut dot3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let (mut na0, mut na1, mut na2, mut na3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let (mut nb0, mut nb1, mut nb2, mut nb3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
 
     let a_chunks = a.chunks_exact(8);
     let b_chunks = b.chunks_exact(8);
@@ -146,18 +149,41 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let b_rem = b_chunks.remainder();
 
     for (ac, bc) in a_chunks.zip(b_chunks) {
-        // Unrolled loop — LLVM recognizes this pattern and vectorizes it
-        for i in 0..8 {
-            dot += ac[i] * bc[i];
-            norm_a += ac[i] * ac[i];
-            norm_b += bc[i] * bc[i];
-        }
+        dot0 += ac[0] * bc[0];
+        dot1 += ac[1] * bc[1];
+        dot2 += ac[2] * bc[2];
+        dot3 += ac[3] * bc[3];
+        na0 += ac[0] * ac[0];
+        na1 += ac[1] * ac[1];
+        na2 += ac[2] * ac[2];
+        na3 += ac[3] * ac[3];
+        nb0 += bc[0] * bc[0];
+        nb1 += bc[1] * bc[1];
+        nb2 += bc[2] * bc[2];
+        nb3 += bc[3] * bc[3];
+
+        dot0 += ac[4] * bc[4];
+        dot1 += ac[5] * bc[5];
+        dot2 += ac[6] * bc[6];
+        dot3 += ac[7] * bc[7];
+        na0 += ac[4] * ac[4];
+        na1 += ac[5] * ac[5];
+        na2 += ac[6] * ac[6];
+        na3 += ac[7] * ac[7];
+        nb0 += bc[4] * bc[4];
+        nb1 += bc[5] * bc[5];
+        nb2 += bc[6] * bc[6];
+        nb3 += bc[7] * bc[7];
     }
     for (av, bv) in a_rem.iter().zip(b_rem.iter()) {
-        dot += av * bv;
-        norm_a += av * av;
-        norm_b += bv * bv;
+        dot0 += av * bv;
+        na0 += av * av;
+        nb0 += bv * bv;
     }
+
+    let dot = (dot0 + dot1) + (dot2 + dot3);
+    let norm_a = (na0 + na1) + (na2 + na3);
+    let norm_b = (nb0 + nb1) + (nb2 + nb3);
 
     let denom = (norm_a * norm_b).sqrt();
     if denom > 0.0 {
@@ -168,9 +194,10 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Dot product similarity.
+/// Uses 4 independent accumulators for instruction-level parallelism.
 #[inline]
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
-    let mut sum = 0.0f32;
+    let (mut s0, mut s1, mut s2, mut s3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
 
     let a_chunks = a.chunks_exact(8);
     let b_chunks = b.chunks_exact(8);
@@ -178,21 +205,27 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     let b_rem = b_chunks.remainder();
 
     for (ac, bc) in a_chunks.zip(b_chunks) {
-        for i in 0..8 {
-            sum += ac[i] * bc[i];
-        }
+        s0 += ac[0] * bc[0];
+        s1 += ac[1] * bc[1];
+        s2 += ac[2] * bc[2];
+        s3 += ac[3] * bc[3];
+        s0 += ac[4] * bc[4];
+        s1 += ac[5] * bc[5];
+        s2 += ac[6] * bc[6];
+        s3 += ac[7] * bc[7];
     }
     for (av, bv) in a_rem.iter().zip(b_rem.iter()) {
-        sum += av * bv;
+        s0 += av * bv;
     }
 
-    sum
+    (s0 + s1) + (s2 + s3)
 }
 
 /// Negative Euclidean distance (higher = more similar).
+/// Uses 4 independent accumulators for instruction-level parallelism.
 #[inline]
 pub fn neg_euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-    let mut sum = 0.0f32;
+    let (mut s0, mut s1, mut s2, mut s3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
 
     let a_chunks = a.chunks_exact(8);
     let b_chunks = b.chunks_exact(8);
@@ -200,17 +233,29 @@ pub fn neg_euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
     let b_rem = b_chunks.remainder();
 
     for (ac, bc) in a_chunks.zip(b_chunks) {
-        for i in 0..8 {
-            let d = ac[i] - bc[i];
-            sum += d * d;
-        }
+        let d0 = ac[0] - bc[0];
+        let d1 = ac[1] - bc[1];
+        let d2 = ac[2] - bc[2];
+        let d3 = ac[3] - bc[3];
+        s0 += d0 * d0;
+        s1 += d1 * d1;
+        s2 += d2 * d2;
+        s3 += d3 * d3;
+        let d4 = ac[4] - bc[4];
+        let d5 = ac[5] - bc[5];
+        let d6 = ac[6] - bc[6];
+        let d7 = ac[7] - bc[7];
+        s0 += d4 * d4;
+        s1 += d5 * d5;
+        s2 += d6 * d6;
+        s3 += d7 * d7;
     }
     for (av, bv) in a_rem.iter().zip(b_rem.iter()) {
         let d = av - bv;
-        sum += d * d;
+        s0 += d * d;
     }
 
-    -sum.sqrt()
+    -((s0 + s1) + (s2 + s3)).sqrt()
 }
 
 // ─── Top-K Min-Heap ────────────────────────────────────────────────────────────

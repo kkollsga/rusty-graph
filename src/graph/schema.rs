@@ -451,6 +451,17 @@ impl DirGraph {
         }
     }
 
+    /// Look up an embedding store by `(&str, &str)` without allocating owned Strings.
+    /// Falls back to a linear scan of the embeddings map (typically 1-3 entries).
+    #[inline]
+    pub fn embedding_store(&self, node_type: &str, prop_name: &str) -> Option<&EmbeddingStore> {
+        // Embedding maps are tiny (usually 1-5 entries), so linear scan beats allocation
+        self.embeddings
+            .iter()
+            .find(|((nt, pn), _)| nt == node_type && pn == prop_name)
+            .map(|(_, store)| store)
+    }
+
     /// Build the ID index for a specific node type.
     /// Called lazily on first lookup for that type.
     pub fn build_id_index(&mut self, node_type: &str) {

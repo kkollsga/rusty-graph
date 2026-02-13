@@ -355,5 +355,6 @@ fn finalize_load(mut dir_graph: DirGraph) -> KnowledgeGraph {
         selection: CowSelection::new(),
         reports: OperationReports::new(),
         last_mutation_stats: None,
+        embedder: None,
     }
 }

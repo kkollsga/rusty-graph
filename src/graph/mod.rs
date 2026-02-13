@@ -51,6 +51,8 @@ pub struct KnowledgeGraph {
     selection: CowSelection, // Using Cow wrapper for copy-on-write semantics
     reports: OperationReports,
     last_mutation_stats: Option<cypher::result::MutationStats>,
+    /// Registered Python embedding model (not serialized — re-set after load).
+    embedder: Option<Py<PyAny>>,
 }
 
 #[pyclass]
@@ -70,13 +72,51 @@ impl Clone for KnowledgeGraph {
             selection: self.selection.clone(), // Arc clone - O(1), shares data
             reports: self.reports.clone(),
             last_mutation_stats: self.last_mutation_stats.clone(),
+            embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
         }
     }
 }
 
+/// Error message shown when embed_texts/search_text is called without set_embedder().
+const EMBEDDER_SKELETON_MSG: &str = "\
+No embedding model registered. Call g.set_embedder(model) first.
+
+Your model must implement:
+
+    class MyEmbedder:
+        dimension: int  # vector dimensionality (e.g. 384)
+
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            # Return one vector per input text
+            ...
+
+Example with sentence-transformers:
+
+    from sentence_transformers import SentenceTransformer
+
+    class Embedder:
+        def __init__(self, model_name=\"all-MiniLM-L6-v2\"):
+            self._model = SentenceTransformer(model_name)
+            self.dimension = self._model.get_sentence_embedding_dimension()
+
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            return self._model.encode(texts).tolist()
+
+    g.set_embedder(Embedder())";
+
 impl KnowledgeGraph {
     fn add_report(&mut self, report: OperationReport) -> usize {
         self.reports.add_report(report)
+    }
+
+    /// Get the registered embedder or return a helpful error with a skeleton.
+    fn get_embedder_or_error<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match &self.embedder {
+            Some(model) => Ok(model.bind(py).clone()),
+            None => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                EMBEDDER_SKELETON_MSG,
+            )),
+        }
     }
 }
 
@@ -204,6 +244,7 @@ impl KnowledgeGraph {
             selection: CowSelection::new(),
             reports: OperationReports::new(),
             last_mutation_stats: None,
+            embedder: None,
         }
     }
 
@@ -1104,6 +1145,7 @@ impl KnowledgeGraph {
             },
             reports: self.reports.clone(),
             last_mutation_stats: None,
+            embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
         };
 
         // Create and add a report
@@ -1810,6 +1852,7 @@ impl KnowledgeGraph {
             },
             reports: self.reports.clone(), // Copy over existing reports
             last_mutation_stats: None,
+            embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
         };
 
         // Store the report in the new graph
@@ -1902,6 +1945,7 @@ impl KnowledgeGraph {
             },
             reports: self.reports.clone(),
             last_mutation_stats: None,
+            embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
         };
 
         // Store the report
@@ -1950,6 +1994,7 @@ impl KnowledgeGraph {
                         },
                         reports: self.reports.clone(), // Copy existing reports
                         last_mutation_stats: None,
+                        embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
                     };
 
                     // Store the calculation report
@@ -2055,6 +2100,7 @@ impl KnowledgeGraph {
                 },
                 reports: self.reports.clone(), // Copy existing reports
                 last_mutation_stats: None,
+                embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
             };
 
             // Add the report
@@ -3743,6 +3789,7 @@ impl KnowledgeGraph {
             selection: CowSelection::new(),
             reports: OperationReports::new(), // Fresh reports for new graph
             last_mutation_stats: None,
+            embedder: None,
         })
     }
 
@@ -5215,15 +5262,51 @@ impl KnowledgeGraph {
         Ok(())
     }
 
-    /// Retrieve embeddings for nodes in the current selection.
+    /// Retrieve embeddings for nodes.
+    ///
+    /// Can be called in two ways:
+    ///   - ``get_embeddings(node_type, property_name)`` — returns all embeddings of that type
+    ///   - ``get_embeddings(property_name)`` — returns embeddings for the current selection
     ///
     /// Args:
-    ///     property_name: The embedding property name
+    ///     node_type: (optional) The node type. If given, returns all embeddings for that type
+    ///         without requiring a selection.
+    ///     property_name: The embedding property name.
     ///
     /// Returns:
     ///     Dict mapping node IDs to embedding vectors (list of floats).
-    fn get_embeddings(&self, py: Python<'_>, property_name: &str) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (node_type_or_property, property_name=None))]
+    fn get_embeddings(
+        &self,
+        py: Python<'_>,
+        node_type_or_property: &str,
+        property_name: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
         let result = PyDict::new(py);
+
+        // Two-arg form: get_embeddings(node_type, property_name)
+        if let Some(prop) = property_name {
+            let key = (node_type_or_property.to_string(), prop.to_string());
+            let store = match self.inner.embeddings.get(&key) {
+                Some(s) => s,
+                None => return result.into_py_any(py),
+            };
+
+            for (&node_index, &_slot) in &store.node_to_slot {
+                if let Some(embedding) = store.get_embedding(node_index) {
+                    if let Some(node) = self.inner.graph.node_weight(NodeIndex::new(node_index)) {
+                        let py_id = py_out::value_to_py(py, &node.id)?;
+                        let py_vec = PyList::new(py, embedding)?;
+                        result.set_item(py_id, py_vec)?;
+                    }
+                }
+            }
+
+            return result.into_py_any(py);
+        }
+
+        // One-arg form: get_embeddings(property_name) — selection-based
+        let prop = node_type_or_property;
 
         let level_count = self.selection.get_level_count();
         if level_count == 0 {
@@ -5242,7 +5325,7 @@ impl KnowledgeGraph {
                 None => continue,
             };
 
-            let key = (node.node_type.clone(), property_name.to_string());
+            let key = (node.node_type.clone(), prop.to_string());
             let store = match self.inner.embeddings.get(&key) {
                 Some(s) => s,
                 None => continue,
@@ -5256,6 +5339,301 @@ impl KnowledgeGraph {
         }
 
         result.into_py_any(py)
+    }
+
+    /// Retrieve a single node's embedding vector.
+    ///
+    /// Args:
+    ///     node_type: The node type (e.g. 'Article').
+    ///     property_name: The embedding property name (e.g. 'summary_emb').
+    ///     node_id: The node ID to look up.
+    ///
+    /// Returns:
+    ///     The embedding vector as a list of floats, or None if not found.
+    fn get_embedding(
+        &self,
+        py: Python<'_>,
+        node_type: &str,
+        property_name: &str,
+        node_id: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let id = py_in::py_value_to_value(node_id)?;
+
+        let node_idx = match self.inner.lookup_by_id_readonly(node_type, &id) {
+            Some(idx) => idx,
+            None => return Ok(py.None()),
+        };
+
+        let key = (node_type.to_string(), property_name.to_string());
+        let store = match self.inner.embeddings.get(&key) {
+            Some(s) => s,
+            None => return Ok(py.None()),
+        };
+
+        match store.get_embedding(node_idx.index()) {
+            Some(embedding) => {
+                let py_vec = PyList::new(py, embedding)?;
+                py_vec.into_py_any(py)
+            }
+            None => Ok(py.None()),
+        }
+    }
+
+    // ========================================================================
+    // Text-Level Embedding API
+    // ========================================================================
+
+    /// Register an embedding model on the graph.
+    ///
+    /// The model must have:
+    /// - ``dimension: int`` — the embedding vector size
+    /// - ``embed(texts: list[str]) -> list[list[float]]`` — batch embedding method
+    ///
+    /// After calling this, ``embed_texts()`` and ``search_text()`` use the
+    /// registered model automatically.  The model is **not** serialized —
+    /// call ``set_embedder()`` again after ``load()``.
+    #[pyo3(signature = (model,))]
+    fn set_embedder(&mut self, py: Python<'_>, model: Py<PyAny>) -> PyResult<()> {
+        let bound = model.bind(py);
+        bound.getattr("dimension").map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                "model must have a 'dimension' attribute (int)",
+            )
+        })?;
+        bound.getattr("embed").map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                "model must have an 'embed' method",
+            )
+        })?;
+        self.embedder = Some(model);
+        Ok(())
+    }
+
+    /// Embed a text column for all nodes of a given type.
+    ///
+    /// Uses the model registered via ``set_embedder()``.  Reads each node's
+    /// ``text_column`` property, calls ``model.embed()`` in batches, and stores
+    /// the resulting vectors as ``{text_column}_emb``.  Nodes with missing or
+    /// non-string text values are skipped.
+    ///
+    /// Args:
+    ///     node_type: The node type to embed (e.g. ``'Article'``).
+    ///     text_column: The node property containing text to embed.
+    ///     batch_size: Number of texts per ``model.embed()`` call (default 256).
+    ///     show_progress: Show a tqdm progress bar (default ``True``).
+    ///         Requires ``tqdm`` to be installed; silently falls back to no
+    ///         progress bar if it is not available.
+    ///     replace: If ``True``, re-embed all nodes even if they already have
+    ///         embeddings.  Default ``False`` (skip nodes with existing embeddings).
+    ///
+    /// Returns:
+    ///     Dict with ``embedded``, ``skipped``, ``skipped_existing``, and ``dimension``.
+    #[pyo3(signature = (node_type, text_column, batch_size=None, show_progress=None, replace=None))]
+    fn embed_texts(
+        &mut self,
+        py: Python<'_>,
+        node_type: &str,
+        text_column: &str,
+        batch_size: Option<usize>,
+        show_progress: Option<bool>,
+        replace: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let model = self.get_embedder_or_error(py)?;
+        let embedding_property = format!("{}_emb", text_column);
+        let batch_size = batch_size.unwrap_or(256);
+        let replace = replace.unwrap_or(false);
+
+        // Get model dimension
+        let dimension: usize = model.getattr("dimension")?.extract().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                "model must have an int 'dimension' attribute",
+            )
+        })?;
+
+        // Collect (node_index, text) for nodes that need embedding
+        let mut node_texts: Vec<(NodeIndex, String)> = Vec::new();
+        let mut skipped = 0usize;
+        let mut skipped_existing = 0usize;
+
+        let emb_key = (node_type.to_string(), embedding_property.clone());
+        let existing_store = if replace {
+            None
+        } else {
+            self.inner.embeddings.get(&emb_key)
+        };
+
+        let node_indices: Vec<NodeIndex> = self
+            .inner
+            .type_indices
+            .get(node_type)
+            .cloned()
+            .unwrap_or_default();
+
+        for &node_idx in &node_indices {
+            if let Some(node) = self.inner.graph.node_weight(node_idx) {
+                match node.properties.get(text_column) {
+                    Some(Value::String(s)) if !s.is_empty() => {
+                        // Skip nodes that already have an embedding
+                        if existing_store
+                            .map(|s| s.get_embedding(node_idx.index()).is_some())
+                            .unwrap_or(false)
+                        {
+                            skipped_existing += 1;
+                        } else {
+                            node_texts.push((node_idx, s.clone()));
+                        }
+                    }
+                    _ => {
+                        skipped += 1;
+                    }
+                }
+            }
+        }
+
+        if node_texts.is_empty() {
+            let result = PyDict::new(py);
+            result.set_item("embedded", 0)?;
+            result.set_item("skipped", skipped)?;
+            result.set_item("skipped_existing", skipped_existing)?;
+            result.set_item("dimension", dimension)?;
+            return Ok(result.into());
+        }
+
+        // Clone existing store or create new — we'll merge new embeddings into it
+        let mut store = match existing_store {
+            Some(s) => s.clone(),
+            None => schema::EmbeddingStore::new(dimension),
+        };
+        store.data.reserve(node_texts.len() * dimension);
+
+        // Try to create a tqdm progress bar (if tqdm is installed and show_progress != false)
+        let progress_bar = if show_progress.unwrap_or(true) {
+            py.import("tqdm.auto")
+                .or_else(|_| py.import("tqdm"))
+                .ok()
+                .and_then(|tqdm_mod| {
+                    let kwargs = PyDict::new(py);
+                    let _ = kwargs.set_item("total", node_texts.len());
+                    let _ = kwargs.set_item(
+                        "desc",
+                        format!("Embedding {}.{}", node_type, text_column),
+                    );
+                    let _ = kwargs.set_item("unit", "text");
+                    tqdm_mod
+                        .call_method("tqdm", (), Some(&kwargs))
+                        .ok()
+                })
+        } else {
+            None
+        };
+
+        for batch in node_texts.chunks(batch_size) {
+            let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
+            let py_texts = PyList::new(py, &texts)?;
+
+            let embeddings_result = model.call_method1("embed", (py_texts,))?;
+            let embeddings: Vec<Vec<f32>> = embeddings_result.extract().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "model.embed() must return list[list[float]]",
+                )
+            })?;
+
+            if embeddings.len() != batch.len() {
+                if let Some(ref bar) = progress_bar {
+                    let _ = bar.call_method0("close");
+                }
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "model.embed() returned {} vectors for {} texts",
+                    embeddings.len(),
+                    batch.len()
+                )));
+            }
+
+            for (i, vec) in embeddings.iter().enumerate() {
+                if vec.len() != dimension {
+                    if let Some(ref bar) = progress_bar {
+                        let _ = bar.call_method0("close");
+                    }
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "model.embed() returned vector of dimension {} (expected {})",
+                        vec.len(),
+                        dimension
+                    )));
+                }
+                store.set_embedding(batch[i].0.index(), vec);
+            }
+
+            // Update progress bar
+            if let Some(ref bar) = progress_bar {
+                let _ = bar.call_method1("update", (batch.len(),));
+            }
+        }
+
+        // Close progress bar
+        if let Some(ref bar) = progress_bar {
+            let _ = bar.call_method0("close");
+        }
+
+        let embedded = node_texts.len();
+        let g = Arc::make_mut(&mut self.inner);
+        g.embeddings.insert(emb_key, store);
+
+        let result = PyDict::new(py);
+        result.set_item("embedded", embedded)?;
+        result.set_item("skipped", skipped)?;
+        result.set_item("skipped_existing", skipped_existing)?;
+        result.set_item("dimension", dimension)?;
+        Ok(result.into())
+    }
+
+    /// Search embeddings using a text query.
+    ///
+    /// Uses the model registered via ``set_embedder()`` to embed the query,
+    /// then performs vector search within the current selection.  The user
+    /// refers to the text column name (e.g. ``"summary"``); the graph
+    /// resolves it to ``"summary_emb"`` internally.
+    ///
+    /// Args:
+    ///     text_column: Text column whose embeddings to search (e.g. ``'summary'``).
+    ///     query: The text query to search for.
+    ///     top_k: Number of results to return (default 10).
+    ///     metric: Distance metric (default ``'cosine'``).
+    ///     to_df: If True, return a pandas DataFrame.
+    ///
+    /// Returns:
+    ///     Same format as ``vector_search()`` — list of dicts or DataFrame.
+    #[pyo3(signature = (text_column, query, top_k=None, metric=None, to_df=None))]
+    fn search_text(
+        &self,
+        py: Python<'_>,
+        text_column: &str,
+        query: &str,
+        top_k: Option<usize>,
+        metric: Option<&str>,
+        to_df: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let model = self.get_embedder_or_error(py)?;
+        let embedding_property = format!("{}_emb", text_column);
+
+        // Embed the query text
+        let py_texts = PyList::new(py, [query])?;
+        let embeddings_result = model.call_method1("embed", (py_texts,))?;
+        let embeddings: Vec<Vec<f32>> = embeddings_result.extract().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "model.embed() must return list[list[float]]",
+            )
+        })?;
+
+        if embeddings.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "model.embed() returned an empty list",
+            ));
+        }
+
+        let query_vector = embeddings.into_iter().next().unwrap();
+
+        // Delegate to existing vector_search
+        self.vector_search(py, &embedding_property, query_vector, top_k, metric, to_df)
     }
 }
 

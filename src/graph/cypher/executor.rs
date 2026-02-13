@@ -16,8 +16,8 @@ use petgraph::graph::NodeIndex;
 use petgraph::visit::{EdgeRef, NodeIndexable};
 use petgraph::Direction;
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::{Arc, OnceLock};
 
 /// Minimum row count to switch from sequential to parallel iteration.
 /// Below this threshold, sequential is faster (avoids rayon thread pool overhead).
@@ -26,6 +26,18 @@ const RAYON_THRESHOLD: usize = 256;
 // ============================================================================
 // Specialized Distance Filter Types
 // ============================================================================
+
+/// Extracted vector_score filter for fast-path evaluation in WHERE clauses.
+/// Bypasses the generic expression evaluator by inlining similarity computation.
+struct VectorScoreFilterSpec {
+    variable: String,
+    prop_name: String,
+    query_vec: Vec<f32>,
+    similarity_fn: fn(&[f32], &[f32]) -> f32,
+    threshold: f64,
+    greater_than: bool,
+    inclusive: bool,
+}
 
 /// Extracted distance filter pattern for fast-path evaluation in WHERE clauses.
 struct DistanceFilterSpec {
@@ -40,17 +52,69 @@ struct DistanceFilterSpec {
 }
 
 // ============================================================================
+// Min-heap helper for top-k scoring
+// ============================================================================
+
+/// A scored row reference for use in a min-heap (BinaryHeap).
+/// The ordering is reversed: lower scores have higher priority (get popped first),
+/// so the heap naturally evicts the worst candidate when it exceeds capacity k.
+struct ScoredRowRef {
+    score: f64,
+    index: usize,
+}
+
+impl PartialEq for ScoredRowRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index
+    }
+}
+
+impl Eq for ScoredRowRef {}
+
+impl PartialOrd for ScoredRowRef {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ScoredRowRef {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reverse ordering: smaller score = higher priority (popped first from max-heap)
+        other
+            .score
+            .partial_cmp(&self.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| other.index.cmp(&self.index))
+    }
+}
+
+// ============================================================================
 // Executor
 // ============================================================================
+
+/// Cached pre-computed constant arguments for `vector_score()` calls.
+/// The query vector, property name, and similarity function are identical for every row
+/// in a given query, so we parse them once on first invocation and reuse thereafter.
+struct VectorScoreCache {
+    prop_name: String,
+    query_vec: Vec<f32>,
+    similarity_fn: fn(&[f32], &[f32]) -> f32,
+}
 
 pub struct CypherExecutor<'a> {
     graph: &'a DirGraph,
     params: &'a HashMap<String, Value>,
+    /// Cache for vector_score constant arguments (set once on first call, thread-safe).
+    vs_cache: OnceLock<VectorScoreCache>,
 }
 
 impl<'a> CypherExecutor<'a> {
     pub fn with_params(graph: &'a DirGraph, params: &'a HashMap<String, Value>) -> Self {
-        CypherExecutor { graph, params }
+        CypherExecutor {
+            graph,
+            params,
+            vs_cache: OnceLock::new(),
+        }
     }
 
     /// Execute a parsed Cypher query (read-only)
@@ -99,6 +163,18 @@ impl<'a> CypherExecutor<'a> {
                 match_clause,
                 with_clause,
             } => self.execute_fused_optional_match_aggregate(match_clause, with_clause, result_set),
+            Clause::FusedVectorScoreTopK {
+                return_clause,
+                score_item_index,
+                descending,
+                limit,
+            } => self.execute_fused_vector_score_top_k(
+                return_clause,
+                *score_item_index,
+                *descending,
+                *limit,
+                result_set,
+            ),
             Clause::Create(_)
             | Clause::Set(_)
             | Clause::Delete(_)
@@ -936,6 +1012,53 @@ impl<'a> CypherExecutor<'a> {
             return Ok(result_set);
         }
 
+        // Fast path: specialized vector_score filter bypasses expression evaluator
+        if let Some((spec, remainder)) = self.try_extract_vector_score_filter(&folded_pred) {
+            let graph = self.graph;
+            result_set.rows.retain(|row| {
+                let idx = match row.node_bindings.get(&spec.variable) {
+                    Some(&idx) => idx,
+                    None => return false,
+                };
+                let node_type = match graph.graph.node_weight(idx) {
+                    Some(n) => &n.node_type,
+                    None => return false,
+                };
+                let store = match graph.embedding_store(node_type, &spec.prop_name) {
+                    Some(s) => s,
+                    None => return false,
+                };
+                let embedding = match store.get_embedding(idx.index()) {
+                    Some(e) => e,
+                    None => return false,
+                };
+                let score = (spec.similarity_fn)(&spec.query_vec, embedding) as f64;
+                if spec.greater_than {
+                    if spec.inclusive {
+                        score >= spec.threshold
+                    } else {
+                        score > spec.threshold
+                    }
+                } else if spec.inclusive {
+                    score <= spec.threshold
+                } else {
+                    score < spec.threshold
+                }
+            });
+            if let Some(rest) = remainder {
+                let mut keep = Vec::with_capacity(result_set.rows.len());
+                for row in result_set.rows {
+                    match self.evaluate_predicate(rest, &row) {
+                        Ok(true) => keep.push(row),
+                        Ok(false) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                result_set.rows = keep;
+            }
+            return Ok(result_set);
+        }
+
         // Apply full predicate evaluation for remaining/non-indexable conditions
         // Sequential: per-row predicate work is typically cheap (property lookup +
         // comparison), so Rayon overhead outweighs parallelism benefits.
@@ -1094,6 +1217,138 @@ impl<'a> CypherExecutor<'a> {
 
     /// Try to extract a distance filter from a (folded) predicate.
     /// Returns (spec, optional remainder predicate for other AND conditions).
+    /// Try to extract a `vector_score(n, prop, vec [, metric]) {>|>=|<|<=} threshold`
+    /// pattern from a (folded) predicate. Returns the spec and optional remainder.
+    fn try_extract_vector_score_filter<'p>(
+        &self,
+        pred: &'p Predicate,
+    ) -> Option<(VectorScoreFilterSpec, Option<&'p Predicate>)> {
+        match pred {
+            Predicate::Comparison {
+                left,
+                operator,
+                right,
+            } => {
+                // Determine which side has vector_score and which has the threshold
+                let (vs_expr, threshold_expr, greater_than, inclusive) = match operator {
+                    ComparisonOp::GreaterThan => (left, right, true, false),
+                    ComparisonOp::GreaterThanEq => (left, right, true, true),
+                    ComparisonOp::LessThan => (left, right, false, false),
+                    ComparisonOp::LessThanEq => (left, right, false, true),
+                    _ => return None,
+                };
+
+                // Try vs_expr as vector_score, threshold_expr as literal
+                if let Some(spec) =
+                    self.extract_vector_score_spec(vs_expr, threshold_expr, greater_than, inclusive)
+                {
+                    return Some((spec, None));
+                }
+
+                // Try flipped: threshold_expr as vector_score, vs_expr as literal
+                // Flip comparison direction
+                if let Some(spec) = self.extract_vector_score_spec(
+                    threshold_expr,
+                    vs_expr,
+                    !greater_than,
+                    inclusive,
+                ) {
+                    return Some((spec, None));
+                }
+
+                None
+            }
+            Predicate::And(left, right) => {
+                if let Some((spec, None)) = self.try_extract_vector_score_filter(left) {
+                    return Some((spec, Some(right)));
+                }
+                if let Some((spec, None)) = self.try_extract_vector_score_filter(right) {
+                    return Some((spec, Some(left)));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract a VectorScoreFilterSpec from a vector_score() function call + threshold.
+    fn extract_vector_score_spec(
+        &self,
+        func_expr: &Expression,
+        threshold_expr: &Expression,
+        greater_than: bool,
+        inclusive: bool,
+    ) -> Option<VectorScoreFilterSpec> {
+        // func_expr must be vector_score(variable, prop, query_vec [, metric])
+        let (name, args) = match func_expr {
+            Expression::FunctionCall { name, args, .. } => (name, args),
+            _ => return None,
+        };
+        if !name.eq_ignore_ascii_case("vector_score") || args.len() < 3 || args.len() > 4 {
+            return None;
+        }
+
+        // threshold must be a literal number
+        let threshold = match threshold_expr {
+            Expression::Literal(val) => value_operations::value_to_f64(val)?,
+            _ => return None,
+        };
+
+        // Arg 0: must be a variable
+        let variable = match &args[0] {
+            Expression::Variable(v) => v.clone(),
+            _ => return None,
+        };
+
+        // Arg 1: prop name (should be folded to literal string)
+        let prop_name = match &args[1] {
+            Expression::Literal(Value::String(s)) => s.clone(),
+            _ => return None,
+        };
+
+        // Arg 2: query vector (should be folded to literal)
+        let query_vec = match &args[2] {
+            Expression::Literal(Value::String(s)) => parse_json_float_list(s).ok()?,
+            Expression::ListLiteral(items) => {
+                let mut vec = Vec::with_capacity(items.len());
+                for item in items {
+                    match item {
+                        Expression::Literal(Value::Float64(f)) => vec.push(*f as f32),
+                        Expression::Literal(Value::Int64(i)) => vec.push(*i as f32),
+                        _ => return None,
+                    }
+                }
+                vec
+            }
+            _ => return None,
+        };
+
+        // Arg 3: optional metric (default cosine)
+        let similarity_fn = if args.len() > 3 {
+            match &args[3] {
+                Expression::Literal(Value::String(s)) => match s.as_str() {
+                    "cosine" => vs::cosine_similarity as fn(&[f32], &[f32]) -> f32,
+                    "dot_product" => vs::dot_product,
+                    "euclidean" => vs::neg_euclidean_distance,
+                    _ => return None,
+                },
+                _ => vs::cosine_similarity,
+            }
+        } else {
+            vs::cosine_similarity
+        };
+
+        Some(VectorScoreFilterSpec {
+            variable,
+            prop_name,
+            query_vec,
+            similarity_fn,
+            threshold,
+            greater_than,
+            inclusive,
+        })
+    }
+
     fn try_extract_distance_filter(
         pred: &Predicate,
     ) -> Option<(DistanceFilterSpec, Option<&Predicate>)> {
@@ -1964,6 +2219,10 @@ impl<'a> CypherExecutor<'a> {
             }
             // vector_score(node, embedding_property, query_vector [, metric])
             // Returns the similarity score (f32→f64) for the node's embedding vs query vector.
+            //
+            // Performance: The constant arguments (property name, query vector, metric) are
+            // parsed once on the first call and cached in self.vs_cache. Subsequent rows
+            // skip JSON parsing, String allocation, and metric dispatch entirely.
             "vector_score" => {
                 if args.len() < 3 || args.len() > 4 {
                     return Err(
@@ -1972,7 +2231,7 @@ impl<'a> CypherExecutor<'a> {
                     );
                 }
 
-                // Arg 0: node variable → resolve to NodeIndex
+                // Arg 0: node variable → resolve to NodeIndex (changes per row)
                 let node_idx = match &args[0] {
                     Expression::Variable(var) => match row.node_bindings.get(var) {
                         Some(&idx) => idx,
@@ -1983,73 +2242,72 @@ impl<'a> CypherExecutor<'a> {
                     }
                 };
 
-                // Arg 1: embedding property name
-                let prop_name = match self.evaluate_expression(&args[1], row)? {
-                    Value::String(s) => s,
-                    _ => {
-                        return Err(
-                            "vector_score(): second argument must be a string property name".into(),
-                        )
-                    }
-                };
-
-                // Arg 2: query vector — either a ListLiteral or a JSON string
-                let query_vec = self.extract_float_list(&args[2], row)?;
-
-                // Arg 3: optional metric (default: cosine)
-                let metric = if args.len() > 3 {
-                    match self.evaluate_expression(&args[3], row)? {
-                        Value::String(s) => match s.as_str() {
-                            "cosine" => vs::DistanceMetric::Cosine,
-                            "dot_product" => vs::DistanceMetric::DotProduct,
-                            "euclidean" => vs::DistanceMetric::Euclidean,
-                            other => {
-                                return Err(format!(
-                                    "vector_score(): unknown metric '{}'. Use 'cosine', 'dot_product', or 'euclidean'.",
-                                    other
-                                ))
+                // Get or initialize cache — constant args parsed once, reused for all rows
+                let c = match self.vs_cache.get() {
+                    Some(c) => c,
+                    None => {
+                        let prop_name = match self.evaluate_expression(&args[1], row)? {
+                            Value::String(s) => s,
+                            _ => return Err(
+                                "vector_score(): second argument must be a string property name"
+                                    .into(),
+                            ),
+                        };
+                        let query_vec = self.extract_float_list(&args[2], row)?;
+                        let similarity_fn = if args.len() > 3 {
+                            match self.evaluate_expression(&args[3], row)? {
+                                Value::String(s) => match s.as_str() {
+                                    "cosine" => vs::cosine_similarity as fn(&[f32], &[f32]) -> f32,
+                                    "dot_product" => vs::dot_product,
+                                    "euclidean" => vs::neg_euclidean_distance,
+                                    other => {
+                                        return Err(format!(
+                                            "vector_score(): unknown metric '{}'. Use 'cosine', 'dot_product', or 'euclidean'.",
+                                            other
+                                        ))
+                                    }
+                                },
+                                _ => vs::cosine_similarity,
                             }
-                        },
-                        _ => vs::DistanceMetric::Cosine,
+                        } else {
+                            vs::cosine_similarity
+                        };
+                        let _ = self.vs_cache.set(VectorScoreCache {
+                            prop_name,
+                            query_vec,
+                            similarity_fn,
+                        });
+                        self.vs_cache.get().unwrap()
                     }
-                } else {
-                    vs::DistanceMetric::Cosine
                 };
 
-                // Look up the node type to find the embedding store
+                // Per-row: look up node type → embedding store → compute similarity
                 let node_type = match self.graph.graph.node_weight(node_idx) {
                     Some(n) => &n.node_type,
                     None => return Ok(Value::Null),
                 };
 
-                let key = (node_type.clone(), prop_name.clone());
-                let store = match self.graph.embeddings.get(&key) {
+                let store = match self.graph.embedding_store(node_type, &c.prop_name) {
                     Some(s) => s,
                     None => {
                         return Err(format!(
                             "vector_score(): no embedding '{}' found for node type '{}'",
-                            prop_name, node_type
+                            c.prop_name, node_type
                         ))
                     }
                 };
 
-                if query_vec.len() != store.dimension {
+                if c.query_vec.len() != store.dimension {
                     return Err(format!(
                         "vector_score(): query vector dimension {} does not match embedding dimension {}",
-                        query_vec.len(),
+                        c.query_vec.len(),
                         store.dimension
                     ));
                 }
 
-                // Get the embedding and compute similarity
                 match store.get_embedding(node_idx.index()) {
                     Some(embedding) => {
-                        let similarity_fn = match metric {
-                            vs::DistanceMetric::Cosine => vs::cosine_similarity,
-                            vs::DistanceMetric::DotProduct => vs::dot_product,
-                            vs::DistanceMetric::Euclidean => vs::neg_euclidean_distance,
-                        };
-                        let score = similarity_fn(&query_vec, embedding);
+                        let score = (c.similarity_fn)(&c.query_vec, embedding);
                         Ok(Value::Float64(score as f64))
                     }
                     None => Ok(Value::Null),
@@ -2119,7 +2377,7 @@ impl<'a> CypherExecutor<'a> {
     fn execute_return_projection(
         &self,
         clause: &ReturnClause,
-        result_set: ResultSet,
+        mut result_set: ResultSet,
     ) -> Result<ResultSet, String> {
         let columns: Vec<String> = clause.items.iter().map(return_item_column_name).collect();
 
@@ -2130,41 +2388,31 @@ impl<'a> CypherExecutor<'a> {
             .map(|item| self.fold_constants_expr(&item.expression))
             .collect();
 
-        let project_row = |row: &ResultRow| -> Result<ResultRow, String> {
-            // Build output row preserving all bindings but fresh projected values
-            // (avoids cloning stale projected values from prior WITH stages).
+        // In-place projection: overwrite each row's `projected` field without
+        // cloning node_bindings / edge_bindings / path_bindings.
+        let project_row = |row: &mut ResultRow| -> Result<(), String> {
             let mut projected = Bindings::with_capacity(clause.items.len());
             for (i, item) in clause.items.iter().enumerate() {
                 let key = return_item_column_name(item);
                 let val = self.evaluate_expression(&folded_exprs[i], row)?;
                 projected.insert(key, val);
             }
-            Ok(ResultRow {
-                node_bindings: row.node_bindings.clone(),
-                edge_bindings: row.edge_bindings.clone(),
-                path_bindings: row.path_bindings.clone(),
-                projected,
-            })
+            row.projected = projected;
+            Ok(())
         };
 
-        let mut rows = if result_set.rows.len() >= RAYON_THRESHOLD {
-            result_set
-                .rows
-                .par_iter()
-                .map(project_row)
-                .collect::<Result<Vec<_>, String>>()?
+        if result_set.rows.len() >= RAYON_THRESHOLD {
+            result_set.rows.par_iter_mut().try_for_each(project_row)?;
         } else {
-            result_set
-                .rows
-                .iter()
-                .map(project_row)
-                .collect::<Result<Vec<_>, String>>()?
-        };
+            for row in &mut result_set.rows {
+                project_row(row)?;
+            }
+        }
 
         // Handle DISTINCT
         if clause.distinct {
             let mut seen = HashSet::new();
-            rows.retain(|row| {
+            result_set.rows.retain(|row| {
                 let key: Vec<String> = columns
                     .iter()
                     .map(|col| format_value_compact(row.projected.get(col).unwrap_or(&Value::Null)))
@@ -2173,7 +2421,8 @@ impl<'a> CypherExecutor<'a> {
             });
         }
 
-        Ok(ResultSet { rows, columns })
+        result_set.columns = columns;
+        Ok(result_set)
     }
 
     /// RETURN with aggregation (grouping + aggregate functions)
@@ -2598,6 +2847,114 @@ impl<'a> CypherExecutor<'a> {
             result_set.rows.clear();
         }
         Ok(result_set)
+    }
+
+    // ========================================================================
+    // Fused RETURN + ORDER BY + LIMIT for vector_score (min-heap top-k)
+    // ========================================================================
+
+    /// Fused path: compute vector_score for all rows using a min-heap of size k,
+    /// then project RETURN expressions only for the k surviving rows.
+    /// O(n log k) instead of O(n log n) sort + O(n) full projection.
+    fn execute_fused_vector_score_top_k(
+        &self,
+        return_clause: &ReturnClause,
+        score_item_index: usize,
+        descending: bool,
+        limit: usize,
+        result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
+        if result_set.rows.is_empty() || limit == 0 {
+            let columns: Vec<String> = return_clause
+                .items
+                .iter()
+                .map(return_item_column_name)
+                .collect();
+            return Ok(ResultSet {
+                rows: Vec::new(),
+                columns,
+            });
+        }
+
+        let score_expr =
+            self.fold_constants_expr(&return_clause.items[score_item_index].expression);
+
+        // Phase 1: Score all rows, keep top-k in a min-heap
+        let mut heap: BinaryHeap<ScoredRowRef> = BinaryHeap::with_capacity(limit + 1);
+
+        for (i, row) in result_set.rows.iter().enumerate() {
+            let score_val = self.evaluate_expression(&score_expr, row)?;
+            let score = match score_val {
+                Value::Float64(f) => f,
+                Value::Int64(n) => n as f64,
+                Value::Null => continue, // skip rows without embeddings
+                _ => continue,
+            };
+            heap.push(ScoredRowRef { score, index: i });
+            if heap.len() > limit {
+                heap.pop(); // evict the smallest score
+            }
+        }
+
+        // Phase 2: Extract winners and sort by score
+        let mut winners: Vec<ScoredRowRef> = heap.into_vec();
+        if descending {
+            winners.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        } else {
+            winners.sort_by(|a, b| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+
+        // Phase 3: Project RETURN expressions only for the k winners
+        let columns: Vec<String> = return_clause
+            .items
+            .iter()
+            .map(return_item_column_name)
+            .collect();
+
+        let folded_exprs: Vec<Expression> = return_clause
+            .items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                if idx == score_item_index {
+                    score_expr.clone() // reuse already-folded score expr
+                } else {
+                    self.fold_constants_expr(&item.expression)
+                }
+            })
+            .collect();
+
+        let mut rows = Vec::with_capacity(winners.len());
+        for winner in &winners {
+            let row = &result_set.rows[winner.index];
+            let mut projected = Bindings::with_capacity(return_clause.items.len());
+            for (j, item) in return_clause.items.iter().enumerate() {
+                let key = return_item_column_name(item);
+                let val = if j == score_item_index {
+                    // Use the pre-computed score instead of re-evaluating
+                    Value::Float64(winner.score)
+                } else {
+                    self.evaluate_expression(&folded_exprs[j], row)?
+                };
+                projected.insert(key, val);
+            }
+            rows.push(ResultRow {
+                node_bindings: row.node_bindings.clone(),
+                edge_bindings: row.edge_bindings.clone(),
+                path_bindings: row.path_bindings.clone(),
+                projected,
+            });
+        }
+
+        Ok(ResultSet { rows, columns })
     }
 
     // ========================================================================

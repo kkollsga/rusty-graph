@@ -116,26 +116,41 @@ pub fn generate_explain_plan(query: &CypherQuery) -> String {
             Clause::FusedOptionalMatchAggregate { .. } => {
                 "FusedOptionalMatchAggregate (optimized OPTIONAL MATCH + count)".to_string()
             }
+            Clause::FusedVectorScoreTopK { limit, .. } => {
+                format!(
+                    "FusedVectorScoreTopK (optimized RETURN+ORDER BY+LIMIT, k={})",
+                    limit
+                )
+            }
         };
         lines.push(format!("  {}. {}", step, desc));
     }
 
     // Note applied optimizations
-    let has_fusion = query
+    let has_opt_fusion = query
         .clauses
         .iter()
         .any(|c| matches!(c, Clause::FusedOptionalMatchAggregate { .. }));
-    let fusion_count = query
+    let opt_fusion_count = query
         .clauses
         .iter()
         .filter(|c| matches!(c, Clause::FusedOptionalMatchAggregate { .. }))
         .count();
+    let has_topk_fusion = query
+        .clauses
+        .iter()
+        .any(|c| matches!(c, Clause::FusedVectorScoreTopK { .. }));
 
-    if has_fusion {
-        lines.push(format!(
-            "Optimizations: optional_match_fusion={}",
-            fusion_count
-        ));
+    let mut opts = Vec::new();
+    if has_opt_fusion {
+        opts.push(format!("optional_match_fusion={}", opt_fusion_count));
+    }
+    if has_topk_fusion {
+        opts.push("vector_score_topk_fusion".to_string());
+    }
+
+    if !opts.is_empty() {
+        lines.push(format!("Optimizations: {}", opts.join(", ")));
     }
 
     lines.join("\n")

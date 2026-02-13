@@ -39,6 +39,18 @@ pub enum Clause {
         match_clause: MatchClause,
         with_clause: WithClause,
     },
+    /// Optimizer-generated: fuse RETURN (with vector_score) + ORDER BY + LIMIT
+    /// into a single pass using a min-heap for O(n log k) instead of O(n log n).
+    /// Projects RETURN expressions only for the k surviving rows.
+    FusedVectorScoreTopK {
+        return_clause: ReturnClause,
+        /// Index of the vector_score item within `return_clause.items`
+        score_item_index: usize,
+        /// ORDER BY direction (true = DESC, which is typical for similarity)
+        descending: bool,
+        /// LIMIT k value
+        limit: usize,
+    },
 }
 
 // ============================================================================

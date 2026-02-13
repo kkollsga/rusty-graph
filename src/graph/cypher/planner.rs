@@ -14,6 +14,7 @@ pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<Stri
     push_where_into_match(query, params);
     push_limit_into_match(query, graph);
     fuse_optional_match_aggregate(query);
+    fuse_vector_score_order_limit(query);
     reorder_predicates_by_cost(query);
 }
 
@@ -320,6 +321,143 @@ fn apply_property_to_patterns(
 }
 
 // ============================================================================
+// Fused RETURN + ORDER BY + LIMIT for vector_score
+// ============================================================================
+
+/// Detect `RETURN ... vector_score(...) AS s ... ORDER BY s DESC LIMIT k`
+/// and replace with a fused clause that uses a min-heap (O(n log k) vs O(n log n))
+/// and projects RETURN expressions only for the k surviving rows.
+fn fuse_vector_score_order_limit(query: &mut CypherQuery) {
+    if query.clauses.len() < 3 {
+        return;
+    }
+
+    let mut i = 0;
+    while i + 2 < query.clauses.len() {
+        // Check for RETURN + ORDER BY + LIMIT pattern
+        let is_pattern = matches!(
+            (
+                &query.clauses[i],
+                &query.clauses[i + 1],
+                &query.clauses[i + 2]
+            ),
+            (Clause::Return(_), Clause::OrderBy(_), Clause::Limit(_))
+        );
+        if !is_pattern {
+            i += 1;
+            continue;
+        }
+
+        // Extract references for analysis (before removing)
+        let (score_idx, alias) = if let Clause::Return(r) = &query.clauses[i] {
+            // Don't fuse if RETURN has aggregation or DISTINCT
+            if r.distinct {
+                i += 1;
+                continue;
+            }
+            // Find the vector_score item
+            let found = r.items.iter().enumerate().find(|(_, item)| {
+                matches!(
+                    &item.expression,
+                    Expression::FunctionCall { name, .. }
+                        if name.eq_ignore_ascii_case("vector_score")
+                )
+            });
+            match found {
+                Some((idx, item)) => {
+                    let col = return_item_column_name(item);
+                    (idx, col)
+                }
+                None => {
+                    i += 1;
+                    continue;
+                }
+            }
+        } else {
+            i += 1;
+            continue;
+        };
+
+        // Check ORDER BY references the score alias and has exactly one item
+        let descending = if let Clause::OrderBy(o) = &query.clauses[i + 1] {
+            if o.items.len() != 1 {
+                i += 1;
+                continue;
+            }
+            let sort_name = match &o.items[0].expression {
+                Expression::Variable(v) => v.clone(),
+                other => expression_to_column_name(other),
+            };
+            if sort_name != alias {
+                i += 1;
+                continue;
+            }
+            !o.items[0].ascending
+        } else {
+            i += 1;
+            continue;
+        };
+
+        // Extract LIMIT value (must be a literal non-negative integer)
+        let limit = if let Clause::Limit(l) = &query.clauses[i + 2] {
+            match &l.count {
+                Expression::Literal(Value::Int64(n)) if *n > 0 => *n as usize,
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            }
+        } else {
+            i += 1;
+            continue;
+        };
+
+        // All checks passed — fuse the three clauses
+        query.clauses.remove(i + 2); // LIMIT
+        query.clauses.remove(i + 1); // ORDER BY
+        let return_clause = if let Clause::Return(r) = query.clauses.remove(i) {
+            r
+        } else {
+            unreachable!()
+        };
+
+        query.clauses.insert(
+            i,
+            Clause::FusedVectorScoreTopK {
+                return_clause,
+                score_item_index: score_idx,
+                descending,
+                limit,
+            },
+        );
+
+        i += 1;
+    }
+}
+
+/// Column name for a return item (mirrors executor's return_item_column_name).
+fn return_item_column_name(item: &ReturnItem) -> String {
+    if let Some(ref alias) = item.alias {
+        alias.clone()
+    } else {
+        expression_to_column_name(&item.expression)
+    }
+}
+
+/// Simple expression-to-string for column name matching in the planner.
+fn expression_to_column_name(expr: &Expression) -> String {
+    match expr {
+        Expression::Variable(name) => name.clone(),
+        Expression::PropertyAccess { variable, property } => format!("{}.{}", variable, property),
+        Expression::FunctionCall { name, args, .. } => {
+            let args_str: Vec<String> = args.iter().map(expression_to_column_name).collect();
+            format!("{}({})", name, args_str.join(", "))
+        }
+        _ => format!("{:?}", expr),
+    }
+}
+
+// ============================================================================
 // Predicate Cost-Based Reordering
 // ============================================================================
 
@@ -402,7 +540,8 @@ fn estimate_expression_cost(expr: &Expression) -> u32 {
                 "tolower" | "toupper" | "trim" | "ltrim" | "rtrim" => 3,
                 "substring" | "replace" | "split" => 5,
                 "abs" | "ceil" | "floor" | "round" | "sqrt" | "sign" => 2,
-                _ => 5, // Unknown functions get moderate cost
+                "vector_score" => 200, // Embedding lookup + similarity computation
+                _ => 5,                // Unknown functions get moderate cost
             };
             let arg_cost: u32 = args.iter().map(estimate_expression_cost).sum();
             base + arg_cost

@@ -2,11 +2,39 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional, Union
+from typing import Any, Optional, Protocol, Union, overload, runtime_checkable
 
 import pandas as pd
 
 __version__: str
+
+
+@runtime_checkable
+class EmbeddingModel(Protocol):
+    """Protocol for embedding models passed to ``embed_texts`` / ``search_text``.
+
+    Any object with these two members works — no inheritance needed.
+
+    Example::
+
+        class MyEmbedder:
+            def __init__(self):
+                from sentence_transformers import SentenceTransformer
+                self._model = SentenceTransformer("all-MiniLM-L6-v2")
+                self.dimension = self._model.get_sentence_embedding_dimension()
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                return self._model.encode(texts).tolist()
+    """
+
+    @property
+    def dimension(self) -> int:
+        """The dimensionality of the embedding vectors."""
+        ...
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch of texts, returning one vector per text."""
+        ...
 
 
 class ResultIter:
@@ -1819,6 +1847,20 @@ class KnowledgeGraph:
         """
         ...
 
+    @overload
+    def get_embeddings(self, node_type: str, property_name: str) -> dict[Any, list[float]]:
+        """Retrieve all embeddings for a node type.
+
+        Args:
+            node_type: The node type (e.g. 'Article').
+            property_name: The embedding property name.
+
+        Returns:
+            Dict mapping node IDs to embedding vectors.
+        """
+        ...
+
+    @overload
     def get_embeddings(self, property_name: str) -> dict[Any, list[float]]:
         """Retrieve embeddings for nodes in the current selection.
 
@@ -1827,6 +1869,116 @@ class KnowledgeGraph:
 
         Returns:
             Dict mapping node IDs to embedding vectors.
+        """
+        ...
+
+    def get_embeddings(self, *args, **kwargs) -> dict[Any, list[float]]: ...
+
+    def get_embedding(
+        self, node_type: str, property_name: str, node_id: Any
+    ) -> list[float] | None:
+        """Retrieve a single node's embedding vector.
+
+        Args:
+            node_type: The node type (e.g. 'Article').
+            property_name: The embedding property name (e.g. 'summary_emb').
+            node_id: The node ID to look up.
+
+        Returns:
+            The embedding vector as a list of floats, or None if not found.
+        """
+        ...
+
+    def set_embedder(self, model: EmbeddingModel) -> None:
+        """Register an embedding model on the graph.
+
+        After calling this, ``embed_texts()`` and ``search_text()`` use the
+        registered model automatically.  The model is **not** serialized —
+        call ``set_embedder()`` again after ``load()``.
+
+        Args:
+            model: An embedding model with ``dimension`` and ``embed()`` — see
+                :class:`EmbeddingModel`.
+
+        Example::
+
+            g.set_embedder(my_model)
+        """
+        ...
+
+    def embed_texts(
+        self,
+        node_type: str,
+        text_column: str,
+        batch_size: int = 256,
+        show_progress: bool = True,
+        replace: bool = False,
+    ) -> dict[str, int]:
+        """Embed a text column for all nodes of a given type.
+
+        Uses the model registered via ``set_embedder()``.  Reads each node's
+        ``text_column`` property, calls ``model.embed()`` in batches, and
+        stores the resulting vectors as ``{text_column}_emb``.
+        Nodes with missing or non-string text are skipped.
+
+        By default, nodes that already have an embedding are skipped.
+        Pass ``replace=True`` to re-embed everything.
+
+        Shows a tqdm progress bar by default (requires ``tqdm``).
+
+        Args:
+            node_type: The node type to embed (e.g. ``'Article'``).
+            text_column: The node property containing text to embed.
+            batch_size: Number of texts per ``model.embed()`` call (default 256).
+            show_progress: Show a tqdm progress bar (default ``True``).
+                Silently falls back to no bar if ``tqdm`` is not installed.
+            replace: Re-embed all nodes, even those with existing embeddings
+                (default ``False``).
+
+        Returns:
+            Dict with ``embedded``, ``skipped``, ``skipped_existing``, and ``dimension``.
+
+        Example::
+
+            g.set_embedder(my_model)
+            g.embed_texts("Article", "summary")
+            # Embedding Article.summary: 100%|████████| 1000/1000 [00:05<00:00]
+
+            # Add new articles, then re-run — only new ones get embedded:
+            g.embed_texts("Article", "summary")  # skips already-embedded nodes
+        """
+        ...
+
+    def search_text(
+        self,
+        text_column: str,
+        query: str,
+        top_k: int = 10,
+        metric: str = "cosine",
+        to_df: bool = False,
+    ) -> list[dict[str, Any]] | pd.DataFrame:
+        """Search embeddings using a text query.
+
+        Uses the model registered via ``set_embedder()`` to embed the query,
+        then performs vector search within the current selection.  Refer to
+        the text column name (e.g. ``"summary"``); the graph resolves it to
+        ``"summary_emb"`` internally.
+
+        Args:
+            text_column: Text column whose embeddings to search (e.g. ``'summary'``).
+            query: The text query to search for.
+            top_k: Number of results (default 10).
+            metric: ``'cosine'`` (default), ``'dot_product'``, or ``'euclidean'``.
+            to_df: If True, return a pandas DataFrame.
+
+        Returns:
+            Same format as ``vector_search()`` — list of dicts or DataFrame.
+
+        Example::
+
+            results = g.type_filter("Article").search_text(
+                "summary", "find AI articles", top_k=10
+            )
         """
         ...
 

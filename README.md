@@ -246,11 +246,19 @@ graph.type_filter('Person')                        # select by type → Knowledg
 ### Semantic search
 
 ```python
+# Text-level API (recommended) — register model once, embed & search by column name
+graph.set_embedder(model)                                                    # register model (.dimension, .embed())
+graph.embed_texts('Article', 'summary')                                      # embed text column → stored as summary_emb
+graph.type_filter('Article').search_text('summary', 'find AI papers', top_k=10)  # text query search
+
+# Low-level vector API — bring your own vectors
 graph.set_embeddings('Article', 'summary_emb', {id: vec, ...})   # store embeddings
 graph.type_filter('Article').vector_search('summary_emb', qvec, top_k=10)  # similarity search
 graph.list_embeddings()                                           # list all embedding stores
 graph.remove_embeddings('Article', 'summary_emb')                # remove an embedding store
-graph.type_filter('Article').get_embeddings('summary_emb')        # retrieve raw vectors
+graph.get_embeddings('Article', 'summary_emb')                    # retrieve all vectors for type
+graph.type_filter('Article').get_embeddings('summary_emb')        # retrieve vectors for selection
+graph.get_embedding('Article', 'summary_emb', node_id)            # single node vector (or None)
 # Cypher: vector_score(n, 'summary_emb', [0.1, ...]) — inline similarity in queries
 ```
 
@@ -1144,7 +1152,61 @@ degrees = graph.type_filter('Person').get_degrees()
 
 Store embedding vectors alongside nodes and query them with fast similarity search. Embeddings are stored separately from node properties — they don't appear in `get_nodes()`, `to_df()`, or regular Cypher property access.
 
-### Storing Embeddings
+### Text-Level API (Recommended)
+
+Register an embedding model once, then embed and search using text column names. The model runs on the Python side — KGLite only stores the resulting vectors.
+
+```python
+from sentence_transformers import SentenceTransformer
+
+class Embedder:
+    def __init__(self, model_name="all-MiniLM-L6-v2"):
+        self._model = SentenceTransformer(model_name)
+        self.dimension = self._model.get_sentence_embedding_dimension()
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return self._model.encode(texts).tolist()
+
+# Register once on the graph
+graph.set_embedder(Embedder())
+
+# Embed a text column — stores vectors as "summary_emb" automatically
+graph.embed_texts("Article", "summary")
+# Embedding Article.summary: 100%|████████| 1000/1000 [00:05<00:00]
+# → {'embedded': 1000, 'skipped': 3, 'skipped_existing': 0, 'dimension': 384}
+
+# Search with text — resolves "summary" → "summary_emb" internally
+results = graph.type_filter("Article").search_text("summary", "machine learning", top_k=10)
+# [{'id': 42, 'title': '...', 'type': 'Article', 'score': 0.95, ...}, ...]
+```
+
+**Key details:**
+
+- **Auto-naming:** text column `"summary"` → embedding store key `"summary_emb"` (auto-derived)
+- **Incremental:** re-running `embed_texts` skips nodes that already have embeddings — only new nodes get embedded. Pass `replace=True` to force re-embed.
+- **Progress bar:** shows a tqdm progress bar by default. Disable with `show_progress=False`.
+- **Not serialized:** the model is not saved with `save()` — call `set_embedder()` again after `load()`.
+
+```python
+# Add new articles, then re-embed — only new ones are processed
+graph.embed_texts("Article", "summary")
+# → {'embedded': 50, 'skipped': 0, 'skipped_existing': 1000, ...}
+
+# Force full re-embed
+graph.embed_texts("Article", "summary", replace=True)
+
+# Combine with filters
+results = (graph
+    .type_filter("Article")
+    .filter({"category": "politics"})
+    .search_text("summary", "foreign policy", top_k=10))
+```
+
+Calling `embed_texts()` or `search_text()` without `set_embedder()` raises an error with a full skeleton showing the required model interface.
+
+### Storing Embeddings (Low-Level)
+
+If you manage vectors yourself, use the low-level API:
 
 ```python
 # Explicit: pass a dict of {node_id: vector}
@@ -1162,7 +1224,7 @@ df = pd.DataFrame({
 graph.add_nodes(df, 'Doc', 'id', 'title', column_types={'text_emb': 'embedding'})
 ```
 
-### Vector Search (Fluent API)
+### Vector Search (Low-Level)
 
 Search operates on the current selection — combine with `type_filter()` and `filter()` for scoped queries:
 
@@ -1170,6 +1232,7 @@ Search operates on the current selection — combine with `type_filter()` and `f
 # Basic search — returns list of dicts sorted by similarity
 results = graph.type_filter('Article').vector_search('summary_emb', query_vec, top_k=10)
 # [{'id': 5, 'title': '...', 'type': 'Article', 'score': 0.95, ...}, ...]
+# 'score' is always included: cosine similarity [-1,1], dot_product, or negative euclidean distance
 
 # Filtered search — only search within a subset
 results = (graph
@@ -1222,9 +1285,15 @@ graph.list_embeddings()
 
 graph.remove_embeddings('Article', 'summary_emb')
 
-# Retrieve raw embeddings for current selection
-embs = graph.type_filter('Article').get_embeddings('summary_emb')
-# {1: [0.1, 0.2, ...], 2: [0.4, 0.5, ...]}
+# Retrieve all embeddings for a type (no selection needed)
+embs = graph.get_embeddings('Article', 'summary_emb')
+# {1: [0.1, 0.2, ...], 2: [0.4, 0.5, ...], ...}
+
+# Retrieve embeddings for current selection only
+embs = graph.type_filter('Article').filter({'category': 'politics'}).get_embeddings('summary_emb')
+
+# Get a single node's embedding (O(1) lookup, returns None if not found)
+vec = graph.get_embedding('Article', 'summary_emb', node_id)
 ```
 
 Embeddings persist across `save()`/`load()` cycles automatically.
