@@ -13,15 +13,44 @@ __version__: str
 class EmbeddingModel(Protocol):
     """Protocol for embedding models passed to ``embed_texts`` / ``search_text``.
 
-    Any object with these two members works — no inheritance needed.
+    **Required** — ``dimension`` and ``embed()`` must be present.
+
+    **Optional** — ``load()`` and ``unload()`` are called automatically if present:
+
+    - ``load()`` is called before each ``embed_texts()`` / ``search_text()`` call.
+    - ``unload()`` is called after each call completes (even on error).
+
+    This lets models manage heavyweight resources (GPU memory, large weights)
+    on demand.  A common pattern is to implement a cooldown in ``unload()``
+    so the model stays warm across rapid successive calls but eventually
+    releases memory after a period of inactivity.
 
     Example::
 
-        class MyEmbedder:
-            def __init__(self):
-                from sentence_transformers import SentenceTransformer
-                self._model = SentenceTransformer("all-MiniLM-L6-v2")
-                self.dimension = self._model.get_sentence_embedding_dimension()
+        import threading
+        from sentence_transformers import SentenceTransformer
+
+        class Embedder:
+            def __init__(self, model_name="all-MiniLM-L6-v2"):
+                self._model_name = model_name
+                self._model = None
+                self._timer = None
+                self.dimension = 384  # known ahead of time, or set in load()
+
+            def load(self):
+                if self._timer:
+                    self._timer.cancel()
+                    self._timer = None
+                if self._model is None:
+                    self._model = SentenceTransformer(self._model_name)
+                    self.dimension = self._model.get_sentence_embedding_dimension()
+
+            def unload(self, cooldown=60):
+                def _release():
+                    self._model = None
+                    self._timer = None
+                self._timer = threading.Timer(cooldown, _release)
+                self._timer.start()
 
             def embed(self, texts: list[str]) -> list[list[float]]:
                 return self._model.encode(texts).tolist()
@@ -34,6 +63,23 @@ class EmbeddingModel(Protocol):
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts, returning one vector per text."""
+        ...
+
+    def load(self) -> None:
+        """(Optional) Load model weights / allocate resources.
+
+        Called automatically before ``embed()`` in ``embed_texts()`` and
+        ``search_text()``.  If not defined, this step is skipped.
+        """
+        ...
+
+    def unload(self) -> None:
+        """(Optional) Release model weights / free resources.
+
+        Called automatically after ``embed_texts()`` and ``search_text()``
+        complete (including on error).  A common pattern is to start a
+        cooldown timer here instead of releasing immediately.
+        """
         ...
 
 
@@ -1894,7 +1940,10 @@ class KnowledgeGraph:
 
         After calling this, ``embed_texts()`` and ``search_text()`` use the
         registered model automatically.  The model is **not** serialized —
-        call ``set_embedder()`` again after ``load()``.
+        call ``set_embedder()`` again after deserializing.
+
+        If the model has optional ``load()`` / ``unload()`` methods, they are
+        called automatically around each embedding operation.
 
         Args:
             model: An embedding model with ``dimension`` and ``embed()`` — see

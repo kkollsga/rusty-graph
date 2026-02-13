@@ -856,3 +856,142 @@ class TestSearchText:
 
         with pytest.raises(RuntimeError, match="set_embedder"):
             graph.type_filter("Node").search_text("text", "hello")
+
+
+# ── load/unload lifecycle ─────────────────────────────────────────────────
+
+
+class MockEmbedderWithLifecycle:
+    """Mock embedder that tracks load/unload calls."""
+
+    def __init__(self, dimension=3):
+        self.dimension = dimension
+        self.load_count = 0
+        self.unload_count = 0
+
+    def load(self):
+        self.load_count += 1
+
+    def unload(self):
+        self.unload_count += 1
+
+    def embed(self, texts):
+        import hashlib
+
+        vectors = []
+        for text in texts:
+            h = hashlib.md5(text.encode()).digest()
+            raw = [float(b) for b in h[: self.dimension]]
+            norm = math.sqrt(sum(x * x for x in raw))
+            if norm > 0:
+                vectors.append([x / norm for x in raw])
+            else:
+                vectors.append([0.0] * self.dimension)
+        return vectors
+
+
+class TestEmbedderLifecycle:
+    def _make_graph(self):
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "title": ["A", "B", "C"],
+                "text": ["alpha", "beta", "gamma"],
+            }
+        )
+        graph.add_nodes(df, "Node", "id", "title", ["text"])
+        return graph
+
+    def test_embed_texts_calls_load_and_unload(self):
+        """embed_texts calls load() before and unload() after embedding."""
+        graph = self._make_graph()
+        model = MockEmbedderWithLifecycle(dimension=3)
+        graph.set_embedder(model)
+
+        result = graph.embed_texts("Node", "text", show_progress=False)
+
+        assert result["embedded"] == 3
+        assert model.load_count == 1
+        assert model.unload_count == 1
+
+    def test_embed_texts_calls_unload_on_empty(self):
+        """unload() is called even when there are no texts to embed."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1], "title": ["A"]})
+        graph.add_nodes(df, "Node", "id", "title")
+
+        model = MockEmbedderWithLifecycle(dimension=3)
+        graph.set_embedder(model)
+
+        result = graph.embed_texts("Node", "text", show_progress=False)
+
+        assert result["embedded"] == 0
+        assert model.load_count == 1
+        assert model.unload_count == 1
+
+    def test_search_text_calls_load_and_unload(self):
+        """search_text calls load() before and unload() after embedding the query."""
+        graph = self._make_graph()
+        model = MockEmbedderWithLifecycle(dimension=3)
+        graph.set_embedder(model)
+        graph.embed_texts("Node", "text", show_progress=False)
+        model.load_count = 0
+        model.unload_count = 0
+
+        results = graph.type_filter("Node").search_text("text", "alpha", top_k=2)
+
+        assert len(results) == 2
+        assert model.load_count == 1
+        assert model.unload_count == 1
+
+    def test_multiple_embed_calls_load_unload_each_time(self):
+        """Each embed_texts call triggers its own load/unload cycle."""
+        graph = self._make_graph()
+        model = MockEmbedderWithLifecycle(dimension=3)
+        graph.set_embedder(model)
+
+        graph.embed_texts("Node", "text", show_progress=False)
+        graph.embed_texts("Node", "text", show_progress=False, replace=True)
+
+        assert model.load_count == 2
+        assert model.unload_count == 2
+
+    def test_model_without_load_unload_works(self):
+        """Models without load/unload still work fine (methods are optional)."""
+        graph = self._make_graph()
+        model = MockEmbedder(dimension=3)  # no load/unload
+        graph.set_embedder(model)
+
+        result = graph.embed_texts("Node", "text", show_progress=False)
+        assert result["embedded"] == 3
+
+        results = graph.type_filter("Node").search_text("text", "alpha", top_k=2)
+        assert len(results) == 2
+
+    def test_unload_called_on_embed_error(self):
+        """unload() is called even if embed() raises an exception."""
+        graph = self._make_graph()
+
+        class FailingEmbedder:
+            dimension = 3
+            load_count = 0
+            unload_count = 0
+
+            def load(self):
+                self.load_count += 1
+
+            def unload(self):
+                self.unload_count += 1
+
+            def embed(self, texts):
+                raise RuntimeError("boom")
+
+        model = FailingEmbedder()
+        graph.set_embedder(model)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            graph.embed_texts("Node", "text", show_progress=False)
+
+        assert model.load_count == 1
+        assert model.unload_count == 1

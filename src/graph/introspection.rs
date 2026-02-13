@@ -362,9 +362,9 @@ const API_EMBEDDINGS: &str = r#"    <method sig="set_embeddings(node_type, prope
     <method sig="type_filter(t).get_embeddings(property_name)">Retrieve embeddings for nodes in current selection.</method>
     <method sig="get_embedding(node_type, property_name, node_id)">Single node embedding lookup. Returns list of floats or None.</method>
     <method sig="list_embeddings()">List all embedding stores with type, name, dimension, count.</method>
-    <method sig="set_embedder(model)">Register embedding model (.dimension, .embed()). Used by embed_texts/search_text. Not serialized.</method>
-    <method sig="embed_texts(node_type, text_column, batch_size=256)">Embed text column using registered model. Stores as {text_column}_emb.</method>
-    <method sig="type_filter(t).search_text(text_column, query, top_k=10, metric='cosine')">Semantic search: embed query via registered model, then vector_search.</method>
+    <method sig="set_embedder(model)">Register embedding model (.dimension, .embed(), optional .load()/.unload()). Not serialized.</method>
+    <method sig="embed_texts(node_type, text_column, batch_size=256)">Embed text column. Calls model.load() before, model.unload() after (if present).</method>
+    <method sig="type_filter(t).search_text(text_column, query, top_k=10, metric='cosine')">Semantic search: load → embed query → unload → vector_search.</method>
 "#;
 
 /// Static XML: Cypher reference — clauses through expressions (always present).

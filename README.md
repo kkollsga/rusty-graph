@@ -1161,8 +1161,29 @@ from sentence_transformers import SentenceTransformer
 
 class Embedder:
     def __init__(self, model_name="all-MiniLM-L6-v2"):
-        self._model = SentenceTransformer(model_name)
-        self.dimension = self._model.get_sentence_embedding_dimension()
+        self._model_name = model_name
+        self._model = None
+        self._timer = None
+        self.dimension = 384  # set in load() if unknown
+
+    def load(self):
+        """Called automatically before embedding. Loads model on demand."""
+        import threading
+        if self._timer:
+            self._timer.cancel()
+            self._timer = None
+        if self._model is None:
+            self._model = SentenceTransformer(self._model_name)
+            self.dimension = self._model.get_sentence_embedding_dimension()
+
+    def unload(self, cooldown=60):
+        """Called automatically after embedding. Releases after cooldown."""
+        import threading
+        def _release():
+            self._model = None
+            self._timer = None
+        self._timer = threading.Timer(cooldown, _release)
+        self._timer.start()
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         return self._model.encode(texts).tolist()
@@ -1185,7 +1206,8 @@ results = graph.type_filter("Article").search_text("summary", "machine learning"
 - **Auto-naming:** text column `"summary"` → embedding store key `"summary_emb"` (auto-derived)
 - **Incremental:** re-running `embed_texts` skips nodes that already have embeddings — only new nodes get embedded. Pass `replace=True` to force re-embed.
 - **Progress bar:** shows a tqdm progress bar by default. Disable with `show_progress=False`.
-- **Not serialized:** the model is not saved with `save()` — call `set_embedder()` again after `load()`.
+- **Load/unload lifecycle:** if the model has optional `load()` / `unload()` methods, they are called automatically before and after each embedding operation. Use this to load on demand and release after a cooldown.
+- **Not serialized:** the model is not saved with `save()` — call `set_embedder()` again after deserializing.
 
 ```python
 # Add new articles, then re-embed — only new ones are processed

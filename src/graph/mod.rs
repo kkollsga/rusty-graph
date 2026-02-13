@@ -118,6 +118,23 @@ impl KnowledgeGraph {
             )),
         }
     }
+
+    /// Call `model.load()` if the method exists (optional lifecycle hook).
+    /// Errors propagate — if load() fails, the caller should not proceed.
+    fn try_load_embedder(model: &Bound<'_, PyAny>) -> PyResult<()> {
+        if model.hasattr("load")? {
+            model.call_method0("load")?;
+        }
+        Ok(())
+    }
+
+    /// Call `model.unload()` if the method exists (optional lifecycle hook).
+    /// Best-effort: errors are silently ignored since this is cleanup.
+    fn try_unload_embedder(model: &Bound<'_, PyAny>) {
+        if model.hasattr("unload").unwrap_or(false) {
+            let _ = model.call_method0("unload");
+        }
+    }
 }
 
 /// Helper function to get a mutable DirGraph from Arc.
@@ -5443,12 +5460,20 @@ impl KnowledgeGraph {
         let batch_size = batch_size.unwrap_or(256);
         let replace = replace.unwrap_or(false);
 
+        // Load model if it has a load() lifecycle method
+        Self::try_load_embedder(&model)?;
+
         // Get model dimension
-        let dimension: usize = model.getattr("dimension")?.extract().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
-                "model must have an int 'dimension' attribute",
-            )
-        })?;
+        let dimension: usize =
+            match model.getattr("dimension").and_then(|d| d.extract()) {
+                Ok(dim) => dim,
+                Err(_) => {
+                    Self::try_unload_embedder(&model);
+                    return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                        "model must have an int 'dimension' attribute",
+                    ));
+                }
+            };
 
         // Collect (node_index, text) for nodes that need embedding
         let mut node_texts: Vec<(NodeIndex, String)> = Vec::new();
@@ -5491,6 +5516,7 @@ impl KnowledgeGraph {
         }
 
         if node_texts.is_empty() {
+            Self::try_unload_embedder(&model);
             let result = PyDict::new(py);
             result.set_item("embedded", 0)?;
             result.set_item("skipped", skipped)?;
@@ -5531,17 +5557,34 @@ impl KnowledgeGraph {
             let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
             let py_texts = PyList::new(py, &texts)?;
 
-            let embeddings_result = model.call_method1("embed", (py_texts,))?;
-            let embeddings: Vec<Vec<f32>> = embeddings_result.extract().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "model.embed() must return list[list[float]]",
-                )
-            })?;
+            let embeddings_result = match model.call_method1("embed", (py_texts,)) {
+                Ok(r) => r,
+                Err(e) => {
+                    if let Some(ref bar) = progress_bar {
+                        let _ = bar.call_method0("close");
+                    }
+                    Self::try_unload_embedder(&model);
+                    return Err(e);
+                }
+            };
+            let embeddings: Vec<Vec<f32>> = match embeddings_result.extract() {
+                Ok(v) => v,
+                Err(_) => {
+                    if let Some(ref bar) = progress_bar {
+                        let _ = bar.call_method0("close");
+                    }
+                    Self::try_unload_embedder(&model);
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "model.embed() must return list[list[float]]",
+                    ));
+                }
+            };
 
             if embeddings.len() != batch.len() {
                 if let Some(ref bar) = progress_bar {
                     let _ = bar.call_method0("close");
                 }
+                Self::try_unload_embedder(&model);
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "model.embed() returned {} vectors for {} texts",
                     embeddings.len(),
@@ -5554,6 +5597,7 @@ impl KnowledgeGraph {
                     if let Some(ref bar) = progress_bar {
                         let _ = bar.call_method0("close");
                     }
+                    Self::try_unload_embedder(&model);
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                         "model.embed() returned vector of dimension {} (expected {})",
                         vec.len(),
@@ -5573,6 +5617,9 @@ impl KnowledgeGraph {
         if let Some(ref bar) = progress_bar {
             let _ = bar.call_method0("close");
         }
+
+        // Unload model after embedding is complete
+        Self::try_unload_embedder(&model);
 
         let embedded = node_texts.len();
         let g = Arc::make_mut(&mut self.inner);
@@ -5615,9 +5662,15 @@ impl KnowledgeGraph {
         let model = self.get_embedder_or_error(py)?;
         let embedding_property = format!("{}_emb", text_column);
 
-        // Embed the query text
+        // Load model if it has a load() lifecycle method
+        Self::try_load_embedder(&model)?;
+
+        // Embed the query text, then unload regardless of success/failure
         let py_texts = PyList::new(py, [query])?;
-        let embeddings_result = model.call_method1("embed", (py_texts,))?;
+        let embed_result = model.call_method1("embed", (py_texts,));
+        Self::try_unload_embedder(&model);
+        let embeddings_result = embed_result?;
+
         let embeddings: Vec<Vec<f32>> = embeddings_result.extract().map_err(|_| {
             PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "model.embed() must return list[list[float]]",
