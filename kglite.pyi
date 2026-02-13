@@ -1746,6 +1746,90 @@ class KnowledgeGraph:
         """
         ...
 
+    # ── Embedding / Vector Search ──────────────────────────────────────────
+
+    def set_embeddings(
+        self,
+        node_type: str,
+        property_name: str,
+        embeddings: dict[Any, list[float]],
+    ) -> dict[str, int]:
+        """Store embeddings for nodes of the given type.
+
+        Embeddings are stored separately from regular node properties and are
+        invisible to ``get_nodes()``, ``to_df()``, and other property-based APIs.
+
+        Args:
+            node_type: The node type (e.g. ``'Article'``).
+            property_name: Name for this embedding (e.g. ``'summary_embeddings'``).
+            embeddings: Dict mapping node IDs to embedding vectors.
+
+        Returns:
+            Dict with ``embeddings_stored``, ``dimension``, and ``skipped``.
+        """
+        ...
+
+    def vector_search(
+        self,
+        property_name: str,
+        query_vector: list[float],
+        top_k: int = 10,
+        metric: str = "cosine",
+        to_df: bool = False,
+    ) -> list[dict[str, Any]] | pd.DataFrame:
+        """Vector similarity search within the current selection.
+
+        Searches for nodes most similar to the query vector among the currently
+        selected nodes. Results are ordered by similarity (most similar first).
+
+        Args:
+            property_name: The embedding property name.
+            query_vector: The query embedding vector.
+            top_k: Number of results to return (default 10).
+            metric: ``'cosine'`` (default), ``'dot_product'``, or ``'euclidean'``.
+            to_df: If ``True``, return a pandas DataFrame instead of list of dicts.
+
+        Returns:
+            List of dicts with ``id``, ``title``, ``type``, ``score``, and all
+            node properties. Or a DataFrame if ``to_df=True``.
+
+        Example::
+
+            results = (graph
+                .type_filter('Article')
+                .filter({'category': 'politics'})
+                .vector_search('summary_embeddings', query_vec, top_k=10))
+        """
+        ...
+
+    def list_embeddings(self) -> list[dict[str, Any]]:
+        """List all embedding stores in the graph.
+
+        Returns:
+            List of dicts with ``node_type``, ``property_name``, ``dimension``, ``count``.
+        """
+        ...
+
+    def remove_embeddings(self, node_type: str, property_name: str) -> None:
+        """Remove an embedding store.
+
+        Args:
+            node_type: The node type.
+            property_name: The embedding property name.
+        """
+        ...
+
+    def get_embeddings(self, property_name: str) -> dict[Any, list[float]]:
+        """Retrieve embeddings for nodes in the current selection.
+
+        Args:
+            property_name: The embedding property name.
+
+        Returns:
+            Dict mapping node IDs to embedding vectors.
+        """
+        ...
+
     def begin(self) -> Transaction:
         """Begin a transaction — returns a Transaction with a working copy of the graph.
 

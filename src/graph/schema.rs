@@ -261,6 +261,64 @@ pub struct ConnectionTypeInfo {
     pub property_types: HashMap<String, String>,
 }
 
+/// Contiguous columnar storage for f32 embeddings associated with a (node_type, property_name).
+/// All vectors in one store share the same dimensionality.
+/// The flat Vec<f32> layout enables SIMD-friendly linear scans during vector search.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EmbeddingStore {
+    /// Embedding dimensionality (e.g. 384, 768, 1536)
+    pub dimension: usize,
+    /// Contiguous f32 buffer: embedding i occupies data[i*dimension..(i+1)*dimension]
+    pub data: Vec<f32>,
+    /// Maps NodeIndex.index() -> slot position in the contiguous buffer
+    pub node_to_slot: HashMap<usize, usize>,
+    /// Reverse map: slot -> NodeIndex.index(), needed for returning results
+    pub slot_to_node: Vec<usize>,
+}
+
+impl EmbeddingStore {
+    pub fn new(dimension: usize) -> Self {
+        EmbeddingStore {
+            dimension,
+            data: Vec::new(),
+            node_to_slot: HashMap::new(),
+            slot_to_node: Vec::new(),
+        }
+    }
+
+    /// Add or replace an embedding for a node. Returns the slot index.
+    pub fn set_embedding(&mut self, node_index: usize, embedding: &[f32]) -> usize {
+        if let Some(&slot) = self.node_to_slot.get(&node_index) {
+            // Replace existing embedding in-place
+            let start = slot * self.dimension;
+            self.data[start..start + self.dimension].copy_from_slice(embedding);
+            slot
+        } else {
+            // Append new embedding
+            let slot = self.slot_to_node.len();
+            self.node_to_slot.insert(node_index, slot);
+            self.slot_to_node.push(node_index);
+            self.data.extend_from_slice(embedding);
+            slot
+        }
+    }
+
+    /// Get the embedding slice for a node (by NodeIndex.index()).
+    #[inline]
+    pub fn get_embedding(&self, node_index: usize) -> Option<&[f32]> {
+        self.node_to_slot.get(&node_index).map(|&slot| {
+            let start = slot * self.dimension;
+            &self.data[start..start + self.dimension]
+        })
+    }
+
+    /// Number of stored embeddings.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.slot_to_node.len()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DirGraph {
     pub(crate) graph: Graph,
@@ -331,6 +389,11 @@ pub struct DirGraph {
     /// RwLock allows concurrent reads from parallel row evaluation.
     #[serde(skip)]
     pub(crate) wkt_cache: Arc<RwLock<HashMap<String, Arc<geo::Geometry<f64>>>>>,
+    /// Columnar embedding storage: (node_type, property_name) -> EmbeddingStore.
+    /// Stored separately from NodeData.properties — invisible to normal node API.
+    /// Persisted as a separate section in v2 .kgl files.
+    #[serde(skip)]
+    pub(crate) embeddings: HashMap<(String, String), EmbeddingStore>,
 }
 
 fn default_auto_vacuum_threshold() -> Option<f64> {
@@ -358,6 +421,7 @@ impl DirGraph {
             title_field_aliases: HashMap::new(),
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
+            embeddings: HashMap::new(),
         }
     }
 
@@ -383,6 +447,7 @@ impl DirGraph {
             title_field_aliases: HashMap::new(),
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
+            embeddings: HashMap::new(),
         }
     }
 
@@ -1253,6 +1318,30 @@ impl DirGraph {
 
         // Replace graph storage
         self.graph = new_graph;
+
+        // Remap embedding stores to use new node indices
+        for store in self.embeddings.values_mut() {
+            let mut new_node_to_slot = HashMap::with_capacity(store.node_to_slot.len());
+            let mut new_slot_to_node = Vec::with_capacity(store.slot_to_node.len());
+            let mut new_data = Vec::with_capacity(store.data.len());
+
+            for (&old_node_raw, &slot) in &store.node_to_slot {
+                let old_idx = NodeIndex::new(old_node_raw);
+                if let Some(&new_idx) = old_to_new.get(&old_idx) {
+                    let new_slot = new_slot_to_node.len();
+                    new_node_to_slot.insert(new_idx.index(), new_slot);
+                    new_slot_to_node.push(new_idx.index());
+                    let start = slot * store.dimension;
+                    let end = start + store.dimension;
+                    new_data.extend_from_slice(&store.data[start..end]);
+                }
+                // Deleted nodes (not in old_to_new) are dropped
+            }
+
+            store.node_to_slot = new_node_to_slot;
+            store.slot_to_node = new_slot_to_node;
+            store.data = new_data;
+        }
 
         // Rebuild all indexes from the compacted graph
         self.reindex();

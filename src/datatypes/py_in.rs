@@ -445,5 +445,24 @@ pub fn py_value_to_value(value: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::UniqueId(u));
     }
 
+    // Handle lists (e.g. embedding vectors for Cypher params) — serialize as JSON string
+    if let Ok(list) = value.cast::<pyo3::types::PyList>() {
+        let items: Vec<String> = list
+            .iter()
+            .map(|item| {
+                if let Ok(f) = item.extract::<f64>() {
+                    format!("{}", f)
+                } else if let Ok(s) = item.extract::<String>() {
+                    format!("\"{}\"", s)
+                } else if let Ok(i) = item.extract::<i64>() {
+                    format!("{}", i)
+                } else {
+                    "null".to_string()
+                }
+            })
+            .collect();
+        return Ok(Value::String(format!("[{}]", items.join(", "))));
+    }
+
     Ok(Value::Null)
 }

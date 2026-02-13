@@ -35,6 +35,7 @@ pub mod statistics_methods;
 pub mod subgraph;
 pub mod traversal_methods;
 pub mod value_operations;
+pub mod vector_search;
 
 use schema::{
     ConnectionSchemaDefinition, CowSelection, CurrentSelection, DirGraph, NodeSchemaDefinition,
@@ -232,6 +233,18 @@ impl KnowledgeGraph {
         skip_columns: Option<&Bound<'_, PyList>>,
         column_types: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        // Detect embedding columns from column_types before DataFrame conversion
+        let mut embedding_columns: Vec<String> = Vec::new();
+        if let Some(type_dict) = column_types {
+            for (key, value) in type_dict.iter() {
+                let col_name: String = key.extract()?;
+                let type_str: String = value.extract()?;
+                if type_str.to_lowercase() == "embedding" {
+                    embedding_columns.push(col_name);
+                }
+            }
+        }
+
         // Get all columns from the dataframe
         let df_cols = data.getattr("columns")?;
         let all_columns: Vec<String> = df_cols.extract()?;
@@ -246,13 +259,43 @@ impl KnowledgeGraph {
         let enforce_columns = Some(false);
 
         // Get the filtered columns
-        let column_list = py_in::ensure_columns(
+        let mut column_list = py_in::ensure_columns(
             &all_columns,
             &default_cols,
             columns,
             skip_columns,
             enforce_columns,
         )?;
+
+        // Remove embedding columns from the regular column list
+        if !embedding_columns.is_empty() {
+            column_list.retain(|c| !embedding_columns.contains(c));
+        }
+
+        // Extract embedding data before DataFrame conversion
+        let embedding_data: Vec<(String, Vec<(Value, Vec<f32>)>)> = if !embedding_columns.is_empty()
+        {
+            let id_series = data.get_item(&unique_id_field)?;
+            let nrows: usize = data.getattr("shape")?.get_item(0)?.extract()?;
+            let mut result = Vec::new();
+
+            for emb_col in &embedding_columns {
+                let series = data.get_item(emb_col)?;
+                let mut pairs = Vec::with_capacity(nrows);
+
+                for i in 0..nrows {
+                    let id_val = py_in::py_value_to_value(&id_series.get_item(i)?)?;
+                    let emb_val: Vec<f32> = series.get_item(i)?.extract()?;
+                    pairs.push((id_val, emb_val));
+                }
+
+                result.push((emb_col.clone(), pairs));
+            }
+
+            result
+        } else {
+            Vec::new()
+        };
 
         let df_result = py_in::pandas_to_dataframe(
             data,
@@ -266,12 +309,39 @@ impl KnowledgeGraph {
         let result = maintain_graph::add_nodes(
             graph,
             df_result,
-            node_type,
+            node_type.clone(),
             unique_id_field,
             node_title_field,
             conflict_handling,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+        // Store embeddings for the created nodes
+        if !embedding_data.is_empty() {
+            graph.build_id_index(&node_type);
+            for (emb_col, pairs) in &embedding_data {
+                let dimension = pairs.first().map(|(_, v)| v.len()).unwrap_or(0);
+                if dimension == 0 {
+                    continue;
+                }
+
+                let mut store = schema::EmbeddingStore::new(dimension);
+                store.data.reserve(pairs.len() * dimension);
+                for (id_val, vec) in pairs {
+                    if vec.len() != dimension {
+                        continue; // skip mismatched dimensions
+                    }
+                    if let Some(node_idx) = graph.lookup_by_id(&node_type, id_val) {
+                        store.set_embedding(node_idx.index(), vec);
+                    }
+                }
+                if store.len() > 0 {
+                    graph
+                        .embeddings
+                        .insert((node_type.clone(), emb_col.clone()), store);
+                }
+            }
+        }
 
         self.selection.clear();
 
@@ -4919,6 +4989,275 @@ impl KnowledgeGraph {
                 e
             ))),
         }
+    }
+
+    // ========================================================================
+    // Embedding / Vector Search Methods
+    // ========================================================================
+
+    /// Store embeddings for nodes of the given type.
+    ///
+    /// Embeddings are stored separately from regular node properties and are
+    /// invisible to get_nodes(), to_df(), and other property-based operations.
+    ///
+    /// Args:
+    ///     node_type: The node type (e.g. 'Article')
+    ///     property_name: Name for this embedding (e.g. 'summary_embeddings')
+    ///     embeddings: Dict mapping node IDs to embedding vectors (list of floats)
+    ///
+    /// Returns:
+    ///     dict: {'embeddings_stored': int, 'dimension': int, 'skipped': int}
+    fn set_embeddings(
+        &mut self,
+        py: Python<'_>,
+        node_type: &str,
+        property_name: &str,
+        embeddings: &Bound<'_, PyDict>,
+    ) -> PyResult<Py<PyAny>> {
+        let g = Arc::make_mut(&mut self.inner);
+
+        // Build ID index for this node type if not already built
+        g.build_id_index(node_type);
+
+        let mut dimension: Option<usize> = None;
+        let mut entries: Vec<(NodeIndex, Vec<f32>)> = Vec::new();
+        let mut skipped = 0usize;
+
+        for (key, value) in embeddings.iter() {
+            // Convert key to Value for ID lookup
+            let id = py_in::py_value_to_value(&key)?;
+
+            // Look up node by ID
+            let node_idx = match g.lookup_by_id(node_type, &id) {
+                Some(idx) => idx,
+                None => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+
+            // Convert embedding to Vec<f32>
+            let vec: Vec<f32> = value.extract()?;
+
+            // Validate/set dimension
+            match dimension {
+                None => dimension = Some(vec.len()),
+                Some(d) => {
+                    if vec.len() != d {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Inconsistent embedding dimensions: expected {} but got {}",
+                            d,
+                            vec.len()
+                        )));
+                    }
+                }
+            }
+
+            entries.push((node_idx, vec));
+        }
+
+        let dim = match dimension {
+            Some(d) => d,
+            None => {
+                let result = PyDict::new(py);
+                result.set_item("embeddings_stored", 0)?;
+                result.set_item("dimension", 0)?;
+                result.set_item("skipped", skipped)?;
+                return Ok(result.into());
+            }
+        };
+
+        // Create or replace the EmbeddingStore
+        let mut store = schema::EmbeddingStore::new(dim);
+        store.data.reserve(entries.len() * dim);
+        for (node_idx, vec) in &entries {
+            store.set_embedding(node_idx.index(), vec);
+        }
+
+        let stored = store.len();
+        g.embeddings
+            .insert((node_type.to_string(), property_name.to_string()), store);
+
+        let result = PyDict::new(py);
+        result.set_item("embeddings_stored", stored)?;
+        result.set_item("dimension", dim)?;
+        result.set_item("skipped", skipped)?;
+        Ok(result.into())
+    }
+
+    /// Vector similarity search within the current selection.
+    ///
+    /// Searches for nodes most similar to the query vector among the currently
+    /// selected nodes. Returns results as a list of dicts ordered by similarity.
+    ///
+    /// Args:
+    ///     property_name: The embedding property name (e.g. 'summary_embeddings')
+    ///     query_vector: The query embedding vector (list of floats)
+    ///     top_k: Number of results to return (default 10)
+    ///     metric: Distance metric - 'cosine' (default), 'dot_product', or 'euclidean'
+    ///     to_df: If True, return a pandas DataFrame instead of list of dicts
+    ///
+    /// Returns:
+    ///     List of dicts with 'id', 'title', 'type', 'score', and all node properties,
+    ///     ordered by similarity (most similar first). Or a DataFrame if to_df=True.
+    ///
+    /// Example:
+    ///     ```python
+    ///     results = (graph
+    ///         .type_filter('Article')
+    ///         .filter({'category': 'politics'})
+    ///         .vector_search('summary_embeddings', query_vec, top_k=10))
+    ///     ```
+    #[pyo3(signature = (property_name, query_vector, top_k=None, metric=None, to_df=None))]
+    fn vector_search(
+        &self,
+        py: Python<'_>,
+        property_name: &str,
+        query_vector: Vec<f32>,
+        top_k: Option<usize>,
+        metric: Option<&str>,
+        to_df: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let top_k = top_k.unwrap_or(10);
+        let metric = match metric.unwrap_or("cosine") {
+            "cosine" => vector_search::DistanceMetric::Cosine,
+            "dot_product" => vector_search::DistanceMetric::DotProduct,
+            "euclidean" => vector_search::DistanceMetric::Euclidean,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unknown metric '{}'. Use 'cosine', 'dot_product', or 'euclidean'.",
+                    other
+                )));
+            }
+        };
+
+        let results = vector_search::vector_search(
+            &self.inner,
+            &self.selection,
+            property_name,
+            &query_vector,
+            top_k,
+            metric,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+        if to_df.unwrap_or(false) {
+            // Build DataFrame via pandas
+            let pandas = py.import("pandas")?;
+            let records: Vec<Py<PyAny>> = results
+                .iter()
+                .filter_map(|r| {
+                    self.inner.graph.node_weight(r.node_idx).map(|node| {
+                        let dict = PyDict::new(py);
+                        let _ = dict.set_item("id", py_out::value_to_py(py, &node.id).ok());
+                        let _ = dict.set_item("title", py_out::value_to_py(py, &node.title).ok());
+                        let _ = dict.set_item("type", &node.node_type);
+                        let _ = dict.set_item("score", r.score);
+                        for (k, v) in &node.properties {
+                            let _ = dict.set_item(k, py_out::value_to_py(py, v).ok());
+                        }
+                        dict.into()
+                    })
+                })
+                .collect();
+            let py_list = PyList::new(py, &records)?;
+            let df = pandas.call_method1("DataFrame", (py_list,))?;
+            return df.into_py_any(py);
+        }
+
+        // Return as list of dicts
+        let py_list = PyList::empty(py);
+        for r in &results {
+            if let Some(node) = self.inner.graph.node_weight(r.node_idx) {
+                let dict = PyDict::new(py);
+                dict.set_item("id", py_out::value_to_py(py, &node.id)?)?;
+                dict.set_item("title", py_out::value_to_py(py, &node.title)?)?;
+                dict.set_item("type", &node.node_type)?;
+                dict.set_item("score", r.score)?;
+                for (k, v) in &node.properties {
+                    dict.set_item(k, py_out::value_to_py(py, v)?)?;
+                }
+                py_list.append(dict)?;
+            }
+        }
+
+        py_list.into_py_any(py)
+    }
+
+    /// List all embedding stores in the graph.
+    ///
+    /// Returns:
+    ///     List of dicts with 'node_type', 'property_name', 'dimension', 'count'.
+    fn list_embeddings(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let py_list = PyList::empty(py);
+        for ((node_type, property_name), store) in &self.inner.embeddings {
+            let dict = PyDict::new(py);
+            dict.set_item("node_type", node_type)?;
+            dict.set_item("property_name", property_name)?;
+            dict.set_item("dimension", store.dimension)?;
+            dict.set_item("count", store.len())?;
+            py_list.append(dict)?;
+        }
+        py_list.into_py_any(py)
+    }
+
+    /// Remove an embedding store.
+    ///
+    /// Args:
+    ///     node_type: The node type
+    ///     property_name: The embedding property name
+    fn remove_embeddings(&mut self, node_type: &str, property_name: &str) -> PyResult<()> {
+        let g = Arc::make_mut(&mut self.inner);
+        let key = (node_type.to_string(), property_name.to_string());
+        g.embeddings.remove(&key);
+        Ok(())
+    }
+
+    /// Retrieve embeddings for nodes in the current selection.
+    ///
+    /// Args:
+    ///     property_name: The embedding property name
+    ///
+    /// Returns:
+    ///     Dict mapping node IDs to embedding vectors (list of floats).
+    fn get_embeddings(
+        &self,
+        py: Python<'_>,
+        property_name: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let result = PyDict::new(py);
+
+        let level_count = self.selection.get_level_count();
+        if level_count == 0 {
+            return result.into_py_any(py);
+        }
+
+        let nodes: Vec<NodeIndex> = self
+            .selection
+            .get_level(level_count - 1)
+            .map(|l| l.get_all_nodes())
+            .unwrap_or_default();
+
+        for node_idx in &nodes {
+            let node = match self.inner.graph.node_weight(*node_idx) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            let key = (node.node_type.clone(), property_name.to_string());
+            let store = match self.inner.embeddings.get(&key) {
+                Some(s) => s,
+                None => continue,
+            };
+
+            if let Some(embedding) = store.get_embedding(node_idx.index()) {
+                let py_id = py_out::value_to_py(py, &node.id)?;
+                let py_vec = PyList::new(py, embedding)?;
+                result.set_item(py_id, py_vec)?;
+            }
+        }
+
+        result.into_py_any(py)
     }
 }
 

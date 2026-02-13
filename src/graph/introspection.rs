@@ -346,32 +346,35 @@ pub fn compute_sample<'a>(
 
 // ── Agent description ──────────────────────────────────────────────────────
 
-/// Static XML fragment: API methods and Cypher reference (never changes per graph).
-const STATIC_XML: &str = r#"  <api>
+/// Static XML: base API methods (always present).
+const API_BASE: &str = r#"  <api>
     <method sig="cypher(query, *, to_df=False, params=None)">Primary query interface. Returns ResultView (lazy) or DataFrame with to_df=True.</method>
     <method sig="schema()">Returns dict: node_types, connection_types, indexes, node_count, edge_count.</method>
     <method sig="properties(node_type, max_values=20)">Per-property stats: type, non_null, unique, values.</method>
     <method sig="sample(node_type, n=5)">Returns first N nodes as ResultView.</method>
     <method sig="save(path) / load(path)">Persist and reload the graph.</method>
-  </api>
-  <cypher_ref>
+"#;
+
+/// Static XML: embedding API methods (only when graph has embeddings).
+const API_EMBEDDINGS: &str = r#"    <method sig="set_embeddings(node_type, property_name, embeddings)">Store embedding vectors ({id: [f32, ...]}). Invisible to get_nodes/to_df.</method>
+    <method sig="type_filter(t).vector_search(prop, query_vec, top_k=10, metric='cosine')">Similarity search on current selection. Returns list of dicts with scores.</method>
+    <method sig="list_embeddings()">List all embedding stores with type, name, dimension, count.</method>
+"#;
+
+/// Static XML: Cypher reference — clauses through expressions (always present).
+const CYPHER_REF_BASE: &str = r#"  <cypher_ref>
     <clauses>MATCH, OPTIONAL MATCH, WHERE, RETURN, WITH, ORDER BY, SKIP, LIMIT, UNWIND, UNION, UNION ALL, CREATE, SET, DELETE, DETACH DELETE, REMOVE, MERGE, EXPLAIN</clauses>
     <patterns>(n:Type), (n:Type {key: val}), -[:REL]-&gt;, &lt;-[:REL]-, -[:REL]-, -[:REL*1..3]-&gt;, p = shortestPath(...)</patterns>
     <where>=, &lt;&gt;, &lt;, &gt;, &lt;=, &gt;=, =~ (regex), AND, OR, NOT, IS NULL, IS NOT NULL, IN [...], CONTAINS, STARTS WITH, ENDS WITH, EXISTS { pattern }, EXISTS(( pattern ))</where>
     <return>n.prop, r.prop, AS alias, DISTINCT, arithmetic (+, -, *, /), map projections n {.prop1, .prop2}</return>
     <aggregation>count(*), count(expr), sum, avg, min, max, collect, std</aggregation>
     <expressions>CASE WHEN...THEN...ELSE...END, $param, [x IN list WHERE ... | expr]</expressions>
-    <functions>toUpper, toLower, toString, toInteger, toFloat, size, length, type, id, labels, coalesce, nodes(p), relationships(p), point, distance, wkt_contains, wkt_intersects, wkt_centroid, latitude, longitude</functions>
-    <mutations>CREATE (n:Label {props}), CREATE (a)-[:TYPE]-&gt;(b), SET n.prop = expr, DELETE, DETACH DELETE, REMOVE n.prop, MERGE...ON CREATE SET...ON MATCH SET</mutations>
+"#;
+
+/// Static XML: Cypher mutations and unsupported features (always present).
+const CYPHER_REF_MUTATIONS: &str = r#"    <mutations>CREATE (n:Label {props}), CREATE (a)-[:TYPE]-&gt;(b), SET n.prop = expr, DELETE, DETACH DELETE, REMOVE n.prop, MERGE...ON CREATE SET...ON MATCH SET</mutations>
     <not_supported>CALL/stored procedures, FOREACH, subqueries, SET n:Label, REMOVE n:Label, multi-label</not_supported>
-    <notes>
-      <note>Each node has exactly one type. labels(n) returns a string, not a list.</note>
-      <note>Built-in node fields: type, title, id. Access via n.type, n.title, n.id.</note>
-      <note>If a node type has id_alias/title_alias attributes, the original column name also works as a property accessor (e.g. n.npdid resolves to n.id).</note>
-      <note>Each cypher() call is atomic. Params via $param syntax.</note>
-      <note>to_df=True returns a pandas DataFrame instead of ResultView.</note>
-    </notes>
-  </cypher_ref>"#;
+"#;
 
 /// Minimal XML escaping for attribute values.
 fn xml_escape(s: &str) -> String {
@@ -382,9 +385,16 @@ fn xml_escape(s: &str) -> String {
 }
 
 /// Build a minimal XML description of the graph for AI agents.
+/// Only includes embedding and spatial sections when the graph actually uses those features.
 pub fn compute_agent_description(graph: &DirGraph) -> String {
     let overview = compute_schema(graph);
-    let mut xml = String::with_capacity(2048 + STATIC_XML.len());
+    let has_embeddings = !graph.embeddings.is_empty();
+    let has_spatial = graph
+        .node_type_metadata
+        .values()
+        .any(|props| props.values().any(|t| t.eq_ignore_ascii_case("point")));
+
+    let mut xml = String::with_capacity(4096);
 
     xml.push_str(&format!(
         "<kglite nodes=\"{}\" edges=\"{}\">\n",
@@ -397,7 +407,6 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     } else {
         xml.push_str("  <node_types>\n");
         for (nt, info) in &overview.node_types {
-            // Build alias attributes if original field names differ from canonical
             let mut alias_attrs = String::new();
             if let Some(id_alias) = graph.id_field_aliases.get(nt) {
                 alias_attrs.push_str(&format!(" id_alias=\"{}\"", xml_escape(id_alias)));
@@ -463,9 +472,65 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
         xml.push_str("  </indexes>\n");
     }
 
-    // Static sections
-    xml.push_str(STATIC_XML);
-    xml.push('\n');
+    // Embeddings (only when graph has embedding data)
+    if has_embeddings {
+        xml.push_str("  <embeddings>\n");
+        let mut emb_keys: Vec<&(String, String)> = graph.embeddings.keys().collect();
+        emb_keys.sort();
+        for (node_type, prop_name) in emb_keys {
+            if let Some(store) = graph.embeddings.get(&(node_type.clone(), prop_name.clone())) {
+                xml.push_str(&format!(
+                    "    <emb type=\"{}\" prop=\"{}\" dim=\"{}\" count=\"{}\"/>\n",
+                    xml_escape(node_type),
+                    xml_escape(prop_name),
+                    store.dimension,
+                    store.len()
+                ));
+            }
+        }
+        xml.push_str("  </embeddings>\n");
+    }
+
+    // API methods
+    xml.push_str(API_BASE);
+    if has_embeddings {
+        xml.push_str(API_EMBEDDINGS);
+    }
+    xml.push_str("  </api>\n");
+
+    // Cypher reference
+    xml.push_str(CYPHER_REF_BASE);
+
+    // Functions list — conditionally include spatial and embedding functions
+    let mut functions = String::from(
+        "toUpper, toLower, toString, toInteger, toFloat, size, length, \
+         type, id, labels, coalesce, nodes(p), relationships(p)",
+    );
+    if has_spatial {
+        functions.push_str(
+            ", point, distance, wkt_contains, wkt_intersects, wkt_centroid, \
+             latitude, longitude",
+        );
+    }
+    if has_embeddings {
+        functions.push_str(", vector_score");
+    }
+    xml.push_str(&format!("    <functions>{}</functions>\n", functions));
+
+    xml.push_str(CYPHER_REF_MUTATIONS);
+
+    // Notes — conditionally include feature-specific notes
+    xml.push_str("    <notes>\n");
+    xml.push_str("      <note>Each node has exactly one type. labels(n) returns a string, not a list.</note>\n");
+    xml.push_str("      <note>Built-in node fields: type, title, id. Access via n.type, n.title, n.id.</note>\n");
+    xml.push_str("      <note>If a node type has id_alias/title_alias attributes, the original column name also works as a property accessor (e.g. n.npdid resolves to n.id).</note>\n");
+    xml.push_str("      <note>Each cypher() call is atomic. Params via $param syntax.</note>\n");
+    xml.push_str("      <note>to_df=True returns a pandas DataFrame instead of ResultView.</note>\n");
+    if has_embeddings {
+        xml.push_str("      <note>vector_score(n, 'prop', [f32,...]) computes cosine similarity in Cypher. Optional 4th arg: 'cosine', 'dot_product', 'euclidean'. Query vector can be a $param.</note>\n");
+    }
+    xml.push_str("    </notes>\n");
+    xml.push_str("  </cypher_ref>\n");
     xml.push_str("</kglite>");
 
     xml

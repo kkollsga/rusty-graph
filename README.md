@@ -12,7 +12,7 @@ An embedded knowledge graph engine for Python. Import and go — no server, no s
 |---|---|
 | Embedded, in-process | No server, no network; `import` and go |
 | In-memory | Persistence via `save()`/`load()` snapshots |
-| Cypher subset | Querying + mutations; returns `ResultView` or DataFrame |
+| Cypher subset | Querying + mutations + `vector_score()` for semantic search |
 | Single-label nodes | Each node has exactly one type |
 | Single-threaded | Designed for single-threaded use (see [Threading](#threading)) |
 
@@ -241,6 +241,17 @@ graph.type_filter('Person')                        # select by type → Knowledg
     .sort('age', ascending=False)                  # sort → KnowledgeGraph
     .traverse('KNOWS', direction='outgoing')       # traverse → KnowledgeGraph
     .get_nodes()                                   # materialize → ResultView or grouped dict
+```
+
+### Semantic search
+
+```python
+graph.set_embeddings('Article', 'summary_emb', {id: vec, ...})   # store embeddings
+graph.type_filter('Article').vector_search('summary_emb', qvec, top_k=10)  # similarity search
+graph.list_embeddings()                                           # list all embedding stores
+graph.remove_embeddings('Article', 'summary_emb')                # remove an embedding store
+graph.type_filter('Article').get_embeddings('summary_emb')        # retrieve raw vectors
+# Cypher: vector_score(n, 'summary_emb', [0.1, ...]) — inline similarity in queries
 ```
 
 ### Introspection
@@ -504,6 +515,8 @@ graph.cypher("""
 | `wkt_centroid(wkt)` | Centroid of WKT geometry |
 | `latitude(point)` | Extract latitude from point |
 | `longitude(point)` | Extract longitude from point |
+| `vector_score(n, prop, vec)` | Cosine similarity between node embedding and query vector |
+| `vector_score(n, prop, vec, metric)` | Similarity with explicit metric (`'cosine'`, `'dot_product'`, `'euclidean'`) |
 
 ### Spatial Functions
 
@@ -808,6 +821,7 @@ print(plan)
 | **Expressions** | `CASE WHEN...THEN...ELSE...END`, `$param`, `[x IN list WHERE ... \| expr]` |
 | **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `length`, `type`, `id`, `labels`, `coalesce`, `nodes(p)`, `relationships(p)` |
 | **Spatial** | `point(lat, lon)`, `distance(p1, p2)`, `wkt_contains(wkt, point)`, `wkt_intersects(wkt1, wkt2)`, `wkt_centroid(wkt)`, `latitude(point)`, `longitude(point)` |
+| **Semantic** | `vector_score(n, prop, vec [, metric])` — cosine/dot_product/euclidean similarity against stored embeddings |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
 | **Not supported** | `CALL`/stored procedures, `FOREACH`, subqueries, `SET n:Label` (label mutation), `REMOVE n:Label`, multi-label |
 
@@ -1123,6 +1137,97 @@ result = graph.label_propagation(max_iterations=100)
 degrees = graph.type_filter('Person').get_degrees()
 # Returns: {'Alice': 5, 'Bob': 3, ...}
 ```
+
+---
+
+## Semantic Search
+
+Store embedding vectors alongside nodes and query them with fast similarity search. Embeddings are stored separately from node properties — they don't appear in `get_nodes()`, `to_df()`, or regular Cypher property access.
+
+### Storing Embeddings
+
+```python
+# Explicit: pass a dict of {node_id: vector}
+graph.set_embeddings('Article', 'summary_emb', {
+    1: [0.1, 0.2, 0.3, ...],
+    2: [0.4, 0.5, 0.6, ...],
+})
+
+# Or auto-detect during add_nodes with column_types
+df = pd.DataFrame({
+    'id': [1, 2, 3],
+    'title': ['A', 'B', 'C'],
+    'text_emb': [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]],
+})
+graph.add_nodes(df, 'Doc', 'id', 'title', column_types={'text_emb': 'embedding'})
+```
+
+### Vector Search (Fluent API)
+
+Search operates on the current selection — combine with `type_filter()` and `filter()` for scoped queries:
+
+```python
+# Basic search — returns list of dicts sorted by similarity
+results = graph.type_filter('Article').vector_search('summary_emb', query_vec, top_k=10)
+# [{'id': 5, 'title': '...', 'type': 'Article', 'score': 0.95, ...}, ...]
+
+# Filtered search — only search within a subset
+results = (graph
+    .type_filter('Article')
+    .filter({'category': 'politics'})
+    .vector_search('summary_emb', query_vec, top_k=10))
+
+# DataFrame output
+df = graph.type_filter('Article').vector_search('summary_emb', query_vec, top_k=10, to_df=True)
+
+# Distance metrics: 'cosine' (default), 'dot_product', 'euclidean'
+results = graph.type_filter('Article').vector_search(
+    'summary_emb', query_vec, top_k=10, metric='dot_product')
+```
+
+### Vector Search in Cypher
+
+The `vector_score()` function computes similarity inline in Cypher queries — use it in `RETURN`, `WHERE`, and `ORDER BY`:
+
+```python
+# Rank articles by similarity
+graph.cypher("""
+    MATCH (n:Article)
+    RETURN n.title, vector_score(n, 'summary_emb', [0.1, 0.2, 0.3]) AS score
+    ORDER BY score DESC LIMIT 10
+""")
+
+# Filter by similarity threshold
+graph.cypher("""
+    MATCH (n:Article)
+    WHERE vector_score(n, 'summary_emb', $query_vec) > 0.8
+    RETURN n.title
+""", params={'query_vec': [0.1, 0.2, 0.3]})
+
+# Combine with graph structure
+graph.cypher("""
+    MATCH (n:Article)-[:CITED_BY]->(m:Article)
+    WHERE n.category = 'politics'
+    RETURN n.title, m.title,
+           vector_score(m, 'summary_emb', $qvec, 'dot_product') AS relevance
+    ORDER BY relevance DESC
+""", params={'qvec': query_vec})
+```
+
+### Embedding Utilities
+
+```python
+graph.list_embeddings()
+# [{'node_type': 'Article', 'property_name': 'summary_emb', 'dimension': 384, 'count': 1000}]
+
+graph.remove_embeddings('Article', 'summary_emb')
+
+# Retrieve raw embeddings for current selection
+embs = graph.type_filter('Article').get_embeddings('summary_emb')
+# {1: [0.1, 0.2, ...], 2: [0.4, 0.5, ...]}
+```
+
+Embeddings persist across `save()`/`load()` cycles automatically.
 
 ---
 

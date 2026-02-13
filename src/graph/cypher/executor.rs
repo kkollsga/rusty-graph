@@ -11,6 +11,7 @@ use crate::graph::pattern_matching::{
 use crate::graph::schema::{DirGraph, EdgeData, NodeData};
 use crate::graph::spatial;
 use crate::graph::value_operations;
+use crate::graph::vector_search as vs;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::{EdgeRef, NodeIndexable};
 use petgraph::Direction;
@@ -1961,12 +1962,133 @@ impl<'a> CypherExecutor<'a> {
                     _ => Err("longitude() requires a Point argument".into()),
                 }
             }
+            // vector_score(node, embedding_property, query_vector [, metric])
+            // Returns the similarity score (f32→f64) for the node's embedding vs query vector.
+            "vector_score" => {
+                if args.len() < 3 || args.len() > 4 {
+                    return Err(
+                        "vector_score() requires 3-4 arguments: (node, property, query_vector [, metric])"
+                            .into(),
+                    );
+                }
+
+                // Arg 0: node variable → resolve to NodeIndex
+                let node_idx = match &args[0] {
+                    Expression::Variable(var) => match row.node_bindings.get(var) {
+                        Some(&idx) => idx,
+                        None => return Ok(Value::Null),
+                    },
+                    _ => return Err("vector_score(): first argument must be a node variable".into()),
+                };
+
+                // Arg 1: embedding property name
+                let prop_name = match self.evaluate_expression(&args[1], row)? {
+                    Value::String(s) => s,
+                    _ => return Err("vector_score(): second argument must be a string property name".into()),
+                };
+
+                // Arg 2: query vector — either a ListLiteral or a JSON string
+                let query_vec = self.extract_float_list(&args[2], row)?;
+
+                // Arg 3: optional metric (default: cosine)
+                let metric = if args.len() > 3 {
+                    match self.evaluate_expression(&args[3], row)? {
+                        Value::String(s) => match s.as_str() {
+                            "cosine" => vs::DistanceMetric::Cosine,
+                            "dot_product" => vs::DistanceMetric::DotProduct,
+                            "euclidean" => vs::DistanceMetric::Euclidean,
+                            other => {
+                                return Err(format!(
+                                    "vector_score(): unknown metric '{}'. Use 'cosine', 'dot_product', or 'euclidean'.",
+                                    other
+                                ))
+                            }
+                        },
+                        _ => vs::DistanceMetric::Cosine,
+                    }
+                } else {
+                    vs::DistanceMetric::Cosine
+                };
+
+                // Look up the node type to find the embedding store
+                let node_type = match self.graph.graph.node_weight(node_idx) {
+                    Some(n) => &n.node_type,
+                    None => return Ok(Value::Null),
+                };
+
+                let key = (node_type.clone(), prop_name.clone());
+                let store = match self.graph.embeddings.get(&key) {
+                    Some(s) => s,
+                    None => {
+                        return Err(format!(
+                            "vector_score(): no embedding '{}' found for node type '{}'",
+                            prop_name, node_type
+                        ))
+                    }
+                };
+
+                if query_vec.len() != store.dimension {
+                    return Err(format!(
+                        "vector_score(): query vector dimension {} does not match embedding dimension {}",
+                        query_vec.len(),
+                        store.dimension
+                    ));
+                }
+
+                // Get the embedding and compute similarity
+                match store.get_embedding(node_idx.index()) {
+                    Some(embedding) => {
+                        let similarity_fn = match metric {
+                            vs::DistanceMetric::Cosine => vs::cosine_similarity,
+                            vs::DistanceMetric::DotProduct => vs::dot_product,
+                            vs::DistanceMetric::Euclidean => vs::neg_euclidean_distance,
+                        };
+                        let score = similarity_fn(&query_vec, embedding);
+                        Ok(Value::Float64(score as f64))
+                    }
+                    None => Ok(Value::Null),
+                }
+            }
             // Aggregate functions should not be evaluated per-row
             "count" | "sum" | "avg" | "min" | "max" | "collect" | "mean" | "std" => Err(format!(
                 "Aggregate function '{}' cannot be used outside of RETURN/WITH",
                 name
             )),
             _ => Err(format!("Unknown function: {}", name)),
+        }
+    }
+
+    /// Extract a Vec<f32> from an expression that is either a ListLiteral or a JSON string.
+    fn extract_float_list(
+        &self,
+        expr: &Expression,
+        row: &ResultRow,
+    ) -> Result<Vec<f32>, String> {
+        match expr {
+            Expression::ListLiteral(items) => {
+                let mut result = Vec::with_capacity(items.len());
+                for item in items {
+                    match self.evaluate_expression(item, row)? {
+                        Value::Float64(f) => result.push(f as f32),
+                        Value::Int64(i) => result.push(i as f32),
+                        other => {
+                            return Err(format!(
+                                "vector_score(): query vector elements must be numeric, got {:?}",
+                                other
+                            ))
+                        }
+                    }
+                }
+                Ok(result)
+            }
+            _ => {
+                // Evaluate and try to parse from JSON string "[1.0, 2.0, ...]"
+                let val = self.evaluate_expression(expr, row)?;
+                match val {
+                    Value::String(s) => parse_json_float_list(&s),
+                    _ => Err("vector_score(): query vector must be a list of numbers".into()),
+                }
+            }
         }
     }
 
@@ -3722,6 +3844,25 @@ fn format_value_json(val: &Value) -> String {
 }
 fn value_to_f64(val: &Value) -> Option<f64> {
     value_operations::value_to_f64(val)
+}
+/// Parse a JSON-style float list string "[1.0, 2.0, 3.0]" into Vec<f32>.
+fn parse_json_float_list(s: &str) -> Result<Vec<f32>, String> {
+    let trimmed = s.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return Err("vector_score(): query vector must be a list like [1.0, 2.0, ...]".into());
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    if inner.is_empty() {
+        return Ok(Vec::new());
+    }
+    inner
+        .split(',')
+        .map(|item| {
+            item.trim()
+                .parse::<f32>()
+                .map_err(|_| format!("vector_score(): cannot parse '{}' as a number", item.trim()))
+        })
+        .collect()
 }
 fn arithmetic_add(a: &Value, b: &Value) -> Value {
     value_operations::arithmetic_add(a, b)

@@ -7,7 +7,9 @@
 //   [4..8]    core_data_version: u32 LE (tracks NodeData/EdgeData/Value changes)
 //   [8..12]   metadata_length: u32 LE
 //   [12..12+N]  JSON metadata (UTF-8, uncompressed)
-//   [12+N..]  Gzip-compressed bincode of StableDiGraph<NodeData, EdgeData>
+//   [12+N..12+N+G]  Gzip-compressed bincode of StableDiGraph<NodeData, EdgeData>
+//   [12+N+G..]  (optional) Gzip-compressed bincode of embedding stores
+//               Present only when metadata.graph_compressed_size is set.
 //
 // Format detection (first bytes):
 //   b"RGF\x02"  → v2 (sectioned format)
@@ -16,8 +18,8 @@
 
 use crate::graph::reporting::OperationReports;
 use crate::graph::schema::{
-    CompositeIndexKey, ConnectionTypeInfo, CowSelection, DirGraph, IndexKey, SaveMetadata,
-    SchemaDefinition,
+    CompositeIndexKey, ConnectionTypeInfo, CowSelection, DirGraph, EmbeddingStore, IndexKey,
+    SaveMetadata, SchemaDefinition,
 };
 use crate::graph::KnowledgeGraph;
 use bincode;
@@ -78,6 +80,10 @@ struct FileMetadata {
     /// Auto-vacuum threshold (None = disabled, default Some(0.3))
     #[serde(default = "default_auto_vacuum_threshold")]
     auto_vacuum_threshold: Option<f64>,
+    /// Compressed size of the graph section in bytes.
+    /// When present, bytes after graph_compressed_size contain the embedding section.
+    #[serde(default)]
+    graph_compressed_size: Option<u64>,
 }
 
 fn default_auto_vacuum_threshold() -> Option<f64> {
@@ -93,6 +99,24 @@ pub fn save_to_file(graph: &mut Arc<DirGraph>, path: &str) -> io::Result<()> {
     // Snapshot index keys (indices themselves are #[serde(skip)])
     g.populate_index_keys();
 
+    // Compress graph to buffer first so we know its size (needed for embedding section)
+    let mut graph_compressed = Vec::new();
+    {
+        let gz = GzEncoder::new(&mut graph_compressed, Compression::new(3));
+        bincode::serialize_into(gz, &g.graph).map_err(io::Error::other)?;
+    }
+
+    // Compress embeddings if any exist
+    let has_embeddings = !g.embeddings.is_empty();
+    let embedding_compressed = if has_embeddings {
+        let mut buf = Vec::new();
+        let gz = GzEncoder::new(&mut buf, Compression::new(3));
+        bincode::serialize_into(gz, &g.embeddings).map_err(io::Error::other)?;
+        Some(buf)
+    } else {
+        None
+    };
+
     // Build JSON metadata from DirGraph fields
     let metadata = FileMetadata {
         core_data_version: CURRENT_CORE_DATA_VERSION,
@@ -106,6 +130,11 @@ pub fn save_to_file(graph: &mut Arc<DirGraph>, path: &str) -> io::Result<()> {
         id_field_aliases: g.id_field_aliases.clone(),
         title_field_aliases: g.title_field_aliases.clone(),
         auto_vacuum_threshold: g.auto_vacuum_threshold,
+        graph_compressed_size: if has_embeddings {
+            Some(graph_compressed.len() as u64)
+        } else {
+            None
+        },
     };
 
     let metadata_json = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
@@ -121,9 +150,13 @@ pub fn save_to_file(graph: &mut Arc<DirGraph>, path: &str) -> io::Result<()> {
     // Write JSON metadata (uncompressed — small and self-describing)
     writer.write_all(&metadata_json)?;
 
-    // Write gzip-compressed bincode of the graph only (not the full DirGraph)
-    let gz = GzEncoder::new(&mut writer, Compression::new(3));
-    bincode::serialize_into(gz, &g.graph).map_err(io::Error::other)?;
+    // Write pre-compressed graph data
+    writer.write_all(&graph_compressed)?;
+
+    // Write embedding section if present
+    if let Some(emb_data) = embedding_compressed {
+        writer.write_all(&emb_data)?;
+    }
 
     writer.flush()?;
     Ok(())
@@ -159,7 +192,7 @@ pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
     Ok(finalize_load(dir_graph))
 }
 
-/// Load v2 sectioned format: header + JSON metadata + gzip bincode graph.
+/// Load v2 sectioned format: header + JSON metadata + gzip bincode graph + optional embeddings.
 fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
     if buf.len() < 12 {
         return Err(io::Error::other(
@@ -180,13 +213,27 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
         )));
     }
 
-    // Run migration if needed
-    let graph_bytes = &buf[metadata_end..];
-    let graph = load_core_data(graph_bytes, core_version)?;
-
     // Parse JSON metadata (self-describing — missing/extra fields handled by serde defaults)
     let metadata: FileMetadata = serde_json::from_slice(&buf[12..metadata_end])
         .map_err(|e| io::Error::other(format!("Failed to parse v2 metadata JSON: {}", e)))?;
+
+    // Determine graph section boundaries
+    let graph_start = metadata_end;
+    let (graph_bytes, embedding_bytes) = match metadata.graph_compressed_size {
+        Some(size) => {
+            let graph_end = graph_start + size as usize;
+            if buf.len() < graph_end {
+                return Err(io::Error::other(
+                    "v2 file is truncated — graph section incomplete.",
+                ));
+            }
+            (&buf[graph_start..graph_end], Some(&buf[graph_end..]))
+        }
+        None => (&buf[graph_start..], None),
+    };
+
+    // Decompress and deserialize graph
+    let graph = load_core_data(graph_bytes, core_version)?;
 
     // Reassemble DirGraph
     let mut dir_graph = DirGraph::from_graph(graph);
@@ -203,6 +250,21 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
         format_version: 2,
         library_version: metadata.library_version,
     };
+
+    // Load embeddings if present
+    if let Some(emb_bytes) = embedding_bytes {
+        if !emb_bytes.is_empty() {
+            let gz = GzDecoder::new(emb_bytes);
+            let embeddings: HashMap<(String, String), EmbeddingStore> =
+                bincode::deserialize_from(gz).map_err(|e| {
+                    io::Error::other(format!(
+                        "Failed to deserialize embedding data: {}",
+                        e
+                    ))
+                })?;
+            dir_graph.embeddings = embeddings;
+        }
+    }
 
     Ok(dir_graph)
 }
