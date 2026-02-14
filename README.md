@@ -4,9 +4,9 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/kglite)](https://pypi.org/project/kglite/)
 [![License: MIT](https://img.shields.io/pypi/l/kglite)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
 
-An embedded knowledge graph engine for Python. Import and go — no server, no setup.
+A knowledge graph that runs inside your Python process. Load data, query with Cypher, do semantic search — no server, no setup, no infrastructure.
 
-> **For AI agents:** see [Using with AI Agents](#using-with-ai-agents) and [`kglite.pyi`](kglite.pyi) for type stubs.
+> **Two APIs:** Use **Cypher** for querying, mutations, and semantic search. Use the **fluent API** (`add_nodes` / `add_connections`) for bulk-loading DataFrames. Most agent and application code only needs `cypher()`.
 
 | | |
 |---|---|
@@ -14,13 +14,38 @@ An embedded knowledge graph engine for Python. Import and go — no server, no s
 | In-memory | Persistence via `save()`/`load()` snapshots |
 | Cypher subset | Querying + mutations + `text_score()` for semantic search |
 | Single-label nodes | Each node has exactly one type |
-| Single-threaded | Designed for single-threaded use (see [Threading](#threading)) |
+| Fluent bulk loading | Import DataFrames with `add_nodes()` / `add_connections()` |
 
 **Requirements:** Python 3.10+ (CPython) | macOS (ARM/Intel), Linux (x86_64/aarch64), Windows (x86_64) | `pandas >= 1.5`
 
 ```bash
 pip install kglite
 ```
+
+---
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Using with AI Agents](#using-with-ai-agents)
+- [Core Concepts](#core-concepts)
+- [How It Works](#how-it-works)
+- [Return Types](#return-types)
+- [Schema Introspection](#schema-introspection)
+- [Cypher Queries](#cypher-queries) | [Full Cypher Reference](CYPHER.md)
+- [Fluent API: Data Loading](#fluent-api-data-loading)
+- [Fluent API: Querying](#fluent-api-querying)
+- [Semantic Search](#semantic-search)
+- [Graph Algorithms](#graph-algorithms)
+- [Spatial Operations](#spatial-operations)
+- [Analytics](#analytics)
+- [Schema and Indexes](#schema-and-indexes)
+- [Import and Export](#import-and-export)
+- [Performance](#performance)
+- [Common Gotchas](#common-gotchas)
+- [Graph Maintenance](#graph-maintenance)
+- [Common Recipes](#common-recipes)
+- [API Quick Reference](#api-quick-reference)
 
 ---
 
@@ -82,6 +107,123 @@ graph.add_connections(data=edges_df, connection_type='KNOWS', source_type='User'
 
 graph.cypher("MATCH (u:User) WHERE u.age > 30 RETURN u.name, u.age")
 ```
+
+---
+
+## Using with AI Agents
+
+KGLite is designed to work as a self-contained knowledge layer for AI agents. No external database, no server process, no network — just a Python object with a Cypher interface that an agent can query directly.
+
+### The idea
+
+1. **Load or build a graph** from your data (DataFrames, CSVs, APIs)
+2. **Give the agent `agent_describe()`** — a single XML string containing the full schema, Cypher reference, property values, and embedding info
+3. **The agent writes Cypher queries** using `graph.cypher()` — no other API to learn
+4. **Semantic search works natively** — `text_score()` in Cypher, backed by any embedding model you wrap
+
+No vector database, no graph database, no infrastructure. The graph lives in memory and persists to a single `.kgl` file.
+
+### Quick setup
+
+```python
+xml = graph.agent_describe()  # schema + Cypher reference + property values as XML
+prompt = f"You have a knowledge graph:\n{xml}\nAnswer the user's question using graph.cypher()."
+```
+
+### MCP server
+
+Expose the graph to any MCP-compatible agent (Claude, etc.) with a thin server:
+
+```python
+from mcp.server.fastmcp import FastMCP
+import kglite
+
+graph = kglite.load("my_graph.kgl")
+mcp = FastMCP("knowledge-graph")
+
+@mcp.tool()
+def describe() -> str:
+    """Get the graph schema and Cypher reference."""
+    return graph.agent_describe()
+
+@mcp.tool()
+def query(cypher: str) -> str:
+    """Run a Cypher query and return results."""
+    result = graph.cypher(cypher, to_df=True)
+    return result.to_markdown()
+
+mcp.run(transport="stdio")
+```
+
+The agent calls `describe()` once to learn the schema, then uses `query()` for everything — traversals, aggregations, filtering, and semantic search via `text_score()`.
+
+### Adding semantic search (5-minute setup)
+
+Semantic search lets agents find nodes by meaning, not just exact property matches. Here's the minimal path:
+
+```python
+# 1. Wrap any embedding model (local or remote)
+class Embedder:
+    dimension = 384
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer("all-MiniLM-L6-v2")
+        return model.encode(texts).tolist()
+
+# 2. Register it on the graph
+graph.set_embedder(Embedder())
+
+# 3. Embed a text column (one-time, incremental on re-run)
+graph.embed_texts("Article", "summary")
+
+# 4. Now agents can search by meaning in Cypher — no extra API
+graph.cypher("""
+    MATCH (a:Article)
+    WHERE text_score(a, 'summary', 'climate policy') > 0.5
+    RETURN a.title, text_score(a, 'summary', 'climate policy') AS score
+    ORDER BY score DESC LIMIT 10
+""")
+```
+
+The model wrapper works with any provider — OpenAI, Cohere, local sentence-transformers, Ollama. See [Semantic Search](#semantic-search) for the full API including load/unload lifecycle, incremental embedding, and low-level vector access.
+
+### Semantic search in agent workflows
+
+```python
+# Wrap any local or remote model — only needs .dimension and .embed()
+class OpenAIEmbedder:
+    dimension = 1536
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        response = client.embeddings.create(input=texts, model="text-embedding-3-small")
+        return [e.embedding for e in response.data]
+
+graph.set_embedder(OpenAIEmbedder())
+graph.embed_texts("Article", "summary")  # one-time: vectorize all articles
+
+# Now agents can use text_score() in Cypher — no extra API needed
+graph.cypher("""
+    MATCH (a:Article)
+    WHERE text_score(a, 'summary', 'climate policy') > 0.5
+    RETURN a.title, text_score(a, 'summary', 'climate policy') AS score
+    ORDER BY score DESC LIMIT 10
+""")
+```
+
+The model wrapper pattern works with any provider (OpenAI, Cohere, local sentence-transformers, Ollama) — see the [Semantic Search](#semantic-search) section for a full load/unload lifecycle example.
+
+### Tips for agent prompts
+
+1. **Start with `agent_describe()`** — gives the agent schema, types, property names with sample values, counts, and full Cypher syntax in one XML string
+2. **Use `properties(type)`** for deeper column discovery — shows types, nullability, unique counts, and sample values
+3. **Use `sample(type, n=3)`** before writing queries — lets the agent see real data shapes
+4. **Prefer Cypher** over the fluent API in agent contexts — closer to natural language, easier for LLMs to generate
+5. **Use parameters** (`params={'x': val}`) to prevent injection when passing user input to queries
+6. **ResultView is lazy** — agents can call `len(result)` to check row count without converting all rows
+
+### What `agent_describe()` returns
+
+- **Dynamic** (per-graph): node types with counts, property names/types/sample values, connection types with endpoints, indexes, field aliases, embedding stores
+- **Static** (always the same): supported Cypher clauses, WHERE operators, functions (including spatial and semantic), mutation syntax, notes
 
 ---
 
@@ -202,92 +344,6 @@ All centrality methods (`pagerank`, `betweenness_centrality`, `closeness_central
 
 ---
 
-## API Quick Reference
-
-### Graph lifecycle
-
-```python
-graph = kglite.KnowledgeGraph()     # create
-graph.save("file.kgl")              # persist
-graph = kglite.load("file.kgl")     # reload
-graph.graph_info()                   # → dict with node_count, edge_count, fragmentation_ratio, ...
-graph.get_schema()                   # → str summary of types and connections
-graph.node_types                     # → ['Person', 'Product', ...]
-```
-
-### Cypher (recommended for most tasks)
-
-```python
-graph.cypher("MATCH (n:Person) RETURN n.name")                          # → ResultView
-graph.cypher("MATCH (n:Person) RETURN n.name", to_df=True)              # → DataFrame
-graph.cypher("MATCH (n:Person) RETURN n.name", params={'x': 1})         # parameterized
-graph.cypher("CREATE (:Person {name: 'Alice'})")                        # → ResultView (.stats has counts)
-```
-
-### Data loading (fluent API)
-
-```python
-graph.add_nodes(data=df, node_type='T', unique_id_field='id')           # → report dict
-graph.add_connections(data=df, connection_type='REL',
-    source_type='A', source_id_field='src',
-    target_type='B', target_id_field='tgt')                              # → report dict
-```
-
-### Selection chain (fluent API)
-
-```python
-graph.type_filter('Person')                        # select by type → KnowledgeGraph
-    .filter({'age': {'>': 25}})                    # filter → KnowledgeGraph
-    .sort('age', ascending=False)                  # sort → KnowledgeGraph
-    .traverse('KNOWS', direction='outgoing')       # traverse → KnowledgeGraph
-    .get_nodes()                                   # materialize → ResultView or grouped dict
-```
-
-### Semantic search
-
-```python
-# Text-level API (recommended) — register model once, embed & search by column name
-graph.set_embedder(model)                                                    # register model (.dimension, .embed())
-graph.embed_texts('Article', 'summary')                                      # embed text column → stored as summary_emb
-graph.type_filter('Article').search_text('summary', 'find AI papers', top_k=10)  # text query search
-
-# Low-level vector API — bring your own vectors
-graph.set_embeddings('Article', 'summary', {id: vec, ...})             # store embeddings
-graph.type_filter('Article').vector_search('summary', qvec, top_k=10)  # similarity search
-graph.list_embeddings()                                                 # list all embedding stores
-graph.remove_embeddings('Article', 'summary')                           # remove an embedding store
-graph.get_embeddings('Article', 'summary')                              # retrieve all vectors for type
-graph.type_filter('Article').get_embeddings('summary')                  # retrieve vectors for selection
-graph.get_embedding('Article', 'summary', node_id)                      # single node vector (or None)
-# Cypher: text_score(n, 'summary', 'query text') — semantic search in Cypher, needs set_embedder()
-```
-
-### Introspection
-
-```python
-graph.schema()                                # → full graph overview (types, counts, connections, indexes)
-graph.connection_types()                      # → list of edge types with counts and endpoint types
-graph.properties('Person')                    # → per-property stats (type, non_null, unique, values)
-graph.properties('Person', max_values=50)     # → include values list for up to 50 unique values
-graph.neighbors_schema('Person')              # → outgoing/incoming connection topology
-graph.sample('Person', n=5)                   # → first N nodes as ResultView
-graph.indexes()                               # → all indexes with type info
-graph.agent_describe()                        # → XML string for LLM prompt context
-```
-
-### Algorithms
-
-```python
-graph.shortest_path(source_type, source_id, target_type, target_id)  # → {path, connections, length} | None
-graph.all_paths(source_type, source_id, target_type, target_id)      # → list[{path, connections, length}]
-graph.pagerank(top_k=10)                                             # → ResultView of {type, title, id, score}
-graph.betweenness_centrality(top_k=10)                               # → ResultView of {type, title, id, score}
-graph.louvain_communities()                                          # → {communities, modularity, num_communities}
-graph.connected_components()                                         # → list[list[node_dict]]
-```
-
----
-
 ## Schema Introspection
 
 Methods for exploring graph structure — what types exist, what properties they have, and how they connect. Useful for discovering an unfamiliar graph or building dynamic UIs.
@@ -402,7 +458,7 @@ The output includes:
 
 ## Cypher Queries
 
-A substantial Cypher subset. See the [Supported Cypher Subset](#supported-cypher-subset) table for exact coverage.
+A substantial Cypher subset. See [CYPHER.md](CYPHER.md) for the full reference with examples of every clause.
 
 > **Single-label note:** Each node has exactly one type. `labels(n)` returns a string, not a list. `SET n:OtherLabel` is not supported.
 
@@ -423,341 +479,20 @@ for row in result:
 df = graph.cypher("MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age", to_df=True)
 ```
 
-### WHERE Clause
+### Mutations
 
 ```python
-# Comparisons: =, <>, <, >, <=, >=
-graph.cypher("MATCH (n:Product) WHERE n.price >= 500 RETURN n.title, n.price")
-
-# Boolean operators: AND, OR, NOT
-graph.cypher("MATCH (n:Person) WHERE n.age > 25 AND NOT n.city = 'Oslo' RETURN n.name")
-
-# Null checks
-graph.cypher("MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n.name")
-
-# String predicates: CONTAINS, STARTS WITH, ENDS WITH
-graph.cypher("MATCH (n:Person) WHERE n.name CONTAINS 'ali' RETURN n.name")
-
-# IN lists
-graph.cypher("MATCH (n:Person) WHERE n.city IN ['Oslo', 'Bergen'] RETURN n.name")
-
-# Regex matching with =~
-graph.cypher("MATCH (n:Person) WHERE n.name =~ '(?i)^ali.*' RETURN n.name")
-graph.cypher("MATCH (n:Person) WHERE n.email =~ '.*@example\\.com$' RETURN n.name")
-```
-
-### Relationship Properties
-
-Relationships can have properties. Access them with `r.property` syntax:
-
-```python
-# Create relationships with properties
-graph.cypher("""
-    MATCH (p:Person {name: 'Alice'}), (m:Movie {title: 'Inception'})
-    CREATE (p)-[:RATED {score: 5, comment: 'Excellent'}]->(m)
-""")
-
-# Access, filter, aggregate, sort by relationship properties
-graph.cypher("MATCH (p)-[r:RATED]->(m) RETURN p.name, r.score, r.comment, type(r)")
-graph.cypher("MATCH (p)-[r:RATED]->(m) WHERE r.score >= 4 RETURN p.name, m.title")
-graph.cypher("MATCH (p)-[r:RATED]->(m) RETURN avg(r.score) AS avg_rating")
-graph.cypher("MATCH ()-[r:RATED]->(m) RETURN m.title, r.score ORDER BY r.score DESC")
-```
-
-### Aggregation
-
-```python
-graph.cypher("MATCH (n:Person) RETURN n.city, count(*) AS population ORDER BY population DESC")
-graph.cypher("MATCH (n:Person) RETURN avg(n.age) AS avg_age, min(n.age), max(n.age)")
-
-# DISTINCT
-graph.cypher("MATCH (n:Person) RETURN DISTINCT n.city")
-graph.cypher("MATCH (n:Person) RETURN count(DISTINCT n.city) AS unique_cities")
-```
-
-### WITH Clause
-
-```python
-graph.cypher("""
-    MATCH (p:Person)-[:KNOWS]->(f:Person)
-    WITH p, count(f) AS friend_count
-    WHERE friend_count > 3
-    RETURN p.name, friend_count
-    ORDER BY friend_count DESC
-""")
-```
-
-### OPTIONAL MATCH
-
-Left outer join — keeps rows even when no match:
-
-```python
-graph.cypher("""
-    MATCH (p:Person)
-    OPTIONAL MATCH (p)-[:KNOWS]->(f:Person)
-    RETURN p.name, count(f) AS friends
-""")
-```
-
-### Built-in Functions
-
-| Function | Description |
-|----------|-------------|
-| `toUpper(expr)` | Convert to uppercase |
-| `toLower(expr)` | Convert to lowercase |
-| `toString(expr)` | Convert to string |
-| `toInteger(expr)` | Convert to integer |
-| `toFloat(expr)` | Convert to float |
-| `size(expr)` | Length of string or list |
-| `type(r)` | Relationship type |
-| `id(n)` | Node ID |
-| `labels(n)` | Node type (string, not list — single-label) |
-| `coalesce(a, b, ...)` | First non-null argument |
-| `length(p)` | Path hop count |
-| `nodes(p)` | Nodes in a path |
-| `relationships(p)` | Relationships in a path |
-| `point(lat, lon)` | Create a geographic point |
-| `distance(p1, p2)` | Haversine great-circle distance (km) |
-| `wkt_contains(wkt, point)` | Point-in-polygon test |
-| `wkt_intersects(wkt1, wkt2)` | Geometry intersection test |
-| `wkt_centroid(wkt)` | Centroid of WKT geometry |
-| `latitude(point)` | Extract latitude from point |
-| `longitude(point)` | Extract longitude from point |
-| `text_score(n, prop, query)` | Semantic similarity (auto-embeds query text; requires `set_embedder()`) |
-| `text_score(n, prop, query, metric)` | With explicit metric (`'cosine'`, `'dot_product'`, `'euclidean'`) |
-
-### Spatial Functions
-
-Built-in spatial functions for geographic queries using the Haversine formula:
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `point(lat, lon)` | Point | Create a geographic point |
-| `distance(p1, p2)` | Float (km) | Haversine great-circle distance between two points |
-| `distance(lat1, lon1, lat2, lon2)` | Float (km) | Haversine distance (4-arg shorthand) |
-| `wkt_contains(wkt, point)` | Boolean | Point-in-polygon test |
-| `wkt_contains(wkt, lat, lon)` | Boolean | Point-in-polygon (3-arg shorthand) |
-| `wkt_intersects(wkt1, wkt2)` | Boolean | Geometry intersection test |
-| `wkt_centroid(wkt)` | Point | Centroid of WKT geometry |
-| `latitude(point)` | Float | Extract latitude component |
-| `longitude(point)` | Float | Extract longitude component |
-
-```python
-# Distance filtering — cities within 100km of Oslo
-graph.cypher("""
-    MATCH (n:City)
-    WHERE distance(point(n.latitude, n.longitude), point(59.91, 10.75)) < 100.0
-    RETURN n.name, distance(n.latitude, n.longitude, 59.91, 10.75) AS dist_km
-    ORDER BY dist_km
-""")
-
-# Spatial + graph traversal
-graph.cypher("""
-    MATCH (a:City)-[:CONNECTED_TO]->(b:City)
-    WHERE distance(point(a.lat, a.lon), point(b.lat, b.lon)) < 50.0
-    RETURN a.name, b.name
-""")
-
-# Point-in-polygon with WKT
-graph.cypher("""
-    MATCH (c:City), (a:Area)
-    WHERE wkt_contains(a.geometry, point(c.latitude, c.longitude))
-    RETURN c.name, a.name
-""")
-
-# Aggregation with spatial
-graph.cypher("""
-    MATCH (n:City)
-    RETURN avg(distance(point(n.latitude, n.longitude), point(59.91, 10.75))) AS avg_dist,
-           min(distance(point(n.latitude, n.longitude), point(59.91, 10.75))) AS min_dist
-""")
-```
-
-### Arithmetic
-
-```python
-graph.cypher("MATCH (n:Product) RETURN n.title, n.price * 1.25 AS price_with_tax")
-```
-
-### CASE Expressions
-
-```python
-# Generic form
-graph.cypher("""
-    MATCH (n:Person)
-    RETURN n.name,
-           CASE WHEN n.age >= 18 THEN 'adult' ELSE 'minor' END AS category
-""")
-
-# Simple form
-graph.cypher("""
-    MATCH (n:Person)
-    RETURN n.name,
-           CASE n.city WHEN 'Oslo' THEN 'capital' WHEN 'Bergen' THEN 'west coast' ELSE 'other' END AS region
-""")
-```
-
-### List Comprehensions
-
-`[x IN list WHERE predicate | expression]` syntax:
-
-```python
-# Map: double each number
-graph.cypher("UNWIND [1] AS _ RETURN [x IN [1, 2, 3, 4, 5] | x * 2] AS doubled")
-# [2, 4, 6, 8, 10]
-
-# Filter only
-graph.cypher("UNWIND [1] AS _ RETURN [x IN [1, 2, 3, 4, 5] WHERE x > 3] AS filtered")
-# [4, 5]
-
-# Filter + map
-graph.cypher("UNWIND [1] AS _ RETURN [x IN [1, 2, 3, 4, 5] WHERE x > 3 | x * 2] AS result")
-# [8, 10]
-
-# With collect() — transform aggregated values
-graph.cypher("""
-    MATCH (p:Person)
-    WITH collect(p.name) AS names
-    RETURN [x IN names | toUpper(x)] AS upper_names
-""")
-```
-
-> **Note:** List comprehensions require at least one row in the pipeline. Use `UNWIND [1] AS _` or a preceding `MATCH`/`WITH` to provide the row context.
-
-### Map Projections
-
-`n {.prop1, .prop2, alias: expr}` syntax — select specific properties from a node:
-
-```python
-# Select only name and age (returns a dict per row)
-graph.cypher("MATCH (p:Person) RETURN p {.name, .age} AS info")
-# [{'info': {'name': 'Alice', 'age': 30}}, {'info': {'name': 'Bob', 'age': 25}}]
-
-# Mix shorthand properties with computed values
-graph.cypher("""
-    MATCH (p:Person)-[:WORKS_AT]->(c:Company)
-    RETURN p {.name, .age, company: c.name} AS info
-""")
-
-# System properties (id, type) work too
-graph.cypher("MATCH (p:Person) RETURN p {.name, .type, .id} AS info LIMIT 1")
-# [{'info': {'name': 'Alice', 'type': 'Person', 'id': 1}}]
-```
-
-### Parameters
-
-```python
-graph.cypher(
-    "MATCH (n:Person) WHERE n.age > $min_age RETURN n.name, n.age",
-    params={'min_age': 25}
-)
-
-# Parameters in inline pattern properties
-graph.cypher(
-    "MATCH (n:Person {name: $name}) RETURN n.age",
-    params={'name': 'Alice'}
-)
-
-# Parameters with DataFrame output
-df = graph.cypher(
-    "MATCH (n:Person) WHERE n.age > $min_age RETURN n.name, n.age ORDER BY n.age",
-    params={'min_age': 20}, to_df=True
-)
-```
-
-### UNWIND
-
-Expand a list into rows:
-
-```python
-graph.cypher("UNWIND [1, 2, 3] AS x RETURN x, x * 2 AS doubled")
-```
-
-### UNION
-
-```python
-graph.cypher("""
-    MATCH (n:Person) WHERE n.city = 'Oslo' RETURN n.name AS name
-    UNION
-    MATCH (n:Person) WHERE n.age > 30 RETURN n.name AS name
-""")
-```
-
-### Variable-Length Paths
-
-```python
-# 1 to 3 hops
-graph.cypher("MATCH (a:Person)-[:KNOWS*1..3]->(b:Person) WHERE a.name = 'Alice' RETURN b.name")
-
-# Exact 2 hops
-graph.cypher("MATCH (a:Person)-[:KNOWS*2]->(b:Person) RETURN a.name, b.name")
-```
-
-### WHERE EXISTS
-
-Check for subpattern existence. Both brace `{ }` and parenthesis `(( ))` syntax are supported:
-
-```python
-# Brace syntax
-graph.cypher("MATCH (p:Person) WHERE EXISTS { (p)-[:KNOWS]->(:Person) } RETURN p.name")
-
-# Parenthesis syntax (equivalent)
-graph.cypher("MATCH (p:Person) WHERE EXISTS((p)-[:KNOWS]->(:Person)) RETURN p.name")
-
-# Negation
-graph.cypher("""
-    MATCH (p:Person)
-    WHERE NOT EXISTS { (p)-[:PURCHASED]->(:Product) }
-    RETURN p.name
-""")
-```
-
-### shortestPath()
-
-BFS shortest path between two nodes. Supports directed (`->`) and undirected (`-`) syntax:
-
-```python
-# Directed — only follows edges in their defined direction
-result = graph.cypher("""
-    MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Dave'}))
-    RETURN length(p), nodes(p), relationships(p), a.name, b.name
-""")
-
-# Undirected — traverses edges in both directions (same as fluent API)
-result = graph.cypher("""
-    MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]-(b:Person {name: 'Dave'}))
-    RETURN length(p), nodes(p), relationships(p)
-""")
-
-# No path → empty list (not an error)
-```
-
-**Path functions:** `length(p)` returns hop count, `nodes(p)` returns node list, `relationships(p)` returns edge type list.
-
-### CREATE / SET / DELETE / REMOVE / MERGE
-
-```python
-# CREATE — returns ResultView with .stats
+# CREATE
 result = graph.cypher("CREATE (n:Person {name: 'Alice', age: 30, city: 'Oslo'})")
 print(result.stats['nodes_created'])  # 1
 
-# CREATE relationship between existing nodes
-graph.cypher("""
-    MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
-    CREATE (a)-[:KNOWS]->(b)
-""")
+# SET
+graph.cypher("MATCH (n:Person {name: 'Bob'}) SET n.age = 26")
 
-# SET — update properties
-result = graph.cypher("MATCH (n:Person {name: 'Bob'}) SET n.age = 26, n.city = 'Stavanger'")
-print(result.stats['properties_set'])  # 2
-
-# DELETE — plain DELETE errors if node has relationships; DETACH removes all
+# DELETE / DETACH DELETE
 graph.cypher("MATCH (n:Person {name: 'Alice'}) DETACH DELETE n")
 
-# REMOVE — remove properties (id/type are immutable)
-graph.cypher("MATCH (n:Person {name: 'Alice'}) REMOVE n.city")
-
-# MERGE — match or create
+# MERGE
 graph.cypher("""
     MERGE (n:Person {name: 'Alice'})
     ON CREATE SET n.created = 'today'
@@ -767,8 +502,6 @@ graph.cypher("""
 
 ### Transactions
 
-Group multiple mutations into an atomic unit. On success, all changes apply; on exception, nothing changes.
-
 ```python
 with graph.begin() as tx:
     tx.cypher("CREATE (:Person {name: 'Alice', age: 30})")
@@ -777,44 +510,29 @@ with graph.begin() as tx:
         MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
         CREATE (a)-[:KNOWS]->(b)
     """)
-    # Commits automatically when the block exits normally
-    # Rolls back if an exception occurs
-
-# Manual control:
-tx = graph.begin()
-tx.cypher("CREATE (:Person {name: 'Charlie'})")
-tx.commit()   # or tx.rollback()
+    # Commits on exit; rolls back on exception
 ```
 
-### DataFrame Output
+### Parameters
 
 ```python
-df = graph.cypher("""
-    MATCH (p:Person)-[:KNOWS]->(f:Person)
-    WITH p, count(f) AS friends
-    RETURN p.name, p.city, friends
-    ORDER BY friends DESC
-""", to_df=True)
+graph.cypher(
+    "MATCH (n:Person) WHERE n.age > $min_age RETURN n.name, n.age",
+    params={'min_age': 25}
+)
 ```
 
-### EXPLAIN
+### Semantic search in Cypher
 
-Prefix any Cypher query with `EXPLAIN` to see the query plan without executing it:
+`text_score()` enables semantic search directly in Cypher. Requires `set_embedder()` + `embed_texts()`:
 
 ```python
-plan = graph.cypher("""
-    EXPLAIN
-    MATCH (p:Person)
-    OPTIONAL MATCH (p)-[:KNOWS]->(f:Person)
-    WITH p, count(f) AS friends
-    RETURN p.name, friends
+graph.cypher("""
+    MATCH (n:Article)
+    WHERE text_score(n, 'summary', 'machine learning') > 0.8
+    RETURN n.title, text_score(n, 'summary', 'machine learning') AS score
+    ORDER BY score DESC LIMIT 10
 """)
-print(plan)
-# Query Plan:
-#   1. NodeScan (MATCH) :Person
-#   2. FusedOptionalMatchAggregate (optimized OPTIONAL MATCH + count)
-#   3. Projection (RETURN) [p.name, friends]
-# Optimizations: optional_match_fusion=1
 ```
 
 ### Supported Cypher Subset
@@ -824,14 +542,11 @@ print(plan)
 | **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN` |
 | **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val}`, `p = shortestPath(...)` |
 | **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern }`, `EXISTS(( pattern ))` |
-| **RETURN** | `n.prop`, `r.prop`, `AS` aliases, `DISTINCT`, arithmetic `+`/`-`/`*`/`/`, map projections `n {.prop1, .prop2}` |
-| **Aggregation** | `count(*)`, `count(expr)`, `sum`, `avg`/`mean`, `min`, `max`, `collect`, `std` |
-| **Expressions** | `CASE WHEN...THEN...ELSE...END`, `$param`, `[x IN list WHERE ... \| expr]` |
-| **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `length`, `type`, `id`, `labels`, `coalesce`, `nodes(p)`, `relationships(p)` |
-| **Spatial** | `point(lat, lon)`, `distance(p1, p2)`, `wkt_contains(wkt, point)`, `wkt_intersects(wkt1, wkt2)`, `wkt_centroid(wkt)`, `latitude(point)`, `longitude(point)` |
-| **Semantic** | `text_score(n, prop, query [, metric])` — auto-embeds query via `set_embedder()`, cosine/dot_product/euclidean |
-| **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
-| **Not supported** | `CALL`/stored procedures, `FOREACH`, subqueries, `SET n:Label` (label mutation), `REMOVE n:Label`, multi-label |
+| **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `type`, `id`, `labels`, `coalesce`, `count`, `sum`, `avg`, `min`, `max`, `collect`, `std`, `text_score` |
+| **Spatial** | `point`, `distance`, `wkt_contains`, `wkt_intersects`, `wkt_centroid`, `latitude`, `longitude` |
+| **Not supported** | `CALL`/stored procedures, `FOREACH`, subqueries, `SET n:Label` (label mutation), multi-label |
+
+See [CYPHER.md](CYPHER.md) for full examples of every feature.
 
 ---
 
@@ -1054,104 +769,6 @@ graph.match_pattern('(a:Person)-[:KNOWS]->(b:Person)', max_matches=100)
 
 ---
 
-## Graph Algorithms
-
-### Shortest Path
-
-```python
-result = graph.shortest_path(source_type='Person', source_id=1, target_type='Person', target_id=100)
-if result:
-    for node in result["path"]:
-        print(f"{node['type']}: {node['title']}")
-    print(f"Connections: {result['connections']}")
-    print(f"Path length: {result['length']}")
-```
-
-Lightweight variants when you don't need full path data:
-
-```python
-graph.shortest_path_length(...)    # → int | None (hop count only)
-graph.shortest_path_ids(...)       # → list[id] | None (node IDs along path)
-graph.shortest_path_indices(...)   # → list[int] | None (raw graph indices, fastest)
-```
-
-All path methods support `connection_types`, `via_types`, and `timeout_ms` for filtering and safety.
-
-Batch variant for computing many distances at once:
-
-```python
-distances = graph.shortest_path_lengths_batch('Person', [(1, 5), (2, 8), (3, 10)])
-# → [2, None, 5]  (None where no path exists, same order as input)
-```
-
-Much faster than calling `shortest_path_length` in a loop — builds the adjacency list once.
-
-### All Paths
-
-```python
-paths = graph.all_paths(
-    source_type='Play', source_id=1,
-    target_type='Wellbore', target_id=100,
-    max_hops=4,
-    max_results=100  # Prevent OOM on dense graphs
-)
-```
-
-### Connected Components
-
-```python
-components = graph.connected_components()
-# Returns list of lists: [[node_dicts...], [node_dicts...], ...]
-print(f"Found {len(components)} connected components")
-print(f"Largest component: {len(components[0])} nodes")
-
-graph.are_connected(source_type='Person', source_id=1, target_type='Person', target_id=100)
-```
-
-### Centrality Algorithms
-
-All centrality methods return a `ResultView` of `{type, title, id, score}` rows, sorted by score descending.
-
-```python
-graph.betweenness_centrality(top_k=10)
-graph.betweenness_centrality(normalized=True, sample_size=500)
-graph.pagerank(top_k=10, damping_factor=0.85)
-graph.degree_centrality(top_k=10)
-graph.closeness_centrality(top_k=10)
-
-# Alternative output formats
-graph.pagerank(as_dict=True)      # → {1: 0.45, 2: 0.32, ...} (keyed by id)
-graph.pagerank(to_df=True)        # → DataFrame with type, title, id, score columns
-```
-
-### Community Detection
-
-```python
-# Louvain modularity optimization (recommended)
-result = graph.louvain_communities()
-# {'communities': {0: [{type, title, id}, ...], 1: [...]},
-#  'modularity': 0.45, 'num_communities': 2}
-
-for comm_id, members in result['communities'].items():
-    names = [m['title'] for m in members]
-    print(f"Community {comm_id}: {names}")
-
-# With edge weights and resolution tuning
-result = graph.louvain_communities(weight_property='strength', resolution=1.5)
-
-# Label propagation (faster, less precise)
-result = graph.label_propagation(max_iterations=100)
-```
-
-### Node Degrees
-
-```python
-degrees = graph.type_filter('Person').get_degrees()
-# Returns: {'Alice': 5, 'Bob': 3, ...}
-```
-
----
-
 ## Semantic Search
 
 Store embedding vectors alongside nodes and query them with fast similarity search. Embeddings are stored separately from node properties — they don't appear in `get_nodes()`, `to_df()`, or regular Cypher property access.
@@ -1326,9 +943,107 @@ Embeddings persist across `save()`/`load()` cycles automatically.
 
 ---
 
+## Graph Algorithms
+
+### Shortest Path
+
+```python
+result = graph.shortest_path(source_type='Person', source_id=1, target_type='Person', target_id=100)
+if result:
+    for node in result["path"]:
+        print(f"{node['type']}: {node['title']}")
+    print(f"Connections: {result['connections']}")
+    print(f"Path length: {result['length']}")
+```
+
+Lightweight variants when you don't need full path data:
+
+```python
+graph.shortest_path_length(...)    # → int | None (hop count only)
+graph.shortest_path_ids(...)       # → list[id] | None (node IDs along path)
+graph.shortest_path_indices(...)   # → list[int] | None (raw graph indices, fastest)
+```
+
+All path methods support `connection_types`, `via_types`, and `timeout_ms` for filtering and safety.
+
+Batch variant for computing many distances at once:
+
+```python
+distances = graph.shortest_path_lengths_batch('Person', [(1, 5), (2, 8), (3, 10)])
+# → [2, None, 5]  (None where no path exists, same order as input)
+```
+
+Much faster than calling `shortest_path_length` in a loop — builds the adjacency list once.
+
+### All Paths
+
+```python
+paths = graph.all_paths(
+    source_type='Play', source_id=1,
+    target_type='Wellbore', target_id=100,
+    max_hops=4,
+    max_results=100  # Prevent OOM on dense graphs
+)
+```
+
+### Connected Components
+
+```python
+components = graph.connected_components()
+# Returns list of lists: [[node_dicts...], [node_dicts...], ...]
+print(f"Found {len(components)} connected components")
+print(f"Largest component: {len(components[0])} nodes")
+
+graph.are_connected(source_type='Person', source_id=1, target_type='Person', target_id=100)
+```
+
+### Centrality Algorithms
+
+All centrality methods return a `ResultView` of `{type, title, id, score}` rows, sorted by score descending.
+
+```python
+graph.betweenness_centrality(top_k=10)
+graph.betweenness_centrality(normalized=True, sample_size=500)
+graph.pagerank(top_k=10, damping_factor=0.85)
+graph.degree_centrality(top_k=10)
+graph.closeness_centrality(top_k=10)
+
+# Alternative output formats
+graph.pagerank(as_dict=True)      # → {1: 0.45, 2: 0.32, ...} (keyed by id)
+graph.pagerank(to_df=True)        # → DataFrame with type, title, id, score columns
+```
+
+### Community Detection
+
+```python
+# Louvain modularity optimization (recommended)
+result = graph.louvain_communities()
+# {'communities': {0: [{type, title, id}, ...], 1: [...]},
+#  'modularity': 0.45, 'num_communities': 2}
+
+for comm_id, members in result['communities'].items():
+    names = [m['title'] for m in members]
+    print(f"Community {comm_id}: {names}")
+
+# With edge weights and resolution tuning
+result = graph.louvain_communities(weight_property='strength', resolution=1.5)
+
+# Label propagation (faster, less precise)
+result = graph.label_propagation(max_iterations=100)
+```
+
+### Node Degrees
+
+```python
+degrees = graph.type_filter('Person').get_degrees()
+# Returns: {'Alice': 5, 'Bob': 3, ...}
+```
+
+---
+
 ## Spatial Operations
 
-> Spatial queries are also available in Cypher via `point()`, `distance()`, `wkt_contains()`, `wkt_intersects()`, and `wkt_centroid()`. See [Spatial Functions](#spatial-functions).
+> Spatial queries are also available in Cypher via `point()`, `distance()`, `wkt_contains()`, `wkt_intersects()`, and `wkt_centroid()`. See [CYPHER.md](CYPHER.md#spatial-functions).
 
 ### Bounding Box
 
@@ -1521,95 +1236,6 @@ For concurrent access from multiple threads, mutations (`add_nodes`, `CREATE`/`S
 
 ---
 
-## Using with AI Agents
-
-KGLite is designed to work as a self-contained knowledge layer for AI agents. No external database, no server process, no network — just a Python object with a Cypher interface that an agent can query directly.
-
-### The idea
-
-1. **Load or build a graph** from your data (DataFrames, CSVs, APIs)
-2. **Give the agent `agent_describe()`** — a single XML string containing the full schema, Cypher reference, property values, and embedding info
-3. **The agent writes Cypher queries** using `graph.cypher()` — no other API to learn
-4. **Semantic search works natively** — `text_score()` in Cypher, backed by any embedding model you wrap
-
-No vector database, no graph database, no infrastructure. The graph lives in memory and persists to a single `.kgl` file.
-
-### Quick setup
-
-```python
-xml = graph.agent_describe()  # schema + Cypher reference + property values as XML
-prompt = f"You have a knowledge graph:\n{xml}\nAnswer the user's question using graph.cypher()."
-```
-
-### MCP server
-
-Expose the graph to any MCP-compatible agent (Claude, etc.) with a thin server:
-
-```python
-from mcp.server.fastmcp import FastMCP
-import kglite
-
-graph = kglite.load("my_graph.kgl")
-mcp = FastMCP("knowledge-graph")
-
-@mcp.tool()
-def describe() -> str:
-    """Get the graph schema and Cypher reference."""
-    return graph.agent_describe()
-
-@mcp.tool()
-def query(cypher: str) -> str:
-    """Run a Cypher query and return results."""
-    result = graph.cypher(cypher, to_df=True)
-    return result.to_markdown()
-
-mcp.run(transport="stdio")
-```
-
-The agent calls `describe()` once to learn the schema, then uses `query()` for everything — traversals, aggregations, filtering, and semantic search via `text_score()`.
-
-### Semantic search in agent workflows
-
-With an embedding model registered, agents can do semantic search directly in Cypher:
-
-```python
-# Wrap any local or remote model — only needs .dimension and .embed()
-class OpenAIEmbedder:
-    dimension = 1536
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        response = client.embeddings.create(input=texts, model="text-embedding-3-small")
-        return [e.embedding for e in response.data]
-
-graph.set_embedder(OpenAIEmbedder())
-graph.embed_texts("Article", "summary")  # one-time: vectorize all articles
-
-# Now agents can use text_score() in Cypher — no extra API needed
-graph.cypher("""
-    MATCH (a:Article)
-    WHERE text_score(a, 'summary', 'climate policy') > 0.5
-    RETURN a.title, text_score(a, 'summary', 'climate policy') AS score
-    ORDER BY score DESC LIMIT 10
-""")
-```
-
-The model wrapper pattern works with any provider (OpenAI, Cohere, local sentence-transformers, Ollama) — see the [Semantic Search](#semantic-search) section for a full load/unload lifecycle example.
-
-### Tips for agent prompts
-
-1. **Start with `agent_describe()`** — gives the agent schema, types, property names with sample values, counts, and full Cypher syntax in one XML string
-2. **Use `properties(type)`** for deeper column discovery — shows types, nullability, unique counts, and sample values
-3. **Use `sample(type, n=3)`** before writing queries — lets the agent see real data shapes
-4. **Prefer Cypher** over the fluent API in agent contexts — closer to natural language, easier for LLMs to generate
-5. **Use parameters** (`params={'x': val}`) to prevent injection when passing user input to queries
-6. **ResultView is lazy** — agents can call `len(result)` to check row count without converting all rows
-
-### What `agent_describe()` returns
-
-- **Dynamic** (per-graph): node types with counts, property names/types/sample values, connection types with endpoints, indexes, field aliases, embedding stores
-- **Static** (always the same): supported Cypher clauses, WHERE operators, functions (including spatial and semantic), mutation syntax, notes
-
----
-
 ## Graph Maintenance
 
 After heavy mutation workloads (DELETE, REMOVE), internal storage accumulates tombstones. Monitor with `graph_info()`.
@@ -1699,4 +1325,90 @@ graph.cypher("""
     RETURN p.name, avg(r.score) AS avg_rating, count(m) AS movies_rated
     ORDER BY avg_rating DESC
 """)
+```
+
+---
+
+## API Quick Reference
+
+### Graph lifecycle
+
+```python
+graph = kglite.KnowledgeGraph()     # create
+graph.save("file.kgl")              # persist
+graph = kglite.load("file.kgl")     # reload
+graph.graph_info()                   # → dict with node_count, edge_count, fragmentation_ratio, ...
+graph.get_schema()                   # → str summary of types and connections
+graph.node_types                     # → ['Person', 'Product', ...]
+```
+
+### Cypher (recommended for most tasks)
+
+```python
+graph.cypher("MATCH (n:Person) RETURN n.name")                          # → ResultView
+graph.cypher("MATCH (n:Person) RETURN n.name", to_df=True)              # → DataFrame
+graph.cypher("MATCH (n:Person) RETURN n.name", params={'x': 1})         # parameterized
+graph.cypher("CREATE (:Person {name: 'Alice'})")                        # → ResultView (.stats has counts)
+```
+
+### Data loading (fluent API)
+
+```python
+graph.add_nodes(data=df, node_type='T', unique_id_field='id')           # → report dict
+graph.add_connections(data=df, connection_type='REL',
+    source_type='A', source_id_field='src',
+    target_type='B', target_id_field='tgt')                              # → report dict
+```
+
+### Selection chain (fluent API)
+
+```python
+graph.type_filter('Person')                        # select by type → KnowledgeGraph
+    .filter({'age': {'>': 25}})                    # filter → KnowledgeGraph
+    .sort('age', ascending=False)                  # sort → KnowledgeGraph
+    .traverse('KNOWS', direction='outgoing')       # traverse → KnowledgeGraph
+    .get_nodes()                                   # materialize → ResultView or grouped dict
+```
+
+### Semantic search
+
+```python
+# Text-level API (recommended) — register model once, embed & search by column name
+graph.set_embedder(model)                                                    # register model (.dimension, .embed())
+graph.embed_texts('Article', 'summary')                                      # embed text column → stored as summary_emb
+graph.type_filter('Article').search_text('summary', 'find AI papers', top_k=10)  # text query search
+
+# Low-level vector API — bring your own vectors
+graph.set_embeddings('Article', 'summary', {id: vec, ...})             # store embeddings
+graph.type_filter('Article').vector_search('summary', qvec, top_k=10)  # similarity search
+graph.list_embeddings()                                                 # list all embedding stores
+graph.remove_embeddings('Article', 'summary')                           # remove an embedding store
+graph.get_embeddings('Article', 'summary')                              # retrieve all vectors for type
+graph.type_filter('Article').get_embeddings('summary')                  # retrieve vectors for selection
+graph.get_embedding('Article', 'summary', node_id)                      # single node vector (or None)
+# Cypher: text_score(n, 'summary', 'query text') — semantic search in Cypher, needs set_embedder()
+```
+
+### Introspection
+
+```python
+graph.schema()                                # → full graph overview (types, counts, connections, indexes)
+graph.connection_types()                      # → list of edge types with counts and endpoint types
+graph.properties('Person')                    # → per-property stats (type, non_null, unique, values)
+graph.properties('Person', max_values=50)     # → include values list for up to 50 unique values
+graph.neighbors_schema('Person')              # → outgoing/incoming connection topology
+graph.sample('Person', n=5)                   # → first N nodes as ResultView
+graph.indexes()                               # → all indexes with type info
+graph.agent_describe()                        # → XML string for LLM prompt context
+```
+
+### Algorithms
+
+```python
+graph.shortest_path(source_type, source_id, target_type, target_id)  # → {path, connections, length} | None
+graph.all_paths(source_type, source_id, target_type, target_id)      # → list[{path, connections, length}]
+graph.pagerank(top_k=10)                                             # → ResultView of {type, title, id, score}
+graph.betweenness_centrality(top_k=10)                               # → ResultView of {type, title, id, score}
+graph.louvain_communities()                                          # → {communities, modularity, num_communities}
+graph.connected_components()                                         # → list[list[node_dict]]
 ```
