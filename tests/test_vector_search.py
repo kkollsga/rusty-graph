@@ -995,3 +995,191 @@ class TestEmbedderLifecycle:
 
         assert model.load_count == 1
         assert model.unload_count == 1
+
+
+# ── text_score() in Cypher (AST rewrite to vector_score) ──────────────────
+
+
+class TestCypherTextScore:
+    """Tests for text_score() Cypher function."""
+
+    def _make_graph(self):
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame(
+            {
+                "id": [1, 2, 3, 4, 5],
+                "title": ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"],
+                "summary": [
+                    "artificial intelligence",
+                    "football game",
+                    "machine learning",
+                    "quantum physics",
+                    "basketball match",
+                ],
+            }
+        )
+        graph.add_nodes(df, "Article", "id", "title", ["summary"])
+        model = MockEmbedder(dimension=8)
+        graph.set_embedder(model)
+        graph.embed_texts("Article", "summary", show_progress=False)
+        return graph, model
+
+    def test_text_score_in_return(self):
+        """text_score in RETURN with ORDER BY + LIMIT."""
+        graph, _ = self._make_graph()
+        result = graph.cypher(
+            "MATCH (n:Article) "
+            "RETURN n.title AS title, "
+            "text_score(n, 'summary', 'artificial intelligence') AS score "
+            "ORDER BY score DESC LIMIT 3",
+            to_df=True,
+        )
+        assert len(result) == 3
+        # The same text should score highest (cosine = 1.0)
+        assert result.iloc[0]["title"] == "Alpha"
+        assert result.iloc[0]["score"] == pytest.approx(1.0, abs=1e-5)
+
+    def test_text_score_in_where(self):
+        """text_score in WHERE clause threshold filter."""
+        graph, _ = self._make_graph()
+        result = graph.cypher(
+            "MATCH (n:Article) "
+            "WHERE text_score(n, 'summary', 'artificial intelligence') > 0.99 "
+            "RETURN n.title AS title",
+            to_df=True,
+        )
+        titles = result["title"].tolist()
+        assert "Alpha" in titles
+
+    def test_text_score_with_param(self):
+        """text_score with $param for query text."""
+        graph, _ = self._make_graph()
+        result = graph.cypher(
+            "MATCH (n:Article) "
+            "RETURN n.title AS title, "
+            "text_score(n, 'summary', $query) AS score "
+            "ORDER BY score DESC LIMIT 1",
+            params={"query": "artificial intelligence"},
+            to_df=True,
+        )
+        assert result.iloc[0]["title"] == "Alpha"
+
+    def test_text_score_matches_vector_score(self):
+        """text_score produces same results as manual embed + vector_score."""
+        graph, model = self._make_graph()
+        query = "artificial intelligence"
+        query_vec = model.embed([query])[0]
+
+        ts_result = graph.cypher(
+            "MATCH (n:Article) "
+            "RETURN n.title, text_score(n, 'summary', $q) AS score "
+            "ORDER BY score DESC",
+            params={"q": query},
+            to_df=True,
+        )
+        vs_result = graph.cypher(
+            "MATCH (n:Article) "
+            "RETURN n.title, vector_score(n, 'summary_emb', $v) AS score "
+            "ORDER BY score DESC",
+            params={"v": query_vec},
+            to_df=True,
+        )
+        assert len(ts_result) == len(vs_result)
+        for i in range(len(ts_result)):
+            assert ts_result.iloc[i]["n.title"] == vs_result.iloc[i]["n.title"]
+            assert ts_result.iloc[i]["score"] == pytest.approx(
+                vs_result.iloc[i]["score"], abs=1e-5
+            )
+
+    def test_text_score_no_embedder_error(self):
+        """text_score without set_embedder raises helpful error."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1], "title": ["A"], "summary": ["hello"]})
+        graph.add_nodes(df, "Article", "id", "title", ["summary"])
+        graph.set_embeddings("Article", "summary_emb", {1: [1.0, 0.0, 0.0]})
+
+        with pytest.raises(RuntimeError, match="set_embedder"):
+            graph.cypher(
+                "MATCH (n:Article) "
+                "RETURN text_score(n, 'summary', 'hello') AS score"
+            )
+
+    def test_text_score_wrong_arg_count(self):
+        """text_score with wrong number of args raises clear error."""
+        graph, _ = self._make_graph()
+        with pytest.raises(ValueError, match="3 arguments"):
+            graph.cypher(
+                "MATCH (n:Article) "
+                "RETURN text_score(n, 'summary') AS score"
+            )
+
+    def test_text_score_non_string_column(self):
+        """text_score with non-string column name raises."""
+        graph, _ = self._make_graph()
+        with pytest.raises(ValueError, match="string literal"):
+            graph.cypher(
+                "MATCH (n:Article) "
+                "RETURN text_score(n, n.summary, 'hello') AS score"
+            )
+
+    def test_text_score_fused_topk(self):
+        """text_score benefits from fused top-k optimization."""
+        graph, _ = self._make_graph()
+        plan = graph.cypher(
+            "EXPLAIN MATCH (n:Article) "
+            "RETURN n.title AS title, "
+            "text_score(n, 'summary', 'artificial intelligence') AS score "
+            "ORDER BY score DESC LIMIT 2"
+        )
+        assert "FusedVectorScoreTopK" in plan
+
+    def test_text_score_load_unload_lifecycle(self):
+        """text_score triggers embedder load/unload lifecycle."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame(
+            {
+                "id": [1, 2],
+                "title": ["A", "B"],
+                "text": ["hello", "world"],
+            }
+        )
+        graph.add_nodes(df, "Node", "id", "title", ["text"])
+        model = MockEmbedderWithLifecycle(dimension=3)
+        graph.set_embedder(model)
+        graph.embed_texts("Node", "text", show_progress=False)
+        model.load_count = 0
+        model.unload_count = 0
+
+        graph.cypher(
+            "MATCH (n:Node) "
+            "RETURN text_score(n, 'text', 'hello') AS score"
+        )
+        assert model.load_count == 1
+        assert model.unload_count == 1
+
+    def test_text_score_with_property_filter(self):
+        """text_score combined with WHERE property filter."""
+        graph, _ = self._make_graph()
+        graph.cypher("MATCH (n:Article) WHERE n.id = 1 SET n.category = 'tech'")
+        graph.cypher("MATCH (n:Article) WHERE n.id = 3 SET n.category = 'tech'")
+
+        result = graph.cypher(
+            "MATCH (n:Article) "
+            "WHERE n.category = 'tech' "
+            "RETURN n.title, "
+            "text_score(n, 'summary', 'machine learning') AS score "
+            "ORDER BY score DESC",
+            to_df=True,
+        )
+        assert len(result) == 2
+        titles = result["n.title"].tolist()
+        assert "Alpha" in titles or "Gamma" in titles
+
+    def test_text_score_regular_queries_unaffected(self):
+        """Regular queries without text_score work normally."""
+        graph, _ = self._make_graph()
+        result = graph.cypher(
+            "MATCH (n:Article) RETURN n.title LIMIT 3",
+            to_df=True,
+        )
+        assert len(result) == 3

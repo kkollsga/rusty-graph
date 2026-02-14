@@ -1653,6 +1653,21 @@ class KnowledgeGraph:
                 MATCH (n:Person) WHERE n.name = 'Alice'
                 SET n.city = 'Oslo', n.age = 31
             ''')
+
+            # Semantic search with text_score (requires set_embedder + embed_texts)
+            results = graph.cypher('''
+                MATCH (n:Article)
+                RETURN n.title,
+                       text_score(n, 'summary', 'machine learning') AS score
+                ORDER BY score DESC LIMIT 10
+            ''', to_df=True)
+
+            # text_score with parameter
+            graph.cypher('''
+                MATCH (n:Article)
+                WHERE text_score(n, 'summary', $query) > 0.8
+                RETURN n.title
+            ''', params={'query': 'artificial intelligence'})
         """
         ...
 

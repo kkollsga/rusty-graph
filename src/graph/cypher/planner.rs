@@ -576,6 +576,340 @@ fn estimate_expression_cost(expr: &Expression) -> u32 {
 }
 
 // ============================================================================
+// text_score → vector_score AST Rewrite
+// ============================================================================
+
+/// Collected texts that the caller must embed before execution.
+/// Each entry is `(param_name, query_text)` — the caller embeds the text and
+/// inserts the resulting vector into the params map under `param_name`.
+pub struct TextScoreRewrite {
+    pub texts_to_embed: Vec<(String, String)>,
+}
+
+/// Walk the AST and rewrite all `text_score(node, col, query_text)` calls
+/// to `vector_score(node, col_emb, $__ts_N)`.
+///
+/// The text argument can be a string literal or a `$parameter` (resolved from
+/// `params`).  Returns the collected texts so the caller can embed them and
+/// inject the resulting vectors into the params map before optimization.
+pub fn rewrite_text_score(
+    query: &mut CypherQuery,
+    params: &HashMap<String, Value>,
+) -> Result<TextScoreRewrite, String> {
+    let mut collector = TextScoreCollector {
+        counter: 0,
+        texts_to_embed: Vec::new(),
+    };
+
+    for clause in &mut query.clauses {
+        match clause {
+            Clause::Return(r) => {
+                for item in &mut r.items {
+                    collector.rewrite_expr(&mut item.expression, params)?;
+                }
+            }
+            Clause::Where(w) => {
+                collector.rewrite_pred(&mut w.predicate, params)?;
+            }
+            Clause::With(w) => {
+                for item in &mut w.items {
+                    collector.rewrite_expr(&mut item.expression, params)?;
+                }
+                if let Some(ref mut wh) = w.where_clause {
+                    collector.rewrite_pred(&mut wh.predicate, params)?;
+                }
+            }
+            Clause::OrderBy(o) => {
+                for item in &mut o.items {
+                    collector.rewrite_expr(&mut item.expression, params)?;
+                }
+            }
+            Clause::Unwind(u) => {
+                collector.rewrite_expr(&mut u.expression, params)?;
+            }
+            Clause::Delete(d) => {
+                for expr in &mut d.expressions {
+                    collector.rewrite_expr(expr, params)?;
+                }
+            }
+            Clause::Set(s) => {
+                for item in &mut s.items {
+                    if let SetItem::Property {
+                        ref mut expression, ..
+                    } = item
+                    {
+                        collector.rewrite_expr(expression, params)?;
+                    }
+                }
+            }
+            Clause::Create(c) => {
+                for pattern in &mut c.patterns {
+                    for element in &mut pattern.elements {
+                        match element {
+                            CreateElement::Node(n) => {
+                                for (_, expr) in &mut n.properties {
+                                    collector.rewrite_expr(expr, params)?;
+                                }
+                            }
+                            CreateElement::Edge(e) => {
+                                for (_, expr) in &mut e.properties {
+                                    collector.rewrite_expr(expr, params)?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Clause::Merge(m) => {
+                for element in &mut m.pattern.elements {
+                    match element {
+                        CreateElement::Node(n) => {
+                            for (_, expr) in &mut n.properties {
+                                collector.rewrite_expr(expr, params)?;
+                            }
+                        }
+                        CreateElement::Edge(e) => {
+                            for (_, expr) in &mut e.properties {
+                                collector.rewrite_expr(expr, params)?;
+                            }
+                        }
+                    }
+                }
+                if let Some(ref mut items) = m.on_create {
+                    for item in items {
+                        if let SetItem::Property {
+                            ref mut expression, ..
+                        } = item
+                        {
+                            collector.rewrite_expr(expression, params)?;
+                        }
+                    }
+                }
+                if let Some(ref mut items) = m.on_match {
+                    for item in items {
+                        if let SetItem::Property {
+                            ref mut expression, ..
+                        } = item
+                        {
+                            collector.rewrite_expr(expression, params)?;
+                        }
+                    }
+                }
+            }
+            Clause::Skip(s) => {
+                collector.rewrite_expr(&mut s.count, params)?;
+            }
+            Clause::Limit(l) => {
+                collector.rewrite_expr(&mut l.count, params)?;
+            }
+            // Match/OptionalMatch: patterns only, no function call expressions
+            // Remove: no expressions
+            // Fused clauses: don't exist yet (created by optimize, which runs after rewrite)
+            _ => {}
+        }
+    }
+
+    Ok(TextScoreRewrite {
+        texts_to_embed: collector.texts_to_embed,
+    })
+}
+
+struct TextScoreCollector {
+    counter: usize,
+    texts_to_embed: Vec<(String, String)>,
+}
+
+impl TextScoreCollector {
+    /// Rewrite an expression in-place.  Turns `text_score(...)` into `vector_score(...)`.
+    fn rewrite_expr(
+        &mut self,
+        expr: &mut Expression,
+        params: &HashMap<String, Value>,
+    ) -> Result<(), String> {
+        match expr {
+            Expression::FunctionCall { name, args, .. }
+                if name.eq_ignore_ascii_case("text_score") =>
+            {
+                if args.len() != 3 && args.len() != 4 {
+                    return Err(
+                        "text_score() requires 3 arguments: (node, text_column, query_text) \
+                         with optional 4th metric argument"
+                            .into(),
+                    );
+                }
+
+                // arg[1]: text column — must be a string literal
+                let col_name =
+                    match &args[1] {
+                        Expression::Literal(Value::String(s)) => s.clone(),
+                        _ => return Err(
+                            "text_score(): second argument must be a string literal column name"
+                                .into(),
+                        ),
+                    };
+
+                // arg[2]: query text — string literal or $param
+                let query_text = match &args[2] {
+                    Expression::Literal(Value::String(s)) => s.clone(),
+                    Expression::Parameter(param_name) => match params.get(param_name.as_str()) {
+                        Some(Value::String(s)) => s.clone(),
+                        Some(_) => {
+                            return Err(format!(
+                                "text_score(): parameter ${} must be a string",
+                                param_name
+                            ))
+                        }
+                        None => {
+                            return Err(format!(
+                                "text_score(): parameter ${} not found",
+                                param_name
+                            ))
+                        }
+                    },
+                    _ => {
+                        return Err(
+                            "text_score(): third argument must be a string literal or $parameter"
+                                .into(),
+                        )
+                    }
+                };
+
+                // Deduplicate: reuse param if same query text already collected
+                let param_name = if let Some((existing, _)) =
+                    self.texts_to_embed.iter().find(|(_, t)| t == &query_text)
+                {
+                    existing.clone()
+                } else {
+                    let pname = format!("__ts_{}", self.counter);
+                    self.counter += 1;
+                    self.texts_to_embed.push((pname.clone(), query_text));
+                    pname
+                };
+
+                // Rewrite: text_score(n, 'summary', ...) → vector_score(n, 'summary_emb', $__ts_N)
+                *name = "vector_score".to_string();
+                args[1] = Expression::Literal(Value::String(format!("{}_emb", col_name)));
+                args[2] = Expression::Parameter(param_name);
+
+                Ok(())
+            }
+            Expression::FunctionCall { args, .. } => {
+                for arg in args.iter_mut() {
+                    self.rewrite_expr(arg, params)?;
+                }
+                Ok(())
+            }
+            Expression::Add(l, r)
+            | Expression::Subtract(l, r)
+            | Expression::Multiply(l, r)
+            | Expression::Divide(l, r) => {
+                self.rewrite_expr(l, params)?;
+                self.rewrite_expr(r, params)?;
+                Ok(())
+            }
+            Expression::Negate(inner) => self.rewrite_expr(inner, params),
+            Expression::ListLiteral(items) => {
+                for item in items.iter_mut() {
+                    self.rewrite_expr(item, params)?;
+                }
+                Ok(())
+            }
+            Expression::Case {
+                operand,
+                when_clauses,
+                else_expr,
+            } => {
+                if let Some(op) = operand {
+                    self.rewrite_expr(op, params)?;
+                }
+                for (cond, result) in when_clauses.iter_mut() {
+                    match cond {
+                        CaseCondition::Expression(e) => self.rewrite_expr(e, params)?,
+                        CaseCondition::Predicate(p) => self.rewrite_pred(p, params)?,
+                    }
+                    self.rewrite_expr(result, params)?;
+                }
+                if let Some(el) = else_expr {
+                    self.rewrite_expr(el, params)?;
+                }
+                Ok(())
+            }
+            Expression::IndexAccess { expr, index } => {
+                self.rewrite_expr(expr, params)?;
+                self.rewrite_expr(index, params)?;
+                Ok(())
+            }
+            Expression::ListComprehension {
+                list_expr,
+                filter,
+                map_expr,
+                ..
+            } => {
+                self.rewrite_expr(list_expr, params)?;
+                if let Some(f) = filter {
+                    self.rewrite_pred(f, params)?;
+                }
+                if let Some(m) = map_expr {
+                    self.rewrite_expr(m, params)?;
+                }
+                Ok(())
+            }
+            Expression::MapProjection { items, .. } => {
+                for item in items.iter_mut() {
+                    if let MapProjectionItem::Alias { expr, .. } = item {
+                        self.rewrite_expr(expr, params)?;
+                    }
+                }
+                Ok(())
+            }
+            // Leaf nodes
+            Expression::PropertyAccess { .. }
+            | Expression::Variable(_)
+            | Expression::Literal(_)
+            | Expression::Parameter(_)
+            | Expression::Star => Ok(()),
+        }
+    }
+
+    /// Rewrite predicates in-place (for WHERE clauses).
+    fn rewrite_pred(
+        &mut self,
+        pred: &mut Predicate,
+        params: &HashMap<String, Value>,
+    ) -> Result<(), String> {
+        match pred {
+            Predicate::Comparison { left, right, .. } => {
+                self.rewrite_expr(left, params)?;
+                self.rewrite_expr(right, params)?;
+                Ok(())
+            }
+            Predicate::And(l, r) | Predicate::Or(l, r) => {
+                self.rewrite_pred(l, params)?;
+                self.rewrite_pred(r, params)?;
+                Ok(())
+            }
+            Predicate::Not(inner) => self.rewrite_pred(inner, params),
+            Predicate::IsNull(e) | Predicate::IsNotNull(e) => self.rewrite_expr(e, params),
+            Predicate::In { expr, list } => {
+                self.rewrite_expr(expr, params)?;
+                for item in list.iter_mut() {
+                    self.rewrite_expr(item, params)?;
+                }
+                Ok(())
+            }
+            Predicate::StartsWith { expr, pattern }
+            | Predicate::EndsWith { expr, pattern }
+            | Predicate::Contains { expr, pattern } => {
+                self.rewrite_expr(expr, params)?;
+                self.rewrite_expr(pattern, params)?;
+                Ok(())
+            }
+            Predicate::Exists { .. } => Ok(()),
+        }
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

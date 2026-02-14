@@ -259,7 +259,7 @@ graph.remove_embeddings('Article', 'summary_emb')                # remove an emb
 graph.get_embeddings('Article', 'summary_emb')                    # retrieve all vectors for type
 graph.type_filter('Article').get_embeddings('summary_emb')        # retrieve vectors for selection
 graph.get_embedding('Article', 'summary_emb', node_id)            # single node vector (or None)
-# Cypher: vector_score(n, 'summary_emb', [0.1, ...]) — inline similarity in queries
+# Cypher: text_score(n, 'summary', 'query text') — semantic search in Cypher, needs set_embedder()
 ```
 
 ### Introspection
@@ -1270,33 +1270,33 @@ results = graph.type_filter('Article').vector_search(
     'summary_emb', query_vec, top_k=10, metric='dot_product')
 ```
 
-### Vector Search in Cypher
+### Semantic Search in Cypher
 
-The `vector_score()` function computes similarity inline in Cypher queries — use it in `RETURN`, `WHERE`, and `ORDER BY`:
+`text_score()` enables semantic search directly in Cypher queries.
+It automatically embeds the query text using the registered model (via `set_embedder()`) and computes similarity:
 
 ```python
-# Rank articles by similarity
+# Requires: set_embedder() + embed_texts()
 graph.cypher("""
     MATCH (n:Article)
-    RETURN n.title, vector_score(n, 'summary_emb', [0.1, 0.2, 0.3]) AS score
+    RETURN n.title, text_score(n, 'summary', 'machine learning') AS score
     ORDER BY score DESC LIMIT 10
 """)
 
-# Filter by similarity threshold
+# With parameters
 graph.cypher("""
     MATCH (n:Article)
-    WHERE vector_score(n, 'summary_emb', $query_vec) > 0.8
+    WHERE text_score(n, 'summary', $query) > 0.8
     RETURN n.title
-""", params={'query_vec': [0.1, 0.2, 0.3]})
+""", params={'query': 'artificial intelligence'})
 
-# Combine with graph structure
+# Combine with graph filters
 graph.cypher("""
     MATCH (n:Article)-[:CITED_BY]->(m:Article)
     WHERE n.category = 'politics'
-    RETURN n.title, m.title,
-           vector_score(m, 'summary_emb', $qvec, 'dot_product') AS relevance
-    ORDER BY relevance DESC
-""", params={'qvec': query_vec})
+    RETURN m.title, text_score(m, 'summary', 'foreign policy') AS score
+    ORDER BY score DESC LIMIT 5
+""")
 ```
 
 ### Embedding Utilities

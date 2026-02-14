@@ -365,6 +365,7 @@ const API_EMBEDDINGS: &str = r#"    <method sig="set_embeddings(node_type, prope
     <method sig="set_embedder(model)">Register embedding model (.dimension, .embed(), optional .load()/.unload()). Not serialized.</method>
     <method sig="embed_texts(node_type, text_column, batch_size=256)">Embed text column. Calls model.load() before, model.unload() after (if present).</method>
     <method sig="type_filter(t).search_text(text_column, query, top_k=10, metric='cosine')">Semantic search: load → embed query → unload → vector_search.</method>
+    <note>Cypher: text_score(n, 'text_col', 'query text') — auto-embeds query, rewrites to vector_score. Requires set_embedder(). Works in WHERE and RETURN.</note>
 "#;
 
 /// Static XML: Cypher reference — clauses through expressions (always present).
@@ -522,7 +523,7 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
         );
     }
     if has_embeddings {
-        functions.push_str(", vector_score");
+        functions.push_str(", text_score");
     }
     xml.push_str(&format!("    <functions>{}</functions>\n", functions));
 
@@ -538,7 +539,7 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
         "      <note>to_df=True returns a pandas DataFrame instead of ResultView.</note>\n",
     );
     if has_embeddings {
-        xml.push_str("      <note>vector_score(n, 'prop', [f32,...]) computes cosine similarity in Cypher. Optional 4th arg: 'cosine', 'dot_product', 'euclidean'. Query vector can be a $param.</note>\n");
+        xml.push_str("      <note>text_score(n, 'text_col', 'query text') semantic search in Cypher — auto-embeds the query via set_embedder() model. Use in WHERE and RETURN. Optional 4th arg: 'cosine', 'dot_product', 'euclidean'.</note>\n");
     }
     xml.push_str("    </notes>\n");
     xml.push_str("  </cypher_ref>\n");

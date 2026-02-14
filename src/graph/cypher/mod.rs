@@ -19,7 +19,7 @@ pub mod tokenizer;
 // Re-exports for convenience
 pub use executor::{execute_mutable, is_mutation_query, CypherExecutor};
 pub use parser::parse_cypher;
-pub use planner::optimize;
+pub use planner::{optimize, rewrite_text_score};
 pub use result_view::{ResultIter, ResultView};
 
 use ast::*;

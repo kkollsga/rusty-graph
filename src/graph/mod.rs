@@ -4427,7 +4427,7 @@ impl KnowledgeGraph {
         })?;
 
         // Convert params dict to HashMap<String, Value> (before optimize so pushdown can resolve params)
-        let param_map = if let Some(params_dict) = params {
+        let mut param_map = if let Some(params_dict) = params {
             let mut map = std::collections::HashMap::new();
             for (key, val) in params_dict.iter() {
                 let key_str: String = key.extract()?;
@@ -4438,6 +4438,52 @@ impl KnowledgeGraph {
         } else {
             std::collections::HashMap::new()
         };
+
+        // Rewrite text_score() → vector_score() and collect texts to embed
+        let rewrite = cypher::rewrite_text_score(&mut parsed, &param_map)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        // Embed collected query texts if any (skip for EXPLAIN)
+        if !rewrite.texts_to_embed.is_empty() && !parsed.explain {
+            let this = slf.borrow();
+            let model = this.get_embedder_or_error(py)?;
+            Self::try_load_embedder(&model)?;
+
+            let texts: Vec<&str> = rewrite
+                .texts_to_embed
+                .iter()
+                .map(|(_, t)| t.as_str())
+                .collect();
+            let py_texts = PyList::new(py, &texts)?;
+            let embed_result = model.call_method1("embed", (py_texts,));
+            Self::try_unload_embedder(&model);
+            let embeddings_result = embed_result?;
+            let embeddings: Vec<Vec<f32>> = embeddings_result.extract().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "model.embed() must return list[list[float]]",
+                )
+            })?;
+
+            if embeddings.len() != texts.len() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "text_score: model.embed() returned {} vectors for {} texts",
+                    embeddings.len(),
+                    texts.len()
+                )));
+            }
+
+            for (i, (param_name, _)) in rewrite.texts_to_embed.iter().enumerate() {
+                let json = format!(
+                    "[{}]",
+                    embeddings[i]
+                        .iter()
+                        .map(|f| f.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                param_map.insert(param_name.clone(), Value::String(json));
+            }
+        }
 
         // Optimize (predicate pushdown, etc.) — needs shared borrow of graph
         {
