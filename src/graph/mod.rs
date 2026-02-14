@@ -441,7 +441,7 @@ impl KnowledgeGraph {
                 .unwrap_or_default();
                 let _ = PyErr::warn(
                     py,
-                    &py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+                    py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
                     msg.as_c_str(),
                     1,
                 );
@@ -568,7 +568,7 @@ impl KnowledgeGraph {
                 .unwrap_or_default();
                 let _ = PyErr::warn(
                     py,
-                    &py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+                    py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
                     msg.as_c_str(),
                     1,
                 );
@@ -3654,6 +3654,7 @@ impl KnowledgeGraph {
     ///     # Find the most connected nodes
     ///     connected_nodes = graph.degree_centrality(top_k=10)
     ///     ```
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (normalized=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
     fn degree_centrality(
         &self,
@@ -3710,6 +3711,7 @@ impl KnowledgeGraph {
     ///     # Find nodes that are "closest" to all others
     ///     close_nodes = graph.closeness_centrality(top_k=10)
     ///     ```
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (normalized=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
     fn closeness_centrality(
         &self,
