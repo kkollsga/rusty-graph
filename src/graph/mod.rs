@@ -3549,7 +3549,13 @@ impl KnowledgeGraph {
 
         let inner = Arc::clone(&self.inner);
         let results = py.detach(move || {
-            graph_algorithms::betweenness_centrality(&inner, normalized, sample_size, connection_types.as_deref(), deadline)
+            graph_algorithms::betweenness_centrality(
+                &inner,
+                normalized,
+                sample_size,
+                connection_types.as_deref(),
+                deadline,
+            )
         });
 
         if to_df.unwrap_or(false) {
@@ -3607,8 +3613,16 @@ impl KnowledgeGraph {
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         let inner = Arc::clone(&self.inner);
-        let results =
-            py.detach(move || graph_algorithms::pagerank(&inner, damping, max_iter, tol, connection_types.as_deref(), deadline));
+        let results = py.detach(move || {
+            graph_algorithms::pagerank(
+                &inner,
+                damping,
+                max_iter,
+                tol,
+                connection_types.as_deref(),
+                deadline,
+            )
+        });
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -3656,8 +3670,14 @@ impl KnowledgeGraph {
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         let inner = Arc::clone(&self.inner);
-        let results =
-            py.detach(move || graph_algorithms::degree_centrality(&inner, normalized, connection_types.as_deref(), deadline));
+        let results = py.detach(move || {
+            graph_algorithms::degree_centrality(
+                &inner,
+                normalized,
+                connection_types.as_deref(),
+                deadline,
+            )
+        });
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -3706,8 +3726,14 @@ impl KnowledgeGraph {
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         let inner = Arc::clone(&self.inner);
-        let results =
-            py.detach(move || graph_algorithms::closeness_centrality(&inner, normalized, connection_types.as_deref(), deadline));
+        let results = py.detach(move || {
+            graph_algorithms::closeness_centrality(
+                &inner,
+                normalized,
+                connection_types.as_deref(),
+                deadline,
+            )
+        });
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)

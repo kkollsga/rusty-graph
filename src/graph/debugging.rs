@@ -41,8 +41,16 @@ pub fn get_schema_string(graph: &DirGraph) -> String {
             schema_string.push_str(&format!(
                 "  Connection Type: {} ({} -> {})\n",
                 conn_type,
-                sources.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
-                targets.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+                sources
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                targets
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
             ));
 
             if !info.property_types.is_empty() {
