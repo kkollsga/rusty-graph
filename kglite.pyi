@@ -1840,17 +1840,21 @@ class KnowledgeGraph:
     def set_embeddings(
         self,
         node_type: str,
-        property_name: str,
+        text_column: str,
         embeddings: dict[Any, list[float]],
     ) -> dict[str, int]:
         """Store embeddings for nodes of the given type.
 
         Embeddings are stored separately from regular node properties and are
         invisible to ``get_nodes()``, ``to_df()``, and other property-based APIs.
+        The embedding store key is auto-derived as ``{text_column}_emb``.
+
+        Validates that ``text_column`` exists as a property on the node type
+        (builtins ``id``, ``title``, ``type`` are always accepted).
 
         Args:
             node_type: The node type (e.g. ``'Article'``).
-            property_name: Name for this embedding (e.g. ``'summary_embeddings'``).
+            text_column: Source text column name (e.g. ``'summary'``).
             embeddings: Dict mapping node IDs to embedding vectors.
 
         Returns:
@@ -1860,7 +1864,7 @@ class KnowledgeGraph:
 
     def vector_search(
         self,
-        property_name: str,
+        text_column: str,
         query_vector: list[float],
         top_k: int = 10,
         metric: str = "cosine",
@@ -1872,7 +1876,7 @@ class KnowledgeGraph:
         selected nodes. Results are ordered by similarity (most similar first).
 
         Args:
-            property_name: The embedding property name.
+            text_column: Source text column name (e.g. ``'summary'``).
             query_vector: The query embedding vector.
             top_k: Number of results to return (default 10).
             metric: ``'cosine'`` (default), ``'dot_product'``, or ``'euclidean'``.
@@ -1887,7 +1891,7 @@ class KnowledgeGraph:
             results = (graph
                 .type_filter('Article')
                 .filter({'category': 'politics'})
-                .vector_search('summary_embeddings', query_vec, top_k=10))
+                .vector_search('summary', query_vec, top_k=10))
         """
         ...
 
@@ -1895,26 +1899,26 @@ class KnowledgeGraph:
         """List all embedding stores in the graph.
 
         Returns:
-            List of dicts with ``node_type``, ``property_name``, ``dimension``, ``count``.
+            List of dicts with ``node_type``, ``text_column``, ``dimension``, ``count``.
         """
         ...
 
-    def remove_embeddings(self, node_type: str, property_name: str) -> None:
+    def remove_embeddings(self, node_type: str, text_column: str) -> None:
         """Remove an embedding store.
 
         Args:
             node_type: The node type.
-            property_name: The embedding property name.
+            text_column: Source text column name (e.g. ``'summary'``).
         """
         ...
 
     @overload
-    def get_embeddings(self, node_type: str, property_name: str) -> dict[Any, list[float]]:
+    def get_embeddings(self, node_type: str, text_column: str) -> dict[Any, list[float]]:
         """Retrieve all embeddings for a node type.
 
         Args:
             node_type: The node type (e.g. 'Article').
-            property_name: The embedding property name.
+            text_column: Source text column name (e.g. 'summary').
 
         Returns:
             Dict mapping node IDs to embedding vectors.
@@ -1922,11 +1926,11 @@ class KnowledgeGraph:
         ...
 
     @overload
-    def get_embeddings(self, property_name: str) -> dict[Any, list[float]]:
+    def get_embeddings(self, text_column: str) -> dict[Any, list[float]]:
         """Retrieve embeddings for nodes in the current selection.
 
         Args:
-            property_name: The embedding property name.
+            text_column: Source text column name (e.g. 'summary').
 
         Returns:
             Dict mapping node IDs to embedding vectors.
@@ -1936,13 +1940,13 @@ class KnowledgeGraph:
     def get_embeddings(self, *args, **kwargs) -> dict[Any, list[float]]: ...
 
     def get_embedding(
-        self, node_type: str, property_name: str, node_id: Any
+        self, node_type: str, text_column: str, node_id: Any
     ) -> list[float] | None:
         """Retrieve a single node's embedding vector.
 
         Args:
             node_type: The node type (e.g. 'Article').
-            property_name: The embedding property name (e.g. 'summary_emb').
+            text_column: Source text column name (e.g. 'summary').
             node_id: The node ID to look up.
 
         Returns:

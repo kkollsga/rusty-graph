@@ -92,26 +92,28 @@ fn default_auto_vacuum_threshold() -> Option<f64> {
 
 // ─── Save ────────────────────────────────────────────────────────────────────
 
-pub fn save_to_file(graph: &mut Arc<DirGraph>, path: &str) -> io::Result<()> {
+/// Stamp save metadata and snapshot index keys. Quick, runs with GIL held.
+pub fn prepare_save(graph: &mut Arc<DirGraph>) {
     let g = Arc::make_mut(graph);
-    // Stamp save metadata
     g.save_metadata = SaveMetadata::current();
-    // Snapshot index keys (indices themselves are #[serde(skip)])
     g.populate_index_keys();
+}
 
+/// Serialize, compress, and write graph data to file. Heavy I/O, safe to run without GIL.
+pub fn write_graph_to_file(graph: &DirGraph, path: &str) -> io::Result<()> {
     // Compress graph to buffer first so we know its size (needed for embedding section)
     let mut graph_compressed = Vec::new();
     {
         let gz = GzEncoder::new(&mut graph_compressed, Compression::new(3));
-        bincode::serialize_into(gz, &g.graph).map_err(io::Error::other)?;
+        bincode::serialize_into(gz, &graph.graph).map_err(io::Error::other)?;
     }
 
     // Compress embeddings if any exist
-    let has_embeddings = !g.embeddings.is_empty();
+    let has_embeddings = !graph.embeddings.is_empty();
     let embedding_compressed = if has_embeddings {
         let mut buf = Vec::new();
         let gz = GzEncoder::new(&mut buf, Compression::new(3));
-        bincode::serialize_into(gz, &g.embeddings).map_err(io::Error::other)?;
+        bincode::serialize_into(gz, &graph.embeddings).map_err(io::Error::other)?;
         Some(buf)
     } else {
         None
@@ -121,15 +123,15 @@ pub fn save_to_file(graph: &mut Arc<DirGraph>, path: &str) -> io::Result<()> {
     let metadata = FileMetadata {
         core_data_version: CURRENT_CORE_DATA_VERSION,
         library_version: env!("CARGO_PKG_VERSION").to_string(),
-        schema_definition: g.schema_definition.clone(),
-        property_index_keys: g.property_index_keys.clone(),
-        composite_index_keys: g.composite_index_keys.clone(),
-        range_index_keys: g.range_index_keys.clone(),
-        node_type_metadata: g.node_type_metadata.clone(),
-        connection_type_metadata: g.connection_type_metadata.clone(),
-        id_field_aliases: g.id_field_aliases.clone(),
-        title_field_aliases: g.title_field_aliases.clone(),
-        auto_vacuum_threshold: g.auto_vacuum_threshold,
+        schema_definition: graph.schema_definition.clone(),
+        property_index_keys: graph.property_index_keys.clone(),
+        composite_index_keys: graph.composite_index_keys.clone(),
+        range_index_keys: graph.range_index_keys.clone(),
+        node_type_metadata: graph.node_type_metadata.clone(),
+        connection_type_metadata: graph.connection_type_metadata.clone(),
+        id_field_aliases: graph.id_field_aliases.clone(),
+        title_field_aliases: graph.title_field_aliases.clone(),
+        auto_vacuum_threshold: graph.auto_vacuum_threshold,
         graph_compressed_size: if has_embeddings {
             Some(graph_compressed.len() as u64)
         } else {

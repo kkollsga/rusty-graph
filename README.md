@@ -12,7 +12,7 @@ An embedded knowledge graph engine for Python. Import and go — no server, no s
 |---|---|
 | Embedded, in-process | No server, no network; `import` and go |
 | In-memory | Persistence via `save()`/`load()` snapshots |
-| Cypher subset | Querying + mutations + `vector_score()` for semantic search |
+| Cypher subset | Querying + mutations + `text_score()` for semantic search |
 | Single-label nodes | Each node has exactly one type |
 | Single-threaded | Designed for single-threaded use (see [Threading](#threading)) |
 
@@ -252,13 +252,13 @@ graph.embed_texts('Article', 'summary')                                      # e
 graph.type_filter('Article').search_text('summary', 'find AI papers', top_k=10)  # text query search
 
 # Low-level vector API — bring your own vectors
-graph.set_embeddings('Article', 'summary_emb', {id: vec, ...})   # store embeddings
-graph.type_filter('Article').vector_search('summary_emb', qvec, top_k=10)  # similarity search
-graph.list_embeddings()                                           # list all embedding stores
-graph.remove_embeddings('Article', 'summary_emb')                # remove an embedding store
-graph.get_embeddings('Article', 'summary_emb')                    # retrieve all vectors for type
-graph.type_filter('Article').get_embeddings('summary_emb')        # retrieve vectors for selection
-graph.get_embedding('Article', 'summary_emb', node_id)            # single node vector (or None)
+graph.set_embeddings('Article', 'summary', {id: vec, ...})             # store embeddings
+graph.type_filter('Article').vector_search('summary', qvec, top_k=10)  # similarity search
+graph.list_embeddings()                                                 # list all embedding stores
+graph.remove_embeddings('Article', 'summary')                           # remove an embedding store
+graph.get_embeddings('Article', 'summary')                              # retrieve all vectors for type
+graph.type_filter('Article').get_embeddings('summary')                  # retrieve vectors for selection
+graph.get_embedding('Article', 'summary', node_id)                      # single node vector (or None)
 # Cypher: text_score(n, 'summary', 'query text') — semantic search in Cypher, needs set_embedder()
 ```
 
@@ -523,8 +523,8 @@ graph.cypher("""
 | `wkt_centroid(wkt)` | Centroid of WKT geometry |
 | `latitude(point)` | Extract latitude from point |
 | `longitude(point)` | Extract longitude from point |
-| `vector_score(n, prop, vec)` | Cosine similarity between node embedding and query vector |
-| `vector_score(n, prop, vec, metric)` | Similarity with explicit metric (`'cosine'`, `'dot_product'`, `'euclidean'`) |
+| `text_score(n, prop, query)` | Semantic similarity (auto-embeds query text; requires `set_embedder()`) |
+| `text_score(n, prop, query, metric)` | With explicit metric (`'cosine'`, `'dot_product'`, `'euclidean'`) |
 
 ### Spatial Functions
 
@@ -829,7 +829,7 @@ print(plan)
 | **Expressions** | `CASE WHEN...THEN...ELSE...END`, `$param`, `[x IN list WHERE ... \| expr]` |
 | **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `length`, `type`, `id`, `labels`, `coalesce`, `nodes(p)`, `relationships(p)` |
 | **Spatial** | `point(lat, lon)`, `distance(p1, p2)`, `wkt_contains(wkt, point)`, `wkt_intersects(wkt1, wkt2)`, `wkt_centroid(wkt)`, `latitude(point)`, `longitude(point)` |
-| **Semantic** | `vector_score(n, prop, vec [, metric])` — cosine/dot_product/euclidean similarity against stored embeddings |
+| **Semantic** | `text_score(n, prop, query [, metric])` — auto-embeds query via `set_embedder()`, cosine/dot_product/euclidean |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
 | **Not supported** | `CALL`/stored procedures, `FOREACH`, subqueries, `SET n:Label` (label mutation), `REMOVE n:Label`, multi-label |
 
@@ -863,18 +863,22 @@ print(f"Created {report['nodes_created']} nodes in {report['processing_time_ms']
 
 ### Property Mapping
 
-When adding nodes, `unique_id_field` and `node_title_field` are **renamed** to `id` and `title`. The original column names no longer exist as properties.
+When adding nodes, `unique_id_field` and `node_title_field` are **mapped** to `id` and `title`. The original column names become **aliases** — they work in Cypher queries and `filter()`, but results always use the canonical names.
 
-| Your DataFrame Column | Stored As | Why |
-|-----------------------|-----------|-----|
-| `unique_id_field` (e.g., `user_id`) | `id` | Canonical identifier |
-| `node_title_field` (e.g., `name`) | `title` | Display/label field |
-| All other columns | Same name | Preserved as-is |
+| Your DataFrame Column | Stored As | Alias? |
+|-----------------------|-----------|--------|
+| `unique_id_field` (e.g., `user_id`) | `id` | `n.user_id` resolves to `n.id` |
+| `node_title_field` (e.g., `name`) | `title` | `n.name` resolves to `n.title` |
+| All other columns | Same name | — |
 
 ```python
 # After adding with unique_id_field='user_id', node_title_field='name':
-graph.type_filter('User').filter({'user_id': 1001})  # WRONG — field was renamed
-graph.type_filter('User').filter({'id': 1001})        # CORRECT
+graph.cypher("MATCH (u:User) WHERE u.user_id = 1001 RETURN u")  # OK — alias resolves to id
+graph.type_filter('User').filter({'user_id': 1001})              # OK — alias works here too
+graph.type_filter('User').filter({'id': 1001})                   # Also OK — canonical name
+
+# Results always use canonical names:
+# {'id': 1001, 'title': 'Alice', 'type': 'User', ...}  — NOT 'user_id' or 'name'
 ```
 
 ### Creating Connections
@@ -1232,7 +1236,7 @@ If you manage vectors yourself, use the low-level API:
 
 ```python
 # Explicit: pass a dict of {node_id: vector}
-graph.set_embeddings('Article', 'summary_emb', {
+graph.set_embeddings('Article', 'summary', {
     1: [0.1, 0.2, 0.3, ...],
     2: [0.4, 0.5, 0.6, ...],
 })
@@ -1252,7 +1256,7 @@ Search operates on the current selection — combine with `type_filter()` and `f
 
 ```python
 # Basic search — returns list of dicts sorted by similarity
-results = graph.type_filter('Article').vector_search('summary_emb', query_vec, top_k=10)
+results = graph.type_filter('Article').vector_search('summary', query_vec, top_k=10)
 # [{'id': 5, 'title': '...', 'type': 'Article', 'score': 0.95, ...}, ...]
 # 'score' is always included: cosine similarity [-1,1], dot_product, or negative euclidean distance
 
@@ -1260,14 +1264,14 @@ results = graph.type_filter('Article').vector_search('summary_emb', query_vec, t
 results = (graph
     .type_filter('Article')
     .filter({'category': 'politics'})
-    .vector_search('summary_emb', query_vec, top_k=10))
+    .vector_search('summary', query_vec, top_k=10))
 
 # DataFrame output
-df = graph.type_filter('Article').vector_search('summary_emb', query_vec, top_k=10, to_df=True)
+df = graph.type_filter('Article').vector_search('summary', query_vec, top_k=10, to_df=True)
 
 # Distance metrics: 'cosine' (default), 'dot_product', 'euclidean'
 results = graph.type_filter('Article').vector_search(
-    'summary_emb', query_vec, top_k=10, metric='dot_product')
+    'summary', query_vec, top_k=10, metric='dot_product')
 ```
 
 ### Semantic Search in Cypher
@@ -1303,19 +1307,19 @@ graph.cypher("""
 
 ```python
 graph.list_embeddings()
-# [{'node_type': 'Article', 'property_name': 'summary_emb', 'dimension': 384, 'count': 1000}]
+# [{'node_type': 'Article', 'text_column': 'summary', 'dimension': 384, 'count': 1000}]
 
-graph.remove_embeddings('Article', 'summary_emb')
+graph.remove_embeddings('Article', 'summary')
 
 # Retrieve all embeddings for a type (no selection needed)
-embs = graph.get_embeddings('Article', 'summary_emb')
+embs = graph.get_embeddings('Article', 'summary')
 # {1: [0.1, 0.2, ...], 2: [0.4, 0.5, ...], ...}
 
 # Retrieve embeddings for current selection only
-embs = graph.type_filter('Article').filter({'category': 'politics'}).get_embeddings('summary_emb')
+embs = graph.type_filter('Article').filter({'category': 'politics'}).get_embeddings('summary')
 
 # Get a single node's embedding (O(1) lookup, returns None if not found)
-vec = graph.get_embedding('Article', 'summary_emb', node_id)
+vec = graph.get_embedding('Article', 'summary', node_id)
 ```
 
 Embeddings persist across `save()`/`load()` cycles automatically.
@@ -1490,14 +1494,26 @@ subgraph.export('acme_network.graphml', format='graphml')
 
 ### Threading
 
-Designed for single-threaded use. The Rust code does not release the Python GIL during operations. If you share a graph instance across threads, guard access with your own lock.
+The Python GIL is released during heavy Rust operations, allowing other Python threads to run concurrently:
+
+| Operation | GIL Released? | Notes |
+|-----------|:---:|-------|
+| `save()` | Yes | Serialization + compression + file write |
+| `load()` | Yes | File read + decompression + deserialization |
+| `cypher()` (reads) | Yes | Query parsing, optimization, and execution |
+| `vector_search()` | Yes | Similarity computation (uses rayon internally) |
+| `search_text()` | Partial | Model embedding needs GIL; vector search releases it |
+| `add_nodes()` | No | DataFrame conversion requires GIL throughout |
+| `cypher()` (mutations) | No | Must hold exclusive lock on graph |
+
+For concurrent access from multiple threads, mutations (`add_nodes`, `CREATE`/`SET`/`DELETE` Cypher) require external synchronization. Read-only operations (`cypher` reads, `vector_search`, `save`) can run while other Python threads execute.
 
 ---
 
 ## Common Gotchas
 
 - **Single-label only.** Each node has exactly one type. `labels(n)` returns a string, not a list. `SET n:OtherLabel` is not supported.
-- **`id` and `title` are renamed.** `add_nodes(unique_id_field='user_id')` stores the column as `id` — query with `n.id`, not `n.user_id`. Same for `node_title_field` → `title`.
+- **`id` and `title` are canonical.** `add_nodes(unique_id_field='user_id')` stores the column as `id`. The original name works as an alias in Cypher (`n.user_id` resolves to `n.id`), but results always return canonical names (`id`, `title`).
 - **Save files aren't portable.** The binary format (bincode) may differ across OS, CPU architecture, or library versions. Use `export()` (GraphML, CSV) for sharing across machines.
 - **Indexes:** `create_index()` accelerates equality only (`=`). For range queries (`>`, `<`, `>=`, `<=`), use `create_range_index()`.
 - **Flat vs. grouped results.** After traversal with multiple parents, `get_titles()`, `get_nodes()`, and `get_properties()` return grouped dicts instead of flat lists. Use `flatten_single_parent=False` to always get grouped output.
@@ -1507,17 +1523,81 @@ Designed for single-threaded use. The Rust code does not release the Python GIL 
 
 ## Using with AI Agents
 
+KGLite is designed to work as a self-contained knowledge layer for AI agents. No external database, no server process, no network — just a Python object with a Cypher interface that an agent can query directly.
+
+### The idea
+
+1. **Load or build a graph** from your data (DataFrames, CSVs, APIs)
+2. **Give the agent `agent_describe()`** — a single XML string containing the full schema, Cypher reference, property values, and embedding info
+3. **The agent writes Cypher queries** using `graph.cypher()` — no other API to learn
+4. **Semantic search works natively** — `text_score()` in Cypher, backed by any embedding model you wrap
+
+No vector database, no graph database, no infrastructure. The graph lives in memory and persists to a single `.kgl` file.
+
 ### Quick setup
 
 ```python
-xml = graph.agent_describe()  # graph structure + Cypher reference as XML
+xml = graph.agent_describe()  # schema + Cypher reference + property values as XML
 prompt = f"You have a knowledge graph:\n{xml}\nAnswer the user's question using graph.cypher()."
 ```
 
+### MCP server
+
+Expose the graph to any MCP-compatible agent (Claude, etc.) with a thin server:
+
+```python
+from mcp.server.fastmcp import FastMCP
+import kglite
+
+graph = kglite.load("my_graph.kgl")
+mcp = FastMCP("knowledge-graph")
+
+@mcp.tool()
+def describe() -> str:
+    """Get the graph schema and Cypher reference."""
+    return graph.agent_describe()
+
+@mcp.tool()
+def query(cypher: str) -> str:
+    """Run a Cypher query and return results."""
+    result = graph.cypher(cypher, to_df=True)
+    return result.to_markdown()
+
+mcp.run(transport="stdio")
+```
+
+The agent calls `describe()` once to learn the schema, then uses `query()` for everything — traversals, aggregations, filtering, and semantic search via `text_score()`.
+
+### Semantic search in agent workflows
+
+With an embedding model registered, agents can do semantic search directly in Cypher:
+
+```python
+# Wrap any local or remote model — only needs .dimension and .embed()
+class OpenAIEmbedder:
+    dimension = 1536
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        response = client.embeddings.create(input=texts, model="text-embedding-3-small")
+        return [e.embedding for e in response.data]
+
+graph.set_embedder(OpenAIEmbedder())
+graph.embed_texts("Article", "summary")  # one-time: vectorize all articles
+
+# Now agents can use text_score() in Cypher — no extra API needed
+graph.cypher("""
+    MATCH (a:Article)
+    WHERE text_score(a, 'summary', 'climate policy') > 0.5
+    RETURN a.title, text_score(a, 'summary', 'climate policy') AS score
+    ORDER BY score DESC LIMIT 10
+""")
+```
+
+The model wrapper pattern works with any provider (OpenAI, Cohere, local sentence-transformers, Ollama) — see the [Semantic Search](#semantic-search) section for a full load/unload lifecycle example.
+
 ### Tips for agent prompts
 
-1. **Start with `agent_describe()`** — gives the agent schema, types, property names, counts, and Cypher syntax in one XML string
-2. **Use `properties(type)`** for column discovery — shows types, nullability, unique counts, and sample values
+1. **Start with `agent_describe()`** — gives the agent schema, types, property names with sample values, counts, and full Cypher syntax in one XML string
+2. **Use `properties(type)`** for deeper column discovery — shows types, nullability, unique counts, and sample values
 3. **Use `sample(type, n=3)`** before writing queries — lets the agent see real data shapes
 4. **Prefer Cypher** over the fluent API in agent contexts — closer to natural language, easier for LLMs to generate
 5. **Use parameters** (`params={'x': val}`) to prevent injection when passing user input to queries
@@ -1525,8 +1605,8 @@ prompt = f"You have a knowledge graph:\n{xml}\nAnswer the user's question using 
 
 ### What `agent_describe()` returns
 
-- **Dynamic** (per-graph): node types with counts, property names and types, connection types with endpoints, indexes, field aliases
-- **Static** (always the same): supported Cypher clauses, WHERE operators, functions (including spatial), mutation syntax, single-label notes
+- **Dynamic** (per-graph): node types with counts, property names/types/sample values, connection types with endpoints, indexes, field aliases, embedding stores
+- **Static** (always the same): supported Cypher clauses, WHERE operators, functions (including spatial and semantic), mutation syntax, notes
 
 ---
 

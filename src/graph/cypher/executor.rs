@@ -2318,6 +2318,10 @@ impl<'a> CypherExecutor<'a> {
                 "Aggregate function '{}' cannot be used outside of RETURN/WITH",
                 name
             )),
+            "text_score" => Err(
+                "text_score() requires set_embedder(). Call g.set_embedder(model) first."
+                    .to_string(),
+            ),
             _ => Err(format!("Unknown function: {}", name)),
         }
     }

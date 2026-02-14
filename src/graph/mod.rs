@@ -2,7 +2,6 @@
 use crate::datatypes::values::{FilterCondition, Value};
 use crate::datatypes::{py_in, py_out};
 use crate::graph::calculations::StatResult;
-use crate::graph::io_operations::save_to_file;
 use crate::graph::reporting::{OperationReport, OperationReports};
 use petgraph::graph::NodeIndex;
 use petgraph::visit::NodeIndexable;
@@ -385,6 +384,12 @@ impl KnowledgeGraph {
                     continue;
                 }
 
+                let store_key = if emb_col.ends_with("_emb") {
+                    emb_col.clone()
+                } else {
+                    format!("{}_emb", emb_col)
+                };
+
                 let mut store = schema::EmbeddingStore::new(dimension);
                 store.data.reserve(pairs.len() * dimension);
                 for (id_val, vec) in pairs {
@@ -398,7 +403,7 @@ impl KnowledgeGraph {
                 if store.len() > 0 {
                     graph
                         .embeddings
-                        .insert((node_type.clone(), emb_col.clone()), store);
+                        .insert((node_type.clone(), store_key), store);
                 }
             }
         }
@@ -2311,8 +2316,13 @@ impl KnowledgeGraph {
         Ok(())
     }
 
-    fn save(&mut self, path: &str) -> PyResult<()> {
-        save_to_file(&mut self.inner, path)
+    fn save(&mut self, py: Python<'_>, path: &str) -> PyResult<()> {
+        // Prep phase (quick): stamp metadata, snapshot index keys
+        io_operations::prepare_save(&mut self.inner);
+        // Heavy phase: serialize, compress, write — release GIL for other Python threads
+        let inner = self.inner.clone();
+        let path_owned = path.to_string();
+        py.detach(move || io_operations::write_graph_to_file(&inner, &path_owned))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))
     }
 
@@ -4446,7 +4456,15 @@ impl KnowledgeGraph {
         // Embed collected query texts if any (skip for EXPLAIN)
         if !rewrite.texts_to_embed.is_empty() && !parsed.explain {
             let this = slf.borrow();
-            let model = this.get_embedder_or_error(py)?;
+            let model = match &this.embedder {
+                Some(m) => m.bind(py).clone(),
+                None => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "text_score() requires a registered embedding model. \
+                         Call g.set_embedder(model) first.",
+                    ))
+                }
+            };
             Self::try_load_embedder(&model)?;
 
             let texts: Vec<&str> = rewrite
@@ -4532,17 +4550,21 @@ impl KnowledgeGraph {
                 Py::new(py, view).map(|v| v.into_any())
             }
         } else {
-            // Read-only path: shared borrow for execution, then release
-            let result = {
+            // Read-only path: clone Arc, release borrow, then execute without GIL
+            let inner = {
                 let this = slf.borrow();
-                let executor = cypher::CypherExecutor::with_params(&this.inner, &param_map);
-                executor.execute(&parsed).map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "Cypher execution error: {}",
-                        e
-                    ))
-                })?
+                this.inner.clone()
             };
+            let result = {
+                let executor = cypher::CypherExecutor::with_params(&inner, &param_map);
+                py.detach(|| executor.execute(&parsed))
+            }
+            .map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Cypher execution error: {}",
+                    e
+                ))
+            })?;
             let columns = result.columns;
             let stats = result.stats;
             let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
@@ -5111,12 +5133,9 @@ impl KnowledgeGraph {
 
     /// Store embeddings for nodes of the given type.
     ///
-    /// Embeddings are stored separately from regular node properties and are
-    /// invisible to get_nodes(), to_df(), and other property-based operations.
-    ///
     /// Args:
     ///     node_type: The node type (e.g. 'Article')
-    ///     property_name: Name for this embedding (e.g. 'summary_embeddings')
+    ///     text_column: Source column name (e.g. 'summary'). Stored as '{text_column}_emb'.
     ///     embeddings: Dict mapping node IDs to embedding vectors (list of floats)
     ///
     /// Returns:
@@ -5125,10 +5144,46 @@ impl KnowledgeGraph {
         &mut self,
         py: Python<'_>,
         node_type: &str,
-        property_name: &str,
+        text_column: &str,
         embeddings: &Bound<'_, PyDict>,
     ) -> PyResult<Py<PyAny>> {
         let g = Arc::make_mut(&mut self.inner);
+        let embedding_property = format!("{}_emb", text_column);
+
+        // Validate node type exists
+        if !g.type_indices.contains_key(node_type) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Node type '{}' does not exist in the graph",
+                node_type
+            )));
+        }
+
+        // Validate source column exists (skip for empty dicts)
+        if !embeddings.is_empty() {
+            let is_builtin = matches!(text_column, "id" | "title" | "type");
+            if !is_builtin {
+                let has_property = g
+                    .type_indices
+                    .get(node_type)
+                    .map(|indices| {
+                        indices.iter().any(|&idx| {
+                            g.graph
+                                .node_weight(idx)
+                                .map(|n| n.properties.contains_key(text_column))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false);
+                if !has_property {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Source column '{}' not found on any '{}' node. \
+                         set_embeddings() expects the text column name \
+                         (e.g. 'summary'), not the embedding store name.",
+                        text_column, node_type
+                    )));
+                }
+            }
+        }
 
         // Build ID index for this node type if not already built
         g.build_id_index(node_type);
@@ -5190,7 +5245,7 @@ impl KnowledgeGraph {
 
         let stored = store.len();
         g.embeddings
-            .insert((node_type.to_string(), property_name.to_string()), store);
+            .insert((node_type.to_string(), embedding_property), store);
 
         let result = PyDict::new(py);
         result.set_item("embeddings_stored", stored)?;
@@ -5201,32 +5256,17 @@ impl KnowledgeGraph {
 
     /// Vector similarity search within the current selection.
     ///
-    /// Searches for nodes most similar to the query vector among the currently
-    /// selected nodes. Returns results as a list of dicts ordered by similarity.
-    ///
     /// Args:
-    ///     property_name: The embedding property name (e.g. 'summary_embeddings')
+    ///     text_column: Source column name (e.g. 'summary'). Resolves to '{text_column}_emb'.
     ///     query_vector: The query embedding vector (list of floats)
     ///     top_k: Number of results to return (default 10)
     ///     metric: Distance metric - 'cosine' (default), 'dot_product', or 'euclidean'
     ///     to_df: If True, return a pandas DataFrame instead of list of dicts
-    ///
-    /// Returns:
-    ///     List of dicts with 'id', 'title', 'type', 'score', and all node properties,
-    ///     ordered by similarity (most similar first). Or a DataFrame if to_df=True.
-    ///
-    /// Example:
-    ///     ```python
-    ///     results = (graph
-    ///         .type_filter('Article')
-    ///         .filter({'category': 'politics'})
-    ///         .vector_search('summary_embeddings', query_vec, top_k=10))
-    ///     ```
-    #[pyo3(signature = (property_name, query_vector, top_k=None, metric=None, to_df=None))]
+    #[pyo3(signature = (text_column, query_vector, top_k=None, metric=None, to_df=None))]
     fn vector_search(
         &self,
         py: Python<'_>,
-        property_name: &str,
+        text_column: &str,
         query_vector: Vec<f32>,
         top_k: Option<usize>,
         metric: Option<&str>,
@@ -5245,15 +5285,22 @@ impl KnowledgeGraph {
             }
         };
 
-        let results = vector_search::vector_search(
-            &self.inner,
-            &self.selection,
-            property_name,
-            &query_vector,
-            top_k,
-            metric,
-        )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        let embedding_property = format!("{}_emb", text_column);
+        // Release GIL during heavy vector similarity computation
+        let inner = self.inner.clone();
+        let selection = self.selection.clone();
+        let results = py
+            .detach(|| {
+                vector_search::vector_search(
+                    &inner,
+                    &selection,
+                    &embedding_property,
+                    &query_vector,
+                    top_k,
+                    metric,
+                )
+            })
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         if to_df.unwrap_or(false) {
             // Build DataFrame via pandas
@@ -5301,13 +5348,16 @@ impl KnowledgeGraph {
     /// List all embedding stores in the graph.
     ///
     /// Returns:
-    ///     List of dicts with 'node_type', 'property_name', 'dimension', 'count'.
+    ///     List of dicts with 'node_type', 'text_column', 'dimension', 'count'.
     fn list_embeddings(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let py_list = PyList::empty(py);
-        for ((node_type, property_name), store) in &self.inner.embeddings {
+        for ((node_type, store_name), store) in &self.inner.embeddings {
+            let text_column = store_name
+                .strip_suffix("_emb")
+                .unwrap_or(store_name.as_str());
             let dict = PyDict::new(py);
             dict.set_item("node_type", node_type)?;
-            dict.set_item("property_name", property_name)?;
+            dict.set_item("text_column", text_column)?;
             dict.set_item("dimension", store.dimension)?;
             dict.set_item("count", store.len())?;
             py_list.append(dict)?;
@@ -5319,10 +5369,10 @@ impl KnowledgeGraph {
     ///
     /// Args:
     ///     node_type: The node type
-    ///     property_name: The embedding property name
-    fn remove_embeddings(&mut self, node_type: &str, property_name: &str) -> PyResult<()> {
+    ///     text_column: Source column name (e.g. 'summary')
+    fn remove_embeddings(&mut self, node_type: &str, text_column: &str) -> PyResult<()> {
         let g = Arc::make_mut(&mut self.inner);
-        let key = (node_type.to_string(), property_name.to_string());
+        let key = (node_type.to_string(), format!("{}_emb", text_column));
         g.embeddings.remove(&key);
         Ok(())
     }
@@ -5330,28 +5380,26 @@ impl KnowledgeGraph {
     /// Retrieve embeddings for nodes.
     ///
     /// Can be called in two ways:
-    ///   - ``get_embeddings(node_type, property_name)`` — returns all embeddings of that type
-    ///   - ``get_embeddings(property_name)`` — returns embeddings for the current selection
+    ///   - ``get_embeddings(node_type, text_column)`` — returns all embeddings of that type
+    ///   - ``get_embeddings(text_column)`` — returns embeddings for the current selection
     ///
     /// Args:
-    ///     node_type: (optional) The node type. If given, returns all embeddings for that type
-    ///         without requiring a selection.
-    ///     property_name: The embedding property name.
+    ///     text_column: Source column name (e.g. 'summary'). Resolves to '{text_column}_emb'.
     ///
     /// Returns:
     ///     Dict mapping node IDs to embedding vectors (list of floats).
-    #[pyo3(signature = (node_type_or_property, property_name=None))]
+    #[pyo3(signature = (node_type_or_text_column, text_column=None))]
     fn get_embeddings(
         &self,
         py: Python<'_>,
-        node_type_or_property: &str,
-        property_name: Option<&str>,
+        node_type_or_text_column: &str,
+        text_column: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let result = PyDict::new(py);
 
-        // Two-arg form: get_embeddings(node_type, property_name)
-        if let Some(prop) = property_name {
-            let key = (node_type_or_property.to_string(), prop.to_string());
+        // Two-arg form: get_embeddings(node_type, text_column)
+        if let Some(col) = text_column {
+            let key = (node_type_or_text_column.to_string(), format!("{}_emb", col));
             let store = match self.inner.embeddings.get(&key) {
                 Some(s) => s,
                 None => return result.into_py_any(py),
@@ -5370,8 +5418,8 @@ impl KnowledgeGraph {
             return result.into_py_any(py);
         }
 
-        // One-arg form: get_embeddings(property_name) — selection-based
-        let prop = node_type_or_property;
+        // One-arg form: get_embeddings(text_column) — selection-based
+        let col = node_type_or_text_column;
 
         let level_count = self.selection.get_level_count();
         if level_count == 0 {
@@ -5390,7 +5438,7 @@ impl KnowledgeGraph {
                 None => continue,
             };
 
-            let key = (node.node_type.clone(), prop.to_string());
+            let key = (node.node_type.clone(), format!("{}_emb", col));
             let store = match self.inner.embeddings.get(&key) {
                 Some(s) => s,
                 None => continue,
@@ -5410,7 +5458,7 @@ impl KnowledgeGraph {
     ///
     /// Args:
     ///     node_type: The node type (e.g. 'Article').
-    ///     property_name: The embedding property name (e.g. 'summary_emb').
+    ///     text_column: Source column name (e.g. 'summary').
     ///     node_id: The node ID to look up.
     ///
     /// Returns:
@@ -5419,7 +5467,7 @@ impl KnowledgeGraph {
         &self,
         py: Python<'_>,
         node_type: &str,
-        property_name: &str,
+        text_column: &str,
         node_id: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyAny>> {
         let id = py_in::py_value_to_value(node_id)?;
@@ -5429,7 +5477,7 @@ impl KnowledgeGraph {
             None => return Ok(py.None()),
         };
 
-        let key = (node_type.to_string(), property_name.to_string());
+        let key = (node_type.to_string(), format!("{}_emb", text_column));
         let store = match self.inner.embeddings.get(&key) {
             Some(s) => s,
             None => return Ok(py.None()),
@@ -5701,7 +5749,6 @@ impl KnowledgeGraph {
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let model = self.get_embedder_or_error(py)?;
-        let embedding_property = format!("{}_emb", text_column);
 
         // Load model if it has a load() lifecycle method
         Self::try_load_embedder(&model)?;
@@ -5727,7 +5774,7 @@ impl KnowledgeGraph {
         let query_vector = embeddings.into_iter().next().unwrap();
 
         // Delegate to existing vector_search
-        self.vector_search(py, &embedding_property, query_vector, top_k, metric, to_df)
+        self.vector_search(py, text_column, query_vector, top_k, metric, to_df)
     }
 }
 

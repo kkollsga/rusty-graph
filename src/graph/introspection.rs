@@ -159,6 +159,35 @@ fn value_type_name(v: &Value) -> &'static str {
     }
 }
 
+/// Compact display string for a Value (used in agent description `vals` attributes).
+/// Truncates long strings to keep output concise.
+fn value_display_compact(v: &Value) -> String {
+    match v {
+        Value::String(s) => {
+            if s.chars().count() > 40 {
+                let truncated: String = s.chars().take(37).collect();
+                format!("{}...", truncated)
+            } else {
+                s.clone()
+            }
+        }
+        Value::Int64(i) => i.to_string(),
+        Value::Float64(f) => format!("{}", f),
+        Value::Boolean(b) => {
+            if *b {
+                "true"
+            } else {
+                "false"
+            }
+        }
+        .to_string(),
+        Value::DateTime(d) => d.to_string(),
+        Value::UniqueId(u) => u.to_string(),
+        Value::Point { lat, lon } => format!("({},{})", lat, lon),
+        Value::Null => String::new(),
+    }
+}
+
 /// Property stats for one node type. Scans all nodes of that type.
 /// `max_values`: include `values` list when unique count ≤ this threshold (0 = never).
 pub fn compute_property_stats(
@@ -355,19 +384,6 @@ const API_BASE: &str = r#"  <api>
     <method sig="save(path) / load(path)">Persist and reload the graph.</method>
 "#;
 
-/// Static XML: embedding API methods (only when graph has embeddings).
-const API_EMBEDDINGS: &str = r#"    <method sig="set_embeddings(node_type, property_name, embeddings)">Store embedding vectors ({id: [f32, ...]}). Invisible to get_nodes/to_df.</method>
-    <method sig="type_filter(t).vector_search(prop, query_vec, top_k=10, metric='cosine')">Similarity search on current selection. Returns list of dicts with 'score' key.</method>
-    <method sig="get_embeddings(node_type, property_name)">Retrieve all embeddings for a node type as {id: [f32, ...]}.</method>
-    <method sig="type_filter(t).get_embeddings(property_name)">Retrieve embeddings for nodes in current selection.</method>
-    <method sig="get_embedding(node_type, property_name, node_id)">Single node embedding lookup. Returns list of floats or None.</method>
-    <method sig="list_embeddings()">List all embedding stores with type, name, dimension, count.</method>
-    <method sig="set_embedder(model)">Register embedding model (.dimension, .embed(), optional .load()/.unload()). Not serialized.</method>
-    <method sig="embed_texts(node_type, text_column, batch_size=256)">Embed text column. Calls model.load() before, model.unload() after (if present).</method>
-    <method sig="type_filter(t).search_text(text_column, query, top_k=10, metric='cosine')">Semantic search: load → embed query → unload → vector_search.</method>
-    <note>Cypher: text_score(n, 'text_col', 'query text') — auto-embeds query, rewrites to vector_score. Requires set_embedder(). Works in WHERE and RETURN.</note>
-"#;
-
 /// Static XML: Cypher reference — clauses through expressions (always present).
 const CYPHER_REF_BASE: &str = r#"  <cypher_ref>
     <clauses>MATCH, OPTIONAL MATCH, WHERE, RETURN, WITH, ORDER BY, SKIP, LIMIT, UNWIND, UNION, UNION ALL, CREATE, SET, DELETE, DETACH DELETE, REMOVE, MERGE, EXPLAIN</clauses>
@@ -438,12 +454,58 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
                 ));
                 let mut props: Vec<(&String, &String)> = info.properties.iter().collect();
                 props.sort_by_key(|(k, _)| k.as_str());
-                for (pname, ptype) in props {
-                    xml.push_str(&format!(
-                        "      <prop name=\"{}\" type=\"{}\"/>\n",
-                        xml_escape(pname),
-                        xml_escape(ptype)
-                    ));
+
+                // Collect unique values per property for low-cardinality display
+                const MAX_DISPLAY_VALS: usize = 15;
+                let mut prop_values: HashMap<&str, Vec<String>> = HashMap::new();
+                if let Some(indices) = graph.type_indices.get(nt) {
+                    for (pname, ptype) in &props {
+                        // Skip UniqueId — always unique, not useful for WHERE clauses
+                        if ptype.eq_ignore_ascii_case("uniqueid") {
+                            continue;
+                        }
+                        let mut unique_vals: HashSet<String> = HashSet::new();
+                        let mut exceeded = false;
+                        for &idx in indices {
+                            if let Some(node) = graph.get_node(idx) {
+                                let val = match pname.as_str() {
+                                    "title" => Some(&node.title),
+                                    _ => node.properties.get(*pname),
+                                };
+                                if let Some(v) = val {
+                                    if !is_null_value(v) {
+                                        unique_vals.insert(value_display_compact(v));
+                                        if unique_vals.len() > MAX_DISPLAY_VALS {
+                                            exceeded = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !exceeded && !unique_vals.is_empty() {
+                            let mut sorted: Vec<String> = unique_vals.into_iter().collect();
+                            sorted.sort();
+                            prop_values.insert(pname.as_str(), sorted);
+                        }
+                    }
+                }
+
+                for (pname, ptype) in &props {
+                    if let Some(vals) = prop_values.get(pname.as_str()) {
+                        xml.push_str(&format!(
+                            "      <prop name=\"{}\" type=\"{}\" vals=\"{}\"/>\n",
+                            xml_escape(pname),
+                            xml_escape(ptype),
+                            xml_escape(&vals.join("|"))
+                        ));
+                    } else {
+                        xml.push_str(&format!(
+                            "      <prop name=\"{}\" type=\"{}\"/>\n",
+                            xml_escape(pname),
+                            xml_escape(ptype)
+                        ));
+                    }
                 }
                 xml.push_str("    </type>\n");
             }
@@ -489,10 +551,12 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
                 .embeddings
                 .get(&(node_type.clone(), prop_name.clone()))
             {
+                // Show text column name (strip _emb suffix) for text_score() usage
+                let text_col = prop_name.strip_suffix("_emb").unwrap_or(prop_name.as_str());
                 xml.push_str(&format!(
-                    "    <emb type=\"{}\" prop=\"{}\" dim=\"{}\" count=\"{}\"/>\n",
+                    "    <emb type=\"{}\" text_col=\"{}\" dim=\"{}\" count=\"{}\"/>\n",
                     xml_escape(node_type),
-                    xml_escape(prop_name),
+                    xml_escape(text_col),
                     store.dimension,
                     store.len()
                 ));
@@ -503,9 +567,6 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
 
     // API methods
     xml.push_str(API_BASE);
-    if has_embeddings {
-        xml.push_str(API_EMBEDDINGS);
-    }
     xml.push_str("  </api>\n");
 
     // Cypher reference
@@ -539,7 +600,9 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
         "      <note>to_df=True returns a pandas DataFrame instead of ResultView.</note>\n",
     );
     if has_embeddings {
-        xml.push_str("      <note>text_score(n, 'text_col', 'query text') semantic search in Cypher — auto-embeds the query via set_embedder() model. Use in WHERE and RETURN. Optional 4th arg: 'cosine', 'dot_product', 'euclidean'.</note>\n");
+        xml.push_str(
+            "      <note>text_score(n, 'col', 'query') — semantic similarity (0..1). Use text_col value from &lt;emb&gt; as 'col'. Usable in WHERE/RETURN/ORDER BY.</note>\n",
+        );
     }
     xml.push_str("    </notes>\n");
     xml.push_str("  </cypher_ref>\n");
