@@ -105,6 +105,8 @@ pub enum MatchBinding {
         source: NodeIndex,
         target: NodeIndex,
         edge_index: EdgeIndex,
+        connection_type: String,
+        properties: HashMap<String, Value>,
     },
     /// Variable-length path binding for patterns like -[:TYPE*1..3]->
     VariableLengthPath {
@@ -1210,11 +1212,14 @@ impl<'a> PatternExecutor<'a> {
                     }
                 }
 
-                // Create edge binding — stores only indices, no cloned data
+                // Create edge binding with connection data
+                let edge_data = edge.weight();
                 let edge_binding = MatchBinding::Edge {
                     source,
                     target,
                     edge_index: edge.id(),
+                    connection_type: edge_data.connection_type.clone(),
+                    properties: edge_data.properties.clone(),
                 };
 
                 results.push((target, edge_binding));

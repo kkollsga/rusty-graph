@@ -430,6 +430,23 @@ impl KnowledgeGraph {
             }
             report_dict.set_item("has_errors", has_errors)?;
 
+            // Emit Python warning if rows were skipped
+            if result.nodes_skipped > 0 {
+                let total = result.nodes_created + result.nodes_updated + result.nodes_skipped;
+                let detail = result.errors.join("; ");
+                let msg = std::ffi::CString::new(format!(
+                    "add_nodes: {} of {} rows skipped. {}",
+                    result.nodes_skipped, total, detail
+                ))
+                .unwrap_or_default();
+                let _ = PyErr::warn(
+                    py,
+                    &py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+                    msg.as_c_str(),
+                    1,
+                );
+            }
+
             Ok(report_dict.into())
         })
     }
@@ -539,6 +556,23 @@ impl KnowledgeGraph {
                 report_dict.set_item("errors", &result.errors)?;
             }
             report_dict.set_item("has_errors", has_errors)?;
+
+            // Emit Python warning if rows were skipped
+            if result.connections_skipped > 0 {
+                let total = result.connections_created + result.connections_skipped;
+                let detail = result.errors.join("; ");
+                let msg = std::ffi::CString::new(format!(
+                    "add_connections: {} of {} rows skipped. {}",
+                    result.connections_skipped, total, detail
+                ))
+                .unwrap_or_default();
+                let _ = PyErr::warn(
+                    py,
+                    &py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+                    msg.as_c_str(),
+                    1,
+                );
+            }
 
             Ok(report_dict.into())
         })
@@ -1977,6 +2011,7 @@ impl KnowledgeGraph {
         Python::attach(|py| Ok(Py::new(py, new_kg)?.into_any()))
     }
 
+    #[pyo3(signature = (property, level_index=None))]
     fn statistics(&self, property: &str, level_index: Option<usize>) -> PyResult<Py<PyAny>> {
         let pairs = statistics_methods::get_parent_child_pairs(&self.selection, level_index);
         let stats = statistics_methods::calculate_property_stats(&self.inner, &pairs, property);
@@ -2089,6 +2124,7 @@ impl KnowledgeGraph {
         }
     }
 
+    #[pyo3(signature = (level_index=None, group_by_parent=None, store_as=None, keep_selection=None))]
     fn count(
         &mut self,
         level_index: Option<usize>,
@@ -3494,13 +3530,14 @@ impl KnowledgeGraph {
     ///     for node in central_nodes:
     ///         print(f"{node['title']}: {node['score']:.4f}")
     ///     ```
-    #[pyo3(signature = (normalized=None, sample_size=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
+    #[pyo3(signature = (normalized=None, sample_size=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
     #[allow(clippy::too_many_arguments)]
     fn betweenness_centrality(
         &self,
         py: Python<'_>,
         normalized: Option<bool>,
         sample_size: Option<usize>,
+        connection_types: Option<Vec<String>>,
         top_k: Option<usize>,
         as_dict: Option<bool>,
         timeout_ms: Option<u64>,
@@ -3512,7 +3549,7 @@ impl KnowledgeGraph {
 
         let inner = Arc::clone(&self.inner);
         let results = py.detach(move || {
-            graph_algorithms::betweenness_centrality(&inner, normalized, sample_size, deadline)
+            graph_algorithms::betweenness_centrality(&inner, normalized, sample_size, connection_types.as_deref(), deadline)
         });
 
         if to_df.unwrap_or(false) {
@@ -3549,7 +3586,7 @@ impl KnowledgeGraph {
     ///     for node in important_nodes:
     ///         print(f"{node['title']}: {node['score']:.6f}")
     ///     ```
-    #[pyo3(signature = (damping_factor=None, max_iterations=None, tolerance=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
+    #[pyo3(signature = (damping_factor=None, max_iterations=None, tolerance=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
     #[allow(clippy::too_many_arguments)]
     fn pagerank(
         &self,
@@ -3557,6 +3594,7 @@ impl KnowledgeGraph {
         damping_factor: Option<f64>,
         max_iterations: Option<usize>,
         tolerance: Option<f64>,
+        connection_types: Option<Vec<String>>,
         top_k: Option<usize>,
         as_dict: Option<bool>,
         timeout_ms: Option<u64>,
@@ -3570,7 +3608,7 @@ impl KnowledgeGraph {
 
         let inner = Arc::clone(&self.inner);
         let results =
-            py.detach(move || graph_algorithms::pagerank(&inner, damping, max_iter, tol, deadline));
+            py.detach(move || graph_algorithms::pagerank(&inner, damping, max_iter, tol, connection_types.as_deref(), deadline));
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -3602,11 +3640,12 @@ impl KnowledgeGraph {
     ///     # Find the most connected nodes
     ///     connected_nodes = graph.degree_centrality(top_k=10)
     ///     ```
-    #[pyo3(signature = (normalized=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
+    #[pyo3(signature = (normalized=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
     fn degree_centrality(
         &self,
         py: Python<'_>,
         normalized: Option<bool>,
+        connection_types: Option<Vec<String>>,
         top_k: Option<usize>,
         as_dict: Option<bool>,
         timeout_ms: Option<u64>,
@@ -3618,7 +3657,7 @@ impl KnowledgeGraph {
 
         let inner = Arc::clone(&self.inner);
         let results =
-            py.detach(move || graph_algorithms::degree_centrality(&inner, normalized, deadline));
+            py.detach(move || graph_algorithms::degree_centrality(&inner, normalized, connection_types.as_deref(), deadline));
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -3651,11 +3690,12 @@ impl KnowledgeGraph {
     ///     # Find nodes that are "closest" to all others
     ///     close_nodes = graph.closeness_centrality(top_k=10)
     ///     ```
-    #[pyo3(signature = (normalized=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
+    #[pyo3(signature = (normalized=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
     fn closeness_centrality(
         &self,
         py: Python<'_>,
         normalized: Option<bool>,
+        connection_types: Option<Vec<String>>,
         top_k: Option<usize>,
         as_dict: Option<bool>,
         timeout_ms: Option<u64>,
@@ -3667,7 +3707,7 @@ impl KnowledgeGraph {
 
         let inner = Arc::clone(&self.inner);
         let results =
-            py.detach(move || graph_algorithms::closeness_centrality(&inner, normalized, deadline));
+            py.detach(move || graph_algorithms::closeness_centrality(&inner, normalized, connection_types.as_deref(), deadline));
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -4051,7 +4091,7 @@ impl KnowledgeGraph {
         let unique_values = graph.create_index(node_type, property);
 
         let result_dict = PyDict::new(py);
-        result_dict.set_item("type", node_type)?;
+        result_dict.set_item("node_type", node_type)?;
         result_dict.set_item("property", property)?;
         result_dict.set_item("unique_values", unique_values)?;
         result_dict.set_item("created", true)?;
@@ -4089,7 +4129,7 @@ impl KnowledgeGraph {
         let result_list = pyo3::types::PyList::empty(py);
         for (node_type, property) in indexes {
             let idx_dict = PyDict::new(py);
-            idx_dict.set_item("type", node_type)?;
+            idx_dict.set_item("node_type", node_type)?;
             idx_dict.set_item("property", property)?;
             result_list.append(idx_dict)?;
         }
@@ -4128,7 +4168,7 @@ impl KnowledgeGraph {
         match self.inner.get_index_stats(node_type, property) {
             Some(stats) => {
                 let result_dict = PyDict::new(py);
-                result_dict.set_item("type", node_type)?;
+                result_dict.set_item("node_type", node_type)?;
                 result_dict.set_item("property", property)?;
                 result_dict.set_item("unique_values", stats.unique_values)?;
                 result_dict.set_item("total_entries", stats.total_entries)?;
@@ -4167,7 +4207,7 @@ impl KnowledgeGraph {
         let unique_values = graph.create_range_index(node_type, property);
 
         let result_dict = PyDict::new(py);
-        result_dict.set_item("type", node_type)?;
+        result_dict.set_item("node_type", node_type)?;
         result_dict.set_item("property", property)?;
         result_dict.set_item("unique_values", unique_values)?;
         result_dict.set_item("created", true)?;
@@ -4244,7 +4284,7 @@ impl KnowledgeGraph {
         let props_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
         let unique_values = graph.create_composite_index(node_type, &props_refs);
         let result_dict = PyDict::new(py);
-        result_dict.set_item("type", node_type)?;
+        result_dict.set_item("node_type", node_type)?;
         result_dict.set_item("properties", properties)?;
         result_dict.set_item("unique_combinations", unique_values)?;
 
@@ -4274,7 +4314,7 @@ impl KnowledgeGraph {
         let result_list = pyo3::types::PyList::empty(py);
         for (node_type, properties) in indexes {
             let idx_dict = PyDict::new(py);
-            idx_dict.set_item("type", node_type)?;
+            idx_dict.set_item("node_type", node_type)?;
             idx_dict.set_item("properties", properties)?;
             result_list.append(idx_dict)?;
         }
@@ -4311,7 +4351,7 @@ impl KnowledgeGraph {
         match self.inner.get_composite_index_stats(node_type, &properties) {
             Some(stats) => {
                 let result_dict = PyDict::new(py);
-                result_dict.set_item("type", node_type)?;
+                result_dict.set_item("node_type", node_type)?;
                 result_dict.set_item("properties", properties)?;
                 result_dict.set_item("unique_combinations", stats.unique_values)?;
                 result_dict.set_item("total_entries", stats.total_entries)?;

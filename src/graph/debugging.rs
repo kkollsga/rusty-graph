@@ -36,9 +36,13 @@ pub fn get_schema_string(graph: &DirGraph) -> String {
     for conn_type in conn_types {
         has_metadata = true;
         if let Some(info) = graph.connection_type_metadata.get(conn_type.as_str()) {
+            let sources: Vec<&String> = info.source_types.iter().collect();
+            let targets: Vec<&String> = info.target_types.iter().collect();
             schema_string.push_str(&format!(
                 "  Connection Type: {} ({} -> {})\n",
-                conn_type, info.source_type, info.target_type
+                conn_type,
+                sources.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+                targets.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
             ));
 
             if !info.property_types.is_empty() {

@@ -706,6 +706,7 @@ pub fn betweenness_centrality(
     graph: &DirGraph,
     normalized: bool,
     sample_size: Option<usize>,
+    connection_types: Option<&[String]>,
     deadline: Option<Instant>,
 ) -> Vec<CentralityResult> {
     use std::collections::VecDeque;
@@ -733,6 +734,11 @@ pub fn betweenness_centrality(
     // Pre-build outgoing adjacency list for fast BFS
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for edge in graph.graph.edge_references() {
+        if let Some(types) = &connection_types {
+            if !types.iter().any(|t| t == &edge.weight().connection_type) {
+                continue;
+            }
+        }
         let src_i = node_to_idx[edge.source().index()];
         let tgt_i = node_to_idx[edge.target().index()];
         adj[src_i].push(tgt_i);
@@ -869,6 +875,7 @@ pub fn pagerank(
     damping_factor: f64,
     max_iterations: usize,
     tolerance: f64,
+    connection_types: Option<&[String]>,
     deadline: Option<Instant>,
 ) -> Vec<CentralityResult> {
     let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
@@ -890,6 +897,11 @@ pub fn pagerank(
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut out_degrees: Vec<usize> = vec![0; n];
     for edge in graph.graph.edge_references() {
+        if let Some(types) = &connection_types {
+            if !types.iter().any(|t| t == &edge.weight().connection_type) {
+                continue;
+            }
+        }
         let src_i = node_to_idx[edge.source().index()];
         let tgt_i = node_to_idx[edge.target().index()];
         adj[src_i].push(tgt_i);
@@ -991,6 +1003,7 @@ pub fn pagerank(
 pub fn degree_centrality(
     graph: &DirGraph,
     normalized: bool,
+    connection_types: Option<&[String]>,
     _deadline: Option<Instant>,
 ) -> Vec<CentralityResult> {
     let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
@@ -1010,6 +1023,11 @@ pub fn degree_centrality(
     let bound = graph.graph.node_bound();
     let mut degrees = vec![0usize; bound];
     for edge in graph.graph.edge_references() {
+        if let Some(types) = &connection_types {
+            if !types.iter().any(|t| t == &edge.weight().connection_type) {
+                continue;
+            }
+        }
         degrees[edge.source().index()] += 1; // out-degree
         degrees[edge.target().index()] += 1; // in-degree
     }
@@ -1041,6 +1059,7 @@ pub fn degree_centrality(
 pub fn closeness_centrality(
     graph: &DirGraph,
     normalized: bool,
+    connection_types: Option<&[String]>,
     deadline: Option<Instant>,
 ) -> Vec<CentralityResult> {
     use std::collections::VecDeque;
@@ -1063,6 +1082,11 @@ pub fn closeness_centrality(
     // we BFS via incoming edges (convention: d(v, u) = how easy for v to reach u)
     let mut adj_incoming: Vec<Vec<usize>> = vec![Vec::new(); n];
     for edge in graph.graph.edge_references() {
+        if let Some(types) = &connection_types {
+            if !types.iter().any(|t| t == &edge.weight().connection_type) {
+                continue;
+            }
+        }
         let src_i = node_to_idx[edge.source().index()];
         let tgt_i = node_to_idx[edge.target().index()];
         // For incoming BFS from node u: follow edges pointing INTO u
@@ -1865,7 +1889,7 @@ mod tests {
     #[test]
     fn test_betweenness_centrality_chain() {
         let (graph, indices) = build_chain_graph();
-        let results = betweenness_centrality(&graph, false, None, None);
+        let results = betweenness_centrality(&graph, false, None, None, None);
         assert_eq!(results.len(), 5);
         // Middle node (index 2) should have highest betweenness in a chain
         let middle_score = results
@@ -1884,7 +1908,7 @@ mod tests {
     #[test]
     fn test_degree_centrality() {
         let (graph, indices) = build_chain_graph();
-        let results = degree_centrality(&graph, false, None);
+        let results = degree_centrality(&graph, false, None, None);
         assert_eq!(results.len(), 5);
         // Middle nodes should have degree 2, end nodes degree 1
         let middle = results.iter().find(|r| r.node_idx == indices[2]).unwrap();
@@ -1896,7 +1920,7 @@ mod tests {
     #[test]
     fn test_pagerank_basic() {
         let (graph, _) = build_triangle_graph();
-        let results = pagerank(&graph, 0.85, 100, 1e-6, None);
+        let results = pagerank(&graph, 0.85, 100, 1e-6, None, None);
         assert_eq!(results.len(), 3);
         // All nodes in a symmetric triangle should have roughly equal PageRank
         let scores: Vec<f64> = results.iter().map(|r| r.score).collect();
@@ -1911,7 +1935,7 @@ mod tests {
     #[test]
     fn test_closeness_centrality_chain() {
         let (graph, indices) = build_chain_graph();
-        let results = closeness_centrality(&graph, false, None);
+        let results = closeness_centrality(&graph, false, None, None);
         assert_eq!(results.len(), 5);
         // Middle node should have highest closeness
         let middle = results
@@ -1930,7 +1954,7 @@ mod tests {
     #[test]
     fn test_pagerank_empty_graph() {
         let graph = DirGraph::new();
-        let results = pagerank(&graph, 0.85, 100, 1e-6, None);
+        let results = pagerank(&graph, 0.85, 100, 1e-6, None, None);
         assert!(results.is_empty());
     }
 

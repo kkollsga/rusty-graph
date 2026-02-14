@@ -504,6 +504,7 @@ impl<'a> CypherExecutor<'a> {
                     source,
                     target,
                     edge_index,
+                    ..
                 } => {
                     row.edge_bindings.insert(
                         var,
@@ -547,6 +548,7 @@ impl<'a> CypherExecutor<'a> {
                     source,
                     target,
                     edge_index,
+                    ..
                 } => {
                     row.edge_bindings.insert(
                         var.clone(),

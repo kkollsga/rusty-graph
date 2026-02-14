@@ -627,10 +627,18 @@ pub fn pattern_matches_to_pylist(
                     source,
                     target,
                     edge_index,
+                    connection_type,
+                    properties,
                 } => {
                     binding_dict.set_item("source_idx", source.index())?;
                     binding_dict.set_item("target_idx", target.index())?;
                     binding_dict.set_item("edge_index", edge_index.index())?;
+                    binding_dict.set_item("connection_type", connection_type)?;
+                    let props_dict = PyDict::new(py);
+                    for (key, value) in properties {
+                        props_dict.set_item(key, value_to_py(py, value)?)?;
+                    }
+                    binding_dict.set_item("properties", props_dict)?;
                 }
                 MatchBinding::VariableLengthPath {
                     source,

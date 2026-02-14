@@ -161,6 +161,21 @@ impl ResultView {
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        // String key access — dict-like interface for 'columns' and 'rows'
+        if let Ok(skey) = key.extract::<String>() {
+            match skey.as_str() {
+                "columns" => return self.columns(py),
+                "rows" => {
+                    let rows: Vec<Py<PyAny>> = (0..self.rows.len())
+                        .map(|i| self.row_to_py(py, i))
+                        .collect::<Result<_, _>>()?;
+                    return rows.into_py_any(py);
+                }
+                _ => {
+                    return Err(pyo3::exceptions::PyKeyError::new_err(skey));
+                }
+            }
+        }
         if let Ok(idx) = key.extract::<isize>() {
             // Integer indexing — returns a single row as dict
             let len = self.rows.len() as isize;
@@ -196,7 +211,7 @@ impl ResultView {
             .map(|v| v.into_any())
         } else {
             Err(pyo3::exceptions::PyTypeError::new_err(
-                "indices must be integers or slices",
+                "indices must be integers, slices, or string keys ('columns', 'rows')",
             ))
         }
     }

@@ -4,7 +4,7 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
 use petgraph::visit::NodeIndexable;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 #[derive(Clone, Debug)]
@@ -253,12 +253,52 @@ impl SaveMetadata {
 }
 
 /// Metadata about a connection type: which node types it connects and what properties it carries.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct ConnectionTypeInfo {
-    pub source_type: String,
-    pub target_type: String,
+    pub source_types: HashSet<String>,
+    pub target_types: HashSet<String>,
     /// property_name → type_string (e.g. "weight" → "Float64")
     pub property_types: HashMap<String, String>,
+}
+
+/// Custom deserializer to handle both old format (source_type/target_type as single strings)
+/// and new format (source_types/target_types as sets).
+impl<'de> Deserialize<'de> for ConnectionTypeInfo {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Legacy {
+            source_type: Option<String>,
+            target_type: Option<String>,
+            #[serde(default)]
+            source_types: Option<HashSet<String>>,
+            #[serde(default)]
+            target_types: Option<HashSet<String>>,
+            #[serde(default)]
+            property_types: HashMap<String, String>,
+        }
+
+        let legacy = Legacy::deserialize(deserializer)?;
+        let source_types = legacy.source_types.unwrap_or_else(|| {
+            legacy
+                .source_type
+                .map(|s| HashSet::from([s]))
+                .unwrap_or_default()
+        });
+        let target_types = legacy.target_types.unwrap_or_else(|| {
+            legacy
+                .target_type
+                .map(|s| HashSet::from([s]))
+                .unwrap_or_default()
+        });
+        Ok(ConnectionTypeInfo {
+            source_types,
+            target_types,
+            property_types: legacy.property_types,
+        })
+    }
 }
 
 /// Contiguous columnar storage for f32 embeddings associated with a (node_type, property_name).
@@ -664,7 +704,7 @@ impl DirGraph {
         }
     }
 
-    /// Upsert connection type metadata — merges property types into existing.
+    /// Upsert connection type metadata — merges property types and accumulates type pairs.
     pub fn upsert_connection_type_metadata(
         &mut self,
         conn_type: &str,
@@ -676,13 +716,12 @@ impl DirGraph {
             .connection_type_metadata
             .entry(conn_type.to_string())
             .or_insert_with(|| ConnectionTypeInfo {
-                source_type: source_type.to_string(),
-                target_type: target_type.to_string(),
+                source_types: HashSet::new(),
+                target_types: HashSet::new(),
                 property_types: HashMap::new(),
             });
-        // Update source/target if provided (shouldn't change, but be safe)
-        entry.source_type = source_type.to_string();
-        entry.target_type = target_type.to_string();
+        entry.source_types.insert(source_type.to_string());
+        entry.target_types.insert(target_type.to_string());
         for (k, v) in prop_types {
             entry.property_types.insert(k, v);
         }
