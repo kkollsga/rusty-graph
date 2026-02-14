@@ -4441,7 +4441,7 @@ impl KnowledgeGraph {
 
         // Rewrite text_score() → vector_score() and collect texts to embed
         let rewrite = cypher::rewrite_text_score(&mut parsed, &param_map)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Embed collected query texts if any (skip for EXPLAIN)
         if !rewrite.texts_to_embed.is_empty() && !parsed.explain {
