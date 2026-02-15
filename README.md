@@ -45,6 +45,7 @@ pip install kglite
 - [Common Gotchas](#common-gotchas)
 - [Graph Maintenance](#graph-maintenance)
 - [Common Recipes](#common-recipes)
+- [Code Tree](#code-tree)
 - [API Quick Reference](#api-quick-reference)
 
 ---
@@ -1457,4 +1458,69 @@ graph.pagerank(top_k=10)                                             # → Resul
 graph.betweenness_centrality(top_k=10)                               # → ResultView of {type, title, id, score}
 graph.louvain_communities()                                          # → {communities, modularity, num_communities}
 graph.connected_components()                                         # → list[list[node_dict]]
+```
+
+---
+
+## Code Tree
+
+Parse multi-language codebases into KGLite knowledge graphs using [tree-sitter](https://tree-sitter.github.io/tree-sitter/). Extracts functions, classes/structs, enums, traits/interfaces, modules, and their relationships.
+
+```bash
+pip install kglite[code-tree]
+```
+
+### Quick start
+
+```python
+from kglite.code_tree import build
+
+graph = build("/path/to/project/src")
+
+# What are the most-called functions?
+graph.cypher("""
+    MATCH (caller:Function)-[:CALLS]->(f:Function)
+    RETURN f.name AS function, count(caller) AS callers
+    ORDER BY callers DESC LIMIT 10
+""")
+
+# What does a specific struct look like?
+graph.cypher("""
+    MATCH (s:Struct {name: 'MyStruct'})-[:HAS_ATTRIBUTE]->(a:Attribute)
+    RETURN a.name AS field, a.type_annotation AS type
+""")
+
+# Cross-file dependency analysis
+graph.cypher("""
+    MATCH (f:File)-[:IMPORTS]->(m:Module)
+    RETURN f.filename AS file, collect(DISTINCT m.name) AS imports
+""")
+
+# Save for later
+graph.save("codebase.kgl")
+```
+
+### Supported languages
+
+| Language | Parser | Extensions |
+|----------|--------|------------|
+| Rust | `tree-sitter-rust` | `.rs` |
+| Python | `tree-sitter-python` | `.py` |
+| TypeScript | `tree-sitter-typescript` | `.ts`, `.tsx` |
+| JavaScript | `tree-sitter-javascript` | `.js`, `.jsx`, `.mjs` |
+
+### Graph schema
+
+**Node types:** `File`, `Module`, `Function`, `Struct`, `Class`, `Enum`, `Trait`, `Protocol`, `Interface`, `Attribute`, `Constant`
+
+**Relationship types:** `DEFINES` (File→item), `CALLS` (Function→Function), `HAS_METHOD` (Struct/Class→Function), `HAS_ATTRIBUTE` (Struct/Class→Attribute), `HAS_SUBMODULE` (Module→Module), `IMPLEMENTS` (type→trait), `EXTENDS` (class→class), `IMPORTS` (File→Module)
+
+### Options
+
+```python
+graph = build(
+    "/path/to/src",
+    save_to="codebase.kgl",  # auto-save after building
+    verbose=True,             # print progress
+)
 ```

@@ -33,6 +33,15 @@ classifiers = [
 dependencies = ["pandas>=1.5"]
 dynamic = ["version"]
 
+[project.optional-dependencies]
+code-tree = [
+    "tree-sitter>=0.21",
+    "tree-sitter-rust",
+    "tree-sitter-python",
+    "tree-sitter-typescript",
+    "tree-sitter-javascript",
+]
+
 [project.urls]
 Homepage = "https://github.com/kkollsga/kglite"
 Repository = "https://github.com/kkollsga/kglite"
@@ -40,7 +49,6 @@ Documentation = "https://github.com/kkollsga/kglite#readme"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-include = ["kglite.pyi", "py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
