@@ -40,6 +40,11 @@ code-tree = [
     "tree-sitter-python",
     "tree-sitter-typescript",
     "tree-sitter-javascript",
+    "tree-sitter-go",
+    "tree-sitter-java",
+    "tree-sitter-c",
+    "tree-sitter-cpp",
+    "tree-sitter-c-sharp",
 ]
 
 [project.urls]

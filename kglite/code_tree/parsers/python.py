@@ -176,7 +176,11 @@ class PythonParser(LanguageParser):
         return False
 
     def _extract_calls(self, body_node, source: bytes) -> list[str]:
-        """Recursively extract function/method names called within a block."""
+        """Recursively extract function/method names called within a block.
+
+        Emits qualified calls where possible: "receiver.method" for
+        attribute access calls, bare names for plain calls and self/cls.
+        """
         calls = []
 
         def walk(node):
@@ -186,11 +190,19 @@ class PythonParser(LanguageParser):
                     if func.type == "identifier":
                         calls.append(node_text(func, source))
                     elif func.type == "attribute":
-                        # obj.method() -> extract "method"
-                        for child in reversed(func.children):
+                        parts = []
+                        for child in func.children:
                             if child.type == "identifier":
-                                calls.append(node_text(child, source))
-                                break
+                                parts.append(node_text(child, source))
+                        if len(parts) >= 2:
+                            receiver = parts[-2]
+                            method = parts[-1]
+                            if receiver in ("self", "cls"):
+                                calls.append(method)
+                            else:
+                                calls.append(f"{receiver}.{method}")
+                        elif parts:
+                            calls.append(parts[-1])
             for child in node.children:
                 walk(child)
 

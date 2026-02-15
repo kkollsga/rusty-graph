@@ -4,7 +4,7 @@ from pathlib import Path
 from tree_sitter import Language, Parser
 import tree_sitter_rust as ts_rust
 
-from .base import LanguageParser, node_text, count_lines
+from .base import LanguageParser, node_text, count_lines, get_type_parameters
 from .models import (
     ParseResult, FileInfo, FunctionInfo, ClassInfo,
     EnumInfo, InterfaceInfo, TypeRelationship,
@@ -139,7 +139,11 @@ class RustParser(LanguageParser):
         return None
 
     def _extract_calls(self, body_node, source: bytes) -> list[str]:
-        """Recursively extract function/method names called within a block."""
+        """Recursively extract function/method names called within a block.
+
+        Emits qualified calls where possible: "Receiver.method" for
+        field expressions and "Type.method" for scoped identifiers.
+        """
         calls = []
 
         def walk(node):
@@ -158,15 +162,23 @@ class RustParser(LanguageParser):
                                     field = c
                                     break
                         if field:
-                            calls.append(node_text(field, source))
+                            field_name = node_text(field, source)
+                            value = func.child_by_field_name("value")
+                            if value:
+                                val_text = node_text(value, source)
+                                hint = val_text.rsplit(".", 1)[-1].rsplit("::", 1)[-1]
+                                if hint in ("self", "&self", "Self"):
+                                    calls.append(field_name)
+                                else:
+                                    calls.append(f"{hint}.{field_name}")
+                            else:
+                                calls.append(field_name)
                     elif func.type == "scoped_identifier":
-                        name = func.child_by_field_name("name")
-                        if name:
-                            calls.append(node_text(name, source))
-                        else:
-                            parts = node_text(func, source).split("::")
-                            if parts:
-                                calls.append(parts[-1])
+                        parts = node_text(func, source).split("::")
+                        if len(parts) >= 2:
+                            calls.append(f"{parts[-2]}.{parts[-1]}")
+                        elif parts:
+                            calls.append(parts[-1])
             for child in node.children:
                 walk(child)
 
@@ -247,9 +259,20 @@ class RustParser(LanguageParser):
                 break
 
         is_pymethod = self._is_pymethod_fn(attrs, impl_is_pymethods)
+        is_ffi = any("#[no_mangle]" in a for a in attrs)
+        ffi_kind = None
+        if is_pymethod:
+            ffi_kind = "pyo3"
+        elif is_ffi:
+            ffi_kind = "extern_c"
         visibility = self._get_visibility(node)
         if is_pymethod and visibility == "private":
             visibility = "pub(py)"
+
+        metadata: dict = {"is_pymethod": is_pymethod}
+        if is_ffi or is_pymethod:
+            metadata["is_ffi"] = True
+            metadata["ffi_kind"] = ffi_kind
 
         return FunctionInfo(
             name=name,
@@ -263,7 +286,8 @@ class RustParser(LanguageParser):
             docstring=self._get_doc_comment(node, source),
             return_type=self._get_return_type(node, source),
             calls=self._extract_calls(body, source) if body else [],
-            metadata={"is_pymethod": is_pymethod},
+            type_parameters=get_type_parameters(node, source),
+            metadata=metadata,
         )
 
     def parse_file(self, filepath: Path, src_root: Path) -> ParseResult:
@@ -309,6 +333,7 @@ class RustParser(LanguageParser):
                     file_path=rel_path,
                     line_number=child.start_point[0] + 1,
                     docstring=self._get_doc_comment(child, source),
+                    type_parameters=get_type_parameters(child, source),
                     metadata={"is_pyclass": is_pyclass},
                 ))
                 # Extract struct fields as attributes
@@ -338,17 +363,27 @@ class RustParser(LanguageParser):
                     file_path=rel_path,
                     line_number=child.start_point[0] + 1,
                     docstring=self._get_doc_comment(child, source),
+                    type_parameters=get_type_parameters(child, source),
                 ))
                 # Extract trait method signatures as functions
+                trait_rel = TypeRelationship(
+                    source_type=f"{module_path}::{name}",
+                    target_type=None,
+                    relationship="inherent",
+                )
                 for tc in child.children:
                     if tc.type == "declaration_list":
                         for item in tc.children:
                             if item.type in ("function_item", "function_signature_item"):
-                                result.functions.append(self._parse_function(
+                                fn = self._parse_function(
                                     item, source, module_path, rel_path,
                                     is_method=True, owner=name,
                                     impl_is_pymethods=False,
-                                ))
+                                )
+                                result.functions.append(fn)
+                                trait_rel.methods.append(fn)
+                if trait_rel.methods:
+                    result.type_relationships.append(trait_rel)
 
             elif child.type == "impl_item":
                 attrs = self._get_attributes(child, source)

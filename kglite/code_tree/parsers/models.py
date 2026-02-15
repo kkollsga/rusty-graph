@@ -29,6 +29,7 @@ class FunctionInfo:
     return_type: str | None
     decorators: list[str] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
+    type_parameters: str | None = None  # e.g. "T, U: Display"
     metadata: dict = field(default_factory=dict)
 
 
@@ -43,6 +44,7 @@ class ClassInfo:
     line_number: int
     docstring: str | None
     bases: list[str] = field(default_factory=list)
+    type_parameters: str | None = None  # e.g. "T, U"
     metadata: dict = field(default_factory=dict)
 
 
@@ -67,6 +69,7 @@ class InterfaceInfo:
     file_path: str
     line_number: int
     docstring: str | None
+    type_parameters: str | None = None  # e.g. "T"
 
 
 @dataclass

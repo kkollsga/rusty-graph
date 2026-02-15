@@ -20,6 +20,7 @@ from .parsers import (
     AttributeInfo, ConstantInfo,
     get_parsers_for_directory,
 )
+from .parsers.base import extract_parameters_from_signature
 
 # Node type mapping: ClassInfo.kind / InterfaceInfo.kind -> graph node type
 NODE_TYPE_MAP = {
@@ -57,11 +58,11 @@ def _parse_all(src_root: Path, verbose: bool = False) -> tuple[ParseResult, froz
 
 
 def _get_separator(language: str) -> str:
-    if language == "rust":
+    if language in ("rust", "cpp"):
         return "::"
-    elif language == "python":
+    elif language in ("python", "java", "csharp"):
         return "."
-    return "/"
+    return "/"  # go, c, typescript, javascript
 
 
 def _build_modules(files: list[FileInfo]) -> list[dict]:
@@ -106,7 +107,11 @@ def _build_contains_edges(files: list[FileInfo]) -> list[dict]:
 def _build_call_edges(all_functions: list[FunctionInfo],
                       max_targets: int = 5,
                       excluded_names: frozenset[str] = frozenset()) -> pd.DataFrame:
-    """Resolve function calls by name matching.
+    """Resolve function calls by name matching with optional receiver hints.
+
+    Calls can be bare names ("process") or qualified ("Receiver.method").
+    Qualified calls prefer targets whose owner matches the receiver hint,
+    falling back to bare-name matching when no hint match is found.
 
     Names in excluded_names are skipped (common stdlib methods).
     Names with more than max_targets definitions are skipped as too ambiguous.
@@ -115,18 +120,51 @@ def _build_call_edges(all_functions: list[FunctionInfo],
     for fn in all_functions:
         name_lookup[fn.name].append(fn.qualified_name)
 
+    # Map qualified name -> owner short name for receiver-aware matching.
+    # e.g. "crate::server::Server::start" -> "Server"
+    qname_to_owner: dict[str, str] = {}
+    for fn in all_functions:
+        qn = fn.qualified_name
+        for sep in ("::", ".", "/"):
+            if sep in qn:
+                owner_path = qn.rsplit(sep, 1)[0]
+                for sep2 in ("::", ".", "/"):
+                    if sep2 in owner_path:
+                        qname_to_owner[qn] = owner_path.rsplit(sep2, 1)[-1]
+                        break
+                else:
+                    qname_to_owner[qn] = owner_path
+                break
+
     edges = []
     seen = set()
 
     for fn in all_functions:
         for called_name in fn.calls:
-            if called_name in excluded_names:
+            # Parse qualified call: "Receiver.method" or bare "method"
+            if "." in called_name:
+                receiver_hint, method_name = called_name.rsplit(".", 1)
+            else:
+                receiver_hint = None
+                method_name = called_name
+
+            if method_name in excluded_names:
                 continue
-            if called_name not in name_lookup:
+            if method_name not in name_lookup:
                 continue
-            targets = name_lookup[called_name]
+
+            targets = name_lookup[method_name]
+
+            # If receiver hint available, prefer targets whose owner matches
+            if receiver_hint:
+                filtered = [t for t in targets
+                            if qname_to_owner.get(t) == receiver_hint]
+                if filtered:
+                    targets = filtered
+
             if len(targets) > max_targets:
                 continue
+
             for target_qname in targets:
                 if target_qname != fn.qualified_name:
                     key = (fn.qualified_name, target_qname)
@@ -289,7 +327,18 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
             "line_number": f.line_number,
             "docstring": f.docstring,
             "return_type": f.return_type,
+            "decorators": ", ".join(f.decorators) if f.decorators else None,
+            "parameters": extract_parameters_from_signature(f.signature),
+            "type_parameters": f.type_parameters,
+            **{k: v for k, v in f.metadata.items()
+               if not isinstance(v, (list, dict))},
         } for f in result.functions])
+        # Fix mixed True/NaN columns from conditional metadata to proper bool
+        for col in funcs_df.columns:
+            if funcs_df[col].dtype == "object":
+                vals = funcs_df[col].dropna().unique()
+                if len(vals) > 0 and all(isinstance(v, bool) for v in vals):
+                    funcs_df[col] = funcs_df[col].fillna(False).astype(bool)
         graph.add_nodes(data=funcs_df, node_type="Function",
                         unique_id_field="qualified_name", node_title_field="name")
 
@@ -303,6 +352,7 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
                 "file_path": c.file_path,
                 "line_number": c.line_number,
                 "docstring": c.docstring,
+                "type_parameters": c.type_parameters,
                 **{k: v for k, v in c.metadata.items()},
             } for c in subset])
             graph.add_nodes(data=df, node_type=node_type,
@@ -317,6 +367,7 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
             "file_path": e.file_path,
             "line_number": e.line_number,
             "docstring": e.docstring,
+            "variants": ", ".join(e.variants) if e.variants else None,
         } for e in result.enums])
         graph.add_nodes(data=df, node_type="Enum",
                         unique_id_field="qualified_name", node_title_field="name")
@@ -332,6 +383,7 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
                 "file_path": i.file_path,
                 "line_number": i.line_number,
                 "docstring": i.docstring,
+                "type_parameters": i.type_parameters,
             } for i in subset])
             graph.add_nodes(data=df, node_type=node_type,
                             unique_id_field="qualified_name",
@@ -408,7 +460,7 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
 
     if has_method_edges:
         df = pd.DataFrame(has_method_edges)
-        _add_has_method_connections(graph, df, result.classes)
+        _add_has_method_connections(graph, df, result.classes, result.interfaces)
 
     if import_edges:
         df = pd.DataFrame(import_edges)
@@ -476,19 +528,25 @@ def _add_typed_connections_same(graph, df, conn_type, source_field, target_field
         )
 
 
-def _add_has_method_connections(graph, df, classes):
+def _add_has_method_connections(graph, df, classes, interfaces=None):
     """Add HAS_METHOD connections, routing through correct source node type."""
     type_map = {}
     for c in classes:
         type_map[c.name] = NODE_TYPE_MAP[c.kind]
         type_map[c.qualified_name] = NODE_TYPE_MAP[c.kind]
+    if interfaces:
+        for i in interfaces:
+            type_map[i.name] = NODE_TYPE_MAP[i.kind]
+            type_map[i.qualified_name] = NODE_TYPE_MAP[i.kind]
 
     schema = graph.schema()
-    if "Class" in schema["node_types"]:
-        default_type = "Class"
-    elif "Struct" in schema["node_types"]:
-        default_type = "Struct"
-    else:
+    # Pick a default type from what's available
+    default_type = None
+    for candidate in ("Class", "Struct", "Trait", "Interface", "Protocol"):
+        if candidate in schema["node_types"]:
+            default_type = candidate
+            break
+    if default_type is None:
         return
 
     groups: dict[str, list] = defaultdict(list)

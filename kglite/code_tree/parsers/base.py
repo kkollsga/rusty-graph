@@ -58,3 +58,51 @@ def node_text(node, source: bytes) -> str:
 def count_lines(source: bytes) -> int:
     """Count lines of code in source bytes."""
     return source.count(b"\n") + (1 if source and not source.endswith(b"\n") else 0)
+
+
+def get_type_parameters(node, source: bytes,
+                        node_type: str = "type_parameters") -> str | None:
+    """Extract generic/template type parameters from a declaration node.
+
+    Looks for a child of the given node_type (e.g. "type_parameters",
+    "type_parameter_list") and returns the inner text with angle brackets
+    stripped.  Returns None if no type parameters are found.
+    """
+    for child in node.children:
+        if child.type == node_type:
+            text = source[child.start_byte:child.end_byte].decode("utf8")
+            # Strip surrounding < > if present
+            if text.startswith("<") and text.endswith(">"):
+                text = text[1:-1].strip()
+            return text if text else None
+    return None
+
+
+_SELF_PARAMS = frozenset({"self", "&self", "&mut self", "cls"})
+
+
+def extract_parameters_from_signature(signature: str) -> str | None:
+    """Extract the parameter list from a function signature string.
+
+    Finds the first balanced (...) group, filters out self/cls, and
+    returns the cleaned parameter text or None if empty.
+    """
+    start = signature.find("(")
+    if start == -1:
+        return None
+    depth = 0
+    end = start
+    for i in range(start, len(signature)):
+        if signature[i] == "(":
+            depth += 1
+        elif signature[i] == ")":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    params_text = signature[start + 1:end].strip()
+    if not params_text:
+        return None
+    parts = [p.strip() for p in params_text.split(",")]
+    filtered = [p for p in parts if p and p.strip() not in _SELF_PARAMS]
+    return ", ".join(filtered) if filtered else None

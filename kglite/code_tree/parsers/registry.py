@@ -11,6 +11,17 @@ EXTENSION_MAP: dict[str, str] = {
     ".js": "javascript",
     ".jsx": "javascript",
     ".mjs": "javascript",
+    ".go": "go",
+    ".java": "java",
+    ".cs": "csharp",
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".hpp": "cpp",
+    ".hh": "cpp",
+    ".hxx": "cpp",
 }
 
 
@@ -28,6 +39,21 @@ def get_parser(language: str) -> LanguageParser:
     elif language == "javascript":
         from .typescript import JavaScriptParser
         return JavaScriptParser()
+    elif language == "go":
+        from .go import GoParser
+        return GoParser()
+    elif language == "java":
+        from .java import JavaParser
+        return JavaParser()
+    elif language == "csharp":
+        from .csharp import CSharpParser
+        return CSharpParser()
+    elif language == "c":
+        from .cpp import CParser
+        return CParser()
+    elif language == "cpp":
+        from .cpp import CppParser
+        return CppParser()
     else:
         raise ValueError(f"Unsupported language: {language}")
 
