@@ -5445,6 +5445,85 @@ impl KnowledgeGraph {
         Ok(())
     }
 
+    /// Export embeddings to a standalone .kgle file.
+    ///
+    /// Exported embeddings are keyed by node ID, so they survive graph rebuilds.
+    ///
+    /// Args:
+    ///     path: File path to write (typically ending in .kgle)
+    ///     node_types: Optional filter. Can be:
+    ///         - None: export all embeddings
+    ///         - list[str]: export all embedding stores for these node types
+    ///         - dict[str, list[str]]: export specific (node_type -> [text_columns]) pairs.
+    ///           An empty list means all properties for that type.
+    ///
+    /// Returns:
+    ///     Dict with 'stores' (int) and 'embeddings' (int) counts.
+    #[pyo3(signature = (path, node_types=None))]
+    fn export_embeddings(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        node_types: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let filter = match &node_types {
+            None => None,
+            Some(obj) => {
+                if let Ok(list) = obj.cast::<PyList>() {
+                    let types: Vec<String> = list.extract()?;
+                    Some(io_operations::EmbeddingExportFilter::Types(types))
+                } else if let Ok(dict) = obj.cast::<PyDict>() {
+                    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+                    for (k, v) in dict.iter() {
+                        let key: String = k.extract()?;
+                        let vals: Vec<String> = v.extract()?;
+                        map.insert(key, vals);
+                    }
+                    Some(io_operations::EmbeddingExportFilter::TypeProperties(map))
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "node_types must be a list of strings or a dict of {str: list[str]}",
+                    ));
+                }
+            }
+        };
+
+        let inner = self.inner.clone();
+        let path_owned = path.to_string();
+        let stats = py
+            .detach(move || {
+                io_operations::export_embeddings_to_file(&inner, &path_owned, filter.as_ref())
+            })
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
+
+        let result = PyDict::new(py);
+        result.set_item("stores", stats.stores)?;
+        result.set_item("embeddings", stats.embeddings)?;
+        result.into_py_any(py)
+    }
+
+    /// Import embeddings from a .kgle file.
+    ///
+    /// Matches embeddings to nodes by (node_type, node_id). Embeddings whose
+    /// node ID doesn't exist in the current graph are silently skipped.
+    ///
+    /// Args:
+    ///     path: Path to a .kgle file previously created by export_embeddings.
+    ///
+    /// Returns:
+    ///     Dict with 'stores' (int), 'imported' (int), and 'skipped' (int) counts.
+    fn import_embeddings(&mut self, py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
+        let g = Arc::make_mut(&mut self.inner);
+        let stats = io_operations::import_embeddings_from_file(g, path)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
+
+        let result = PyDict::new(py);
+        result.set_item("stores", stats.stores)?;
+        result.set_item("imported", stats.imported)?;
+        result.set_item("skipped", stats.skipped)?;
+        result.into_py_any(py)
+    }
+
     /// Retrieve embeddings for nodes.
     ///
     /// Can be called in two ways:

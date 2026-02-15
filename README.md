@@ -941,6 +941,33 @@ vec = graph.get_embedding('Article', 'summary', node_id)
 
 Embeddings persist across `save()`/`load()` cycles automatically.
 
+### Embedding Export / Import
+
+Export embeddings to a standalone `.kgle` file so they survive graph rebuilds. Embeddings are keyed by node ID — import resolves IDs against the current graph, skipping any that no longer exist.
+
+```python
+# Export all embeddings
+stats = graph.export_embeddings("embeddings.kgle")
+# {'stores': 2, 'embeddings': 5000}
+
+# Export only specific node types
+graph.export_embeddings("embeddings.kgle", ["Article", "Author"])
+
+# Export specific (node_type, property) pairs — empty list = all properties for that type
+graph.export_embeddings("embeddings.kgle", {
+    "Article": ["summary", "title"],  # only these two
+    "Author": [],                     # all embedding properties for Author
+})
+
+# Import into a fresh graph — matches by (node_type, node_id)
+graph2 = kglite.KnowledgeGraph()
+graph2.add_nodes(articles_df, 'Article', 'id', 'title')
+result = graph2.import_embeddings("embeddings.kgle")
+# {'stores': 2, 'imported': 4800, 'skipped': 200}
+```
+
+This is useful when rebuilding a graph from scratch (e.g., re-running a build script) without re-generating expensive embeddings.
+
 ---
 
 ## Graph Algorithms
@@ -1169,7 +1196,20 @@ graph.save("my_graph.kgl")
 loaded_graph = kglite.load("my_graph.kgl")
 ```
 
-> **Portability:** Save files use bincode serialization and are **not guaranteed portable** across OS, CPU architecture, or library versions. Always re-export via a portable format (GraphML, CSV) when sharing across machines.
+Save files (`.kgl`) use a pinned binary format (bincode with explicit little-endian, fixed-int encoding). Files are forward-compatible within the same major version. For sharing across machines or long-term archival, prefer a portable format (GraphML, CSV).
+
+### Embedding Snapshots
+
+Export embeddings separately so they survive graph rebuilds. See [Embedding Export / Import](#embedding-export--import) under Semantic Search for full details.
+
+```python
+graph.export_embeddings("embeddings.kgle")                          # all embeddings
+graph.export_embeddings("embeddings.kgle", ["Article"])             # by node type
+graph.export_embeddings("embeddings.kgle", {"Article": ["summary"]})  # by type + property
+
+result = graph.import_embeddings("embeddings.kgle")
+# {'stores': 2, 'imported': 4800, 'skipped': 200}
+```
 
 ### Export Formats
 
@@ -1215,10 +1255,12 @@ The Python GIL is released during heavy Rust operations, allowing other Python t
 |-----------|:---:|-------|
 | `save()` | Yes | Serialization + compression + file write |
 | `load()` | Yes | File read + decompression + deserialization |
+| `export_embeddings()` | Yes | Serialization + compression + file write |
 | `cypher()` (reads) | Yes | Query parsing, optimization, and execution |
 | `vector_search()` | Yes | Similarity computation (uses rayon internally) |
 | `search_text()` | Partial | Model embedding needs GIL; vector search releases it |
 | `add_nodes()` | No | DataFrame conversion requires GIL throughout |
+| `import_embeddings()` | No | Mutates graph in-place |
 | `cypher()` (mutations) | No | Must hold exclusive lock on graph |
 
 For concurrent access from multiple threads, mutations (`add_nodes`, `CREATE`/`SET`/`DELETE` Cypher) require external synchronization. Read-only operations (`cypher` reads, `vector_search`, `save`) can run while other Python threads execute.
@@ -1229,7 +1271,7 @@ For concurrent access from multiple threads, mutations (`add_nodes`, `CREATE`/`S
 
 - **Single-label only.** Each node has exactly one type. `labels(n)` returns a string, not a list. `SET n:OtherLabel` is not supported.
 - **`id` and `title` are canonical.** `add_nodes(unique_id_field='user_id')` stores the column as `id`. The original name works as an alias in Cypher (`n.user_id` resolves to `n.id`), but results always return canonical names (`id`, `title`).
-- **Save files aren't portable.** The binary format (bincode) may differ across OS, CPU architecture, or library versions. Use `export()` (GraphML, CSV) for sharing across machines.
+- **Save files use a pinned binary format.** `.kgl` and `.kgle` files use bincode with explicitly pinned encoding options (little-endian, fixed-int). Files are compatible across OS and CPU architecture within the same major version. For long-term archival or sharing with non-kglite tools, use `export()` (GraphML, CSV).
 - **Indexes:** `create_index()` accelerates equality only (`=`). For range queries (`>`, `<`, `>=`, `<=`), use `create_range_index()`.
 - **Flat vs. grouped results.** After traversal with multiple parents, `get_titles()`, `get_nodes()`, and `get_properties()` return grouped dicts instead of flat lists. Use `flatten_single_parent=False` to always get grouped output.
 - **No auto-persistence.** The graph lives in memory. `save()` is manual — crashes lose unsaved work.
@@ -1386,6 +1428,10 @@ graph.remove_embeddings('Article', 'summary')                           # remove
 graph.get_embeddings('Article', 'summary')                              # retrieve all vectors for type
 graph.type_filter('Article').get_embeddings('summary')                  # retrieve vectors for selection
 graph.get_embedding('Article', 'summary', node_id)                      # single node vector (or None)
+graph.export_embeddings('emb.kgle')                                     # export all embeddings to file
+graph.export_embeddings('emb.kgle', ['Article'])                        # export by node type
+graph.export_embeddings('emb.kgle', {'Article': ['summary']})           # export by type + property
+graph.import_embeddings('emb.kgle')                                     # import embeddings from file
 # Cypher: text_score(n, 'summary', 'query text') — semantic search in Cypher, needs set_embedder()
 ```
 

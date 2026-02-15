@@ -22,7 +22,7 @@ use crate::graph::schema::{
     SaveMetadata, SchemaDefinition,
 };
 use crate::graph::KnowledgeGraph;
-use bincode;
+use bincode::Options;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -31,6 +31,23 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::sync::Arc;
+
+/// Return a pinned bincode configuration that is identical to the legacy
+/// `bincode::serialize` / `bincode::deserialize` encoding:
+///   - Fixed-size integer encoding (not varint)
+///   - Little-endian byte order
+///   - No trailing bytes rejected
+///   - 2 GiB size limit (generous, prevents OOM on corrupt files)
+///
+/// Using explicit options guarantees wire-format stability regardless of
+/// bincode crate default changes or future upgrades.
+fn bincode_options() -> impl bincode::Options {
+    bincode::options()
+        .with_fixint_encoding()
+        .with_little_endian()
+        .allow_trailing_bytes()
+        .with_limit(2 * 1024 * 1024 * 1024) // 2 GiB
+}
 
 /// Magic bytes for the v2 sectioned format: "RGF\x02"
 const V2_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x02];
@@ -105,7 +122,9 @@ pub fn write_graph_to_file(graph: &DirGraph, path: &str) -> io::Result<()> {
     let mut graph_compressed = Vec::new();
     {
         let gz = GzEncoder::new(&mut graph_compressed, Compression::new(3));
-        bincode::serialize_into(gz, &graph.graph).map_err(io::Error::other)?;
+        bincode_options()
+            .serialize_into(gz, &graph.graph)
+            .map_err(io::Error::other)?;
     }
 
     // Compress embeddings if any exist
@@ -113,7 +132,9 @@ pub fn write_graph_to_file(graph: &DirGraph, path: &str) -> io::Result<()> {
     let embedding_compressed = if has_embeddings {
         let mut buf = Vec::new();
         let gz = GzEncoder::new(&mut buf, Compression::new(3));
-        bincode::serialize_into(gz, &graph.embeddings).map_err(io::Error::other)?;
+        bincode_options()
+            .serialize_into(gz, &graph.embeddings)
+            .map_err(io::Error::other)?;
         Some(buf)
     } else {
         None
@@ -258,7 +279,7 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
         if !emb_bytes.is_empty() {
             let gz = GzDecoder::new(emb_bytes);
             let embeddings: HashMap<(String, String), EmbeddingStore> =
-                bincode::deserialize_from(gz).map_err(|e| {
+                bincode_options().deserialize_from(gz).map_err(|e| {
                     io::Error::other(format!("Failed to deserialize embedding data: {}", e))
                 })?;
             dir_graph.embeddings = embeddings;
@@ -271,13 +292,15 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
 /// Load v1 format: gzip-compressed bincode of full DirGraph.
 fn load_v1(buf: &[u8]) -> io::Result<DirGraph> {
     let gz = GzDecoder::new(buf);
-    let dir_graph: DirGraph = bincode::deserialize_from(gz).map_err(|e| {
-        io::Error::other(format!(
-            "Failed to load v1 (gzip+bincode) file. This file may have been saved with an \
-                 incompatible version of kglite. Error: {}",
-            e
-        ))
-    })?;
+    let dir_graph: DirGraph = bincode_options()
+        .deserialize_from(gz)
+        .map_err(|e| {
+            io::Error::other(format!(
+                "Failed to load v1 (gzip+bincode) file. This file may have been saved with an \
+                     incompatible version of kglite. Error: {}",
+                e
+            ))
+        })?;
 
     // v1 files stored format_version in save_metadata
     let saved_version = dir_graph.save_metadata.format_version;
@@ -307,12 +330,14 @@ fn load_core_data(
 
     // Decompress
     let gz = GzDecoder::new(graph_bytes);
-    let graph: crate::graph::schema::Graph = bincode::deserialize_from(gz).map_err(|e| {
-        io::Error::other(format!(
-            "Failed to deserialize graph data (core version {}). Error: {}",
-            file_core_version, e
-        ))
-    })?;
+    let graph: crate::graph::schema::Graph = bincode_options()
+        .deserialize_from(gz)
+        .map_err(|e| {
+            io::Error::other(format!(
+                "Failed to deserialize graph data (core version {}). Error: {}",
+                file_core_version, e
+            ))
+        })?;
 
     // Run migration chain: version N → N+1 → ... → CURRENT_CORE_DATA_VERSION
     if file_core_version < CURRENT_CORE_DATA_VERSION {
@@ -344,6 +369,203 @@ fn migrate_core_data(
     // This function exists as infrastructure for future core data changes.
     let _ = from_version;
     Ok(graph)
+}
+
+// ─── Embedding Export / Import ────────────────────────────────────────────
+
+use crate::datatypes::values::Value;
+
+/// Magic bytes for the embedding export format.
+const KGLE_MAGIC: [u8; 4] = *b"KGLE";
+const KGLE_VERSION: u32 = 1;
+
+/// A single embedding store serialized with node IDs (not internal indices).
+#[derive(Serialize, Deserialize)]
+struct ExportedEmbeddingStore {
+    node_type: String,
+    text_column: String, // e.g. "summary" (without _emb suffix)
+    dimension: usize,
+    entries: Vec<(Value, Vec<f32>)>, // (node_id, embedding) pairs
+}
+
+/// Filter for selective embedding export.
+pub enum EmbeddingExportFilter {
+    /// Export all embedding stores for these node types.
+    Types(Vec<String>),
+    /// Export specific (node_type → [text_columns]) pairs.
+    /// An empty vec means all properties for that type.
+    TypeProperties(HashMap<String, Vec<String>>),
+}
+
+pub struct ExportStats {
+    pub stores: usize,
+    pub embeddings: usize,
+}
+
+pub struct ImportStats {
+    pub stores: usize,
+    pub imported: usize,
+    pub skipped: usize,
+}
+
+/// Export embeddings to a standalone .kgle file, keyed by node ID.
+pub fn export_embeddings_to_file(
+    graph: &DirGraph,
+    path: &str,
+    filter: Option<&EmbeddingExportFilter>,
+) -> io::Result<ExportStats> {
+    let mut exported_stores: Vec<ExportedEmbeddingStore> = Vec::new();
+    let mut total_embeddings = 0usize;
+
+    for ((node_type, store_name), store) in &graph.embeddings {
+        let text_column = store_name
+            .strip_suffix("_emb")
+            .unwrap_or(store_name.as_str());
+
+        // Apply filter
+        if let Some(f) = filter {
+            match f {
+                EmbeddingExportFilter::Types(types) => {
+                    if !types.iter().any(|t| t == node_type) {
+                        continue;
+                    }
+                }
+                EmbeddingExportFilter::TypeProperties(map) => {
+                    match map.get(node_type) {
+                        None => continue, // type not in filter
+                        Some(props) if !props.is_empty() => {
+                            if !props.iter().any(|p| p == text_column) {
+                                continue;
+                            }
+                        }
+                        Some(_) => {} // empty list = all properties for this type
+                    }
+                }
+            }
+        }
+
+        // Resolve node indices → node IDs
+        let mut entries: Vec<(Value, Vec<f32>)> = Vec::with_capacity(store.len());
+        for &node_index in &store.slot_to_node {
+            if let Some(node) = graph
+                .graph
+                .node_weight(petgraph::graph::NodeIndex::new(node_index))
+            {
+                if let Some(embedding) = store.get_embedding(node_index) {
+                    entries.push((node.id.clone(), embedding.to_vec()));
+                }
+            }
+        }
+
+        total_embeddings += entries.len();
+        exported_stores.push(ExportedEmbeddingStore {
+            node_type: node_type.clone(),
+            text_column: text_column.to_string(),
+            dimension: store.dimension,
+            entries,
+        });
+    }
+
+    // Write: magic + version + gzip(bincode(stores))
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    writer.write_all(&KGLE_MAGIC)?;
+    writer.write_all(&KGLE_VERSION.to_le_bytes())?;
+
+    let gz = GzEncoder::new(&mut writer, Compression::new(3));
+    bincode_options()
+        .serialize_into(gz, &exported_stores)
+        .map_err(|e| io::Error::other(format!("Failed to serialize embeddings: {}", e)))?;
+
+    writer.flush()?;
+
+    Ok(ExportStats {
+        stores: exported_stores.len(),
+        embeddings: total_embeddings,
+    })
+}
+
+/// Import embeddings from a .kgle file, resolving node IDs to current graph indices.
+pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Result<ImportStats> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf)?;
+
+    if buf.len() < 8 {
+        return Err(io::Error::other(
+            "File is too small to be a valid .kgle file.",
+        ));
+    }
+
+    // Validate magic and version
+    if buf[..4] != KGLE_MAGIC {
+        return Err(io::Error::other(
+            "Not a valid .kgle file (bad magic bytes).",
+        ));
+    }
+    let version = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    if version > KGLE_VERSION {
+        return Err(io::Error::other(format!(
+            "Embedding file version {} is newer than supported version {}. Please upgrade kglite.",
+            version, KGLE_VERSION,
+        )));
+    }
+
+    // Decompress and deserialize
+    let gz = GzDecoder::new(&buf[8..]);
+    let exported_stores: Vec<ExportedEmbeddingStore> =
+        bincode_options().deserialize_from(gz).map_err(|e| {
+            io::Error::other(format!("Failed to deserialize embedding data: {}", e))
+        })?;
+
+    let mut total_imported = 0usize;
+    let mut total_skipped = 0usize;
+    let mut stores_count = 0usize;
+
+    for exported in exported_stores {
+        // Build ID index for this node type so lookup_by_id works
+        graph.build_id_index(&exported.node_type);
+
+        let mut store =
+            crate::graph::schema::EmbeddingStore::new(exported.dimension);
+        store
+            .data
+            .reserve(exported.entries.len() * exported.dimension);
+
+        let mut imported = 0usize;
+        let mut skipped = 0usize;
+
+        for (id, vec) in &exported.entries {
+            match graph.lookup_by_id(&exported.node_type, id) {
+                Some(node_idx) => {
+                    store.set_embedding(node_idx.index(), vec);
+                    imported += 1;
+                }
+                None => {
+                    skipped += 1;
+                }
+            }
+        }
+
+        if imported > 0 {
+            let key = (
+                exported.node_type,
+                format!("{}_emb", exported.text_column),
+            );
+            graph.embeddings.insert(key, store);
+            stores_count += 1;
+        }
+
+        total_imported += imported;
+        total_skipped += skipped;
+    }
+
+    Ok(ImportStats {
+        stores: stores_count,
+        imported: total_imported,
+        skipped: total_skipped,
+    })
 }
 
 /// Rebuild caches and wrap in KnowledgeGraph.
