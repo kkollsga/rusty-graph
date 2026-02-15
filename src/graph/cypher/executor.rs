@@ -18,6 +18,7 @@ use petgraph::Direction;
 use rayon::prelude::*;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 /// Minimum row count to switch from sequential to parallel iteration.
 /// Below this threshold, sequential is faster (avoids rayon thread pool overhead).
@@ -106,15 +107,32 @@ pub struct CypherExecutor<'a> {
     params: &'a HashMap<String, Value>,
     /// Cache for vector_score constant arguments (set once on first call, thread-safe).
     vs_cache: OnceLock<VectorScoreCache>,
+    /// Optional deadline for aborting long-running queries.
+    deadline: Option<Instant>,
 }
 
 impl<'a> CypherExecutor<'a> {
-    pub fn with_params(graph: &'a DirGraph, params: &'a HashMap<String, Value>) -> Self {
+    pub fn with_params(
+        graph: &'a DirGraph,
+        params: &'a HashMap<String, Value>,
+        deadline: Option<Instant>,
+    ) -> Self {
         CypherExecutor {
             graph,
             params,
             vs_cache: OnceLock::new(),
+            deadline,
         }
+    }
+
+    #[inline]
+    fn check_deadline(&self) -> Result<(), String> {
+        if let Some(dl) = self.deadline {
+            if Instant::now() > dl {
+                return Err("Query timed out".to_string());
+            }
+        }
+        Ok(())
     }
 
     /// Execute a parsed Cypher query (read-only)
@@ -122,6 +140,7 @@ impl<'a> CypherExecutor<'a> {
         let mut result_set = ResultSet::new();
 
         for (i, clause) in query.clauses.iter().enumerate() {
+            self.check_deadline()?;
             // Seed first-clause WITH/UNWIND with one empty row so standalone
             // expressions (e.g. `WITH [1,2,3] AS l`) can be evaluated.
             // Only for the very first clause — a WITH after an empty MATCH
@@ -212,7 +231,8 @@ impl<'a> CypherExecutor<'a> {
                         self.graph,
                         None,
                         self.params.clone(),
-                    );
+                    )
+                    .set_deadline(self.deadline);
                     let matches = executor.execute(pattern)?;
                     for m in matches {
                         all_rows.push(self.pattern_match_to_row(m));
@@ -227,7 +247,8 @@ impl<'a> CypherExecutor<'a> {
                             None,
                             existing_row.node_bindings.to_hashmap(),
                             self.params.clone(),
-                        );
+                        )
+                        .set_deadline(self.deadline);
                         let matches = executor.execute(pattern)?;
                         for m in matches {
                             if !self.bindings_compatible(existing_row, &m) {
@@ -253,7 +274,8 @@ impl<'a> CypherExecutor<'a> {
                         None,
                         row.node_bindings.to_hashmap(),
                         self.params.clone(),
-                    );
+                    )
+                    .set_deadline(self.deadline);
                     let matches = executor.execute(pattern)?;
 
                     for m in matches {
@@ -382,7 +404,8 @@ impl<'a> CypherExecutor<'a> {
 
         // Find matching source and target nodes
         let executor =
-            PatternExecutor::new_lightweight_with_params(self.graph, None, self.params.clone());
+            PatternExecutor::new_lightweight_with_params(self.graph, None, self.params.clone())
+                .set_deadline(self.deadline);
         let source_nodes = executor.find_matching_nodes_pub(source_pattern)?;
         let target_nodes = executor.find_matching_nodes_pub(target_pattern)?;
 
@@ -404,7 +427,7 @@ impl<'a> CypherExecutor<'a> {
                             target_idx,
                             connection_types,
                             None,
-                            None,
+                            self.deadline,
                         )
                     }
                     EdgeDirection::Outgoing => {
@@ -415,7 +438,7 @@ impl<'a> CypherExecutor<'a> {
                             target_idx,
                             connection_types,
                             None,
-                            None,
+                            self.deadline,
                         )
                     }
                     EdgeDirection::Incoming => {
@@ -426,7 +449,7 @@ impl<'a> CypherExecutor<'a> {
                             source_idx,
                             connection_types,
                             None,
-                            None,
+                            self.deadline,
                         )
                         .map(|mut pr| {
                             pr.path.reverse();
@@ -666,7 +689,8 @@ impl<'a> CypherExecutor<'a> {
                     None,
                     row.node_bindings.to_hashmap(),
                     self.params.clone(),
-                );
+                )
+                .set_deadline(self.deadline);
                 let matches = executor.execute(pattern)?;
 
                 for m in &matches {
@@ -844,7 +868,8 @@ impl<'a> CypherExecutor<'a> {
                         None,
                         node_map,
                         self.params.clone(),
-                    );
+                    )
+                    .set_deadline(self.deadline);
                     let matches = executor.execute(pattern)?;
 
                     for m in &matches {
@@ -999,6 +1024,7 @@ impl<'a> CypherExecutor<'a> {
                     dist > spec.threshold_km
                 }
             });
+            self.check_deadline()?;
             // Apply remainder predicate if there were additional AND conditions
             if let Some(rest) = remainder {
                 let mut keep = Vec::with_capacity(result_set.rows.len());
@@ -1047,6 +1073,7 @@ impl<'a> CypherExecutor<'a> {
                     score < spec.threshold
                 }
             });
+            self.check_deadline()?;
             if let Some(rest) = remainder {
                 let mut keep = Vec::with_capacity(result_set.rows.len());
                 for row in result_set.rows {
@@ -1064,6 +1091,7 @@ impl<'a> CypherExecutor<'a> {
         // Apply full predicate evaluation for remaining/non-indexable conditions
         // Sequential: per-row predicate work is typically cheap (property lookup +
         // comparison), so Rayon overhead outweighs parallelism benefits.
+        self.check_deadline()?;
         let mut filtered_rows = Vec::new();
         for row in result_set.rows {
             match self.evaluate_predicate(&folded_pred, &row) {
@@ -1201,7 +1229,8 @@ impl<'a> CypherExecutor<'a> {
                         None,
                         row.node_bindings.to_hashmap(),
                         self.params.clone(),
-                    );
+                    )
+                    .set_deadline(self.deadline);
                     let matches = executor.execute(pattern)?;
                     let found = matches.iter().any(|m| self.bindings_compatible(row, m));
                     if !found {
@@ -1658,6 +1687,16 @@ impl<'a> CypherExecutor<'a> {
                     if let Some(node) = self.graph.graph.node_weight(idx) {
                         return Ok(node_to_map_value(node));
                     }
+                }
+                // Edge variable — return connection_type as representative value
+                if let Some(edge) = row.edge_bindings.get(name) {
+                    if let Some(edge_data) = self.graph.graph.edge_weight(edge.edge_index) {
+                        return Ok(Value::String(edge_data.connection_type.clone()));
+                    }
+                }
+                // Path variable — return hops count
+                if let Some(path) = row.path_bindings.get(name) {
+                    return Ok(Value::Int64(path.hops as i64));
                 }
                 // Variable might be unbound (OPTIONAL MATCH null)
                 Ok(Value::Null)
@@ -2469,6 +2508,7 @@ impl<'a> CypherExecutor<'a> {
             .collect();
 
         // Group rows by grouping key values (single composite string key to reduce allocations)
+        self.check_deadline()?;
         let mut groups: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
         let mut group_index_map: HashMap<String, usize> = HashMap::new();
         let mut key_buf = String::with_capacity(64);
@@ -2763,6 +2803,7 @@ impl<'a> CypherExecutor<'a> {
         clause: &OrderByClause,
         mut result_set: ResultSet,
     ) -> Result<ResultSet, String> {
+        self.check_deadline()?;
         // Fold constant sub-expressions in sort key expressions
         let folded_sort_exprs: Vec<Expression> = clause
             .items
@@ -2886,6 +2927,7 @@ impl<'a> CypherExecutor<'a> {
             self.fold_constants_expr(&return_clause.items[score_item_index].expression);
 
         // Phase 1: Score all rows, keep top-k in a min-heap
+        self.check_deadline()?;
         let mut heap: BinaryHeap<ScoredRowRef> = BinaryHeap::with_capacity(limit + 1);
 
         for (i, row) in result_set.rows.iter().enumerate() {
@@ -2972,6 +3014,7 @@ impl<'a> CypherExecutor<'a> {
         clause: &UnwindClause,
         result_set: ResultSet,
     ) -> Result<ResultSet, String> {
+        self.check_deadline()?;
         let mut new_rows = Vec::new();
 
         let source_rows = result_set.rows;
@@ -3154,11 +3197,17 @@ pub fn execute_mutable(
     graph: &mut DirGraph,
     query: &CypherQuery,
     params: HashMap<String, Value>,
+    deadline: Option<Instant>,
 ) -> Result<CypherResult, String> {
     let mut result_set = ResultSet::new();
     let mut stats = MutationStats::default();
 
     for (i, clause) in query.clauses.iter().enumerate() {
+        if let Some(dl) = deadline {
+            if Instant::now() > dl {
+                return Err("Query timed out".to_string());
+            }
+        }
         // Seed first-clause WITH/UNWIND (same as read-only path)
         if i == 0
             && result_set.rows.is_empty()
@@ -3185,7 +3234,7 @@ pub fn execute_mutable(
             }
             // Read clauses: create temporary immutable executor
             _ => {
-                let executor = CypherExecutor::with_params(graph, &params);
+                let executor = CypherExecutor::with_params(graph, &params, deadline);
                 result_set = executor.execute_single_clause(clause, result_set)?;
             }
         }
@@ -3195,7 +3244,7 @@ pub fn execute_mutable(
     let has_return = query.clauses.iter().any(|c| matches!(c, Clause::Return(_)));
 
     if has_return || !result_set.columns.is_empty() {
-        let executor = CypherExecutor::with_params(graph, &params);
+        let executor = CypherExecutor::with_params(graph, &params, deadline);
         let mut result = executor.finalize_result(result_set)?;
         result.stats = Some(stats);
         Ok(result)
@@ -3277,7 +3326,7 @@ fn execute_create(
                     // Evaluate edge properties
                     let mut edge_props = HashMap::new();
                     {
-                        let executor = CypherExecutor::with_params(graph, params);
+                        let executor = CypherExecutor::with_params(graph, params, None);
                         for (key, expr) in &edge_pat.properties {
                             let val = executor.evaluate_expression(expr, &new_row)?;
                             edge_props.insert(key.clone(), val);
@@ -3328,7 +3377,7 @@ fn create_node(
     // Evaluate property expressions (borrow graph immutably, then drop)
     let mut properties = HashMap::new();
     {
-        let executor = CypherExecutor::with_params(graph, params);
+        let executor = CypherExecutor::with_params(graph, params, None);
         for (key, expr) in &node_pat.properties {
             let val = executor.evaluate_expression(expr, row)?;
             properties.insert(key.clone(), val);
@@ -3464,7 +3513,7 @@ fn execute_set(
 
                     // Evaluate the expression (borrows graph immutably)
                     let value = {
-                        let executor = CypherExecutor::with_params(graph, params);
+                        let executor = CypherExecutor::with_params(graph, params, None);
                         executor.evaluate_expression(expression, row)?
                     };
 
@@ -3842,7 +3891,7 @@ fn try_match_merge_pattern(
 ) -> Result<Option<ResultRow>, String> {
     use petgraph::visit::EdgeRef;
 
-    let executor = CypherExecutor::with_params(graph, params);
+    let executor = CypherExecutor::with_params(graph, params, None);
 
     match pattern.elements.len() {
         1 => {
@@ -4654,7 +4703,7 @@ mod tests {
     fn test_case_simple_form_evaluation() {
         let graph = DirGraph::new();
         let no_params = HashMap::new();
-        let executor = CypherExecutor::with_params(&graph, &no_params);
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
         let row = ResultRow::new();
 
         // CASE 'Oslo' WHEN 'Oslo' THEN 'capital' ELSE 'other' END
@@ -4679,7 +4728,7 @@ mod tests {
     fn test_case_simple_form_else() {
         let graph = DirGraph::new();
         let no_params = HashMap::new();
-        let executor = CypherExecutor::with_params(&graph, &no_params);
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
         let row = ResultRow::new();
 
         // CASE 'Bergen' WHEN 'Oslo' THEN 'capital' ELSE 'other' END
@@ -4704,7 +4753,7 @@ mod tests {
     fn test_case_no_else_returns_null() {
         let graph = DirGraph::new();
         let no_params = HashMap::new();
-        let executor = CypherExecutor::with_params(&graph, &no_params);
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
         let row = ResultRow::new();
 
         // CASE 'Bergen' WHEN 'Oslo' THEN 'capital' END → null
@@ -4727,7 +4776,7 @@ mod tests {
     fn test_case_generic_form_evaluation() {
         let graph = DirGraph::new();
         let no_params = HashMap::new();
-        let executor = CypherExecutor::with_params(&graph, &no_params);
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
         let mut row = ResultRow::new();
         row.projected.insert("val".to_string(), Value::Int64(25));
 
@@ -4762,7 +4811,7 @@ mod tests {
             ("name".to_string(), Value::String("Alice".to_string())),
             ("age".to_string(), Value::Int64(30)),
         ]);
-        let executor = CypherExecutor::with_params(&graph, &params);
+        let executor = CypherExecutor::with_params(&graph, &params, None);
         let row = ResultRow::new();
 
         let result = executor
@@ -4780,7 +4829,7 @@ mod tests {
     fn test_parameter_missing_error() {
         let graph = DirGraph::new();
         let no_params = HashMap::new();
-        let executor = CypherExecutor::with_params(&graph, &no_params);
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
         let row = ResultRow::new();
 
         let result =
@@ -4856,7 +4905,7 @@ mod tests {
         let query =
             super::super::parser::parse_cypher("CREATE (n:Person {name: 'Alice', age: 30})")
                 .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         assert!(result.stats.is_some());
         let stats = result.stats.unwrap();
@@ -4881,7 +4930,7 @@ mod tests {
         let query =
             super::super::parser::parse_cypher("CREATE (n:Product {name: 'Laptop', price: 999})")
                 .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         assert_eq!(result.stats.as_ref().unwrap().nodes_created, 1);
         let node = graph
@@ -4899,7 +4948,7 @@ mod tests {
             "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) CREATE (a)-[:FRIENDS]->(b)",
         )
         .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         let stats = result.stats.unwrap();
         assert_eq!(stats.nodes_created, 0);
@@ -4916,7 +4965,7 @@ mod tests {
             "CREATE (a:Person {name: 'A'})-[:KNOWS]->(b:Person {name: 'B'})",
         )
         .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         let stats = result.stats.unwrap();
         assert_eq!(stats.nodes_created, 2);
@@ -4936,7 +4985,7 @@ mod tests {
             ("name".to_string(), Value::String("Charlie".to_string())),
             ("age".to_string(), Value::Int64(35)),
         ]);
-        let result = execute_mutable(&mut graph, &query, params).unwrap();
+        let result = execute_mutable(&mut graph, &query, params, None).unwrap();
 
         assert_eq!(result.stats.as_ref().unwrap().nodes_created, 1);
         let node = graph
@@ -4956,7 +5005,7 @@ mod tests {
             "CREATE (n:Person {name: 'Test'}) RETURN n.name AS name",
         )
         .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         assert_eq!(result.columns, vec!["name"]);
         assert_eq!(result.rows.len(), 1);
@@ -4969,7 +5018,7 @@ mod tests {
         let query =
             super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) SET n.age = 31")
                 .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         let stats = result.stats.unwrap();
         assert_eq!(stats.properties_set, 1);
@@ -4989,7 +5038,7 @@ mod tests {
             "MATCH (n:Person {name: 'Alice'}) SET n.name = 'Alicia'",
         )
         .unwrap();
-        execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         // title is accessed via "name" or "title"
         let node = graph
@@ -5008,7 +5057,7 @@ mod tests {
         let query =
             super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) SET n.id = 999")
                 .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new());
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None);
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("immutable"));
@@ -5022,7 +5071,7 @@ mod tests {
             "MATCH (n:Person {name: 'Alice'}) SET n.age = n.age + 1",
         )
         .unwrap();
-        execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         let node = graph
             .graph
@@ -5069,7 +5118,7 @@ mod tests {
         let query =
             super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) DETACH DELETE n")
                 .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         let stats = result.stats.unwrap();
         assert_eq!(stats.nodes_deleted, 1);
@@ -5083,7 +5132,7 @@ mod tests {
         let mut graph = build_test_graph();
         let query = super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) DELETE n")
             .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new());
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("DETACH DELETE"));
     }
@@ -5096,7 +5145,7 @@ mod tests {
         let query =
             super::super::parser::parse_cypher("MATCH (a:Person)-[r:KNOWS]->(b:Person) DELETE r")
                 .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         let stats = result.stats.unwrap();
         assert_eq!(stats.relationships_deleted, 1);
@@ -5122,7 +5171,7 @@ mod tests {
 
         let query =
             super::super::parser::parse_cypher("MATCH (n:Person {name: 'Solo'}) DELETE n").unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         assert_eq!(result.stats.unwrap().nodes_deleted, 1);
         assert_eq!(graph.graph.node_count(), 0);
@@ -5134,7 +5183,7 @@ mod tests {
         let query =
             super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) DETACH DELETE n")
                 .unwrap();
-        execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         let person_indices = graph.type_indices.get("Person").unwrap();
         assert_eq!(person_indices.len(), 1);
@@ -5150,7 +5199,7 @@ mod tests {
         let query =
             super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) REMOVE n.age")
                 .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         assert_eq!(result.stats.as_ref().unwrap().properties_removed, 1);
 
@@ -5168,7 +5217,7 @@ mod tests {
             "MATCH (n:Person {name: 'Alice'}) REMOVE n.nonexistent",
         )
         .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
         assert_eq!(result.stats.as_ref().unwrap().properties_removed, 0);
     }
 
@@ -5178,7 +5227,7 @@ mod tests {
         let query =
             super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) REMOVE n:Person")
                 .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new());
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not supported"));
     }
@@ -5191,7 +5240,7 @@ mod tests {
     fn test_merge_creates_when_not_found() {
         let mut graph = DirGraph::new();
         let query = super::super::parser::parse_cypher("MERGE (n:Person {name: 'Alice'})").unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         assert_eq!(result.stats.as_ref().unwrap().nodes_created, 1);
         // 1 Person node (no SchemaNodes — metadata stored in HashMap)
@@ -5203,7 +5252,7 @@ mod tests {
         let mut graph = build_test_graph();
         let initial_count = graph.graph.node_count();
         let query = super::super::parser::parse_cypher("MERGE (n:Person {name: 'Alice'})").unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         assert_eq!(result.stats.as_ref().unwrap().nodes_created, 0);
         // No new nodes — MERGE matched existing; schema may or may not exist already
@@ -5217,7 +5266,7 @@ mod tests {
             "MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.age = 30",
         )
         .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         assert_eq!(result.stats.as_ref().unwrap().nodes_created, 1);
         assert_eq!(result.stats.as_ref().unwrap().properties_set, 1);
@@ -5230,7 +5279,7 @@ mod tests {
             "MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.visits = 1",
         )
         .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         assert_eq!(result.stats.as_ref().unwrap().nodes_created, 0);
         assert_eq!(result.stats.as_ref().unwrap().properties_set, 1);
@@ -5249,7 +5298,7 @@ mod tests {
             "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) MERGE (a)-[r:KNOWS]->(b)",
         )
         .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         assert_eq!(result.stats.as_ref().unwrap().relationships_created, 0);
         assert_eq!(graph.graph.edge_count(), 1);
@@ -5262,7 +5311,7 @@ mod tests {
             "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) MERGE (a)-[r:FRIENDS]->(b)",
         )
         .unwrap();
-        let result = execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         assert_eq!(result.stats.as_ref().unwrap().relationships_created, 1);
         assert_eq!(graph.graph.edge_count(), 2);
@@ -5281,7 +5330,7 @@ mod tests {
         let query =
             super::super::parser::parse_cypher("CREATE (p:Person {name: 'Charlie', age: 40})")
                 .unwrap();
-        execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         let found = graph.lookup_by_index("Person", "age", &Value::Int64(40));
         assert!(found.is_some());
@@ -5297,7 +5346,7 @@ mod tests {
         let query =
             super::super::parser::parse_cypher("MATCH (p:Person {name: 'Alice'}) SET p.age = 99")
                 .unwrap();
-        execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         // Old value should be gone
         let old = graph.lookup_by_index("Person", "age", &Value::Int64(30));
@@ -5318,7 +5367,7 @@ mod tests {
         let query =
             super::super::parser::parse_cypher("MATCH (p:Person {name: 'Alice'}) REMOVE p.age")
                 .unwrap();
-        execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         let found = graph.lookup_by_index("Person", "age", &Value::Int64(30));
         assert!(found.is_none() || found.unwrap().is_empty());
@@ -5330,7 +5379,7 @@ mod tests {
         let query =
             super::super::parser::parse_cypher("CREATE (p:Animal {name: 'Rex', species: 'Dog'})")
                 .unwrap();
-        execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         // Type metadata for "Animal" should exist
         let metadata = graph.get_node_type_metadata("Animal");
@@ -5356,7 +5405,7 @@ mod tests {
             "MERGE (p:Person {name: 'Dave'}) ON CREATE SET p.age = 50",
         )
         .unwrap();
-        execute_mutable(&mut graph, &query, HashMap::new()).unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
 
         let found = graph.lookup_by_index("Person", "age", &Value::Int64(50));
         assert!(found.is_some());
@@ -5367,7 +5416,7 @@ mod tests {
             "MERGE (p:Person {name: 'Alice'}) ON MATCH SET p.age = 31",
         )
         .unwrap();
-        execute_mutable(&mut graph, &query2, HashMap::new()).unwrap();
+        execute_mutable(&mut graph, &query2, HashMap::new(), None).unwrap();
 
         // Old Alice age gone
         let old = graph.lookup_by_index("Person", "age", &Value::Int64(30));
@@ -5377,5 +5426,75 @@ mod tests {
         let new = graph.lookup_by_index("Person", "age", &Value::Int64(31));
         assert!(new.is_some());
         assert_eq!(new.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_self_loop_pattern_same_variable() {
+        // Build graph manually: Alice -KNOWS-> Bob, Alice -KNOWS-> Alice (self-loop)
+        let mut graph = build_test_graph(); // Alice -> Bob via KNOWS
+        // Add self-loop: Alice -> Alice
+        let alice_idx = graph.type_indices["Person"][0];
+        let self_edge = EdgeData::new("KNOWS".to_string(), HashMap::new());
+        graph.graph.add_edge(alice_idx, alice_idx, self_edge);
+
+        // MATCH (p)-[:KNOWS]->(p) should only return the self-loop (Alice->Alice)
+        let read_query =
+            super::super::parser::parse_cypher("MATCH (p:Person)-[:KNOWS]->(p) RETURN p.name")
+                .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&read_query).unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get(0),
+            Some(&Value::String("Alice".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_edge_variable_in_expression() {
+        // Edge variables should resolve to connection_type, not Null
+        let graph = build_test_graph(); // Alice -KNOWS-> Bob
+        let query = super::super::parser::parse_cypher(
+            "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN r, count(r) AS cnt",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&query).unwrap();
+
+        assert!(!result.rows.is_empty());
+        // count(r) should be non-zero (was 0 before fix)
+        let cnt_col = result.columns.iter().position(|c| c == "cnt").unwrap();
+        assert_eq!(result.rows[0].get(cnt_col), Some(&Value::Int64(1)));
+    }
+
+    #[test]
+    fn test_path_variable_count() {
+        // Path variables should be countable (non-null)
+        let mut graph = DirGraph::new();
+        let query = super::super::parser::parse_cypher(
+            "CREATE (a:Node {name: 'A'}), (b:Node {name: 'B'}), (c:Node {name: 'C'}), \
+             (a)-[:LINK]->(b), (b)-[:LINK]->(c)",
+        )
+        .unwrap();
+        execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+
+        let read_query = super::super::parser::parse_cypher(
+            "MATCH path = (a:Node)-[:LINK*1..2]->(b:Node) RETURN count(path) AS cnt",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&read_query).unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        let cnt_col = result.columns.iter().position(|c| c == "cnt").unwrap();
+        // Should be > 0 (A->B, B->C, A->B->C = 3 paths)
+        match result.rows[0].get(cnt_col) {
+            Some(Value::Int64(n)) => assert!(*n > 0, "count(path) should be > 0, got {}", n),
+            other => panic!("Expected Int64, got {:?}", other),
+        }
     }
 }

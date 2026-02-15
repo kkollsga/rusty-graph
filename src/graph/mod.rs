@@ -140,6 +140,11 @@ impl KnowledgeGraph {
 /// Uses Arc::make_mut which clones only if there are other references,
 /// otherwise gives a mutable reference in place. Callers mutate the graph
 /// through the returned reference — no extraction/replacement needed.
+///
+/// WARNING: If other Arc references exist (e.g., a ResultView still in Python
+/// scope, or a cloned KnowledgeGraph), this will deep-clone the entire DirGraph
+/// including all nodes, edges, and indices. In read-heavy workloads this is fine,
+/// but be aware that a lingering reference can cause unexpected memory spikes on mutation.
 fn get_graph_mut(arc: &mut Arc<DirGraph>) -> &mut DirGraph {
     Arc::make_mut(arc)
 }
@@ -4491,14 +4496,18 @@ impl KnowledgeGraph {
     ///     for row in result:
     ///         print(f"{row['person']}: {row['friends']} friends")
     ///     ```
-    #[pyo3(signature = (query, *, to_df=false, params=None))]
+    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None))]
     fn cypher(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         query: &str,
         to_df: bool,
         params: Option<&Bound<'_, PyDict>>,
+        timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
+        let deadline = timeout_ms
+            .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+
         // Parse the Cypher query (no borrow needed)
         let mut parsed = cypher::parse_cypher(query).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Cypher syntax error: {}", e))
@@ -4587,7 +4596,7 @@ impl KnowledgeGraph {
             // Mutation path: needs exclusive borrow
             let mut this = slf.borrow_mut();
             let graph = get_graph_mut(&mut this.inner);
-            let result = cypher::execute_mutable(graph, &parsed, param_map).map_err(|e| {
+            let result = cypher::execute_mutable(graph, &parsed, param_map, deadline).map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                     "Cypher execution error: {}",
                     e
@@ -4624,7 +4633,7 @@ impl KnowledgeGraph {
                 this.inner.clone()
             };
             let result = {
-                let executor = cypher::CypherExecutor::with_params(&inner, &param_map);
+                let executor = cypher::CypherExecutor::with_params(&inner, &param_map, deadline);
                 py.detach(|| executor.execute(&parsed))
             }
             .map_err(|e| {
@@ -5943,14 +5952,18 @@ impl Transaction {
     ///
     /// Returns:
     ///     Query results (same format as KnowledgeGraph.cypher).
-    #[pyo3(signature = (query, params=None, to_df=false))]
+    #[pyo3(signature = (query, params=None, to_df=false, timeout_ms=None))]
     fn cypher(
         &mut self,
         py: Python<'_>,
         query: &str,
         params: Option<&Bound<'_, PyDict>>,
         to_df: bool,
+        timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
+        let deadline = timeout_ms
+            .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+
         let working = self.working.as_mut().ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Transaction already committed or rolled back",
@@ -5979,14 +5992,14 @@ impl Transaction {
 
         // Execute
         let result = if cypher::is_mutation_query(&parsed) {
-            cypher::execute_mutable(working, &parsed, param_map).map_err(|e| {
+            cypher::execute_mutable(working, &parsed, param_map, deadline).map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                     "Cypher execution error: {}",
                     e
                 ))
             })?
         } else {
-            let executor = cypher::CypherExecutor::with_params(working, &param_map);
+            let executor = cypher::CypherExecutor::with_params(working, &param_map, deadline);
             executor.execute(&parsed).map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                     "Cypher execution error: {}",

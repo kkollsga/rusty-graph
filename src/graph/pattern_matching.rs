@@ -9,6 +9,7 @@ use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::time::Instant;
 
 /// Minimum match count to use parallel expansion via rayon.
 /// Set high: each expand_from_node does light work (a few edge iterations),
@@ -707,6 +708,8 @@ pub struct PatternExecutor<'a> {
     lightweight: bool,
     /// Query parameters for resolving $param references in inline properties
     params: HashMap<String, Value>,
+    /// Optional deadline for aborting long-running pattern execution.
+    deadline: Option<Instant>,
 }
 
 impl<'a> PatternExecutor<'a> {
@@ -717,6 +720,7 @@ impl<'a> PatternExecutor<'a> {
             pre_bindings: HashMap::new(),
             lightweight: false,
             params: HashMap::new(),
+            deadline: None,
         }
     }
 
@@ -730,6 +734,7 @@ impl<'a> PatternExecutor<'a> {
             pre_bindings: HashMap::new(),
             lightweight: true,
             params: HashMap::new(),
+            deadline: None,
         }
     }
 
@@ -745,6 +750,7 @@ impl<'a> PatternExecutor<'a> {
             pre_bindings: HashMap::new(),
             lightweight: true,
             params,
+            deadline: None,
         }
     }
 
@@ -760,6 +766,7 @@ impl<'a> PatternExecutor<'a> {
             pre_bindings,
             lightweight: true,
             params: HashMap::new(),
+            deadline: None,
         }
     }
 
@@ -775,7 +782,14 @@ impl<'a> PatternExecutor<'a> {
             pre_bindings,
             lightweight: true,
             params,
+            deadline: None,
         }
+    }
+
+    /// Set a deadline for pattern execution. Returns self for chaining.
+    pub fn set_deadline(mut self, deadline: Option<Instant>) -> Self {
+        self.deadline = deadline;
+        self
     }
 
     /// Execute the pattern and return all matches
@@ -828,6 +842,11 @@ impl<'a> PatternExecutor<'a> {
             if self.max_matches.is_some_and(|max| matches.len() >= max) {
                 break;
             }
+            if let Some(dl) = self.deadline {
+                if Instant::now() > dl {
+                    return Err("Query timed out".to_string());
+                }
+            }
 
             let edge_pattern = match &pattern.elements[i] {
                 PatternElement::Edge(ep) => ep,
@@ -867,6 +886,28 @@ impl<'a> PatternExecutor<'a> {
                                             return None;
                                         }
                                     }
+                                    // Enforce intra-pattern variable constraint
+                                    let already_bound = current_match
+                                        .bindings
+                                        .iter()
+                                        .find_map(|(name, binding)| {
+                                            if name == var {
+                                                match binding {
+                                                    MatchBinding::Node { index, .. }
+                                                    | MatchBinding::NodeRef(index) => {
+                                                        Some(*index)
+                                                    }
+                                                    _ => None,
+                                                }
+                                            } else {
+                                                None
+                                            }
+                                        });
+                                    if let Some(bound_idx) = already_bound {
+                                        if target_idx != bound_idx {
+                                            return None;
+                                        }
+                                    }
                                 }
                                 let mut new_match = current_match.clone();
                                 if let Some(ref var) = edge_pattern.variable {
@@ -894,6 +935,7 @@ impl<'a> PatternExecutor<'a> {
                 // Sequential expansion with max_matches early-exit
                 let mut new_matches_seq = Vec::new();
                 let mut new_indices_seq = Vec::new();
+                let mut expand_count: usize = 0;
                 for (current_match, &source_idx) in matches.iter().zip(current_indices.iter()) {
                     if self
                         .max_matches
@@ -904,6 +946,14 @@ impl<'a> PatternExecutor<'a> {
                     let expansions =
                         self.expand_from_node(source_idx, edge_pattern, node_pattern)?;
                     for (target_idx, edge_binding) in expansions {
+                        expand_count += 1;
+                        if expand_count.is_multiple_of(1024) {
+                            if let Some(dl) = self.deadline {
+                                if Instant::now() > dl {
+                                    return Err("Query timed out".to_string());
+                                }
+                            }
+                        }
                         if self
                             .max_matches
                             .is_some_and(|max| new_matches_seq.len() >= max)
@@ -912,6 +962,26 @@ impl<'a> PatternExecutor<'a> {
                         }
                         if let Some(ref var) = node_pattern.variable {
                             if let Some(&bound_idx) = self.pre_bindings.get(var) {
+                                if target_idx != bound_idx {
+                                    continue;
+                                }
+                            }
+                            // Enforce intra-pattern variable constraint:
+                            // if this variable was already bound earlier in the
+                            // same pattern, the target must match that binding.
+                            let already_bound =
+                                current_match.bindings.iter().find_map(|(name, binding)| {
+                                    if name == var {
+                                        match binding {
+                                            MatchBinding::Node { index, .. }
+                                            | MatchBinding::NodeRef(index) => Some(*index),
+                                            _ => None,
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                });
+                            if let Some(bound_idx) = already_bound {
                                 if target_idx != bound_idx {
                                     continue;
                                 }
@@ -936,6 +1006,13 @@ impl<'a> PatternExecutor<'a> {
                 }
                 (new_matches_seq, new_indices_seq)
             };
+
+            // Check deadline after expansion (covers both parallel and sequential paths)
+            if let Some(dl) = self.deadline {
+                if Instant::now() > dl {
+                    return Err("Query timed out".to_string());
+                }
+            }
 
             // Apply max_matches truncation (for parallel path which can't early-exit)
             if let Some(max) = self.max_matches {
@@ -1258,7 +1335,16 @@ impl<'a> PatternExecutor<'a> {
 
         queue.push_back((source, 0, Vec::new()));
 
+        let mut vlp_count: usize = 0;
         while let Some((current, depth, path)) = queue.pop_front() {
+            vlp_count += 1;
+            if vlp_count.is_multiple_of(512) {
+                if let Some(dl) = self.deadline {
+                    if Instant::now() > dl {
+                        return Err("Query timed out".to_string());
+                    }
+                }
+            }
             if depth >= max_hops {
                 continue;
             }
