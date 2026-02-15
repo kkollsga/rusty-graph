@@ -5432,7 +5432,7 @@ mod tests {
     fn test_self_loop_pattern_same_variable() {
         // Build graph manually: Alice -KNOWS-> Bob, Alice -KNOWS-> Alice (self-loop)
         let mut graph = build_test_graph(); // Alice -> Bob via KNOWS
-        // Add self-loop: Alice -> Alice
+                                            // Add self-loop: Alice -> Alice
         let alice_idx = graph.type_indices["Person"][0];
         let self_edge = EdgeData::new("KNOWS".to_string(), HashMap::new());
         graph.graph.add_edge(alice_idx, alice_idx, self_edge);

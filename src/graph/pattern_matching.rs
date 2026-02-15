@@ -887,22 +887,19 @@ impl<'a> PatternExecutor<'a> {
                                         }
                                     }
                                     // Enforce intra-pattern variable constraint
-                                    let already_bound = current_match
-                                        .bindings
-                                        .iter()
-                                        .find_map(|(name, binding)| {
+                                    let already_bound = current_match.bindings.iter().find_map(
+                                        |(name, binding)| {
                                             if name == var {
                                                 match binding {
                                                     MatchBinding::Node { index, .. }
-                                                    | MatchBinding::NodeRef(index) => {
-                                                        Some(*index)
-                                                    }
+                                                    | MatchBinding::NodeRef(index) => Some(*index),
                                                     _ => None,
                                                 }
                                             } else {
                                                 None
                                             }
-                                        });
+                                        },
+                                    );
                                     if let Some(bound_idx) = already_bound {
                                         if target_idx != bound_idx {
                                             return None;

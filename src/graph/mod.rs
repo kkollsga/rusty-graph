@@ -4505,8 +4505,8 @@ impl KnowledgeGraph {
         params: Option<&Bound<'_, PyDict>>,
         timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
-        let deadline = timeout_ms
-            .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         // Parse the Cypher query (no borrow needed)
         let mut parsed = cypher::parse_cypher(query).map_err(|e| {
@@ -4596,12 +4596,13 @@ impl KnowledgeGraph {
             // Mutation path: needs exclusive borrow
             let mut this = slf.borrow_mut();
             let graph = get_graph_mut(&mut this.inner);
-            let result = cypher::execute_mutable(graph, &parsed, param_map, deadline).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Cypher execution error: {}",
-                    e
-                ))
-            })?;
+            let result =
+                cypher::execute_mutable(graph, &parsed, param_map, deadline).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Cypher execution error: {}",
+                        e
+                    ))
+                })?;
             // Auto-vacuum after deletions
             if let Some(ref stats) = result.stats {
                 if (stats.nodes_deleted > 0 || stats.relationships_deleted > 0)
@@ -5961,8 +5962,8 @@ impl Transaction {
         to_df: bool,
         timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
-        let deadline = timeout_ms
-            .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         let working = self.working.as_mut().ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
