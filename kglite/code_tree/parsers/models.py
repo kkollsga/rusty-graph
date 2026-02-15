@@ -30,6 +30,7 @@ class FunctionInfo:
     decorators: list[str] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
     type_parameters: str | None = None  # e.g. "T, U: Display"
+    end_line: int | None = None
     metadata: dict = field(default_factory=dict)
 
 
@@ -45,6 +46,7 @@ class ClassInfo:
     docstring: str | None
     bases: list[str] = field(default_factory=list)
     type_parameters: str | None = None  # e.g. "T, U"
+    end_line: int | None = None
     metadata: dict = field(default_factory=dict)
 
 
@@ -57,6 +59,7 @@ class EnumInfo:
     line_number: int
     docstring: str | None
     variants: list[str] = field(default_factory=list)
+    end_line: int | None = None
 
 
 @dataclass
@@ -70,6 +73,7 @@ class InterfaceInfo:
     line_number: int
     docstring: str | None
     type_parameters: str | None = None  # e.g. "T"
+    end_line: int | None = None
 
 
 @dataclass

@@ -138,6 +138,26 @@ class RustParser(LanguageParser):
                 return node_text(child, source)
         return None
 
+    def _extract_type_name_from_node(self, node, source: bytes) -> str | None:
+        """Extract the base type name from a type node.
+
+        Handles: type_identifier, generic_type (e.g. Foo<T>),
+        and scoped_type_identifier (e.g. crate::module::Foo).
+        """
+        if node.type == "type_identifier":
+            return node_text(node, source)
+        elif node.type == "generic_type":
+            for child in node.children:
+                if child.type == "type_identifier":
+                    return node_text(child, source)
+                elif child.type == "scoped_type_identifier":
+                    return self._extract_type_name_from_node(child, source)
+        elif node.type == "scoped_type_identifier":
+            for child in reversed(node.children):
+                if child.type == "type_identifier":
+                    return node_text(child, source)
+        return None
+
     def _extract_calls(self, body_node, source: bytes) -> list[str]:
         """Recursively extract function/method names called within a block.
 
@@ -287,6 +307,7 @@ class RustParser(LanguageParser):
             return_type=self._get_return_type(node, source),
             calls=self._extract_calls(body, source) if body else [],
             type_parameters=get_type_parameters(node, source),
+            end_line=node.end_point[0] + 1,
             metadata=metadata,
         )
 
@@ -334,6 +355,7 @@ class RustParser(LanguageParser):
                     line_number=child.start_point[0] + 1,
                     docstring=self._get_doc_comment(child, source),
                     type_parameters=get_type_parameters(child, source),
+                    end_line=child.end_point[0] + 1,
                     metadata={"is_pyclass": is_pyclass},
                 ))
                 # Extract struct fields as attributes
@@ -351,6 +373,7 @@ class RustParser(LanguageParser):
                     line_number=child.start_point[0] + 1,
                     docstring=self._get_doc_comment(child, source),
                     variants=self._get_enum_variants(child, source),
+                    end_line=child.end_point[0] + 1,
                 ))
 
             elif child.type == "trait_item":
@@ -364,6 +387,7 @@ class RustParser(LanguageParser):
                     line_number=child.start_point[0] + 1,
                     docstring=self._get_doc_comment(child, source),
                     type_parameters=get_type_parameters(child, source),
+                    end_line=child.end_point[0] + 1,
                 ))
                 # Extract trait method signatures as functions
                 trait_rel = TypeRelationship(
@@ -389,20 +413,32 @@ class RustParser(LanguageParser):
                 attrs = self._get_attributes(child, source)
                 pymethods = self._is_pymethods_block(attrs)
 
-                type_ids = [c for c in child.children
-                            if c.type == "type_identifier"]
-                has_for = any(
-                    not c.is_named and node_text(c, source) == "for"
-                    for c in child.children
-                )
+                # Collect type nodes before/after "for" keyword.
+                # Handles bare type_identifier, generic_type (e.g. Foo<'a>),
+                # and scoped_type_identifier (e.g. crate::mod::Foo).
+                seen_for = False
+                types_before: list = []
+                types_after: list = []
+                for c in child.children:
+                    if not c.is_named and node_text(c, source) == "for":
+                        seen_for = True
+                    elif c.type in ("type_identifier", "generic_type",
+                                    "scoped_type_identifier"):
+                        (types_after if seen_for else types_before).append(c)
 
-                if has_for and len(type_ids) >= 2:
-                    trait_name = node_text(type_ids[0], source)
-                    self_type = node_text(type_ids[1], source)
-                elif type_ids:
+                if seen_for and types_before and types_after:
+                    trait_name = self._extract_type_name_from_node(
+                        types_before[0], source)
+                    self_type = self._extract_type_name_from_node(
+                        types_after[0], source)
+                elif types_before:
                     trait_name = None
-                    self_type = node_text(type_ids[0], source)
+                    self_type = self._extract_type_name_from_node(
+                        types_before[0], source)
                 else:
+                    continue
+
+                if self_type is None:
                     continue
 
                 if trait_name:

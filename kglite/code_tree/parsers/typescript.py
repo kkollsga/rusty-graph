@@ -350,6 +350,7 @@ class _BaseJSTSParser(LanguageParser):
             file_path=rel_path,
             line_number=node.start_point[0] + 1,
             docstring=self._get_docstring(node, source),
+            end_line=node.end_point[0] + 1,
             return_type=self._get_return_type(node, source),
             decorators=self._get_decorators(node, source),
             calls=self._extract_calls(block, source) if block else [],
@@ -378,6 +379,7 @@ class _BaseJSTSParser(LanguageParser):
             file_path=rel_path,
             line_number=node.start_point[0] + 1,
             docstring=docstring,
+            end_line=node.end_point[0] + 1,
             bases=extends,
             type_parameters=get_type_parameters(node, source),
             metadata=metadata,
@@ -447,6 +449,7 @@ class _BaseJSTSParser(LanguageParser):
             file_path=rel_path,
             line_number=node.start_point[0] + 1,
             docstring=docstring,
+            end_line=node.end_point[0] + 1,
             type_parameters=get_type_parameters(node, source),
         ))
 
@@ -491,6 +494,7 @@ class _BaseJSTSParser(LanguageParser):
             file_path=rel_path,
             line_number=node.start_point[0] + 1,
             docstring=self._get_docstring(node, source),
+            end_line=node.end_point[0] + 1,
             variants=self._get_enum_members(node, source),
         ))
 

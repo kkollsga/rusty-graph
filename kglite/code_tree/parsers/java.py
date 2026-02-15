@@ -273,6 +273,7 @@ class JavaParser(LanguageParser):
             signature=self._get_signature(node, source),
             file_path=rel_path,
             line_number=node.start_point[0] + 1,
+            end_line=node.end_point[0] + 1,
             docstring=self._get_doc_comment(node, source),
             return_type=self._get_return_type(node, source),
             decorators=self._get_annotations(node, source),
@@ -310,6 +311,7 @@ class JavaParser(LanguageParser):
             visibility=self._get_visibility(node, source),
             file_path=rel_path,
             line_number=node.start_point[0] + 1,
+            end_line=node.end_point[0] + 1,
             docstring=docstring,
             bases=bases,
             type_parameters=get_type_parameters(node, source),
@@ -452,6 +454,7 @@ class JavaParser(LanguageParser):
             visibility=self._get_visibility(node, source),
             file_path=rel_path,
             line_number=node.start_point[0] + 1,
+            end_line=node.end_point[0] + 1,
             docstring=docstring,
             type_parameters=get_type_parameters(node, source),
         ))
@@ -495,6 +498,7 @@ class JavaParser(LanguageParser):
             visibility=self._get_visibility(node, source),
             file_path=rel_path,
             line_number=node.start_point[0] + 1,
+            end_line=node.end_point[0] + 1,
             docstring=self._get_doc_comment(node, source),
             variants=self._get_enum_constants(node, source),
         ))

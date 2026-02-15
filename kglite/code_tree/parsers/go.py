@@ -250,6 +250,7 @@ class GoParser(LanguageParser):
             signature=self._get_signature(node, source),
             file_path=rel_path,
             line_number=node.start_point[0] + 1,
+            end_line=node.end_point[0] + 1,
             docstring=self._get_doc_comment(node, source),
             return_type=self._get_return_type(node, source),
             calls=self._extract_calls(body, source) if body else [],
@@ -337,6 +338,7 @@ class GoParser(LanguageParser):
                                 visibility=self._get_visibility(name),
                                 file_path=rel_path,
                                 line_number=child.start_point[0] + 1,
+                                end_line=child.end_point[0] + 1,
                                 docstring=docstring,
                             ))
                             result.attributes.extend(
@@ -351,6 +353,7 @@ class GoParser(LanguageParser):
                                 visibility=self._get_visibility(name),
                                 file_path=rel_path,
                                 line_number=child.start_point[0] + 1,
+                                end_line=child.end_point[0] + 1,
                                 docstring=docstring,
                             ))
                             # Parse interface method specs as functions
@@ -373,6 +376,7 @@ class GoParser(LanguageParser):
                                             signature=node_text(ms, source),
                                             file_path=rel_path,
                                             line_number=ms.start_point[0] + 1,
+                                            end_line=ms.end_point[0] + 1,
                                             docstring=None,
                                             return_type=None,
                                             calls=[],

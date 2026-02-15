@@ -281,6 +281,7 @@ class CSharpParser(LanguageParser):
             calls=self._extract_calls(body, source) if body else [],
             type_parameters=get_type_parameters(node, source, "type_parameter_list"),
             metadata=metadata,
+            end_line=node.end_point[0] + 1,
         )
 
     def _parse_type_declaration(self, node, source: bytes, module_path: str,
@@ -318,6 +319,7 @@ class CSharpParser(LanguageParser):
                 line_number=node.start_point[0] + 1,
                 docstring=docstring,
                 type_parameters=get_type_parameters(node, source, "type_parameter_list"),
+                end_line=node.end_point[0] + 1,
             ))
             # Interface extends
             for base in base_types:
@@ -345,6 +347,7 @@ class CSharpParser(LanguageParser):
                 bases=base_types[:1],  # First base is the class
                 type_parameters=get_type_parameters(node, source, "type_parameter_list"),
                 metadata=metadata,
+                end_line=node.end_point[0] + 1,
             ))
 
             # Relationships — first base could be class (extends),
@@ -502,6 +505,7 @@ class CSharpParser(LanguageParser):
             line_number=node.start_point[0] + 1,
             docstring=self._get_doc_comment(node, source),
             variants=self._get_enum_members(node, source),
+            end_line=node.end_point[0] + 1,
         ))
 
     def _parse_top_level(self, node, source: bytes, module_path: str,

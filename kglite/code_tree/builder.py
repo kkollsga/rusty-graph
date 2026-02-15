@@ -9,6 +9,8 @@ EXTENDS, HAS_METHOD, HAS_SUBMODULE, IMPORTS).
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 from collections import defaultdict
 
@@ -17,7 +19,6 @@ import kglite
 
 from .parsers import (
     ParseResult, FileInfo, FunctionInfo, TypeRelationship,
-    AttributeInfo, ConstantInfo,
     get_parsers_for_directory,
 )
 from .parsers.base import extract_parameters_from_signature
@@ -298,8 +299,21 @@ def _build_defines_edges(result: ParseResult) -> list[dict]:
 
 def _load_graph(result: ParseResult, modules, call_edges_df,
                 implements_edges, extends_edges, has_method_edges,
-                contains_edges, import_edges, defines_edges) -> kglite.KnowledgeGraph:
+                contains_edges, import_edges, defines_edges,
+                uses_type_edges) -> kglite.KnowledgeGraph:
     graph = kglite.KnowledgeGraph()
+
+    # Pre-compute attribute lookup for embedding as JSON on parent nodes
+    attrs_by_owner: dict[str, list[dict]] = defaultdict(list)
+    for attr in result.attributes:
+        entry: dict = {"name": attr.name}
+        if attr.type_annotation:
+            entry["type"] = attr.type_annotation
+        if attr.visibility:
+            entry["visibility"] = attr.visibility
+        if attr.default_value:
+            entry["default"] = attr.default_value
+        attrs_by_owner[attr.owner_qualified_name].append(entry)
 
     # -- Nodes --
     if result.files:
@@ -320,25 +334,20 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
             "qualified_name": f.qualified_name,
             "name": f.name,
             "visibility": f.visibility,
-            "is_async": f.is_async,
-            "is_method": f.is_method,
+            "is_async": True if f.is_async else None,
+            "is_method": True if f.is_method else None,
             "signature": f.signature,
             "file_path": f.file_path,
             "line_number": f.line_number,
+            "end_line": f.end_line,
             "docstring": f.docstring,
             "return_type": f.return_type,
             "decorators": ", ".join(f.decorators) if f.decorators else None,
             "parameters": extract_parameters_from_signature(f.signature),
             "type_parameters": f.type_parameters,
             **{k: v for k, v in f.metadata.items()
-               if not isinstance(v, (list, dict))},
+               if not isinstance(v, (list, dict)) and v is not False},
         } for f in result.functions])
-        # Fix mixed True/NaN columns from conditional metadata to proper bool
-        for col in funcs_df.columns:
-            if funcs_df[col].dtype == "object":
-                vals = funcs_df[col].dropna().unique()
-                if len(vals) > 0 and all(isinstance(v, bool) for v in vals):
-                    funcs_df[col] = funcs_df[col].fillna(False).astype(bool)
         graph.add_nodes(data=funcs_df, node_type="Function",
                         unique_id_field="qualified_name", node_title_field="name")
 
@@ -351,9 +360,13 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
                 "visibility": c.visibility,
                 "file_path": c.file_path,
                 "line_number": c.line_number,
+                "end_line": c.end_line,
                 "docstring": c.docstring,
                 "type_parameters": c.type_parameters,
-                **{k: v for k, v in c.metadata.items()},
+                "fields": json.dumps(attrs_by_owner[c.qualified_name])
+                          if c.qualified_name in attrs_by_owner else None,
+                **{k: v for k, v in c.metadata.items()
+                   if v is not False},
             } for c in subset])
             graph.add_nodes(data=df, node_type=node_type,
                             unique_id_field="qualified_name",
@@ -366,6 +379,7 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
             "visibility": e.visibility,
             "file_path": e.file_path,
             "line_number": e.line_number,
+            "end_line": e.end_line,
             "docstring": e.docstring,
             "variants": ", ".join(e.variants) if e.variants else None,
         } for e in result.enums])
@@ -382,26 +396,15 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
                 "visibility": i.visibility,
                 "file_path": i.file_path,
                 "line_number": i.line_number,
+                "end_line": i.end_line,
                 "docstring": i.docstring,
                 "type_parameters": i.type_parameters,
+                "fields": json.dumps(attrs_by_owner[i.qualified_name])
+                          if i.qualified_name in attrs_by_owner else None,
             } for i in subset])
             graph.add_nodes(data=df, node_type=node_type,
                             unique_id_field="qualified_name",
                             node_title_field="name")
-
-    if result.attributes:
-        df = pd.DataFrame([{
-            "qualified_name": a.qualified_name,
-            "name": a.name,
-            "owner": a.owner_qualified_name,
-            "type_annotation": a.type_annotation,
-            "visibility": a.visibility,
-            "file_path": a.file_path,
-            "line_number": a.line_number,
-            "default_value": a.default_value,
-        } for a in result.attributes])
-        graph.add_nodes(data=df, node_type="Attribute",
-                        unique_id_field="qualified_name", node_title_field="name")
 
     if result.constants:
         df = pd.DataFrame([{
@@ -470,9 +473,15 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
             target_type="Module", target_id_field="module",
         )
 
-    if result.attributes:
-        _add_has_attribute_connections(graph, result.attributes,
-                                       result.classes, result.interfaces)
+    # -- USES_TYPE edges --
+    if uses_type_edges:
+        for target_type, rows in uses_type_edges.items():
+            df = pd.DataFrame(rows)
+            graph.add_connections(
+                data=df, connection_type="USES_TYPE",
+                source_type="Function", source_id_field="function",
+                target_type=target_type, target_id_field="type_name",
+            )
 
     return graph
 
@@ -572,42 +581,62 @@ def _add_has_method_connections(graph, df, classes, interfaces=None):
         )
 
 
-def _add_has_attribute_connections(graph, attributes, classes, interfaces):
-    """Add HAS_ATTRIBUTE connections from owner type to attribute."""
-    type_map = {}
+def _build_uses_type_edges(
+    functions: list[FunctionInfo],
+    classes: list,
+    enums: list,
+    interfaces: list,
+) -> dict[str, list[dict]]:
+    """Build USES_TYPE edges from functions to types referenced in signatures.
+
+    Scans each function's parameters and return_type for known type names,
+    producing (Function)-[:USES_TYPE]->(Struct|Class|Enum|Trait|...) edges.
+    """
+    # Collect all known type names → (qualified_name, node_type)
+    type_lookup: dict[str, tuple[str, str]] = {}
     for c in classes:
-        type_map[c.name] = NODE_TYPE_MAP[c.kind]
-        type_map[c.qualified_name] = NODE_TYPE_MAP[c.kind]
+        if len(c.name) > 1:  # skip single-char generics
+            type_lookup[c.name] = (c.qualified_name, NODE_TYPE_MAP[c.kind])
+    for e in enums:
+        if len(e.name) > 1:
+            type_lookup[e.name] = (e.qualified_name, "Enum")
     for i in interfaces:
-        type_map[i.name] = NODE_TYPE_MAP[i.kind]
-        type_map[i.qualified_name] = NODE_TYPE_MAP[i.kind]
+        if len(i.name) > 1:
+            type_lookup[i.name] = (i.qualified_name, NODE_TYPE_MAP[i.kind])
 
-    schema = graph.schema()
+    if not type_lookup:
+        return {}
 
-    groups: dict[str, list] = defaultdict(list)
-    for attr in attributes:
-        owner = attr.owner_qualified_name
-        for sep in ("::", "."):
-            if sep in owner:
-                name = owner.rsplit(sep, 1)[-1]
-                break
-        else:
-            name = owner
-        src_nt = type_map.get(name, type_map.get(owner, "Class"))
-        groups[src_nt].append({
-            "owner": owner,
-            "attribute": attr.qualified_name,
-        })
+    # Build regex matching any known type name as a whole word
+    escaped = [re.escape(name) for name in sorted(type_lookup, key=len, reverse=True)]
+    pattern = re.compile(r"\b(" + "|".join(escaped) + r")\b")
 
-    for src_nt, rows in groups.items():
-        if src_nt not in schema["node_types"]:
+    # Scan function signatures for type references
+    edges_by_target_type: dict[str, list[dict]] = defaultdict(list)
+    seen: set[tuple[str, str]] = set()
+
+    for fn in functions:
+        text_parts = []
+        if fn.signature:
+            text_parts.append(fn.signature)
+        if fn.return_type:
+            text_parts.append(fn.return_type)
+        if not text_parts:
             continue
-        sub_df = pd.DataFrame(rows)
-        graph.add_connections(
-            data=sub_df, connection_type="HAS_ATTRIBUTE",
-            source_type=src_nt, source_id_field="owner",
-            target_type="Attribute", target_id_field="attribute",
-        )
+
+        text = " ".join(text_parts)
+        for match in pattern.finditer(text):
+            type_name = match.group(1)
+            qname, node_type = type_lookup[type_name]
+            key = (fn.qualified_name, qname)
+            if key not in seen:
+                seen.add(key)
+                edges_by_target_type[node_type].append({
+                    "function": fn.qualified_name,
+                    "type_name": qname,
+                })
+
+    return dict(edges_by_target_type)
 
 
 # ── Public API ──────────────────────────────────────────────────────────
@@ -673,12 +702,16 @@ def build(
         )
     import_edges = _build_import_edges(result.files, known_modules)
     defines_edges = _build_defines_edges(result)
+    uses_type_edges = _build_uses_type_edges(
+        result.functions, result.classes, result.enums, result.interfaces,
+    )
 
     # Phase 3: Load
     graph = _load_graph(
         result, modules, call_edges_df,
         implements_edges, extends_edges, has_method_edges,
         contains_edges, import_edges, defines_edges,
+        uses_type_edges,
     )
 
     if save_to is not None:
