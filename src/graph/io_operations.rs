@@ -292,15 +292,13 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
 /// Load v1 format: gzip-compressed bincode of full DirGraph.
 fn load_v1(buf: &[u8]) -> io::Result<DirGraph> {
     let gz = GzDecoder::new(buf);
-    let dir_graph: DirGraph = bincode_options()
-        .deserialize_from(gz)
-        .map_err(|e| {
-            io::Error::other(format!(
-                "Failed to load v1 (gzip+bincode) file. This file may have been saved with an \
+    let dir_graph: DirGraph = bincode_options().deserialize_from(gz).map_err(|e| {
+        io::Error::other(format!(
+            "Failed to load v1 (gzip+bincode) file. This file may have been saved with an \
                      incompatible version of kglite. Error: {}",
-                e
-            ))
-        })?;
+            e
+        ))
+    })?;
 
     // v1 files stored format_version in save_metadata
     let saved_version = dir_graph.save_metadata.format_version;
@@ -330,9 +328,8 @@ fn load_core_data(
 
     // Decompress
     let gz = GzDecoder::new(graph_bytes);
-    let graph: crate::graph::schema::Graph = bincode_options()
-        .deserialize_from(gz)
-        .map_err(|e| {
+    let graph: crate::graph::schema::Graph =
+        bincode_options().deserialize_from(gz).map_err(|e| {
             io::Error::other(format!(
                 "Failed to deserialize graph data (core version {}). Error: {}",
                 file_core_version, e
@@ -514,10 +511,9 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
 
     // Decompress and deserialize
     let gz = GzDecoder::new(&buf[8..]);
-    let exported_stores: Vec<ExportedEmbeddingStore> =
-        bincode_options().deserialize_from(gz).map_err(|e| {
-            io::Error::other(format!("Failed to deserialize embedding data: {}", e))
-        })?;
+    let exported_stores: Vec<ExportedEmbeddingStore> = bincode_options()
+        .deserialize_from(gz)
+        .map_err(|e| io::Error::other(format!("Failed to deserialize embedding data: {}", e)))?;
 
     let mut total_imported = 0usize;
     let mut total_skipped = 0usize;
@@ -527,8 +523,7 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
         // Build ID index for this node type so lookup_by_id works
         graph.build_id_index(&exported.node_type);
 
-        let mut store =
-            crate::graph::schema::EmbeddingStore::new(exported.dimension);
+        let mut store = crate::graph::schema::EmbeddingStore::new(exported.dimension);
         store
             .data
             .reserve(exported.entries.len() * exported.dimension);
@@ -549,10 +544,7 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
         }
 
         if imported > 0 {
-            let key = (
-                exported.node_type,
-                format!("{}_emb", exported.text_column),
-            );
+            let key = (exported.node_type, format!("{}_emb", exported.text_column));
             graph.embeddings.insert(key, store);
             stores_count += 1;
         }
