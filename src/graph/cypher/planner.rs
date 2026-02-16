@@ -100,7 +100,11 @@ fn push_limit_into_match(_query: &mut CypherQuery, _graph: &DirGraph) {
 /// 1. `clauses[i]` is `OptionalMatch` and `clauses[i+1]` is `With`
 /// 2. The WITH has at least one `count(variable)` aggregate
 /// 3. All non-aggregate items in the WITH are simple variable pass-throughs
-/// 4. The count variable comes from the OPTIONAL MATCH pattern
+/// 4. ALL count aggregate variables come from THIS OPTIONAL MATCH pattern
+///    (not from earlier OPTIONAL MATCHes — otherwise the fused execution would
+///    assign a single match_count to all count columns, producing wrong results)
+/// 5. The count aggregates do NOT use DISTINCT (the fused fast-path counts raw
+///    matches and cannot perform deduplication)
 fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
     let mut i = 0;
     while i + 1 < query.clauses.len() {
@@ -122,6 +126,56 @@ fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
         };
 
         if !fusable {
+            i += 1;
+            continue;
+        }
+
+        // Collect variables defined in the OPTIONAL MATCH pattern
+        let opt_match_vars: std::collections::HashSet<String> =
+            if let Clause::OptionalMatch(m) = &query.clauses[i] {
+                collect_pattern_variables(&m.patterns)
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect()
+            } else {
+                i += 1;
+                continue;
+            };
+
+        // Verify ALL count aggregate variables come from THIS OPTIONAL MATCH,
+        // and none use DISTINCT (which the fused path cannot handle)
+        let all_counts_local = if let Clause::With(w) = &query.clauses[i + 1] {
+            w.items.iter().all(|item| {
+                if let Expression::FunctionCall {
+                    name,
+                    args,
+                    distinct,
+                } = &item.expression
+                {
+                    if name.eq_ignore_ascii_case("count") {
+                        // Reject DISTINCT — fused path can't deduplicate
+                        if *distinct {
+                            return false;
+                        }
+                        // count(*) is always fine
+                        if args.len() == 1 && matches!(args[0], Expression::Star) {
+                            return true;
+                        }
+                        // count(var) — var must come from this OPTIONAL MATCH
+                        if let Some(Expression::Variable(var)) = args.first() {
+                            return opt_match_vars.contains(var);
+                        }
+                        // count(expr) — not a simple variable, bail
+                        return false;
+                    }
+                }
+                true // non-aggregate items (group keys) are fine
+            })
+        } else {
+            false
+        };
+
+        if !all_counts_local {
             i += 1;
             continue;
         }

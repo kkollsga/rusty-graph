@@ -2626,11 +2626,33 @@ impl<'a> CypherExecutor<'a> {
                     } else {
                         let mut count = 0i64;
                         let mut seen = HashSet::new();
+                        // For DISTINCT on a node/edge variable, use the binding
+                        // index as the identity key so that two distinct nodes
+                        // with the same title are not incorrectly merged.
+                        let var_name = if *distinct {
+                            match &args[0] {
+                                Expression::Variable(v) => Some(v.as_str()),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
                         for row in rows {
                             let val = self.evaluate_expression(&args[0], row)?;
                             if !matches!(val, Value::Null) {
                                 if *distinct {
-                                    if seen.insert(format_value_compact(&val)) {
+                                    let identity = if let Some(vn) = var_name {
+                                        if let Some(&idx) = row.node_bindings.get(vn) {
+                                            format!("n:{}", idx.index())
+                                        } else if let Some(eb) = row.edge_bindings.get(vn) {
+                                            format!("e:{}", eb.edge_index.index())
+                                        } else {
+                                            format_value_compact(&val)
+                                        }
+                                    } else {
+                                        format_value_compact(&val)
+                                    };
+                                    if seen.insert(identity) {
                                         count += 1;
                                     }
                                 } else {
