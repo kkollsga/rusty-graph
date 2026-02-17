@@ -1545,8 +1545,15 @@ impl KnowledgeGraph {
     #[pyo3(signature = (name, node_type=None))]
     fn find(&self, name: &str, node_type: Option<&str>) -> PyResult<Py<PyAny>> {
         const CODE_TYPES: &[&str] = &[
-            "Function", "Struct", "Class", "Enum", "Trait",
-            "Protocol", "Interface", "Module", "Constant",
+            "Function",
+            "Struct",
+            "Class",
+            "Enum",
+            "Trait",
+            "Protocol",
+            "Interface",
+            "Module",
+            "Constant",
         ];
 
         let types_to_search: Vec<&str> = match node_type {
@@ -1562,10 +1569,12 @@ impl KnowledgeGraph {
                 for &idx in indices {
                     if let Some(node) = self.inner.get_node(idx) {
                         // Match on "name" property or "title" field
-                        let matches = node.get_field_ref("name")
+                        let matches = node
+                            .get_field_ref("name")
                             .map(|v| v == &name_val)
                             .unwrap_or(false)
-                            || node.get_field_ref("title")
+                            || node
+                                .get_field_ref("title")
                                 .map(|v| v == &name_val)
                                 .unwrap_or(false);
                         if matches {
@@ -1615,8 +1624,15 @@ impl KnowledgeGraph {
         hops: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
         const CODE_TYPES: &[&str] = &[
-            "Function", "Struct", "Class", "Enum", "Trait",
-            "Protocol", "Interface", "Module", "Constant",
+            "Function",
+            "Struct",
+            "Class",
+            "Enum",
+            "Trait",
+            "Protocol",
+            "Interface",
+            "Module",
+            "Constant",
         ];
 
         let hops = hops.unwrap_or(1);
@@ -1653,10 +1669,12 @@ impl KnowledgeGraph {
                 if let Some(indices) = self.inner.type_indices.get(*nt) {
                     for &idx in indices {
                         if let Some(node) = self.inner.get_node(idx) {
-                            let name_match = node.get_field_ref("name")
+                            let name_match = node
+                                .get_field_ref("name")
                                 .map(|v| v == &name_val)
                                 .unwrap_or(false)
-                                || node.get_field_ref("title")
+                                || node
+                                    .get_field_ref("title")
                                     .map(|v| v == &name_val)
                                     .unwrap_or(false);
                             if name_match {
@@ -1697,7 +1715,9 @@ impl KnowledgeGraph {
         }
 
         let target_idx = resolved_idx.unwrap();
-        let target_node = self.inner.get_node(target_idx)
+        let target_node = self
+            .inner
+            .get_node(target_idx)
             .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Node disappeared"))?;
 
         // Phase 2: Build result dict
@@ -1719,10 +1739,18 @@ impl KnowledgeGraph {
             let neighbor_indices = if hops <= 1 {
                 // Direct neighbors only
                 let mut neighbors = HashSet::new();
-                for edge in self.inner.graph.edges_directed(target_idx, petgraph::Direction::Outgoing) {
+                for edge in self
+                    .inner
+                    .graph
+                    .edges_directed(target_idx, petgraph::Direction::Outgoing)
+                {
                     neighbors.insert(edge.target());
                 }
-                for edge in self.inner.graph.edges_directed(target_idx, petgraph::Direction::Incoming) {
+                for edge in self
+                    .inner
+                    .graph
+                    .edges_directed(target_idx, petgraph::Direction::Incoming)
+                {
                     neighbors.insert(edge.source());
                 }
                 neighbors
@@ -1755,30 +1783,51 @@ impl KnowledgeGraph {
             let mut outgoing_groups: HashMap<String, Vec<NodeIndex>> = HashMap::new();
             let mut incoming_groups: HashMap<String, Vec<NodeIndex>> = HashMap::new();
 
-            for edge in self.inner.graph.edges_directed(target_idx, petgraph::Direction::Outgoing) {
+            for edge in self
+                .inner
+                .graph
+                .edges_directed(target_idx, petgraph::Direction::Outgoing)
+            {
                 let edge_type = &edge.weight().connection_type;
                 let target = edge.target();
                 if hops <= 1 || neighbor_indices.contains(&target) {
-                    outgoing_groups.entry(edge_type.clone()).or_default().push(target);
+                    outgoing_groups
+                        .entry(edge_type.clone())
+                        .or_default()
+                        .push(target);
                 }
             }
 
-            for edge in self.inner.graph.edges_directed(target_idx, petgraph::Direction::Incoming) {
+            for edge in self
+                .inner
+                .graph
+                .edges_directed(target_idx, petgraph::Direction::Incoming)
+            {
                 let edge_type = &edge.weight().connection_type;
                 let source = edge.source();
                 if hops <= 1 || neighbor_indices.contains(&source) {
-                    incoming_groups.entry(edge_type.clone()).or_default().push(source);
+                    incoming_groups
+                        .entry(edge_type.clone())
+                        .or_default()
+                        .push(source);
                 }
             }
 
             // For multi-hop: also collect edges between neighbor nodes
             if hops > 1 {
                 for &n_idx in &neighbor_indices {
-                    for edge in self.inner.graph.edges_directed(n_idx, petgraph::Direction::Outgoing) {
+                    for edge in self
+                        .inner
+                        .graph
+                        .edges_directed(n_idx, petgraph::Direction::Outgoing)
+                    {
                         let t = edge.target();
                         if t != target_idx && neighbor_indices.contains(&t) {
                             let edge_type = &edge.weight().connection_type;
-                            outgoing_groups.entry(edge_type.clone()).or_default().push(t);
+                            outgoing_groups
+                                .entry(edge_type.clone())
+                                .or_default()
+                                .push(t);
                         }
                     }
                 }
