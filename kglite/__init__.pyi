@@ -555,6 +555,26 @@ class KnowledgeGraph:
         """
         ...
 
+    def source(
+        self,
+        name: str,
+        node_type: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Get the source location of a code entity.
+
+        Resolves a name or qualified name to a single code entity and returns
+        its file path and line range.
+
+        Args:
+            name: Entity name or qualified name.
+            node_type: Optional node type hint.
+
+        Returns:
+            Dict with ``file_path``, ``line_number``, ``end_line``, ``name``,
+            ``qualified_name``, ``type``, and ``signature``.
+        """
+        ...
+
     def context(
         self,
         name: str,

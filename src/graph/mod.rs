@@ -134,6 +134,77 @@ impl KnowledgeGraph {
             let _ = model.call_method0("unload");
         }
     }
+
+    /// Code entity node types used by find/context/source.
+    const CODE_TYPES: &[&str] = &[
+        "Function",
+        "Struct",
+        "Class",
+        "Enum",
+        "Trait",
+        "Protocol",
+        "Interface",
+        "Module",
+        "Constant",
+    ];
+
+    /// Resolve a name (or qualified_name) to a single code entity NodeIndex.
+    ///
+    /// Returns:
+    /// - `Ok(Ok(idx))` — uniquely resolved
+    /// - `Ok(Err(matches))` — ambiguous (>1) or not found (0)
+    fn resolve_code_entity(
+        &self,
+        name: &str,
+        node_type: Option<&str>,
+    ) -> (Option<NodeIndex>, Vec<(NodeIndex, schema::NodeInfo)>) {
+        let name_val = Value::String(name.to_string());
+        let types_to_search: Vec<&str> = match node_type {
+            Some(nt) => vec![nt],
+            None => Self::CODE_TYPES.to_vec(),
+        };
+
+        // Try qualified_name (stored as "id") exact match first
+        for nt in &types_to_search {
+            if let Some(indices) = self.inner.type_indices.get(*nt) {
+                for &idx in indices {
+                    if let Some(node) = self.inner.get_node(idx) {
+                        if node.id == name_val {
+                            return (Some(idx), Vec::new());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fall back to name/title search
+        let mut matches: Vec<(NodeIndex, schema::NodeInfo)> = Vec::new();
+        for nt in &types_to_search {
+            if let Some(indices) = self.inner.type_indices.get(*nt) {
+                for &idx in indices {
+                    if let Some(node) = self.inner.get_node(idx) {
+                        let name_match = node
+                            .get_field_ref("name")
+                            .map(|v| v == &name_val)
+                            .unwrap_or(false)
+                            || node
+                                .get_field_ref("title")
+                                .map(|v| v == &name_val)
+                                .unwrap_or(false);
+                        if name_match {
+                            matches.push((idx, node.to_node_info()));
+                        }
+                    }
+                }
+            }
+        }
+
+        if matches.len() == 1 {
+            (Some(matches[0].0), matches)
+        } else {
+            (None, matches)
+        }
+    }
 }
 
 /// Helper function to get a mutable DirGraph from Arc.
@@ -1544,31 +1615,17 @@ impl KnowledgeGraph {
     ///     ```
     #[pyo3(signature = (name, node_type=None))]
     fn find(&self, name: &str, node_type: Option<&str>) -> PyResult<Py<PyAny>> {
-        const CODE_TYPES: &[&str] = &[
-            "Function",
-            "Struct",
-            "Class",
-            "Enum",
-            "Trait",
-            "Protocol",
-            "Interface",
-            "Module",
-            "Constant",
-        ];
-
+        let name_val = Value::String(name.to_string());
         let types_to_search: Vec<&str> = match node_type {
             Some(nt) => vec![nt],
-            None => CODE_TYPES.to_vec(),
+            None => Self::CODE_TYPES.to_vec(),
         };
 
-        let name_val = Value::String(name.to_string());
         let mut results: Vec<schema::NodeInfo> = Vec::new();
-
         for nt in &types_to_search {
             if let Some(indices) = self.inner.type_indices.get(*nt) {
                 for &idx in indices {
                     if let Some(node) = self.inner.get_node(idx) {
-                        // Match on "name" property or "title" field
                         let matches = node
                             .get_field_ref("name")
                             .map(|v| v == &name_val)
@@ -1592,6 +1649,80 @@ impl KnowledgeGraph {
                 list.append(dict)?;
             }
             Ok(list.into_any().unbind())
+        })
+    }
+
+    /// Get the source location of a code entity.
+    ///
+    /// Resolves a name or qualified name to a single code entity and returns
+    /// its file path and line range. If the name is ambiguous, returns
+    /// the matches so you can refine with a qualified name.
+    ///
+    /// Args:
+    ///     name: Entity name (e.g. "build") or qualified name
+    ///         (e.g. "crate::graph::cypher::executor::execute")
+    ///     node_type: Optional node type hint ("Function", "Struct", etc.)
+    ///
+    /// Returns:
+    ///     Dict with file_path, line_number, end_line, name, qualified_name,
+    ///     and type. If ambiguous, returns {"ambiguous": true, "matches": [...]}.
+    ///
+    /// Example:
+    ///     ```python
+    ///     loc = graph.source("execute_single_clause")
+    ///     # {'file_path': 'src/graph/cypher/executor.rs',
+    ///     #  'line_number': 163, 'end_line': 202, ...}
+    ///     ```
+    #[pyo3(signature = (name, node_type=None))]
+    fn source(&self, name: &str, node_type: Option<&str>) -> PyResult<Py<PyAny>> {
+        let (resolved, matches) = self.resolve_code_entity(name, node_type);
+
+        let target_idx = match resolved {
+            Some(idx) => idx,
+            None => {
+                return Python::attach(|py| {
+                    let dict = PyDict::new(py);
+                    if matches.is_empty() {
+                        dict.set_item("error", format!("Node not found: {}", name))?;
+                    } else {
+                        dict.set_item("ambiguous", true)?;
+                        let match_list = PyList::empty(py);
+                        for (_, info) in &matches {
+                            let d = py_out::nodeinfo_to_pydict(py, info)?;
+                            match_list.append(d)?;
+                        }
+                        dict.set_item("matches", match_list)?;
+                    }
+                    Ok(dict.into_any().unbind())
+                });
+            }
+        };
+
+        let node = self
+            .inner
+            .get_node(target_idx)
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Node disappeared"))?;
+
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            dict.set_item("type", node.get_node_type_ref())?;
+            dict.set_item("name", py_out::value_to_py(py, &node.title)?)?;
+            dict.set_item("qualified_name", py_out::value_to_py(py, &node.id)?)?;
+
+            if let Some(v) = node.get_field_ref("file_path") {
+                dict.set_item("file_path", py_out::value_to_py(py, v)?)?;
+            }
+            if let Some(v) = node.get_field_ref("line_number") {
+                dict.set_item("line_number", py_out::value_to_py(py, v)?)?;
+            }
+            if let Some(v) = node.get_field_ref("end_line") {
+                dict.set_item("end_line", py_out::value_to_py(py, v)?)?;
+            }
+            if let Some(v) = node.get_field_ref("signature") {
+                dict.set_item("signature", py_out::value_to_py(py, v)?)?;
+            }
+
+            Ok(dict.into_any().unbind())
         })
     }
 
@@ -1623,84 +1754,18 @@ impl KnowledgeGraph {
         node_type: Option<&str>,
         hops: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
-        const CODE_TYPES: &[&str] = &[
-            "Function",
-            "Struct",
-            "Class",
-            "Enum",
-            "Trait",
-            "Protocol",
-            "Interface",
-            "Module",
-            "Constant",
-        ];
-
         let hops = hops.unwrap_or(1);
-        let name_val = Value::String(name.to_string());
 
-        let types_to_search: Vec<&str> = match node_type {
-            Some(nt) => vec![nt],
-            None => CODE_TYPES.to_vec(),
-        };
+        let (resolved, matches) = self.resolve_code_entity(name, node_type);
 
-        // Phase 1: Resolve name to a single node index
-        // Try qualified_name (stored as "id") exact match first
-        let mut resolved_idx: Option<NodeIndex> = None;
-        for nt in &types_to_search {
-            if let Some(indices) = self.inner.type_indices.get(*nt) {
-                for &idx in indices {
-                    if let Some(node) = self.inner.get_node(idx) {
-                        if node.id == name_val {
-                            resolved_idx = Some(idx);
-                            break;
-                        }
-                    }
-                }
-                if resolved_idx.is_some() {
-                    break;
-                }
-            }
-        }
-
-        // Fall back to name-based search if no qualified_name match
-        if resolved_idx.is_none() {
-            let mut matches: Vec<(NodeIndex, schema::NodeInfo)> = Vec::new();
-            for nt in &types_to_search {
-                if let Some(indices) = self.inner.type_indices.get(*nt) {
-                    for &idx in indices {
-                        if let Some(node) = self.inner.get_node(idx) {
-                            let name_match = node
-                                .get_field_ref("name")
-                                .map(|v| v == &name_val)
-                                .unwrap_or(false)
-                                || node
-                                    .get_field_ref("title")
-                                    .map(|v| v == &name_val)
-                                    .unwrap_or(false);
-                            if name_match {
-                                matches.push((idx, node.to_node_info()));
-                            }
-                        }
-                    }
-                }
-            }
-
-            match matches.len() {
-                0 => {
-                    // Not found
-                    return Python::attach(|py| {
-                        let dict = PyDict::new(py);
+        let target_idx = match resolved {
+            Some(idx) => idx,
+            None => {
+                return Python::attach(|py| {
+                    let dict = PyDict::new(py);
+                    if matches.is_empty() {
                         dict.set_item("error", format!("Node not found: {}", name))?;
-                        Ok(dict.into_any().unbind())
-                    });
-                }
-                1 => {
-                    resolved_idx = Some(matches[0].0);
-                }
-                _ => {
-                    // Ambiguous — return matches for disambiguation
-                    return Python::attach(|py| {
-                        let dict = PyDict::new(py);
+                    } else {
                         dict.set_item("ambiguous", true)?;
                         let match_list = PyList::empty(py);
                         for (_, info) in &matches {
@@ -1708,13 +1773,12 @@ impl KnowledgeGraph {
                             match_list.append(d)?;
                         }
                         dict.set_item("matches", match_list)?;
-                        Ok(dict.into_any().unbind())
-                    });
-                }
+                    }
+                    Ok(dict.into_any().unbind())
+                });
             }
-        }
+        };
 
-        let target_idx = resolved_idx.unwrap();
         let target_node = self
             .inner
             .get_node(target_idx)
