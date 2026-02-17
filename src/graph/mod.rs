@@ -177,6 +177,31 @@ impl KnowledgeGraph {
             }
         }
 
+        // Try qualified_name suffix match (e.g. "CypherExecutor::execute_single_clause"
+        // matches "crate::graph::cypher::executor::CypherExecutor::execute_single_clause")
+        if name.contains("::") {
+            let suffix = format!("::{}", name);
+            let mut matches: Vec<(NodeIndex, schema::NodeInfo)> = Vec::new();
+            for nt in &types_to_search {
+                if let Some(indices) = self.inner.type_indices.get(*nt) {
+                    for &idx in indices {
+                        if let Some(node) = self.inner.get_node(idx) {
+                            if let Value::String(qn) = &node.id {
+                                if qn.ends_with(&suffix) {
+                                    matches.push((idx, node.to_node_info()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if matches.len() == 1 {
+                return (Some(matches[0].0), matches);
+            } else if !matches.is_empty() {
+                return (None, matches);
+            }
+        }
+
         // Fall back to name/title search
         let mut matches: Vec<(NodeIndex, schema::NodeInfo)> = Vec::new();
         for nt in &types_to_search {
