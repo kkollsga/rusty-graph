@@ -1718,6 +1718,13 @@ impl KnowledgeGraph {
             if let Some(v) = node.get_field_ref("end_line") {
                 dict.set_item("end_line", py_out::value_to_py(py, v)?)?;
             }
+            // Compute line_count from line_number and end_line
+            if let (Some(Value::Int64(start)), Some(Value::Int64(end))) = (
+                node.get_field_ref("line_number"),
+                node.get_field_ref("end_line"),
+            ) {
+                dict.set_item("line_count", end - start + 1)?;
+            }
             if let Some(v) = node.get_field_ref("signature") {
                 dict.set_item("signature", py_out::value_to_py(py, v)?)?;
             }
