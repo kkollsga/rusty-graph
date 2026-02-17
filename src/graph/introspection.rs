@@ -416,6 +416,9 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
         .node_type_metadata
         .values()
         .any(|props| props.values().any(|t| t.eq_ignore_ascii_case("point")));
+    let has_code_entities = ["Function", "Struct", "Class", "Enum", "Trait"]
+        .iter()
+        .any(|t| graph.type_indices.contains_key(*t));
 
     let mut xml = String::with_capacity(4096);
 
@@ -567,6 +570,10 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
 
     // API methods
     xml.push_str(API_BASE);
+    if has_code_entities {
+        xml.push_str("    <method sig=\"find(name, node_type=None)\">Search code entities by name. Returns list of matches with type, qualified_name, file_path, line_number.</method>\n");
+        xml.push_str("    <method sig=\"context(name, node_type=None, hops=None)\">Get full neighborhood of a code entity. Returns node properties + relationships grouped by type.</method>\n");
+    }
     xml.push_str("  </api>\n");
 
     // Cypher reference
@@ -602,6 +609,14 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     if has_embeddings {
         xml.push_str(
             "      <note>text_score(n, 'col', 'query') — semantic similarity (0..1). Use text_col value from &lt;emb&gt; as 'col'. Usable in WHERE/RETURN/ORDER BY.</note>\n",
+        );
+    }
+    if has_code_entities {
+        xml.push_str(
+            "      <note>find(name) searches code entities (Function, Struct, Class, etc.) by name. Use qualified_name from results to disambiguate.</note>\n",
+        );
+        xml.push_str(
+            "      <note>context(name) returns a node's properties and all relationships grouped by edge type (HAS_METHOD, CALLS, called_by, etc.).</note>\n",
         );
     }
     xml.push_str("    </notes>\n");

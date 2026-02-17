@@ -1,10 +1,14 @@
 """Rust language parser using tree-sitter-rust."""
 
+import re
 from pathlib import Path
 from tree_sitter import Language, Parser
 import tree_sitter_rust as ts_rust
 
-from .base import LanguageParser, node_text, count_lines, get_type_parameters
+from .base import (
+    LanguageParser, node_text, count_lines, get_type_parameters,
+    extract_comment_annotations,
+)
 from .models import (
     ParseResult, FileInfo, FunctionInfo, ClassInfo,
     EnumInfo, InterfaceInfo, TypeRelationship,
@@ -96,8 +100,19 @@ class RustParser(LanguageParser):
             break
         return attrs
 
+    _PY_NAME_RE = re.compile(r'name\s*=\s*"([^"]+)"')
+
     def _has_pyclass(self, attrs: list[str]) -> bool:
         return any("#[pyclass" in a for a in attrs)
+
+    def _extract_py_name(self, attrs: list[str], keyword: str = "#[pyclass") -> str | None:
+        """Extract name="X" from #[pyclass(name = "X")] or similar."""
+        for a in attrs:
+            if keyword in a:
+                m = self._PY_NAME_RE.search(a)
+                if m:
+                    return m.group(1)
+        return None
 
     def _is_pymethods_block(self, attrs: list[str]) -> bool:
         return any("#[pymethods]" in a for a in attrs)
@@ -249,17 +264,60 @@ class RustParser(LanguageParser):
                             ))
         return attrs
 
-    def _get_enum_variants(self, node, source: bytes) -> list[str]:
-        """Extract variant names from an enum_variant_list."""
-        variants = []
+    def _get_enum_variants(self, node, source: bytes) -> tuple[list[str], list[dict]]:
+        """Extract variant names and structured details from an enum_variant_list."""
+        names = []
+        details = []
         for child in node.children:
             if child.type == "enum_variant_list":
                 for variant in child.children:
                     if variant.type == "enum_variant":
                         name = self._get_name(variant, source, "identifier")
-                        if name:
-                            variants.append(name)
-        return variants
+                        if not name:
+                            continue
+                        names.append(name)
+                        detail: dict = {"name": name, "kind": "unit"}
+                        for vc in variant.children:
+                            if vc.type == "field_declaration_list":
+                                # Struct variant: Variant { field: Type }
+                                detail["kind"] = "struct"
+                                detail["fields"] = self._extract_variant_struct_fields(vc, source)
+                            elif vc.type == "ordered_field_declaration_list":
+                                # Tuple variant: Variant(Type1, Type2)
+                                detail["kind"] = "tuple"
+                                detail["fields"] = self._extract_variant_tuple_fields(vc, source)
+                        details.append(detail)
+        return names, details
+
+    def _extract_variant_struct_fields(self, field_list, source: bytes) -> list[dict]:
+        """Extract named fields from a struct enum variant."""
+        fields = []
+        for child in field_list.children:
+            if child.type == "field_declaration":
+                name = None
+                type_ann = None
+                saw_colon = False
+                for fc in child.children:
+                    if fc.type in ("field_identifier", "identifier") and not saw_colon:
+                        name = node_text(fc, source)
+                    elif not fc.is_named and node_text(fc, source) == ":":
+                        saw_colon = True
+                    elif saw_colon and type_ann is None and fc.is_named:
+                        type_ann = node_text(fc, source)
+                if name:
+                    entry: dict = {"name": name}
+                    if type_ann:
+                        entry["type"] = type_ann
+                    fields.append(entry)
+        return fields
+
+    def _extract_variant_tuple_fields(self, field_list, source: bytes) -> list[dict]:
+        """Extract positional types from a tuple enum variant."""
+        fields = []
+        for child in field_list.children:
+            if child.is_named and child.type != "visibility_modifier":
+                fields.append({"type": node_text(child, source)})
+        return fields
 
     # ── Parsing ─────────────────────────────────────────────────────────
 
@@ -280,6 +338,9 @@ class RustParser(LanguageParser):
 
         is_pymethod = self._is_pymethod_fn(attrs, impl_is_pymethods)
         is_ffi = any("#[no_mangle]" in a for a in attrs)
+        is_test = any(a in ("#[test]", "#[bench]") or
+                       "#[tokio::test" in a or "#[rstest" in a
+                       for a in attrs)
         ffi_kind = None
         if is_pymethod:
             ffi_kind = "pyo3"
@@ -289,10 +350,21 @@ class RustParser(LanguageParser):
         if is_pymethod and visibility == "private":
             visibility = "pub(py)"
 
+        is_pymodule = any("#[pymodule]" in a for a in attrs)
+
         metadata: dict = {"is_pymethod": is_pymethod}
+        if is_test:
+            metadata["is_test"] = True
         if is_ffi or is_pymethod:
             metadata["is_ffi"] = True
             metadata["ffi_kind"] = ffi_kind
+            py_name = self._extract_py_name(attrs, "#[pyfunction")
+            if py_name:
+                metadata["py_name"] = py_name
+        if is_pymodule:
+            metadata["is_pymodule"] = True
+            metadata["is_ffi"] = True
+            metadata["ffi_kind"] = "pyo3"
 
         return FunctionInfo(
             name=name,
@@ -311,27 +383,11 @@ class RustParser(LanguageParser):
             metadata=metadata,
         )
 
-    def parse_file(self, filepath: Path, src_root: Path) -> ParseResult:
-        source = filepath.read_bytes()
-        tree = self._parser.parse(source)
-        root = tree.root_node
-
-        rel_path = str(filepath.relative_to(src_root))
-        module_path = self._file_to_module_path(filepath, src_root)
-        loc = count_lines(source)
-
-        file_info = FileInfo(
-            path=rel_path,
-            filename=filepath.name,
-            loc=loc,
-            module_path=module_path,
-            language="rust",
-        )
-
-        result = ParseResult()
-        result.files.append(file_info)
-
-        for child in root.children:
+    def _parse_items(self, node, source: bytes, module_path: str,
+                     rel_path: str, file_info: FileInfo,
+                     result: ParseResult) -> None:
+        """Parse all item-level children of a node (top-level or inside mod block)."""
+        for child in node.children:
             if child.type == "function_item":
                 result.functions.append(self._parse_function(
                     child, source, module_path, rel_path,
@@ -346,6 +402,11 @@ class RustParser(LanguageParser):
                 visibility = self._get_visibility(child)
                 if is_pyclass and visibility == "private":
                     visibility = "pub(py)"
+                metadata: dict = {"is_pyclass": is_pyclass}
+                if is_pyclass:
+                    py_name = self._extract_py_name(attrs, "#[pyclass")
+                    if py_name:
+                        metadata["py_name"] = py_name
                 result.classes.append(ClassInfo(
                     name=name,
                     qualified_name=qname,
@@ -356,7 +417,7 @@ class RustParser(LanguageParser):
                     docstring=self._get_doc_comment(child, source),
                     type_parameters=get_type_parameters(child, source),
                     end_line=child.end_point[0] + 1,
-                    metadata={"is_pyclass": is_pyclass},
+                    metadata=metadata,
                 ))
                 # Extract struct fields as attributes
                 result.attributes.extend(
@@ -365,6 +426,7 @@ class RustParser(LanguageParser):
 
             elif child.type == "enum_item":
                 name = self._get_name(child, source, "type_identifier") or "unknown"
+                variant_names, variant_details = self._get_enum_variants(child, source)
                 result.enums.append(EnumInfo(
                     name=name,
                     qualified_name=f"{module_path}::{name}",
@@ -372,8 +434,9 @@ class RustParser(LanguageParser):
                     file_path=rel_path,
                     line_number=child.start_point[0] + 1,
                     docstring=self._get_doc_comment(child, source),
-                    variants=self._get_enum_variants(child, source),
+                    variants=variant_names,
                     end_line=child.end_point[0] + 1,
+                    variant_details=variant_details if variant_details else None,
                 ))
 
             elif child.type == "trait_item":
@@ -478,7 +541,20 @@ class RustParser(LanguageParser):
             elif child.type == "mod_item":
                 mod_name = self._get_name(child, source, "identifier")
                 if mod_name:
-                    file_info.submodule_declarations.append(mod_name)
+                    # Check for inline module body (mod name { ... })
+                    decl_list = None
+                    for mc in child.children:
+                        if mc.type == "declaration_list":
+                            decl_list = mc
+                            break
+                    if decl_list is not None:
+                        # Inline module — recurse with updated module path
+                        inner_path = f"{module_path}::{mod_name}"
+                        self._parse_items(decl_list, source, inner_path,
+                                          rel_path, file_info, result)
+                    else:
+                        # External module declaration (mod name;)
+                        file_info.submodule_declarations.append(mod_name)
 
             elif child.type == "type_item":
                 name = self._get_name(child, source, "type_identifier")
@@ -533,4 +609,25 @@ class RustParser(LanguageParser):
                         line_number=child.start_point[0] + 1,
                     ))
 
+    def parse_file(self, filepath: Path, src_root: Path) -> ParseResult:
+        source = filepath.read_bytes()
+        tree = self._parser.parse(source)
+        root = tree.root_node
+
+        rel_path = str(filepath.relative_to(src_root))
+        module_path = self._file_to_module_path(filepath, src_root)
+        loc = count_lines(source)
+
+        file_info = FileInfo(
+            path=rel_path,
+            filename=filepath.name,
+            loc=loc,
+            module_path=module_path,
+            language="rust",
+        )
+
+        result = ParseResult()
+        result.files.append(file_info)
+        self._parse_items(root, source, module_path, rel_path, file_info, result)
+        file_info.annotations = extract_comment_annotations(root, source)
         return result

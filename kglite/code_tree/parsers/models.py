@@ -1,6 +1,7 @@
 """Language-agnostic data models for code graph entities."""
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -13,6 +14,8 @@ class FileInfo:
     submodule_declarations: list[str] = field(default_factory=list)
     imports: list[str] = field(default_factory=list)
     exports: list[str] = field(default_factory=list)  # __all__, pub items
+    annotations: list[dict] | None = None  # TODO/FIXME/HACK/SAFETY comments
+    is_test: bool = False
 
 
 @dataclass
@@ -60,6 +63,7 @@ class EnumInfo:
     docstring: str | None
     variants: list[str] = field(default_factory=list)
     end_line: int | None = None
+    variant_details: list[dict] | None = None  # structured variant info per language
 
 
 @dataclass
@@ -134,3 +138,43 @@ class ParseResult:
         self.attributes.extend(other.attributes)
         self.constants.extend(other.constants)
         return self
+
+
+# ── Manifest / project-level models ──────────────────────────────────
+
+
+@dataclass
+class SourceRoot:
+    """A directory containing source code to parse."""
+    path: Path                          # absolute path to directory
+    language: str | None = None         # if known; None = auto-detect
+    is_test: bool = False
+    label: str | None = None            # e.g. "python-package", "rust-crate"
+
+
+@dataclass
+class DependencyInfo:
+    """A project dependency declared in a manifest."""
+    name: str
+    version_spec: str | None = None
+    is_dev: bool = False
+    is_optional: bool = False
+    group: str | None = None            # optional dep group name
+
+
+@dataclass
+class ProjectInfo:
+    """Project metadata extracted from a manifest file."""
+    name: str
+    version: str | None = None
+    description: str | None = None
+    languages: list[str] = field(default_factory=list)
+    authors: list[str] = field(default_factory=list)
+    license: str | None = None
+    repository_url: str | None = None
+    manifest_path: str = ""
+    source_roots: list[SourceRoot] = field(default_factory=list)
+    test_roots: list[SourceRoot] = field(default_factory=list)
+    dependencies: list[DependencyInfo] = field(default_factory=list)
+    build_system: str | None = None     # "maturin", "setuptools", "cargo", etc.
+    metadata: dict = field(default_factory=dict)

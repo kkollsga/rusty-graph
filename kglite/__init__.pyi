@@ -533,6 +533,52 @@ class KnowledgeGraph:
         """
         ...
 
+    def find(
+        self,
+        name: str,
+        node_type: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Find code entities by name, with disambiguation context.
+
+        Searches across code entity node types (Function, Struct, Class, Enum,
+        Trait, Protocol, Interface, Module, Constant) for nodes matching the
+        given name.
+
+        Args:
+            name: Entity name to search for (e.g. ``"execute"``).
+            node_type: Optional filter — only search this node type
+                (e.g. ``"Function"``, ``"Struct"``).
+
+        Returns:
+            List of dicts with: type, name, qualified_name, file_path,
+            line_number, and optionally signature and visibility.
+        """
+        ...
+
+    def context(
+        self,
+        name: str,
+        node_type: Optional[str] = None,
+        hops: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Get the full neighborhood of a code entity.
+
+        Returns the node's properties and all related entities grouped by
+        relationship type. If the name is ambiguous, returns the matches
+        so you can refine with a qualified name.
+
+        Args:
+            name: Entity name or qualified name.
+            node_type: Optional node type hint.
+            hops: Max traversal depth (default 1).
+
+        Returns:
+            Dict with ``"node"`` (properties), ``"defined_in"`` (file path),
+            and relationship groups (e.g. ``"HAS_METHOD"``, ``"CALLS"``,
+            ``"called_by"``).
+        """
+        ...
+
     def build_id_indices(self, node_types: Optional[list[str]] = None) -> None:
         """Pre-build ID lookup indices for fast :meth:`get_node_by_id` calls.
 

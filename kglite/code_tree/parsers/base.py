@@ -1,5 +1,6 @@
 """Abstract base class for language parsers and shared helpers."""
 
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -106,3 +107,37 @@ def extract_parameters_from_signature(signature: str) -> str | None:
     parts = [p.strip() for p in params_text.split(",")]
     filtered = [p for p in parts if p and p.strip() not in _SELF_PARAMS]
     return ", ".join(filtered) if filtered else None
+
+
+_ANNOTATION_PATTERN = re.compile(
+    r"\b(TODO|FIXME|HACK|SAFETY|XXX|BUG|NOTE|WARNING)\b[:\s]*(.*)",
+    re.IGNORECASE,
+)
+
+
+def extract_comment_annotations(
+    root_node,
+    source: bytes,
+    comment_types: tuple[str, ...] = ("line_comment", "block_comment", "comment"),
+) -> list[dict] | None:
+    """Recursively scan all comment nodes for TODO/FIXME/etc annotations.
+
+    Returns a list of dicts with keys: kind, text, line.
+    Returns None if no annotations found.
+    """
+    annotations: list[dict] = []
+
+    def walk(node):
+        if node.type in comment_types:
+            text = source[node.start_byte:node.end_byte].decode("utf8")
+            for match in _ANNOTATION_PATTERN.finditer(text):
+                annotations.append({
+                    "kind": match.group(1).upper(),
+                    "text": match.group(2).strip()[:200],
+                    "line": node.start_point[0] + 1,
+                })
+        for child in node.children:
+            walk(child)
+
+    walk(root_node)
+    return annotations if annotations else None

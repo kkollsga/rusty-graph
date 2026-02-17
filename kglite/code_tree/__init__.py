@@ -18,5 +18,6 @@ except ImportError:
     ) from None
 
 from .builder import build
+from .parsers.manifest import read_manifest
 
-__all__ = ["build"]
+__all__ = ["build", "read_manifest"]

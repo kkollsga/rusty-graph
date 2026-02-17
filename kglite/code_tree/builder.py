@@ -19,9 +19,11 @@ import kglite
 
 from .parsers import (
     ParseResult, FileInfo, FunctionInfo, TypeRelationship,
-    get_parsers_for_directory,
+    get_parser, get_parsers_for_directory,
 )
 from .parsers.base import extract_parameters_from_signature
+from .parsers.models import ProjectInfo, SourceRoot
+from .parsers.manifest import read_manifest
 
 # Node type mapping: ClassInfo.kind / InterfaceInfo.kind -> graph node type
 NODE_TYPE_MAP = {
@@ -53,6 +55,75 @@ def _parse_all(src_root: Path, verbose: bool = False) -> tuple[ParseResult, froz
         combined.merge(result)
         noise_names.update(parser.noise_names)
     return combined, frozenset(noise_names)
+
+
+def _parse_all_roots(
+    project_root: Path,
+    source_roots: list[SourceRoot],
+    verbose: bool = False,
+) -> tuple[ParseResult, frozenset[str]]:
+    """Parse source files from specific source roots (manifest-guided)."""
+    combined = ParseResult()
+    all_noise: set[str] = set()
+
+    for root in source_roots:
+        if not root.path.is_dir():
+            if verbose:
+                print(f"  Skipping missing source root: {root.path}")
+            continue
+
+        if root.language:
+            try:
+                parsers = [get_parser(root.language)]
+            except (ValueError, ImportError) as e:
+                if verbose:
+                    print(f"  Warning: Skipping {root.language} ({e})")
+                continue
+        else:
+            parsers = get_parsers_for_directory(root.path)
+
+        for parser in parsers:
+            label = root.path.relative_to(project_root)
+            if verbose:
+                print(f"Parsing {parser.language_name} files in {label}/...")
+            result = parser.parse_directory(root.path)
+
+            # Adjust all file paths to be relative to project_root
+            # (parsers produce paths relative to the source root)
+            path_map: dict[str, str] = {}
+            for f in result.files:
+                old_path = f.path
+                abs_path = root.path / old_path
+                new_path = str(abs_path.relative_to(project_root))
+                path_map[old_path] = new_path
+                f.path = new_path
+                if root.is_test:
+                    f.is_test = True
+
+            # Remap file_path on all entities
+            for fn in result.functions:
+                fn.file_path = path_map.get(fn.file_path, fn.file_path)
+                if root.is_test:
+                    fn.metadata["is_test"] = True
+            for c in result.classes:
+                c.file_path = path_map.get(c.file_path, c.file_path)
+            for e in result.enums:
+                e.file_path = path_map.get(e.file_path, e.file_path)
+            for i in result.interfaces:
+                i.file_path = path_map.get(i.file_path, i.file_path)
+            for a in result.attributes:
+                a.file_path = path_map.get(a.file_path, a.file_path)
+            for co in result.constants:
+                co.file_path = path_map.get(co.file_path, co.file_path)
+
+            combined.merge(result)
+            all_noise.update(parser.noise_names)
+
+    if not combined.files:
+        raise FileNotFoundError(
+            f"No supported source files found in {project_root}"
+        )
+    return combined, frozenset(all_noise)
 
 
 # ── Phase 2: Model ─────────────────────────────────────────────────────
@@ -183,13 +254,18 @@ def _build_type_relationship_edges(
     type_rels: list[TypeRelationship],
     known_interfaces: set[str],
     name_to_qname: dict[str, str],
-) -> tuple[list[dict], list[dict], list[dict]]:
-    """Build implements, extends, and has_method edges from TypeRelationships."""
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    """Build implements, extends, and has_method edges from TypeRelationships.
+
+    Returns (implements_edges, extends_edges, has_method_edges, external_traits).
+    External traits are those referenced in impl blocks but not defined locally.
+    """
     implements_edges = []
     extends_edges = []
     has_method_edges = []
     seen_impl = set()
     seen_ext = set()
+    external_traits: dict[str, dict] = {}  # name -> node dict
 
     def resolve(name: str) -> str:
         return name_to_qname.get(name, name)
@@ -208,14 +284,22 @@ def _build_type_relationship_edges(
                     "method": method.qualified_name,
                 })
         elif tr.relationship == "implements" and tr.target_type:
-            if tr.target_type in known_interfaces:
-                key = (tr.source_type, tr.target_type)
-                if key not in seen_impl:
-                    seen_impl.add(key)
-                    implements_edges.append({
-                        "type_name": resolve(tr.source_type),
-                        "interface_name": resolve(tr.target_type),
-                    })
+            key = (tr.source_type, tr.target_type)
+            if key not in seen_impl:
+                seen_impl.add(key)
+                resolved_target = resolve(tr.target_type)
+                implements_edges.append({
+                    "type_name": resolve(tr.source_type),
+                    "interface_name": resolved_target,
+                })
+                # Track external traits that need node auto-creation
+                if tr.target_type not in known_interfaces:
+                    if resolved_target not in external_traits:
+                        external_traits[resolved_target] = {
+                            "qualified_name": resolved_target,
+                            "name": tr.target_type,
+                            "is_external": True,
+                        }
             for method in tr.methods:
                 for sep in ("::", "."):
                     if sep in method.qualified_name:
@@ -236,7 +320,7 @@ def _build_type_relationship_edges(
                     "parent_name": resolve(tr.target_type),
                 })
 
-    return implements_edges, extends_edges, has_method_edges
+    return implements_edges, extends_edges, has_method_edges, list(external_traits.values())
 
 
 def _build_import_edges(files: list[FileInfo], known_modules: set[str]) -> list[dict]:
@@ -300,8 +384,37 @@ def _build_defines_edges(result: ParseResult) -> list[dict]:
 def _load_graph(result: ParseResult, modules, call_edges_df,
                 implements_edges, extends_edges, has_method_edges,
                 contains_edges, import_edges, defines_edges,
-                uses_type_edges) -> kglite.KnowledgeGraph:
+                uses_type_edges, external_traits=None,
+                ffi_exposes_edges=None,
+                project_info: ProjectInfo | None = None) -> kglite.KnowledgeGraph:
     graph = kglite.KnowledgeGraph()
+
+    # -- Project & Dependency nodes (from manifest) --
+    if project_info is not None:
+        proj_df = pd.DataFrame([{
+            "name": project_info.name,
+            "version": project_info.version,
+            "description": project_info.description,
+            "languages": ", ".join(project_info.languages) or None,
+            "authors": ", ".join(project_info.authors) or None,
+            "license": project_info.license,
+            "repository": project_info.repository_url,
+            "build_system": project_info.build_system,
+            "manifest": project_info.manifest_path,
+        }])
+        graph.add_nodes(data=proj_df, node_type="Project",
+                        unique_id_field="name", node_title_field="name")
+
+        if project_info.dependencies:
+            deps_df = pd.DataFrame([{
+                "name": d.name,
+                "version_spec": d.version_spec,
+                "is_dev": True if d.is_dev else None,
+                "is_optional": True if d.is_optional else None,
+                "group": d.group,
+            } for d in project_info.dependencies])
+            graph.add_nodes(data=deps_df, node_type="Dependency",
+                            unique_id_field="name", node_title_field="name")
 
     # Pre-compute attribute lookup for embedding as JSON on parent nodes
     attrs_by_owner: dict[str, list[dict]] = defaultdict(list)
@@ -320,6 +433,8 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
         files_df = pd.DataFrame([{
             "path": f.path, "filename": f.filename, "loc": f.loc,
             "language": f.language,
+            "is_test": True if f.is_test else None,
+            "annotations": json.dumps(f.annotations) if f.annotations else None,
         } for f in result.files])
         graph.add_nodes(data=files_df, node_type="File",
                         unique_id_field="path", node_title_field="filename")
@@ -382,6 +497,8 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
             "end_line": e.end_line,
             "docstring": e.docstring,
             "variants": ", ".join(e.variants) if e.variants else None,
+            "variant_details": json.dumps(e.variant_details)
+                              if e.variant_details else None,
         } for e in result.enums])
         graph.add_nodes(data=df, node_type="Enum",
                         unique_id_field="qualified_name", node_title_field="name")
@@ -405,6 +522,14 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
             graph.add_nodes(data=df, node_type=node_type,
                             unique_id_field="qualified_name",
                             node_title_field="name")
+
+    # Auto-create Trait nodes for external traits referenced in impl blocks
+    if external_traits:
+        df = pd.DataFrame(external_traits)
+        graph.add_nodes(data=df, node_type="Trait",
+                        unique_id_field="qualified_name",
+                        node_title_field="name",
+                        conflict_handling="skip")
 
     if result.constants:
         df = pd.DataFrame([{
@@ -481,6 +606,45 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
                 data=df, connection_type="USES_TYPE",
                 source_type="Function", source_id_field="function",
                 target_type=target_type, target_id_field="type_name",
+            )
+
+    # -- FFI EXPOSES edges --
+    if ffi_exposes_edges:
+        by_target_type: dict[str, list] = defaultdict(list)
+        for edge in ffi_exposes_edges:
+            by_target_type[edge["target_type"]].append({
+                "module_fn": edge["module_fn"],
+                "target_qname": edge["target_qname"],
+            })
+        for target_type, rows in by_target_type.items():
+            df = pd.DataFrame(rows)
+            graph.add_connections(
+                data=df, connection_type="EXPOSES",
+                source_type="Function", source_id_field="module_fn",
+                target_type=target_type, target_id_field="target_qname",
+            )
+
+    # -- Project manifest edges --
+    if project_info is not None:
+        if project_info.dependencies:
+            dep_edges_df = pd.DataFrame([{
+                "project": project_info.name,
+                "dependency": d.name,
+            } for d in project_info.dependencies])
+            graph.add_connections(
+                data=dep_edges_df, connection_type="DEPENDS_ON",
+                source_type="Project", source_id_field="project",
+                target_type="Dependency", target_id_field="dependency",
+            )
+        if result.files:
+            has_source_df = pd.DataFrame([{
+                "project": project_info.name,
+                "file_path": f.path,
+            } for f in result.files])
+            graph.add_connections(
+                data=has_source_df, connection_type="HAS_SOURCE",
+                source_type="Project", source_id_field="project",
+                target_type="File", target_id_field="file_path",
             )
 
     return graph
@@ -639,6 +803,52 @@ def _build_uses_type_edges(
     return dict(edges_by_target_type)
 
 
+def _build_ffi_exposes_edges(result: ParseResult) -> list[dict]:
+    """Build EXPOSES edges from #[pymodule] functions to #[pyclass]/#[pyfunction] items.
+
+    Connects the FFI module entry point to the types and functions it registers,
+    showing the cross-language boundary for Maturin/PyO3 projects.
+    """
+    # Find pymodule functions
+    pymodule_fns = [f for f in result.functions
+                    if f.metadata.get("is_pymodule")]
+    if not pymodule_fns:
+        return []
+
+    # Find all pyclass structs and pyfunction functions
+    pyclass_qnames = {}
+    for c in result.classes:
+        if c.metadata.get("is_pyclass"):
+            py_name = c.metadata.get("py_name", c.name)
+            pyclass_qnames[c.name] = (c.qualified_name, "Struct", py_name)
+
+    pyfunction_qnames = {}
+    for f in result.functions:
+        if f.metadata.get("ffi_kind") == "pyo3" and not f.is_method and not f.metadata.get("is_pymodule"):
+            py_name = f.metadata.get("py_name", f.name)
+            pyfunction_qnames[f.name] = (f.qualified_name, "Function", py_name)
+
+    edges = []
+    for mod_fn in pymodule_fns:
+        # Connect module to all pyclass and pyfunction items
+        for qname, target_type, py_name in pyclass_qnames.values():
+            edges.append({
+                "module_fn": mod_fn.qualified_name,
+                "target_qname": qname,
+                "target_type": target_type,
+                "py_name": py_name,
+            })
+        for qname, target_type, py_name in pyfunction_qnames.values():
+            edges.append({
+                "module_fn": mod_fn.qualified_name,
+                "target_qname": qname,
+                "target_type": target_type,
+                "py_name": py_name,
+            })
+
+    return edges
+
+
 # ── Public API ──────────────────────────────────────────────────────────
 
 
@@ -647,33 +857,78 @@ def build(
     *,
     save_to: str | Path | None = None,
     verbose: bool = False,
+    include_tests: bool = False,
 ) -> kglite.KnowledgeGraph:
     """Parse a codebase and build a KGLite knowledge graph.
 
+    If a project manifest (pyproject.toml, Cargo.toml) is found, uses it
+    to discover source roots and extract project metadata.  Otherwise
+    falls back to scanning the entire directory.
+
     Args:
-        src_dir: Path to the source directory to parse.
+        src_dir: Path to a source directory or manifest file.
         save_to: Optional path to save the graph as a .kgl file.
         verbose: If True, print progress information.
+        include_tests: If True, also parse test directories found in the
+            manifest.  Has no effect when no manifest is detected.
 
     Returns:
         A KnowledgeGraph populated with code entities and relationships.
 
     Raises:
-        FileNotFoundError: If src_dir doesn't exist or contains no supported files.
+        FileNotFoundError: If src_dir doesn't exist or contains no
+            supported files.
 
     Example::
 
         from kglite.code_tree import build
 
-        graph = build("/path/to/project/src")
-        result = graph.cypher("MATCH (f:Function) RETURN f.name LIMIT 10")
+        graph = build(".")                          # auto-detect manifest
+        graph = build("pyproject.toml")             # explicit manifest
+        graph = build("src", include_tests=True)    # directory fallback
     """
-    src_root = Path(src_dir).resolve()
-    if not src_root.is_dir():
-        raise FileNotFoundError(f"Not a directory: {src_root}")
+    input_path = Path(src_dir).resolve()
+
+    # Resolve project_root and attempt manifest detection
+    project_info: ProjectInfo | None = None
+    if input_path.is_file():
+        project_root = input_path.parent
+        from .parsers.manifest import ManifestReader, MANIFEST_READERS
+        for reader_cls in MANIFEST_READERS:
+            reader: ManifestReader = reader_cls()
+            if reader.manifest_filename == input_path.name:
+                project_info = reader.read(input_path, project_root)
+                break
+        if project_info is None:
+            raise FileNotFoundError(
+                f"Not a recognised manifest file: {input_path.name}"
+            )
+    elif input_path.is_dir():
+        project_root = input_path
+        project_info = read_manifest(input_path)
+    else:
+        raise FileNotFoundError(f"Not a file or directory: {input_path}")
 
     # Phase 1: Parse
-    result, noise_names = _parse_all(src_root, verbose=verbose)
+    if project_info and project_info.source_roots:
+        roots = list(project_info.source_roots)
+        if include_tests:
+            roots.extend(project_info.test_roots)
+        if verbose:
+            root_labels = [
+                str(r.path.relative_to(project_root)) for r in roots
+            ]
+            print(f"Manifest: {project_info.manifest_path} "
+                  f"({project_info.build_system})")
+            print(f"Source roots: {', '.join(root_labels)}")
+        result, noise_names = _parse_all_roots(
+            project_root, roots, verbose=verbose,
+        )
+    else:
+        # Fallback: legacy directory scan
+        if not project_root.is_dir():
+            raise FileNotFoundError(f"Not a directory: {project_root}")
+        result, noise_names = _parse_all(project_root, verbose=verbose)
 
     if verbose:
         print(f"Parsed: {len(result.functions)} functions, "
@@ -696,7 +951,7 @@ def build(
 
     contains_edges = _build_contains_edges(result.files)
     call_edges_df = _build_call_edges(result.functions, excluded_names=noise_names)
-    implements_edges, extends_edges, has_method_edges = \
+    implements_edges, extends_edges, has_method_edges, external_traits = \
         _build_type_relationship_edges(
             result.type_relationships, known_interfaces, name_to_qname,
         )
@@ -705,13 +960,15 @@ def build(
     uses_type_edges = _build_uses_type_edges(
         result.functions, result.classes, result.enums, result.interfaces,
     )
+    ffi_exposes_edges = _build_ffi_exposes_edges(result)
 
     # Phase 3: Load
     graph = _load_graph(
         result, modules, call_edges_df,
         implements_edges, extends_edges, has_method_edges,
         contains_edges, import_edges, defines_edges,
-        uses_type_edges,
+        uses_type_edges, external_traits, ffi_exposes_edges,
+        project_info=project_info,
     )
 
     if save_to is not None:
