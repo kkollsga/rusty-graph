@@ -205,6 +205,62 @@ impl KnowledgeGraph {
             (None, matches)
         }
     }
+
+    /// Build a source-location dict for a single name.
+    fn source_one(&self, py: Python, name: &str, node_type: Option<&str>) -> PyResult<Py<PyAny>> {
+        let (resolved, matches) = self.resolve_code_entity(name, node_type);
+
+        let target_idx = match resolved {
+            Some(idx) => idx,
+            None => {
+                let dict = PyDict::new(py);
+                dict.set_item("name", name)?;
+                if matches.is_empty() {
+                    dict.set_item("error", format!("Node not found: {}", name))?;
+                } else {
+                    dict.set_item("ambiguous", true)?;
+                    let match_list = PyList::empty(py);
+                    for (_, info) in &matches {
+                        let d = py_out::nodeinfo_to_pydict(py, info)?;
+                        match_list.append(d)?;
+                    }
+                    dict.set_item("matches", match_list)?;
+                }
+                return Ok(dict.into());
+            }
+        };
+
+        let node = self
+            .inner
+            .get_node(target_idx)
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Node disappeared"))?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("type", node.get_node_type_ref())?;
+        dict.set_item("name", py_out::value_to_py(py, &node.title)?)?;
+        dict.set_item("qualified_name", py_out::value_to_py(py, &node.id)?)?;
+
+        if let Some(v) = node.get_field_ref("file_path") {
+            dict.set_item("file_path", py_out::value_to_py(py, v)?)?;
+        }
+        if let Some(v) = node.get_field_ref("line_number") {
+            dict.set_item("line_number", py_out::value_to_py(py, v)?)?;
+        }
+        if let Some(v) = node.get_field_ref("end_line") {
+            dict.set_item("end_line", py_out::value_to_py(py, v)?)?;
+        }
+        if let (Some(Value::Int64(start)), Some(Value::Int64(end))) = (
+            node.get_field_ref("line_number"),
+            node.get_field_ref("end_line"),
+        ) {
+            dict.set_item("line_count", end - start + 1)?;
+        }
+        if let Some(v) = node.get_field_ref("signature") {
+            dict.set_item("signature", py_out::value_to_py(py, v)?)?;
+        }
+
+        Ok(dict.into())
+    }
 }
 
 /// Helper function to get a mutable DirGraph from Arc.
@@ -1652,85 +1708,45 @@ impl KnowledgeGraph {
         })
     }
 
-    /// Get the source location of a code entity.
+    /// Get the source location of one or more code entities.
     ///
-    /// Resolves a name or qualified name to a single code entity and returns
-    /// its file path and line range. If the name is ambiguous, returns
-    /// the matches so you can refine with a qualified name.
+    /// Resolves names or qualified names to code entities and returns
+    /// file paths and line ranges. Accepts a single string or a list.
     ///
     /// Args:
-    ///     name: Entity name (e.g. "build") or qualified name
-    ///         (e.g. "crate::graph::cypher::executor::execute")
+    ///     name: Entity name, qualified name, or list of names.
     ///     node_type: Optional node type hint ("Function", "Struct", etc.)
     ///
     /// Returns:
-    ///     Dict with file_path, line_number, end_line, name, qualified_name,
-    ///     and type. If ambiguous, returns {"ambiguous": true, "matches": [...]}.
+    ///     Single name: dict with file_path, line_number, end_line, line_count,
+    ///         name, qualified_name, type, signature.
+    ///     List of names: list of dicts (one per name).
+    ///     Ambiguous names return {"name": ..., "ambiguous": true, "matches": [...]}.
+    ///     Unknown names return {"name": ..., "error": "Node not found: ..."}.
     ///
     /// Example:
     ///     ```python
     ///     loc = graph.source("execute_single_clause")
-    ///     # {'file_path': 'src/graph/cypher/executor.rs',
-    ///     #  'line_number': 163, 'end_line': 202, ...}
+    ///     locs = graph.source(["KnowledgeGraph", "build", "execute"])
     ///     ```
     #[pyo3(signature = (name, node_type=None))]
-    fn source(&self, name: &str, node_type: Option<&str>) -> PyResult<Py<PyAny>> {
-        let (resolved, matches) = self.resolve_code_entity(name, node_type);
+    fn source(&self, name: &Bound<'_, PyAny>, node_type: Option<&str>) -> PyResult<Py<PyAny>> {
+        // Check if name is a list/sequence of strings
+        if let Ok(list) = name.cast::<PyList>() {
+            let names: Vec<String> = list.extract()?;
+            return Python::attach(|py| {
+                let result = PyList::empty(py);
+                for n in &names {
+                    let dict = self.source_one(py, n, node_type)?;
+                    result.append(dict)?;
+                }
+                Ok(result.into_any().unbind())
+            });
+        }
 
-        let target_idx = match resolved {
-            Some(idx) => idx,
-            None => {
-                return Python::attach(|py| {
-                    let dict = PyDict::new(py);
-                    if matches.is_empty() {
-                        dict.set_item("error", format!("Node not found: {}", name))?;
-                    } else {
-                        dict.set_item("ambiguous", true)?;
-                        let match_list = PyList::empty(py);
-                        for (_, info) in &matches {
-                            let d = py_out::nodeinfo_to_pydict(py, info)?;
-                            match_list.append(d)?;
-                        }
-                        dict.set_item("matches", match_list)?;
-                    }
-                    Ok(dict.into_any().unbind())
-                });
-            }
-        };
-
-        let node = self
-            .inner
-            .get_node(target_idx)
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Node disappeared"))?;
-
-        Python::attach(|py| {
-            let dict = PyDict::new(py);
-            dict.set_item("type", node.get_node_type_ref())?;
-            dict.set_item("name", py_out::value_to_py(py, &node.title)?)?;
-            dict.set_item("qualified_name", py_out::value_to_py(py, &node.id)?)?;
-
-            if let Some(v) = node.get_field_ref("file_path") {
-                dict.set_item("file_path", py_out::value_to_py(py, v)?)?;
-            }
-            if let Some(v) = node.get_field_ref("line_number") {
-                dict.set_item("line_number", py_out::value_to_py(py, v)?)?;
-            }
-            if let Some(v) = node.get_field_ref("end_line") {
-                dict.set_item("end_line", py_out::value_to_py(py, v)?)?;
-            }
-            // Compute line_count from line_number and end_line
-            if let (Some(Value::Int64(start)), Some(Value::Int64(end))) = (
-                node.get_field_ref("line_number"),
-                node.get_field_ref("end_line"),
-            ) {
-                dict.set_item("line_count", end - start + 1)?;
-            }
-            if let Some(v) = node.get_field_ref("signature") {
-                dict.set_item("signature", py_out::value_to_py(py, v)?)?;
-            }
-
-            Ok(dict.into_any().unbind())
-        })
+        // Single string
+        let name_str: String = name.extract()?;
+        Python::attach(|py| self.source_one(py, &name_str, node_type))
     }
 
     /// Get the full neighborhood of a code entity.

@@ -8,6 +8,9 @@ Claude Code / Claude Desktop via the Model Context Protocol.
 Tools:
     graph_overview  — schema, Cypher reference, and example queries
     cypher_query    — run any Cypher query (including text_score() for semantic search)
+    find_entity     — search code entities by name across all types
+    read_source     — resolve entities to source locations (file, line range, line count)
+    entity_context  — get full neighborhood of a code entity
 
 Usage:
     python mcp_server.py                          # uses default graph.kgl
@@ -155,6 +158,83 @@ def cypher_query(query: str) -> str:
         return header + ":\n" + "\n".join(rows)
     except Exception as e:
         return f"Cypher query error: {e}"
+
+
+@mcp.tool()
+def find_entity(name: str, node_type: str | None = None) -> str:
+    """Search code entities by name across all types (Function, Struct, Class,
+    Enum, Trait, etc.). Returns matching entities with qualified_name, file_path,
+    and line_number for disambiguation. Use qualified_name with read_source or
+    entity_context for exact lookups."""
+    try:
+        results = graph.find(name, node_type=node_type)
+        if not results:
+            return f"No code entities found matching '{name}'."
+        lines = [f"Found {len(results)} match(es) for '{name}':"]
+        for r in results:
+            qn = r.get("qualified_name", r.get("id", "?"))
+            fp = r.get("file_path", "?")
+            ln = r.get("line_number", "?")
+            lines.append(f"  {r.get('type', '?')}: {qn}  ({fp}:{ln})")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"find_entity error: {e}"
+
+
+@mcp.tool()
+def read_source(names: list[str], node_type: str | None = None) -> str:
+    """Resolve one or more code entity names to their source locations.
+    Returns file_path, line_number, end_line, and line_count for each.
+    Accepts names or qualified_names. Use find_entity first if a name
+    is ambiguous."""
+    try:
+        results = graph.source(names, node_type=node_type)
+        lines = []
+        for r in results:
+            name = r.get("name", "?")
+            if r.get("error"):
+                lines.append(f"{name}: {r['error']}")
+            elif r.get("ambiguous"):
+                matches = r.get("matches", [])
+                lines.append(f"{name}: ambiguous ({len(matches)} matches) — use find_entity to disambiguate")
+            else:
+                fp = r.get("file_path", "?")
+                ln = r.get("line_number", "?")
+                el = r.get("end_line", "?")
+                lc = r.get("line_count", "?")
+                qn = r.get("qualified_name", "")
+                sig = r.get("signature", "")
+                lines.append(f"{r.get('type', '?')}: {qn}")
+                lines.append(f"  file: {fp}:{ln}-{el} ({lc} lines)")
+                if sig:
+                    lines.append(f"  signature: {sig}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"read_source error: {e}"
+
+
+@mcp.tool()
+def entity_context(name: str, node_type: str | None = None, hops: int = 1) -> str:
+    """Get the full neighborhood of a code entity — its properties and all
+    relationships grouped by type (HAS_METHOD, CALLS, called_by, USES_TYPE,
+    etc.). Accepts a name or qualified_name. Set hops > 1 for multi-hop
+    expansion."""
+    try:
+        import json
+        ctx = graph.context(name, node_type=node_type, hops=hops)
+        if ctx.get("error"):
+            return ctx["error"]
+        if ctx.get("ambiguous"):
+            matches = ctx.get("matches", [])
+            lines = [f"Ambiguous name '{name}' — {len(matches)} matches:"]
+            for m in matches:
+                qn = m.get("qualified_name", m.get("id", "?"))
+                lines.append(f"  {m.get('type', '?')}: {qn}")
+            lines.append("Use a qualified_name for an exact match.")
+            return "\n".join(lines)
+        return json.dumps(ctx, indent=2, default=str)
+    except Exception as e:
+        return f"entity_context error: {e}"
 
 
 # ---------------------------------------------------------------------------

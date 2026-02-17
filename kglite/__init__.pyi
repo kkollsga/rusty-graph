@@ -555,23 +555,37 @@ class KnowledgeGraph:
         """
         ...
 
+    @overload
     def source(
         self,
         name: str,
         node_type: Optional[str] = None,
-    ) -> dict[str, Any]:
-        """Get the source location of a code entity.
+    ) -> dict[str, Any]: ...
+    @overload
+    def source(
+        self,
+        name: list[str],
+        node_type: Optional[str] = None,
+    ) -> list[dict[str, Any]]: ...
+    def source(
+        self,
+        name: str | list[str],
+        node_type: Optional[str] = None,
+    ) -> dict[str, Any] | list[dict[str, Any]]:
+        """Get the source location of one or more code entities.
 
-        Resolves a name or qualified name to a single code entity and returns
-        its file path and line range.
+        Resolves names or qualified names to code entities and returns
+        file paths and line ranges.
 
         Args:
-            name: Entity name or qualified name.
+            name: Entity name, qualified name, or list of names.
             node_type: Optional node type hint.
 
         Returns:
-            Dict with ``file_path``, ``line_number``, ``end_line``, ``name``,
-            ``qualified_name``, ``type``, and ``signature``.
+            Single name: dict with ``file_path``, ``line_number``,
+            ``end_line``, ``line_count``, ``name``, ``qualified_name``,
+            ``type``, ``signature``.
+            List of names: list of such dicts.
         """
         ...
 
