@@ -161,6 +161,7 @@ jobs:
       contents: write
       id-token: write  # Required for Trusted Publishing
     steps:
+      - uses: actions/checkout@v4
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -169,12 +170,35 @@ jobs:
           merge-multiple: true
       - name: Display structure of downloaded files
         run: find dist -type f
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          VERSION="${{ needs.version-check.outputs.version }}"
+          # Extract the section between "## [VERSION]" and the next "## [" heading
+          NOTES=$(awk "/^## \[${VERSION}\]/{found=1; next} /^## \[/{if(found) exit} found" CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            echo "No changelog entry found for $VERSION, using auto-generated notes"
+            echo "has_notes=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_notes=true" >> $GITHUB_OUTPUT
+            echo "$NOTES" > /tmp/release_notes.md
+          fi
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
           password: ${{ secrets.PYPI_API_TOKEN }}
-      - name: Create GitHub Release
+      - name: Create GitHub Release (with changelog)
+        if: steps.changelog.outputs.has_notes == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.whl
+          body_path: /tmp/release_notes.md
+          tag_name: v${{ needs.version-check.outputs.version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create GitHub Release (auto-generated)
+        if: steps.changelog.outputs.has_notes != 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.whl

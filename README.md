@@ -1502,6 +1502,8 @@ graph.save("codebase.kgl")
 # Find entities by name (searches all code entity types)
 graph.find("execute")
 graph.find("KnowledgeGraph", node_type="Struct")
+graph.find("exec", match_type="contains")       # case-insensitive substring
+graph.find("Knowl", match_type="starts_with")    # case-insensitive prefix
 
 # Get source location — single or batch
 graph.source("execute_single_clause")
@@ -1513,6 +1515,10 @@ graph.source(["KnowledgeGraph", "build", "execute"])
 graph.context("KnowledgeGraph")
 # {'node': {...}, 'defined_in': 'src/graph/mod.rs',
 #  'HAS_METHOD': [...], 'IMPLEMENTS': [...], 'called_by': [...]}
+
+# File table of contents — all entities defined in a file
+graph.toc("src/graph/mod.rs")
+# {'file': '...', 'entities': [...], 'summary': {'Function': 4, 'Struct': 2}}
 ```
 
 ### Supported languages

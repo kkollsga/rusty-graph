@@ -66,7 +66,7 @@ class RustParser(LanguageParser):
         return "private"
 
     def _get_doc_comment(self, node, source: bytes) -> str | None:
-        """Walk backward through siblings to collect /// doc comments."""
+        """Walk backward through siblings to collect /// or /** */ doc comments."""
         doc_lines = []
         sibling = node.prev_named_sibling
         while sibling is not None:
@@ -79,6 +79,24 @@ class RustParser(LanguageParser):
                     doc_lines.insert(0, content)
                     sibling = sibling.prev_named_sibling
                     continue
+            elif sibling.type == "block_comment":
+                text = node_text(sibling, source).strip()
+                if text.startswith("/**"):
+                    text = text[3:]
+                    if text.endswith("*/"):
+                        text = text[:-2]
+                    lines = []
+                    for line in text.split("\n"):
+                        line = line.strip()
+                        if line.startswith("* "):
+                            line = line[2:]
+                        elif line.startswith("*"):
+                            line = line[1:]
+                        lines.append(line)
+                    content = "\n".join(lines).strip()
+                    if content:
+                        doc_lines.insert(0, content)
+                    break
             elif sibling.type == "attribute_item":
                 sibling = sibling.prev_named_sibling
                 continue
@@ -535,7 +553,7 @@ class RustParser(LanguageParser):
                     if uc.type in ("scoped_identifier", "use_wildcard",
                                    "scoped_use_list", "identifier"):
                         path_text = node_text(uc, source)
-                if path_text and path_text.startswith("crate::"):
+                if path_text:
                     file_info.imports.append(path_text)
 
             elif child.type == "mod_item":
