@@ -279,6 +279,28 @@ def file_toc(file_path: str) -> str:
         return f"file_toc error: {e}"
 
 
+@mcp.tool()
+def call_trace(name: str, depth: int = 3, direction: str = "outgoing") -> str:
+    """Trace the call chain of a function — what it calls (outgoing) or
+    what calls it (incoming). Returns a list of function calls up to N
+    levels deep. Use this to understand execution flow.
+
+    direction: 'outgoing' (what does it call?) or 'incoming' (what calls it?)"""
+    arrow = "-[:CALLS*1..{}]->".format(depth) if direction == "outgoing" else "<-[:CALLS*1..{}]-".format(depth)
+    query = f"MATCH (f:Function {{name: '{name}'}}){arrow}(g:Function) RETURN DISTINCT g.name AS name, g.qualified_name AS qname, g.file_path AS file"
+    try:
+        results = graph.cypher(query)
+        if len(results) == 0:
+            return f"No {'callees' if direction == 'outgoing' else 'callers'} found for '{name}'."
+        label = "calls" if direction == "outgoing" else "called by"
+        lines = [f"'{name}' {label} ({len(results)} functions, depth {depth}):"]
+        for r in results:
+            lines.append(f"  {r.get('qname', r.get('name', '?'))}  ({r.get('file', '?')})")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"call_trace error: {e}"
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------

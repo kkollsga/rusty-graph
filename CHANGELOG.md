@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.34] - 2026-02-18
+
 ### Added
 
 - `toc(file_path)` method: get a table of contents for any source file — all code entities sorted by line number with a type summary
@@ -15,10 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `find_entity` MCP tool now supports `match_type` parameter
 - Qualified name format documented in `agent_describe()` output (Rust: `crate::module::Type::method`, Python: `package.module.Class.method`)
 - Block doc comment support (`/** */`) in Rust parser — previously only `///` line comments were captured
+- `call_trace` MCP tool in `examples/mcp_server.py` for tracing function call chains (outgoing/incoming, configurable depth)
+- Call trace Cypher pattern documented in `agent_describe()` output
 - CHANGELOG.md, CONTRIBUTING.md, and CLAUDE.md for project governance
 
 ### Changed
 
+- Doc comments added to all critical Rust structs (`KnowledgeGraph`, `DirGraph`, `CypherExecutor`, `PatternExecutor`, `CypherParser`, and 15+ supporting types)
 - Rust parser now captures all `use` declarations, not just `crate::` prefixed imports
 - MCP tool descriptions improved with workflow guidance (`graph_overview` says "ALWAYS call this first", `cypher_query` mentions label-optional MATCH, etc.)
 - GitHub Release workflow now uses CHANGELOG.md content instead of auto-generated notes
@@ -69,7 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 *For versions prior to 0.5.22, see [GitHub Releases](https://github.com/kkollsga/kglite/releases).*
 
-[Unreleased]: https://github.com/kkollsga/kglite/compare/v0.5.31...HEAD
+[Unreleased]: https://github.com/kkollsga/kglite/compare/v0.5.34...HEAD
+[0.5.34]: https://github.com/kkollsga/kglite/compare/v0.5.31...v0.5.34
 [0.5.31]: https://github.com/kkollsga/kglite/compare/v0.5.28...v0.5.31
 [0.5.28]: https://github.com/kkollsga/kglite/compare/v0.5.22...v0.5.28
 [0.5.22]: https://github.com/kkollsga/kglite/releases/tag/v0.5.22

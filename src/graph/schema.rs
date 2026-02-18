@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
+/// Lightweight snapshot of a node's data: id, title, type, and properties.
+/// Used as the return type for node queries and traversals.
 #[derive(Clone, Debug)]
 pub struct NodeInfo {
     pub id: Value,
@@ -15,6 +17,8 @@ pub struct NodeInfo {
     pub properties: HashMap<String, Value>,
 }
 
+/// Records a filtering, sorting, or traversal operation applied to a selection.
+/// Used by `explain()` to show the query execution plan.
 #[derive(Clone, Debug)]
 pub enum SelectionOperation {
     Filter(HashMap<String, FilterCondition>),
@@ -27,6 +31,8 @@ pub enum SelectionOperation {
     Custom(String), // For operations that don't fit other categories
 }
 
+/// A single level in the selection hierarchy — holds node sets grouped
+/// by their parent (for traversals) and tracks applied operations.
 #[derive(Clone, Debug)]
 pub struct SelectionLevel {
     pub selections: HashMap<Option<NodeIndex>, Vec<NodeIndex>>, // parent_idx -> selected_children
@@ -100,6 +106,9 @@ impl PlanStep {
     }
 }
 
+/// Tracks the current selection state across a chain of query operations
+/// (type_filter → filter → traverse → ...). Supports nested levels for
+/// parent-child traversals and records execution plan steps for `explain()`.
 #[derive(Clone, Default)]
 pub struct CurrentSelection {
     levels: Vec<SelectionLevel>,
@@ -359,6 +368,12 @@ impl EmbeddingStore {
     }
 }
 
+/// Core graph storage: a directed graph (petgraph `StableDiGraph`) with fast
+/// type-based indexing and optional property/composite/range/spatial indexes.
+///
+/// Fields include `type_indices` for O(1) node-type lookup, `property_indices`
+/// for indexed equality filters, connection-type metadata, schema definitions,
+/// and optional embedding stores for vector similarity search.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DirGraph {
     pub(crate) graph: Graph,

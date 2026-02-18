@@ -10,6 +10,11 @@ use crate::graph::pattern_matching;
 // Parser
 // ============================================================================
 
+/// Tokenizes and parses Cypher query strings into a `CypherQuery` AST.
+///
+/// Handles the full Cypher clause set: MATCH, WHERE, RETURN, WITH,
+/// ORDER BY, LIMIT, SKIP, CREATE, SET, DELETE, MERGE, REMOVE, UNWIND, UNION.
+/// Uses a token-based recursive descent approach.
 pub struct CypherParser {
     tokens: Vec<CypherToken>,
     pos: usize,

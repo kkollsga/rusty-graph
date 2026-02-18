@@ -44,6 +44,12 @@ use schema::{
 /// Embedding column data extracted from a DataFrame: `[(column_name, [(node_id, embedding)])]`
 type EmbeddingColumnData = Vec<(String, Vec<(Value, Vec<f32>)>)>;
 
+/// Main knowledge graph type exposed to Python via PyO3.
+///
+/// Wraps a `DirGraph` behind an `Arc` for cheap cloning (read-heavy workloads).
+/// All read methods take `&self`; mutations use `Arc::make_mut` for copy-on-write.
+/// Supports Cypher queries, property filtering, traversals, graph algorithms,
+/// and code entity exploration methods (`find`, `source`, `context`, `toc`).
 #[pyclass]
 pub struct KnowledgeGraph {
     inner: Arc<DirGraph>,
@@ -54,6 +60,11 @@ pub struct KnowledgeGraph {
     embedder: Option<Py<PyAny>>,
 }
 
+/// Mutable working copy during a transaction.
+///
+/// Created by `graph.begin()`, provides a separate `DirGraph` that can be
+/// modified without affecting the original. Call `commit()` to apply changes
+/// back, or let it drop to discard.
 #[pyclass]
 pub struct Transaction {
     /// Back-reference to the owning KnowledgeGraph (for commit)

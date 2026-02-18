@@ -28,8 +28,9 @@ const RAYON_THRESHOLD: usize = 256;
 // Specialized Distance Filter Types
 // ============================================================================
 
-/// Extracted vector_score filter for fast-path evaluation in WHERE clauses.
-/// Bypasses the generic expression evaluator by inlining similarity computation.
+/// Fast-path specification for vector similarity filtering.
+/// Pre-extracts the column name, query vector, and threshold from
+/// WHERE clauses to enable optimized scoring without re-parsing.
 struct VectorScoreFilterSpec {
     variable: String,
     prop_name: String,
@@ -40,7 +41,8 @@ struct VectorScoreFilterSpec {
     inclusive: bool,
 }
 
-/// Extracted distance filter pattern for fast-path evaluation in WHERE clauses.
+/// Fast-path specification for spatial distance filtering.
+/// Pre-extracts center point and max distance for Haversine calculations.
 struct DistanceFilterSpec {
     variable: String,
     lat_prop: String,
@@ -56,9 +58,9 @@ struct DistanceFilterSpec {
 // Min-heap helper for top-k scoring
 // ============================================================================
 
-/// A scored row reference for use in a min-heap (BinaryHeap).
-/// The ordering is reversed: lower scores have higher priority (get popped first),
-/// so the heap naturally evicts the worst candidate when it exceeds capacity k.
+/// Min-heap entry for top-k scoring. Uses reverse ordering so
+/// `BinaryHeap` (max-heap) behaves as a min-heap — the lowest score
+/// gets popped first, naturally evicting the worst candidate at capacity k.
 struct ScoredRowRef {
     score: f64,
     index: usize,
@@ -93,15 +95,22 @@ impl Ord for ScoredRowRef {
 // Executor
 // ============================================================================
 
-/// Cached pre-computed constant arguments for `vector_score()` calls.
-/// The query vector, property name, and similarity function are identical for every row
-/// in a given query, so we parse them once on first invocation and reuse thereafter.
+/// Cache for pre-computed `vector_score()` function arguments.
+/// Initialized lazily via `OnceLock` on first use within a query.
+/// The query vector, property name, and similarity function are identical for
+/// every row, so we parse them once and reuse thereafter.
 struct VectorScoreCache {
     prop_name: String,
     query_vec: Vec<f32>,
     similarity_fn: fn(&[f32], &[f32]) -> f32,
 }
 
+/// Executes parsed Cypher queries against a `DirGraph`.
+///
+/// Processes a pipeline of clauses (MATCH → WHERE → RETURN, etc.) by
+/// maintaining a row-based result set that flows through each stage.
+/// Supports parameterized queries via `$param` syntax, optional deadlines
+/// for timeout enforcement, and pre-computed caches for vector similarity.
 pub struct CypherExecutor<'a> {
     graph: &'a DirGraph,
     params: &'a HashMap<String, Value>,

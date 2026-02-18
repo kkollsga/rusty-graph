@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 
 // ── Return types ────────────────────────────────────────────────────────────
 
+/// Statistics about a connection type: count, source/target node types.
 pub struct ConnectionTypeStats {
     pub connection_type: String,
     pub count: usize,
@@ -18,11 +19,13 @@ pub struct ConnectionTypeStats {
     pub target_types: Vec<String>,
 }
 
+/// Summary of a node type: count and property schemas with types.
 pub struct NodeTypeOverview {
     pub count: usize,
     pub properties: HashMap<String, String>,
 }
 
+/// Complete schema summary: all node types, connection types, indexes, and totals.
 pub struct SchemaOverview {
     pub node_types: Vec<(String, NodeTypeOverview)>,
     pub connection_types: Vec<ConnectionTypeStats>,
@@ -31,6 +34,7 @@ pub struct SchemaOverview {
     pub edge_count: usize,
 }
 
+/// Per-property statistics: data type, non-null count, unique count, and optional value list.
 pub struct PropertyStatInfo {
     pub property_name: String,
     pub type_string: String,
@@ -39,12 +43,14 @@ pub struct PropertyStatInfo {
     pub values: Option<Vec<Value>>,
 }
 
+/// A single neighbor connection: edge type, connected node type, and count.
 pub struct NeighborConnection {
     pub connection_type: String,
     pub other_type: String,
     pub count: usize,
 }
 
+/// Grouped neighbor connections for a node type: incoming and outgoing edges.
 pub struct NeighborsSchema {
     pub outgoing: Vec<NeighborConnection>,
     pub incoming: Vec<NeighborConnection>,
@@ -629,6 +635,9 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
         );
         xml.push_str(
             "      <note>Node id IS the qualified_name. Formats — Rust: crate::module::Type::method, Python: package.module.Class.method, TS/JS: module.Class.method. Use with find(), source(), context() for exact lookups.</note>\n",
+        );
+        xml.push_str(
+            "      <note>To trace call chains: MATCH (f:Function {name: 'x'})-[:CALLS*1..3]->(g:Function) RETURN g.name, g.file_path. Use *1..N for depth control.</note>\n",
         );
     }
     xml.push_str("    </notes>\n");

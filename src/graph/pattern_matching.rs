@@ -336,6 +336,10 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 // Parser
 // ============================================================================
 
+/// Parses Cypher-like pattern strings into a `Pattern` AST.
+///
+/// Tokenizes the input, then builds a sequence of `PatternElement`
+/// nodes and edges: `(a:Type {key: val})-[:REL]->(b:Type)`.
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -699,6 +703,12 @@ pub fn parse_pattern(input: &str) -> Result<Pattern, String> {
 // Executor
 // ============================================================================
 
+/// Executes graph pattern matching against a `DirGraph`.
+///
+/// Takes a parsed `Pattern` and finds all subgraph matches using
+/// BFS expansion from type-indexed starting nodes. Supports variable
+/// binding, property filters, edge direction, variable-length paths,
+/// and optional pre-bound variables for Cypher integration.
 pub struct PatternExecutor<'a> {
     graph: &'a DirGraph,
     max_matches: Option<usize>,
