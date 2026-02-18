@@ -131,9 +131,10 @@ mcp = FastMCP(
 
 @mcp.tool()
 def graph_overview() -> str:
-    """Get the full schema of the knowledge graph — node types with
-    properties, edge types, indexes, Cypher reference, and example queries.
-    Call this first to understand what you can query."""
+    """ALWAYS call this tool first. Returns the full schema of the knowledge
+    graph (node types with properties, edge types, indexes), a Cypher query
+    reference, and available API methods. You need this context before using
+    any other tool."""
     return graph.agent_describe()
 
 
@@ -141,8 +142,10 @@ def graph_overview() -> str:
 def cypher_query(query: str) -> str:
     """Run a Cypher query against the knowledge graph. Supports MATCH, WHERE,
     RETURN, ORDER BY, LIMIT, aggregations, path traversals, CREATE, SET,
-    DELETE, and more. Call graph_overview first if you need the schema.
-    Returns up to 200 rows as formatted text."""
+    DELETE, and more. Tip: label-optional patterns like (n {name: 'x'})
+    search across all node types. Use CONTAINS, STARTS WITH, or =~ (regex)
+    in WHERE for flexible text matching. Call graph_overview first if you
+    need the schema. Returns up to 200 rows as formatted text."""
     try:
         result = graph.cypher(query)
         if len(result) == 0:
@@ -161,13 +164,21 @@ def cypher_query(query: str) -> str:
 
 
 @mcp.tool()
-def find_entity(name: str, node_type: str | None = None) -> str:
+def find_entity(
+    name: str,
+    node_type: str | None = None,
+    match_type: str | None = None,
+) -> str:
     """Search code entities by name across all types (Function, Struct, Class,
-    Enum, Trait, etc.). Returns matching entities with qualified_name, file_path,
-    and line_number for disambiguation. Use qualified_name with read_source or
-    entity_context for exact lookups."""
+    Enum, Trait, etc.). Faster than cypher_query for entity lookups — use this
+    when you know part or all of an entity name. Returns matching entities with
+    qualified_name, file_path, and line_number. Use qualified_name with
+    read_source or entity_context for exact lookups.
+
+    match_type: 'exact' (default), 'contains' (case-insensitive substring),
+    or 'starts_with' (case-insensitive prefix)."""
     try:
-        results = graph.find(name, node_type=node_type)
+        results = graph.find(name, node_type=node_type, match_type=match_type)
         if not results:
             return f"No code entities found matching '{name}'."
         lines = [f"Found {len(results)} match(es) for '{name}':"]
@@ -183,10 +194,11 @@ def find_entity(name: str, node_type: str | None = None) -> str:
 
 @mcp.tool()
 def read_source(names: list[str], node_type: str | None = None) -> str:
-    """Resolve one or more code entity names to their source locations.
-    Returns file_path, line_number, end_line, and line_count for each.
-    Accepts names or qualified_names. Use find_entity first if a name
-    is ambiguous."""
+    """Resolve one or more code entity names to their source file locations.
+    Returns file_path, line_number, end_line, and line_count for each entity.
+    Use the file_path and line range to read the actual source code with your
+    file-reading tool. Accepts simple names or qualified_names. Use find_entity
+    first if a name is ambiguous (multiple matches)."""
     try:
         results = graph.source(names, node_type=node_type)
         lines = []
@@ -215,10 +227,11 @@ def read_source(names: list[str], node_type: str | None = None) -> str:
 
 @mcp.tool()
 def entity_context(name: str, node_type: str | None = None, hops: int = 1) -> str:
-    """Get the full neighborhood of a code entity — its properties and all
-    relationships grouped by type (HAS_METHOD, CALLS, called_by, USES_TYPE,
-    etc.). Accepts a name or qualified_name. Set hops > 1 for multi-hop
-    expansion."""
+    """Get the full neighborhood of a code entity — shows all relationships
+    grouped by type (HAS_METHOD, CALLS, called_by, USES_TYPE, DEFINES, etc.).
+    Use this to understand how an entity connects to the rest of the codebase
+    (what it calls, what calls it, what types it uses, etc.). Accepts a name
+    or qualified_name. Set hops > 1 for multi-hop expansion."""
     try:
         import json
         ctx = graph.context(name, node_type=node_type, hops=hops)
@@ -235,6 +248,35 @@ def entity_context(name: str, node_type: str | None = None, hops: int = 1) -> st
         return json.dumps(ctx, indent=2, default=str)
     except Exception as e:
         return f"entity_context error: {e}"
+
+
+@mcp.tool()
+def file_toc(file_path: str) -> str:
+    """Get the table of contents for a source file — all code entities
+    (functions, classes, structs, etc.) defined in it, sorted by line number.
+    Use this to understand what a file contains before diving into specific
+    entities with read_source or entity_context. Returns entity types, names,
+    qualified_names, and line ranges."""
+    try:
+        result = graph.toc(file_path)
+        if result.get("error"):
+            return result["error"]
+        entities = result.get("entities", [])
+        if not entities:
+            return f"No code entities found in {file_path}."
+        summary = result.get("summary", {})
+        summary_str = ", ".join(f"{v} {k}(s)" for k, v in sorted(summary.items()))
+        lines = [f"File: {file_path}  ({summary_str})"]
+        for e in entities:
+            sig = e.get("signature", "")
+            sig_str = f"  {sig}" if sig else ""
+            lines.append(
+                f"  L{e['line_number']}-{e['end_line']}  {e['type']}: {e['name']}"
+                f"  ({e['qualified_name']}){sig_str}"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        return f"file_toc error: {e}"
 
 
 # ---------------------------------------------------------------------------

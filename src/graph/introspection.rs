@@ -571,9 +571,10 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     // API methods
     xml.push_str(API_BASE);
     if has_code_entities {
-        xml.push_str("    <method sig=\"find(name, node_type=None)\">Search code entities by name. Returns list of matches with type, qualified_name, file_path, line_number.</method>\n");
+        xml.push_str("    <method sig=\"find(name, node_type=None, match_type=None)\">Search code entities by name. match_type: 'exact' (default), 'contains' (case-insensitive substring), 'starts_with' (case-insensitive prefix). Returns list of matches with type, qualified_name, file_path, line_number.</method>\n");
         xml.push_str("    <method sig=\"source(name, node_type=None)\">Get source location of a code entity. Returns file_path, line_number, end_line, signature.</method>\n");
         xml.push_str("    <method sig=\"context(name, node_type=None, hops=None)\">Get full neighborhood of a code entity. Returns node properties + relationships grouped by type.</method>\n");
+        xml.push_str("    <method sig=\"toc(file_path)\">Get table of contents for a source file. Returns all code entities defined in it, sorted by line_number, with a type summary.</method>\n");
     }
     xml.push_str("  </api>\n");
 
@@ -615,13 +616,19 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     }
     if has_code_entities {
         xml.push_str(
-            "      <note>find(name) searches code entities (Function, Struct, Class, etc.) by name. Use qualified_name from results to disambiguate.</note>\n",
+            "      <note>find(name) searches code entities (Function, Struct, Class, etc.) by name. Use match_type='contains' for substring search. Use qualified_name from results to disambiguate.</note>\n",
         );
         xml.push_str(
             "      <note>source(name) returns file_path, line_number, end_line for a code entity. Resolves qualified names directly.</note>\n",
         );
         xml.push_str(
             "      <note>context(name) returns a node's properties and all relationships grouped by edge type (HAS_METHOD, CALLS, called_by, etc.).</note>\n",
+        );
+        xml.push_str(
+            "      <note>toc(file_path) returns all entities defined in a file, sorted by line number, without needing a Cypher query.</note>\n",
+        );
+        xml.push_str(
+            "      <note>Node id IS the qualified_name. Formats — Rust: crate::module::Type::method, Python: package.module.Class.method, TS/JS: module.Class.method. Use with find(), source(), context() for exact lookups.</note>\n",
         );
     }
     xml.push_str("    </notes>\n");

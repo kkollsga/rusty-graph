@@ -537,6 +537,7 @@ class KnowledgeGraph:
         self,
         name: str,
         node_type: Optional[str] = None,
+        match_type: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Find code entities by name, with disambiguation context.
 
@@ -548,6 +549,9 @@ class KnowledgeGraph:
             name: Entity name to search for (e.g. ``"execute"``).
             node_type: Optional filter — only search this node type
                 (e.g. ``"Function"``, ``"Struct"``).
+            match_type: Matching strategy: ``"exact"`` (default),
+                ``"contains"`` (case-insensitive substring), or
+                ``"starts_with"`` (case-insensitive prefix).
 
         Returns:
             List of dicts with: type, name, qualified_name, file_path,
@@ -610,6 +614,25 @@ class KnowledgeGraph:
             Dict with ``"node"`` (properties), ``"defined_in"`` (file path),
             and relationship groups (e.g. ``"HAS_METHOD"``, ``"CALLS"``,
             ``"called_by"``).
+        """
+        ...
+
+    def toc(
+        self,
+        file_path: str,
+    ) -> dict[str, Any]:
+        """Get a table of contents for a file — all code entities defined in it.
+
+        Returns entities sorted by line number with a type summary.
+
+        Args:
+            file_path: Path of the file (the File node's id/path).
+
+        Returns:
+            Dict with ``"file"`` (path), ``"entities"`` (list of entity dicts
+            sorted by line_number, each with type, name, qualified_name,
+            line_number, end_line, and optionally signature), and ``"summary"``
+            (dict of type name to count).
         """
         ...
 

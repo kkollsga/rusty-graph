@@ -286,6 +286,26 @@ impl KnowledgeGraph {
 
         Ok(dict.into())
     }
+
+    /// Check if a node's field value contains the given lowercase string (case-insensitive).
+    fn field_contains_ci(node: &schema::NodeData, field: &str, needle_lower: &str) -> bool {
+        node.get_field_ref(field)
+            .and_then(|v| match v {
+                Value::String(s) => Some(s.to_lowercase().contains(needle_lower)),
+                _ => None,
+            })
+            .unwrap_or(false)
+    }
+
+    /// Check if a node's field value starts with the given lowercase string (case-insensitive).
+    fn field_starts_with_ci(node: &schema::NodeData, field: &str, prefix_lower: &str) -> bool {
+        node.get_field_ref(field)
+            .and_then(|v| match v {
+                Value::String(s) => Some(s.to_lowercase().starts_with(prefix_lower)),
+                _ => None,
+            })
+            .unwrap_or(false)
+    }
 }
 
 /// Helper function to get a mutable DirGraph from Arc.
@@ -1694,9 +1714,15 @@ impl KnowledgeGraph {
     ///     results = graph.find("execute")
     ///     results = graph.find("KnowledgeGraph", node_type="Struct")
     ///     ```
-    #[pyo3(signature = (name, node_type=None))]
-    fn find(&self, name: &str, node_type: Option<&str>) -> PyResult<Py<PyAny>> {
-        let name_val = Value::String(name.to_string());
+    #[pyo3(signature = (name, node_type=None, match_type=None))]
+    fn find(
+        &self,
+        name: &str,
+        node_type: Option<&str>,
+        match_type: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        let match_type = match_type.unwrap_or("exact");
+        let name_lower = name.to_lowercase();
         let types_to_search: Vec<&str> = match node_type {
             Some(nt) => vec![nt],
             None => Self::CODE_TYPES.to_vec(),
@@ -1707,14 +1733,27 @@ impl KnowledgeGraph {
             if let Some(indices) = self.inner.type_indices.get(*nt) {
                 for &idx in indices {
                     if let Some(node) = self.inner.get_node(idx) {
-                        let matches = node
-                            .get_field_ref("name")
-                            .map(|v| v == &name_val)
-                            .unwrap_or(false)
-                            || node
-                                .get_field_ref("title")
-                                .map(|v| v == &name_val)
-                                .unwrap_or(false);
+                        let matches = match match_type {
+                            "contains" => {
+                                Self::field_contains_ci(node, "name", &name_lower)
+                                    || Self::field_contains_ci(node, "title", &name_lower)
+                            }
+                            "starts_with" => {
+                                Self::field_starts_with_ci(node, "name", &name_lower)
+                                    || Self::field_starts_with_ci(node, "title", &name_lower)
+                            }
+                            _ => {
+                                // "exact" (default)
+                                let name_val = Value::String(name.to_string());
+                                node.get_field_ref("name")
+                                    .map(|v| v == &name_val)
+                                    .unwrap_or(false)
+                                    || node
+                                        .get_field_ref("title")
+                                        .map(|v| v == &name_val)
+                                        .unwrap_or(false)
+                            }
+                        };
                         if matches {
                             results.push(node.to_node_info());
                         }
@@ -1992,6 +2031,131 @@ impl KnowledgeGraph {
                 }
                 result.set_item(key.as_str(), list)?;
             }
+
+            Ok(result.into_any().unbind())
+        })
+    }
+
+    /// Get a table of contents for a file — all code entities defined in it.
+    ///
+    /// Returns entities sorted by line_number with a type summary.
+    ///
+    /// Args:
+    ///     file_path: Path of the file (the File node's path).
+    ///
+    /// Returns:
+    ///     Dict with "file" (path), "entities" (list of dicts sorted by
+    ///     line_number, each with type, name, qualified_name, line_number,
+    ///     end_line, and optionally signature), and "summary" (type -> count).
+    ///     Returns {"error": "..."} if file not found.
+    ///
+    /// Example:
+    ///     ```python
+    ///     toc = graph.toc("src/graph/mod.rs")
+    ///     ```
+    #[pyo3(signature = (file_path))]
+    fn toc(&self, file_path: &str) -> PyResult<Py<PyAny>> {
+        let file_id = Value::String(file_path.to_string());
+
+        // Find the File node by its id (path)
+        let file_idx = if let Some(indices) = self.inner.type_indices.get("File") {
+            indices
+                .iter()
+                .find(|&&idx| {
+                    self.inner
+                        .get_node(idx)
+                        .map(|n| n.id == file_id)
+                        .unwrap_or(false)
+                })
+                .copied()
+        } else {
+            None
+        };
+
+        let file_idx = match file_idx {
+            Some(idx) => idx,
+            None => {
+                return Python::attach(|py| {
+                    let dict = PyDict::new(py);
+                    dict.set_item("error", format!("File not found: {}", file_path))?;
+                    Ok(dict.into_any().unbind())
+                });
+            }
+        };
+
+        // Collect all entities connected via outgoing DEFINES edges
+        // (type, name, qualified_name, line_number, end_line, signature)
+        let mut entities: Vec<(String, String, String, i64, i64, Option<String>)> = Vec::new();
+
+        for edge in self
+            .inner
+            .graph
+            .edges_directed(file_idx, petgraph::Direction::Outgoing)
+        {
+            if edge.weight().connection_type != "DEFINES" {
+                continue;
+            }
+            if let Some(node) = self.inner.get_node(edge.target()) {
+                let node_type = node.get_node_type_ref().to_string();
+                let name = match &node.title {
+                    Value::String(s) => s.clone(),
+                    _ => String::new(),
+                };
+                let qname = match &node.id {
+                    Value::String(s) => s.clone(),
+                    _ => String::new(),
+                };
+                let line = match node.get_field_ref("line_number") {
+                    Some(Value::Int64(n)) => *n,
+                    _ => 0,
+                };
+                let end = match node.get_field_ref("end_line") {
+                    Some(Value::Int64(n)) => *n,
+                    _ => 0,
+                };
+                let sig = match node.get_field_ref("signature") {
+                    Some(Value::String(s)) => Some(s.clone()),
+                    _ => None,
+                };
+                entities.push((node_type, name, qname, line, end, sig));
+            }
+        }
+
+        // Sort by line_number
+        entities.sort_by_key(|e| e.3);
+
+        // Build summary: type -> count
+        let mut summary: HashMap<String, usize> = HashMap::new();
+        for e in &entities {
+            *summary.entry(e.0.clone()).or_insert(0) += 1;
+        }
+
+        Python::attach(|py| {
+            let result = PyDict::new(py);
+            result.set_item("file", file_path)?;
+
+            let entity_list = PyList::empty(py);
+            for (etype, name, qname, line, end, sig) in &entities {
+                let d = PyDict::new(py);
+                d.set_item("type", etype)?;
+                d.set_item("name", name)?;
+                d.set_item("qualified_name", qname)?;
+                d.set_item("line_number", line)?;
+                d.set_item("end_line", end)?;
+                if let Some(s) = sig {
+                    d.set_item("signature", s)?;
+                }
+                entity_list.append(d)?;
+            }
+            result.set_item("entities", entity_list)?;
+
+            let summary_dict = PyDict::new(py);
+            let mut sorted_summary: Vec<_> = summary.iter().collect();
+            sorted_summary.sort_by_key(|(k, _)| (*k).clone());
+            for (k, v) in sorted_summary {
+                summary_dict.set_item(k.as_str(), v)?;
+            }
+            result.set_item("summary", summary_dict)?;
 
             Ok(result.into_any().unbind())
         })
