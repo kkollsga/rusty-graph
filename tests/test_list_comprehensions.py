@@ -90,6 +90,103 @@ class TestListComprehensions:
         assert result_val == [3, 5, 7]
 
 
+class TestListComprehensionPathFunctions:
+    """Test list comprehensions with nodes(p) and relationships(p)."""
+
+    @pytest.fixture
+    def chain_graph(self):
+        """Linear chain: Alice -> Bob -> Charlie."""
+        graph = KnowledgeGraph()
+        for name in ['Alice', 'Bob', 'Charlie']:
+            graph.cypher(f"CREATE (:Person {{name: '{name}', age: {20 + len(name)}}})")
+        graph.cypher(
+            "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) "
+            "CREATE (a)-[:KNOWS]->(b)"
+        )
+        graph.cypher(
+            "MATCH (a:Person {name: 'Bob'}), (b:Person {name: 'Charlie'}) "
+            "CREATE (a)-[:KNOWS]->(b)"
+        )
+        return graph
+
+    def test_nodes_name_extraction(self, chain_graph):
+        """[n IN nodes(p) | n.name] extracts name from each node."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
+            "RETURN [n IN nodes(p) | n.name] AS names"
+        )
+        assert len(result) == 1
+        names = result[0]['names']
+        assert isinstance(names, list)
+        assert names == ['Alice', 'Bob', 'Charlie']
+
+    def test_nodes_type_extraction(self, chain_graph):
+        """[n IN nodes(p) | n.type] extracts type from each node."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
+            "RETURN [n IN nodes(p) | n.type] AS types"
+        )
+        assert len(result) == 1
+        types = result[0]['types']
+        assert isinstance(types, list)
+        assert types == ['Person', 'Person', 'Person']
+
+    def test_nodes_property_access(self, chain_graph):
+        """[n IN nodes(p) | n.age] extracts custom property from each node."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
+            "RETURN [n IN nodes(p) | n.age] AS ages"
+        )
+        assert len(result) == 1
+        ages = result[0]['ages']
+        assert isinstance(ages, list)
+        assert ages == [25, 23, 27]  # 20 + len(name)
+
+    def test_nodes_with_filter(self, chain_graph):
+        """[n IN nodes(p) WHERE pred | n.name] filters path nodes."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
+            "RETURN [n IN nodes(p) WHERE n.name <> 'Bob' | n.name] AS names"
+        )
+        assert len(result) == 1
+        names = result[0]['names']
+        assert isinstance(names, list)
+        assert names == ['Alice', 'Charlie']
+
+    def test_nodes_identity(self, chain_graph):
+        """[n IN nodes(p)] without map returns node dicts."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
+            "RETURN [n IN nodes(p)] AS node_list"
+        )
+        assert len(result) == 1
+        node_list = result[0]['node_list']
+        assert isinstance(node_list, list)
+        assert len(node_list) == 3
+
+    def test_relationships_identity(self, chain_graph):
+        """[r IN relationships(p)] returns relationship types."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
+            "RETURN [r IN relationships(p)] AS rels"
+        )
+        assert len(result) == 1
+        rels = result[0]['rels']
+        assert isinstance(rels, list)
+        assert rels == ['KNOWS', 'KNOWS']
+
+    def test_nodes_after_with(self, chain_graph):
+        """nodes(p) in list comprehension works after WITH clause."""
+        result = chain_graph.cypher(
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
+            "WITH p "
+            "RETURN [n IN nodes(p) | n.name] AS names"
+        )
+        assert len(result) == 1
+        names = result[0]['names']
+        assert names == ['Alice', 'Bob', 'Charlie']
+
+
 class TestListComprehensionIntegration:
     """Test list comprehensions integrated with MATCH queries."""
 

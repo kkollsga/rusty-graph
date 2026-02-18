@@ -366,6 +366,44 @@ class TestCaseExpressions:
         assert bob['tier'] == 'newcomer'  # age 25
 
 
+class TestCaseEdgeCases:
+    """Edge cases for CASE expressions: nulls, WHERE usage, nesting."""
+
+    def test_case_in_where(self, cypher_graph):
+        """CASE expression used inside WHERE clause."""
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person)
+            WHERE CASE WHEN n.age >= 30 THEN true ELSE false END
+            RETURN n.name AS name
+            ORDER BY n.name
+        """)
+        names = [r['name'] for r in rows]
+        assert 'Alice' in names  # age 30
+        assert 'Eve' in names    # age 40
+        assert 'Bob' not in names  # age 25
+
+    def test_case_with_null_property(self, cypher_graph):
+        """CASE on a property that might be null."""
+        cypher_graph.cypher("CREATE (:Person {name: 'NullAge'})")
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person {name: 'NullAge'})
+            RETURN CASE WHEN n.age IS NULL THEN 'unknown' ELSE 'known' END AS status
+        """)
+        assert len(rows) == 1
+        assert rows[0]['status'] == 'unknown'
+
+    def test_case_no_else_no_match_returns_null(self, cypher_graph):
+        """CASE without ELSE returns null when no WHEN matches."""
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person)
+            RETURN n.name AS name,
+                   CASE WHEN n.age > 100 THEN 'centenarian' END AS label
+            ORDER BY n.name
+        """)
+        for row in rows:
+            assert row['label'] is None
+
+
 class TestParameters:
     """Tests for $param parameter substitution."""
 

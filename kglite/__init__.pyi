@@ -2156,8 +2156,14 @@ class KnowledgeGraph:
     def begin(self) -> Transaction:
         """Begin a transaction — returns a Transaction with a working copy of the graph.
 
-        All mutations within the transaction are isolated until ``commit()``.
-        If rolled back (or dropped without committing), no changes are applied.
+        Creates a snapshot (deep-clone) of the current graph state. All mutations
+        within the transaction are isolated until ``commit()`` is called. If rolled
+        back (or dropped without committing), no changes are applied.
+
+        Note:
+            The snapshot is a full deep-clone of the graph, so creating a
+            transaction on a very large graph has a one-time memory cost
+            proportional to graph size. Embeddings are not cloned.
 
         Can be used as a context manager::
 
@@ -2176,6 +2182,16 @@ class Transaction:
     working copy and only become visible in the original graph after
     :meth:`commit`. If an exception occurs (or :meth:`rollback` is called),
     all changes are discarded.
+
+    Isolation semantics:
+        - **Snapshot isolation**: ``begin()`` clones the entire graph. The
+          transaction sees a frozen snapshot from the moment it was created.
+        - **Write isolation**: mutations inside the transaction modify only the
+          working copy. The original graph is untouched until ``commit()``.
+        - **Commit**: replaces the original graph's data atomically.
+        - **No concurrent-transaction guarantees**: if two transactions exist
+          simultaneously, whichever commits last wins (last-writer-wins). There
+          is no conflict detection or merge.
     """
 
     def cypher(

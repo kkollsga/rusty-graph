@@ -73,6 +73,41 @@ class TestExportString:
         assert isinstance(result, str)
 
 
+class TestExportStringFormats:
+    """Ensure all string export formats produce valid output."""
+
+    def test_gexf_string(self, small_graph):
+        result = small_graph.export_string(format='gexf')
+        assert isinstance(result, str)
+        assert 'gexf' in result.lower()
+
+    def test_graphml_contains_nodes(self, small_graph):
+        result = small_graph.export_string(format='graphml')
+        assert '<node' in result
+        assert '<edge' in result
+
+    def test_d3_node_count(self, small_graph):
+        result = small_graph.export_string(format='d3')
+        data = json.loads(result)
+        assert len(data['nodes']) >= 2
+
+    def test_special_chars_in_export(self):
+        """Properties with special XML characters don't break export."""
+        graph = KnowledgeGraph()
+        df = pd.DataFrame({
+            'id': [1],
+            'name': ["O'Brien & <Co>"],
+            'desc': ['Has "quotes"'],
+        })
+        graph.add_nodes(df, 'T', 'id', 'name')
+        # Should not crash
+        graphml = graph.export_string(format='graphml')
+        assert isinstance(graphml, str)
+        d3 = graph.export_string(format='d3')
+        data = json.loads(d3)
+        assert len(data['nodes']) == 1
+
+
 class TestExportWithSelection:
     def test_export_selection_only(self, social_graph):
         selection = social_graph.type_filter('Person').filter({'city': 'Oslo'})

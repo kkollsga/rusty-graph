@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.36] - 2026-02-18
+
+### Changed
+
+- Split `mod.rs` (6,742 LOC) into 5 thematic `#[pymethods]` files: algorithms, export, indexes, spatial, vector — mod.rs reduced to 4,005 LOC
+- Enabled PyO3 `multiple-pymethods` feature for multi-file `#[pymethods]` blocks
+- Documented transaction isolation semantics (snapshot isolation, last-writer-wins)
+
+### Fixed
+
+- `[n IN nodes(p) | n.name]` now correctly extracts node properties in list comprehensions over path functions — previously returned serialized JSON fragments instead of property values
+- `parse_list_value` is now brace-aware — splits at top-level commas only, preserving JSON objects and nested structures
+- `EXISTS { MATCH (pattern) }` syntax now accepted — the optional `MATCH` keyword inside EXISTS braces is silently skipped, matching standard Cypher behavior
+
 ## [0.5.35] - 2026-02-18
 
 ### Added

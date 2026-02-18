@@ -324,6 +324,11 @@ impl CypherParser {
 
     /// Extract tokens forming a pattern inside EXISTS { ... }, stopping at RBrace or comma.
     fn extract_exists_pattern_string(&mut self) -> Result<String, String> {
+        // Skip optional MATCH keyword — standard Cypher allows EXISTS { MATCH (pattern) }
+        if self.check(&CypherToken::Match) {
+            self.advance();
+        }
+
         let mut parts = Vec::new();
         let mut paren_depth = 0i32;
         let mut bracket_depth = 0i32;

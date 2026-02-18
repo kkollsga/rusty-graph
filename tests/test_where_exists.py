@@ -237,6 +237,52 @@ class TestWhereExistsEdgeCases:
         assert names == ['Charlie', 'Diana']
 
 
+class TestExistsMatchSyntax:
+    """Tests for EXISTS { MATCH pattern } syntax (optional MATCH keyword)."""
+
+    def test_exists_match_keyword(self, social_graph):
+        """EXISTS { MATCH (pattern) } works like EXISTS { (pattern) }."""
+        result_with_match = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE EXISTS { MATCH (p)-[:KNOWS]->(:Person) }
+            RETURN p.name
+            ORDER BY p.name
+        """)
+
+        result_without_match = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE EXISTS { (p)-[:KNOWS]->(:Person) }
+            RETURN p.name
+            ORDER BY p.name
+        """)
+
+        assert [r['p.name'] for r in result_with_match] == [r['p.name'] for r in result_without_match]
+
+    def test_not_exists_match_keyword(self, social_graph):
+        """NOT EXISTS { MATCH (pattern) } works correctly."""
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE NOT EXISTS { MATCH (p)-[:KNOWS]->(:Person) }
+            RETURN p.name
+            ORDER BY p.name
+        """)
+
+        names = [row['p.name'] for row in result]
+        assert names == ['Charlie', 'Diana']
+
+    def test_exists_match_with_label(self, social_graph):
+        """EXISTS { MATCH (pattern) } with edge type filter."""
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE EXISTS { MATCH (p)-[:PURCHASED]->(:Product) }
+            RETURN p.name
+            ORDER BY p.name
+        """)
+
+        names = [row['p.name'] for row in result]
+        assert names == ['Alice', 'Bob']
+
+
 class TestExistsParenSyntax:
     """Tests for EXISTS((...)) parenthesis syntax (alternative to brace syntax)."""
 

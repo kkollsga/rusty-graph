@@ -1766,9 +1766,35 @@ impl<'a> CypherExecutor<'a> {
                 filter,
                 map_expr,
             } => {
-                // Evaluate the list expression
+                // Special handling for nodes(p) / relationships(p): extract structured
+                // data directly from path bindings so property access works correctly.
+                // Without this, nodes(p) returns a JSON string that parse_list_value
+                // cannot split correctly (commas inside JSON objects).
+                if let Expression::FunctionCall { name, args, .. } = list_expr.as_ref() {
+                    let fn_lower = name.to_lowercase();
+                    if fn_lower == "nodes"
+                        || fn_lower == "relationships"
+                        || fn_lower == "rels"
+                    {
+                        if let Some(Expression::Variable(path_var)) = args.first() {
+                            if let Some(path) = row.path_bindings.get(path_var) {
+                                let path = path.clone();
+                                return if fn_lower == "nodes" {
+                                    self.list_comp_nodes(
+                                        variable, &path, filter, map_expr, row,
+                                    )
+                                } else {
+                                    self.list_comp_relationships(
+                                        variable, &path, filter, map_expr, row,
+                                    )
+                                };
+                            }
+                        }
+                    }
+                }
+
+                // Default path: evaluate and parse list value
                 let list_val = self.evaluate_expression(list_expr, row)?;
-                // Parse list value (currently stored as "[a, b, c]" string)
                 let items = parse_list_value(&list_val);
 
                 let mut results = Vec::new();
@@ -1872,6 +1898,88 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
         }
+    }
+
+    /// List comprehension over nodes(p): bind each path node as a node_binding
+    /// so that property access (n.name, n.type, etc.) resolves correctly.
+    fn list_comp_nodes(
+        &self,
+        variable: &str,
+        path: &PathBinding,
+        filter: &Option<Box<Predicate>>,
+        map_expr: &Option<Box<Expression>>,
+        row: &ResultRow,
+    ) -> Result<Value, String> {
+        let mut node_indices = vec![path.source];
+        for (node_idx, _) in &path.path {
+            node_indices.push(*node_idx);
+        }
+
+        let mut results = Vec::new();
+        for node_idx in node_indices {
+            let mut temp_row = row.clone();
+            temp_row.node_bindings.insert(variable.to_string(), node_idx);
+
+            if let Some(ref pred) = filter {
+                if !self.evaluate_predicate(pred, &temp_row)? {
+                    continue;
+                }
+            }
+
+            let result = if let Some(ref expr) = map_expr {
+                self.evaluate_expression(expr, &temp_row)?
+            } else {
+                // No map expression — serialize node as JSON dict (backward compatible)
+                if let Some(node) = self.graph.graph.node_weight(node_idx) {
+                    let mut props = Vec::new();
+                    props.push(format!("\"id\": {}", format_value_compact(&node.id)));
+                    props.push(format!(
+                        "\"title\": \"{}\"",
+                        format_value_compact(&node.title).replace('"', "\\\"")
+                    ));
+                    props.push(format!("\"type\": \"{}\"", node.node_type));
+                    Value::String(format!("{{{}}}", props.join(", ")))
+                } else {
+                    Value::Null
+                }
+            };
+
+            results.push(format_value_json(&result));
+        }
+        Ok(Value::String(format!("[{}]", results.join(", "))))
+    }
+
+    /// List comprehension over relationships(p): bind each relationship type as a projected value.
+    fn list_comp_relationships(
+        &self,
+        variable: &str,
+        path: &PathBinding,
+        filter: &Option<Box<Predicate>>,
+        map_expr: &Option<Box<Expression>>,
+        row: &ResultRow,
+    ) -> Result<Value, String> {
+        let mut results = Vec::new();
+        for (_, conn_type) in &path.path {
+            let mut temp_row = row.clone();
+            temp_row
+                .projected
+                .insert(variable.to_string(), Value::String(conn_type.clone()));
+
+            if let Some(ref pred) = filter {
+                if !self.evaluate_predicate(pred, &temp_row)? {
+                    continue;
+                }
+            }
+
+            let result = if let Some(ref expr) = map_expr {
+                self.evaluate_expression(expr, &temp_row)?
+            } else {
+                Value::String(conn_type.clone())
+            };
+
+            results.push(format_value_json(&result));
+        }
+        Ok(Value::String(format!("[{}]", results.join(", "))))
     }
 
     /// Evaluate a CASE expression
@@ -4237,8 +4345,9 @@ fn node_to_map_value(node: &NodeData) -> Value {
     node.title.clone()
 }
 
-// Parse a list value from string format "[a, b, c]"
-// This is a simple parser for the string representation of lists
+/// Parse a list value from string format "[a, b, c]".
+/// Splits at top-level commas only — respects brace/bracket/quote nesting so that
+/// JSON objects like `{"id": 1, "name": "Alice"}` are kept intact.
 fn parse_list_value(val: &Value) -> Vec<Value> {
     match val {
         Value::String(s) => {
@@ -4250,19 +4359,23 @@ fn parse_list_value(val: &Value) -> Vec<Value> {
             if inner.is_empty() {
                 return vec![];
             }
-            // Simple split by comma - doesn't handle nested lists or quoted strings properly
-            // but sufficient for basic list comprehensions
-            inner
-                .split(',')
+            // Split at top-level commas, respecting nesting
+            let items = split_top_level_commas(inner);
+            items
+                .into_iter()
                 .map(|item| {
                     let trimmed_item = item.trim();
-                    // Try to parse as int, float, or keep as string
                     if let Ok(i) = trimmed_item.parse::<i64>() {
                         Value::Int64(i)
                     } else if let Ok(f) = trimmed_item.parse::<f64>() {
                         Value::Float64(f)
+                    } else if trimmed_item == "true" {
+                        Value::Boolean(true)
+                    } else if trimmed_item == "false" {
+                        Value::Boolean(false)
+                    } else if trimmed_item == "null" {
+                        Value::Null
                     } else {
-                        // Remove quotes if present
                         let unquoted = trimmed_item.trim_matches(|c| c == '"' || c == '\'');
                         Value::String(unquoted.to_string())
                     }
@@ -4271,6 +4384,40 @@ fn parse_list_value(val: &Value) -> Vec<Value> {
         }
         _ => vec![],
     }
+}
+
+/// Split a string at commas that are not inside braces, brackets, or quotes.
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut depth = 0i32; // tracks {}, [], ()
+    let mut in_quotes = false;
+    let mut quote_char = '"';
+    let mut start = 0;
+
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '"' | '\'' if !in_quotes => {
+                in_quotes = true;
+                quote_char = ch;
+            }
+            c if in_quotes && c == quote_char => {
+                // Check for escaped quote
+                let bytes = s.as_bytes();
+                if i == 0 || bytes[i - 1] != b'\\' {
+                    in_quotes = false;
+                }
+            }
+            '{' | '[' | '(' if !in_quotes => depth += 1,
+            '}' | ']' | ')' if !in_quotes => depth -= 1,
+            ',' if !in_quotes && depth == 0 => {
+                items.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    items.push(&s[start..]);
+    items
 }
 
 // Delegate to shared value_operations module
@@ -5527,5 +5674,101 @@ mod tests {
             Some(Value::Int64(n)) => assert!(*n > 0, "count(path) should be > 0, got {}", n),
             other => panic!("Expected Int64, got {:?}", other),
         }
+    }
+
+    // ========================================================================
+    // parse_list_value + split_top_level_commas tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_list_value_simple_ints() {
+        let val = Value::String("[1, 2, 3]".to_string());
+        let items = parse_list_value(&val);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0], Value::Int64(1));
+        assert_eq!(items[1], Value::Int64(2));
+        assert_eq!(items[2], Value::Int64(3));
+    }
+
+    #[test]
+    fn test_parse_list_value_strings() {
+        let val = Value::String(r#"["hello", "world"]"#.to_string());
+        let items = parse_list_value(&val);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], Value::String("hello".to_string()));
+        assert_eq!(items[1], Value::String("world".to_string()));
+    }
+
+    #[test]
+    fn test_parse_list_value_empty() {
+        let val = Value::String("[]".to_string());
+        let items = parse_list_value(&val);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_parse_list_value_json_objects() {
+        // This is the critical test — JSON objects must not be split on inner commas
+        let val = Value::String(
+            r#"[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]"#.to_string(),
+        );
+        let items = parse_list_value(&val);
+        assert_eq!(items.len(), 2);
+        // Each item should be a complete JSON object string
+        match &items[0] {
+            Value::String(s) => assert!(s.contains("Alice"), "first item: {}", s),
+            other => panic!("Expected String, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_list_value_booleans() {
+        let val = Value::String("[true, false, null]".to_string());
+        let items = parse_list_value(&val);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0], Value::Boolean(true));
+        assert_eq!(items[1], Value::Boolean(false));
+        assert_eq!(items[2], Value::Null);
+    }
+
+    #[test]
+    fn test_parse_list_value_non_list() {
+        let val = Value::String("not a list".to_string());
+        let items = parse_list_value(&val);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_parse_list_value_non_string() {
+        let val = Value::Int64(42);
+        let items = parse_list_value(&val);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_split_top_level_commas_simple() {
+        let items = split_top_level_commas("a, b, c");
+        assert_eq!(items, vec!["a", " b", " c"]);
+    }
+
+    #[test]
+    fn test_split_top_level_commas_nested_braces() {
+        let items = split_top_level_commas(r#"{"a": 1, "b": 2}, {"c": 3}"#);
+        assert_eq!(items.len(), 2);
+        assert!(items[0].contains("\"a\": 1"));
+        assert!(items[1].contains("\"c\": 3"));
+    }
+
+    #[test]
+    fn test_split_top_level_commas_nested_brackets() {
+        let items = split_top_level_commas("[1, 2], [3, 4]");
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn test_split_top_level_commas_quoted_strings() {
+        let items = split_top_level_commas(r#""hello, world", "foo""#);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].trim(), r#""hello, world""#);
     }
 }

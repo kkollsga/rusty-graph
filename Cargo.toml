@@ -1,6 +1,6 @@
 [package]
 name = "kglite"
-version = "0.5.35"
+version = "0.5.36"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 description = "A high-performance graph database with Python bindings written in Rust."
@@ -13,7 +13,7 @@ name = "kglite"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.27"
+pyo3 = { version = "0.27", features = ["multiple-pymethods"] }
 petgraph = { version = "0.8.3", features = ["serde-1"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
