@@ -3,7 +3,7 @@
 from pathlib import Path
 from tree_sitter import Language, Parser
 
-from .base import LanguageParser, node_text, count_lines, get_type_parameters
+from .base import LanguageParser, node_text, count_lines, get_type_parameters, extract_comment_annotations
 from .models import (
     ParseResult, FileInfo, FunctionInfo, ClassInfo,
     EnumInfo, InterfaceInfo, TypeRelationship,
@@ -175,20 +175,22 @@ class _BaseJSTSParser(LanguageParser):
                 break
         return False
 
-    def _extract_calls(self, body_node, source: bytes) -> list[str]:
+    def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
         """Recursively extract function/method names called within a block.
 
         Emits qualified calls where possible: "receiver.method" for
         member expressions, bare names for this/super and plain calls.
+        Returns list of (call_name, line_number) tuples.
         """
-        calls = []
+        calls: list[tuple[str, int]] = []
 
         def walk(node):
             if node.type == "call_expression":
+                line = node.start_point[0] + 1
                 func = node.children[0] if node.children else None
                 if func:
                     if func.type == "identifier":
-                        calls.append(node_text(func, source))
+                        calls.append((node_text(func, source), line))
                     elif func.type == "member_expression":
                         prop = func.child_by_field_name("property")
                         obj = func.child_by_field_name("object")
@@ -198,21 +200,22 @@ class _BaseJSTSParser(LanguageParser):
                             hint = obj_text.rsplit(".", 1)[-1]
                             if hint in ("this", "super", "window",
                                         "document", "console"):
-                                calls.append(prop_name)
+                                calls.append((prop_name, line))
                             else:
-                                calls.append(f"{hint}.{prop_name}")
+                                calls.append((f"{hint}.{prop_name}", line))
                         elif prop:
-                            calls.append(node_text(prop, source))
+                            calls.append((node_text(prop, source), line))
                         else:
                             for child in reversed(func.children):
                                 if child.type in ("property_identifier",
                                                    "identifier"):
-                                    calls.append(node_text(child, source))
+                                    calls.append((node_text(child, source), line))
                                     break
             elif node.type == "new_expression":
+                line = node.start_point[0] + 1
                 for child in node.children:
                     if child.type == "identifier":
-                        calls.append(node_text(child, source))
+                        calls.append((node_text(child, source), line))
                         break
             for child in node.children:
                 walk(child)
@@ -630,6 +633,14 @@ class _BaseJSTSParser(LanguageParser):
             module_path=module_path,
             language=self.language_name,
         )
+        fname = filepath.name
+        if (any(fname.endswith(ext) for ext in (
+                ".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx",
+                ".test.js", ".spec.js", ".test.jsx", ".spec.jsx",
+                ".test.mjs", ".spec.mjs"))
+                or "/__tests__/" in rel_path
+                or rel_path.startswith("__tests__/")):
+            file_info.is_test = True
 
         result = ParseResult()
         result.files.append(file_info)
@@ -638,6 +649,8 @@ class _BaseJSTSParser(LanguageParser):
             self._parse_top_level(
                 child, source, module_path, rel_path, result, file_info,
             )
+
+        file_info.annotations = extract_comment_annotations(root, source)
 
         return result
 

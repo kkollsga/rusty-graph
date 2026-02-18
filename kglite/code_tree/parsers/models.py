@@ -31,7 +31,7 @@ class FunctionInfo:
     docstring: str | None
     return_type: str | None
     decorators: list[str] = field(default_factory=list)
-    calls: list[str] = field(default_factory=list)
+    calls: list[tuple[str, int]] = field(default_factory=list)  # (name, line_number)
     type_parameters: str | None = None  # e.g. "T, U: Display"
     end_line: int | None = None
     metadata: dict = field(default_factory=dict)

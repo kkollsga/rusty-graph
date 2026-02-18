@@ -5,7 +5,7 @@ import re
 from tree_sitter import Language, Parser
 import tree_sitter_python as ts_python
 
-from .base import LanguageParser, node_text, count_lines
+from .base import LanguageParser, node_text, count_lines, extract_comment_annotations, get_type_parameters
 from .models import (
     ParseResult, FileInfo, FunctionInfo, ClassInfo,
     EnumInfo, InterfaceInfo, TypeRelationship,
@@ -175,20 +175,22 @@ class PythonParser(LanguageParser):
                 break
         return False
 
-    def _extract_calls(self, body_node, source: bytes) -> list[str]:
+    def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
         """Recursively extract function/method names called within a block.
 
         Emits qualified calls where possible: "receiver.method" for
         attribute access calls, bare names for plain calls and self/cls.
+        Returns list of (call_name, line_number) tuples.
         """
-        calls = []
+        calls: list[tuple[str, int]] = []
 
         def walk(node):
             if node.type == "call":
+                line = node.start_point[0] + 1
                 func = node.children[0] if node.children else None
                 if func:
                     if func.type == "identifier":
-                        calls.append(node_text(func, source))
+                        calls.append((node_text(func, source), line))
                     elif func.type == "attribute":
                         parts = []
                         for child in func.children:
@@ -198,11 +200,11 @@ class PythonParser(LanguageParser):
                             receiver = parts[-2]
                             method = parts[-1]
                             if receiver in ("self", "cls"):
-                                calls.append(method)
+                                calls.append((method, line))
                             else:
-                                calls.append(f"{receiver}.{method}")
+                                calls.append((f"{receiver}.{method}", line))
                         elif parts:
-                            calls.append(parts[-1])
+                            calls.append((parts[-1], line))
             for child in node.children:
                 walk(child)
 
@@ -406,6 +408,7 @@ class PythonParser(LanguageParser):
             docstring=self._get_docstring(node, source),
             return_type=self._get_return_type(node, source),
             calls=self._extract_calls(block, source) if block else [],
+            type_parameters=get_type_parameters(node, source, "type_parameter"),
         )
 
     def _parse_class(self, node, source: bytes, module_path: str,
@@ -444,6 +447,7 @@ class PythonParser(LanguageParser):
                 line_number=node.start_point[0] + 1,
                 end_line=node.end_point[0] + 1,
                 docstring=docstring,
+                type_parameters=get_type_parameters(node, source, "type_parameter"),
             ))
         else:
             result.classes.append(ClassInfo(
@@ -456,6 +460,7 @@ class PythonParser(LanguageParser):
                 end_line=node.end_point[0] + 1,
                 docstring=docstring,
                 bases=bases,
+                type_parameters=get_type_parameters(node, source, "type_parameter"),
                 metadata={"decorators": decorators or []},
             ))
 
@@ -531,6 +536,10 @@ class PythonParser(LanguageParser):
             module_path=module_path,
             language="python",
         )
+        fname = filepath.name
+        if (fname.startswith("test_") or fname.endswith("_test.py")
+                or "/tests/" in rel_path or rel_path.startswith("tests/")):
+            file_info.is_test = True
 
         result = ParseResult()
         result.files.append(file_info)
@@ -648,5 +657,7 @@ class PythonParser(LanguageParser):
                     file_info.submodule_declarations.append(
                         item.stem  # filename without .py
                     )
+
+        file_info.annotations = extract_comment_annotations(root, source)
 
         return result

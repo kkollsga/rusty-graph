@@ -4,7 +4,7 @@ from pathlib import Path
 from tree_sitter import Language, Parser
 import tree_sitter_c_sharp as ts_csharp
 
-from .base import LanguageParser, node_text, count_lines, get_type_parameters
+from .base import LanguageParser, node_text, count_lines, get_type_parameters, extract_comment_annotations
 from .models import (
     ParseResult, FileInfo, FunctionInfo, ClassInfo,
     EnumInfo, InterfaceInfo, TypeRelationship,
@@ -148,17 +148,19 @@ class CSharpParser(LanguageParser):
                     return text
         return None
 
-    def _extract_calls(self, body_node, source: bytes) -> list[str]:
+    def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
         """Emits qualified calls where possible: "receiver.Method" for
-        member access calls, bare names for this/base calls."""
-        calls: list[str] = []
+        member access calls, bare names for this/base calls.
+        Returns list of (call_name, line_number) tuples."""
+        calls: list[tuple[str, int]] = []
 
         def walk(node):
             if node.type == "invocation_expression":
+                line = node.start_point[0] + 1
                 func = node.children[0] if node.children else None
                 if func:
                     if func.type == "identifier":
-                        calls.append(node_text(func, source))
+                        calls.append((node_text(func, source), line))
                     elif func.type == "member_access_expression":
                         name = func.child_by_field_name("name")
                         expr = func.child_by_field_name("expression")
@@ -167,21 +169,22 @@ class CSharpParser(LanguageParser):
                             expr_text = node_text(expr, source)
                             hint = expr_text.rsplit(".", 1)[-1]
                             if hint in ("this", "base"):
-                                calls.append(method_name)
+                                calls.append((method_name, line))
                             else:
-                                calls.append(f"{hint}.{method_name}")
+                                calls.append((f"{hint}.{method_name}", line))
                         elif name:
-                            calls.append(node_text(name, source))
+                            calls.append((node_text(name, source), line))
                         else:
                             for c in reversed(func.children):
                                 if c.type == "identifier":
-                                    calls.append(node_text(c, source))
+                                    calls.append((node_text(c, source), line))
                                     break
             elif node.type == "object_creation_expression":
+                line = node.start_point[0] + 1
                 for child in node.children:
                     if child.type in ("identifier", "type_identifier",
                                       "generic_name"):
-                        calls.append(node_text(child, source))
+                        calls.append((node_text(child, source), line))
                         break
             for child in node.children:
                 walk(child)
@@ -564,6 +567,12 @@ class CSharpParser(LanguageParser):
             module_path=module_path,
             language="csharp",
         )
+        stem = filepath.stem
+        if (stem.endswith("Test") or stem.endswith("Tests")
+                or "/Tests/" in rel_path or "/.Tests/" in rel_path
+                or rel_path.startswith("Tests/")
+                or rel_path.startswith("tests/")):
+            file_info.is_test = True
 
         result = ParseResult()
         result.files.append(file_info)
@@ -571,5 +580,7 @@ class CSharpParser(LanguageParser):
         for child in root.children:
             self._parse_top_level(child, source, module_path, rel_path,
                                   result, file_info)
+
+        file_info.annotations = extract_comment_annotations(root, source)
 
         return result

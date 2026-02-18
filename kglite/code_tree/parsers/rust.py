@@ -191,22 +191,24 @@ class RustParser(LanguageParser):
                     return node_text(child, source)
         return None
 
-    def _extract_calls(self, body_node, source: bytes) -> list[str]:
+    def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
         """Recursively extract function/method names called within a block.
 
         Emits qualified calls where possible: "Receiver.method" for
         field expressions and "Type.method" for scoped identifiers.
+        Returns list of (call_name, line_number) tuples.
         """
-        calls = []
+        calls: list[tuple[str, int]] = []
 
         def walk(node):
             if node.type == "call_expression":
+                line = node.start_point[0] + 1
                 func = node.child_by_field_name("function")
                 if func is None and node.children:
                     func = node.children[0]
                 if func:
                     if func.type == "identifier":
-                        calls.append(node_text(func, source))
+                        calls.append((node_text(func, source), line))
                     elif func.type == "field_expression":
                         field = func.child_by_field_name("field")
                         if field is None:
@@ -221,17 +223,17 @@ class RustParser(LanguageParser):
                                 val_text = node_text(value, source)
                                 hint = val_text.rsplit(".", 1)[-1].rsplit("::", 1)[-1]
                                 if hint in ("self", "&self", "Self"):
-                                    calls.append(field_name)
+                                    calls.append((field_name, line))
                                 else:
-                                    calls.append(f"{hint}.{field_name}")
+                                    calls.append((f"{hint}.{field_name}", line))
                             else:
-                                calls.append(field_name)
+                                calls.append((field_name, line))
                     elif func.type == "scoped_identifier":
                         parts = node_text(func, source).split("::")
                         if len(parts) >= 2:
-                            calls.append(f"{parts[-2]}.{parts[-1]}")
+                            calls.append((f"{parts[-2]}.{parts[-1]}", line))
                         elif parts:
-                            calls.append(parts[-1])
+                            calls.append((parts[-1], line))
             for child in node.children:
                 walk(child)
 

@@ -72,8 +72,10 @@ def get_type_parameters(node, source: bytes,
     for child in node.children:
         if child.type == node_type:
             text = source[child.start_byte:child.end_byte].decode("utf8")
-            # Strip surrounding < > if present
+            # Strip surrounding < > or [ ] if present
             if text.startswith("<") and text.endswith(">"):
+                text = text[1:-1].strip()
+            elif text.startswith("[") and text.endswith("]"):
                 text = text[1:-1].strip()
             return text if text else None
     return None

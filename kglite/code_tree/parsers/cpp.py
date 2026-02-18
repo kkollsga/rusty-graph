@@ -5,7 +5,7 @@ from tree_sitter import Language, Parser
 import tree_sitter_c as ts_c
 import tree_sitter_cpp as ts_cpp
 
-from .base import LanguageParser, node_text, count_lines, get_type_parameters
+from .base import LanguageParser, node_text, count_lines, get_type_parameters, extract_comment_annotations
 from .models import (
     ParseResult, FileInfo, FunctionInfo, ClassInfo,
     EnumInfo, InterfaceInfo, TypeRelationship,
@@ -127,17 +127,19 @@ class _BaseCCppParser(LanguageParser):
                     return True
         return False
 
-    def _extract_calls(self, body_node, source: bytes) -> list[str]:
+    def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
         """Emits qualified calls where possible: "Receiver.method" for
-        field/member access and "Type.method" for scoped identifiers."""
-        calls: list[str] = []
+        field/member access and "Type.method" for scoped identifiers.
+        Returns list of (call_name, line_number) tuples."""
+        calls: list[tuple[str, int]] = []
 
         def walk(node):
             if node.type == "call_expression":
+                line = node.start_point[0] + 1
                 func = node.children[0] if node.children else None
                 if func:
                     if func.type == "identifier":
-                        calls.append(node_text(func, source))
+                        calls.append((node_text(func, source), line))
                     elif func.type == "field_expression":
                         field = func.child_by_field_name("field")
                         argument = func.child_by_field_name("argument")
@@ -145,20 +147,20 @@ class _BaseCCppParser(LanguageParser):
                             field_name = node_text(field, source)
                             arg_text = node_text(argument, source)
                             hint = arg_text.rsplit(".", 1)[-1].rsplit("->", 1)[-1]
-                            calls.append(f"{hint}.{field_name}")
+                            calls.append((f"{hint}.{field_name}", line))
                         elif field:
-                            calls.append(node_text(field, source))
+                            calls.append((node_text(field, source), line))
                         else:
                             for c in func.children:
                                 if c.type == "field_identifier":
-                                    calls.append(node_text(c, source))
+                                    calls.append((node_text(c, source), line))
                                     break
                     elif func.type == "scoped_identifier":
                         parts = node_text(func, source).split("::")
                         if len(parts) >= 2:
-                            calls.append(f"{parts[-2]}.{parts[-1]}")
+                            calls.append((f"{parts[-2]}.{parts[-1]}", line))
                         elif parts:
-                            calls.append(parts[-1])
+                            calls.append((parts[-1], line))
             for child in node.children:
                 walk(child)
 
@@ -469,6 +471,13 @@ class CParser(_BaseCCppParser):
             module_path=module_path,
             language="c",
         )
+        stem = filepath.stem
+        if (stem.endswith("_test") or stem.endswith("_tests")
+                or stem.startswith("test_")
+                or "/test/" in rel_path or "/tests/" in rel_path
+                or rel_path.startswith("test/")
+                or rel_path.startswith("tests/")):
+            file_info.is_test = True
 
         result = ParseResult()
         result.files.append(file_info)
@@ -508,6 +517,8 @@ class CParser(_BaseCCppParser):
             elif child.type == "preproc_def":
                 self._parse_preproc_def(child, source, module_path,
                                         rel_path, result)
+
+        file_info.annotations = extract_comment_annotations(root, source)
 
         return result
 
@@ -844,6 +855,13 @@ class CppParser(_BaseCCppParser):
             module_path=module_path,
             language="cpp",
         )
+        stem = filepath.stem
+        if (stem.endswith("_test") or stem.endswith("_tests")
+                or stem.startswith("test_")
+                or "/test/" in rel_path or "/tests/" in rel_path
+                or rel_path.startswith("test/")
+                or rel_path.startswith("tests/")):
+            file_info.is_test = True
 
         result = ParseResult()
         result.files.append(file_info)
@@ -851,5 +869,7 @@ class CppParser(_BaseCCppParser):
         for child in root.children:
             self._parse_cpp_top_level(child, source, module_path, rel_path,
                                       result, file_info)
+
+        file_info.annotations = extract_comment_annotations(root, source)
 
         return result

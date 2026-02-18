@@ -208,11 +208,11 @@ def _build_call_edges(all_functions: list[FunctionInfo],
                     qname_to_owner[qn] = owner_path
                 break
 
-    edges = []
-    seen = set()
+    # Accumulate call-site line numbers per (caller, callee) pair
+    seen: dict[tuple[str, str], list[int]] = {}
 
     for fn in all_functions:
-        for called_name in fn.calls:
+        for called_name, call_line in fn.calls:
             # Parse qualified call: "Receiver.method" or bare "method"
             if "." in called_name:
                 receiver_hint, method_name = called_name.rsplit(".", 1)
@@ -240,14 +240,21 @@ def _build_call_edges(all_functions: list[FunctionInfo],
             for target_qname in targets:
                 if target_qname != fn.qualified_name:
                     key = (fn.qualified_name, target_qname)
-                    if key not in seen:
-                        seen.add(key)
-                        edges.append({
-                            "caller": fn.qualified_name,
-                            "callee": target_qname,
-                        })
+                    seen.setdefault(key, []).append(call_line)
 
-    return pd.DataFrame(edges) if edges else pd.DataFrame(columns=["caller", "callee"])
+    edges = []
+    for (caller, callee), lines in seen.items():
+        sorted_lines = sorted(set(lines))
+        edges.append({
+            "caller": caller,
+            "callee": callee,
+            "call_lines": ",".join(str(ln) for ln in sorted_lines),
+            "call_count": len(sorted_lines),
+        })
+
+    return pd.DataFrame(edges) if edges else pd.DataFrame(
+        columns=["caller", "callee", "call_lines", "call_count"]
+    )
 
 
 def _build_type_relationship_edges(
@@ -572,6 +579,7 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
             data=call_edges_df, connection_type="CALLS",
             source_type="Function", source_id_field="caller",
             target_type="Function", target_id_field="callee",
+            columns=["call_lines", "call_count"],
         )
 
     if implements_edges:

@@ -4,7 +4,7 @@ from pathlib import Path
 from tree_sitter import Language, Parser
 import tree_sitter_java as ts_java
 
-from .base import LanguageParser, node_text, count_lines, get_type_parameters
+from .base import LanguageParser, node_text, count_lines, get_type_parameters, extract_comment_annotations
 from .models import (
     ParseResult, FileInfo, FunctionInfo, ClassInfo,
     EnumInfo, InterfaceInfo, TypeRelationship,
@@ -138,16 +138,18 @@ class JavaParser(LanguageParser):
                 return node_text(child, source)
         return None
 
-    def _extract_calls(self, body_node, source: bytes) -> list[str]:
+    def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
         """Recursively extract function/method names called within a block.
 
         Emits qualified calls where possible: "receiver.method" for
         method invocations on objects, bare names for this/super calls.
+        Returns list of (call_name, line_number) tuples.
         """
-        calls: list[str] = []
+        calls: list[tuple[str, int]] = []
 
         def walk(node):
             if node.type == "method_invocation":
+                line = node.start_point[0] + 1
                 name = node.child_by_field_name("name")
                 obj = node.child_by_field_name("object")
                 if name and obj:
@@ -155,15 +157,16 @@ class JavaParser(LanguageParser):
                     obj_text = node_text(obj, source)
                     hint = obj_text.rsplit(".", 1)[-1]
                     if hint in ("this", "super"):
-                        calls.append(method_name)
+                        calls.append((method_name, line))
                     else:
-                        calls.append(f"{hint}.{method_name}")
+                        calls.append((f"{hint}.{method_name}", line))
                 elif name:
-                    calls.append(node_text(name, source))
+                    calls.append((node_text(name, source), line))
             elif node.type == "object_creation_expression":
+                line = node.start_point[0] + 1
                 type_node = node.child_by_field_name("type")
                 if type_node:
-                    calls.append(node_text(type_node, source))
+                    calls.append((node_text(type_node, source), line))
             for child in node.children:
                 walk(child)
 
@@ -520,6 +523,11 @@ class JavaParser(LanguageParser):
             module_path=module_path,
             language="java",
         )
+        stem = filepath.stem
+        if (stem.endswith("Test") or stem.endswith("Tests")
+                or "/src/test/" in rel_path
+                or rel_path.startswith("src/test/")):
+            file_info.is_test = True
 
         result = ParseResult()
         result.files.append(file_info)
@@ -539,5 +547,7 @@ class JavaParser(LanguageParser):
                     if sub.type == "scoped_identifier":
                         file_info.imports.append(node_text(sub, source))
                         break
+
+        file_info.annotations = extract_comment_annotations(root, source)
 
         return result

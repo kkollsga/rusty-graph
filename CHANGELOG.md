@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.35] - 2026-02-18
+
+### Added
+
+- CALLS edges now carry `call_lines` and `call_count` properties — line numbers where each call occurs in the caller function
+- Comment annotation extraction (TODO/FIXME/HACK/NOTE/etc.) for all non-Rust parsers (Python, TypeScript, JavaScript, Java, Go, C, C++, C#)
+- Test file detection (`is_test`) for all parsers based on language naming conventions
+- Generic/type parameter extraction for Go 1.18+ and Python 3.12+ (PEP 695) parsers
+
 ## [0.5.34] - 2026-02-18
 
 ### Added
@@ -74,7 +83,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 *For versions prior to 0.5.22, see [GitHub Releases](https://github.com/kkollsga/kglite/releases).*
 
-[Unreleased]: https://github.com/kkollsga/kglite/compare/v0.5.34...HEAD
+[Unreleased]: https://github.com/kkollsga/kglite/compare/v0.5.35...HEAD
+[0.5.35]: https://github.com/kkollsga/kglite/compare/v0.5.34...v0.5.35
 [0.5.34]: https://github.com/kkollsga/kglite/compare/v0.5.31...v0.5.34
 [0.5.31]: https://github.com/kkollsga/kglite/compare/v0.5.28...v0.5.31
 [0.5.28]: https://github.com/kkollsga/kglite/compare/v0.5.22...v0.5.28

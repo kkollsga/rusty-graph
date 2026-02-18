@@ -4,7 +4,7 @@ from pathlib import Path
 from tree_sitter import Language, Parser
 import tree_sitter_go as ts_go
 
-from .base import LanguageParser, node_text, count_lines
+from .base import LanguageParser, node_text, count_lines, extract_comment_annotations, get_type_parameters
 from .models import (
     ParseResult, FileInfo, FunctionInfo, ClassInfo,
     EnumInfo, InterfaceInfo, TypeRelationship,
@@ -102,20 +102,22 @@ class GoParser(LanguageParser):
         """Go doesn't have async keyword — always False."""
         return False
 
-    def _extract_calls(self, body_node, source: bytes) -> list[str]:
+    def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
         """Recursively extract function/method names called within a block.
 
         Emits qualified calls where possible: "receiver.Method" for
         selector expressions, bare names for plain function calls.
+        Returns list of (call_name, line_number) tuples.
         """
-        calls: list[str] = []
+        calls: list[tuple[str, int]] = []
 
         def walk(node):
             if node.type == "call_expression":
+                line = node.start_point[0] + 1
                 func = node.children[0] if node.children else None
                 if func:
                     if func.type == "identifier":
-                        calls.append(node_text(func, source))
+                        calls.append((node_text(func, source), line))
                     elif func.type == "selector_expression":
                         field = func.child_by_field_name("field")
                         operand = func.child_by_field_name("operand")
@@ -123,13 +125,13 @@ class GoParser(LanguageParser):
                             field_name = node_text(field, source)
                             op_text = node_text(operand, source)
                             hint = op_text.rsplit(".", 1)[-1]
-                            calls.append(f"{hint}.{field_name}")
+                            calls.append((f"{hint}.{field_name}", line))
                         elif field:
-                            calls.append(node_text(field, source))
+                            calls.append((node_text(field, source), line))
                         else:
                             for c in func.children:
                                 if c.type == "field_identifier":
-                                    calls.append(node_text(c, source))
+                                    calls.append((node_text(c, source), line))
                                     break
             for child in node.children:
                 walk(child)
@@ -254,6 +256,7 @@ class GoParser(LanguageParser):
             docstring=self._get_doc_comment(node, source),
             return_type=self._get_return_type(node, source),
             calls=self._extract_calls(body, source) if body else [],
+            type_parameters=get_type_parameters(node, source, "type_parameter_list"),
         )
 
     def parse_file(self, filepath: Path, src_root: Path) -> ParseResult:
@@ -274,6 +277,8 @@ class GoParser(LanguageParser):
             module_path=module_path,
             language="go",
         )
+        if filepath.name.endswith("_test.go"):
+            file_info.is_test = True
 
         result = ParseResult()
         result.files.append(file_info)
@@ -340,6 +345,7 @@ class GoParser(LanguageParser):
                                 line_number=child.start_point[0] + 1,
                                 end_line=child.end_point[0] + 1,
                                 docstring=docstring,
+                                type_parameters=get_type_parameters(spec, source, "type_parameter_list"),
                             ))
                             result.attributes.extend(
                                 self._extract_struct_fields(
@@ -355,6 +361,7 @@ class GoParser(LanguageParser):
                                 line_number=child.start_point[0] + 1,
                                 end_line=child.end_point[0] + 1,
                                 docstring=docstring,
+                                type_parameters=get_type_parameters(spec, source, "type_parameter_list"),
                             ))
                             # Parse interface method specs as functions
                             iface_rel = TypeRelationship(
@@ -461,5 +468,7 @@ class GoParser(LanguageParser):
                                     if sub.type == "interpreted_string_literal":
                                         path = node_text(sub, source).strip('"')
                                         file_info.imports.append(path)
+
+        file_info.annotations = extract_comment_annotations(root, source)
 
         return result
