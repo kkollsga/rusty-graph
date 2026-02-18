@@ -1772,17 +1772,12 @@ impl<'a> CypherExecutor<'a> {
                 // cannot split correctly (commas inside JSON objects).
                 if let Expression::FunctionCall { name, args, .. } = list_expr.as_ref() {
                     let fn_lower = name.to_lowercase();
-                    if fn_lower == "nodes"
-                        || fn_lower == "relationships"
-                        || fn_lower == "rels"
-                    {
+                    if fn_lower == "nodes" || fn_lower == "relationships" || fn_lower == "rels" {
                         if let Some(Expression::Variable(path_var)) = args.first() {
                             if let Some(path) = row.path_bindings.get(path_var) {
                                 let path = path.clone();
                                 return if fn_lower == "nodes" {
-                                    self.list_comp_nodes(
-                                        variable, &path, filter, map_expr, row,
-                                    )
+                                    self.list_comp_nodes(variable, &path, filter, map_expr, row)
                                 } else {
                                     self.list_comp_relationships(
                                         variable, &path, filter, map_expr, row,
@@ -1918,7 +1913,9 @@ impl<'a> CypherExecutor<'a> {
         let mut results = Vec::new();
         for node_idx in node_indices {
             let mut temp_row = row.clone();
-            temp_row.node_bindings.insert(variable.to_string(), node_idx);
+            temp_row
+                .node_bindings
+                .insert(variable.to_string(), node_idx);
 
             if let Some(ref pred) = filter {
                 if !self.evaluate_predicate(pred, &temp_row)? {
@@ -5709,9 +5706,8 @@ mod tests {
     #[test]
     fn test_parse_list_value_json_objects() {
         // This is the critical test — JSON objects must not be split on inner commas
-        let val = Value::String(
-            r#"[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]"#.to_string(),
-        );
+        let val =
+            Value::String(r#"[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]"#.to_string());
         let items = parse_list_value(&val);
         assert_eq!(items.len(), 2);
         // Each item should be a complete JSON object string
