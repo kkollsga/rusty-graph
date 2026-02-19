@@ -287,7 +287,22 @@ fn determine_column_type(series: &Bound<'_, PyAny>, col_name: &str) -> PyResult<
         "float64" | "float32" | "Float64" | "Float32" => Ok(ColumnType::Float64),
         "bool" | "boolean" => Ok(ColumnType::Boolean),
         s if s.starts_with("datetime64") => Ok(ColumnType::DateTime),
-        "object" | "string" | "str" | "string[python]" | "string[pyarrow]" => {
+        "object" => {
+            // Object dtype may contain booleans mixed with None (common in code_tree
+            // metadata like is_test, is_abstract).  Use pandas' own type inference
+            // which handles skipna correctly.
+            let pd = series.py().import("pandas")?.getattr("api")?.getattr("types")?;
+            let kwargs = pyo3::types::PyDict::new(series.py());
+            kwargs.set_item("skipna", true)?;
+            let inferred: String = pd
+                .call_method("infer_dtype", (series,), Some(&kwargs))?
+                .extract()?;
+            if inferred == "boolean" {
+                return Ok(ColumnType::Boolean);
+            }
+            Ok(ColumnType::String)
+        }
+        "string" | "str" | "string[python]" | "string[pyarrow]" => {
             Ok(ColumnType::String)
         }
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(

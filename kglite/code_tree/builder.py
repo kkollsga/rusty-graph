@@ -140,6 +140,11 @@ def _get_separator(language: str) -> str:
 def _build_modules(files: list[FileInfo]) -> list[dict]:
     """Build module nodes from file module paths and submodule declarations."""
     modules = {}
+    # Map module_path → file_path from parsed files
+    file_module_paths: dict[str, str] = {}
+    for f in files:
+        file_module_paths[f.module_path] = f.path
+
     for f in files:
         sep = _get_separator(f.language)
         path = f.module_path
@@ -154,10 +159,17 @@ def _build_modules(files: list[FileInfo]) -> list[dict]:
         for sub_name in f.submodule_declarations:
             child_path = f"{path}{sep}{sub_name}"
             if child_path not in modules:
+                # Try to resolve path from a parsed file with this module_path
+                child_file_path = file_module_paths.get(child_path, "")
+                if not child_file_path:
+                    # Infer directory path from the parent file's directory
+                    parent_dir = "/".join(f.path.split("/")[:-1])
+                    if parent_dir:
+                        child_file_path = f"{parent_dir}/{sub_name}/"
                 modules[child_path] = {
                     "qualified_name": child_path,
                     "name": sub_name,
-                    "path": "",
+                    "path": child_file_path,
                     "language": f.language,
                 }
     return list(modules.values())
@@ -998,6 +1010,23 @@ def build(
               f"{len(result.interfaces)} interfaces/traits, "
               f"{len(result.attributes)} attributes, "
               f"{len(result.constants)} constants")
+
+    # Deduplicate parsed entities — overlapping source/test roots can parse
+    # the same file twice.  Last-seen wins so test-root flags take priority.
+    def _dedup(items: list, key: str) -> list:
+        seen: dict[str, int] = {}
+        for idx, item in enumerate(items):
+            seen[getattr(item, key)] = idx
+        if len(seen) < len(items):
+            return [items[i] for i in sorted(seen.values())]
+        return items
+
+    result.files = _dedup(result.files, "path")
+    result.functions = _dedup(result.functions, "qualified_name")
+    result.classes = _dedup(result.classes, "qualified_name")
+    result.enums = _dedup(result.enums, "qualified_name")
+    result.interfaces = _dedup(result.interfaces, "qualified_name")
+    result.constants = _dedup(result.constants, "qualified_name")
 
     # Phase 2: Model
     modules = _build_modules(result.files)

@@ -381,13 +381,22 @@ pub fn compute_sample<'a>(
 
 // ── Agent description ──────────────────────────────────────────────────────
 
-/// Static XML: base API methods (always present).
-const API_BASE: &str = r#"  <api>
-    <method sig="cypher(query, *, to_df=False, params=None)">Primary query interface. Returns ResultView (lazy) or DataFrame with to_df=True.</method>
+/// Static XML: code-entity exploration methods (only for code graphs).
+const API_CODE_EXPLORATION: &str = r#"    <exploration hint="Use these FIRST to understand the codebase">
+    <method sig="find(name, node_type=None, match_type=None)">Search code entities by name. match_type: 'exact' (default), 'contains' (substring), 'starts_with'. Returns type, qualified_name, file_path, line_number.</method>
+    <method sig="source(name, node_type=None)">Get source location: file_path, line_number, end_line, signature. Resolves qualified names directly.</method>
+    <method sig="context(name, node_type=None, hops=None)">Full neighborhood of an entity: properties + relationships grouped by edge type.</method>
+    <method sig="toc(file_path)">Table of contents for a source file: all entities sorted by line_number.</method>
+    </exploration>
+"#;
+
+/// Static XML: query tools (always present).
+const API_QUERY: &str = r#"    <method sig="cypher(query, *, to_df=False, params=None)">Primary query interface. Returns ResultView (lazy) or DataFrame with to_df=True.</method>
     <method sig="schema()">Returns dict: node_types, connection_types, indexes, node_count, edge_count.</method>
     <method sig="properties(node_type, max_values=20)">Per-property stats: type, non_null, unique, values.</method>
     <method sig="sample(node_type, n=5)">Returns first N nodes as ResultView.</method>
     <method sig="save(path) / load(path)">Persist and reload the graph.</method>
+  </api>
 "#;
 
 /// Static XML: Cypher reference — clauses through expressions (read-write mode).
@@ -442,6 +451,17 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
         "<kglite nodes=\"{}\" edges=\"{}\">\n",
         overview.node_count, overview.edge_count
     ));
+
+    // Quick start — actionable tips at the very top
+    if has_code_entities {
+        xml.push_str("  <quick_start>\n");
+        xml.push_str("    <tip>Find code by name — faster than grep: MATCH (f:Function {name: 'foo'}) RETURN f.file_path, f.line_number, f.end_line</tip>\n");
+        xml.push_str("    <tip>Read code by qualified name — no file path needed: read_source(qualified_name=\"MyClass.method\")</tip>\n");
+        xml.push_str("    <tip>Trace call chains: MATCH (f:Function {name: 'x'})-[:CALLS*1..3]->(g) RETURN g.name, g.file_path</tip>\n");
+        xml.push_str("    <tip>Node id IS the qualified_name (e.g. 'package.module.Class.method'). Use with find(), source(), context().</tip>\n");
+        xml.push_str("    <tip>Use find(name, match_type='contains') for fuzzy search. Use toc(file_path) for file overview. Use context(name) for relationships.</tip>\n");
+        xml.push_str("  </quick_start>\n");
+    }
 
     // Node types
     if overview.node_types.is_empty() {
@@ -547,6 +567,16 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
             ));
         }
         xml.push_str("  </connections>\n");
+
+        // Workflow recipes for code graphs — group edges by use case
+        if has_code_entities {
+            xml.push_str("  <workflows hint=\"Common query patterns using the edge types above\">\n");
+            xml.push_str("    <workflow name=\"Call graph\">CALLS edges link Function→Function. Use [:CALLS*1..N] for transitive callers/callees.\n      Example: MATCH (f:Function {name: 'main'})-[:CALLS*1..2]->(g) RETURN g.name, g.file_path</workflow>\n");
+            xml.push_str("    <workflow name=\"Inheritance\">EXTENDS (class→class), IMPLEMENTS (class→trait/interface).\n      Example: MATCH (s)-[:IMPLEMENTS]->(t {name: 'Display'}) RETURN s.name, s.file_path</workflow>\n");
+            xml.push_str("    <workflow name=\"File structure\">DEFINES (Module→entities), HAS_SOURCE (entity→File).\n      Example: MATCH (m:Module)-[:DEFINES]->(f:Function) WHERE m.name = 'utils' RETURN f.name</workflow>\n");
+            xml.push_str("    <workflow name=\"Dependencies\">IMPORTS (Module→Module), DEPENDS_ON (Project→Dependency).\n      Example: MATCH (m:Module)-[:IMPORTS]->(dep) RETURN dep.name, count(*) ORDER BY count(*) DESC</workflow>\n");
+            xml.push_str("  </workflows>\n");
+        }
     }
 
     // Indexes
@@ -584,15 +614,12 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
         xml.push_str("  </embeddings>\n");
     }
 
-    // API methods
-    xml.push_str(API_BASE);
+    // API methods — exploration (code graphs only) + query tools
+    xml.push_str("  <api>\n");
     if has_code_entities {
-        xml.push_str("    <method sig=\"find(name, node_type=None, match_type=None)\">Search code entities by name. match_type: 'exact' (default), 'contains' (case-insensitive substring), 'starts_with' (case-insensitive prefix). Returns list of matches with type, qualified_name, file_path, line_number.</method>\n");
-        xml.push_str("    <method sig=\"source(name, node_type=None)\">Get source location of a code entity. Returns file_path, line_number, end_line, signature.</method>\n");
-        xml.push_str("    <method sig=\"context(name, node_type=None, hops=None)\">Get full neighborhood of a code entity. Returns node properties + relationships grouped by type.</method>\n");
-        xml.push_str("    <method sig=\"toc(file_path)\">Get table of contents for a source file. Returns all code entities defined in it, sorted by line_number, with a type summary.</method>\n");
+        xml.push_str(API_CODE_EXPLORATION);
     }
-    xml.push_str("  </api>\n");
+    xml.push_str(API_QUERY);
 
     // Cypher reference (read-only mode omits mutation clauses)
     if graph.read_only {
@@ -604,7 +631,8 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     // Functions list — conditionally include spatial and embedding functions
     let mut functions = String::from(
         "toUpper, toLower, toString, toInteger, toFloat, size, length, \
-         type, id, labels, coalesce, nodes(p), relationships(p)",
+         type, id, labels, coalesce, nodes(p), relationships(p), \
+         split, replace, substring, left, right, trim, ltrim, rtrim, reverse",
     );
     if has_spatial {
         functions.push_str(
@@ -637,18 +665,15 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     xml.push_str("      <proc name=\"connected_components\" params=\"\" yields=\"node, component\">Weakly connected component membership.</proc>\n");
     xml.push_str("    </procedures>\n");
 
-    // Notes — conditionally include feature-specific notes
+    // Notes — technical details (workflow tips are in <quick_start>)
     xml.push_str("    <notes>\n");
     xml.push_str("      <note>Each node has exactly one type. labels(n) returns a string, not a list.</note>\n");
     xml.push_str("      <note>Built-in node fields: type, title, id. Access via n.type, n.title, n.id.</note>\n");
     xml.push_str("      <note>Label-optional MATCH: (n {name: 'x'}) searches all node types. Use n.type or labels(n) to see the type.</note>\n");
     xml.push_str("      <note>If a node type has id_alias/title_alias attributes, the original column name also works as a property accessor (e.g. n.npdid resolves to n.id).</note>\n");
-    xml.push_str("      <note>Each cypher() call is atomic. Params via $param syntax.</note>\n");
+    xml.push_str("      <note>Each cypher() call is atomic. Params via $param syntax. to_df=True returns a pandas DataFrame.</note>\n");
     xml.push_str(
-        "      <note>to_df=True returns a pandas DataFrame instead of ResultView.</note>\n",
-    );
-    xml.push_str(
-        "      <note>CALL proc() YIELD node, score — node is a node binding (use node.title, node.type, etc. in RETURN/WHERE). Example: CALL pagerank() YIELD node, score RETURN node.title, score ORDER BY score DESC LIMIT 10</note>\n",
+        "      <note>CALL proc() YIELD node, score — node is a node binding (use node.title, node.type, etc. in RETURN/WHERE).</note>\n",
     );
     if has_embeddings {
         xml.push_str(
@@ -657,22 +682,7 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     }
     if has_code_entities {
         xml.push_str(
-            "      <note>find(name) searches code entities (Function, Struct, Class, etc.) by name. Use match_type='contains' for substring search. Use qualified_name from results to disambiguate.</note>\n",
-        );
-        xml.push_str(
-            "      <note>source(name) returns file_path, line_number, end_line for a code entity. Resolves qualified names directly.</note>\n",
-        );
-        xml.push_str(
-            "      <note>context(name) returns a node's properties and all relationships grouped by edge type (HAS_METHOD, CALLS, called_by, etc.).</note>\n",
-        );
-        xml.push_str(
-            "      <note>toc(file_path) returns all entities defined in a file, sorted by line number, without needing a Cypher query.</note>\n",
-        );
-        xml.push_str(
-            "      <note>Node id IS the qualified_name. Formats — Rust: crate::module::Type::method, Python: package.module.Class.method, TS/JS: module.Class.method. Use with find(), source(), context() for exact lookups.</note>\n",
-        );
-        xml.push_str(
-            "      <note>To trace call chains: MATCH (f:Function {name: 'x'})-[:CALLS*1..3]->(g:Function) RETURN g.name, g.file_path. Use *1..N for depth control.</note>\n",
+            "      <note>Qualified name formats — Rust: crate::module::Type::method, Python: package.module.Class.method, TS/JS: module.Class.method.</note>\n",
         );
     }
     xml.push_str("    </notes>\n");

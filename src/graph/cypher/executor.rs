@@ -2218,6 +2218,141 @@ impl<'a> CypherExecutor<'a> {
                 }
                 Ok(Value::Null)
             }
+            // ── String functions ──────────────────────────────────
+            "split" => {
+                if args.len() != 2 {
+                    return Err("split() requires 2 arguments: string, delimiter".into());
+                }
+                let str_val = self.evaluate_expression(&args[0], row)?;
+                let delim_val = self.evaluate_expression(&args[1], row)?;
+                match (&str_val, &delim_val) {
+                    (Value::String(s), Value::String(delim)) => {
+                        let parts: Vec<String> = s
+                            .split(delim.as_str())
+                            .map(|p| {
+                                format!("\"{}\"", p.replace('\\', "\\\\").replace('"', "\\\""))
+                            })
+                            .collect();
+                        Ok(Value::String(format!("[{}]", parts.join(", "))))
+                    }
+                    _ => Ok(Value::Null),
+                }
+            }
+            "replace" => {
+                if args.len() != 3 {
+                    return Err(
+                        "replace() requires 3 arguments: string, search, replacement".into(),
+                    );
+                }
+                let str_val = self.evaluate_expression(&args[0], row)?;
+                let search_val = self.evaluate_expression(&args[1], row)?;
+                let replace_val = self.evaluate_expression(&args[2], row)?;
+                match (&str_val, &search_val, &replace_val) {
+                    (Value::String(s), Value::String(search), Value::String(replacement)) => Ok(
+                        Value::String(s.replace(search.as_str(), replacement.as_str())),
+                    ),
+                    _ => Ok(Value::Null),
+                }
+            }
+            "substring" => {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(
+                        "substring() requires 2-3 arguments: string, start [, length]".into(),
+                    );
+                }
+                let str_val = self.evaluate_expression(&args[0], row)?;
+                let start_val = self.evaluate_expression(&args[1], row)?;
+                match (&str_val, &start_val) {
+                    (Value::String(s), Value::Int64(start)) => {
+                        let chars: Vec<char> = s.chars().collect();
+                        let start_idx = (*start as usize).min(chars.len());
+                        let substr = if args.len() == 3 {
+                            let len_val = self.evaluate_expression(&args[2], row)?;
+                            match len_val {
+                                Value::Int64(len) => {
+                                    let end_idx = (start_idx + len as usize).min(chars.len());
+                                    chars[start_idx..end_idx].iter().collect()
+                                }
+                                _ => return Ok(Value::Null),
+                            }
+                        } else {
+                            chars[start_idx..].iter().collect()
+                        };
+                        Ok(Value::String(substr))
+                    }
+                    _ => Ok(Value::Null),
+                }
+            }
+            "left" => {
+                if args.len() != 2 {
+                    return Err("left() requires 2 arguments: string, length".into());
+                }
+                let str_val = self.evaluate_expression(&args[0], row)?;
+                let len_val = self.evaluate_expression(&args[1], row)?;
+                match (&str_val, &len_val) {
+                    (Value::String(s), Value::Int64(len)) => {
+                        let result: String = s.chars().take(*len as usize).collect();
+                        Ok(Value::String(result))
+                    }
+                    _ => Ok(Value::Null),
+                }
+            }
+            "right" => {
+                if args.len() != 2 {
+                    return Err("right() requires 2 arguments: string, length".into());
+                }
+                let str_val = self.evaluate_expression(&args[0], row)?;
+                let len_val = self.evaluate_expression(&args[1], row)?;
+                match (&str_val, &len_val) {
+                    (Value::String(s), Value::Int64(len)) => {
+                        let char_count = s.chars().count();
+                        let skip = char_count.saturating_sub(*len as usize);
+                        let result: String = s.chars().skip(skip).collect();
+                        Ok(Value::String(result))
+                    }
+                    _ => Ok(Value::Null),
+                }
+            }
+            "trim" | "btrim" => {
+                if args.len() != 1 {
+                    return Err("trim() requires 1 argument: string".into());
+                }
+                let val = self.evaluate_expression(&args[0], row)?;
+                match val {
+                    Value::String(s) => Ok(Value::String(s.trim().to_string())),
+                    _ => Ok(Value::Null),
+                }
+            }
+            "ltrim" => {
+                if args.len() != 1 {
+                    return Err("ltrim() requires 1 argument: string".into());
+                }
+                let val = self.evaluate_expression(&args[0], row)?;
+                match val {
+                    Value::String(s) => Ok(Value::String(s.trim_start().to_string())),
+                    _ => Ok(Value::Null),
+                }
+            }
+            "rtrim" => {
+                if args.len() != 1 {
+                    return Err("rtrim() requires 1 argument: string".into());
+                }
+                let val = self.evaluate_expression(&args[0], row)?;
+                match val {
+                    Value::String(s) => Ok(Value::String(s.trim_end().to_string())),
+                    _ => Ok(Value::Null),
+                }
+            }
+            "reverse" => {
+                if args.len() != 1 {
+                    return Err("reverse() requires 1 argument: string".into());
+                }
+                let val = self.evaluate_expression(&args[0], row)?;
+                match val {
+                    Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
+                    _ => Ok(Value::Null),
+                }
+            }
             // ── Spatial functions ─────────────────────────────────
             "point" => {
                 if args.len() != 2 {
@@ -6108,5 +6243,157 @@ mod tests {
         let items = split_top_level_commas(r#""hello, world", "foo""#);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].trim(), r#""hello, world""#);
+    }
+
+    // ========================================================================
+    // String function tests
+    // ========================================================================
+
+    /// Helper: create a graph with one node and run a Cypher RETURN expression
+    fn eval_string_fn(query: &str) -> Value {
+        let mut graph = DirGraph::new();
+        let setup = super::super::parser::parse_cypher(
+            "CREATE (n:Item {name: 'hello world', path: 'src/graph/mod.rs'})",
+        )
+        .unwrap();
+        execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+
+        let q = super::super::parser::parse_cypher(query).unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows.len(), 1, "Expected 1 row for query: {}", query);
+        result.rows[0].get(0).cloned().unwrap_or(Value::Null)
+    }
+
+    #[test]
+    fn test_split_function() {
+        let val = eval_string_fn("MATCH (n:Item) RETURN split(n.path, '/')");
+        assert_eq!(
+            val,
+            Value::String(r#"["src", "graph", "mod.rs"]"#.to_string())
+        );
+    }
+
+    #[test]
+    fn test_split_function_single_char() {
+        let val = eval_string_fn("MATCH (n:Item) RETURN split(n.name, ' ')");
+        assert_eq!(val, Value::String(r#"["hello", "world"]"#.to_string()));
+    }
+
+    #[test]
+    fn test_replace_function() {
+        let val = eval_string_fn("MATCH (n:Item) RETURN replace(n.path, '/', '.')");
+        assert_eq!(val, Value::String("src.graph.mod.rs".to_string()));
+    }
+
+    #[test]
+    fn test_substring_two_args() {
+        let val = eval_string_fn("MATCH (n:Item) RETURN substring(n.name, 6)");
+        assert_eq!(val, Value::String("world".to_string()));
+    }
+
+    #[test]
+    fn test_substring_three_args() {
+        let val = eval_string_fn("MATCH (n:Item) RETURN substring(n.name, 0, 5)");
+        assert_eq!(val, Value::String("hello".to_string()));
+    }
+
+    #[test]
+    fn test_left_function() {
+        let val = eval_string_fn("MATCH (n:Item) RETURN left(n.name, 5)");
+        assert_eq!(val, Value::String("hello".to_string()));
+    }
+
+    #[test]
+    fn test_right_function() {
+        let val = eval_string_fn("MATCH (n:Item) RETURN right(n.name, 5)");
+        assert_eq!(val, Value::String("world".to_string()));
+    }
+
+    #[test]
+    fn test_trim_function() {
+        let mut graph = DirGraph::new();
+        let setup =
+            super::super::parser::parse_cypher("CREATE (n:Item {val: '  hello  '})").unwrap();
+        execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+
+        let q = super::super::parser::parse_cypher("MATCH (n:Item) RETURN trim(n.val)").unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(
+            result.rows[0].get(0),
+            Some(&Value::String("hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_ltrim_function() {
+        let mut graph = DirGraph::new();
+        let setup =
+            super::super::parser::parse_cypher("CREATE (n:Item {val: '  hello  '})").unwrap();
+        execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+
+        let q = super::super::parser::parse_cypher("MATCH (n:Item) RETURN ltrim(n.val)").unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(
+            result.rows[0].get(0),
+            Some(&Value::String("hello  ".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_rtrim_function() {
+        let mut graph = DirGraph::new();
+        let setup =
+            super::super::parser::parse_cypher("CREATE (n:Item {val: '  hello  '})").unwrap();
+        execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+
+        let q = super::super::parser::parse_cypher("MATCH (n:Item) RETURN rtrim(n.val)").unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(
+            result.rows[0].get(0),
+            Some(&Value::String("  hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_reverse_function() {
+        let val = eval_string_fn("MATCH (n:Item) RETURN reverse(n.name)");
+        assert_eq!(val, Value::String("dlrow olleh".to_string()));
+    }
+
+    #[test]
+    fn test_string_functions_null_safety() {
+        // String functions on non-string values should return Null
+        let mut graph = DirGraph::new();
+        let setup = super::super::parser::parse_cypher("CREATE (n:Item {num: 42})").unwrap();
+        execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+
+        for query in [
+            "MATCH (n:Item) RETURN split(n.num, '/')",
+            "MATCH (n:Item) RETURN replace(n.num, 'a', 'b')",
+            "MATCH (n:Item) RETURN substring(n.num, 0)",
+            "MATCH (n:Item) RETURN left(n.num, 3)",
+            "MATCH (n:Item) RETURN right(n.num, 3)",
+            "MATCH (n:Item) RETURN trim(n.num)",
+            "MATCH (n:Item) RETURN reverse(n.num)",
+        ] {
+            let q = super::super::parser::parse_cypher(query).unwrap();
+            let no_params = HashMap::new();
+            let executor = CypherExecutor::with_params(&graph, &no_params, None);
+            let result = executor.execute(&q).unwrap();
+            assert_eq!(
+                result.rows[0].get(0),
+                Some(&Value::Null),
+                "Expected Null for query: {}",
+                query
+            );
+        }
     }
 }
