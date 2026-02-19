@@ -1,8 +1,11 @@
 """Tests for CALLS edge resolution tiers in code_tree builder."""
 
 import pytest
-from kglite.code_tree.parsers.models import FunctionInfo
-from kglite.code_tree.builder import _build_call_edges
+
+ts = pytest.importorskip("tree_sitter", reason="requires tree-sitter")
+
+from kglite.code_tree.parsers.models import FunctionInfo  # noqa: E402
+from kglite.code_tree.builder import _build_call_edges  # noqa: E402
 
 
 def _fn(name: str, qualified_name: str, file_path: str = "a.py",
