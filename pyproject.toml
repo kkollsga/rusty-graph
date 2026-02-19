@@ -30,11 +30,8 @@ classifiers = [
     "Topic :: Scientific/Engineering",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = ["pandas>=1.5"]
-dynamic = ["version"]
-
-[project.optional-dependencies]
-code-tree = [
+dependencies = [
+    "pandas>=1.5",
     "tree-sitter>=0.21",
     "tree-sitter-rust",
     "tree-sitter-python",
@@ -46,6 +43,7 @@ code-tree = [
     "tree-sitter-cpp",
     "tree-sitter-c-sharp",
 ]
+dynamic = ["version"]
 
 [project.urls]
 Homepage = "https://github.com/kkollsga/kglite"
