@@ -16,7 +16,10 @@ make test-py                 # Python tests only
 cargo check                  # fast compile check (no codegen)
 cargo fmt                    # format Rust code
 cargo clippy -- -D warnings  # lint
+make lint                    # fmt --check + clippy (run before pushing)
 ```
+
+**Before pushing:** Always run `make lint` to catch formatting and clippy issues that CI will reject.
 
 ## Architecture
 

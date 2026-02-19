@@ -3321,14 +3321,46 @@ impl<'a> CypherExecutor<'a> {
             }
             "list_procedures" => {
                 let procedures = [
-                    ("pagerank", "Compute PageRank centrality for all nodes", "node, score"),
-                    ("betweenness", "Compute betweenness centrality for all nodes", "node, score"),
-                    ("degree", "Compute degree centrality for all nodes", "node, score"),
-                    ("closeness", "Compute closeness centrality for all nodes", "node, score"),
-                    ("louvain", "Detect communities using the Louvain algorithm", "node, community"),
-                    ("label_propagation", "Detect communities using label propagation", "node, community"),
-                    ("connected_components", "Find weakly connected components", "node, component"),
-                    ("list_procedures", "List all available procedures", "name, description, yield_columns"),
+                    (
+                        "pagerank",
+                        "Compute PageRank centrality for all nodes",
+                        "node, score",
+                    ),
+                    (
+                        "betweenness",
+                        "Compute betweenness centrality for all nodes",
+                        "node, score",
+                    ),
+                    (
+                        "degree",
+                        "Compute degree centrality for all nodes",
+                        "node, score",
+                    ),
+                    (
+                        "closeness",
+                        "Compute closeness centrality for all nodes",
+                        "node, score",
+                    ),
+                    (
+                        "louvain",
+                        "Detect communities using the Louvain algorithm",
+                        "node, community",
+                    ),
+                    (
+                        "label_propagation",
+                        "Detect communities using label propagation",
+                        "node, community",
+                    ),
+                    (
+                        "connected_components",
+                        "Find weakly connected components",
+                        "node, component",
+                    ),
+                    (
+                        "list_procedures",
+                        "List all available procedures",
+                        "name, description, yield_columns",
+                    ),
                 ];
                 let mut rows = Vec::new();
                 for (name, desc, yields) in &procedures {
@@ -3337,13 +3369,16 @@ impl<'a> CypherExecutor<'a> {
                         let alias = item.alias.as_deref().unwrap_or(&item.name);
                         match item.name.as_str() {
                             "name" => {
-                                row.projected.insert(alias.to_string(), Value::String(name.to_string()));
+                                row.projected
+                                    .insert(alias.to_string(), Value::String(name.to_string()));
                             }
                             "description" => {
-                                row.projected.insert(alias.to_string(), Value::String(desc.to_string()));
+                                row.projected
+                                    .insert(alias.to_string(), Value::String(desc.to_string()));
                             }
                             "yield_columns" => {
-                                row.projected.insert(alias.to_string(), Value::String(yields.to_string()));
+                                row.projected
+                                    .insert(alias.to_string(), Value::String(yields.to_string()));
                             }
                             _ => {}
                         }

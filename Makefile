@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev test test-rust test-py bench check clean fmt clippy
+.PHONY: dev test test-rust test-py bench check clean fmt clippy lint
 
 ## Build and install the package into the local .venv
 dev:
@@ -35,6 +35,11 @@ fmt:
 
 ## Run clippy lints
 clippy:
+	cargo clippy -- -D warnings
+
+## Run all lint checks (fmt + clippy) — use before pushing
+lint:
+	cargo fmt -- --check
 	cargo clippy -- -D warnings
 
 ## Remove build artifacts
