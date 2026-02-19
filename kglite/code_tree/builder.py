@@ -57,6 +57,19 @@ def _parse_all(src_root: Path, verbose: bool = False) -> tuple[ParseResult, froz
     return combined, frozenset(noise_names)
 
 
+def _reprefix(value: str, old_prefix: str, new_prefix: str, sep: str) -> str:
+    """Replace a module path prefix in a qualified name.
+
+    Returns value unchanged if it doesn't start with old_prefix
+    (e.g. short names like base class names).
+    """
+    if value == old_prefix:
+        return new_prefix
+    if value.startswith(old_prefix + sep):
+        return new_prefix + value[len(old_prefix):]
+    return value
+
+
 def _parse_all_roots(
     project_root: Path,
     source_roots: list[SourceRoot],
@@ -65,11 +78,33 @@ def _parse_all_roots(
     """Parse source files from specific source roots (manifest-guided)."""
     combined = ParseResult()
     all_noise: set[str] = set()
+    parsed_dirs: list[Path] = []  # track parsed roots to detect overlaps
 
     for root in source_roots:
         if not root.path.is_dir():
             if verbose:
                 print(f"  Skipping missing source root: {root.path}")
+            continue
+
+        # Skip if this root is a subdirectory of an already-parsed root
+        # (e.g. xarray/tests/ is inside xarray/).  Instead, just apply
+        # the is_test flag to matching entities already in combined.
+        already_covered = any(
+            root.path != d and root.path.is_relative_to(d)
+            for d in parsed_dirs
+        )
+        if already_covered:
+            if root.is_test:
+                rel_prefix = str(root.path.relative_to(project_root))
+                for f in combined.files:
+                    if f.path.startswith(rel_prefix):
+                        f.is_test = True
+                for fn in combined.functions:
+                    if fn.file_path.startswith(rel_prefix):
+                        fn.metadata["is_test"] = True
+            if verbose:
+                label = root.path.relative_to(project_root)
+                print(f"  Skipping {label}/ (already covered by parent root)")
             continue
 
         if root.language:
@@ -116,8 +151,53 @@ def _parse_all_roots(
             for co in result.constants:
                 co.file_path = path_map.get(co.file_path, co.file_path)
 
+            # Remap module_path / qualified_name when source root is nested
+            # inside the package (e.g. xarray/tests/ as a separate root).
+            # The parser uses src_root.name ("tests") as prefix, but the
+            # correct prefix is the full path relative to project_root
+            # ("xarray.tests" for Python).
+            sep = _get_separator(parser.language_name)
+            rel_parts = root.path.relative_to(project_root).parts
+            correct_prefix = sep.join(rel_parts)
+            parser_prefix = root.path.name
+            if correct_prefix != parser_prefix:
+                for f in result.files:
+                    f.module_path = _reprefix(
+                        f.module_path, parser_prefix, correct_prefix, sep)
+                for fn in result.functions:
+                    fn.qualified_name = _reprefix(
+                        fn.qualified_name, parser_prefix, correct_prefix, sep)
+                for c in result.classes:
+                    c.qualified_name = _reprefix(
+                        c.qualified_name, parser_prefix, correct_prefix, sep)
+                for e in result.enums:
+                    e.qualified_name = _reprefix(
+                        e.qualified_name, parser_prefix, correct_prefix, sep)
+                for i in result.interfaces:
+                    i.qualified_name = _reprefix(
+                        i.qualified_name, parser_prefix, correct_prefix, sep)
+                for a in result.attributes:
+                    a.qualified_name = _reprefix(
+                        a.qualified_name, parser_prefix, correct_prefix, sep)
+                    a.owner_qualified_name = _reprefix(
+                        a.owner_qualified_name, parser_prefix, correct_prefix, sep)
+                for co in result.constants:
+                    co.qualified_name = _reprefix(
+                        co.qualified_name, parser_prefix, correct_prefix, sep)
+                for tr in result.type_relationships:
+                    tr.source_type = _reprefix(
+                        tr.source_type, parser_prefix, correct_prefix, sep)
+                    if tr.target_type:
+                        tr.target_type = _reprefix(
+                            tr.target_type, parser_prefix, correct_prefix, sep)
+                    for m in tr.methods:
+                        m.qualified_name = _reprefix(
+                            m.qualified_name, parser_prefix, correct_prefix, sep)
+
             combined.merge(result)
             all_noise.update(parser.noise_names)
+
+        parsed_dirs.append(root.path)
 
     if not combined.files:
         raise FileNotFoundError(
