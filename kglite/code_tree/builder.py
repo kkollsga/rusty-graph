@@ -199,6 +199,13 @@ def _build_call_edges(all_functions: list[FunctionInfo],
 
     Names in excluded_names are skipped (common stdlib methods).
     Names with more than max_targets definitions are skipped as too ambiguous.
+
+    Note: Receiver hints are syntactic (field names, not resolved types).
+    A call like ``self.inner.method()`` produces hint ``"inner"``, which
+    won't match a target owned by the actual type (e.g. ``DirGraph``).
+    These calls will fall through to tier 2-5 resolution or remain
+    unresolved.  This is an inherent limitation of tree-sitter based
+    parsing — resolving field names to types requires type inference.
     """
     name_lookup: dict[str, list[str]] = defaultdict(list)
     for fn in all_functions:
@@ -911,7 +918,7 @@ def build(
     *,
     save_to: str | Path | None = None,
     verbose: bool = False,
-    include_tests: bool = False,
+    include_tests: bool = True,
 ) -> kglite.KnowledgeGraph:
     """Parse a codebase and build a KGLite knowledge graph.
 

@@ -1,8 +1,17 @@
 """Shared fixtures for kglite test suite."""
 
+import importlib
+
 import pytest
 import pandas as pd
 from kglite import KnowledgeGraph
+
+
+def pytest_collect_file(parent, file_path):  # noqa: ARG001
+    """Skip test_code_tree_* files when tree-sitter is not installed."""
+    if file_path.name.startswith("test_code_tree") and file_path.suffix == ".py":
+        if importlib.util.find_spec("tree_sitter") is None:
+            return None  # skip collection entirely
 
 
 @pytest.fixture

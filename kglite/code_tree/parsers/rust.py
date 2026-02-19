@@ -197,6 +197,14 @@ class RustParser(LanguageParser):
         Emits qualified calls where possible: "Receiver.method" for
         field expressions and "Type.method" for scoped identifiers.
         Returns list of (call_name, line_number) tuples.
+
+        Receiver hints use the syntactic field name, not the resolved type.
+        For example, ``self.inner.has_index()`` emits ``("inner.has_index", line)``
+        because the parser sees the field name ``inner``, not its type
+        ``DirGraph``.  Downstream call-edge resolution therefore cannot match
+        this to ``DirGraph::has_index`` — resolving field names to types would
+        require full type inference, which is out of scope for a tree-sitter
+        based parser.
         """
         calls: list[tuple[str, int]] = []
 
@@ -645,6 +653,12 @@ class RustParser(LanguageParser):
             module_path=module_path,
             language="rust",
         )
+        stem = filepath.stem
+        if (stem.endswith("_test") or stem.endswith("_tests")
+                or stem.startswith("test_")
+                or "/tests/" in rel_path or rel_path.startswith("tests/")
+                or "/benches/" in rel_path or rel_path.startswith("benches/")):
+            file_info.is_test = True
 
         result = ParseResult()
         result.files.append(file_info)

@@ -1695,6 +1695,12 @@ impl CypherParser {
         self.expect(&CypherToken::LParen)?;
         let parameters = if self.check(&CypherToken::LBrace) {
             self.parse_create_properties()?
+        } else if !self.check(&CypherToken::RParen) {
+            return Err(format!(
+                "CALL parameters must use map syntax: CALL {}({{key: value, ...}}). \
+                 Example: CALL {}({{damping_factor: 0.85}})",
+                procedure_name, procedure_name
+            ));
         } else {
             Vec::new()
         };

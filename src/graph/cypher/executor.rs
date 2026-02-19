@@ -3201,10 +3201,12 @@ impl<'a> CypherExecutor<'a> {
             | "closeness_centrality" => &["node", "score"],
             "louvain" | "louvain_communities" | "label_propagation" => &["node", "community"],
             "connected_components" | "weakly_connected_components" => &["node", "component"],
+            "list_procedures" => &["name", "description", "yield_columns"],
             _ => {
                 return Err(format!(
                     "Unknown procedure '{}'. Available: pagerank, betweenness, degree, \
-                     closeness, louvain, label_propagation, connected_components",
+                     closeness, louvain, label_propagation, connected_components, \
+                     list_procedures",
                     clause.procedure_name
                 ));
             }
@@ -3314,6 +3316,39 @@ impl<'a> CypherExecutor<'a> {
                         }
                         rows.push(row);
                     }
+                }
+                rows
+            }
+            "list_procedures" => {
+                let procedures = [
+                    ("pagerank", "Compute PageRank centrality for all nodes", "node, score"),
+                    ("betweenness", "Compute betweenness centrality for all nodes", "node, score"),
+                    ("degree", "Compute degree centrality for all nodes", "node, score"),
+                    ("closeness", "Compute closeness centrality for all nodes", "node, score"),
+                    ("louvain", "Detect communities using the Louvain algorithm", "node, community"),
+                    ("label_propagation", "Detect communities using label propagation", "node, community"),
+                    ("connected_components", "Find weakly connected components", "node, component"),
+                    ("list_procedures", "List all available procedures", "name, description, yield_columns"),
+                ];
+                let mut rows = Vec::new();
+                for (name, desc, yields) in &procedures {
+                    let mut row = ResultRow::new();
+                    for item in &clause.yield_items {
+                        let alias = item.alias.as_deref().unwrap_or(&item.name);
+                        match item.name.as_str() {
+                            "name" => {
+                                row.projected.insert(alias.to_string(), Value::String(name.to_string()));
+                            }
+                            "description" => {
+                                row.projected.insert(alias.to_string(), Value::String(desc.to_string()));
+                            }
+                            "yield_columns" => {
+                                row.projected.insert(alias.to_string(), Value::String(yields.to_string()));
+                            }
+                            _ => {}
+                        }
+                    }
+                    rows.push(row);
                 }
                 rows
             }
