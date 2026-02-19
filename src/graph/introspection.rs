@@ -570,7 +570,9 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
 
         // Workflow recipes for code graphs — group edges by use case
         if has_code_entities {
-            xml.push_str("  <workflows hint=\"Common query patterns using the edge types above\">\n");
+            xml.push_str(
+                "  <workflows hint=\"Common query patterns using the edge types above\">\n",
+            );
             xml.push_str("    <workflow name=\"Call graph\">CALLS edges link Function→Function. Use [:CALLS*1..N] for transitive callers/callees.\n      Example: MATCH (f:Function {name: 'main'})-[:CALLS*1..2]->(g) RETURN g.name, g.file_path</workflow>\n");
             xml.push_str("    <workflow name=\"Inheritance\">EXTENDS (class→class), IMPLEMENTS (class→trait/interface).\n      Example: MATCH (s)-[:IMPLEMENTS]->(t {name: 'Display'}) RETURN s.name, s.file_path</workflow>\n");
             xml.push_str("    <workflow name=\"File structure\">DEFINES (Module→entities), HAS_SOURCE (entity→File).\n      Example: MATCH (m:Module)-[:DEFINES]->(f:Function) WHERE m.name = 'utils' RETURN f.name</workflow>\n");
