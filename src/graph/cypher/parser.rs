@@ -81,7 +81,9 @@ impl CypherParser {
             | Some(CypherToken::Detach)
             | Some(CypherToken::Merge)
             | Some(CypherToken::Remove)
-            | Some(CypherToken::On) => true,
+            | Some(CypherToken::On)
+            | Some(CypherToken::Call)
+            | Some(CypherToken::Yield) => true,
             Some(CypherToken::Match) => true,
             Some(CypherToken::Optional) => {
                 // OPTIONAL MATCH
@@ -169,6 +171,9 @@ impl CypherParser {
                 }
                 Some(CypherToken::Merge) => {
                     clauses.push(self.parse_merge_clause()?);
+                }
+                Some(CypherToken::Call) => {
+                    clauses.push(self.parse_call_clause()?);
                 }
                 Some(t) => {
                     return Err(format!("Unexpected token at start of clause: {:?}", t));
@@ -407,6 +412,14 @@ impl CypherParser {
                 break;
             }
 
+            // Stop at AND/OR at top level (boolean operators in WHERE)
+            if paren_depth == 0
+                && bracket_depth == 0
+                && (self.check(&CypherToken::And) || self.check(&CypherToken::Or))
+            {
+                break;
+            }
+
             // Stop at RParen that would go negative (e.g. closing shortestPath(...))
             if paren_depth == 0 && self.check(&CypherToken::RParen) {
                 break;
@@ -544,8 +557,12 @@ impl CypherParser {
             // Could be a parenthesized predicate or the start of a pattern
             // Peek ahead to determine
             if self.looks_like_pattern_start() {
-                // It's a pattern predicate - not yet supported
-                return Err("Pattern predicates in WHERE not yet supported".to_string());
+                // Inline pattern predicate — desugar to EXISTS { pattern }
+                let pattern_str = self.extract_pattern_string()?;
+                let pattern = crate::graph::pattern_matching::parse_pattern(&pattern_str)?;
+                return Ok(Predicate::Exists {
+                    patterns: vec![pattern],
+                });
             }
             self.advance(); // consume (
             let pred = self.parse_predicate()?;
@@ -657,15 +674,29 @@ impl CypherParser {
 
     /// Quick lookahead to check if ( starts a pattern (node pattern) vs a parenthesized predicate
     fn looks_like_pattern_start(&self) -> bool {
-        // Pattern: (var:Type) or (:Type) or ()
-        // Predicate: (expr op expr) or (NOT ...)
+        // Pattern: (var:Type), (:Type), (), (var)-[...]->()
+        // Predicate: (expr op expr), (NOT ...)
         match self.peek_at(1) {
-            Some(CypherToken::RParen) => true, // ()
-            Some(CypherToken::Colon) => true,  // (:Type)
+            Some(CypherToken::RParen) => {
+                // () or (var) closed immediately — pattern if followed by - or <
+                matches!(
+                    self.peek_at(2),
+                    Some(CypherToken::Dash) | Some(CypherToken::LessThan)
+                )
+            }
+            Some(CypherToken::Colon) => true, // (:Type)
             Some(CypherToken::Identifier(_)) => {
-                // Could be (var:Type) or (expr ...)
-                // Check if third token is Colon -> pattern, otherwise predicate
-                matches!(self.peek_at(2), Some(CypherToken::Colon))
+                match self.peek_at(2) {
+                    Some(CypherToken::Colon) => true, // (var:Type
+                    Some(CypherToken::RParen) => {
+                        // (var) — pattern if followed by - or <  e.g. (p)-[:REL]->()
+                        matches!(
+                            self.peek_at(3),
+                            Some(CypherToken::Dash) | Some(CypherToken::LessThan)
+                        )
+                    }
+                    _ => false,
+                }
             }
             _ => false,
         }
@@ -1637,6 +1668,96 @@ impl CypherParser {
             on_create,
             on_match,
         }))
+    }
+
+    // ========================================================================
+    // CALL Clause
+    // ========================================================================
+
+    fn parse_call_clause(&mut self) -> Result<Clause, String> {
+        self.expect(&CypherToken::Call)?;
+
+        // Parse procedure name
+        let procedure_name = match self.peek().cloned() {
+            Some(CypherToken::Identifier(name)) => {
+                self.advance();
+                name
+            }
+            other => {
+                return Err(format!(
+                    "Expected procedure name after CALL, got {:?}",
+                    other
+                ));
+            }
+        };
+
+        // Parse argument list: ( [{key: val, ...}] )
+        self.expect(&CypherToken::LParen)?;
+        let parameters = if self.check(&CypherToken::LBrace) {
+            self.parse_create_properties()?
+        } else {
+            Vec::new()
+        };
+        self.expect(&CypherToken::RParen)?;
+
+        // Parse YIELD clause (required)
+        if !self.check(&CypherToken::Yield) {
+            return Err(
+                "CALL requires a YIELD clause, e.g. CALL pagerank() YIELD node, score".to_string(),
+            );
+        }
+        self.advance(); // consume YIELD
+
+        let yield_items = self.parse_yield_items()?;
+        if yield_items.is_empty() {
+            return Err("YIELD requires at least one column name".to_string());
+        }
+
+        Ok(Clause::Call(CallClause {
+            procedure_name,
+            parameters,
+            yield_items,
+        }))
+    }
+
+    /// Parse comma-separated YIELD items: name [AS alias], ...
+    fn parse_yield_items(&mut self) -> Result<Vec<YieldItem>, String> {
+        let mut items = Vec::new();
+
+        loop {
+            let name = match self.peek().cloned() {
+                Some(CypherToken::Identifier(n)) => {
+                    self.advance();
+                    n
+                }
+                other => {
+                    return Err(format!("Expected column name in YIELD, got {:?}", other));
+                }
+            };
+
+            let alias = if self.check(&CypherToken::As) {
+                self.advance();
+                match self.peek().cloned() {
+                    Some(CypherToken::Identifier(a)) => {
+                        self.advance();
+                        Some(a)
+                    }
+                    _ => return Err("Expected alias name after AS in YIELD".to_string()),
+                }
+            } else {
+                None
+            };
+
+            items.push(YieldItem { name, alias });
+
+            if self.check(&CypherToken::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        Ok(items)
     }
 }
 

@@ -113,6 +113,14 @@ pub fn generate_explain_plan(query: &CypherQuery) -> String {
             }
             Clause::Remove(_) => "Remove (REMOVE)".to_string(),
             Clause::Merge(_) => "Merge (MERGE)".to_string(),
+            Clause::Call(c) => {
+                let yields: Vec<&str> = c.yield_items.iter().map(|y| y.name.as_str()).collect();
+                format!(
+                    "ProcedureCall (CALL {}) YIELD [{}]",
+                    c.procedure_name,
+                    yields.join(", ")
+                )
+            }
             Clause::FusedOptionalMatchAggregate { .. } => {
                 "FusedOptionalMatchAggregate (optimized OPTIONAL MATCH + count)".to_string()
             }

@@ -49,6 +49,8 @@ pub enum CypherToken {
     False,
     Exists,
     Explain,
+    Call,
+    Yield,
 
     // Parameters
     Parameter(String), // $param_name
@@ -400,6 +402,8 @@ fn identifier_to_token(ident: String) -> CypherToken {
         "CONTAINS" => CypherToken::Contains,
         "EXISTS" => CypherToken::Exists,
         "EXPLAIN" => CypherToken::Explain,
+        "CALL" => CypherToken::Call,
+        "YIELD" => CypherToken::Yield,
         _ => CypherToken::Identifier(ident),
     }
 }

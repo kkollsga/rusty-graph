@@ -1715,6 +1715,8 @@ class KnowledgeGraph:
         OPTIONAL MATCH, UNWIND, UNION, CREATE, SET, DELETE, DETACH DELETE,
         REMOVE, MERGE (with ON CREATE SET / ON MATCH SET), CASE expressions,
         WHERE EXISTS, shortestPath(), list comprehensions,
+        CALL...YIELD (graph algorithms: pagerank, betweenness, degree,
+        closeness, louvain, label_propagation, connected_components),
         parameters ($param), ``!=`` operator, and aggregation functions.
 
         Mutation queries (CREATE, SET, DELETE, REMOVE, MERGE) store
@@ -1771,6 +1773,20 @@ class KnowledgeGraph:
                 WHERE text_score(n, 'summary', $query) > 0.8
                 RETURN n.title
             ''', params={'query': 'artificial intelligence'})
+
+            # CALL graph algorithms
+            top = graph.cypher('''
+                CALL pagerank() YIELD node, score
+                RETURN node.title, score
+                ORDER BY score DESC LIMIT 10
+            ''')
+
+            # Community detection
+            graph.cypher('''
+                CALL louvain() YIELD node, community
+                RETURN community, count(*) AS size
+                ORDER BY size DESC
+            ''')
         """
         ...
 

@@ -33,6 +33,7 @@ pub enum Clause {
     Delete(DeleteClause),
     Remove(RemoveClause),
     Merge(MergeClause),
+    Call(CallClause),
     /// Optimizer-generated: fuse OPTIONAL MATCH + WITH count(...) into a single pass.
     /// Instead of expanding rows then aggregating, count matches directly per input row.
     FusedOptionalMatchAggregate {
@@ -378,4 +379,23 @@ pub struct MergeClause {
     pub pattern: CreatePattern,
     pub on_create: Option<Vec<SetItem>>,
     pub on_match: Option<Vec<SetItem>>,
+}
+
+// ============================================================================
+// CALL Clause
+// ============================================================================
+
+/// CALL clause: invoke a graph algorithm procedure
+#[derive(Debug, Clone)]
+pub struct CallClause {
+    pub procedure_name: String,
+    pub parameters: Vec<(String, Expression)>,
+    pub yield_items: Vec<YieldItem>,
+}
+
+/// A single YIELD item: output_name [AS alias]
+#[derive(Debug, Clone)]
+pub struct YieldItem {
+    pub name: String,
+    pub alias: Option<String>,
 }

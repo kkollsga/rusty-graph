@@ -392,7 +392,7 @@ const API_BASE: &str = r#"  <api>
 
 /// Static XML: Cypher reference — clauses through expressions (always present).
 const CYPHER_REF_BASE: &str = r#"  <cypher_ref>
-    <clauses>MATCH, OPTIONAL MATCH, WHERE, RETURN, WITH, ORDER BY, SKIP, LIMIT, UNWIND, UNION, UNION ALL, CREATE, SET, DELETE, DETACH DELETE, REMOVE, MERGE, EXPLAIN</clauses>
+    <clauses>MATCH, OPTIONAL MATCH, WHERE, RETURN, WITH, ORDER BY, SKIP, LIMIT, UNWIND, UNION, UNION ALL, CREATE, SET, DELETE, DETACH DELETE, REMOVE, MERGE, CALL...YIELD, EXPLAIN</clauses>
     <patterns>(n:Type), (n:Type {key: val}), (n {key: val}), (n), -[:REL]-&gt;, &lt;-[:REL]-, -[:REL]-, -[:REL*1..3]-&gt;, p = shortestPath(...)</patterns>
     <where>=, &lt;&gt;, &lt;, &gt;, &lt;=, &gt;=, =~ (regex), AND, OR, NOT, IS NULL, IS NOT NULL, IN [...], CONTAINS, STARTS WITH, ENDS WITH, EXISTS { pattern }, EXISTS(( pattern ))</where>
     <return>n.prop, r.prop, AS alias, DISTINCT, arithmetic (+, -, *, /), map projections n {.prop1, .prop2}</return>
@@ -402,7 +402,7 @@ const CYPHER_REF_BASE: &str = r#"  <cypher_ref>
 
 /// Static XML: Cypher mutations and unsupported features (always present).
 const CYPHER_REF_MUTATIONS: &str = r#"    <mutations>CREATE (n:Label {props}), CREATE (a)-[:TYPE]-&gt;(b), SET n.prop = expr, DELETE, DETACH DELETE, REMOVE n.prop, MERGE...ON CREATE SET...ON MATCH SET</mutations>
-    <not_supported>CALL/stored procedures, FOREACH, subqueries, SET n:Label, REMOVE n:Label, multi-label</not_supported>
+    <not_supported>FOREACH, subqueries, SET n:Label, REMOVE n:Label, multi-label</not_supported>
 "#;
 
 /// Minimal XML escaping for attribute values.
@@ -605,6 +605,17 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
 
     xml.push_str(CYPHER_REF_MUTATIONS);
 
+    // CALL procedures
+    xml.push_str("    <procedures hint=\"CALL name({params}) YIELD columns — then use WHERE/RETURN/ORDER BY/LIMIT as usual\">\n");
+    xml.push_str("      <proc name=\"pagerank\" params=\"damping_factor(0.85), max_iterations(100), tolerance(1e-6), connection_types\" yields=\"node, score\">Importance via incoming links.</proc>\n");
+    xml.push_str("      <proc name=\"betweenness\" params=\"normalized(true), sample_size, connection_types\" yields=\"node, score\">Bridge nodes on shortest paths.</proc>\n");
+    xml.push_str("      <proc name=\"degree\" params=\"normalized(true), connection_types\" yields=\"node, score\">Connection count per node.</proc>\n");
+    xml.push_str("      <proc name=\"closeness\" params=\"normalized(true), connection_types\" yields=\"node, score\">Proximity to all other nodes.</proc>\n");
+    xml.push_str("      <proc name=\"louvain\" params=\"resolution(1.0), weight_property\" yields=\"node, community\">Community detection via modularity.</proc>\n");
+    xml.push_str("      <proc name=\"label_propagation\" params=\"max_iterations(100)\" yields=\"node, community\">Community detection via label spread.</proc>\n");
+    xml.push_str("      <proc name=\"connected_components\" params=\"\" yields=\"node, component\">Weakly connected component membership.</proc>\n");
+    xml.push_str("    </procedures>\n");
+
     // Notes — conditionally include feature-specific notes
     xml.push_str("    <notes>\n");
     xml.push_str("      <note>Each node has exactly one type. labels(n) returns a string, not a list.</note>\n");
@@ -614,6 +625,9 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     xml.push_str("      <note>Each cypher() call is atomic. Params via $param syntax.</note>\n");
     xml.push_str(
         "      <note>to_df=True returns a pandas DataFrame instead of ResultView.</note>\n",
+    );
+    xml.push_str(
+        "      <note>CALL proc() YIELD node, score — node is a node binding (use node.title, node.type, etc. in RETURN/WHERE). Example: CALL pagerank() YIELD node, score RETURN node.title, score ORDER BY score DESC LIMIT 10</note>\n",
     );
     if has_embeddings {
         xml.push_str(

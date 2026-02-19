@@ -5,6 +5,7 @@ use super::ast::*;
 use super::result::*;
 use crate::datatypes::values::Value;
 use crate::graph::filtering_methods;
+use crate::graph::graph_algorithms;
 use crate::graph::pattern_matching::{
     EdgeDirection, MatchBinding, PatternElement, PatternExecutor, PatternMatch,
 };
@@ -203,6 +204,7 @@ impl<'a> CypherExecutor<'a> {
                 *limit,
                 result_set,
             ),
+            Clause::Call(c) => self.execute_call(c),
             Clause::Create(_)
             | Clause::Set(_)
             | Clause::Delete(_)
@@ -373,8 +375,6 @@ impl<'a> CypherExecutor<'a> {
         path_assignment: &PathAssignment,
         existing: ResultSet,
     ) -> Result<ResultSet, String> {
-        use crate::graph::graph_algorithms;
-
         let pattern = clause
             .patterns
             .get(path_assignment.pattern_index)
@@ -3182,6 +3182,221 @@ impl<'a> CypherExecutor<'a> {
     }
 
     // ========================================================================
+    // CALL (graph algorithm procedures)
+    // ========================================================================
+
+    fn execute_call(&self, clause: &CallClause) -> Result<ResultSet, String> {
+        self.check_deadline()?;
+
+        let proc_name = clause.procedure_name.to_lowercase();
+
+        // Validate YIELD columns
+        let valid_yields: &[&str] = match proc_name.as_str() {
+            "pagerank"
+            | "betweenness"
+            | "betweenness_centrality"
+            | "degree"
+            | "degree_centrality"
+            | "closeness"
+            | "closeness_centrality" => &["node", "score"],
+            "louvain" | "louvain_communities" | "label_propagation" => &["node", "community"],
+            "connected_components" | "weakly_connected_components" => &["node", "component"],
+            _ => {
+                return Err(format!(
+                    "Unknown procedure '{}'. Available: pagerank, betweenness, degree, \
+                     closeness, louvain, label_propagation, connected_components",
+                    clause.procedure_name
+                ));
+            }
+        };
+
+        for item in &clause.yield_items {
+            if !valid_yields.contains(&item.name.as_str()) {
+                return Err(format!(
+                    "Procedure '{}' does not yield '{}'. Available: {}",
+                    clause.procedure_name,
+                    item.name,
+                    valid_yields.join(", ")
+                ));
+            }
+        }
+
+        // Extract parameters
+        let params = self.extract_call_params(&clause.parameters)?;
+
+        // Dispatch to algorithm
+        let rows = match proc_name.as_str() {
+            "pagerank" => {
+                let damping = call_param_f64(&params, "damping_factor", 0.85);
+                let max_iter = call_param_usize(&params, "max_iterations", 100);
+                let tolerance = call_param_f64(&params, "tolerance", 1e-6);
+                let conn = call_param_string_list(&params, "connection_types");
+                let results = graph_algorithms::pagerank(
+                    self.graph,
+                    damping,
+                    max_iter,
+                    tolerance,
+                    conn.as_deref(),
+                    self.deadline,
+                );
+                self.centrality_to_rows(&results, &clause.yield_items)
+            }
+            "betweenness" | "betweenness_centrality" => {
+                let normalized = call_param_bool(&params, "normalized", true);
+                let sample_size = call_param_opt_usize(&params, "sample_size");
+                let conn = call_param_string_list(&params, "connection_types");
+                let results = graph_algorithms::betweenness_centrality(
+                    self.graph,
+                    normalized,
+                    sample_size,
+                    conn.as_deref(),
+                    self.deadline,
+                );
+                self.centrality_to_rows(&results, &clause.yield_items)
+            }
+            "degree" | "degree_centrality" => {
+                let normalized = call_param_bool(&params, "normalized", true);
+                let conn = call_param_string_list(&params, "connection_types");
+                let results = graph_algorithms::degree_centrality(
+                    self.graph,
+                    normalized,
+                    conn.as_deref(),
+                    self.deadline,
+                );
+                self.centrality_to_rows(&results, &clause.yield_items)
+            }
+            "closeness" | "closeness_centrality" => {
+                let normalized = call_param_bool(&params, "normalized", true);
+                let conn = call_param_string_list(&params, "connection_types");
+                let results = graph_algorithms::closeness_centrality(
+                    self.graph,
+                    normalized,
+                    conn.as_deref(),
+                    self.deadline,
+                );
+                self.centrality_to_rows(&results, &clause.yield_items)
+            }
+            "louvain" | "louvain_communities" => {
+                let resolution = call_param_f64(&params, "resolution", 1.0);
+                let weight_prop = call_param_opt_string(&params, "weight_property");
+                let result = graph_algorithms::louvain_communities(
+                    self.graph,
+                    weight_prop.as_deref(),
+                    resolution,
+                    self.deadline,
+                );
+                self.community_to_rows(&result.assignments, &clause.yield_items)
+            }
+            "label_propagation" => {
+                let max_iter = call_param_usize(&params, "max_iterations", 100);
+                let result =
+                    graph_algorithms::label_propagation(self.graph, max_iter, self.deadline);
+                self.community_to_rows(&result.assignments, &clause.yield_items)
+            }
+            "connected_components" | "weakly_connected_components" => {
+                let components = graph_algorithms::weakly_connected_components(self.graph);
+                let mut rows = Vec::new();
+                for (comp_id, nodes) in components.iter().enumerate() {
+                    for &node_idx in nodes {
+                        let mut row = ResultRow::new();
+                        for item in &clause.yield_items {
+                            let alias = item.alias.as_deref().unwrap_or(&item.name);
+                            match item.name.as_str() {
+                                "node" => {
+                                    row.node_bindings.insert(alias.to_string(), node_idx);
+                                }
+                                "component" => {
+                                    row.projected
+                                        .insert(alias.to_string(), Value::Int64(comp_id as i64));
+                                }
+                                _ => {}
+                            }
+                        }
+                        rows.push(row);
+                    }
+                }
+                rows
+            }
+            _ => unreachable!(),
+        };
+
+        Ok(ResultSet {
+            rows,
+            columns: Vec::new(),
+        })
+    }
+
+    /// Extract CALL parameters from {key: expr} pairs into a value map.
+    fn extract_call_params(
+        &self,
+        params: &[(String, Expression)],
+    ) -> Result<HashMap<String, Value>, String> {
+        let empty_row = ResultRow::new();
+        let mut map = HashMap::new();
+        for (key, expr) in params {
+            let val = self.evaluate_expression(expr, &empty_row)?;
+            map.insert(key.clone(), val);
+        }
+        Ok(map)
+    }
+
+    /// Convert centrality results to ResultRows with node bindings + score.
+    fn centrality_to_rows(
+        &self,
+        results: &[graph_algorithms::CentralityResult],
+        yield_items: &[YieldItem],
+    ) -> Vec<ResultRow> {
+        results
+            .iter()
+            .map(|cr| {
+                let mut row = ResultRow::new();
+                for item in yield_items {
+                    let alias = item.alias.as_deref().unwrap_or(&item.name);
+                    match item.name.as_str() {
+                        "node" => {
+                            row.node_bindings.insert(alias.to_string(), cr.node_idx);
+                        }
+                        "score" => {
+                            row.projected
+                                .insert(alias.to_string(), Value::Float64(cr.score));
+                        }
+                        _ => {}
+                    }
+                }
+                row
+            })
+            .collect()
+    }
+
+    /// Convert community assignments to ResultRows with node bindings + community id.
+    fn community_to_rows(
+        &self,
+        assignments: &[graph_algorithms::CommunityAssignment],
+        yield_items: &[YieldItem],
+    ) -> Vec<ResultRow> {
+        assignments
+            .iter()
+            .map(|ca| {
+                let mut row = ResultRow::new();
+                for item in yield_items {
+                    let alias = item.alias.as_deref().unwrap_or(&item.name);
+                    match item.name.as_str() {
+                        "node" => {
+                            row.node_bindings.insert(alias.to_string(), ca.node_idx);
+                        }
+                        "community" => {
+                            row.projected
+                                .insert(alias.to_string(), Value::Int64(ca.community_id as i64));
+                        }
+                        _ => {}
+                    }
+                }
+                row
+            })
+            .collect()
+    }
+
+    // ========================================================================
     // UNION
     // ========================================================================
 
@@ -4523,6 +4738,63 @@ fn split_list_top_level(s: &str) -> Vec<&str> {
         items.push(last);
     }
     items
+}
+
+// ============================================================================
+// CALL parameter helpers
+// ============================================================================
+
+fn call_param_f64(params: &HashMap<String, Value>, key: &str, default: f64) -> f64 {
+    params
+        .get(key)
+        .map(|v| match v {
+            Value::Float64(f) => *f,
+            Value::Int64(i) => *i as f64,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
+fn call_param_usize(params: &HashMap<String, Value>, key: &str, default: usize) -> usize {
+    params
+        .get(key)
+        .map(|v| match v {
+            Value::Int64(i) => *i as usize,
+            Value::Float64(f) => *f as usize,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
+fn call_param_bool(params: &HashMap<String, Value>, key: &str, default: bool) -> bool {
+    params
+        .get(key)
+        .map(|v| match v {
+            Value::Boolean(b) => *b,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
+fn call_param_opt_usize(params: &HashMap<String, Value>, key: &str) -> Option<usize> {
+    params.get(key).and_then(|v| match v {
+        Value::Int64(i) => Some(*i as usize),
+        _ => None,
+    })
+}
+
+fn call_param_opt_string(params: &HashMap<String, Value>, key: &str) -> Option<String> {
+    params.get(key).and_then(|v| match v {
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    })
+}
+
+fn call_param_string_list(params: &HashMap<String, Value>, key: &str) -> Option<Vec<String>> {
+    params.get(key).and_then(|v| match v {
+        Value::String(s) => Some(vec![s.clone()]),
+        _ => None,
+    })
 }
 
 #[cfg(test)]

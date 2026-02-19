@@ -335,3 +335,126 @@ class TestExistsParenSyntax:
         assert len(result) > 0
         for row in result:
             assert isinstance(row['p.name'], str)
+
+
+class TestInlinePatternPredicates:
+    """Tests for inline pattern predicates in WHERE — desugared to EXISTS."""
+
+    def test_inline_pattern_basic(self, social_graph):
+        """WHERE (p)-[:KNOWS]->(:Person) works like EXISTS { ... }."""
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE (p)-[:KNOWS]->(:Person)
+            RETURN p.name
+            ORDER BY p.name
+        """)
+
+        names = [row['p.name'] for row in result]
+        assert names == ['Alice', 'Bob']
+
+    def test_inline_pattern_matches_exists(self, social_graph):
+        """Inline pattern produces same results as EXISTS { ... }."""
+        inline = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE (p)-[:KNOWS]->(:Person)
+            RETURN p.name ORDER BY p.name
+        """)
+        exists = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE EXISTS { (p)-[:KNOWS]->(:Person) }
+            RETURN p.name ORDER BY p.name
+        """)
+        assert inline.to_list() == exists.to_list()
+
+    def test_not_inline_pattern(self, social_graph):
+        """WHERE NOT (p)-[:KNOWS]->(:Person) — negated pattern predicate."""
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE NOT (p)-[:KNOWS]->(:Person)
+            RETURN p.name
+            ORDER BY p.name
+        """)
+
+        names = [row['p.name'] for row in result]
+        assert names == ['Charlie', 'Diana']
+
+    def test_inline_pattern_with_label(self, social_graph):
+        """Inline pattern with specific relationship type."""
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE (p)-[:PURCHASED]->(:Product)
+            RETURN p.name
+            ORDER BY p.name
+        """)
+
+        names = [row['p.name'] for row in result]
+        assert names == ['Alice', 'Bob']
+
+    def test_inline_pattern_incoming(self, social_graph):
+        """Inline pattern with incoming relationship."""
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE (p)<-[:KNOWS]-(:Person)
+            RETURN p.name
+            ORDER BY p.name
+        """)
+
+        names = [row['p.name'] for row in result]
+        assert names == ['Bob', 'Charlie']
+
+    def test_inline_pattern_with_property(self, social_graph):
+        """Inline pattern with property filter on target node."""
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE (p)-[:KNOWS]->(:Person {city: 'Oslo'})
+            RETURN p.name
+            ORDER BY p.name
+        """)
+
+        names = [row['p.name'] for row in result]
+        assert names == ['Alice', 'Bob']
+
+    def test_inline_pattern_combined_with_and(self, social_graph):
+        """Inline pattern combined with AND condition."""
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE p.city = 'Oslo' AND (p)-[:KNOWS]->(:Person)
+            RETURN p.name
+        """)
+
+        assert len(result) == 1
+        assert result[0]['p.name'] == 'Alice'
+
+    def test_inline_pattern_combined_with_or(self, social_graph):
+        """Inline pattern combined with OR condition."""
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE (p)-[:KNOWS]->(:Person) OR p.city = 'Stavanger'
+            RETURN p.name
+            ORDER BY p.name
+        """)
+
+        names = [row['p.name'] for row in result]
+        assert names == ['Alice', 'Bob', 'Diana']
+
+    def test_inline_pattern_no_match(self, social_graph):
+        """Inline pattern that matches nothing."""
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE (p)-[:WORKS_AT]->(:Company)
+            RETURN p.name
+        """)
+
+        assert len(result) == 0
+
+    def test_not_inline_pattern_with_and(self, social_graph):
+        """NOT pattern combined with AND."""
+        result = social_graph.cypher("""
+            MATCH (p:Person)
+            WHERE NOT (p)-[:KNOWS]->(:Person) AND NOT (p)-[:PURCHASED]->(:Product)
+            RETURN p.name
+            ORDER BY p.name
+        """)
+
+        names = [row['p.name'] for row in result]
+        assert names == ['Charlie', 'Diana']

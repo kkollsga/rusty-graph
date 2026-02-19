@@ -176,14 +176,26 @@ def _build_contains_edges(files: list[FileInfo]) -> list[dict]:
     return edges
 
 
+def _infer_lang_group(qualified_name: str) -> str:
+    """Infer language group from qualified name separator convention."""
+    if "::" in qualified_name:
+        return "rust_cpp"
+    elif "/" in qualified_name:
+        return "go_ts_js"
+    return "python_java"
+
+
 def _build_call_edges(all_functions: list[FunctionInfo],
                       max_targets: int = 5,
                       excluded_names: frozenset[str] = frozenset()) -> pd.DataFrame:
-    """Resolve function calls by name matching with optional receiver hints.
+    """Resolve function calls using tiered scope-aware name matching.
 
-    Calls can be bare names ("process") or qualified ("Receiver.method").
-    Qualified calls prefer targets whose owner matches the receiver hint,
-    falling back to bare-name matching when no hint match is found.
+    Resolution priority (first match wins):
+      1. Receiver hint — "Receiver.method" narrows to targets whose owner matches
+      2. Same owner — caller and target share the same qualified_name prefix
+      3. Same file — caller and target are defined in the same source file
+      4. Same language — caller and target use the same separator convention
+      5. Global fallback — all targets with matching bare name
 
     Names in excluded_names are skipped (common stdlib methods).
     Names with more than max_targets definitions are skipped as too ambiguous.
@@ -195,11 +207,15 @@ def _build_call_edges(all_functions: list[FunctionInfo],
     # Map qualified name -> owner short name for receiver-aware matching.
     # e.g. "crate::server::Server::start" -> "Server"
     qname_to_owner: dict[str, str] = {}
+    # Map qualified name -> owner prefix for same-owner matching.
+    # e.g. "crate::server::Server::start" -> "crate::server::Server"
+    qname_to_prefix: dict[str, str] = {}
     for fn in all_functions:
         qn = fn.qualified_name
         for sep in ("::", ".", "/"):
             if sep in qn:
                 owner_path = qn.rsplit(sep, 1)[0]
+                qname_to_prefix[qn] = owner_path
                 for sep2 in ("::", ".", "/"):
                     if sep2 in owner_path:
                         qname_to_owner[qn] = owner_path.rsplit(sep2, 1)[-1]
@@ -207,6 +223,11 @@ def _build_call_edges(all_functions: list[FunctionInfo],
                 else:
                     qname_to_owner[qn] = owner_path
                 break
+
+    # Map qualified name -> file path for same-file matching.
+    qname_to_file: dict[str, str] = {
+        fn.qualified_name: fn.file_path for fn in all_functions
+    }
 
     # Accumulate call-site line numbers per (caller, callee) pair
     seen: dict[tuple[str, str], list[int]] = {}
@@ -227,12 +248,37 @@ def _build_call_edges(all_functions: list[FunctionInfo],
 
             targets = name_lookup[method_name]
 
-            # If receiver hint available, prefer targets whose owner matches
+            # Tier 0: Receiver hint — "Receiver.method" narrows by owner
             if receiver_hint:
                 filtered = [t for t in targets
                             if qname_to_owner.get(t) == receiver_hint]
                 if filtered:
                     targets = filtered
+
+            # Tier 1: Same owner — caller and target share qualified prefix
+            if len(targets) > 1:
+                caller_prefix = qname_to_prefix.get(fn.qualified_name, "")
+                if caller_prefix:
+                    same_owner = [t for t in targets
+                                  if qname_to_prefix.get(t, "") == caller_prefix]
+                    if same_owner:
+                        targets = same_owner
+
+            # Tier 2: Same file
+            if len(targets) > 1:
+                caller_file = fn.file_path
+                same_file = [t for t in targets
+                             if qname_to_file.get(t) == caller_file]
+                if same_file:
+                    targets = same_file
+
+            # Tier 3: Same language (infer from separator convention)
+            if len(targets) > 1:
+                caller_lang = _infer_lang_group(fn.qualified_name)
+                same_lang = [t for t in targets
+                             if _infer_lang_group(t) == caller_lang]
+                if same_lang:
+                    targets = same_lang
 
             if len(targets) > max_targets:
                 continue
