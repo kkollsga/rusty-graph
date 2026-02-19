@@ -1495,6 +1495,7 @@ class KnowledgeGraph:
         self,
         weight_property: Optional[str] = None,
         resolution: Optional[float] = None,
+        connection_types: Optional[list[str]] = None,
         timeout_ms: Optional[int] = None,
     ) -> dict[str, Any]:
         """Detect communities using the Louvain algorithm.
@@ -1502,6 +1503,7 @@ class KnowledgeGraph:
         Args:
             weight_property: Edge property to use as weight. Default all edges weight ``1.0``.
             resolution: Resolution parameter (higher = more communities). Default ``1.0``.
+            connection_types: Only consider edges of these types. Default all edge types.
             timeout_ms: Abort after this many milliseconds, returning partial results.
 
         Returns:
@@ -1513,12 +1515,14 @@ class KnowledgeGraph:
     def label_propagation(
         self,
         max_iterations: Optional[int] = None,
+        connection_types: Optional[list[str]] = None,
         timeout_ms: Optional[int] = None,
     ) -> dict[str, Any]:
         """Detect communities using label propagation.
 
         Args:
             max_iterations: Maximum iterations. Default ``100``.
+            connection_types: Only consider edges of these types. Default all edge types.
             timeout_ms: Abort after this many milliseconds, returning partial results.
 
         Returns:

@@ -1200,6 +1200,7 @@ pub fn louvain_communities(
     graph: &DirGraph,
     weight_property: Option<&str>,
     resolution: f64,
+    connection_types: Option<&[String]>,
     deadline: Option<Instant>,
 ) -> CommunityResult {
     let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
@@ -1225,6 +1226,11 @@ pub fn louvain_communities(
     let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
     let mut total_weight = 0.0f64;
     for edge in graph.graph.edge_references() {
+        if let Some(types) = &connection_types {
+            if !types.iter().any(|t| t == &edge.weight().connection_type) {
+                continue;
+            }
+        }
         let w = edge_weight(graph, edge.id(), weight_property);
         let src_i = node_to_idx[edge.source().index()];
         let tgt_i = node_to_idx[edge.target().index()];
@@ -1391,6 +1397,7 @@ pub fn louvain_communities(
 pub fn label_propagation(
     graph: &DirGraph,
     max_iterations: usize,
+    connection_types: Option<&[String]>,
     deadline: Option<Instant>,
 ) -> CommunityResult {
     let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
@@ -1414,6 +1421,11 @@ pub fn label_propagation(
     // Pre-build undirected adjacency list (both directions)
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for edge in graph.graph.edge_references() {
+        if let Some(types) = &connection_types {
+            if !types.iter().any(|t| t == &edge.weight().connection_type) {
+                continue;
+            }
+        }
         let src_i = node_to_idx[edge.source().index()];
         let tgt_i = node_to_idx[edge.target().index()];
         adj[src_i].push(tgt_i);

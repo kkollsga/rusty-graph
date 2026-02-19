@@ -897,12 +897,13 @@ impl KnowledgeGraph {
     /// Returns:
     ///     dict with 'communities' (dict mapping community_id -> list of node dicts),
     ///     'modularity' (float), and 'num_communities' (int)
-    #[pyo3(signature = (weight_property=None, resolution=None, timeout_ms=None))]
+    #[pyo3(signature = (weight_property=None, resolution=None, connection_types=None, timeout_ms=None))]
     fn louvain_communities(
         &self,
         py: Python<'_>,
         weight_property: Option<String>,
         resolution: Option<f64>,
+        connection_types: Option<Vec<String>>,
         timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         let res = resolution.unwrap_or(1.0);
@@ -912,6 +913,7 @@ impl KnowledgeGraph {
             &self.inner,
             weight_property.as_deref(),
             res,
+            connection_types.as_deref(),
             deadline,
         );
         community_results_to_py(py, &self.inner, result)
@@ -927,17 +929,23 @@ impl KnowledgeGraph {
     /// Returns:
     ///     dict with 'communities' (dict mapping community_id -> list of node dicts),
     ///     'modularity' (float), and 'num_communities' (int)
-    #[pyo3(signature = (max_iterations=None, timeout_ms=None))]
+    #[pyo3(signature = (max_iterations=None, connection_types=None, timeout_ms=None))]
     fn label_propagation(
         &self,
         py: Python<'_>,
         max_iterations: Option<usize>,
+        connection_types: Option<Vec<String>>,
         timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         let max_iter = max_iterations.unwrap_or(100);
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
-        let result = graph_algorithms::label_propagation(&self.inner, max_iter, deadline);
+        let result = graph_algorithms::label_propagation(
+            &self.inner,
+            max_iter,
+            connection_types.as_deref(),
+            deadline,
+        );
         community_results_to_py(py, &self.inner, result)
     }
 

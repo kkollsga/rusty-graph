@@ -421,7 +421,7 @@ const CYPHER_REF_BASE_RO: &str = r#"  <cypher_ref mode="read-only">
 
 /// Static XML: Cypher mutations and unsupported features (read-write mode only).
 const CYPHER_REF_MUTATIONS: &str = r#"    <mutations>CREATE (n:Label {props}), CREATE (a)-[:TYPE]-&gt;(b), SET n.prop = expr, DELETE, DETACH DELETE, REMOVE n.prop, MERGE...ON CREATE SET...ON MATCH SET</mutations>
-    <not_supported>FOREACH, subqueries, SET n:Label, REMOVE n:Label, multi-label</not_supported>
+    <not_supported>FOREACH, subqueries, SET n:Label, REMOVE n:Label, multi-label, list comprehension patterns</not_supported>
 "#;
 
 /// Minimal XML escaping for attribute values.
@@ -448,8 +448,8 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     let mut xml = String::with_capacity(4096);
 
     xml.push_str(&format!(
-        "<kglite nodes=\"{}\" edges=\"{}\">\n",
-        overview.node_count, overview.edge_count
+        "<kglite version=\"{}\" nodes=\"{}\" edges=\"{}\">\n",
+        graph.save_metadata.library_version, overview.node_count, overview.edge_count
     ));
 
     // Quick start — actionable tips at the very top
@@ -650,7 +650,7 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     if graph.read_only {
         xml.push_str(
             "    <not_supported>FOREACH, subqueries, SET n:Label, REMOVE n:Label, multi-label, \
-             CREATE, SET, DELETE, REMOVE, MERGE (read-only mode)</not_supported>\n",
+             list comprehension patterns, CREATE, SET, DELETE, REMOVE, MERGE (read-only mode)</not_supported>\n",
         );
     } else {
         xml.push_str(CYPHER_REF_MUTATIONS);
@@ -662,8 +662,8 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     xml.push_str("      <proc name=\"betweenness\" params=\"normalized(true), sample_size, connection_types\" yields=\"node, score\">Bridge nodes on shortest paths.</proc>\n");
     xml.push_str("      <proc name=\"degree\" params=\"normalized(true), connection_types\" yields=\"node, score\">Connection count per node.</proc>\n");
     xml.push_str("      <proc name=\"closeness\" params=\"normalized(true), connection_types\" yields=\"node, score\">Proximity to all other nodes.</proc>\n");
-    xml.push_str("      <proc name=\"louvain\" params=\"resolution(1.0), weight_property\" yields=\"node, community\">Community detection via modularity.</proc>\n");
-    xml.push_str("      <proc name=\"label_propagation\" params=\"max_iterations(100)\" yields=\"node, community\">Community detection via label spread.</proc>\n");
+    xml.push_str("      <proc name=\"louvain\" params=\"resolution(1.0), weight_property, connection_types\" yields=\"node, community\">Community detection via modularity.</proc>\n");
+    xml.push_str("      <proc name=\"label_propagation\" params=\"max_iterations(100), connection_types\" yields=\"node, community\">Community detection via label spread.</proc>\n");
     xml.push_str("      <proc name=\"connected_components\" params=\"\" yields=\"node, component\">Weakly connected component membership.</proc>\n");
     xml.push_str("    </procedures>\n");
 
