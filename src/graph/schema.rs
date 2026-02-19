@@ -449,6 +449,10 @@ pub struct DirGraph {
     /// Persisted as a separate section in v2 .kgl files.
     #[serde(skip)]
     pub(crate) embeddings: HashMap<(String, String), EmbeddingStore>,
+    /// If true, Cypher mutations (CREATE, SET, DELETE, REMOVE, MERGE) are rejected
+    /// and agent_describe() omits mutation documentation.
+    #[serde(skip)]
+    pub(crate) read_only: bool,
 }
 
 fn default_auto_vacuum_threshold() -> Option<f64> {
@@ -477,6 +481,7 @@ impl DirGraph {
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
             embeddings: HashMap::new(),
+            read_only: false,
         }
     }
 
@@ -503,6 +508,7 @@ impl DirGraph {
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
             embeddings: HashMap::new(),
+            read_only: false,
         }
     }
 

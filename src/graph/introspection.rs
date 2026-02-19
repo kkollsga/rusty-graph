@@ -390,7 +390,7 @@ const API_BASE: &str = r#"  <api>
     <method sig="save(path) / load(path)">Persist and reload the graph.</method>
 "#;
 
-/// Static XML: Cypher reference — clauses through expressions (always present).
+/// Static XML: Cypher reference — clauses through expressions (read-write mode).
 const CYPHER_REF_BASE: &str = r#"  <cypher_ref>
     <clauses>MATCH, OPTIONAL MATCH, WHERE, RETURN, WITH, ORDER BY, SKIP, LIMIT, UNWIND, UNION, UNION ALL, CREATE, SET, DELETE, DETACH DELETE, REMOVE, MERGE, CALL...YIELD, EXPLAIN</clauses>
     <patterns>(n:Type), (n:Type {key: val}), (n {key: val}), (n), -[:REL]-&gt;, &lt;-[:REL]-, -[:REL]-, -[:REL*1..3]-&gt;, p = shortestPath(...)</patterns>
@@ -400,7 +400,17 @@ const CYPHER_REF_BASE: &str = r#"  <cypher_ref>
     <expressions>CASE WHEN...THEN...ELSE...END, $param, [x IN list WHERE ... | expr]</expressions>
 "#;
 
-/// Static XML: Cypher mutations and unsupported features (always present).
+/// Static XML: Cypher reference — clauses through expressions (read-only mode).
+const CYPHER_REF_BASE_RO: &str = r#"  <cypher_ref mode="read-only">
+    <clauses>MATCH, OPTIONAL MATCH, WHERE, RETURN, WITH, ORDER BY, SKIP, LIMIT, UNWIND, UNION, UNION ALL, CALL...YIELD, EXPLAIN</clauses>
+    <patterns>(n:Type), (n:Type {key: val}), (n {key: val}), (n), -[:REL]-&gt;, &lt;-[:REL]-, -[:REL]-, -[:REL*1..3]-&gt;, p = shortestPath(...)</patterns>
+    <where>=, &lt;&gt;, &lt;, &gt;, &lt;=, &gt;=, =~ (regex), AND, OR, NOT, IS NULL, IS NOT NULL, IN [...], CONTAINS, STARTS WITH, ENDS WITH, EXISTS { pattern }, EXISTS(( pattern ))</where>
+    <return>n.prop, r.prop, AS alias, DISTINCT, arithmetic (+, -, *, /), map projections n {.prop1, .prop2}</return>
+    <aggregation>count(*), count(expr), sum, avg, min, max, collect, std</aggregation>
+    <expressions>CASE WHEN...THEN...ELSE...END, $param, [x IN list WHERE ... | expr]</expressions>
+"#;
+
+/// Static XML: Cypher mutations and unsupported features (read-write mode only).
 const CYPHER_REF_MUTATIONS: &str = r#"    <mutations>CREATE (n:Label {props}), CREATE (a)-[:TYPE]-&gt;(b), SET n.prop = expr, DELETE, DETACH DELETE, REMOVE n.prop, MERGE...ON CREATE SET...ON MATCH SET</mutations>
     <not_supported>FOREACH, subqueries, SET n:Label, REMOVE n:Label, multi-label</not_supported>
 "#;
@@ -584,8 +594,12 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     }
     xml.push_str("  </api>\n");
 
-    // Cypher reference
-    xml.push_str(CYPHER_REF_BASE);
+    // Cypher reference (read-only mode omits mutation clauses)
+    if graph.read_only {
+        xml.push_str(CYPHER_REF_BASE_RO);
+    } else {
+        xml.push_str(CYPHER_REF_BASE);
+    }
 
     // Functions list — conditionally include spatial and embedding functions
     let mut functions = String::from(
@@ -603,7 +617,14 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     }
     xml.push_str(&format!("    <functions>{}</functions>\n", functions));
 
-    xml.push_str(CYPHER_REF_MUTATIONS);
+    if graph.read_only {
+        xml.push_str(
+            "    <not_supported>FOREACH, subqueries, SET n:Label, REMOVE n:Label, multi-label, \
+             CREATE, SET, DELETE, REMOVE, MERGE (read-only mode)</not_supported>\n",
+        );
+    } else {
+        xml.push_str(CYPHER_REF_MUTATIONS);
+    }
 
     // CALL procedures
     xml.push_str("    <procedures hint=\"CALL name({params}) YIELD columns — then use WHERE/RETURN/ORDER BY/LIMIT as usual\">\n");

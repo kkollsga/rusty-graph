@@ -715,6 +715,27 @@ class KnowledgeGraph:
         """
         ...
 
+    def read_only(self, enabled: bool | None = None) -> bool:
+        """Set or query read-only mode for the Cypher layer.
+
+        When enabled, all Cypher mutation queries (CREATE, SET, DELETE, REMOVE,
+        MERGE) are rejected, and ``agent_describe()`` omits mutation docs.
+
+        Args:
+            enabled: If ``True``, enable read-only mode. If ``False``, disable.
+                If omitted, return the current state without changing it.
+
+        Returns:
+            The current read-only state (after applying the change, if any).
+
+        Example::
+
+            graph.read_only(True)   # lock the graph
+            graph.read_only()       # -> True
+            graph.read_only(False)  # unlock
+        """
+        ...
+
     def graph_info(self) -> dict[str, Any]:
         """Get diagnostic information about graph storage health.
 

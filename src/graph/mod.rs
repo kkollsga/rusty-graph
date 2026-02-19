@@ -2360,6 +2360,34 @@ impl KnowledgeGraph {
         Ok(())
     }
 
+    /// Set or query read-only mode for the Cypher layer.
+    ///
+    /// When enabled, all Cypher mutation queries (CREATE, SET, DELETE, REMOVE,
+    /// MERGE) are rejected with an error, and `agent_describe()` omits mutation
+    /// documentation.  Read-only queries (MATCH, RETURN, CALL, etc.) are
+    /// unaffected.
+    ///
+    /// Args:
+    ///     enabled: If True, enable read-only mode. If False, disable it.
+    ///              If omitted, return the current state without changing it.
+    ///
+    /// Returns:
+    ///     The current read-only state (after applying the change, if any).
+    ///
+    /// Example::
+    ///
+    ///     graph.read_only(True)   # lock the graph
+    ///     graph.read_only()       # -> True
+    ///     graph.read_only(False)  # unlock
+    #[pyo3(signature = (enabled=None))]
+    fn read_only(&mut self, enabled: Option<bool>) -> bool {
+        if let Some(v) = enabled {
+            let graph = get_graph_mut(&mut self.inner);
+            graph.read_only = v;
+        }
+        self.inner.read_only
+    }
+
     /// Returns a dict of {node_type: count} using the type index (O(type_count)).
     fn node_type_counts(&self) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {
@@ -3763,6 +3791,16 @@ impl KnowledgeGraph {
         }
 
         if cypher::is_mutation_query(&parsed) {
+            // Read-only guard: reject mutations when read_only is enabled
+            {
+                let this = slf.borrow();
+                if this.inner.read_only {
+                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "Graph is in read-only mode — CREATE, SET, DELETE, REMOVE, and MERGE \
+                         are disabled. Use kg.read_only(False) to re-enable mutations.",
+                    ));
+                }
+            }
             // Mutation path: needs exclusive borrow
             let mut this = slf.borrow_mut();
             let graph = get_graph_mut(&mut this.inner);
