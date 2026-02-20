@@ -3085,6 +3085,90 @@ impl<'a> CypherExecutor<'a> {
                 }
                 _ => Err(format!("Unknown aggregate function: {}", name)),
             },
+            // Wrapper expressions that may contain aggregates — recurse before applying
+            Expression::ListSlice {
+                expr: inner,
+                start,
+                end,
+            } => {
+                let list_val = self.evaluate_aggregate_with_rows(inner, rows)?;
+                let items = parse_list_value(&list_val);
+                let len = items.len() as i64;
+                let dummy = ResultRow::new();
+                let row = rows.first().copied().unwrap_or(&dummy);
+
+                let s = if let Some(se) = start {
+                    match self.evaluate_expression(se, row)? {
+                        Value::Int64(i) => (if i < 0 { len + i } else { i }).clamp(0, len) as usize,
+                        Value::Float64(f) => {
+                            let i = f as i64;
+                            (if i < 0 { len + i } else { i }).clamp(0, len) as usize
+                        }
+                        v => return Err(format!("Slice start must be integer, got {:?}", v)),
+                    }
+                } else {
+                    0
+                };
+                let e = if let Some(ee) = end {
+                    match self.evaluate_expression(ee, row)? {
+                        Value::Int64(i) => (if i < 0 { len + i } else { i }).clamp(0, len) as usize,
+                        Value::Float64(f) => {
+                            let i = f as i64;
+                            (if i < 0 { len + i } else { i }).clamp(0, len) as usize
+                        }
+                        v => return Err(format!("Slice end must be integer, got {:?}", v)),
+                    }
+                } else {
+                    len as usize
+                };
+
+                if s >= e {
+                    Ok(Value::String("[]".to_string()))
+                } else {
+                    let sliced = &items[s..e];
+                    let formatted: Vec<String> = sliced.iter().map(format_value_json).collect();
+                    Ok(Value::String(format!("[{}]", formatted.join(", "))))
+                }
+            }
+            Expression::IndexAccess { expr: inner, index } => {
+                let list_val = self.evaluate_aggregate_with_rows(inner, rows)?;
+                let items = parse_list_value(&list_val);
+                let dummy = ResultRow::new();
+                let row = rows.first().copied().unwrap_or(&dummy);
+                let idx_val = self.evaluate_expression(index, row)?;
+                match idx_val {
+                    Value::Int64(idx) => {
+                        let len = items.len() as i64;
+                        let actual = if idx < 0 { len + idx } else { idx };
+                        if actual >= 0 && (actual as usize) < items.len() {
+                            Ok(items[actual as usize].clone())
+                        } else {
+                            Ok(Value::Null)
+                        }
+                    }
+                    _ => Ok(Value::Null),
+                }
+            }
+            Expression::Add(left, right) => {
+                let l = self.evaluate_aggregate_with_rows(left, rows)?;
+                let r = self.evaluate_aggregate_with_rows(right, rows)?;
+                Ok(value_operations::arithmetic_add(&l, &r))
+            }
+            Expression::Subtract(left, right) => {
+                let l = self.evaluate_aggregate_with_rows(left, rows)?;
+                let r = self.evaluate_aggregate_with_rows(right, rows)?;
+                Ok(value_operations::arithmetic_sub(&l, &r))
+            }
+            Expression::Multiply(left, right) => {
+                let l = self.evaluate_aggregate_with_rows(left, rows)?;
+                let r = self.evaluate_aggregate_with_rows(right, rows)?;
+                Ok(value_operations::arithmetic_mul(&l, &r))
+            }
+            Expression::Divide(left, right) => {
+                let l = self.evaluate_aggregate_with_rows(left, rows)?;
+                let r = self.evaluate_aggregate_with_rows(right, rows)?;
+                Ok(value_operations::arithmetic_div(&l, &r))
+            }
             // Non-aggregate expression in an aggregation context - evaluate with first row
             _ => {
                 if let Some(row) = rows.first() {
@@ -6748,5 +6832,67 @@ mod tests {
         let executor = CypherExecutor::with_params(&graph, &no_params, None);
         let result = executor.execute(&q).unwrap();
         assert_eq!(result.rows[0].get(0), Some(&Value::Int64(3)));
+    }
+
+    #[test]
+    fn test_aggregate_with_slice() {
+        // collect(...)[0..N] in RETURN with aggregation
+        let mut graph = DirGraph::new();
+        let setup = super::super::parser::parse_cypher(
+            "CREATE (a:Item {cat: 'X', name: 'A'}), (b:Item {cat: 'X', name: 'B'}), \
+             (c:Item {cat: 'X', name: 'C'}), (d:Item {cat: 'Y', name: 'D'})",
+        )
+        .unwrap();
+        execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+
+        let q = super::super::parser::parse_cypher(
+            "MATCH (n:Item) \
+             RETURN n.cat AS cat, count(n) AS cnt, collect(n.name)[..2] AS sample \
+             ORDER BY cat",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+
+        assert_eq!(result.rows.len(), 2);
+        // Group X has 3 items, sliced to 2
+        let x_row = &result.rows[0];
+        assert_eq!(x_row.get(0), Some(&Value::String("X".into())));
+        assert_eq!(x_row.get(1), Some(&Value::Int64(3)));
+        let sample = parse_list_value(x_row.get(2).unwrap());
+        assert_eq!(sample.len(), 2);
+
+        // Group Y has 1 item, sliced to at most 2
+        let y_row = &result.rows[1];
+        assert_eq!(y_row.get(0), Some(&Value::String("Y".into())));
+        assert_eq!(y_row.get(1), Some(&Value::Int64(1)));
+        let sample_y = parse_list_value(y_row.get(2).unwrap());
+        assert_eq!(sample_y.len(), 1);
+    }
+
+    #[test]
+    fn test_aggregate_arithmetic() {
+        // count(*) + 1 in RETURN with aggregation
+        let mut graph = DirGraph::new();
+        let setup = super::super::parser::parse_cypher(
+            "CREATE (a:Item {name: 'A'}), (b:Item {name: 'B'}), (c:Item {name: 'C'})",
+        )
+        .unwrap();
+        execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+
+        let q =
+            super::super::parser::parse_cypher("MATCH (n:Item) RETURN count(n) + 1 AS cnt_plus")
+                .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        // count(n)=3, 3+1=4.0 (float because add_values promotes)
+        let val = result.rows[0].get(0).unwrap();
+        match val {
+            Value::Int64(i) => assert_eq!(*i, 4),
+            Value::Float64(f) => assert!((f - 4.0).abs() < 0.001),
+            _ => panic!("Expected numeric, got {:?}", val),
+        }
     }
 }
