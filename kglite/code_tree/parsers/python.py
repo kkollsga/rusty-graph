@@ -46,7 +46,7 @@ class PythonParser(LanguageParser):
 
     @property
     def file_extensions(self) -> list[str]:
-        return [".py"]
+        return [".py", ".pyi"]
 
     @property
     def noise_names(self) -> frozenset[str]:

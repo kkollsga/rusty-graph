@@ -6,6 +6,7 @@ from .base import LanguageParser
 EXTENSION_MAP: dict[str, str] = {
     ".rs": "rust",
     ".py": "python",
+    ".pyi": "python",
     ".ts": "typescript",
     ".tsx": "typescript",
     ".js": "javascript",
