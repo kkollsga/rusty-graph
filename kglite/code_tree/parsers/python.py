@@ -175,12 +175,21 @@ class PythonParser(LanguageParser):
                 break
         return False
 
+    # Node types that create nested function scopes — calls inside these
+    # belong to the nested function, not the enclosing one.
+    _NESTED_SCOPES = frozenset({
+        "function_definition", "lambda", "decorated_definition",
+    })
+
     def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
-        """Recursively extract function/method names called within a block.
+        """Extract function/method names called directly within a block.
 
         Emits qualified calls where possible: "receiver.method" for
         attribute access calls, bare names for plain calls and self/cls.
         Returns list of (call_name, line_number) tuples.
+
+        Scope-aware: does not descend into nested functions, lambdas, or
+        decorated definitions — their calls belong to them, not the parent.
         """
         calls: list[tuple[str, int]] = []
 
@@ -206,7 +215,8 @@ class PythonParser(LanguageParser):
                         elif parts:
                             calls.append((parts[-1], line))
             for child in node.children:
-                walk(child)
+                if child.type not in self._NESTED_SCOPES:
+                    walk(child)
 
         walk(body_node)
         return calls

@@ -586,7 +586,7 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
         files_df = pd.DataFrame([{
             "path": f.path, "filename": f.filename, "loc": f.loc,
             "language": f.language,
-            "is_test": True if f.is_test else None,
+            "is_test": f.is_test,
             "annotations": json.dumps(f.annotations) if f.annotations else None,
         } for f in result.files])
         graph.add_nodes(data=files_df, node_type="File",
@@ -602,19 +602,19 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
             "qualified_name": f.qualified_name,
             "name": f.name,
             "visibility": f.visibility,
-            "is_async": True if f.is_async else None,
-            "is_method": True if f.is_method else None,
+            "is_async": f.is_async,
+            "is_method": f.is_method,
             "signature": f.signature,
             "file_path": f.file_path,
             "line_number": f.line_number,
             "end_line": f.end_line,
             "docstring": f.docstring,
             "return_type": f.return_type,
-            "decorators": ", ".join(f.decorators) if f.decorators else None,
+            "decorators": json.dumps(f.decorators) if f.decorators else None,
             "parameters": extract_parameters_from_signature(f.signature),
             "type_parameters": f.type_parameters,
             **{k: v for k, v in f.metadata.items()
-               if not isinstance(v, (list, dict)) and v is not False},
+               if not isinstance(v, (list, dict))},
         } for f in result.functions])
         graph.add_nodes(data=funcs_df, node_type="Function",
                         unique_id_field="qualified_name", node_title_field="name")
@@ -633,8 +633,7 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
                 "type_parameters": c.type_parameters,
                 "fields": json.dumps(attrs_by_owner[c.qualified_name])
                           if c.qualified_name in attrs_by_owner else None,
-                **{k: v for k, v in c.metadata.items()
-                   if v is not False},
+                **{k: v for k, v in c.metadata.items()},
             } for c in subset])
             graph.add_nodes(data=df, node_type=node_type,
                             unique_id_field="qualified_name",

@@ -68,9 +68,13 @@ class PyProjectReader(ManifestReader):
         name = project.get("name", project_root.name)
         build_backend = build_sys.get("build-backend", "")
 
+        version = project.get("version")
+        if version is None and "version" in project.get("dynamic", []):
+            version = "dynamic"
+
         info = ProjectInfo(
             name=name,
-            version=project.get("version"),
+            version=version,
             description=project.get("description"),
             languages=["python"],
             authors=_extract_authors(project.get("authors", [])),

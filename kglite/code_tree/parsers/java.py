@@ -138,12 +138,21 @@ class JavaParser(LanguageParser):
                 return node_text(child, source)
         return None
 
+    # Node types that create nested function scopes — calls inside these
+    # belong to the nested method/lambda, not the enclosing one.
+    _NESTED_SCOPES = frozenset({
+        "method_declaration", "constructor_declaration", "lambda_expression",
+    })
+
     def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
-        """Recursively extract function/method names called within a block.
+        """Extract function/method names called directly within a block.
 
         Emits qualified calls where possible: "receiver.method" for
         method invocations on objects, bare names for this/super calls.
         Returns list of (call_name, line_number) tuples.
+
+        Scope-aware: does not descend into nested methods or lambdas —
+        their calls belong to them, not the parent.
         """
         calls: list[tuple[str, int]] = []
 
@@ -168,7 +177,8 @@ class JavaParser(LanguageParser):
                 if type_node:
                     calls.append((node_text(type_node, source), line))
             for child in node.children:
-                walk(child)
+                if child.type not in self._NESTED_SCOPES:
+                    walk(child)
 
         walk(body_node)
         return calls

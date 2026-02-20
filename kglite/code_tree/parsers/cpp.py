@@ -127,10 +127,20 @@ class _BaseCCppParser(LanguageParser):
                     return True
         return False
 
+    # Node types that create nested function scopes — calls inside these
+    # belong to the nested function/lambda, not the enclosing one.
+    _NESTED_SCOPES = frozenset({"function_definition", "lambda_expression"})
+
     def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
-        """Emits qualified calls where possible: "Receiver.method" for
+        """Extract function/method names called directly within a block.
+
+        Emits qualified calls where possible: "Receiver.method" for
         field/member access and "Type.method" for scoped identifiers.
-        Returns list of (call_name, line_number) tuples."""
+        Returns list of (call_name, line_number) tuples.
+
+        Scope-aware: does not descend into nested functions or lambdas —
+        their calls belong to them, not the parent.
+        """
         calls: list[tuple[str, int]] = []
 
         def walk(node):
@@ -162,7 +172,8 @@ class _BaseCCppParser(LanguageParser):
                         elif parts:
                             calls.append((parts[-1], line))
             for child in node.children:
-                walk(child)
+                if child.type not in self._NESTED_SCOPES:
+                    walk(child)
 
         walk(body_node)
         return calls

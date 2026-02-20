@@ -191,12 +191,19 @@ class RustParser(LanguageParser):
                     return node_text(child, source)
         return None
 
+    # Node types that create nested function scopes — calls inside these
+    # belong to the nested function/closure, not the enclosing one.
+    _NESTED_SCOPES = frozenset({"function_item", "closure_expression"})
+
     def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
-        """Recursively extract function/method names called within a block.
+        """Extract function/method names called directly within a block.
 
         Emits qualified calls where possible: "Receiver.method" for
         field expressions and "Type.method" for scoped identifiers.
         Returns list of (call_name, line_number) tuples.
+
+        Scope-aware: does not descend into nested functions or closures —
+        their calls belong to them, not the parent.
 
         Receiver hints use the syntactic field name, not the resolved type.
         For example, ``self.inner.has_index()`` emits ``("inner.has_index", line)``
@@ -243,7 +250,8 @@ class RustParser(LanguageParser):
                         elif parts:
                             calls.append((parts[-1], line))
             for child in node.children:
-                walk(child)
+                if child.type not in self._NESTED_SCOPES:
+                    walk(child)
 
         walk(body_node)
         return calls

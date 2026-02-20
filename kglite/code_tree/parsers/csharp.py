@@ -148,10 +148,23 @@ class CSharpParser(LanguageParser):
                     return text
         return None
 
+    # Node types that create nested function scopes — calls inside these
+    # belong to the nested method/lambda, not the enclosing one.
+    _NESTED_SCOPES = frozenset({
+        "method_declaration", "constructor_declaration",
+        "lambda_expression", "local_function_statement",
+    })
+
     def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
-        """Emits qualified calls where possible: "receiver.Method" for
+        """Extract function/method names called directly within a block.
+
+        Emits qualified calls where possible: "receiver.Method" for
         member access calls, bare names for this/base calls.
-        Returns list of (call_name, line_number) tuples."""
+        Returns list of (call_name, line_number) tuples.
+
+        Scope-aware: does not descend into nested methods, lambdas, or
+        local functions — their calls belong to them, not the parent.
+        """
         calls: list[tuple[str, int]] = []
 
         def walk(node):
@@ -187,7 +200,8 @@ class CSharpParser(LanguageParser):
                         calls.append((node_text(child, source), line))
                         break
             for child in node.children:
-                walk(child)
+                if child.type not in self._NESTED_SCOPES:
+                    walk(child)
 
         walk(body_node)
         return calls

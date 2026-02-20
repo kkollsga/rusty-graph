@@ -102,12 +102,21 @@ class GoParser(LanguageParser):
         """Go doesn't have async keyword — always False."""
         return False
 
+    # Node types that create nested function scopes — calls inside these
+    # belong to the nested function/closure, not the enclosing one.
+    _NESTED_SCOPES = frozenset({
+        "function_declaration", "method_declaration", "func_literal",
+    })
+
     def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
-        """Recursively extract function/method names called within a block.
+        """Extract function/method names called directly within a block.
 
         Emits qualified calls where possible: "receiver.Method" for
         selector expressions, bare names for plain function calls.
         Returns list of (call_name, line_number) tuples.
+
+        Scope-aware: does not descend into nested functions or func literals —
+        their calls belong to them, not the parent.
         """
         calls: list[tuple[str, int]] = []
 
@@ -134,7 +143,8 @@ class GoParser(LanguageParser):
                                     calls.append((node_text(c, source), line))
                                     break
             for child in node.children:
-                walk(child)
+                if child.type not in self._NESTED_SCOPES:
+                    walk(child)
 
         walk(body_node)
         return calls
