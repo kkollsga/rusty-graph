@@ -3083,7 +3083,37 @@ impl<'a> CypherExecutor<'a> {
                         Ok(Value::Float64(variance.sqrt()))
                     }
                 }
-                _ => Err(format!("Unknown aggregate function: {}", name)),
+                // Non-aggregate function wrapping aggregate args (e.g. size(collect(...)))
+                // Evaluate args through aggregate path, then evaluate the function normally.
+                _ => {
+                    let dummy = ResultRow::new();
+                    let row = rows.first().copied().unwrap_or(&dummy);
+                    let mut resolved_args = Vec::with_capacity(args.len());
+                    for arg in args {
+                        if is_aggregate_expression(arg) {
+                            resolved_args.push(self.evaluate_aggregate_with_rows(arg, rows)?);
+                        } else {
+                            resolved_args.push(self.evaluate_expression(arg, row)?);
+                        }
+                    }
+                    // Build a synthetic row with the resolved values bound to placeholder keys
+                    let mut synth = ResultRow::new();
+                    let placeholder_exprs: Vec<Expression> = (0..resolved_args.len())
+                        .map(|i| {
+                            let key = format!("__agg_arg_{}", i);
+                            synth
+                                .projected
+                                .insert(key.clone(), resolved_args[i].clone());
+                            Expression::Variable(key)
+                        })
+                        .collect();
+                    let synth_call = Expression::FunctionCall {
+                        name: name.clone(),
+                        args: placeholder_exprs,
+                        distinct: *distinct,
+                    };
+                    self.evaluate_expression(&synth_call, &synth)
+                }
             },
             // Wrapper expressions that may contain aggregates — recurse before applying
             Expression::ListSlice {
@@ -4736,11 +4766,16 @@ fn try_match_merge_pattern(
 /// Check if an expression contains an aggregate function call
 pub fn is_aggregate_expression(expr: &Expression) -> bool {
     match expr {
-        Expression::FunctionCall { name, .. } => {
-            matches!(
-                name.to_lowercase().as_str(),
+        Expression::FunctionCall { name, args, .. } => {
+            let lower = name.to_lowercase();
+            if matches!(
+                lower.as_str(),
                 "count" | "sum" | "avg" | "mean" | "average" | "min" | "max" | "collect" | "std"
-            )
+            ) {
+                return true;
+            }
+            // Non-aggregate function wrapping aggregate args (e.g. size(collect(...)))
+            args.iter().any(is_aggregate_expression)
         }
         Expression::Add(l, r)
         | Expression::Subtract(l, r)
@@ -6894,5 +6929,51 @@ mod tests {
             Value::Float64(f) => assert!((f - 4.0).abs() < 0.001),
             _ => panic!("Expected numeric, got {:?}", val),
         }
+    }
+
+    #[test]
+    fn test_size_of_collect_in_return() {
+        // size(collect(...)) in RETURN — non-aggregate wrapping aggregate
+        let mut graph = DirGraph::new();
+        let setup = super::super::parser::parse_cypher(
+            "CREATE (a:Item {name: 'A'}), (b:Item {name: 'B'}), (c:Item {name: 'C'})",
+        )
+        .unwrap();
+        execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+
+        // No grouping — all rows aggregated
+        let q = super::super::parser::parse_cypher(
+            "MATCH (n:Item) RETURN size(collect(n.name)) AS cnt",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows[0].get(0), Some(&Value::Int64(3)));
+    }
+
+    #[test]
+    fn test_size_of_collect_grouped() {
+        // size(collect(...)) with grouping
+        let mut graph = DirGraph::new();
+        let setup = super::super::parser::parse_cypher(
+            "CREATE (a:Item {cat: 'X', name: 'A'}), (b:Item {cat: 'X', name: 'B'}), \
+             (c:Item {cat: 'X', name: 'C'}), (d:Item {cat: 'Y', name: 'D'})",
+        )
+        .unwrap();
+        execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+
+        let q = super::super::parser::parse_cypher(
+            "MATCH (n:Item) \
+             RETURN n.cat AS cat, size(collect(n.name)) AS cnt \
+             ORDER BY cat",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0].get(1), Some(&Value::Int64(3))); // X: 3
+        assert_eq!(result.rows[1].get(1), Some(&Value::Int64(1))); // Y: 1
     }
 }
