@@ -748,9 +748,17 @@ pub fn betweenness_centrality(
     let mut betweenness: Vec<f64> = vec![0.0; n];
 
     // Determine which nodes to use as sources
+    // Use stride-based sampling to ensure even coverage across the graph,
+    // avoiding bias from sequential selection (e.g. first k nodes being
+    // Module/Class containers with no outgoing edges of the filtered type).
     let source_indices: Vec<usize> = if let Some(k) = sample_size {
         let k = k.min(n);
-        (0..k).collect()
+        if k == n {
+            (0..n).collect()
+        } else {
+            let step = n as f64 / k as f64;
+            (0..k).map(|i| (i as f64 * step) as usize).collect()
+        }
     } else {
         (0..n).collect()
     };
@@ -1915,6 +1923,24 @@ mod tests {
             .unwrap()
             .score;
         assert!(middle_score > end_score);
+    }
+
+    #[test]
+    fn test_betweenness_centrality_with_sampling() {
+        let (graph, indices) = build_chain_graph();
+        // With sample_size, stride-based sampling should still find the middle node
+        let results = betweenness_centrality(&graph, false, Some(3), None, None);
+        assert_eq!(results.len(), 5);
+        // Middle node should still have a non-zero betweenness score
+        let middle_score = results
+            .iter()
+            .find(|r| r.node_idx == indices[2])
+            .unwrap()
+            .score;
+        assert!(
+            middle_score > 0.0,
+            "Middle node should have non-zero betweenness with sampling"
+        );
     }
 
     #[test]

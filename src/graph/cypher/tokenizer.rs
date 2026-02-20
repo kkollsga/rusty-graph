@@ -408,6 +408,58 @@ fn identifier_to_token(ident: String) -> CypherToken {
     }
 }
 
+/// Convert a keyword token back to its string form for use as an alias name.
+/// Returns None for non-keyword tokens (symbols, literals, etc.).
+pub fn token_to_keyword_name(token: &CypherToken) -> Option<String> {
+    let name = match token {
+        CypherToken::Match => "match",
+        CypherToken::Optional => "optional",
+        CypherToken::Where => "where",
+        CypherToken::Return => "return",
+        CypherToken::With => "with",
+        CypherToken::Order => "order",
+        CypherToken::By => "by",
+        CypherToken::As => "as",
+        CypherToken::And => "and",
+        CypherToken::Or => "or",
+        CypherToken::Not => "not",
+        CypherToken::In => "in",
+        CypherToken::Is => "is",
+        CypherToken::Null => "null",
+        CypherToken::Limit => "limit",
+        CypherToken::Skip => "skip",
+        CypherToken::Unwind => "unwind",
+        CypherToken::Union => "union",
+        CypherToken::All => "all",
+        CypherToken::Distinct => "distinct",
+        CypherToken::Create => "create",
+        CypherToken::Set => "set",
+        CypherToken::Delete => "delete",
+        CypherToken::Detach => "detach",
+        CypherToken::Merge => "merge",
+        CypherToken::Remove => "remove",
+        CypherToken::On => "on",
+        CypherToken::Asc => "asc",
+        CypherToken::Desc => "desc",
+        CypherToken::StartsWith => "starts",
+        CypherToken::EndsWith => "ends",
+        CypherToken::Contains => "contains",
+        CypherToken::Case => "case",
+        CypherToken::When => "when",
+        CypherToken::Then => "then",
+        CypherToken::Else => "else",
+        CypherToken::End => "end",
+        CypherToken::True => "true",
+        CypherToken::False => "false",
+        CypherToken::Exists => "exists",
+        CypherToken::Explain => "explain",
+        CypherToken::Call => "call",
+        CypherToken::Yield => "yield",
+        _ => return None,
+    };
+    Some(name.to_string())
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

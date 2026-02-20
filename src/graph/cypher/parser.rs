@@ -2,7 +2,7 @@
 // Cypher clause parser - delegates MATCH patterns to pattern_matching::parse_pattern()
 
 use super::ast::*;
-use super::tokenizer::CypherToken;
+use super::tokenizer::{token_to_keyword_name, CypherToken};
 use crate::datatypes::values::Value;
 use crate::graph::pattern_matching;
 
@@ -63,6 +63,17 @@ impl CypherParser {
     /// Check if current position matches a keyword
     fn check(&self, token: &CypherToken) -> bool {
         self.peek() == Some(token)
+    }
+
+    /// Consume the next token as an alias name (after AS).
+    /// Accepts identifiers and reserved keywords (e.g. `AS optional`, `AS type`).
+    fn try_consume_alias_name(&mut self) -> Result<String, String> {
+        match self.advance().cloned() {
+            Some(CypherToken::Identifier(name)) => Ok(name),
+            Some(ref token) => token_to_keyword_name(token)
+                .ok_or_else(|| format!("Expected alias name after AS, got {:?}", token)),
+            None => Err("Expected alias name after AS".to_string()),
+        }
     }
 
     /// Check if we're at a clause boundary (start of a new clause)
@@ -1157,10 +1168,7 @@ impl CypherParser {
 
         let alias = if self.check(&CypherToken::As) {
             self.advance();
-            match self.advance().cloned() {
-                Some(CypherToken::Identifier(name)) => Some(name),
-                _ => return Err("Expected alias name after AS".to_string()),
-            }
+            Some(self.try_consume_alias_name()?)
         } else {
             None
         };
@@ -1265,12 +1273,8 @@ impl CypherParser {
         self.expect(&CypherToken::Unwind)?;
         let expression = self.parse_expression()?;
         self.expect(&CypherToken::As)?;
-        match self.advance().cloned() {
-            Some(CypherToken::Identifier(alias)) => {
-                Ok(Clause::Unwind(UnwindClause { expression, alias }))
-            }
-            _ => Err("Expected alias after UNWIND ... AS".to_string()),
-        }
+        let alias = self.try_consume_alias_name()?;
+        Ok(Clause::Unwind(UnwindClause { expression, alias }))
     }
 
     fn parse_union_clause(&mut self) -> Result<Clause, String> {
@@ -1773,13 +1777,7 @@ impl CypherParser {
 
             let alias = if self.check(&CypherToken::As) {
                 self.advance();
-                match self.peek().cloned() {
-                    Some(CypherToken::Identifier(a)) => {
-                        self.advance();
-                        Some(a)
-                    }
-                    _ => return Err("Expected alias name after AS in YIELD".to_string()),
-                }
+                Some(self.try_consume_alias_name()?)
             } else {
                 None
             };
@@ -2437,6 +2435,50 @@ mod tests {
         assert_eq!(query.clauses.len(), 2);
         if let Clause::Merge(m) = &query.clauses[1] {
             assert_eq!(m.pattern.elements.len(), 3);
+        }
+    }
+
+    #[test]
+    fn test_reserved_word_as_alias() {
+        // Keywords should be valid alias names after AS
+        for keyword in &[
+            "optional", "match", "where", "return", "order", "limit", "type", "set", "all",
+            "distinct", "contains", "exists", "null", "true", "false", "in", "is", "not",
+        ] {
+            let query_str = format!("MATCH (n) RETURN n AS {}", keyword);
+            let query = parse_cypher(&query_str)
+                .unwrap_or_else(|e| panic!("Failed to parse 'RETURN n AS {}': {}", keyword, e));
+            if let Clause::Return(ret) = &query.clauses[1] {
+                assert_eq!(
+                    ret.items[0].alias.as_deref(),
+                    Some(*keyword),
+                    "Alias should be '{}' for keyword",
+                    keyword
+                );
+            } else {
+                panic!("Expected RETURN clause");
+            }
+        }
+    }
+
+    #[test]
+    fn test_reserved_word_as_unwind_alias() {
+        let query = parse_cypher("UNWIND [1,2] AS optional").unwrap();
+        if let Clause::Unwind(u) = &query.clauses[0] {
+            assert_eq!(u.alias, "optional");
+        } else {
+            panic!("Expected UNWIND clause");
+        }
+    }
+
+    #[test]
+    fn test_reserved_word_as_yield_alias() {
+        let query = parse_cypher("CALL pagerank() YIELD node AS optional, score AS limit").unwrap();
+        if let Clause::Call(c) = &query.clauses[0] {
+            assert_eq!(c.yield_items[0].alias.as_deref(), Some("optional"));
+            assert_eq!(c.yield_items[1].alias.as_deref(), Some("limit"));
+        } else {
+            panic!("Expected CALL clause");
         }
     }
 }
