@@ -787,16 +787,46 @@ impl CypherParser {
         self.parse_postfix(expr)
     }
 
-    /// Parse postfix operators: expr[index]
+    /// Parse postfix operators: expr[index] or expr[start..end]
     fn parse_postfix(&mut self, mut expr: Expression) -> Result<Expression, String> {
         while self.check(&CypherToken::LBracket) {
             self.advance(); // consume [
-            let index = self.parse_expression()?;
-            self.expect(&CypherToken::RBracket)?;
-            expr = Expression::IndexAccess {
-                expr: Box::new(expr),
-                index: Box::new(index),
-            };
+
+            if self.check(&CypherToken::DotDot) {
+                // [..end] — slice with no start
+                self.advance(); // consume ..
+                let end_expr = self.parse_expression()?;
+                self.expect(&CypherToken::RBracket)?;
+                expr = Expression::ListSlice {
+                    expr: Box::new(expr),
+                    start: None,
+                    end: Some(Box::new(end_expr)),
+                };
+            } else {
+                let first = self.parse_expression()?;
+                if self.check(&CypherToken::DotDot) {
+                    // [start..] or [start..end]
+                    self.advance(); // consume ..
+                    let end_expr = if self.check(&CypherToken::RBracket) {
+                        None
+                    } else {
+                        Some(Box::new(self.parse_expression()?))
+                    };
+                    self.expect(&CypherToken::RBracket)?;
+                    expr = Expression::ListSlice {
+                        expr: Box::new(expr),
+                        start: Some(Box::new(first)),
+                        end: end_expr,
+                    };
+                } else {
+                    // [index] — plain index access
+                    self.expect(&CypherToken::RBracket)?;
+                    expr = Expression::IndexAccess {
+                        expr: Box::new(expr),
+                        index: Box::new(first),
+                    };
+                }
+            }
         }
         Ok(expr)
     }

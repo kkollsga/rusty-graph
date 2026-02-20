@@ -406,7 +406,7 @@ const CYPHER_REF_BASE: &str = r#"  <cypher_ref>
     <where>=, &lt;&gt;, &lt;, &gt;, &lt;=, &gt;=, =~ (regex), AND, OR, NOT, IS NULL, IS NOT NULL, IN [...], CONTAINS, STARTS WITH, ENDS WITH, EXISTS { pattern }, EXISTS(( pattern ))</where>
     <return>n.prop, r.prop, AS alias, DISTINCT, arithmetic (+, -, *, /), map projections n {.prop1, .prop2}</return>
     <aggregation>count(*), count(expr), sum, avg, min, max, collect, std</aggregation>
-    <expressions>CASE WHEN...THEN...ELSE...END, $param, [x IN list WHERE ... | expr]</expressions>
+    <expressions>CASE WHEN...THEN...ELSE...END, $param, [x IN list WHERE ... | expr], list[index], list[start..end]</expressions>
 "#;
 
 /// Static XML: Cypher reference — clauses through expressions (read-only mode).
@@ -416,7 +416,7 @@ const CYPHER_REF_BASE_RO: &str = r#"  <cypher_ref mode="read-only">
     <where>=, &lt;&gt;, &lt;, &gt;, &lt;=, &gt;=, =~ (regex), AND, OR, NOT, IS NULL, IS NOT NULL, IN [...], CONTAINS, STARTS WITH, ENDS WITH, EXISTS { pattern }, EXISTS(( pattern ))</where>
     <return>n.prop, r.prop, AS alias, DISTINCT, arithmetic (+, -, *, /), map projections n {.prop1, .prop2}</return>
     <aggregation>count(*), count(expr), sum, avg, min, max, collect, std</aggregation>
-    <expressions>CASE WHEN...THEN...ELSE...END, $param, [x IN list WHERE ... | expr]</expressions>
+    <expressions>CASE WHEN...THEN...ELSE...END, $param, [x IN list WHERE ... | expr], list[index], list[start..end]</expressions>
 "#;
 
 /// Static XML: Cypher mutations and unsupported features (read-write mode only).

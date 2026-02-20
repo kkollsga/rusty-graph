@@ -559,6 +559,7 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
 
         if project_info.dependencies:
             deps_df = pd.DataFrame([{
+                "dep_id": f"{d.name}::{d.group}" if d.group else d.name,
                 "name": d.name,
                 "version_spec": d.version_spec,
                 "is_dev": True if d.is_dev else None,
@@ -566,7 +567,7 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
                 "group": d.group,
             } for d in project_info.dependencies])
             graph.add_nodes(data=deps_df, node_type="Dependency",
-                            unique_id_field="name", node_title_field="name")
+                            unique_id_field="dep_id", node_title_field="name")
 
     # Pre-compute attribute lookup for embedding as JSON on parent nodes
     attrs_by_owner: dict[str, list[dict]] = defaultdict(list)
@@ -782,12 +783,12 @@ def _load_graph(result: ParseResult, modules, call_edges_df,
         if project_info.dependencies:
             dep_edges_df = pd.DataFrame([{
                 "project": project_info.name,
-                "dependency": d.name,
+                "dep_id": f"{d.name}::{d.group}" if d.group else d.name,
             } for d in project_info.dependencies])
             graph.add_connections(
                 data=dep_edges_df, connection_type="DEPENDS_ON",
                 source_type="Project", source_id_field="project",
-                target_type="Dependency", target_id_field="dependency",
+                target_type="Dependency", target_id_field="dep_id",
             )
         if result.files:
             has_source_df = pd.DataFrame([{

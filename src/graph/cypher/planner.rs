@@ -625,6 +625,12 @@ fn estimate_expression_cost(expr: &Expression) -> u32 {
         Expression::IndexAccess { expr, index } => {
             estimate_expression_cost(expr) + estimate_expression_cost(index) + 1
         }
+        Expression::ListSlice { expr, start, end } => {
+            estimate_expression_cost(expr)
+                + start.as_ref().map_or(0, |s| estimate_expression_cost(s))
+                + end.as_ref().map_or(0, |e| estimate_expression_cost(e))
+                + 1
+        }
         _ => 5, // ListComprehension, MapProjection
     }
 }
@@ -891,6 +897,16 @@ impl TextScoreCollector {
             Expression::IndexAccess { expr, index } => {
                 self.rewrite_expr(expr, params)?;
                 self.rewrite_expr(index, params)?;
+                Ok(())
+            }
+            Expression::ListSlice { expr, start, end } => {
+                self.rewrite_expr(expr, params)?;
+                if let Some(s) = start {
+                    self.rewrite_expr(s, params)?;
+                }
+                if let Some(e) = end {
+                    self.rewrite_expr(e, params)?;
+                }
                 Ok(())
             }
             Expression::ListComprehension {

@@ -184,6 +184,12 @@ pub enum Expression {
         expr: Box<Expression>,
         index: Box<Expression>,
     },
+    /// List slice: expr[start..end]
+    ListSlice {
+        expr: Box<Expression>,
+        start: Option<Box<Expression>>,
+        end: Option<Box<Expression>>,
+    },
     /// Map projection: n {.prop1, .prop2, alias: expr}
     MapProjection {
         variable: String,

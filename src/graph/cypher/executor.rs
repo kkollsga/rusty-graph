@@ -152,12 +152,15 @@ impl<'a> CypherExecutor<'a> {
         for (i, clause) in query.clauses.iter().enumerate() {
             self.check_deadline()?;
             // Seed first-clause WITH/UNWIND with one empty row so standalone
-            // expressions (e.g. `WITH [1,2,3] AS l`) can be evaluated.
+            // expressions (e.g. `WITH [1,2,3] AS l` or `RETURN 1+2`) can be evaluated.
             // Only for the very first clause — a WITH after an empty MATCH
             // must stay empty.
             if i == 0
                 && result_set.rows.is_empty()
-                && matches!(clause, Clause::With(_) | Clause::Unwind(_))
+                && matches!(
+                    clause,
+                    Clause::With(_) | Clause::Unwind(_) | Clause::Return(_)
+                )
             {
                 result_set.rows.push(ResultRow::new());
             }
@@ -1572,6 +1575,7 @@ impl<'a> CypherExecutor<'a> {
             Expression::Case { .. }
             | Expression::ListComprehension { .. }
             | Expression::IndexAccess { .. }
+            | Expression::ListSlice { .. }
             | Expression::MapProjection { .. } => false,
         }
     }
@@ -1625,6 +1629,17 @@ impl<'a> CypherExecutor<'a> {
             Expression::ListLiteral(items) => {
                 Expression::ListLiteral(items.iter().map(|i| self.fold_constants_expr(i)).collect())
             }
+            Expression::IndexAccess { expr, index } => Expression::IndexAccess {
+                expr: Box::new(self.fold_constants_expr(expr)),
+                index: Box::new(self.fold_constants_expr(index)),
+            },
+            Expression::ListSlice { expr, start, end } => Expression::ListSlice {
+                expr: Box::new(self.fold_constants_expr(expr)),
+                start: start
+                    .as_ref()
+                    .map(|s| Box::new(self.fold_constants_expr(s))),
+                end: end.as_ref().map(|e| Box::new(self.fold_constants_expr(e))),
+            },
             _ => expr.clone(),
         }
     }
@@ -1892,6 +1907,57 @@ impl<'a> CypherExecutor<'a> {
                     Ok(Value::Null)
                 }
             }
+            Expression::ListSlice { expr, start, end } => {
+                let list_val = self.evaluate_expression(expr, row)?;
+                let items = parse_list_value(&list_val);
+                let len = items.len() as i64;
+
+                // Resolve start index (default 0), clamp to [0, len]
+                let s = if let Some(se) = start {
+                    let v = self.evaluate_expression(se, row)?;
+                    match v {
+                        Value::Int64(i) => {
+                            let i = if i < 0 { len + i } else { i };
+                            i.clamp(0, len) as usize
+                        }
+                        Value::Float64(f) => {
+                            let i = f as i64;
+                            let i = if i < 0 { len + i } else { i };
+                            i.clamp(0, len) as usize
+                        }
+                        _ => return Err(format!("Slice start must be integer, got {:?}", v)),
+                    }
+                } else {
+                    0
+                };
+
+                // Resolve end index (default len), clamp to [0, len]
+                let e = if let Some(ee) = end {
+                    let v = self.evaluate_expression(ee, row)?;
+                    match v {
+                        Value::Int64(i) => {
+                            let i = if i < 0 { len + i } else { i };
+                            i.clamp(0, len) as usize
+                        }
+                        Value::Float64(f) => {
+                            let i = f as i64;
+                            let i = if i < 0 { len + i } else { i };
+                            i.clamp(0, len) as usize
+                        }
+                        _ => return Err(format!("Slice end must be integer, got {:?}", v)),
+                    }
+                } else {
+                    len as usize
+                };
+
+                if s >= e {
+                    Ok(Value::String("[]".to_string()))
+                } else {
+                    let sliced = &items[s..e];
+                    let formatted: Vec<String> = sliced.iter().map(format_value_json).collect();
+                    Ok(Value::String(format!("[{}]", formatted.join(", "))))
+                }
+            }
         }
     }
 
@@ -2112,12 +2178,20 @@ impl<'a> CypherExecutor<'a> {
             "size" => {
                 let val = self.evaluate_expression(&args[0], row)?;
                 match val {
-                    Value::String(s) => Ok(Value::Int64(s.len() as i64)),
+                    Value::String(s) => {
+                        // Lists are stored as JSON-like strings; count elements
+                        if s.starts_with('[') && s.ends_with(']') {
+                            let items = parse_list_value(&Value::String(s));
+                            Ok(Value::Int64(items.len() as i64))
+                        } else {
+                            Ok(Value::Int64(s.len() as i64))
+                        }
+                    }
                     _ => Ok(Value::Null),
                 }
             }
             "length" => {
-                // length(p) for paths, length(s) for strings
+                // length(p) for paths, length(s) for strings, length(list) for lists
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(path) = row.path_bindings.get(var) {
                         return Ok(Value::Int64(path.hops as i64));
@@ -2125,7 +2199,14 @@ impl<'a> CypherExecutor<'a> {
                 }
                 let val = self.evaluate_expression(&args[0], row)?;
                 match val {
-                    Value::String(s) => Ok(Value::Int64(s.len() as i64)),
+                    Value::String(s) => {
+                        if s.starts_with('[') && s.ends_with(']') {
+                            let items = parse_list_value(&Value::String(s));
+                            Ok(Value::Int64(items.len() as i64))
+                        } else {
+                            Ok(Value::Int64(s.len() as i64))
+                        }
+                    }
                     _ => Ok(Value::Null),
                 }
             }
@@ -4607,6 +4688,11 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
         Expression::IndexAccess { expr, index } => {
             is_aggregate_expression(expr) || is_aggregate_expression(index)
         }
+        Expression::ListSlice { expr, start, end } => {
+            is_aggregate_expression(expr)
+                || start.as_ref().is_some_and(|s| is_aggregate_expression(s))
+                || end.as_ref().is_some_and(|e| is_aggregate_expression(e))
+        }
         Expression::MapProjection { items, .. } => items.iter().any(|item| {
             if let MapProjectionItem::Alias { expr, .. } = item {
                 is_aggregate_expression(expr)
@@ -4687,6 +4773,15 @@ fn expression_to_string(expr: &Expression) -> String {
                 expression_to_string(expr),
                 expression_to_string(index)
             )
+        }
+        Expression::ListSlice { expr, start, end } => {
+            let s = start
+                .as_ref()
+                .map_or(String::new(), |e| expression_to_string(e));
+            let e = end
+                .as_ref()
+                .map_or(String::new(), |e| expression_to_string(e));
+            format!("{}[{}..{}]", expression_to_string(expr), s, e)
         }
         Expression::MapProjection { variable, items } => {
             let items_str: Vec<String> = items
@@ -6510,5 +6605,148 @@ mod tests {
             (score_first - score_last).abs() > 0.01,
             "Scores should be non-uniform when filtering by connection type"
         );
+    }
+
+    #[test]
+    fn test_list_slice_basic() {
+        let graph = DirGraph::new();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+
+        // [start..end]
+        let q = super::super::parser::parse_cypher("RETURN [1,2,3,4,5][1..3]").unwrap();
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows[0].get(0), Some(&Value::String("[2, 3]".into())));
+
+        // [..end]
+        let q = super::super::parser::parse_cypher("RETURN [1,2,3][..2]").unwrap();
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows[0].get(0), Some(&Value::String("[1, 2]".into())));
+
+        // [start..]
+        let q = super::super::parser::parse_cypher("RETURN [1,2,3][1..]").unwrap();
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows[0].get(0), Some(&Value::String("[2, 3]".into())));
+    }
+
+    #[test]
+    fn test_list_slice_edge_cases() {
+        let graph = DirGraph::new();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+
+        // Out of bounds — clamps to available
+        let q = super::super::parser::parse_cypher("RETURN [1,2,3][..100]").unwrap();
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(
+            result.rows[0].get(0),
+            Some(&Value::String("[1, 2, 3]".into()))
+        );
+
+        // Empty slice (start >= end)
+        let q = super::super::parser::parse_cypher("RETURN [1,2,3][3..1]").unwrap();
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows[0].get(0), Some(&Value::String("[]".into())));
+
+        // Negative index in slice
+        let q = super::super::parser::parse_cypher("RETURN [1,2,3,4,5][-3..]").unwrap();
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(
+            result.rows[0].get(0),
+            Some(&Value::String("[3, 4, 5]".into()))
+        );
+    }
+
+    #[test]
+    fn test_list_index_still_works() {
+        // Verify plain indexing is unbroken
+        let graph = DirGraph::new();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+
+        let q = super::super::parser::parse_cypher("RETURN [10,20,30][0]").unwrap();
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows[0].get(0), Some(&Value::Int64(10)));
+
+        let q = super::super::parser::parse_cypher("RETURN [10,20,30][-1]").unwrap();
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows[0].get(0), Some(&Value::Int64(30)));
+    }
+
+    #[test]
+    fn test_list_slice_with_collect() {
+        let mut graph = DirGraph::new();
+        let setup = super::super::parser::parse_cypher(
+            "CREATE (a:Item {name: 'A'}), (b:Item {name: 'B'}), \
+             (c:Item {name: 'C'}), (d:Item {name: 'D'})",
+        )
+        .unwrap();
+        execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+
+        let q = super::super::parser::parse_cypher(
+            "MATCH (n:Item) WITH collect(n.name) AS names RETURN names[..2]",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+
+        // Should return a list with exactly 2 elements
+        let val = result.rows[0].get(0).unwrap();
+        let items = parse_list_value(val);
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn test_size_on_list() {
+        let graph = DirGraph::new();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+
+        // size() on a list literal should return element count, not string length
+        let q = super::super::parser::parse_cypher("RETURN size([1,2,3])").unwrap();
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows[0].get(0), Some(&Value::Int64(3)));
+
+        // size() on a plain string should return character count
+        let q = super::super::parser::parse_cypher("RETURN size('hello')").unwrap();
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows[0].get(0), Some(&Value::Int64(5)));
+
+        // size() on empty list
+        let q = super::super::parser::parse_cypher("RETURN size([])").unwrap();
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows[0].get(0), Some(&Value::Int64(0)));
+    }
+
+    #[test]
+    fn test_length_on_list() {
+        let graph = DirGraph::new();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+
+        // length() on a list should return element count
+        let q = super::super::parser::parse_cypher("RETURN length([10,20,30,40])").unwrap();
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows[0].get(0), Some(&Value::Int64(4)));
+    }
+
+    #[test]
+    fn test_size_on_collect_result() {
+        let mut graph = DirGraph::new();
+        let setup = super::super::parser::parse_cypher(
+            "CREATE (a:Item {name: 'A'}), (b:Item {name: 'B'}), (c:Item {name: 'C'})",
+        )
+        .unwrap();
+        execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+
+        let q = super::super::parser::parse_cypher(
+            "MATCH (n:Item) WITH collect(n.name) AS names RETURN size(names)",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows[0].get(0), Some(&Value::Int64(3)));
     }
 }
