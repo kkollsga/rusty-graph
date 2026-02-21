@@ -69,10 +69,18 @@ class TestExplainOptimizations:
         assert "name" in result
         assert "age" in result
 
-    def test_explain_shows_sort_and_limit(self, graph):
-        """ORDER BY and LIMIT are shown."""
+    def test_explain_shows_topk_fusion(self, graph):
+        """ORDER BY + LIMIT fuses into FusedOrderByTopK."""
         result = graph.cypher("""
             EXPLAIN MATCH (n:Person) RETURN n.name ORDER BY n.name LIMIT 5
         """)
+        assert "FusedOrderByTopK" in result
+        assert "k=5" in result
+        assert "order_by_topk_fusion" in result
+
+    def test_explain_shows_sort_and_limit_unfused(self, graph):
+        """ORDER BY without LIMIT shows as separate Sort step."""
+        result = graph.cypher("""
+            EXPLAIN MATCH (n:Person) RETURN n.name ORDER BY n.name
+        """)
         assert "Sort (ORDER BY)" in result
-        assert "Limit (LIMIT)" in result

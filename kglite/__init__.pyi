@@ -139,6 +139,29 @@ class ResultView:
         """Convert to a pandas DataFrame."""
         ...
 
+    def to_gdf(
+        self,
+        geometry_column: str = "geometry",
+        crs: Optional[str] = None,
+    ) -> Any:
+        """Convert to a GeoDataFrame with a geometry column parsed from WKT.
+
+        Materializes the data as a DataFrame, then converts the specified
+        WKT string column into shapely geometries and returns a
+        ``geopandas.GeoDataFrame``.
+
+        Args:
+            geometry_column: Column containing WKT strings. Default ``'geometry'``.
+            crs: Coordinate reference system (e.g. ``'EPSG:4326'``), or ``None``.
+
+        Returns:
+            A ``geopandas.GeoDataFrame``.
+
+        Raises:
+            ImportError: If geopandas is not installed.
+        """
+        ...
+
     def __len__(self) -> int: ...
     def __bool__(self) -> bool: ...
     def __getitem__(self, index: int) -> dict[str, Any]: ...
@@ -219,6 +242,9 @@ class KnowledgeGraph:
             conflict_handling: ``'update'`` (default), ``'replace'``, ``'skip'``, or ``'preserve'``.
             skip_columns: Columns to exclude.
             column_types: Override column dtypes ``{'col': 'string'|'integer'|'float'|'datetime'|'uniqueid'}``.
+                Also supports spatial types: ``'location.lat'``, ``'location.lon'``,
+                ``'geometry'``, ``'point.<name>.lat'``, ``'point.<name>.lon'``,
+                ``'shape.<name>'``.
 
         Returns:
             Operation report dict with keys ``nodes_created``,
@@ -1819,6 +1845,40 @@ class KnowledgeGraph:
     # Spatial / Geometry
     # ====================================================================
 
+    def set_spatial(
+        self,
+        node_type: str,
+        *,
+        location: Optional[tuple[str, str]] = None,
+        geometry: Optional[str] = None,
+        points: Optional[dict[str, tuple[str, str]]] = None,
+        shapes: Optional[dict[str, str]] = None,
+    ) -> None:
+        """Configure spatial properties for a node type.
+
+        Args:
+            node_type: The node type to configure.
+            location: Primary lat/lon pair as ``(lat_field, lon_field)``. At most one per type.
+            geometry: Primary WKT geometry field name. At most one per type.
+            points: Named lat/lon points as ``{name: (lat_field, lon_field)}``.
+            shapes: Named WKT shape fields as ``{name: field_name}``.
+        """
+        ...
+
+    def get_spatial(
+        self,
+        node_type: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Get spatial configuration for a node type or all types.
+
+        Args:
+            node_type: If given, return config for this type only. Otherwise return all.
+
+        Returns:
+            Dict with spatial config, or ``None`` if not configured.
+        """
+        ...
+
     def within_bounds(
         self,
         min_lat: float,
@@ -1929,13 +1989,13 @@ class KnowledgeGraph:
 
     def intersects_geometry(
         self,
-        query_wkt: str,
+        query_wkt: Union[str, Any],
         geometry_field: Optional[str] = None,
     ) -> KnowledgeGraph:
         """Filter nodes whose geometry intersects a WKT geometry.
 
         Args:
-            query_wkt: WKT string of the query geometry.
+            query_wkt: WKT string or shapely geometry object.
             geometry_field: Geometry property name. Default ``'geometry'``.
 
         Returns:
@@ -1947,11 +2007,19 @@ class KnowledgeGraph:
         self,
         lat_field: Optional[str] = None,
         lon_field: Optional[str] = None,
-    ) -> Optional[dict[str, float]]:
+        as_shapely: bool = False,
+    ) -> Optional[Union[dict[str, float], Any]]:
         """Get geographic bounds of selected nodes.
+
+        Args:
+            lat_field: Latitude property name. Default ``'latitude'``.
+            lon_field: Longitude property name. Default ``'longitude'``.
+            as_shapely: If ``True``, return a ``shapely.geometry.Polygon``
+                (box) instead of a dict.
 
         Returns:
             Dict with ``min_lat``, ``max_lat``, ``min_lon``, ``max_lon``,
+            or a shapely box polygon when ``as_shapely=True``,
             or ``None`` if no valid coordinates found.
         """
         ...
@@ -1960,22 +2028,37 @@ class KnowledgeGraph:
         self,
         lat_field: Optional[str] = None,
         lon_field: Optional[str] = None,
-    ) -> Optional[dict[str, float]]:
+        as_shapely: bool = False,
+    ) -> Optional[Union[dict[str, float], Any]]:
         """Get the geographic centroid (average lat/lon) of selected nodes.
 
+        Args:
+            lat_field: Latitude property name. Default ``'latitude'``.
+            lon_field: Longitude property name. Default ``'longitude'``.
+            as_shapely: If ``True``, return a ``shapely.geometry.Point``
+                instead of a dict.
+
         Returns:
-            Dict with ``latitude`` and ``longitude``, or ``None``.
+            Dict with ``latitude`` and ``longitude``, or a shapely Point
+            when ``as_shapely=True``, or ``None``.
         """
         ...
 
-    def wkt_centroid(self, wkt_string: str) -> dict[str, float]:
+    def wkt_centroid(
+        self,
+        wkt_string: Union[str, Any],
+        as_shapely: bool = False,
+    ) -> Union[dict[str, float], Any]:
         """Calculate the centroid of a WKT geometry string.
 
         Args:
-            wkt_string: WKT geometry (e.g. ``'POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))'``).
+            wkt_string: WKT geometry string or shapely geometry object.
+            as_shapely: If ``True``, return a ``shapely.geometry.Point``
+                instead of a dict.
 
         Returns:
-            Dict with ``latitude`` and ``longitude``.
+            Dict with ``latitude`` and ``longitude``, or a shapely Point
+            when ``as_shapely=True``.
         """
         ...
 

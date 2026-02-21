@@ -731,7 +731,9 @@ pub fn betweenness_centrality(
         node_to_idx[node.index()] = i;
     }
 
-    // Pre-build outgoing adjacency list for fast BFS
+    // Pre-build undirected adjacency list for BFS.
+    // Betweenness treats edges as undirected so that nodes bridging
+    // communities are detected regardless of edge direction.
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for edge in graph.graph.edge_references() {
         if let Some(types) = &connection_types {
@@ -742,6 +744,7 @@ pub fn betweenness_centrality(
         let src_i = node_to_idx[edge.source().index()];
         let tgt_i = node_to_idx[edge.target().index()];
         adj[src_i].push(tgt_i);
+        adj[tgt_i].push(src_i);
     }
 
     // Initialize betweenness scores using Vec for O(1) access
@@ -828,11 +831,15 @@ pub fn betweenness_centrality(
         }
     }
 
+    // Undirected BFS counts each (s,t) pair twice, so halve raw scores.
+    for score in betweenness.iter_mut() {
+        *score /= 2.0;
+    }
+
     // Normalize if requested
-    // For directed graphs, the normalization factor is 1/((n-1)*(n-2))
-    // (undirected would be 2/((n-1)*(n-2)) since each pair is counted once)
+    // For undirected graphs: 2 / ((n-1)*(n-2))
     if normalized && n > 2 {
-        let scale = 1.0 / ((n - 1) as f64 * (n - 2) as f64);
+        let scale = 2.0 / ((n - 1) as f64 * (n - 2) as f64);
         for score in betweenness.iter_mut() {
             *score *= scale;
         }

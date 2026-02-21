@@ -437,10 +437,11 @@ fn xml_escape(s: &str) -> String {
 pub fn compute_agent_description(graph: &DirGraph) -> String {
     let overview = compute_schema(graph);
     let has_embeddings = !graph.embeddings.is_empty();
-    let has_spatial = graph
-        .node_type_metadata
-        .values()
-        .any(|props| props.values().any(|t| t.eq_ignore_ascii_case("point")));
+    let has_spatial = !graph.spatial_configs.is_empty()
+        || graph
+            .node_type_metadata
+            .values()
+            .any(|props| props.values().any(|t| t.eq_ignore_ascii_case("point")));
     let has_code_entities = ["Function", "Struct", "Class", "Enum", "Trait"]
         .iter()
         .any(|t| graph.type_indices.contains_key(*t));
@@ -616,6 +617,52 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
         xml.push_str("  </embeddings>\n");
     }
 
+    // Spatial config section — shows configured spatial types for distance auto-resolution
+    if !graph.spatial_configs.is_empty() {
+        xml.push_str("  <spatial hint=\"distance(a,b), contains(a,b), intersects(a,b), centroid(n), area(n), perimeter(n) — all auto-resolve via spatial config\">\n");
+        let mut sorted_types: Vec<_> = graph.spatial_configs.iter().collect();
+        sorted_types.sort_by_key(|(k, _)| k.as_str());
+        for (node_type, config) in sorted_types {
+            let mut attrs = format!("name=\"{}\"", xml_escape(node_type));
+            if let Some((lat, lon)) = &config.location {
+                attrs.push_str(&format!(
+                    " location=\"{},{}\"",
+                    xml_escape(lat),
+                    xml_escape(lon)
+                ));
+            }
+            if let Some(geom) = &config.geometry {
+                attrs.push_str(&format!(" geometry=\"{}\"", xml_escape(geom)));
+            }
+            if config.points.is_empty() && config.shapes.is_empty() {
+                xml.push_str(&format!("    <type {}/>\n", attrs));
+            } else {
+                xml.push_str(&format!("    <type {}>\n", attrs));
+                let mut sorted_points: Vec<_> = config.points.iter().collect();
+                sorted_points.sort_by_key(|(k, _)| k.as_str());
+                for (name, (lat, lon)) in sorted_points {
+                    xml.push_str(&format!(
+                        "      <point name=\"{}\" fields=\"{},{}\"/>\n",
+                        xml_escape(name),
+                        xml_escape(lat),
+                        xml_escape(lon)
+                    ));
+                }
+                let mut sorted_shapes: Vec<_> = config.shapes.iter().collect();
+                sorted_shapes.sort_by_key(|(k, _)| k.as_str());
+                for (name, field) in sorted_shapes {
+                    xml.push_str(&format!(
+                        "      <shape name=\"{}\" field=\"{}\"/>\n",
+                        xml_escape(name),
+                        xml_escape(field)
+                    ));
+                }
+                xml.push_str("    </type>\n");
+            }
+        }
+        xml.push_str("  </spatial>\n");
+    }
+
     // API methods — exploration (code graphs only) + query tools
     xml.push_str("  <api>\n");
     if has_code_entities {
@@ -638,7 +685,7 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     );
     if has_spatial {
         functions.push_str(
-            ", point, distance, wkt_contains, wkt_intersects, wkt_centroid, \
+            ", point, distance, contains, intersects, centroid, area, perimeter, \
              latitude, longitude",
         );
     }

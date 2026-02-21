@@ -7,6 +7,25 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
+/// Spatial configuration for a node type. Declares which properties hold
+/// spatial data (lat/lon pairs, WKT geometries) and enables auto-resolution
+/// in Cypher `distance(a, b)` and fluent API methods.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct SpatialConfig {
+    /// Primary lat/lon location: (lat_field, lon_field). At most one per type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<(String, String)>,
+    /// Primary WKT geometry field name. At most one per type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<String>,
+    /// Named lat/lon points: name → (lat_field, lon_field). Zero or more.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub points: HashMap<String, (String, String)>,
+    /// Named WKT shape fields: name → field_name. Zero or more.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub shapes: HashMap<String, String>,
+}
+
 /// Lightweight snapshot of a node's data: id, title, type, and properties.
 /// Used as the return type for node queries and traversals.
 #[derive(Clone, Debug)]
@@ -187,6 +206,15 @@ impl CurrentSelection {
             .last()
             .into_iter()
             .flat_map(|l| l.iter_node_indices())
+    }
+
+    /// Returns the node type of the first node in the current selection, if any.
+    /// Used by spatial auto-resolution to look up SpatialConfig.
+    pub fn first_node_type(&self, graph: &DirGraph) -> Option<String> {
+        self.current_node_indices()
+            .next()
+            .and_then(|idx| graph.graph.node_weight(idx))
+            .map(|node| node.node_type.clone())
     }
 }
 
@@ -439,6 +467,10 @@ pub struct DirGraph {
     /// Default: Some(0.3). Set to None to disable.
     #[serde(default = "default_auto_vacuum_threshold")]
     pub(crate) auto_vacuum_threshold: Option<f64>,
+    /// Spatial configuration per node type: type_name → SpatialConfig.
+    /// Declares which properties hold lat/lon or WKT data for auto-resolution.
+    #[serde(default)]
+    pub(crate) spatial_configs: HashMap<String, SpatialConfig>,
     /// Graph-level WKT geometry cache — persists across queries.
     /// Uses Arc<Geometry> to avoid cloning heavy geometry objects.
     /// RwLock allows concurrent reads from parallel row evaluation.
@@ -479,6 +511,7 @@ impl DirGraph {
             id_field_aliases: HashMap::new(),
             title_field_aliases: HashMap::new(),
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
+            spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
             embeddings: HashMap::new(),
             read_only: false,
@@ -506,10 +539,16 @@ impl DirGraph {
             id_field_aliases: HashMap::new(),
             title_field_aliases: HashMap::new(),
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
+            spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
             embeddings: HashMap::new(),
             read_only: false,
         }
+    }
+
+    /// Look up spatial config for a node type.
+    pub fn get_spatial_config(&self, node_type: &str) -> Option<&SpatialConfig> {
+        self.spatial_configs.get(node_type)
     }
 
     /// Look up an embedding store by `(&str, &str)` without allocating owned Strings.

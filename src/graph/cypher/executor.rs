@@ -13,12 +13,13 @@ use crate::graph::schema::{DirGraph, EdgeData, NodeData};
 use crate::graph::spatial;
 use crate::graph::value_operations;
 use crate::graph::vector_search as vs;
+use geo::BoundingRect;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::{EdgeRef, NodeIndexable};
 use petgraph::Direction;
 use rayon::prelude::*;
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
 /// Minimum row count to switch from sequential to parallel iteration.
@@ -53,6 +54,56 @@ struct DistanceFilterSpec {
     threshold_km: f64,
     less_than: bool,
     inclusive: bool,
+}
+
+/// Fast-path specification for spatial contains() filtering.
+/// Pre-extracts the container variable and contained target to bypass
+/// the expression evaluator chain per row.
+struct ContainsFilterSpec {
+    /// Container variable name (must have geometry spatial config)
+    container_variable: String,
+    /// What's being tested for containment
+    contained: ContainsTarget,
+    /// Whether the predicate is negated (NOT contains(...))
+    negated: bool,
+}
+
+/// The contained target in a contains() filter.
+enum ContainsTarget {
+    /// Constant point: contains(a, point(59.91, 10.75))
+    ConstantPoint(f64, f64),
+    /// Variable with location config: contains(a, b)
+    Variable { name: String },
+}
+
+// ============================================================================
+// Unified Spatial Resolution
+// ============================================================================
+
+/// Resolved spatial value: either a Point (lat/lon) or a full Geometry with optional bbox.
+/// The bounding box enables cheap rejection before expensive polygon operations.
+enum ResolvedSpatial {
+    Point(f64, f64),
+    Geometry(Arc<geo::Geometry<f64>>, Option<geo::Rect<f64>>),
+}
+
+/// A parsed geometry paired with its bounding box for cheap spatial rejection.
+type GeomWithBBox = (Arc<geo::Geometry<f64>>, Option<geo::Rect<f64>>);
+
+/// Pre-computed spatial data for a node — populated on first access, reused
+/// for all subsequent rows binding the same NodeIndex. This eliminates
+/// redundant HashMap lookups, spatial config lookups, WKT parsing, and
+/// RwLock acquisitions in cross-product queries (N×M → N+M resolutions).
+struct NodeSpatialData {
+    /// Parsed geometry + bounding box (if geometry config present).
+    /// The bbox enables cheap point-in-bbox rejection before expensive polygon tests.
+    geometry: Option<GeomWithBBox>,
+    /// Location as (lat, lon) (if location config present).
+    location: Option<(f64, f64)>,
+    /// Named shapes: name → (geometry, bbox).
+    shapes: HashMap<String, GeomWithBBox>,
+    /// Named points: name → (lat, lon).
+    points: HashMap<String, (f64, f64)>,
 }
 
 // ============================================================================
@@ -119,6 +170,9 @@ pub struct CypherExecutor<'a> {
     vs_cache: OnceLock<VectorScoreCache>,
     /// Optional deadline for aborting long-running queries.
     deadline: Option<Instant>,
+    /// Per-node spatial data cache — populated on first access per NodeIndex.
+    /// Eliminates redundant property/config/WKT lookups in cross-product queries.
+    spatial_node_cache: RwLock<HashMap<usize, Option<NodeSpatialData>>>,
 }
 
 impl<'a> CypherExecutor<'a> {
@@ -132,6 +186,7 @@ impl<'a> CypherExecutor<'a> {
             params,
             vs_cache: OnceLock::new(),
             deadline,
+            spatial_node_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -201,6 +256,18 @@ impl<'a> CypherExecutor<'a> {
                 descending,
                 limit,
             } => self.execute_fused_vector_score_top_k(
+                return_clause,
+                *score_item_index,
+                *descending,
+                *limit,
+                result_set,
+            ),
+            Clause::FusedOrderByTopK {
+                return_clause,
+                score_item_index,
+                descending,
+                limit,
+            } => self.execute_fused_order_by_top_k(
                 return_clause,
                 *score_item_index,
                 *descending,
@@ -995,6 +1062,84 @@ impl<'a> CypherExecutor<'a> {
         // Fold constant sub-expressions once before row iteration
         let folded_pred = self.fold_constants_pred(&clause.predicate);
 
+        // Fast path: spatial contains() filter bypasses expression evaluator
+        if let Some((spec, remainder)) = Self::try_extract_contains_filter(&folded_pred) {
+            result_set.rows.retain(|row| {
+                // Get container geometry from spatial cache
+                let container_idx = match row.node_bindings.get(&spec.container_variable) {
+                    Some(&idx) => idx,
+                    None => return false,
+                };
+                self.ensure_node_spatial_cached(container_idx);
+                // Scope read lock: clone Arc + bbox, then drop lock
+                let container = {
+                    let cache = self.spatial_node_cache.read().unwrap();
+                    cache
+                        .get(&container_idx.index())
+                        .and_then(|opt| opt.as_ref())
+                        .and_then(|data| data.geometry.as_ref())
+                        .map(|(g, bb)| (Arc::clone(g), *bb))
+                };
+                let (geom, bbox) = match container {
+                    Some((g, bb)) => (g, bb),
+                    None => return false,
+                };
+
+                // Get contained point
+                let (lat, lon) = match &spec.contained {
+                    ContainsTarget::ConstantPoint(lat, lon) => (*lat, *lon),
+                    ContainsTarget::Variable { name } => {
+                        let contained_idx = match row.node_bindings.get(name) {
+                            Some(&idx) => idx,
+                            None => return false,
+                        };
+                        self.ensure_node_spatial_cached(contained_idx);
+                        let cache = self.spatial_node_cache.read().unwrap();
+                        match cache
+                            .get(&contained_idx.index())
+                            .and_then(|opt| opt.as_ref())
+                        {
+                            Some(data) => match data.location {
+                                Some((lat, lon)) => (lat, lon),
+                                None => return false,
+                            },
+                            _ => return false,
+                        }
+                    }
+                };
+
+                // Bbox pre-filter
+                if let Some(bb) = bbox {
+                    if lon < bb.min().x || lon > bb.max().x || lat < bb.min().y || lat > bb.max().y
+                    {
+                        return spec.negated;
+                    }
+                }
+
+                // Full polygon test
+                let pt = geo::Point::new(lon, lat);
+                let result = spatial::geometry_contains_point(&geom, &pt);
+                if spec.negated {
+                    !result
+                } else {
+                    result
+                }
+            });
+            self.check_deadline()?;
+            if let Some(rest) = remainder {
+                let mut keep = Vec::with_capacity(result_set.rows.len());
+                for row in result_set.rows {
+                    match self.evaluate_predicate(rest, &row) {
+                        Ok(true) => keep.push(row),
+                        Ok(false) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                result_set.rows = keep;
+            }
+            return Ok(result_set);
+        }
+
         // Fast path: specialized distance filter bypasses expression evaluator
         if let Some((spec, remainder)) = Self::try_extract_distance_filter(&folded_pred) {
             let graph = self.graph;
@@ -1100,10 +1245,9 @@ impl<'a> CypherExecutor<'a> {
             return Ok(result_set);
         }
 
-        // Apply full predicate evaluation for remaining/non-indexable conditions
-        // Sequential: per-row predicate work is typically cheap (property lookup +
-        // comparison), so Rayon overhead outweighs parallelism benefits.
+        // Apply full predicate evaluation for remaining/non-indexable conditions.
         self.check_deadline()?;
+
         let mut filtered_rows = Vec::new();
         for row in result_set.rows {
             match self.evaluate_predicate(&folded_pred, &row) {
@@ -1539,6 +1683,89 @@ impl<'a> CypherExecutor<'a> {
     fn extract_literal_f64(expr: &Expression) -> Option<f64> {
         if let Expression::Literal(val) = expr {
             value_operations::value_to_f64(val)
+        } else {
+            None
+        }
+    }
+
+    // ========================================================================
+    // Contains Filter Extraction
+    // ========================================================================
+
+    /// Try to extract a contains() fast-path spec from a WHERE predicate.
+    /// Matches patterns like: contains(a, point(C1, C2)) or contains(a, b)
+    fn try_extract_contains_filter(
+        pred: &Predicate,
+    ) -> Option<(ContainsFilterSpec, Option<&Predicate>)> {
+        match pred {
+            // contains(a, b) <> false  — the parser's truthy wrapper
+            Predicate::Comparison {
+                left,
+                operator: ComparisonOp::NotEquals,
+                right: Expression::Literal(Value::Boolean(false)),
+            } => {
+                let spec = Self::extract_contains_call(left, false)?;
+                Some((spec, None))
+            }
+            // NOT contains(a, b) — negated
+            Predicate::Not(inner) => {
+                if let Some((mut spec, None)) = Self::try_extract_contains_filter(inner) {
+                    spec.negated = !spec.negated;
+                    Some((spec, None))
+                } else {
+                    None
+                }
+            }
+            // AND extraction
+            Predicate::And(left, right) => {
+                if let Some((spec, None)) = Self::try_extract_contains_filter(left) {
+                    return Some((spec, Some(right)));
+                }
+                if let Some((spec, None)) = Self::try_extract_contains_filter(right) {
+                    return Some((spec, Some(left)));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract a ContainsFilterSpec from a contains() function call expression.
+    fn extract_contains_call(expr: &Expression, negated: bool) -> Option<ContainsFilterSpec> {
+        if let Expression::FunctionCall { name, args, .. } = expr {
+            if !name.eq_ignore_ascii_case("contains") || args.len() != 2 {
+                return None;
+            }
+            // Arg 1: must be a bare Variable (node with geometry config)
+            let container_variable = match &args[0] {
+                Expression::Variable(name) => name.clone(),
+                _ => return None,
+            };
+            // Arg 2: constant point or variable
+            let contained = match &args[1] {
+                // Folded point literal: point(59.91, 10.75) → Literal(Point{...})
+                Expression::Literal(Value::Point { lat, lon }) => {
+                    ContainsTarget::ConstantPoint(*lat, *lon)
+                }
+                // Unfolded point with constant args
+                Expression::FunctionCall {
+                    name: pname,
+                    args: pargs,
+                    ..
+                } if pname.eq_ignore_ascii_case("point") && pargs.len() == 2 => {
+                    let lat = Self::extract_literal_f64(&pargs[0])?;
+                    let lon = Self::extract_literal_f64(&pargs[1])?;
+                    ContainsTarget::ConstantPoint(lat, lon)
+                }
+                // Variable: contains(a, b)
+                Expression::Variable(name) => ContainsTarget::Variable { name: name.clone() },
+                _ => return None,
+            };
+            Some(ContainsFilterSpec {
+                container_variable,
+                contained,
+                negated,
+            })
         } else {
             None
         }
@@ -2083,6 +2310,210 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
+    /// Unified spatial argument resolver. Returns Point or Geometry depending
+    /// on what the expression/value resolves to.
+    ///
+    /// Resolve a spatial argument from its expression, using a per-node cache
+    /// that ensures each NodeIndex is resolved at most once per query execution.
+    ///
+    /// `prefer_geometry`: When true, Variable resolution prefers geometry config
+    /// over location (for contains/intersects/centroid/area/perimeter).
+    /// When false, prefers location → Point (for distance).
+    /// PropertyAccess always resolves based on the explicit property name.
+    fn resolve_spatial(
+        &self,
+        expr: &Expression,
+        row: &ResultRow,
+        prefer_geometry: bool,
+    ) -> Result<Option<ResolvedSpatial>, String> {
+        match expr {
+            // Fast path: Variable bound to a node → resolve from per-node cache
+            Expression::Variable(name) => {
+                if let Some(&idx) = row.node_bindings.get(name) {
+                    self.ensure_node_spatial_cached(idx);
+                    let cache = self.spatial_node_cache.read().unwrap();
+                    if let Some(cached) = cache.get(&idx.index()) {
+                        return Ok(Self::pick_from_node_cache(cached, prefer_geometry));
+                    }
+                }
+                // Not a node binding — evaluate and check value
+                let val = self.evaluate_expression(expr, row)?;
+                self.resolve_spatial_from_value(&val)
+            }
+            // Fast path: PropertyAccess on a node → resolve from per-node cache
+            Expression::PropertyAccess { variable, property } => {
+                if let Some(&idx) = row.node_bindings.get(variable) {
+                    self.ensure_node_spatial_cached(idx);
+                    let cache = self.spatial_node_cache.read().unwrap();
+                    if let Some(cached) = cache.get(&idx.index()) {
+                        if let Some(result) = Self::pick_property_from_node_cache(cached, property)
+                        {
+                            return Ok(Some(result));
+                        }
+                    }
+                }
+                // Fallback: evaluate and check value
+                let val = self.evaluate_expression(expr, row)?;
+                self.resolve_spatial_from_value(&val)
+            }
+            // Any other expression: evaluate first, then check if spatial
+            _ => {
+                let val = self.evaluate_expression(expr, row)?;
+                self.resolve_spatial_from_value(&val)
+            }
+        }
+    }
+
+    /// Ensure that the per-node spatial cache entry exists for the given NodeIndex.
+    /// Populates geometry+bbox, location, named shapes, and named points on first access.
+    #[inline]
+    fn ensure_node_spatial_cached(&self, idx: NodeIndex) {
+        let idx_raw = idx.index();
+        {
+            let cache = self.spatial_node_cache.read().unwrap();
+            if cache.contains_key(&idx_raw) {
+                return;
+            }
+        }
+        let data = self.build_node_spatial_data(idx);
+        self.spatial_node_cache
+            .write()
+            .unwrap()
+            .insert(idx_raw, data);
+    }
+
+    /// Build the full spatial data for a node: geometry+bbox, location, named shapes/points.
+    /// Returns None if the node has no spatial config.
+    fn build_node_spatial_data(&self, idx: NodeIndex) -> Option<NodeSpatialData> {
+        let node = self.graph.graph.node_weight(idx)?;
+        let config = self.graph.get_spatial_config(&node.node_type)?;
+
+        // Primary geometry + bounding box
+        let geometry = config.geometry.as_ref().and_then(|geom_f| {
+            if let Some(Value::String(wkt)) = node.properties.get(geom_f) {
+                if let Ok(geom) = self.parse_wkt_cached(wkt) {
+                    let bbox = geom.bounding_rect();
+                    return Some((geom, bbox));
+                }
+            }
+            None
+        });
+
+        // Primary location
+        let location = config.location.as_ref().and_then(|(lat_f, lon_f)| {
+            let lat = value_operations::value_to_f64(node.properties.get(lat_f)?)?;
+            let lon = value_operations::value_to_f64(node.properties.get(lon_f)?)?;
+            Some((lat, lon))
+        });
+
+        // Named shapes
+        let mut shapes = HashMap::new();
+        for (name, field) in &config.shapes {
+            if let Some(Value::String(wkt)) = node.properties.get(field) {
+                if let Ok(geom) = self.parse_wkt_cached(wkt) {
+                    let bbox = geom.bounding_rect();
+                    shapes.insert(name.clone(), (geom, bbox));
+                }
+            }
+        }
+
+        // Named points
+        let mut points = HashMap::new();
+        for (name, (lat_f, lon_f)) in &config.points {
+            if let (Some(lat), Some(lon)) = (
+                node.properties
+                    .get(lat_f)
+                    .and_then(value_operations::value_to_f64),
+                node.properties
+                    .get(lon_f)
+                    .and_then(value_operations::value_to_f64),
+            ) {
+                points.insert(name.clone(), (lat, lon));
+            }
+        }
+
+        Some(NodeSpatialData {
+            geometry,
+            location,
+            shapes,
+            points,
+        })
+    }
+
+    /// Pick the right spatial value from cached node data based on preference.
+    #[inline]
+    fn pick_from_node_cache(
+        data: &Option<NodeSpatialData>,
+        prefer_geometry: bool,
+    ) -> Option<ResolvedSpatial> {
+        let data = data.as_ref()?;
+        if prefer_geometry {
+            // Prefer geometry → Geometry; fallback to location → Point
+            if let Some((geom, bbox)) = &data.geometry {
+                return Some(ResolvedSpatial::Geometry(Arc::clone(geom), *bbox));
+            }
+            if let Some((lat, lon)) = data.location {
+                return Some(ResolvedSpatial::Point(lat, lon));
+            }
+        } else {
+            // Prefer location → Point; fallback to geometry centroid → Point
+            if let Some((lat, lon)) = data.location {
+                return Some(ResolvedSpatial::Point(lat, lon));
+            }
+            if let Some((geom, _bbox)) = &data.geometry {
+                if let Ok((lat, lon)) = spatial::geometry_centroid(geom) {
+                    return Some(ResolvedSpatial::Point(lat, lon));
+                }
+            }
+        }
+        None
+    }
+
+    /// Pick a specific property from cached node data (for PropertyAccess resolution).
+    #[inline]
+    fn pick_property_from_node_cache(
+        data: &Option<NodeSpatialData>,
+        property: &str,
+    ) -> Option<ResolvedSpatial> {
+        let data = data.as_ref()?;
+        // Named shapes
+        if let Some((geom, bbox)) = data.shapes.get(property) {
+            return Some(ResolvedSpatial::Geometry(Arc::clone(geom), *bbox));
+        }
+        // Named points
+        if let Some((lat, lon)) = data.points.get(property) {
+            return Some(ResolvedSpatial::Point(*lat, *lon));
+        }
+        // "geometry" → primary geometry
+        if property == "geometry" {
+            if let Some((geom, bbox)) = &data.geometry {
+                return Some(ResolvedSpatial::Geometry(Arc::clone(geom), *bbox));
+            }
+        }
+        // "location" → primary location
+        if property == "location" {
+            if let Some((lat, lon)) = data.location {
+                return Some(ResolvedSpatial::Point(lat, lon));
+            }
+        }
+        None
+    }
+
+    /// Try to resolve a pre-evaluated value as spatial (Point or WKT geometry).
+    #[inline]
+    fn resolve_spatial_from_value(&self, val: &Value) -> Result<Option<ResolvedSpatial>, String> {
+        if let Value::Point { lat, lon } = val {
+            return Ok(Some(ResolvedSpatial::Point(*lat, *lon)));
+        }
+        if let Value::String(s) = val {
+            if let Ok(geom) = self.parse_wkt_cached(s) {
+                let bbox = geom.bounding_rect();
+                return Ok(Some(ResolvedSpatial::Geometry(geom, bbox)));
+            }
+        }
+        Ok(None)
+    }
+
     /// Resolve property access: variable.property
     /// Uses zero-copy get_field_ref when possible
     fn resolve_property(
@@ -2447,22 +2878,36 @@ impl<'a> CypherExecutor<'a> {
             }
             "distance" => match args.len() {
                 2 => {
-                    let v1 = self.evaluate_expression(&args[0], row)?;
-                    let v2 = self.evaluate_expression(&args[1], row)?;
-                    match (&v1, &v2) {
+                    // Resolve via spatial config — prefer_geometry=false so bare
+                    // variables resolve as Points; explicit .geometry resolves as Geometry
+                    let r1 = self.resolve_spatial(&args[0], row, false)?;
+                    let r2 = self.resolve_spatial(&args[1], row, false)?;
+                    match (r1, r2) {
                         (
-                            Value::Point {
-                                lat: lat1,
-                                lon: lon1,
-                            },
-                            Value::Point {
-                                lat: lat2,
-                                lon: lon2,
-                            },
+                            Some(ResolvedSpatial::Point(lat1, lon1)),
+                            Some(ResolvedSpatial::Point(lat2, lon2)),
                         ) => Ok(Value::Float64(spatial::haversine_distance(
-                            *lat1, *lon1, *lat2, *lon2,
+                            lat1, lon1, lat2, lon2,
                         ))),
-                        _ => Err("distance() with 2 args requires Point values".into()),
+                        (
+                            Some(ResolvedSpatial::Point(lat, lon)),
+                            Some(ResolvedSpatial::Geometry(g, _)),
+                        )
+                        | (
+                            Some(ResolvedSpatial::Geometry(g, _)),
+                            Some(ResolvedSpatial::Point(lat, lon)),
+                        ) => Ok(Value::Float64(spatial::point_to_geometry_distance_km(
+                            lat, lon, &g,
+                        )?)),
+                        (
+                            Some(ResolvedSpatial::Geometry(g1, _)),
+                            Some(ResolvedSpatial::Geometry(g2, _)),
+                        ) => Ok(Value::Float64(spatial::geometry_to_geometry_distance_km(
+                            &g1, &g2,
+                        )?)),
+                        _ => Err("distance() with 2 args requires Point values or nodes \
+                                 with spatial config (location or geometry)"
+                            .into()),
                     }
                 }
                 4 => {
@@ -2487,87 +2932,169 @@ impl<'a> CypherExecutor<'a> {
                         .into(),
                 ),
             },
-            "wkt_contains" => {
-                let wkt_val = self.evaluate_expression(&args[0], row)?;
-                let wkt_str = match &wkt_val {
-                    Value::String(s) => s.clone(),
-                    _ => return Err("wkt_contains(): first arg must be a WKT string".into()),
-                };
-                let (lat, lon) = match args.len() {
-                    2 => match self.evaluate_expression(&args[1], row)? {
-                        Value::Point { lat, lon } => (lat, lon),
-                        _ => return Err("wkt_contains(): second arg must be a Point".into()),
-                    },
-                    3 => {
-                        let lat = value_operations::value_to_f64(
-                            &self.evaluate_expression(&args[1], row)?,
-                        )
-                        .ok_or("wkt_contains(): lat must be numeric")?;
-                        let lon = value_operations::value_to_f64(
-                            &self.evaluate_expression(&args[2], row)?,
-                        )
-                        .ok_or("wkt_contains(): lon must be numeric")?;
-                        (lat, lon)
-                    }
-                    _ => return Err("wkt_contains() requires 2 or 3 arguments".into()),
-                };
-                let geom = self.parse_wkt_cached(&wkt_str)?;
-                let point = geo::Point::new(lon, lat); // geo uses (x=lon, y=lat)
-                let contains = match &*geom {
-                    geo::Geometry::Polygon(p) => geo::Contains::contains(p, &point),
-                    geo::Geometry::MultiPolygon(mp) => geo::Contains::contains(mp, &point),
-                    geo::Geometry::Rect(r) => geo::Contains::contains(r, &point),
-                    _ => false,
-                };
-                Ok(Value::Boolean(contains))
-            }
-            "wkt_intersects" => {
+            // ── Node-aware spatial functions ──────────────────────────
+            "contains" => {
                 if args.len() != 2 {
-                    return Err("wkt_intersects() requires 2 WKT string arguments".into());
+                    return Err("contains() requires 2 arguments".into());
                 }
-                let s1 = match self.evaluate_expression(&args[0], row)? {
-                    Value::String(s) => s,
-                    _ => return Err("wkt_intersects(): args must be strings".into()),
+                // Arg 1: must be a geometry (the container)
+                let resolved1 = self.resolve_spatial(&args[0], row, true)?.ok_or(
+                    "contains(): first arg must resolve to a geometry (node, WKT string, or named shape)",
+                )?;
+                let (geom, bbox1) = match &resolved1 {
+                    ResolvedSpatial::Geometry(g, bbox) => (g, bbox),
+                    ResolvedSpatial::Point(_, _) => {
+                        return Err("contains(): first arg must be a geometry, not a point".into());
+                    }
                 };
-                let s2 = match self.evaluate_expression(&args[1], row)? {
-                    Value::String(s) => s,
-                    _ => return Err("wkt_intersects(): args must be strings".into()),
-                };
-                let g1 = self.parse_wkt_cached(&s1)?;
-                let g2 = self.parse_wkt_cached(&s2)?;
-                Ok(Value::Boolean(spatial::geometries_intersect(&g1, &g2)))
+                // Arg 2: prefer point for the contained item (point-in-polygon)
+                let resolved2 = self
+                    .resolve_spatial(&args[1], row, false)?
+                    .ok_or("contains(): second arg must resolve to a point or geometry")?;
+
+                match &resolved2 {
+                    ResolvedSpatial::Point(lat, lon) => {
+                        // Bbox pre-filter: if the point is outside the container's bbox,
+                        // it cannot be inside the polygon. This is O(1) vs O(n_vertices).
+                        if let Some(bb) = bbox1 {
+                            let pt = geo::Coord { x: *lon, y: *lat };
+                            if !bb.min().x.le(&pt.x)
+                                || !bb.max().x.ge(&pt.x)
+                                || !bb.min().y.le(&pt.y)
+                                || !bb.max().y.ge(&pt.y)
+                            {
+                                return Ok(Value::Boolean(false));
+                            }
+                        }
+                        let pt = geo::Point::new(*lon, *lat);
+                        Ok(Value::Boolean(spatial::geometry_contains_point(geom, &pt)))
+                    }
+                    ResolvedSpatial::Geometry(g2, bbox2) => {
+                        // Bbox pre-filter: if bboxes don't overlap, containment is impossible
+                        if let (Some(bb1), Some(bb2)) = (bbox1, bbox2) {
+                            if bb1.max().x < bb2.min().x
+                                || bb2.max().x < bb1.min().x
+                                || bb1.max().y < bb2.min().y
+                                || bb2.max().y < bb1.min().y
+                            {
+                                return Ok(Value::Boolean(false));
+                            }
+                        }
+                        Ok(Value::Boolean(spatial::geometry_contains_geometry(
+                            geom, g2,
+                        )))
+                    }
+                }
             }
-            "wkt_centroid" => {
-                if args.len() != 1 {
-                    return Err("wkt_centroid() requires 1 WKT string argument".into());
+            "intersects" => {
+                if args.len() != 2 {
+                    return Err("intersects() requires 2 arguments".into());
                 }
-                let s = match self.evaluate_expression(&args[0], row)? {
-                    Value::String(s) => s,
-                    _ => return Err("wkt_centroid(): arg must be a string".into()),
+                let r1 = self.resolve_spatial(&args[0], row, true)?.ok_or(
+                    "intersects(): args must resolve to geometries or nodes with spatial config",
+                )?;
+                let r2 = self.resolve_spatial(&args[1], row, true)?.ok_or(
+                    "intersects(): args must resolve to geometries or nodes with spatial config",
+                )?;
+                // Dispatch without cloning — use Arc references where possible
+                let result = match (&r1, &r2) {
+                    (
+                        ResolvedSpatial::Geometry(g1, bbox1),
+                        ResolvedSpatial::Geometry(g2, bbox2),
+                    ) => {
+                        // Bbox pre-filter: if bboxes don't overlap, no intersection possible
+                        if let (Some(bb1), Some(bb2)) = (bbox1, bbox2) {
+                            if bb1.max().x < bb2.min().x
+                                || bb2.max().x < bb1.min().x
+                                || bb1.max().y < bb2.min().y
+                                || bb2.max().y < bb1.min().y
+                            {
+                                return Ok(Value::Boolean(false));
+                            }
+                        }
+                        spatial::geometries_intersect(g1, g2)
+                    }
+                    (ResolvedSpatial::Point(lat, lon), ResolvedSpatial::Geometry(g, bbox)) => {
+                        // Bbox pre-filter for point-vs-geometry
+                        if let Some(bb) = bbox {
+                            if *lon < bb.min().x
+                                || *lon > bb.max().x
+                                || *lat < bb.min().y
+                                || *lat > bb.max().y
+                            {
+                                return Ok(Value::Boolean(false));
+                            }
+                        }
+                        let pt = geo::Geometry::Point(geo::Point::new(*lon, *lat));
+                        spatial::geometries_intersect(&pt, g)
+                    }
+                    (ResolvedSpatial::Geometry(g, bbox), ResolvedSpatial::Point(lat, lon)) => {
+                        if let Some(bb) = bbox {
+                            if *lon < bb.min().x
+                                || *lon > bb.max().x
+                                || *lat < bb.min().y
+                                || *lat > bb.max().y
+                            {
+                                return Ok(Value::Boolean(false));
+                            }
+                        }
+                        let pt = geo::Geometry::Point(geo::Point::new(*lon, *lat));
+                        spatial::geometries_intersect(g, &pt)
+                    }
+                    (ResolvedSpatial::Point(lat1, lon1), ResolvedSpatial::Point(lat2, lon2)) => {
+                        lat1 == lat2 && lon1 == lon2
+                    }
                 };
-                let geom = self.parse_wkt_cached(&s)?;
-                let centroid: Option<geo::Point<f64>> = match &*geom {
-                    geo::Geometry::Point(p) => Some(*p),
-                    geo::Geometry::Polygon(p) => {
-                        use geo::Centroid;
-                        p.centroid()
-                    }
-                    geo::Geometry::MultiPolygon(mp) => {
-                        use geo::Centroid;
-                        mp.centroid()
-                    }
-                    geo::Geometry::Rect(r) => {
-                        use geo::Centroid;
-                        Some(r.centroid())
-                    }
-                    _ => None,
-                };
-                match centroid {
-                    Some(pt) => Ok(Value::Point {
-                        lat: pt.y(),
-                        lon: pt.x(),
+                Ok(Value::Boolean(result))
+            }
+            "centroid" => {
+                if args.len() != 1 {
+                    return Err("centroid() requires 1 argument".into());
+                }
+                let resolved = self.resolve_spatial(&args[0], row, true)?.ok_or(
+                    "centroid(): arg must resolve to a geometry (node, WKT string, or named shape)",
+                )?;
+                match &resolved {
+                    ResolvedSpatial::Point(lat, lon) => Ok(Value::Point {
+                        lat: *lat,
+                        lon: *lon,
                     }),
-                    None => Err("wkt_centroid(): geometry has no centroid".into()),
+                    ResolvedSpatial::Geometry(g, _) => {
+                        let (lat, lon) = spatial::geometry_centroid(g)?;
+                        Ok(Value::Point { lat, lon })
+                    }
+                }
+            }
+            "area" => {
+                if args.len() != 1 {
+                    return Err("area() requires 1 argument".into());
+                }
+                let resolved = self
+                    .resolve_spatial(&args[0], row, true)?
+                    .ok_or("area(): arg must resolve to a polygon geometry")?;
+                match &resolved {
+                    ResolvedSpatial::Geometry(g, _) => {
+                        Ok(Value::Float64(spatial::geometry_area_km2(g)?))
+                    }
+                    ResolvedSpatial::Point(_, _) => {
+                        Err("area(): arg must be a polygon geometry, not a point".into())
+                    }
+                }
+            }
+            "perimeter" => {
+                if args.len() != 1 {
+                    return Err("perimeter() requires 1 argument".into());
+                }
+                let resolved = self
+                    .resolve_spatial(&args[0], row, true)?
+                    .ok_or("perimeter(): arg must resolve to a geometry")?;
+                match &resolved {
+                    ResolvedSpatial::Geometry(g, _) => {
+                        Ok(Value::Float64(spatial::geometry_perimeter_km(g)?))
+                    }
+                    ResolvedSpatial::Point(_, _) => {
+                        Err("perimeter(): arg must be a geometry, not a point".into())
+                    }
                 }
             }
             "latitude" => {
@@ -3455,6 +3982,129 @@ impl<'a> CypherExecutor<'a> {
                 let val = if j == score_item_index {
                     // Use the pre-computed score instead of re-evaluating
                     Value::Float64(winner.score)
+                } else {
+                    self.evaluate_expression(&folded_exprs[j], row)?
+                };
+                projected.insert(key, val);
+            }
+            rows.push(ResultRow {
+                node_bindings: row.node_bindings.clone(),
+                edge_bindings: row.edge_bindings.clone(),
+                path_bindings: row.path_bindings.clone(),
+                projected,
+            });
+        }
+
+        Ok(ResultSet { rows, columns })
+    }
+
+    // ========================================================================
+    // Fused RETURN + ORDER BY + LIMIT (general top-k)
+    // ========================================================================
+
+    /// Generalized top-k: score all rows with a min-heap of size k, then project
+    /// RETURN expressions only for the k surviving rows.
+    /// O(n log k) instead of O(n log n) sort + O(n) full RETURN projection.
+    fn execute_fused_order_by_top_k(
+        &self,
+        return_clause: &ReturnClause,
+        score_item_index: usize,
+        descending: bool,
+        limit: usize,
+        result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
+        if result_set.rows.is_empty() || limit == 0 {
+            let columns: Vec<String> = return_clause
+                .items
+                .iter()
+                .map(return_item_column_name)
+                .collect();
+            return Ok(ResultSet {
+                rows: Vec::new(),
+                columns,
+            });
+        }
+
+        let score_expr =
+            self.fold_constants_expr(&return_clause.items[score_item_index].expression);
+
+        // Phase 1: Score all rows, keep top-k in a min-heap.
+        // ScoredRowRef has reverse Ord → BinaryHeap acts as min-heap (smallest popped).
+        // DESC: keep k largest → push actual score, pop smallest survivor → correct.
+        // ASC: keep k smallest → negate score before insertion. Min-heap pops the
+        //      most negative (= largest actual), keeping k smallest actual scores.
+        self.check_deadline()?;
+        let mut heap: BinaryHeap<ScoredRowRef> = BinaryHeap::with_capacity(limit + 1);
+
+        for (i, row) in result_set.rows.iter().enumerate() {
+            let score_val = self.evaluate_expression(&score_expr, row)?;
+            let raw_score = match score_val {
+                Value::Float64(f) => f,
+                Value::Int64(n) => n as f64,
+                Value::Null => continue,
+                _ => continue,
+            };
+            let heap_score = if descending { raw_score } else { -raw_score };
+            heap.push(ScoredRowRef {
+                score: heap_score,
+                index: i,
+            });
+            if heap.len() > limit {
+                heap.pop();
+            }
+        }
+
+        // Phase 2: Extract winners and sort by actual score
+        let mut winners: Vec<ScoredRowRef> = heap.into_vec();
+        if descending {
+            winners.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        } else {
+            // Scores are negated; sort by ascending actual = descending negated
+            winners.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+
+        // Phase 3: Project RETURN expressions only for the k winners
+        let columns: Vec<String> = return_clause
+            .items
+            .iter()
+            .map(return_item_column_name)
+            .collect();
+
+        let folded_exprs: Vec<Expression> = return_clause
+            .items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                if idx == score_item_index {
+                    score_expr.clone()
+                } else {
+                    self.fold_constants_expr(&item.expression)
+                }
+            })
+            .collect();
+
+        let mut rows = Vec::with_capacity(winners.len());
+        for winner in &winners {
+            let row = &result_set.rows[winner.index];
+            let mut projected = Bindings::with_capacity(return_clause.items.len());
+            for (j, item) in return_clause.items.iter().enumerate() {
+                let key = return_item_column_name(item);
+                let val = if j == score_item_index {
+                    // Recover actual score (undo negation for ASC)
+                    let actual = if descending {
+                        winner.score
+                    } else {
+                        -winner.score
+                    };
+                    Value::Float64(actual)
                 } else {
                     self.evaluate_expression(&folded_exprs[j], row)?
                 };
@@ -4948,17 +5598,64 @@ fn evaluate_comparison(left: &Value, op: &ComparisonOp, right: &Value) -> Result
 
 /// Resolve a property from a NodeData.
 /// Checks field aliases so that original column names (e.g. "npdid") resolve to "id"/"title".
+/// Also resolves spatial virtual properties from SpatialConfig.
 fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> Value {
     let resolved = graph.resolve_alias(&node.node_type, property);
     match resolved {
         "id" => node.id.clone(),
         "title" | "name" => node.title.clone(),
         "type" | "node_type" | "label" => Value::String(node.node_type.clone()),
-        _ => node
-            .properties
-            .get(resolved)
-            .cloned()
-            .unwrap_or(Value::Null),
+        _ => {
+            // Check spatial virtual properties (take precedence when configured)
+            if let Some(config) = graph.get_spatial_config(&node.node_type) {
+                // "location" → synthesize Point from location config
+                if resolved == "location" {
+                    if let Some((lat_f, lon_f)) = &config.location {
+                        let lat = value_operations::value_to_f64(
+                            node.properties.get(lat_f).unwrap_or(&Value::Null),
+                        );
+                        let lon = value_operations::value_to_f64(
+                            node.properties.get(lon_f).unwrap_or(&Value::Null),
+                        );
+                        if let (Some(lat), Some(lon)) = (lat, lon) {
+                            return Value::Point { lat, lon };
+                        }
+                    }
+                }
+                // "geometry" → return WKT string from geometry config
+                if resolved == "geometry" {
+                    if let Some(geom_f) = &config.geometry {
+                        if let Some(val) = node.properties.get(geom_f) {
+                            return val.clone();
+                        }
+                    }
+                }
+                // Named points → synthesize Point
+                if let Some((lat_f, lon_f)) = config.points.get(resolved) {
+                    let lat = value_operations::value_to_f64(
+                        node.properties.get(lat_f).unwrap_or(&Value::Null),
+                    );
+                    let lon = value_operations::value_to_f64(
+                        node.properties.get(lon_f).unwrap_or(&Value::Null),
+                    );
+                    if let (Some(lat), Some(lon)) = (lat, lon) {
+                        return Value::Point { lat, lon };
+                    }
+                }
+                // Named shapes → return WKT string
+                if let Some(shape_f) = config.shapes.get(resolved) {
+                    if let Some(val) = node.properties.get(shape_f) {
+                        return val.clone();
+                    }
+                }
+            }
+
+            // Fall back to real property
+            node.properties
+                .get(resolved)
+                .cloned()
+                .unwrap_or(Value::Null)
+        }
     }
 }
 

@@ -119,10 +119,12 @@ graph.cypher("""
 | `nodes(p)` | Nodes in a path |
 | `relationships(p)` | Relationships in a path |
 | `point(lat, lon)` | Create a geographic point |
-| `distance(p1, p2)` | Haversine great-circle distance (km) |
-| `wkt_contains(wkt, point)` | Point-in-polygon test |
-| `wkt_intersects(wkt1, wkt2)` | Geometry intersection test |
-| `wkt_centroid(wkt)` | Centroid of WKT geometry |
+| `distance(a, b)` | Haversine distance (km); geometry-aware |
+| `contains(a, b)` | Does a's geometry contain b? |
+| `intersects(a, b)` | Do geometries intersect? |
+| `centroid(n)` | Centroid of geometry → Point |
+| `area(n)` | Geodesic area (km²) |
+| `perimeter(n)` | Geodesic perimeter/length (km) |
 | `latitude(point)` | Extract latitude from point |
 | `longitude(point)` | Extract longitude from point |
 | `text_score(n, prop, query)` | Semantic similarity (auto-embeds query text; requires `set_embedder()`) |
@@ -130,48 +132,66 @@ graph.cypher("""
 
 ## Spatial Functions
 
-Built-in spatial functions for geographic queries using the Haversine formula:
+Built-in spatial functions for geographic queries. All node-aware functions auto-resolve geometry and location via [spatial types](README.md#spatial-types).
 
 | Function | Returns | Description |
 |----------|---------|-------------|
 | `point(lat, lon)` | Point | Create a geographic point |
-| `distance(p1, p2)` | Float (km) | Haversine great-circle distance between two points |
+| `distance(a, b)` | Float (km) | Haversine distance; geometry-aware (0 if inside/touching) |
 | `distance(lat1, lon1, lat2, lon2)` | Float (km) | Haversine distance (4-arg shorthand) |
-| `wkt_contains(wkt, point)` | Boolean | Point-in-polygon test |
-| `wkt_contains(wkt, lat, lon)` | Boolean | Point-in-polygon (3-arg shorthand) |
-| `wkt_intersects(wkt1, wkt2)` | Boolean | Geometry intersection test |
-| `wkt_centroid(wkt)` | Point | Centroid of WKT geometry |
+| `contains(a, b)` | Boolean | Does a's geometry contain b? (point-in-polygon or geometry containment) |
+| `intersects(a, b)` | Boolean | Do geometries intersect? |
+| `centroid(n)` | Point | Centroid of geometry (node or WKT string) |
+| `area(n)` | Float (km²) | Geodesic area of polygon (node or WKT string) |
+| `perimeter(n)` | Float (km) | Geodesic perimeter/length (node or WKT string) |
 | `latitude(point)` | Float | Extract latitude component |
 | `longitude(point)` | Float | Extract longitude component |
 
+All functions accept both nodes (auto-resolved via spatial config) and raw values (WKT strings, Points).
+
 ```python
-# Distance filtering — cities within 100km of Oslo
+# Node-aware spatial — with spatial config declared via column_types
 graph.cypher("""
-    MATCH (n:City)
-    WHERE distance(point(n.latitude, n.longitude), point(59.91, 10.75)) < 100.0
-    RETURN n.name, distance(n.latitude, n.longitude, 59.91, 10.75) AS dist_km
-    ORDER BY dist_km
+    MATCH (c:City), (a:Area)
+    WHERE contains(a, c)
+    RETURN c.name, a.name
 """)
 
-# Spatial + graph traversal
 graph.cypher("""
-    MATCH (a:City)-[:CONNECTED_TO]->(b:City)
-    WHERE distance(point(a.lat, a.lon), point(b.lat, b.lon)) < 50.0
+    MATCH (a:Field), (b:Field)
+    WHERE intersects(a, b) AND a <> b
     RETURN a.name, b.name
 """)
 
-# Point-in-polygon with WKT
 graph.cypher("""
-    MATCH (c:City), (a:Area)
-    WHERE wkt_contains(a.geometry, point(c.latitude, c.longitude))
-    RETURN c.name, a.name
+    MATCH (n:Field)
+    RETURN n.name, area(n) AS area_km2, centroid(n) AS center
+""")
+
+# Geometry-aware distance
+graph.cypher("""
+    MATCH (a:Field), (b:Field) WHERE a <> b
+    RETURN a.name, b.name, distance(a.geometry, b.geometry) AS dist
+""")  # 0 if polygons touch, centroid distance otherwise
+
+graph.cypher("""
+    MATCH (n:Field)
+    WHERE distance(point(60.5, 3.5), n.geometry) < 10.0
+    RETURN n.name
+""")  # 0 if point inside polygon, closest boundary otherwise
+
+# Distance filtering — cities within 100km of Oslo
+graph.cypher("""
+    MATCH (n:City)
+    WHERE distance(n, point(59.91, 10.75)) < 100.0
+    RETURN n.name
+    ORDER BY distance(n, point(59.91, 10.75))
 """)
 
 # Aggregation with spatial
 graph.cypher("""
-    MATCH (n:City)
-    RETURN avg(distance(point(n.latitude, n.longitude), point(59.91, 10.75))) AS avg_dist,
-           min(distance(point(n.latitude, n.longitude), point(59.91, 10.75))) AS min_dist
+    MATCH (a:Field), (b:Field) WHERE a <> b
+    RETURN avg(distance(a, b)) AS avg_dist, std(distance(a, b)) AS std_dist
 """)
 ```
 
@@ -430,7 +450,7 @@ print(plan)
 | **Aggregation** | `count(*)`, `count(expr)`, `sum`, `avg`/`mean`, `min`, `max`, `collect`, `std` |
 | **Expressions** | `CASE WHEN...THEN...ELSE...END`, `$param`, `[x IN list WHERE ... \| expr]` |
 | **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `length`, `type`, `id`, `labels`, `coalesce`, `nodes(p)`, `relationships(p)` |
-| **Spatial** | `point(lat, lon)`, `distance(p1, p2)`, `wkt_contains(wkt, point)`, `wkt_intersects(wkt1, wkt2)`, `wkt_centroid(wkt)`, `latitude(point)`, `longitude(point)` |
+| **Spatial** | `point(lat, lon)`, `distance(a, b)`, `contains(a, b)`, `intersects(a, b)`, `centroid(n)`, `area(n)`, `perimeter(n)`, `latitude(point)`, `longitude(point)` |
 | **Semantic** | `text_score(n, prop, query [, metric])` — auto-embeds query via `set_embedder()`, cosine/dot_product/euclidean |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
 | **Not supported** | `CALL`/stored procedures, `FOREACH`, subqueries, `SET n:Label` (label mutation), `REMOVE n:Label`, multi-label |

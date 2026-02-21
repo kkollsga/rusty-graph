@@ -546,7 +546,7 @@ graph.cypher("""
 | **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val}`, `p = shortestPath(...)` |
 | **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern }`, `EXISTS(( pattern ))` |
 | **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `type`, `id`, `labels`, `coalesce`, `count`, `sum`, `avg`, `min`, `max`, `collect`, `std`, `text_score` |
-| **Spatial** | `point`, `distance`, `wkt_contains`, `wkt_intersects`, `wkt_centroid`, `latitude`, `longitude` |
+| **Spatial** | `point`, `distance`, `contains`, `intersects`, `centroid`, `area`, `perimeter`, `latitude`, `longitude` |
 | **Not supported** | `CALL`/stored procedures, `FOREACH`, subqueries, `SET n:Label` (label mutation), multi-label |
 
 See [CYPHER.md](CYPHER.md) for full examples of every feature.
@@ -1073,11 +1073,84 @@ degrees = graph.type_filter('Person').get_degrees()
 
 ## Spatial Operations
 
-> Spatial queries are also available in Cypher via `point()`, `distance()`, `wkt_contains()`, `wkt_intersects()`, and `wkt_centroid()`. See [CYPHER.md](CYPHER.md#spatial-functions).
+> Spatial queries are also available in Cypher via `distance()`, `contains()`, `intersects()`, `centroid()`, `area()`, `perimeter()`, and `point()`. See [CYPHER.md](CYPHER.md#spatial-functions).
+
+### Spatial Types
+
+Declare spatial properties via `column_types` when loading data. This enables auto-resolution in Cypher queries and fluent API methods — no need to specify field names on every call.
+
+| Type | Cardinality | Purpose |
+|------|-------------|---------|
+| `location` | 0..1 per type | Primary lat/lon coordinate |
+| `geometry` | 0..1 per type | Primary WKT geometry |
+| `point.<name>` | 0..N | Named lat/lon coordinates |
+| `shape.<name>` | 0..N | Named WKT geometries |
+
+```python
+graph.add_nodes(df, 'Field', 'id', 'name', column_types={
+    'latitude': 'location.lat',
+    'longitude': 'location.lon',
+    'wkt_polygon': 'geometry',
+})
+```
+
+With spatial types declared, queries become simpler:
+
+```python
+# Auto-resolves location fields — no lat_field/lon_field needed
+graph.type_filter('Field').near_point_km(center_lat=60.5, center_lon=3.2, max_distance_km=50.0)
+
+# Cypher distance between nodes — resolves via location, falls back to geometry centroid
+graph.cypher("""
+    MATCH (a:Field {name:'Troll'}), (b:Field {name:'Draugen'})
+    RETURN distance(a, b) AS dist_km
+""")
+
+# Node-aware spatial functions — auto-resolve geometry from spatial config
+graph.cypher("MATCH (c:City), (a:Area) WHERE contains(a, c) RETURN c.name, a.name")
+graph.cypher("MATCH (n:Field) RETURN n.name, area(n) AS km2, centroid(n) AS center")
+graph.cypher("MATCH (a:Field), (b:Field) WHERE intersects(a, b) RETURN a.name, b.name")
+
+# Geometry-aware distance — 0 if inside/touching, boundary distance otherwise
+graph.cypher("RETURN distance(point(60.5, 3.5), n.geometry)")  # 0 if inside polygon
+
+# Virtual properties
+graph.cypher("MATCH (n:Field) RETURN n.name, n.location, n.geometry")
+```
+
+Multiple named points and shapes:
+
+```python
+graph.add_nodes(df, 'Well', 'id', 'name', column_types={
+    'surface_lat': 'location.lat',
+    'surface_lon': 'location.lon',
+    'bh_lat': 'point.bottom_hole.lat',
+    'bh_lon': 'point.bottom_hole.lon',
+    'boundary_wkt': 'shape.boundary',
+})
+
+# Distance between named points
+graph.cypher("... RETURN distance(a.bottom_hole, b.bottom_hole)")
+```
+
+Retroactive configuration (for data loaded without `column_types`):
+
+```python
+graph.set_spatial('Field',
+    location=('latitude', 'longitude'),
+    geometry='wkt_polygon',
+)
+```
 
 ### Bounding Box
 
 ```python
+# With spatial config — field names auto-resolved
+graph.type_filter('Discovery').within_bounds(
+    min_lat=58.0, max_lat=62.0, min_lon=1.0, max_lon=5.0
+)
+
+# Without spatial config — explicit field names
 graph.type_filter('Discovery').within_bounds(
     lat_field='latitude', lon_field='longitude',
     min_lat=58.0, max_lat=62.0, min_lon=1.0, max_lon=5.0
@@ -1088,8 +1161,7 @@ graph.type_filter('Discovery').within_bounds(
 
 ```python
 graph.type_filter('Wellbore').near_point_km(
-    center_lat=60.5, center_lon=3.2, max_distance_km=50.0,
-    lat_field='latitude', lon_field='longitude'
+    center_lat=60.5, center_lon=3.2, max_distance_km=50.0
 )
 ```
 
@@ -1097,15 +1169,30 @@ graph.type_filter('Wellbore').near_point_km(
 
 ```python
 graph.type_filter('Field').intersects_geometry(
-    'POLYGON((1 58, 5 58, 5 62, 1 62, 1 58))',
-    geometry_field='wkt_geometry'
+    'POLYGON((1 58, 5 58, 5 62, 1 62, 1 58))'
 )
+```
+
+Accepts WKT strings or shapely geometry objects:
+
+```python
+from shapely.geometry import box
+graph.type_filter('Field').intersects_geometry(box(1, 58, 5, 62))
 ```
 
 ### Point-in-Polygon
 
 ```python
-graph.type_filter('Block').contains_point(lat=60.5, lon=3.2, geometry_field='wkt_geometry')
+graph.type_filter('Block').contains_point(lat=60.5, lon=3.2)
+```
+
+### GeoDataFrame Export
+
+Convert query results with WKT columns to geopandas GeoDataFrames:
+
+```python
+rv = graph.cypher("MATCH (n:Field) RETURN n.name, n.geometry")
+gdf = rv.to_gdf(geometry_column='n.geometry', crs='EPSG:4326')
 ```
 
 ---

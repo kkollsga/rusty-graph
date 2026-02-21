@@ -1,4 +1,4 @@
-"""Tests for Cypher spatial functions: point(), distance(), wkt_contains(), etc."""
+"""Tests for Cypher spatial functions: point(), distance(), contains(), etc."""
 import pytest
 import pandas as pd
 import kglite
@@ -166,48 +166,48 @@ class TestDistance:
 
 
 # ============================================================================
-# wkt_contains()
+# contains()
 # ============================================================================
 
 
-class TestWktContains:
-    def test_wkt_contains_with_point(self, geo_graph):
+class TestContains:
+    def test_contains_with_point(self, geo_graph):
         """Oslo (59.91, 10.75) is inside SouthNorway polygon."""
         rows = geo_graph.cypher(
             "MATCH (a:Area) "
             "WHERE a.title = 'SouthNorway' "
-            "AND wkt_contains(a.geometry, point(59.91, 10.75)) "
+            "AND contains(a.geometry, point(59.91, 10.75)) "
             "RETURN a.title AS title"
         ).to_list()
         assert len(rows) == 1
         assert rows[0]["title"] == "SouthNorway"
 
-    def test_wkt_contains_three_args(self, geo_graph):
-        """3-arg form: wkt_contains(wkt, lat, lon)."""
+    def test_contains_with_wkt_and_point(self, geo_graph):
+        """contains() with WKT string property and point literal."""
         rows = geo_graph.cypher(
             "MATCH (a:Area) "
-            "WHERE wkt_contains(a.geometry, 59.91, 10.75) "
+            "WHERE contains(a.geometry, point(59.91, 10.75)) "
             "RETURN a.title AS title ORDER BY title"
         ).to_list()
         titles = [r["title"] for r in rows]
         assert "SouthNorway" in titles
         assert "SmallBox" in titles
 
-    def test_wkt_contains_false(self, geo_graph):
+    def test_contains_false(self, geo_graph):
         """Trondheim (63.43, 10.40) is outside SouthNorway (max lat 62)."""
         rows = geo_graph.cypher(
             "MATCH (a:Area) "
             "WHERE a.title = 'SouthNorway' "
-            "AND wkt_contains(a.geometry, point(63.43, 10.40)) "
+            "AND contains(a.geometry, point(63.43, 10.40)) "
             "RETURN a.title"
         ).to_list()
         assert len(rows) == 0
 
-    def test_wkt_contains_with_node_properties(self, geo_graph):
+    def test_contains_with_node_properties(self, geo_graph):
         """Find which areas contain each city."""
         rows = geo_graph.cypher(
             "MATCH (c:City), (a:Area) "
-            "WHERE wkt_contains(a.geometry, point(c.latitude, c.longitude)) "
+            "WHERE contains(a.geometry, point(c.latitude, c.longitude)) "
             "RETURN c.title AS city, a.title AS area ORDER BY city, area"
         ).to_list()
         assert len(rows) >= 1
@@ -216,55 +216,55 @@ class TestWktContains:
 
 
 # ============================================================================
-# wkt_intersects()
+# intersects()
 # ============================================================================
 
 
-class TestWktIntersects:
-    def test_wkt_intersects_overlapping(self, geo_graph):
+class TestIntersects:
+    def test_intersects_overlapping(self, geo_graph):
         """SouthNorway and WestNorway polygons overlap."""
         rows = geo_graph.cypher(
             "MATCH (a:Area), (b:Area) "
             "WHERE a.title = 'SouthNorway' AND b.title = 'WestNorway' "
-            "AND wkt_intersects(a.geometry, b.geometry) "
+            "AND intersects(a.geometry, b.geometry) "
             "RETURN a.title"
         ).to_list()
         assert len(rows) == 1
 
-    def test_wkt_intersects_non_overlapping(self, geo_graph):
+    def test_intersects_non_overlapping(self, geo_graph):
         """SmallBox (lon 10-11) and WestNorway (lon 4-7) don't overlap."""
         rows = geo_graph.cypher(
             "MATCH (a:Area), (b:Area) "
             "WHERE a.title = 'SmallBox' AND b.title = 'WestNorway' "
-            "AND wkt_intersects(a.geometry, b.geometry) "
+            "AND intersects(a.geometry, b.geometry) "
             "RETURN a.title"
         ).to_list()
         assert len(rows) == 0
 
 
 # ============================================================================
-# wkt_centroid()
+# centroid()
 # ============================================================================
 
 
-class TestWktCentroid:
-    def test_wkt_centroid_polygon(self, geo_graph):
+class TestCentroid:
+    def test_centroid_polygon(self, geo_graph):
         """Centroid of SmallBox should be (59.5, 10.5)."""
         rows = geo_graph.cypher(
             "MATCH (a:Area) WHERE a.title = 'SmallBox' "
-            "RETURN wkt_centroid(a.geometry) AS c"
+            "RETURN centroid(a.geometry) AS c"
         ).to_list()
         c = rows[0]["c"]
         assert isinstance(c, dict)
         assert abs(c["latitude"] - 59.5) < 0.01
         assert abs(c["longitude"] - 10.5) < 0.01
 
-    def test_wkt_centroid_in_distance(self, geo_graph):
+    def test_centroid_in_distance(self, geo_graph):
         """Use centroid in distance calculation."""
         rows = geo_graph.cypher(
             "MATCH (a:Area) "
             "RETURN a.title AS title, "
-            "distance(wkt_centroid(a.geometry), point(59.91, 10.75)) AS dist "
+            "distance(centroid(a.geometry), point(59.91, 10.75)) AS dist "
             "ORDER BY dist"
         ).to_list()
         assert len(rows) == 3
@@ -291,11 +291,11 @@ class TestAccessors:
         assert abs(rows[0]["lon"] - 10.75) < 0.001
 
     def test_accessors_with_centroid(self, geo_graph):
-        """Extract lat/lon from wkt_centroid."""
+        """Extract lat/lon from centroid."""
         rows = geo_graph.cypher(
             "MATCH (a:Area) WHERE a.title = 'SmallBox' "
-            "RETURN latitude(wkt_centroid(a.geometry)) AS lat, "
-            "longitude(wkt_centroid(a.geometry)) AS lon"
+            "RETURN latitude(centroid(a.geometry)) AS lat, "
+            "longitude(centroid(a.geometry)) AS lon"
         ).to_list()
         assert abs(rows[0]["lat"] - 59.5) < 0.01
         assert abs(rows[0]["lon"] - 10.5) < 0.01

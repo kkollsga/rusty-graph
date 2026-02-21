@@ -955,6 +955,12 @@ impl CypherParser {
                 }
             }
 
+            // Keywords that can also be function names when followed by (
+            Some(CypherToken::Contains) if self.peek_at(1) == Some(&CypherToken::LParen) => {
+                self.advance();
+                self.parse_function_call("contains".to_string())
+            }
+
             Some(t) => Err(format!("Unexpected token in expression: {:?}", t)),
             None => Err("Unexpected end of query in expression".to_string()),
         }

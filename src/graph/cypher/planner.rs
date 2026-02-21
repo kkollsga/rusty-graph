@@ -15,6 +15,7 @@ pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<Stri
     push_limit_into_match(query, graph);
     fuse_optional_match_aggregate(query);
     fuse_vector_score_order_limit(query);
+    fuse_order_by_top_k(query);
     reorder_predicates_by_cost(query);
 }
 
@@ -512,6 +513,133 @@ fn expression_to_column_name(expr: &Expression) -> String {
 }
 
 // ============================================================================
+// General Top-K ORDER BY LIMIT Fusion
+// ============================================================================
+
+/// Fuse RETURN + ORDER BY + LIMIT into a single top-k heap pass.
+/// Generalizes `fuse_vector_score_order_limit` to any numeric sort expression.
+/// Runs after the vector_score-specific pass so it only handles non-vector_score cases.
+fn fuse_order_by_top_k(query: &mut CypherQuery) {
+    if query.clauses.len() < 3 {
+        return;
+    }
+
+    let mut i = 0;
+    while i + 2 < query.clauses.len() {
+        // Check for RETURN + ORDER BY + LIMIT pattern
+        let is_pattern = matches!(
+            (
+                &query.clauses[i],
+                &query.clauses[i + 1],
+                &query.clauses[i + 2]
+            ),
+            (Clause::Return(_), Clause::OrderBy(_), Clause::Limit(_))
+        );
+        if !is_pattern {
+            i += 1;
+            continue;
+        }
+
+        // Reject if a SKIP clause precedes LIMIT (SKIP+LIMIT needs full sort)
+        if i + 3 < query.clauses.len() && matches!(&query.clauses[i + 2], Clause::Skip(_)) {
+            i += 1;
+            continue;
+        }
+
+        let (score_idx, alias) = if let Clause::Return(r) = &query.clauses[i] {
+            // Don't fuse if RETURN has DISTINCT
+            if r.distinct {
+                i += 1;
+                continue;
+            }
+            // Don't fuse if any RETURN item has aggregation
+            if r.items
+                .iter()
+                .any(|item| super::executor::is_aggregate_expression(&item.expression))
+            {
+                i += 1;
+                continue;
+            }
+            // We need ORDER BY to reference a RETURN alias — find which one
+            let order_alias = if let Clause::OrderBy(o) = &query.clauses[i + 1] {
+                if o.items.len() != 1 {
+                    i += 1;
+                    continue;
+                }
+                match &o.items[0].expression {
+                    Expression::Variable(v) => v.clone(),
+                    other => expression_to_column_name(other),
+                }
+            } else {
+                i += 1;
+                continue;
+            };
+            // Find matching RETURN item
+            let found = r
+                .items
+                .iter()
+                .enumerate()
+                .find(|(_, item)| return_item_column_name(item) == order_alias);
+            match found {
+                Some((idx, _)) => (idx, order_alias),
+                None => {
+                    i += 1;
+                    continue;
+                }
+            }
+        } else {
+            i += 1;
+            continue;
+        };
+        // Verify alias matches ORDER BY (already extracted above)
+        let _ = &alias;
+
+        // Extract ORDER BY direction
+        let descending = if let Clause::OrderBy(o) = &query.clauses[i + 1] {
+            !o.items[0].ascending
+        } else {
+            i += 1;
+            continue;
+        };
+
+        // Extract LIMIT (must be positive integer literal)
+        let limit = if let Clause::Limit(l) = &query.clauses[i + 2] {
+            match &l.count {
+                Expression::Literal(Value::Int64(n)) if *n > 0 => *n as usize,
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            }
+        } else {
+            i += 1;
+            continue;
+        };
+
+        // All checks passed — fuse the three clauses
+        query.clauses.remove(i + 2); // LIMIT
+        query.clauses.remove(i + 1); // ORDER BY
+        let return_clause = if let Clause::Return(r) = query.clauses.remove(i) {
+            r
+        } else {
+            unreachable!()
+        };
+
+        query.clauses.insert(
+            i,
+            Clause::FusedOrderByTopK {
+                return_clause,
+                score_item_index: score_idx,
+                descending,
+                limit,
+            },
+        );
+
+        i += 1;
+    }
+}
+
+// ============================================================================
 // Predicate Cost-Based Reordering
 // ============================================================================
 
@@ -585,9 +713,11 @@ fn estimate_expression_cost(expr: &Expression) -> u32 {
             let base = match name.to_lowercase().as_str() {
                 "point" => 3,
                 "distance" => 10,
-                "wkt_contains" => 50,
-                "wkt_intersects" => 60,
-                "wkt_centroid" => 30,
+                "contains" => 50,
+                "intersects" => 60,
+                "centroid" => 30,
+                "area" => 40,
+                "perimeter" => 40,
                 "latitude" | "longitude" => 2,
                 "tostring" | "tointeger" | "tofloat" | "toboolean" => 2,
                 "size" | "length" | "type" | "id" => 2,

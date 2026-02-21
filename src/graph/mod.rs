@@ -345,6 +345,137 @@ impl KnowledgeGraph {
     }
 }
 
+/// Parse spatial column_types entries and produce a SpatialConfig + cleaned column_types dict.
+///
+/// Recognizes: `location.lat`, `location.lon`, `geometry`, `point.<name>.lat`,
+/// `point.<name>.lon`, `shape.<name>`. These are replaced with natural storage
+/// types (`float` / `str`) in the returned dict so `pandas_to_dataframe` can handle them.
+///
+/// Returns `(Some(config), cleaned_dict)` if any spatial entries were found,
+/// or `(None, original_dict)` if none were found.
+fn parse_spatial_column_types(
+    py: Python<'_>,
+    column_types: &Bound<'_, PyDict>,
+) -> PyResult<(Option<schema::SpatialConfig>, Py<PyDict>)> {
+    let cleaned = PyDict::new(py);
+    let mut config = schema::SpatialConfig::default();
+    let mut has_spatial = false;
+
+    // Track partial location/point entries (need both lat and lon)
+    let mut location_lat: Option<String> = None;
+    let mut location_lon: Option<String> = None;
+    let mut point_lats: HashMap<String, String> = HashMap::new();
+    let mut point_lons: HashMap<String, String> = HashMap::new();
+
+    for (key, value) in column_types.iter() {
+        let col_name: String = key.extract()?;
+        let type_str: String = value.extract()?;
+        let type_lower = type_str.to_lowercase();
+
+        match type_lower.as_str() {
+            "location.lat" => {
+                location_lat = Some(col_name.clone());
+                cleaned.set_item(&col_name, "float")?;
+                has_spatial = true;
+            }
+            "location.lon" => {
+                location_lon = Some(col_name.clone());
+                cleaned.set_item(&col_name, "float")?;
+                has_spatial = true;
+            }
+            "geometry" => {
+                config.geometry = Some(col_name.clone());
+                cleaned.set_item(&col_name, "str")?;
+                has_spatial = true;
+            }
+            _ if type_lower.starts_with("point.") => {
+                // point.<name>.lat or point.<name>.lon
+                let parts: Vec<&str> = type_lower.splitn(3, '.').collect();
+                if parts.len() == 3 {
+                    let name = parts[1].to_string();
+                    match parts[2] {
+                        "lat" => {
+                            point_lats.insert(name, col_name.clone());
+                        }
+                        "lon" => {
+                            point_lons.insert(name, col_name.clone());
+                        }
+                        _ => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Invalid spatial type '{}' for column '{}'. \
+                                     Expected 'point.<name>.lat' or 'point.<name>.lon'.",
+                                type_str, col_name
+                            )));
+                        }
+                    }
+                    cleaned.set_item(&col_name, "float")?;
+                    has_spatial = true;
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Invalid spatial type '{}' for column '{}'. \
+                         Expected 'point.<name>.lat' or 'point.<name>.lon'.",
+                        type_str, col_name
+                    )));
+                }
+            }
+            _ if type_lower.starts_with("shape.") => {
+                // shape.<name>
+                let parts: Vec<&str> = type_lower.splitn(2, '.').collect();
+                if parts.len() == 2 {
+                    let name = parts[1].to_string();
+                    config.shapes.insert(name, col_name.clone());
+                    cleaned.set_item(&col_name, "str")?;
+                    has_spatial = true;
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Invalid spatial type '{}' for column '{}'.",
+                        type_str, col_name
+                    )));
+                }
+            }
+            _ => {
+                // Non-spatial type — pass through unchanged
+                cleaned.set_item(&col_name, &type_str)?;
+            }
+        }
+    }
+
+    if !has_spatial {
+        return Ok((None, column_types.clone().unbind()));
+    }
+
+    // Assemble location
+    match (location_lat, location_lon) {
+        (Some(lat), Some(lon)) => config.location = Some((lat, lon)),
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Incomplete location: both 'location.lat' and 'location.lon' must be specified.",
+            ));
+        }
+        (None, None) => {}
+    }
+
+    // Assemble named points
+    let all_point_names: HashSet<&String> = point_lats.keys().chain(point_lons.keys()).collect();
+    for name in all_point_names {
+        match (point_lats.get(name), point_lons.get(name)) {
+            (Some(lat), Some(lon)) => {
+                config
+                    .points
+                    .insert(name.clone(), (lat.clone(), lon.clone()));
+            }
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Incomplete point '{}': both 'point.{}.lat' and 'point.{}.lon' must be specified.",
+                    name, name, name
+                )));
+            }
+        }
+    }
+
+    Ok((Some(config), cleaned.unbind()))
+}
+
 /// Helper function to get a mutable DirGraph from Arc.
 /// Uses Arc::make_mut which clones only if there are other references,
 /// otherwise gives a mutable reference in place. Callers mutate the graph
@@ -570,11 +701,23 @@ impl KnowledgeGraph {
             Vec::new()
         };
 
+        // Parse spatial column_types entries and produce a cleaned dict
+        let py = data.py();
+        let (spatial_cfg, cleaned_types) = if let Some(type_dict) = column_types {
+            let (cfg, cleaned) = parse_spatial_column_types(py, type_dict)?;
+            (cfg, Some(cleaned))
+        } else {
+            (None, None)
+        };
+
+        // Use cleaned column_types for DataFrame conversion (spatial types replaced with natural types)
+        let effective_types = cleaned_types.as_ref().map(|d| d.bind(py).clone());
+
         let df_result = py_in::pandas_to_dataframe(
             data,
             std::slice::from_ref(&unique_id_field),
             &column_list,
-            column_types,
+            effective_types.as_ref(),
         )?;
 
         let graph = get_graph_mut(&mut self.inner);
@@ -588,6 +731,11 @@ impl KnowledgeGraph {
             conflict_handling,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+        // Merge spatial config into graph
+        if let Some(cfg) = spatial_cfg {
+            graph.spatial_configs.insert(node_type.clone(), cfg);
+        }
 
         // Store embeddings for the created nodes
         if !embedding_data.is_empty() {

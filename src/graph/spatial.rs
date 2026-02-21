@@ -2,7 +2,8 @@
 // Provides spatial filtering and geometry operations on graph nodes
 
 use geo::geometry::{Geometry, LineString, Point, Polygon};
-use geo::{Centroid, Contains, Intersects, Rect};
+use geo::Geodesic;
+use geo::{Centroid, Closest, ClosestPoint, Contains, GeodesicArea, Intersects, Length, Rect};
 use petgraph::graph::NodeIndex;
 use wkt::TryFromWkt;
 
@@ -201,8 +202,12 @@ pub fn parse_wkt(wkt_string: &str) -> Result<Geometry<f64>, String> {
 /// Returns (lat, lon) tuple where lat=y and lon=x (geographic convention)
 pub fn wkt_centroid(wkt_string: &str) -> Result<(f64, f64), String> {
     let geometry = parse_wkt(wkt_string)?;
+    geometry_centroid(&geometry)
+}
 
-    let centroid: Option<Point<f64>> = match &geometry {
+/// Compute centroid of any geometry, returns (lat, lon).
+pub(crate) fn geometry_centroid(geom: &Geometry<f64>) -> Result<(f64, f64), String> {
+    let centroid: Option<Point<f64>> = match geom {
         Geometry::Point(p) => Some(*p),
         Geometry::Polygon(p) => p.centroid(),
         Geometry::MultiPolygon(mp) => mp.centroid(),
@@ -217,6 +222,95 @@ pub fn wkt_centroid(wkt_string: &str) -> Result<(f64, f64), String> {
         Some(point) => Ok((point.y(), point.x())), // lat=y, lon=x
         None => Err("Could not calculate centroid for geometry".to_string()),
     }
+}
+
+/// Geodesic area of a geometry in km²
+pub(crate) fn geometry_area_km2(geom: &Geometry<f64>) -> Result<f64, String> {
+    let area_m2 = match geom {
+        Geometry::Polygon(p) => p.geodesic_area_unsigned(),
+        Geometry::MultiPolygon(mp) => mp.geodesic_area_unsigned(),
+        Geometry::Rect(r) => rect_to_polygon(r).geodesic_area_unsigned(),
+        _ => return Err("area() requires a polygon geometry".into()),
+    };
+    Ok(area_m2 / 1_000_000.0) // m² → km²
+}
+
+/// Geodesic perimeter/length of a geometry in km
+pub(crate) fn geometry_perimeter_km(geom: &Geometry<f64>) -> Result<f64, String> {
+    let length_m = match geom {
+        Geometry::Polygon(p) => p.exterior().length::<Geodesic>(),
+        Geometry::MultiPolygon(mp) => mp.iter().map(|p| p.exterior().length::<Geodesic>()).sum(),
+        Geometry::LineString(l) => l.length::<Geodesic>(),
+        Geometry::MultiLineString(ml) => ml.iter().map(|l| l.length::<Geodesic>()).sum(),
+        Geometry::Rect(r) => rect_to_polygon(r).exterior().length::<Geodesic>(),
+        _ => return Err("perimeter() requires a polygon or line geometry".into()),
+    };
+    Ok(length_m / 1000.0) // m → km
+}
+
+/// Does geometry contain a point?
+pub(crate) fn geometry_contains_point(geom: &Geometry<f64>, point: &Point<f64>) -> bool {
+    match geom {
+        Geometry::Polygon(p) => p.contains(point),
+        Geometry::MultiPolygon(mp) => mp.contains(point),
+        Geometry::Rect(r) => r.contains(point),
+        _ => false,
+    }
+}
+
+/// Does geometry a fully contain geometry b?
+/// Uses the geo::Contains trait for proper geometric containment.
+pub(crate) fn geometry_contains_geometry(a: &Geometry<f64>, b: &Geometry<f64>) -> bool {
+    match (a, b) {
+        (Geometry::Polygon(pa), Geometry::Polygon(pb)) => pa.contains(pb),
+        (Geometry::Polygon(pa), Geometry::Point(pb)) => pa.contains(pb),
+        (Geometry::Polygon(pa), Geometry::LineString(lb)) => pa.contains(lb),
+        (Geometry::MultiPolygon(mpa), Geometry::Point(pb)) => mpa.contains(pb),
+        (Geometry::MultiPolygon(mpa), Geometry::Polygon(pb)) => mpa.contains(pb),
+        (Geometry::Rect(r), Geometry::Point(p)) => r.contains(p),
+        (Geometry::Rect(r), Geometry::Polygon(p)) => rect_to_polygon(r).contains(p),
+        _ => false,
+    }
+}
+
+/// Distance from a point to a geometry: 0 if inside, haversine to closest boundary otherwise.
+pub(crate) fn point_to_geometry_distance_km(
+    lat: f64,
+    lon: f64,
+    geom: &Geometry<f64>,
+) -> Result<f64, String> {
+    let pt = Point::new(lon, lat); // geo uses (x=lon, y=lat)
+                                   // Check containment first
+    if geometry_contains_point(geom, &pt) {
+        return Ok(0.0);
+    }
+    // Find closest point on boundary
+    let closest = match geom {
+        Geometry::Polygon(p) => p.closest_point(&pt),
+        Geometry::MultiPolygon(mp) => mp.closest_point(&pt),
+        Geometry::LineString(l) => l.closest_point(&pt),
+        Geometry::Rect(r) => rect_to_polygon(r).closest_point(&pt),
+        Geometry::Point(p2) => Closest::SinglePoint(*p2),
+        _ => return Err("Unsupported geometry for distance".into()),
+    };
+    match closest {
+        Closest::SinglePoint(cp) => Ok(haversine_distance(lat, lon, cp.y(), cp.x())),
+        Closest::Intersection(cp) => Ok(haversine_distance(lat, lon, cp.y(), cp.x())),
+        Closest::Indeterminate => Err("Cannot determine closest point".into()),
+    }
+}
+
+/// Distance between two geometries: 0 if intersecting, centroid-to-centroid otherwise.
+pub(crate) fn geometry_to_geometry_distance_km(
+    g1: &Geometry<f64>,
+    g2: &Geometry<f64>,
+) -> Result<f64, String> {
+    if geometries_intersect(g1, g2) {
+        return Ok(0.0);
+    }
+    let (lat1, lon1) = geometry_centroid(g1)?;
+    let (lat2, lon2) = geometry_centroid(g2)?;
+    Ok(haversine_distance(lat1, lon1, lat2, lon2))
 }
 
 /// Filter nodes within distance of a point using WKT geometry centroids
@@ -393,7 +487,7 @@ pub(crate) fn geometries_intersect(a: &Geometry<f64>, b: &Geometry<f64>) -> bool
 }
 
 /// Convert a Rect to a Polygon
-fn rect_to_polygon(rect: &Rect<f64>) -> Polygon<f64> {
+pub(crate) fn rect_to_polygon(rect: &Rect<f64>) -> Polygon<f64> {
     let min = rect.min();
     let max = rect.max();
     Polygon::new(

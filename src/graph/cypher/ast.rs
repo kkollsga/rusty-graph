@@ -52,6 +52,18 @@ pub enum Clause {
         /// LIMIT k value
         limit: usize,
     },
+    /// Optimizer-generated: fuse RETURN + ORDER BY + LIMIT into a single
+    /// pass using a min-heap for O(n log k) instead of O(n log n).
+    /// Generalizes FusedVectorScoreTopK to ANY numeric sort expression.
+    FusedOrderByTopK {
+        return_clause: ReturnClause,
+        /// Index of the sort-key item within `return_clause.items`
+        score_item_index: usize,
+        /// true = DESC (keep k largest), false = ASC (keep k smallest)
+        descending: bool,
+        /// LIMIT k value
+        limit: usize,
+    },
 }
 
 // ============================================================================

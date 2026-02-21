@@ -279,6 +279,52 @@ impl ResultView {
     fn to_df(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         preprocessed_result_to_dataframe(py, &self.columns, &self.rows)
     }
+
+    /// Convert to a GeoDataFrame with a geometry column parsed from WKT.
+    ///
+    /// Materializes the data as a pandas DataFrame, then converts the
+    /// specified WKT string column into shapely geometries and returns
+    /// a geopandas GeoDataFrame.
+    ///
+    /// Args:
+    ///     geometry_column: Name of the column containing WKT strings (default: 'geometry')
+    ///     crs: Coordinate reference system (e.g. 'EPSG:4326'), or None
+    ///
+    /// Returns:
+    ///     A geopandas GeoDataFrame
+    #[pyo3(signature = (geometry_column="geometry", crs=None))]
+    fn to_gdf(
+        &self,
+        py: Python<'_>,
+        geometry_column: &str,
+        crs: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        let df = preprocessed_result_to_dataframe(py, &self.columns, &self.rows)?;
+
+        let gpd = py.import("geopandas").map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyImportError, _>(
+                "geopandas is required for to_gdf(). Install it with: pip install geopandas",
+            )
+        })?;
+
+        // gpd.GeoSeries.from_wkt(df[geometry_column])
+        let geo_series_cls = gpd.getattr("GeoSeries")?;
+        let wkt_col = df.call_method1(py, "__getitem__", (geometry_column,))?;
+        let geo_series = geo_series_cls.call_method1("from_wkt", (wkt_col,))?;
+
+        // df[geometry_column] = geo_series
+        df.call_method1(py, "__setitem__", (geometry_column, geo_series))?;
+
+        // gpd.GeoDataFrame(df, geometry=geometry_column, crs=crs)
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("geometry", geometry_column)?;
+        if let Some(crs_val) = crs {
+            kwargs.set_item("crs", crs_val)?;
+        }
+        let gdf_cls = gpd.getattr("GeoDataFrame")?;
+        let gdf = gdf_cls.call((df,), Some(&kwargs))?;
+        Ok(gdf.unbind())
+    }
 }
 
 // ========================================================================

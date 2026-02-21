@@ -130,6 +130,12 @@ pub fn generate_explain_plan(query: &CypherQuery) -> String {
                     limit
                 )
             }
+            Clause::FusedOrderByTopK { limit, .. } => {
+                format!(
+                    "FusedOrderByTopK (optimized RETURN+ORDER BY+LIMIT, k={})",
+                    limit
+                )
+            }
         };
         lines.push(format!("  {}. {}", step, desc));
     }
@@ -148,6 +154,10 @@ pub fn generate_explain_plan(query: &CypherQuery) -> String {
         .clauses
         .iter()
         .any(|c| matches!(c, Clause::FusedVectorScoreTopK { .. }));
+    let has_general_topk = query
+        .clauses
+        .iter()
+        .any(|c| matches!(c, Clause::FusedOrderByTopK { .. }));
 
     let mut opts = Vec::new();
     if has_opt_fusion {
@@ -155,6 +165,9 @@ pub fn generate_explain_plan(query: &CypherQuery) -> String {
     }
     if has_topk_fusion {
         opts.push("vector_score_topk_fusion".to_string());
+    }
+    if has_general_topk {
+        opts.push("order_by_topk_fusion".to_string());
     }
 
     if !opts.is_empty() {
