@@ -49,6 +49,18 @@ pub fn get_parent_child_pairs(
     }
 }
 
+/// Collect all selected node indices from the specified level (flattened).
+pub fn collect_selected_nodes(
+    selection: &CurrentSelection,
+    level_index: Option<usize>,
+) -> Vec<NodeIndex> {
+    let target_level = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
+    selection
+        .get_level(target_level)
+        .map(|level| level.get_all_nodes())
+        .unwrap_or_default()
+}
+
 #[derive(Debug)]
 pub struct PropertyStats {
     pub parent_idx: Option<NodeIndex>,

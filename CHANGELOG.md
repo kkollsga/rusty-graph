@@ -5,6 +5,17 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.51] - 2026-02-21
+
+### Added
+
+- Fluent API: `filter()` now supports `regex` (or `=~`) operator for pattern matching, e.g. `filter({'name': {'regex': '^A.*'}})`
+- Fluent API: `filter()` now supports negated operators: `not_contains`, `not_starts_with`, `not_ends_with`, `not_in`, `not_regex`
+- Fluent API: `filter_any()` method for OR logic — keeps nodes matching any of the provided condition sets
+- Fluent API: `offset(n)` method for pagination — combine with `max_nodes()` for page-based queries
+- Fluent API: `has_connection(type, direction)` method — filter nodes by edge existence without changing the selection target
+- Fluent API: `count(group_by='prop')` and `statistics('prop', group_by='prop')` — group by arbitrary property instead of parent hierarchy
+
 ## [0.5.50] - 2026-02-21
 
 ### Added

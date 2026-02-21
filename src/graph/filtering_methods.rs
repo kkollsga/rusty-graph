@@ -54,6 +54,13 @@ pub fn matches_condition(value: &Value, condition: &FilterCondition) -> bool {
             (Value::String(s), Value::String(t)) => s.ends_with(t.as_str()),
             _ => false,
         },
+        FilterCondition::Regex(pattern) => match value {
+            Value::String(s) => regex::Regex::new(pattern)
+                .map(|re| re.is_match(s))
+                .unwrap_or(false),
+            _ => false,
+        },
+        FilterCondition::Not(inner) => !matches_condition(value, inner),
     }
 }
 
@@ -578,6 +585,164 @@ pub fn limit_nodes_per_group(
         level.selections = new_selections;
     }
 
+    Ok(())
+}
+
+/// Filter nodes matching ANY of the given condition sets (OR logic).
+/// A node is kept if it matches at least one condition set.
+pub fn filter_nodes_any(
+    graph: &DirGraph,
+    selection: &mut CurrentSelection,
+    condition_sets: &[HashMap<String, FilterCondition>],
+    sort_fields: Option<Vec<(String, bool)>>,
+    max_nodes: Option<usize>,
+) -> Result<(), String> {
+    let current_index = selection.get_level_count().saturating_sub(1);
+    let level = selection
+        .get_level_mut(current_index)
+        .ok_or_else(|| "No active selection level".to_string())?;
+
+    let matches_any = |idx: NodeIndex| -> bool {
+        if let Some(node) = graph.get_node(idx) {
+            condition_sets.iter().any(|conditions| {
+                conditions.iter().all(|(key, condition)| {
+                    let resolved = graph.resolve_alias(&node.node_type, key);
+                    match node.get_field_ref(resolved) {
+                        Some(v) => matches_condition(v, condition),
+                        None => matches!(condition, FilterCondition::IsNull),
+                    }
+                })
+            })
+        } else {
+            false
+        }
+    };
+
+    if level.selections.is_empty() {
+        let nodes: Vec<NodeIndex> = graph
+            .graph
+            .node_indices()
+            .filter(|&idx| matches_any(idx))
+            .collect();
+        let processed = process_nodes(graph, nodes, None, sort_fields.as_ref(), max_nodes);
+        if !processed.is_empty() {
+            level.add_selection(None, processed);
+        }
+    } else {
+        let mut new_selections = HashMap::new();
+        for (parent, children) in level.selections.iter() {
+            let filtered: Vec<NodeIndex> = children
+                .iter()
+                .copied()
+                .filter(|&idx| matches_any(idx))
+                .collect();
+            let processed = process_nodes(graph, filtered, None, sort_fields.as_ref(), max_nodes);
+            if !processed.is_empty() {
+                new_selections.insert(*parent, processed);
+            }
+        }
+        level.selections = new_selections;
+    }
+
+    level
+        .operations
+        .push(SelectionOperation::Custom("filter_any".to_string()));
+    if let Some(fields) = sort_fields {
+        level.operations.push(SelectionOperation::Sort(fields));
+    }
+    Ok(())
+}
+
+pub fn offset_nodes(
+    graph: &DirGraph,
+    selection: &mut CurrentSelection,
+    n: usize,
+) -> Result<(), String> {
+    let current_index = selection.get_level_count().saturating_sub(1);
+    let level = selection
+        .get_level_mut(current_index)
+        .ok_or_else(|| "No active selection level".to_string())?;
+
+    if level.selections.is_empty() {
+        // Skip first n nodes from the whole graph
+        let all_nodes: Vec<NodeIndex> = graph.graph.node_indices().skip(n).collect();
+        if !all_nodes.is_empty() {
+            level.add_selection(None, all_nodes);
+        }
+    } else {
+        let mut new_selections = HashMap::new();
+        for (parent, children) in level.selections.iter() {
+            if children.len() > n {
+                let skipped = children[n..].to_vec();
+                new_selections.insert(*parent, skipped);
+            }
+            // If n >= children.len(), drop this group entirely
+        }
+        level.selections = new_selections;
+    }
+
+    Ok(())
+}
+
+/// Filter selection to nodes that have at least one connection of the given type.
+pub fn filter_by_connection(
+    graph: &DirGraph,
+    selection: &mut CurrentSelection,
+    connection_type: &str,
+    direction: Option<petgraph::Direction>,
+) -> Result<(), String> {
+    let current_index = selection.get_level_count().saturating_sub(1);
+    let level = selection
+        .get_level_mut(current_index)
+        .ok_or_else(|| "No active selection level".to_string())?;
+
+    let has_conn = |idx: NodeIndex| -> bool {
+        match direction {
+            Some(dir) => graph
+                .graph
+                .edges_directed(idx, dir)
+                .any(|e| e.weight().connection_type == connection_type),
+            None => {
+                graph
+                    .graph
+                    .edges_directed(idx, petgraph::Direction::Outgoing)
+                    .any(|e| e.weight().connection_type == connection_type)
+                    || graph
+                        .graph
+                        .edges_directed(idx, petgraph::Direction::Incoming)
+                        .any(|e| e.weight().connection_type == connection_type)
+            }
+        }
+    };
+
+    if level.selections.is_empty() {
+        let nodes: Vec<NodeIndex> = graph
+            .graph
+            .node_indices()
+            .filter(|&idx| has_conn(idx))
+            .collect();
+        if !nodes.is_empty() {
+            level.add_selection(None, nodes);
+        }
+    } else {
+        let mut new_selections = HashMap::new();
+        for (parent, children) in level.selections.iter() {
+            let filtered: Vec<NodeIndex> = children
+                .iter()
+                .copied()
+                .filter(|&idx| has_conn(idx))
+                .collect();
+            if !filtered.is_empty() {
+                new_selections.insert(*parent, filtered);
+            }
+        }
+        level.selections = new_selections;
+    }
+
+    level.operations.push(SelectionOperation::Custom(format!(
+        "has_connection({})",
+        connection_type
+    )));
     Ok(())
 }
 

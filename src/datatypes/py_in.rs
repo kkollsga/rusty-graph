@@ -52,8 +52,52 @@ fn parse_operator_condition(op: &str, val: &Bound<'_, PyAny>) -> PyResult<Filter
         "contains" => Ok(FilterCondition::Contains(py_value_to_value(val)?)),
         "starts_with" => Ok(FilterCondition::StartsWith(py_value_to_value(val)?)),
         "ends_with" => Ok(FilterCondition::EndsWith(py_value_to_value(val)?)),
+        "regex" | "=~" => {
+            let pattern = val.extract::<String>().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "'regex' operator requires a string pattern",
+                )
+            })?;
+            // Validate the regex at parse time
+            regex::Regex::new(&pattern).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid regex pattern '{}': {}",
+                    pattern, e
+                ))
+            })?;
+            Ok(FilterCondition::Regex(pattern))
+        }
+        // Negated operators: not_contains, not_starts_with, not_ends_with, not_in, not_regex
+        "not_contains" => Ok(FilterCondition::Not(Box::new(FilterCondition::Contains(
+            py_value_to_value(val)?,
+        )))),
+        "not_starts_with" => Ok(FilterCondition::Not(Box::new(FilterCondition::StartsWith(
+            py_value_to_value(val)?,
+        )))),
+        "not_ends_with" => Ok(FilterCondition::Not(Box::new(FilterCondition::EndsWith(
+            py_value_to_value(val)?,
+        )))),
+        "not_in" => Ok(FilterCondition::Not(Box::new(parse_in_condition(val)?))),
+        "not_regex" => {
+            let pattern = val.extract::<String>().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "'not_regex' operator requires a string pattern",
+                )
+            })?;
+            regex::Regex::new(&pattern).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid regex pattern '{}': {}",
+                    pattern, e
+                ))
+            })?;
+            Ok(FilterCondition::Not(Box::new(FilterCondition::Regex(
+                pattern,
+            ))))
+        }
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-            "Unsupported operator: {}",
+            "Unsupported operator: {}. Supported: ==, !=, >, >=, <, <=, in, between, \
+             is_null, is_not_null, contains, starts_with, ends_with, regex, \
+             not_contains, not_starts_with, not_ends_with, not_in, not_regex",
             op
         ))),
     }

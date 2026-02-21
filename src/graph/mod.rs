@@ -1323,6 +1323,53 @@ impl KnowledgeGraph {
         Ok(new_kg)
     }
 
+    /// Filter nodes matching ANY of the given condition sets (OR logic).
+    /// Each item in the list is a condition dict (same format as filter()).
+    /// A node is kept if it matches at least one condition set.
+    #[pyo3(signature = (conditions, sort=None, max_nodes=None))]
+    fn filter_any(
+        &mut self,
+        conditions: &Bound<'_, PyList>,
+        sort: Option<&Bound<'_, PyAny>>,
+        max_nodes: Option<usize>,
+    ) -> PyResult<Self> {
+        let mut new_kg = self.clone();
+
+        let condition_sets: Vec<HashMap<String, FilterCondition>> = conditions
+            .iter()
+            .map(|item| {
+                let dict = item.cast::<PyDict>().map_err(|_| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "filter_any expects a list of condition dicts",
+                    )
+                })?;
+                py_in::pydict_to_filter_conditions(dict)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+
+        if condition_sets.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "filter_any requires at least one condition set",
+            ));
+        }
+
+        let sort_fields = match sort {
+            Some(spec) => Some(py_in::parse_sort_fields(spec, None)?),
+            None => None,
+        };
+
+        filtering_methods::filter_nodes_any(
+            &self.inner,
+            &mut new_kg.selection,
+            &condition_sets,
+            sort_fields,
+            max_nodes,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+        Ok(new_kg)
+    }
+
     #[pyo3(signature = (include_orphans=None, sort=None, max_nodes=None))]
     fn filter_orphans(
         &mut self,
@@ -1365,6 +1412,44 @@ impl KnowledgeGraph {
         let mut new_kg = self.clone();
         filtering_methods::limit_nodes_per_group(&self.inner, &mut new_kg.selection, max_per_group)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+        Ok(new_kg)
+    }
+
+    /// Skip the first N nodes per group (for pagination).
+    /// Use with sort() + max_nodes() for paged results:
+    ///   graph.sort('name').offset(20).max_nodes(10)
+    fn offset(&mut self, n: usize) -> PyResult<Self> {
+        let mut new_kg = self.clone();
+        filtering_methods::offset_nodes(&self.inner, &mut new_kg.selection, n)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        Ok(new_kg)
+    }
+
+    /// Filter current selection to nodes that have at least one connection
+    /// of the given type. Equivalent to Cypher's WHERE EXISTS {(n)-[:TYPE]->()}.
+    #[pyo3(signature = (connection_type, direction=None))]
+    fn has_connection(&mut self, connection_type: &str, direction: Option<&str>) -> PyResult<Self> {
+        let mut new_kg = self.clone();
+        let dir = match direction.unwrap_or("any") {
+            "outgoing" | "out" => Some(petgraph::Direction::Outgoing),
+            "incoming" | "in" => Some(petgraph::Direction::Incoming),
+            "any" | "both" => None,
+            d => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid direction '{}'. Use 'outgoing', 'incoming', or 'any'",
+                    d
+                )))
+            }
+        };
+
+        filtering_methods::filter_by_connection(
+            &self.inner,
+            &mut new_kg.selection,
+            connection_type,
+            dir,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         Ok(new_kg)
     }
@@ -2872,8 +2957,71 @@ impl KnowledgeGraph {
         Python::attach(|py| Ok(Py::new(py, new_kg)?.into_any()))
     }
 
-    #[pyo3(signature = (property, level_index=None))]
-    fn statistics(&self, property: &str, level_index: Option<usize>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (property, level_index=None, group_by=None))]
+    fn statistics(
+        &self,
+        property: &str,
+        level_index: Option<usize>,
+        group_by: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        // group_by: compute statistics grouped by a property value
+        if let Some(group_prop) = group_by {
+            let nodes = statistics_methods::collect_selected_nodes(&self.selection, level_index);
+            let mut groups: HashMap<String, Vec<f64>> = HashMap::new();
+            for idx in nodes {
+                if let Some(node) = self.inner.get_node(idx) {
+                    let resolved_group = self.inner.resolve_alias(&node.node_type, group_prop);
+                    let key = match node.get_field_ref(resolved_group) {
+                        Some(Value::String(s)) => s.clone(),
+                        Some(Value::Int64(i)) => i.to_string(),
+                        Some(v) => format!("{:?}", v),
+                        None => "null".to_string(),
+                    };
+                    let resolved_prop = self.inner.resolve_alias(&node.node_type, property);
+                    if let Some(val) = node.get_field_ref(resolved_prop) {
+                        let num = match val {
+                            Value::Int64(i) => Some(*i as f64),
+                            Value::Float64(f) => Some(*f),
+                            Value::UniqueId(u) => Some(*u as f64),
+                            _ => None,
+                        };
+                        if let Some(n) = num {
+                            groups.entry(key).or_default().push(n);
+                        } else {
+                            groups.entry(key).or_default(); // ensure group exists
+                        }
+                    } else {
+                        groups.entry(key).or_default();
+                    }
+                }
+            }
+            return Python::attach(|py| {
+                let result = PyDict::new(py);
+                for (key, values) in &groups {
+                    let stats = PyDict::new(py);
+                    let count = values.len();
+                    stats.set_item("count", count)?;
+                    if count > 0 {
+                        let sum: f64 = values.iter().sum();
+                        let mean = sum / count as f64;
+                        let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+                        let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                        stats.set_item("sum", sum)?;
+                        stats.set_item("mean", mean)?;
+                        stats.set_item("min", min)?;
+                        stats.set_item("max", max)?;
+                        if count > 1 {
+                            let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                                / (count - 1) as f64;
+                            stats.set_item("std", variance.sqrt())?;
+                        }
+                    }
+                    result.set_item(key, stats)?;
+                }
+                Ok(result.into_any().unbind())
+            });
+        }
+
         let pairs = statistics_methods::get_parent_child_pairs(&self.selection, level_index);
         let stats = statistics_methods::calculate_property_stats(&self.inner, &pairs, property);
         py_out::convert_stats_for_python(stats)
@@ -2985,14 +3133,44 @@ impl KnowledgeGraph {
         }
     }
 
-    #[pyo3(signature = (level_index=None, group_by_parent=None, store_as=None, keep_selection=None))]
+    #[pyo3(signature = (level_index=None, group_by_parent=None, store_as=None, keep_selection=None, group_by=None))]
     fn count(
         &mut self,
         level_index: Option<usize>,
         group_by_parent: Option<bool>,
         store_as: Option<&str>,
         keep_selection: Option<bool>,
+        group_by: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
+        // group_by property: count nodes grouped by a property value
+        if let Some(property) = group_by {
+            let nodes = statistics_methods::collect_selected_nodes(&self.selection, level_index);
+            let mut groups: HashMap<String, usize> = HashMap::new();
+            for idx in nodes {
+                if let Some(node) = self.inner.get_node(idx) {
+                    let resolved = self.inner.resolve_alias(&node.node_type, property);
+                    let key = match node.get_field_ref(resolved) {
+                        Some(Value::String(s)) => s.clone(),
+                        Some(Value::Int64(i)) => i.to_string(),
+                        Some(Value::Float64(f)) => format!("{}", f),
+                        Some(Value::Boolean(b)) => b.to_string(),
+                        Some(Value::UniqueId(u)) => u.to_string(),
+                        Some(Value::DateTime(d)) => d.to_string(),
+                        Some(Value::Point { lat, lon }) => format!("({}, {})", lat, lon),
+                        Some(Value::Null) | None => "null".to_string(),
+                    };
+                    *groups.entry(key).or_insert(0) += 1;
+                }
+            }
+            return Python::attach(|py| {
+                let dict = PyDict::new(py);
+                for (k, v) in &groups {
+                    dict.set_item(k, v)?;
+                }
+                Ok(dict.into_any().unbind())
+            });
+        }
+
         // Default to grouping by parent if we have a nested structure
         let has_multiple_levels = self.selection.get_level_count() > 1;
         // Use the provided group_by_parent if given, otherwise default based on structure

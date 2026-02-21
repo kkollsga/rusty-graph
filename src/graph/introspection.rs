@@ -390,6 +390,17 @@ const API_CODE_EXPLORATION: &str = r#"    <exploration hint="Use these FIRST to 
     </exploration>
 "#;
 
+/// Static XML: fluent API selection methods (always present).
+const API_FLUENT: &str = r#"    <fluent hint="Selection-based pipeline — chain methods to narrow, filter, and aggregate">
+    <method sig="filter(conditions)">AND filter. Operators: =, &gt;, &lt;, &gt;=, &lt;=, in, contains, starts_with, ends_with, regex (=~), is_null, is_not_null, not_contains, not_in, not_starts_with, not_ends_with, not_regex.</method>
+    <method sig="filter_any([cond1, cond2, ...])">OR filter — keeps nodes matching ANY condition set.</method>
+    <method sig="has_connection(type, direction='any')">Keep nodes with at least one edge of the given type. direction: 'outgoing', 'incoming', 'any'.</method>
+    <method sig="offset(n)">Skip first N nodes (pagination). Combine with max_nodes() for pages.</method>
+    <method sig="count(group_by='prop')">Count nodes grouped by a property. Returns {value: count}.</method>
+    <method sig="statistics('prop', group_by='prop')">Descriptive stats grouped by a property. Returns {value: {count, mean, std, min, max, sum}}.</method>
+    </fluent>
+"#;
+
 /// Static XML: query tools (always present).
 const API_QUERY: &str = r#"    <method sig="cypher(query, *, to_df=False, params=None)">Primary query interface. Returns ResultView (lazy) or DataFrame with to_df=True.</method>
     <method sig="schema()">Returns dict: node_types, connection_types, indexes, node_count, edge_count.</method>
@@ -663,11 +674,12 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
         xml.push_str("  </spatial>\n");
     }
 
-    // API methods — exploration (code graphs only) + query tools
+    // API methods — exploration (code graphs only) + fluent + query tools
     xml.push_str("  <api>\n");
     if has_code_entities {
         xml.push_str(API_CODE_EXPLORATION);
     }
+    xml.push_str(API_FLUENT);
     xml.push_str(API_QUERY);
 
     // Cypher reference (read-only mode omits mutation clauses)

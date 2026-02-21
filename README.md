@@ -678,16 +678,38 @@ graph.type_filter('Product').filter({'price': {'<': 500.0}, 'stock': {'>': 50}})
 graph.type_filter('Product').filter({'id': {'in': [101, 103]}})
 graph.type_filter('Product').filter({'category': {'is_null': True}})
 
+# Regex matching
+graph.type_filter('Person').filter({'name': {'regex': '^A.*'}})   # or {'=~': '^A.*'}
+graph.type_filter('Person').filter({'name': {'regex': '(?i)^alice'}})  # case-insensitive
+
+# Negated conditions
+graph.type_filter('Person').filter({'city': {'not_in': ['Oslo', 'Bergen']}})
+graph.type_filter('Person').filter({'name': {'not_contains': 'test'}})
+graph.type_filter('Person').filter({'name': {'not_regex': '^[A-C].*'}})
+
+# OR logic — filter_any keeps nodes matching ANY condition set
+graph.type_filter('Person').filter_any([
+    {'city': 'Oslo'},
+    {'city': 'Bergen'},
+])
+
+# Connection existence — filter without changing the selection target
+graph.type_filter('Person').has_connection('KNOWS')                        # any direction
+graph.type_filter('Person').has_connection('KNOWS', direction='outgoing')  # outgoing only
+
 # Orphan nodes (no connections)
 graph.filter_orphans(include_orphans=True)
 ```
 
-### Sorting
+### Sorting and Pagination
 
 ```python
 graph.type_filter('Product').sort('price')
 graph.type_filter('Product').sort('price', ascending=False)
 graph.type_filter('Product').sort([('stock', False), ('price', True)])
+
+# Pagination with offset + max_nodes
+graph.type_filter('Person').sort('name').offset(20).max_nodes(10)  # page 3 of 10
 ```
 
 ### Traversing the Graph
@@ -1204,6 +1226,14 @@ gdf = rv.to_gdf(geometry_column='n.geometry', crs='EPSG:4326')
 ```python
 price_stats = graph.type_filter('Product').statistics('price')
 unique_cats = graph.type_filter('Product').unique_values(property='category', max_length=10)
+
+# Group by a property — like SQL GROUP BY
+graph.type_filter('Person').count(group_by='city')
+# → {'Oslo': 42, 'Bergen': 15, 'Trondheim': 8}
+
+graph.type_filter('Person').statistics('age', group_by='city')
+# → {'Oslo': {'count': 42, 'mean': 35.2, 'std': 8.1, 'min': 22, 'max': 65, 'sum': 1478},
+#    'Bergen': {'count': 15, ...}, ...}
 ```
 
 ### Calculations
@@ -1496,8 +1526,11 @@ graph.add_connections(data=df, connection_type='REL',
 
 ```python
 graph.type_filter('Person')                        # select by type → KnowledgeGraph
-    .filter({'age': {'>': 25}})                    # filter → KnowledgeGraph
+    .filter({'age': {'>': 25}})                    # AND filter → KnowledgeGraph
+    .filter_any([{'city': 'Oslo'}, {'city': 'Bergen'}])  # OR filter → KnowledgeGraph
+    .has_connection('KNOWS', direction='outgoing') # edge existence → KnowledgeGraph
     .sort('age', ascending=False)                  # sort → KnowledgeGraph
+    .offset(20).max_nodes(10)                      # pagination → KnowledgeGraph
     .traverse('KNOWS', direction='outgoing')       # traverse → KnowledgeGraph
     .get_nodes()                                   # materialize → ResultView or grouped dict
 ```

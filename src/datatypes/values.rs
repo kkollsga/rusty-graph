@@ -20,6 +20,8 @@ pub enum FilterCondition {
     Contains(Value),
     StartsWith(Value),
     EndsWith(Value),
+    Regex(String),
+    Not(Box<FilterCondition>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

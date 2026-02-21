@@ -354,17 +354,52 @@ class KnowledgeGraph:
 
         Conditions support exact match, comparison operators
         (``'>'``, ``'<'``, ``'>='``, ``'<='``), ``'in'``, ``'is_null'``,
-        ``'is_not_null'``, ``'contains'``, ``'starts_with'``, ``'ends_with'``.
+        ``'is_not_null'``, ``'contains'``, ``'starts_with'``, ``'ends_with'``,
+        ``'regex'`` (or ``'=~'``), and negated variants: ``'not_contains'``,
+        ``'not_starts_with'``, ``'not_ends_with'``, ``'not_in'``, ``'not_regex'``.
 
         Example::
 
             graph.type_filter('Person').filter({
                 'age': {'>': 25},
                 'city': 'Oslo',
+                'name': {'regex': '^A.*'},
+                'status': {'not_in': ['inactive', 'banned']},
             })
 
         Returns:
             A new KnowledgeGraph with the filtered selection.
+        """
+        ...
+
+    def filter_any(
+        self,
+        conditions: list[dict[str, Any]],
+        sort: Optional[Union[str, list[tuple[str, bool]]]] = None,
+        max_nodes: Optional[int] = None,
+    ) -> KnowledgeGraph:
+        """Filter the current selection with OR logic across multiple condition sets.
+
+        Each dict in *conditions* is a set of AND conditions (same as ``filter()``).
+        A node is kept if it matches **any** of the condition sets.
+
+        Args:
+            conditions: List of condition dicts. Must contain at least one.
+            sort: Optional sort spec.
+            max_nodes: Limit the number of selected nodes.
+
+        Returns:
+            A new KnowledgeGraph with the filtered selection.
+
+        Example::
+
+            graph.type_filter('Person').filter_any([
+                {'city': 'Oslo'},
+                {'city': 'Bergen'},
+            ])
+
+        Raises:
+            ValueError: If *conditions* is empty.
         """
         ...
 
@@ -411,6 +446,42 @@ class KnowledgeGraph:
 
         Returns:
             A new KnowledgeGraph with the limited selection.
+        """
+        ...
+
+    def offset(self, n: int) -> KnowledgeGraph:
+        """Skip the first *n* nodes per parent group (pagination).
+
+        Combine with ``max_nodes()`` for pagination:
+        ``graph.sort('name').offset(20).max_nodes(10)``
+
+        Args:
+            n: Number of nodes to skip.
+
+        Returns:
+            A new KnowledgeGraph with the offset selection.
+        """
+        ...
+
+    def has_connection(
+        self,
+        connection_type: str,
+        direction: Optional[str] = None,
+    ) -> KnowledgeGraph:
+        """Filter nodes that have at least one connection of the given type.
+
+        Keeps only nodes from the current selection that participate in
+        edges of the specified type and direction.
+
+        Args:
+            connection_type: Edge type to check (e.g. ``'KNOWS'``).
+            direction: ``'outgoing'``, ``'incoming'``, or ``'any'`` (default).
+
+        Returns:
+            A new KnowledgeGraph with only connected nodes.
+
+        Raises:
+            ValueError: If *direction* is not one of the valid values.
         """
         ...
 
@@ -965,7 +1036,12 @@ class KnowledgeGraph:
     # Statistics & Calculations
     # ====================================================================
 
-    def statistics(self, property: str, level_index: Optional[int] = None) -> Any:
+    def statistics(
+        self,
+        property: str,
+        level_index: Optional[int] = None,
+        group_by: Optional[str] = None,
+    ) -> Any:
         """Compute descriptive statistics for a numeric property.
 
         Returns per-parent stats including count, mean, std, min, max, sum.
@@ -973,6 +1049,8 @@ class KnowledgeGraph:
         Args:
             property: Numeric property name.
             level_index: Target level in the hierarchy.
+            group_by: Group results by this property instead of by parent.
+                Returns ``{group_value: {count, sum, mean, min, max, std}}``.
         """
         ...
 
@@ -1007,14 +1085,17 @@ class KnowledgeGraph:
         group_by_parent: Optional[bool] = None,
         store_as: Optional[str] = None,
         keep_selection: Optional[bool] = None,
+        group_by: Optional[str] = None,
     ) -> Any:
-        """Count nodes, optionally grouped by parent.
+        """Count nodes, optionally grouped by parent or by a property.
 
         Args:
             level_index: Target level in the hierarchy.
             group_by_parent: Group counts by parent node.
             store_as: Store count as a property on parent nodes.
             keep_selection: Preserve selection after store. Default ``False``.
+            group_by: Group counts by this property instead of by parent.
+                Returns ``{group_value: count}``.
 
         Returns:
             An integer count, grouped counts, or a KnowledgeGraph if ``store_as`` is set.
