@@ -5,6 +5,27 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.5.52] - 2026-02-22
+
+### Added
+
+- `add_nodes()` now accepts a `timeseries` parameter for inline timeseries loading from flat DataFrames — automatically deduplicates rows per ID and attaches time-indexed channels
+- Timeseries resolution extended to support `hour` (depth 4) and `minute` (depth 5) granularity
+- `parse_date_string` now handles `'yyyy-mm-dd hh:mm'` and ISO `'yyyy-mm-ddThh:mm'` formats
+- **Timeseries support**: per-node time-indexed data channels with resolution-aware date-string queries
+- `set_timeseries()` with `resolution` ("year", "month", "day"), `units`, and `bin_type` metadata
+- `set_time_index()` / `add_ts_channel()` for per-node timeseries construction
+- `add_timeseries()` for bulk DataFrame ingestion with FK-based node matching and resolution validation
+- `get_timeseries()` / `get_time_index()` for data extraction with date-string range filters
+- Cypher `ts_*()` functions with date-string arguments: `ts_sum(f.oil, '2020')`, `ts_avg(f.oil, '2020-2', '2020-6')`, etc.
+- Query precision validation: errors when query detail exceeds data resolution (e.g. `'2020-2-15'` on month data)
+- Channel units (e.g. "MSm3", "°C") and bin type ("total", "mean", "sample") metadata
+- Timeseries data persisted as a separate section in `.kgl` files (backward compatible)
+- `agent_describe()` includes timeseries metadata, resolution, units, and function reference
+- Cypher `range(start, end [, step])` function — generates integer lists for use with `UNWIND`
+
 ## [0.5.51] - 2026-02-21
 
 ### Added

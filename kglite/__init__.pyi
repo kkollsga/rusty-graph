@@ -226,12 +226,18 @@ class KnowledgeGraph:
         conflict_handling: Optional[str] = None,
         skip_columns: Optional[list[str]] = None,
         column_types: Optional[dict[str, str]] = None,
+        timeseries: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Add nodes from a DataFrame.
 
         String and integer IDs are auto-detected from the DataFrame dtype.
         Non-contiguous DataFrame indexes (e.g. from filtering) are handled
         automatically.
+
+        When ``timeseries`` is provided, the DataFrame may contain multiple
+        rows per unique ID (one per time step). Rows are deduplicated
+        automatically — the first occurrence per ID provides static node
+        properties, and all rows contribute to the timeseries channels.
 
         Args:
             data: DataFrame containing node data.
@@ -245,11 +251,31 @@ class KnowledgeGraph:
                 Also supports spatial types: ``'location.lat'``, ``'location.lon'``,
                 ``'geometry'``, ``'point.<name>.lat'``, ``'point.<name>.lon'``,
                 ``'shape.<name>'``.
+            timeseries: Inline timeseries configuration dict with keys:
+
+                - ``time`` (required): column name containing date strings
+                  (``'yyyy-mm'``, ``'yyyy-mm-dd'``, ``'yyyy-mm-dd hh:mm'``),
+                  or a dict mapping ``year``/``month``/``day``/``hour``/``minute``
+                  to column names (e.g. ``{'year': 'ar', 'month': 'maned'}``).
+                - ``channels`` (required): list of column names for timeseries
+                  data (e.g. ``['oil', 'gas', 'condensate']``).
+                - ``resolution`` (optional): ``'year'``, ``'month'``, ``'day'``,
+                  ``'hour'``, or ``'minute'``. Auto-detected from time format if omitted.
+                - ``units`` (optional): dict mapping channel names to unit strings
+                  (e.g. ``{'oil': 'MSm3'}``).
 
         Returns:
             Operation report dict with keys ``nodes_created``,
             ``nodes_updated``, ``nodes_skipped``, ``processing_time_ms``,
             ``has_errors``, and optionally ``errors`` with skip reasons.
+
+        Example::
+
+            graph.add_nodes(df, 'Production', 'field_id', 'field_name',
+                timeseries={
+                    'time': 'date',
+                    'channels': ['oil', 'gas', 'condensate', 'oe'],
+                })
         """
         ...
 
@@ -2141,6 +2167,141 @@ class KnowledgeGraph:
             Dict with ``latitude`` and ``longitude``, or a shapely Point
             when ``as_shapely=True``.
         """
+        ...
+
+    # ── Timeseries ─────────────────────────────────────────────────────────
+
+    def set_timeseries(
+        self,
+        node_type: str,
+        *,
+        resolution: str,
+        channels: Optional[list[str]] = None,
+        units: Optional[dict[str, str]] = None,
+        bin_type: Optional[str] = None,
+    ) -> None:
+        """Configure timeseries metadata for a node type.
+
+        Args:
+            node_type: The node type to configure.
+            resolution: Time granularity — ``'year'``, ``'month'``, or ``'day'``.
+                Determines key depth (year=1, month=2, day=3).
+            channels: Optional list of known channel names.
+            units: Optional map of channel name to unit string,
+                e.g. ``{'oil': 'MSm3', 'temperature': '°C'}``.
+            bin_type: What values represent — ``'total'``, ``'mean'``,
+                or ``'sample'``. None if unspecified.
+        """
+        ...
+
+    def get_timeseries_config(
+        self,
+        node_type: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Get timeseries configuration for a node type or all types.
+
+        Returns a dict with ``resolution``, ``channels``, ``units``, ``bin_type``.
+        """
+        ...
+
+    def set_time_index(
+        self,
+        node_id: Any,
+        keys: list[list[int]],
+    ) -> None:
+        """Set the sorted time index for a specific node.
+
+        If the node already has a timeseries, this replaces its time index
+        and clears all channels. Key depth must match the resolution set
+        via ``set_timeseries()``.
+
+        Args:
+            node_id: The node's unique ID.
+            keys: Sorted list of composite time keys,
+                e.g. ``[[2020, 1], [2020, 2], ...]`` for month resolution.
+        """
+        ...
+
+    def add_ts_channel(
+        self,
+        node_id: Any,
+        channel_name: str,
+        values: list[float],
+    ) -> None:
+        """Add a timeseries channel to a node.
+
+        The node must already have a time index set (via ``set_time_index``
+        or ``add_timeseries``). The values length must match the time index
+        length. Use ``float('nan')`` for missing values.
+
+        Args:
+            node_id: The node's unique ID.
+            channel_name: Channel name (e.g. ``'oil'``, ``'temperature'``).
+            values: Float values aligned with the time index.
+        """
+        ...
+
+    def add_timeseries(
+        self,
+        node_type: str,
+        *,
+        data: Any,
+        fk: str,
+        time_key: list[str],
+        channels: Union[dict[str, str], list[str]],
+        resolution: Optional[str] = None,
+        units: Optional[dict[str, str]] = None,
+    ) -> dict[str, Any]:
+        """Bulk-load timeseries data from a DataFrame.
+
+        Groups rows by ``fk``, sorts by ``time_key``, and attaches the
+        resulting timeseries to matching nodes (found by node ID).
+
+        Args:
+            node_type: Target node type.
+            data: Source DataFrame.
+            fk: Foreign key column in ``data`` linking to node IDs.
+            time_key: Column(s) forming the composite time key.
+                Count must match resolution depth (2 for month, 3 for day).
+            channels: Either a list of column names (used as channel names)
+                or a dict mapping ``{channel_name: column_name}``.
+            resolution: Time granularity (``'year'``, ``'month'``, ``'day'``).
+                Required if ``set_timeseries()`` has not been called.
+            units: Optional channel→unit map, merged into config.
+
+        Returns:
+            Summary: ``{'nodes_loaded': N, 'total_records': M, 'total_rows': R}``.
+        """
+        ...
+
+    def get_timeseries(
+        self,
+        node_id: Any,
+        channel: Optional[str] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Extract timeseries data for a node.
+
+        If ``channel`` is given, returns ``{'keys': [...], 'values': [...]}``.
+        Otherwise returns ``{'keys': [...], 'channels': {'name': [...], ...}}``.
+
+        Args:
+            node_id: The node's unique ID.
+            channel: Optional channel name to extract.
+            start: Optional range start as date string (e.g. ``'2020'``, ``'2020-2'``).
+            end: Optional range end as date string.
+
+        Returns:
+            Dict with keys and channel data, or ``None`` if no timeseries.
+        """
+        ...
+
+    def get_time_index(
+        self,
+        node_id: Any,
+    ) -> Optional[list[list[int]]]:
+        """Get the time index for a node, or ``None``."""
         ...
 
     # ── Embedding / Vector Search ──────────────────────────────────────────

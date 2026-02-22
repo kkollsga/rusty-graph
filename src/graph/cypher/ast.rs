@@ -52,6 +52,15 @@ pub enum Clause {
         /// LIMIT k value
         limit: usize,
     },
+    /// Optimizer-generated: fuse MATCH traversal + RETURN with count() into
+    /// a single pass. Instead of expanding all edges then grouping, iterate
+    /// group keys and count edges directly per node.
+    FusedMatchReturnAggregate {
+        /// The full MATCH pattern (3 elements: node-edge-node)
+        match_clause: MatchClause,
+        /// RETURN clause (group-by items + count aggregates)
+        return_clause: ReturnClause,
+    },
     /// Optimizer-generated: fuse RETURN + ORDER BY + LIMIT into a single
     /// pass using a min-heap for O(n log k) instead of O(n log n).
     /// Generalizes FusedVectorScoreTopK to ANY numeric sort expression.
@@ -75,6 +84,8 @@ pub enum Clause {
 pub struct MatchClause {
     pub patterns: Vec<Pattern>,
     pub path_assignments: Vec<PathAssignment>,
+    /// Planner-set limit for early termination (pushed down from LIMIT clause)
+    pub limit_hint: Option<usize>,
 }
 
 /// Path variable assignment: `p = shortestPath(pattern)`

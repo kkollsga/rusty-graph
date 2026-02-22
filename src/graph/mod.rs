@@ -32,6 +32,7 @@ pub mod set_operations;
 pub mod spatial;
 pub mod statistics_methods;
 pub mod subgraph;
+pub mod timeseries;
 pub mod traversal_methods;
 pub mod value_operations;
 pub mod vector_search;
@@ -40,6 +41,7 @@ mod pymethods_algorithms;
 mod pymethods_export;
 mod pymethods_indexes;
 mod pymethods_spatial;
+mod pymethods_timeseries;
 mod pymethods_vector;
 
 use schema::{
@@ -476,6 +478,127 @@ fn parse_spatial_column_types(
     Ok((Some(config), cleaned.unbind()))
 }
 
+// ─── Inline timeseries parsing ──────────────────────────────────────────────
+
+/// How the time column(s) are specified in the `timeseries` dict.
+enum TimeSpec {
+    /// Single column with date strings: "2020-01", "2020-01-15 10:30"
+    StringColumn(String),
+    /// Separate columns ordered by depth: [year_col, month_col, ...]
+    SeparateColumns(Vec<String>),
+}
+
+/// Parsed inline timeseries configuration from the `timeseries` dict.
+struct InlineTimeseriesConfig {
+    time: TimeSpec,
+    channels: Vec<String>,
+    resolution: Option<String>,
+    units: HashMap<String, String>,
+}
+
+impl InlineTimeseriesConfig {
+    /// All column names used by the timeseries config (for exclusion from node properties).
+    fn all_columns(&self) -> Vec<String> {
+        let mut cols = self.channels.clone();
+        match &self.time {
+            TimeSpec::StringColumn(c) => cols.push(c.clone()),
+            TimeSpec::SeparateColumns(cs) => cols.extend(cs.iter().cloned()),
+        }
+        cols
+    }
+}
+
+/// Parse the `timeseries` PyDict parameter from `add_nodes`.
+///
+/// Expected keys:
+/// - `time` (required): column name (string) or dict mapping `year`, `month`, `day`, `hour`, `minute` to column names
+/// - `channels` (required): list of column names for timeseries data
+/// - `resolution` (optional): "year", "month", "day", "hour", "minute" — auto-detected if omitted
+/// - `units` (optional): dict mapping channel name to unit string
+fn parse_inline_timeseries(ts_dict: &Bound<'_, PyDict>) -> PyResult<InlineTimeseriesConfig> {
+    // Parse 'time' key (required)
+    let time_val = ts_dict
+        .get_item("time")?
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "timeseries dict requires a 'time' key (column name or dict of year/month/day/hour/minute)",
+            )
+        })?;
+
+    let time = if let Ok(col_name) = time_val.extract::<String>() {
+        TimeSpec::StringColumn(col_name)
+    } else if let Ok(dict) = time_val.cast::<PyDict>() {
+        // Map semantic keys to column names, ordered by depth
+        let semantic_order = ["year", "month", "day", "hour", "minute"];
+        let mut ordered_cols = Vec::new();
+        let mut found_gap = false;
+
+        for &key in &semantic_order {
+            if let Some(val) = dict.get_item(key)? {
+                if found_gap {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "timeseries time dict has '{}' but is missing a higher-level component",
+                        key
+                    )));
+                }
+                let col: String = val.extract()?;
+                ordered_cols.push(col);
+            } else {
+                found_gap = true;
+            }
+        }
+
+        if ordered_cols.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "timeseries time dict must contain at least 'year'",
+            ));
+        }
+
+        TimeSpec::SeparateColumns(ordered_cols)
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "timeseries 'time' must be a column name (str) or dict of {year/month/day/hour/minute: col_name}",
+        ));
+    };
+
+    // Parse 'channels' key (required)
+    let channels_val = ts_dict.get_item("channels")?.ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "timeseries dict requires a 'channels' key (list of column names)",
+        )
+    })?;
+    let channels: Vec<String> = channels_val.extract()?;
+    if channels.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "timeseries 'channels' must not be empty",
+        ));
+    }
+
+    // Parse 'resolution' key (optional)
+    let resolution = if let Some(val) = ts_dict.get_item("resolution")? {
+        let r: String = val.extract()?;
+        timeseries::validate_resolution(&r)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        Some(r)
+    } else {
+        None
+    };
+
+    // Parse 'units' key (optional)
+    let units = if let Some(val) = ts_dict.get_item("units")? {
+        val.extract::<HashMap<String, String>>()?
+    } else {
+        HashMap::new()
+    };
+
+    Ok(InlineTimeseriesConfig {
+        time,
+        channels,
+        resolution,
+        units,
+    })
+}
+
 /// Helper function to get a mutable DirGraph from Arc.
 /// Uses Arc::make_mut which clones only if there are other references,
 /// otherwise gives a mutable reference in place. Callers mutate the graph
@@ -625,7 +748,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     dict with 'nodes_created', 'nodes_updated', 'nodes_skipped',
     ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
-    #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None))]
+    #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_nodes(
         &mut self,
@@ -637,7 +760,10 @@ impl KnowledgeGraph {
         conflict_handling: Option<String>,
         skip_columns: Option<&Bound<'_, PyList>>,
         column_types: Option<&Bound<'_, PyDict>>,
+        timeseries: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        // Parse inline timeseries config (if provided)
+        let ts_config = timeseries.map(|d| parse_inline_timeseries(d)).transpose()?;
         // Detect embedding columns from column_types before DataFrame conversion
         let mut embedding_columns: Vec<String> = Vec::new();
         if let Some(type_dict) = column_types {
@@ -677,6 +803,12 @@ impl KnowledgeGraph {
             column_list.retain(|c| !embedding_columns.contains(c));
         }
 
+        // Remove timeseries columns (time + channel cols) from the regular column list
+        if let Some(ref ts_cfg) = ts_config {
+            let ts_cols = ts_cfg.all_columns();
+            column_list.retain(|c| !ts_cols.contains(c));
+        }
+
         // Extract embedding data before DataFrame conversion
         let embedding_data: EmbeddingColumnData = if !embedding_columns.is_empty() {
             let id_series = data.get_item(&unique_id_field)?;
@@ -713,8 +845,19 @@ impl KnowledgeGraph {
         // Use cleaned column_types for DataFrame conversion (spatial types replaced with natural types)
         let effective_types = cleaned_types.as_ref().map(|d| d.bind(py).clone());
 
+        // When timeseries is present, deduplicate rows (keep first per unique_id) for static props
+        let data_for_nodes: std::borrow::Cow<'_, Bound<'_, PyAny>> = if ts_config.is_some() {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("subset", vec![&unique_id_field])?;
+            kwargs.set_item("keep", "first")?;
+            let deduped = data.call_method("drop_duplicates", (), Some(&kwargs))?;
+            std::borrow::Cow::Owned(deduped)
+        } else {
+            std::borrow::Cow::Borrowed(data)
+        };
+
         let df_result = py_in::pandas_to_dataframe(
-            data,
+            &data_for_nodes,
             std::slice::from_ref(&unique_id_field),
             &column_list,
             effective_types.as_ref(),
@@ -722,6 +865,7 @@ impl KnowledgeGraph {
 
         let graph = get_graph_mut(&mut self.inner);
 
+        let uid_field_clone = unique_id_field.clone();
         let result = maintain_graph::add_nodes(
             graph,
             df_result,
@@ -766,6 +910,158 @@ impl KnowledgeGraph {
                     graph
                         .embeddings
                         .insert((node_type.clone(), store_key), store);
+                }
+            }
+        }
+
+        // Process inline timeseries from the ORIGINAL DataFrame
+        if let Some(ts_cfg) = ts_config {
+            let n_rows: usize = data.getattr("shape")?.get_item(0)?.extract()?;
+            if n_rows > 0 {
+                // Read FK column (same as unique_id_field)
+                let fk_col: Vec<Py<PyAny>> = data
+                    .get_item(&uid_field_clone)?
+                    .call_method0("tolist")?
+                    .extract()?;
+
+                // Read time keys
+                let time_keys: Vec<Vec<i64>> = match &ts_cfg.time {
+                    TimeSpec::StringColumn(col_name) => {
+                        let raw: Vec<String> = data
+                            .get_item(col_name)?
+                            .call_method1("astype", ("str",))?
+                            .call_method0("tolist")?
+                            .extract()?;
+                        raw.iter()
+                            .map(|s| timeseries::parse_date_string(s))
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
+                    }
+                    TimeSpec::SeparateColumns(col_names) => {
+                        let mut int_cols: Vec<Vec<i64>> = Vec::with_capacity(col_names.len());
+                        for cn in col_names {
+                            let col: Vec<i64> =
+                                data.get_item(cn)?.call_method0("tolist")?.extract()?;
+                            int_cols.push(col);
+                        }
+                        (0..n_rows)
+                            .map(|i| int_cols.iter().map(|c| c[i]).collect())
+                            .collect()
+                    }
+                };
+
+                // Auto-detect or validate resolution
+                let detected_depth = time_keys.first().map(|k| k.len()).unwrap_or(2);
+                let resolved_resolution = if let Some(ref r) = ts_cfg.resolution {
+                    // Validate explicit resolution matches key depth
+                    let expected = timeseries::resolution_depth(r)
+                        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+                    if expected != detected_depth {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Resolution '{}' expects {} time components but data has {}",
+                            r, expected, detected_depth
+                        )));
+                    }
+                    r.clone()
+                } else {
+                    timeseries::depth_to_resolution(detected_depth)
+                        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
+                        .to_string()
+                };
+
+                // Read channel columns
+                let mut value_cols: Vec<(String, Vec<f64>)> =
+                    Vec::with_capacity(ts_cfg.channels.len());
+                for ch_name in &ts_cfg.channels {
+                    let col: Vec<f64> =
+                        data.get_item(ch_name)?.call_method0("tolist")?.extract()?;
+                    value_cols.push((ch_name.clone(), col));
+                }
+
+                // Group row indices by FK value
+                let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+                for (i, fk_val) in fk_col.iter().enumerate() {
+                    let key = fk_val.bind(py).str()?.to_string();
+                    groups.entry(key).or_default().push(i);
+                }
+
+                graph.build_id_index(&node_type);
+
+                let mut ts_nodes_loaded = 0usize;
+                for (fk_str, row_indices) in &groups {
+                    // Look up node by FK value (try string, then int)
+                    let node_idx = {
+                        let id_str = Value::String(fk_str.clone());
+                        if let Some(idx) = graph.lookup_by_id_normalized(&node_type, &id_str) {
+                            idx
+                        } else if let Ok(n) = fk_str.parse::<i64>() {
+                            let id_int = Value::Int64(n);
+                            if let Some(idx) = graph.lookup_by_id_normalized(&node_type, &id_int) {
+                                idx
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    };
+
+                    // Sort by time key
+                    let mut sorted = row_indices.clone();
+                    sorted.sort_by(|&a, &b| time_keys[a].cmp(&time_keys[b]));
+
+                    // Build NodeTimeseries
+                    let keys: Vec<Vec<i64>> =
+                        sorted.iter().map(|&i| time_keys[i].clone()).collect();
+                    let channels: HashMap<String, Vec<f64>> = value_cols
+                        .iter()
+                        .map(|(name, col)| (name.clone(), sorted.iter().map(|&i| col[i]).collect()))
+                        .collect();
+
+                    graph.timeseries_store.insert(
+                        node_idx.index(),
+                        timeseries::NodeTimeseries { keys, channels },
+                    );
+                    ts_nodes_loaded += 1;
+                }
+
+                // Update TimeseriesConfig (merge with any existing)
+                let existing = graph.timeseries_configs.get(&node_type);
+                let mut merged_channels = existing.map(|c| c.channels.clone()).unwrap_or_default();
+                for ch in &ts_cfg.channels {
+                    if !merged_channels.contains(ch) {
+                        merged_channels.push(ch.clone());
+                    }
+                }
+                let mut merged_units = existing.map(|c| c.units.clone()).unwrap_or_default();
+                for (k, v) in ts_cfg.units {
+                    merged_units.insert(k, v);
+                }
+                let bin_type = existing.and_then(|c| c.bin_type.clone());
+
+                graph.timeseries_configs.insert(
+                    node_type.clone(),
+                    timeseries::TimeseriesConfig {
+                        resolution: resolved_resolution,
+                        channels: merged_channels,
+                        units: merged_units,
+                        bin_type,
+                    },
+                );
+
+                // Log timeseries loading info
+                if ts_nodes_loaded == 0 && !groups.is_empty() {
+                    let msg = std::ffi::CString::new(format!(
+                        "add_nodes: timeseries data found for {} groups but no matching nodes were created",
+                        groups.len()
+                    ))
+                    .unwrap_or_default();
+                    let _ = PyErr::warn(
+                        py,
+                        py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+                        msg.as_c_str(),
+                        1,
+                    );
                 }
             }
         }

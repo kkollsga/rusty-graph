@@ -448,6 +448,7 @@ fn xml_escape(s: &str) -> String {
 pub fn compute_agent_description(graph: &DirGraph) -> String {
     let overview = compute_schema(graph);
     let has_embeddings = !graph.embeddings.is_empty();
+    let has_timeseries = !graph.timeseries_configs.is_empty();
     let has_spatial = !graph.spatial_configs.is_empty()
         || graph
             .node_type_metadata
@@ -674,6 +675,52 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
         xml.push_str("  </spatial>\n");
     }
 
+    // Timeseries config section
+    if has_timeseries {
+        xml.push_str("  <timeseries hint=\"ts_sum(n.ch, '2020'), ts_avg(n.ch), ts_at(n.ch, '2020-2'), ts_min/max/count/first/last/series/delta — per-node timeseries aggregation\">\n");
+        let mut sorted_types: Vec<_> = graph.timeseries_configs.iter().collect();
+        sorted_types.sort_by_key(|(k, _)| k.as_str());
+        for (node_type, config) in sorted_types {
+            let channels_attr = if config.channels.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " channels=\"{}\"",
+                    config
+                        .channels
+                        .iter()
+                        .map(|c| xml_escape(c))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            };
+            let units_attr = if config.units.is_empty() {
+                String::new()
+            } else {
+                let units_str: Vec<String> = config
+                    .units
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", xml_escape(k), xml_escape(v)))
+                    .collect();
+                format!(" units=\"{}\"", units_str.join(","))
+            };
+            let bin_attr = config
+                .bin_type
+                .as_ref()
+                .map(|bt| format!(" bin_type=\"{}\"", xml_escape(bt)))
+                .unwrap_or_default();
+            xml.push_str(&format!(
+                "    <type name=\"{}\" resolution=\"{}\"{}{}{}/>\n",
+                xml_escape(node_type),
+                xml_escape(&config.resolution),
+                channels_attr,
+                units_attr,
+                bin_attr,
+            ));
+        }
+        xml.push_str("  </timeseries>\n");
+    }
+
     // API methods — exploration (code graphs only) + fluent + query tools
     xml.push_str("  <api>\n");
     if has_code_entities {
@@ -703,6 +750,12 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     }
     if has_embeddings {
         functions.push_str(", text_score");
+    }
+    if has_timeseries {
+        functions.push_str(
+            ", ts_at, ts_sum, ts_avg, ts_min, ts_max, ts_count, \
+             ts_first, ts_last, ts_series, ts_delta",
+        );
     }
     xml.push_str(&format!("    <functions>{}</functions>\n", functions));
 
@@ -739,6 +792,13 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     if has_embeddings {
         xml.push_str(
             "      <note>text_score(n, 'col', 'query') — semantic similarity (0..1). Use text_col value from &lt;emb&gt; as 'col'. Usable in WHERE/RETURN/ORDER BY.</note>\n",
+        );
+    }
+    if has_timeseries {
+        xml.push_str(
+            "      <note>ts_*() functions operate on per-node timeseries channels. First arg is n.channel_name (PropertyAccess). \
+             Range args are date strings: ts_sum(n.ch) = all, ts_sum(n.ch, '2020') = year 2020, ts_sum(n.ch, '2020-2', '2020-6') = Feb-Jun. \
+             Query precision must not exceed data resolution (e.g. '2020-2-15' errors on month data). NaN values are skipped.</note>\n",
         );
     }
     if has_code_entities {

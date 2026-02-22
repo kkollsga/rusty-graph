@@ -237,6 +237,7 @@ impl CypherParser {
             let clause = MatchClause {
                 patterns,
                 path_assignments,
+                limit_hint: None,
             };
             return if optional {
                 Ok(Clause::OptionalMatch(clause))
@@ -251,6 +252,7 @@ impl CypherParser {
         let clause = MatchClause {
             patterns,
             path_assignments,
+            limit_hint: None,
         };
         if optional {
             Ok(Clause::OptionalMatch(clause))

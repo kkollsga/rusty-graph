@@ -38,6 +38,7 @@ pip install kglite
 - [Semantic Search](#semantic-search)
 - [Graph Algorithms](#graph-algorithms)
 - [Spatial Operations](#spatial-operations)
+- [Timeseries](#timeseries)
 - [Analytics](#analytics)
 - [Schema and Indexes](#schema-and-indexes)
 - [Import and Export](#import-and-export)
@@ -190,30 +191,6 @@ graph.cypher("""
 
 The model wrapper works with any provider — OpenAI, Cohere, local sentence-transformers, Ollama. See [Semantic Search](#semantic-search) for the full API including load/unload lifecycle, incremental embedding, and low-level vector access.
 
-### Semantic search in agent workflows
-
-```python
-# Wrap any local or remote model — only needs .dimension and .embed()
-class OpenAIEmbedder:
-    dimension = 1536
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        response = client.embeddings.create(input=texts, model="text-embedding-3-small")
-        return [e.embedding for e in response.data]
-
-graph.set_embedder(OpenAIEmbedder())
-graph.embed_texts("Article", "summary")  # one-time: vectorize all articles
-
-# Now agents can use text_score() in Cypher — no extra API needed
-graph.cypher("""
-    MATCH (a:Article)
-    WHERE text_score(a, 'summary', 'climate policy') > 0.5
-    RETURN a.title, text_score(a, 'summary', 'climate policy') AS score
-    ORDER BY score DESC LIMIT 10
-""")
-```
-
-The model wrapper pattern works with any provider (OpenAI, Cohere, local sentence-transformers, Ollama) — see the [Semantic Search](#semantic-search) section for a full load/unload lifecycle example.
-
 ### Tips for agent prompts
 
 1. **Start with `agent_describe()`** — gives the agent schema, types, property names with sample values, counts, and full Cypher syntax in one XML string
@@ -225,8 +202,8 @@ The model wrapper pattern works with any provider (OpenAI, Cohere, local sentenc
 
 ### What `agent_describe()` returns
 
-- **Dynamic** (per-graph): node types with counts, property names/types/sample values, connection types with endpoints, indexes, field aliases, embedding stores
-- **Static** (always the same): supported Cypher clauses, WHERE operators, functions (including spatial and semantic), mutation syntax, notes
+- **Dynamic** (per-graph): node types with counts, property names/types/sample values, connection types with endpoints, indexes, field aliases, embedding stores, timeseries metadata (resolution, channels, units, bin type)
+- **Static** (always the same): supported Cypher clauses, WHERE operators, functions (including spatial, semantic, and timeseries), mutation syntax, notes
 
 ---
 
@@ -454,7 +431,7 @@ prompt = f"You have a knowledge graph:\n{xml}\nAnswer the user's question using 
 
 The output includes:
 
-- **Dynamic** (per-graph): node types with counts and property schemas, connection types, indexes
+- **Dynamic** (per-graph): node types with counts and property schemas, connection types, indexes, timeseries config (when present)
 - **Static** (always the same): supported Cypher subset, key API methods, single-label model notes
 
 ---
@@ -547,6 +524,7 @@ graph.cypher("""
 | **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern }`, `EXISTS(( pattern ))` |
 | **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `type`, `id`, `labels`, `coalesce`, `count`, `sum`, `avg`, `min`, `max`, `collect`, `std`, `text_score` |
 | **Spatial** | `point`, `distance`, `contains`, `intersects`, `centroid`, `area`, `perimeter`, `latitude`, `longitude` |
+| **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args |
 | **Not supported** | `CALL`/stored procedures, `FOREACH`, subqueries, `SET n:Label` (label mutation), multi-label |
 
 See [CYPHER.md](CYPHER.md) for full examples of every feature.
@@ -1491,6 +1469,159 @@ graph.cypher("""
 
 ---
 
+## Timeseries
+
+Attach time-indexed numeric data directly to nodes — no need to create separate nodes per data point. Data is stored as compact columnar arrays with resolution-aware date-string queries through Cypher `ts_*()` functions.
+
+### Configuration
+
+Configure timeseries metadata per node type: resolution, channel names, units, and bin type.
+
+```python
+graph.set_timeseries("Field",
+    resolution="month",                         # "year", "month", "day", "hour", "minute"
+    channels=["oil", "gas"],                    # channel names
+    units={"oil": "MSm3", "gas": "BSm3"},      # optional: per-channel units
+    bin_type="total",                            # optional: "total", "mean", or "sample"
+)
+
+graph.get_timeseries_config("Field")
+# {'resolution': 'month', 'channels': ['oil', 'gas'],
+#  'units': {'oil': 'MSm3', 'gas': 'BSm3'}, 'bin_type': 'total'}
+```
+
+### Loading Data
+
+```python
+# Bulk load from a DataFrame (most common)
+graph.add_timeseries(
+    "Field",
+    data=production_df,
+    fk="npdid",                              # FK column → matches node.id
+    time_key=["year", "month"],              # composite time key columns
+    channels={"oil": "prfOilCol", "gas": "prfGasCol"},  # channel → column
+    resolution="month",                       # required if set_timeseries() wasn't called
+    units={"oil": "MSm3"},                   # optional, merged into config
+)
+
+# Or manually per node
+graph.set_time_index(node_id, [[2020,1], [2020,2], [2020,3]])
+graph.add_ts_channel(node_id, "oil", [1.23, 1.18, 1.25])
+graph.add_ts_channel(node_id, "gas", [0.45, 0.42, 0.48])
+```
+
+**Validation:** `time_key` column count must match resolution depth (1 for year, 2 for month, 3 for day, 4 for hour, 5 for minute).
+
+### Inline Loading via `add_nodes`
+
+When your DataFrame has one row per time step per entity (e.g., a production CSV), use the `timeseries` parameter on `add_nodes` to load nodes and timeseries in a single call. Rows are automatically deduplicated by `unique_id_field` for node properties; all rows are used for timeseries data.
+
+```python
+# Each row is a monthly production record per field
+prod_df = pd.DataFrame({
+    'field_id': ['Troll']*3 + ['Draugen']*3,
+    'field_name': ['Troll']*3 + ['Draugen']*3,
+    'date': ['2020-01', '2020-02', '2020-03']*2,
+    'oil': [100, 110, 120, 200, 210, 220],
+    'gas': [50, 55, 60, 80, 85, 90],
+})
+
+# Single call — creates 2 nodes with 3 time steps each
+graph.add_nodes(prod_df, 'Production', 'field_id', 'field_name',
+    timeseries={
+        'time': 'date',                   # date string column
+        'channels': ['oil', 'gas'],       # value columns
+    }
+)
+```
+
+The `timeseries` dict accepts:
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `time` | `str` or `dict` | Yes | Date string column name, or dict mapping resolution levels to column names |
+| `channels` | `list[str]` | Yes | Column names containing numeric time-varying data |
+| `resolution` | `str` | No | `"year"`, `"month"`, `"day"`, `"hour"`, `"minute"` — auto-detected if omitted |
+| `units` | `dict[str, str]` | No | Per-channel unit labels |
+
+**Separate time columns** — when time is split across multiple columns (e.g., Norwegian CSVs with `år`, `måned`):
+
+```python
+graph.add_nodes(df, 'Production', 'field_id', 'field_name',
+    timeseries={
+        'time': {'year': 'ar', 'month': 'maned'},
+        'channels': ['oil', 'gas'],
+    }
+)
+```
+
+**High-frequency data** — hour and minute resolution:
+
+```python
+graph.add_nodes(sensor_df, 'Reading', 'sensor_id', 'name',
+    timeseries={
+        'time': 'timestamp',              # e.g., "2020-01-15 10:30"
+        'channels': ['temperature'],
+        'resolution': 'minute',
+    }
+)
+```
+
+Timeseries columns are automatically excluded from node properties. Resolution is auto-detected from the time format when not specified.
+
+### Querying via Cypher
+
+All `ts_*()` functions use **date strings** (`'2020'`, `'2020-2'`, `'2020-2-15'`, `'2020-2-15 10'`, `'2020-2-15 10:30'`). Precision is validated against the data resolution — querying with day precision on month data produces an error.
+
+```python
+# Aggregate monthly data by year
+graph.cypher("MATCH (f:Field) RETURN f.title, ts_sum(f.oil, '2020') AS prod")
+
+# Top 10 fields by production
+graph.cypher("""
+    MATCH (f:Field)
+    RETURN f.title, ts_sum(f.oil, '2020') AS prod
+    ORDER BY prod DESC LIMIT 10
+""")
+
+# Month-level range
+graph.cypher("MATCH (f:Field) RETURN ts_avg(f.oil, '2020-1', '2020-6') AS h1_avg")
+
+# Multi-year range
+graph.cypher("MATCH (f:Field) RETURN ts_sum(f.oil, '2018', '2023') AS total")
+
+# Exact month lookup
+graph.cypher("MATCH (f:Field) RETURN ts_at(f.oil, '2020-3') AS march")
+
+# Change between periods
+graph.cypher("MATCH (f:Field) RETURN ts_delta(f.oil, '2019', '2021') AS change")
+
+# Latest sensor reading
+graph.cypher("MATCH (s:Sensor) RETURN s.title, ts_last(s.temperature)")
+
+# Extract full series for plotting
+graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_series(f.oil, '2015', '2020')")
+```
+
+### Retrieval
+
+```python
+# All channels
+graph.get_timeseries(node_id)
+# {'keys': [[2020,1], [2020,2], ...], 'channels': {'oil': [...], 'gas': [...]}}
+
+# Single channel
+graph.get_timeseries(node_id, channel="oil")
+# {'keys': [...], 'values': [...]}
+
+# Date-string range filter
+graph.get_timeseries(node_id, start='2020', end='2020')
+```
+
+**Available functions:** `ts_at`, `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_first`, `ts_last`, `ts_series`, `ts_delta`. See [CYPHER.md](CYPHER.md#timeseries-functions) for the full reference.
+
+---
+
 ## API Quick Reference
 
 ### Graph lifecycle
@@ -1517,6 +1648,8 @@ graph.cypher("CREATE (:Person {name: 'Alice'})")                        # → Re
 
 ```python
 graph.add_nodes(data=df, node_type='T', unique_id_field='id')           # → report dict
+graph.add_nodes(data=df, node_type='T', unique_id_field='id',          # with inline timeseries
+    timeseries={'time': 'date', 'channels': ['oil', 'gas']})
 graph.add_connections(data=df, connection_type='REL',
     source_type='A', source_id_field='src',
     target_type='B', target_id_field='tgt')                              # → report dict
@@ -1643,12 +1776,17 @@ graph.toc("src/graph/mod.rs")
 
 ### Supported languages
 
-| Language | Parser | Extensions |
-|----------|--------|------------|
-| Rust | `tree-sitter-rust` | `.rs` |
-| Python | `tree-sitter-python` | `.py` |
-| TypeScript | `tree-sitter-typescript` | `.ts`, `.tsx` |
-| JavaScript | `tree-sitter-javascript` | `.js`, `.jsx`, `.mjs` |
+| Language | Extensions |
+|----------|------------|
+| Rust | `.rs` |
+| Python | `.py`, `.pyi` |
+| TypeScript | `.ts`, `.tsx` |
+| JavaScript | `.js`, `.jsx`, `.mjs` |
+| Go | `.go` |
+| Java | `.java` |
+| C# | `.cs` |
+| C | `.c`, `.h` |
+| C++ | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx` |
 
 ### Graph schema
 

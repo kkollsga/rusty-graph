@@ -1,0 +1,20 @@
+
+======================================================================
+Spatial Performance Benchmarks (5000 nodes, x10 repeats)
+======================================================================
+
+  distance() WHERE filter (2-arg point)          avg=   0.97ms  min=   0.94ms
+  distance() 4-arg WHERE                         avg=   1.00ms  min=   0.94ms
+  distance() RETURN + ORDER BY                   avg=   1.37ms  min=   1.34ms
+  point() construction (5K rows)                 avg=   2.14ms  min=   1.98ms
+Traceback (most recent call last):
+  File "/Volumes/EksternalHome/Koding/Rust/KGLite/pytest/benchmark_spatial.py", line 120, in <module>
+    main()
+  File "/Volumes/EksternalHome/Koding/Rust/KGLite/pytest/benchmark_spatial.py", line 88, in main
+    bench("wkt_contains() cross product (5K × 3)",
+  File "/Volumes/EksternalHome/Koding/Rust/KGLite/pytest/benchmark_spatial.py", line 38, in bench
+    fn()
+  File "/Volumes/EksternalHome/Koding/Rust/KGLite/pytest/benchmark_spatial.py", line 89, in <lambda>
+    lambda: g.cypher(
+            ^^^^^^^^^
+RuntimeError: Cypher execution error: Unknown function: wkt_contains

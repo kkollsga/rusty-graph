@@ -115,6 +115,7 @@ graph.cypher("""
 | `id(n)` | Node ID |
 | `labels(n)` | Node type (string, not list — single-label) |
 | `coalesce(a, b, ...)` | First non-null argument |
+| `range(start, end [, step])` | Generate integer list (inclusive); default step = 1 |
 | `length(p)` | Path hop count |
 | `nodes(p)` | Nodes in a path |
 | `relationships(p)` | Relationships in a path |
@@ -129,6 +130,15 @@ graph.cypher("""
 | `longitude(point)` | Extract longitude from point |
 | `text_score(n, prop, query)` | Semantic similarity (auto-embeds query text; requires `set_embedder()`) |
 | `text_score(n, prop, query, metric)` | With explicit metric (`'cosine'`, `'dot_product'`, `'euclidean'`) |
+| `ts_sum(n.ch [, 'start'] [, 'end'])` | Sum of timeseries values (date-string range) |
+| `ts_avg(n.ch [, 'start'] [, 'end'])` | Average of timeseries values |
+| `ts_min(n.ch [, 'start'] [, 'end'])` | Minimum timeseries value |
+| `ts_max(n.ch [, 'start'] [, 'end'])` | Maximum timeseries value |
+| `ts_count(n.ch)` | Count of non-NaN timeseries values |
+| `ts_at(n.ch, 'date')` | Exact timeseries key lookup |
+| `ts_first(n.ch)` / `ts_last(n.ch)` | First / last non-NaN value |
+| `ts_delta(n.ch, 'from', 'to')` | Value change between two time points |
+| `ts_series(n.ch [, 'start'] [, 'end'])` | Extract series as `[{time, value}, ...]` |
 
 ## Spatial Functions
 
@@ -439,6 +449,96 @@ print(plan)
 # Optimizations: optional_match_fusion=1
 ```
 
+## Timeseries Functions
+
+Query time-indexed numeric data attached to nodes. All date arguments are strings (`'2020'`, `'2020-2'`, `'2020-2-15'`), and precision is validated against the data's resolution.
+
+### Date-string syntax
+
+| String | Depth | Matches resolution |
+|--------|-------|--------------------|
+| `'2020'` | year | year, month, day |
+| `'2020-2'` | month | month, day |
+| `'2020-2-15'` | day | day only |
+
+**Precision rule:** Query depth must be ≤ data resolution for range functions (`ts_sum`, `ts_avg`, etc.). For exact-lookup functions (`ts_at`), query depth must equal the data resolution. Querying with day precision on month-resolution data produces an error.
+
+### Functions
+
+| Function | Arguments | Returns | Description |
+|----------|-----------|---------|-------------|
+| `ts_sum(n.channel)` | 1 | Float | Sum of all values |
+| `ts_sum(n.channel, 'start')` | 2 | Float | Sum within prefix range |
+| `ts_sum(n.channel, 'start', 'end')` | 3 | Float | Sum in range [start, end] inclusive |
+| `ts_avg(n.channel [, 'start'] [, 'end'])` | 1-3 | Float | Average (same range rules as ts_sum) |
+| `ts_min(n.channel [, 'start'] [, 'end'])` | 1-3 | Float | Minimum value in range |
+| `ts_max(n.channel [, 'start'] [, 'end'])` | 1-3 | Float | Maximum value in range |
+| `ts_count(n.channel)` | 1 | Integer | Count of non-NaN values |
+| `ts_at(n.channel, 'date')` | 2 | Float/null | Exact key lookup (depth must match resolution) |
+| `ts_first(n.channel)` | 1 | Float/null | First non-NaN value in series |
+| `ts_last(n.channel)` | 1 | Float/null | Last non-NaN value in series |
+| `ts_delta(n.channel, 'from', 'to')` | 3 | Float/null | Value at 'to' minus value at 'from' (prefix match) |
+| `ts_series(n.channel [, 'start'] [, 'end'])` | 1-3 | List | Extract `[{time, value}, ...]` as JSON |
+
+NaN values are skipped in all aggregation functions.
+
+### Examples
+
+```python
+# Aggregate monthly data by year
+graph.cypher("MATCH (f:Field) RETURN f.title, ts_sum(f.oil, '2020') AS prod")
+
+# Range across months
+graph.cypher("MATCH (f:Field) RETURN ts_avg(f.oil, '2020-1', '2020-6') AS h1_avg")
+
+# Multi-year range
+graph.cypher("MATCH (f:Field) RETURN ts_sum(f.oil, '2018', '2023') AS total")
+
+# Exact month lookup
+graph.cypher("MATCH (f:Field) RETURN ts_at(f.oil, '2020-3') AS march_prod")
+
+# Change between two time points
+graph.cypher("MATCH (f:Field) RETURN ts_delta(f.oil, '2019', '2021') AS change")
+
+# Top producers
+graph.cypher("""
+    MATCH (f:Field)
+    RETURN f.title, ts_sum(f.oil, '2020') AS prod
+    ORDER BY prod DESC LIMIT 10
+""")
+
+# Filter by production threshold
+graph.cypher("""
+    MATCH (f:Field)
+    WHERE ts_sum(f.oil, '2020') > 100.0
+    RETURN f.title, ts_sum(f.oil, '2020') AS prod
+""")
+
+# Extract full series for plotting
+graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_series(f.oil, '2015', '2020') AS data")
+
+# Latest reading
+graph.cypher("MATCH (s:Sensor) RETURN s.title, ts_last(s.temperature) AS latest")
+```
+
+### Precision validation
+
+```python
+# OK: year query on month data (coarser → aggregates all months)
+graph.cypher("MATCH (f:Field) RETURN ts_sum(f.oil, '2020')")
+
+# OK: month query on month data (exact match)
+graph.cypher("MATCH (f:Field) RETURN ts_at(f.oil, '2020-3')")
+
+# ERROR: day query on month data (finer than data resolution)
+graph.cypher("MATCH (f:Field) RETURN ts_sum(f.oil, '2020-3-15')")
+# → "Query precision 'day' (depth 3) exceeds data resolution 'month' (depth 2)"
+
+# ERROR: year query with ts_at on month data (depth must match for exact lookup)
+graph.cypher("MATCH (f:Field) RETURN ts_at(f.oil, '2020')")
+# → "Exact lookup requires 2 date components for 'month' resolution, got 1"
+```
+
 ## Supported Cypher Subset
 
 | Category | Supported |
@@ -452,5 +552,6 @@ print(plan)
 | **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `length`, `type`, `id`, `labels`, `coalesce`, `nodes(p)`, `relationships(p)` |
 | **Spatial** | `point(lat, lon)`, `distance(a, b)`, `contains(a, b)`, `intersects(a, b)`, `centroid(n)`, `area(n)`, `perimeter(n)`, `latitude(point)`, `longitude(point)` |
 | **Semantic** | `text_score(n, prop, query [, metric])` — auto-embeds query via `set_embedder()`, cosine/dot_product/euclidean |
+| **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
 | **Not supported** | `CALL`/stored procedures, `FOREACH`, subqueries, `SET n:Label` (label mutation), `REMOVE n:Label`, multi-label |

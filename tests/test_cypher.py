@@ -1076,3 +1076,39 @@ class TestWithPropertyAccess:
         assert result[0]['name'] == 'Alice'
         assert result[0]['age'] == 30
         assert result[0]['friends'] == 2
+
+
+# ── range() function ─────────────────────────────────────────────────────
+
+
+class TestRange:
+    def test_range_basic(self, cypher_graph):
+        result = cypher_graph.cypher("UNWIND range(1, 5) AS x RETURN x")
+        assert [r["x"] for r in result] == [1, 2, 3, 4, 5]
+
+    def test_range_with_step(self, cypher_graph):
+        result = cypher_graph.cypher("UNWIND range(0, 10, 3) AS x RETURN x")
+        assert [r["x"] for r in result] == [0, 3, 6, 9]
+
+    def test_range_negative_step(self, cypher_graph):
+        result = cypher_graph.cypher("UNWIND range(5, 1, -1) AS x RETURN x")
+        assert [r["x"] for r in result] == [5, 4, 3, 2, 1]
+
+    def test_range_single_element(self, cypher_graph):
+        result = cypher_graph.cypher("UNWIND range(3, 3) AS x RETURN x")
+        assert [r["x"] for r in result] == [3]
+
+    def test_range_empty(self, cypher_graph):
+        """range(5, 1) with default step=1 produces empty list."""
+        result = cypher_graph.cypher("UNWIND range(5, 1) AS x RETURN x")
+        assert len(result) == 0
+
+    def test_range_in_return(self, cypher_graph):
+        result = cypher_graph.cypher(
+            "MATCH (p:Person {name: 'Alice'}) RETURN range(1, 3) AS r"
+        )
+        assert result[0]["r"] == [1, 2, 3]
+
+    def test_range_step_zero_errors(self, cypher_graph):
+        with pytest.raises(RuntimeError, match="step must not be zero"):
+            cypher_graph.cypher("UNWIND range(1, 5, 0) AS x RETURN x")

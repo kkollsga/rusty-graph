@@ -14,6 +14,7 @@ pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<Stri
     push_where_into_match(query, params);
     push_limit_into_match(query, graph);
     fuse_optional_match_aggregate(query);
+    fuse_match_return_aggregate(query);
     fuse_vector_score_order_limit(query);
     fuse_order_by_top_k(query);
     reorder_predicates_by_cost(query);
@@ -85,12 +86,68 @@ fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<String, Value
     }
 }
 
-/// Push LIMIT into MATCH when there's no ORDER BY between them.
+/// Push LIMIT into MATCH when there's no ORDER BY/aggregation between them.
 /// This allows the pattern executor to stop early via max_matches.
-fn push_limit_into_match(_query: &mut CypherQuery, _graph: &DirGraph) {
-    // This optimization is deferred - it requires passing hints to PatternExecutor
-    // which needs additional infrastructure. For now, LIMIT is applied post-execution.
-    // The framework is here for future implementation.
+///
+/// Safe when: MATCH → RETURN → LIMIT, with RETURN having no aggregation or DISTINCT.
+/// The LIMIT clause is removed from the pipeline and its value is stored in
+/// `MatchClause.limit_hint`, which `execute_match` passes to PatternExecutor.
+fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) {
+    if query.clauses.len() < 3 {
+        return;
+    }
+    let mut i = 0;
+    while i + 2 < query.clauses.len() {
+        // Look for MATCH → RETURN → LIMIT
+        let is_pattern = matches!(
+            (
+                &query.clauses[i],
+                &query.clauses[i + 1],
+                &query.clauses[i + 2]
+            ),
+            (Clause::Match(_), Clause::Return(_), Clause::Limit(_))
+        );
+        if !is_pattern {
+            i += 1;
+            continue;
+        }
+
+        // Safety check: RETURN must have no aggregation and no DISTINCT
+        let safe = if let Clause::Return(r) = &query.clauses[i + 1] {
+            !r.distinct
+                && !r
+                    .items
+                    .iter()
+                    .any(|item| super::executor::is_aggregate_expression(&item.expression))
+        } else {
+            false
+        };
+        if !safe {
+            i += 1;
+            continue;
+        }
+
+        // Extract LIMIT value — must be a literal positive integer
+        let limit_val = if let Clause::Limit(l) = &query.clauses[i + 2] {
+            match &l.count {
+                Expression::Literal(Value::Int64(n)) if *n > 0 => Some(*n as usize),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let Some(limit) = limit_val else {
+            i += 1;
+            continue;
+        };
+
+        // All checks passed: push limit into MATCH and remove LIMIT clause
+        if let Clause::Match(ref mut m) = query.clauses[i] {
+            m.limit_hint = Some(limit);
+        }
+        query.clauses.remove(i + 2); // Remove LIMIT
+                                     // Don't increment — check the new i+2
+    }
 }
 
 /// Fuse consecutive OPTIONAL MATCH + WITH (containing count aggregation) into
@@ -230,6 +287,171 @@ fn is_fusable_with_clause(with: &WithClause) -> bool {
     }
 
     has_count
+}
+
+/// Fuse MATCH (node-edge-node) + RETURN (group-by + count) into a single
+/// pass that counts edges directly per node instead of materializing all rows.
+///
+/// Criteria for fusion:
+/// 1. `clauses[i]` is `Match` with exactly 1 pattern of 3 elements (node-edge-node)
+/// 2. `clauses[i+1]` is `Return` with at least one `count()` aggregate
+/// 3. All non-aggregate RETURN items are PropertyAccess on the first node variable
+/// 4. All `count()` args reference the second node variable (or `*`)
+/// 5. No DISTINCT on count, no property filters on edge or second node
+///    (required by `try_count_simple_pattern`)
+fn fuse_match_return_aggregate(query: &mut CypherQuery) {
+    use super::executor::is_aggregate_expression;
+
+    let mut i = 0;
+    while i + 1 < query.clauses.len() {
+        let can_fuse = matches!(
+            (&query.clauses[i], &query.clauses[i + 1]),
+            (Clause::Match(_), Clause::Return(_))
+        );
+        if !can_fuse {
+            i += 1;
+            continue;
+        }
+
+        // Check MATCH: exactly 1 pattern with 3 elements (node-edge-node)
+        let (first_var, second_var, edge_has_props, second_has_props) =
+            if let Clause::Match(m) = &query.clauses[i] {
+                if m.patterns.len() != 1 || m.patterns[0].elements.len() != 3 {
+                    i += 1;
+                    continue;
+                }
+                let pat = &m.patterns[0];
+                let first_var = match &pat.elements[0] {
+                    PatternElement::Node(np) => np.variable.clone(),
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                let edge_has_props = match &pat.elements[1] {
+                    PatternElement::Edge(ep) => ep.properties.is_some() || ep.var_length.is_some(),
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                let (second_var, second_has_props) = match &pat.elements[2] {
+                    PatternElement::Node(np) => (np.variable.clone(), np.properties.is_some()),
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                (first_var, second_var, edge_has_props, second_has_props)
+            } else {
+                i += 1;
+                continue;
+            };
+
+        // try_count_simple_pattern requires no property filters on edge or second node
+        if edge_has_props || second_has_props {
+            i += 1;
+            continue;
+        }
+
+        let first_var = match first_var {
+            Some(v) => v,
+            None => {
+                i += 1;
+                continue;
+            }
+        };
+
+        // Check RETURN: must have count() aggregate + group-by on first node only
+        let fusable = if let Clause::Return(r) = &query.clauses[i + 1] {
+            if r.distinct {
+                false
+            } else {
+                let mut has_count = false;
+                let mut all_valid = true;
+                for item in &r.items {
+                    if is_aggregate_expression(&item.expression) {
+                        match &item.expression {
+                            Expression::FunctionCall {
+                                name,
+                                args,
+                                distinct,
+                            } if name.eq_ignore_ascii_case("count") => {
+                                if *distinct {
+                                    all_valid = false;
+                                    break;
+                                }
+                                // count(*) is fine
+                                if args.len() == 1 && matches!(args[0], Expression::Star) {
+                                    has_count = true;
+                                    continue;
+                                }
+                                // count(var) — var must be second node
+                                if let Some(Expression::Variable(var)) = args.first() {
+                                    if second_var.as_deref() == Some(var.as_str()) {
+                                        has_count = true;
+                                        continue;
+                                    }
+                                }
+                                all_valid = false;
+                                break;
+                            }
+                            _ => {
+                                all_valid = false;
+                                break;
+                            }
+                        }
+                    } else {
+                        // Group-by item must reference first node variable
+                        match &item.expression {
+                            Expression::PropertyAccess { variable, .. }
+                                if variable == &first_var =>
+                            {
+                                // OK
+                            }
+                            Expression::Variable(v) if v == &first_var => {
+                                // OK
+                            }
+                            _ => {
+                                all_valid = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                has_count && all_valid
+            }
+        } else {
+            false
+        };
+
+        if !fusable {
+            i += 1;
+            continue;
+        }
+
+        // All checks passed — fuse MATCH + RETURN
+        let return_clause = if let Clause::Return(r) = query.clauses.remove(i + 1) {
+            r
+        } else {
+            unreachable!()
+        };
+        let match_clause = if let Clause::Match(m) = query.clauses.remove(i) {
+            m
+        } else {
+            unreachable!()
+        };
+
+        query.clauses.insert(
+            i,
+            Clause::FusedMatchReturnAggregate {
+                match_clause,
+                return_clause,
+            },
+        );
+
+        i += 1;
+    }
 }
 
 /// Collect variable names and their node types from patterns

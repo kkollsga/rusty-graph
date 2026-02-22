@@ -21,6 +21,7 @@ use crate::graph::schema::{
     CompositeIndexKey, ConnectionTypeInfo, CowSelection, DirGraph, EmbeddingStore, IndexKey,
     SaveMetadata, SchemaDefinition, SpatialConfig,
 };
+use crate::graph::timeseries::{NodeTimeseries, TimeseriesConfig};
 use crate::graph::KnowledgeGraph;
 use bincode::Options;
 use flate2::read::GzDecoder;
@@ -100,10 +101,18 @@ struct FileMetadata {
     /// Spatial configuration per node type.
     #[serde(default)]
     spatial_configs: HashMap<String, SpatialConfig>,
+    /// Timeseries configuration per node type.
+    #[serde(default)]
+    timeseries_configs: HashMap<String, TimeseriesConfig>,
     /// Compressed size of the graph section in bytes.
     /// When present, bytes after graph_compressed_size contain the embedding section.
     #[serde(default)]
     graph_compressed_size: Option<u64>,
+    /// Compressed size of the embedding section in bytes.
+    /// When present (along with graph_compressed_size), the timeseries section
+    /// follows after graph + embedding sections.
+    #[serde(default)]
+    embedding_compressed_size: Option<u64>,
 }
 
 fn default_auto_vacuum_threshold() -> Option<f64> {
@@ -143,6 +152,21 @@ pub fn write_graph_to_file(graph: &DirGraph, path: &str) -> io::Result<()> {
         None
     };
 
+    // Compress timeseries if any exist
+    let has_timeseries = !graph.timeseries_store.is_empty();
+    let timeseries_compressed = if has_timeseries {
+        let mut buf = Vec::new();
+        let gz = GzEncoder::new(&mut buf, Compression::new(3));
+        bincode_options()
+            .serialize_into(gz, &graph.timeseries_store)
+            .map_err(io::Error::other)?;
+        Some(buf)
+    } else {
+        None
+    };
+
+    let has_extra_sections = has_embeddings || has_timeseries;
+
     // Build JSON metadata from DirGraph fields
     let metadata = FileMetadata {
         core_data_version: CURRENT_CORE_DATA_VERSION,
@@ -157,8 +181,20 @@ pub fn write_graph_to_file(graph: &DirGraph, path: &str) -> io::Result<()> {
         title_field_aliases: graph.title_field_aliases.clone(),
         auto_vacuum_threshold: graph.auto_vacuum_threshold,
         spatial_configs: graph.spatial_configs.clone(),
-        graph_compressed_size: if has_embeddings {
+        timeseries_configs: graph.timeseries_configs.clone(),
+        graph_compressed_size: if has_extra_sections {
             Some(graph_compressed.len() as u64)
+        } else {
+            None
+        },
+        embedding_compressed_size: if has_timeseries {
+            // When timeseries exists, we must know the embedding section boundary
+            Some(
+                embedding_compressed
+                    .as_ref()
+                    .map(|b| b.len() as u64)
+                    .unwrap_or(0),
+            )
         } else {
             None
         },
@@ -183,6 +219,11 @@ pub fn write_graph_to_file(graph: &DirGraph, path: &str) -> io::Result<()> {
     // Write embedding section if present
     if let Some(emb_data) = embedding_compressed {
         writer.write_all(&emb_data)?;
+    }
+
+    // Write timeseries section if present
+    if let Some(ts_data) = timeseries_compressed {
+        writer.write_all(&ts_data)?;
     }
 
     writer.flush()?;
@@ -246,17 +287,37 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
 
     // Determine graph section boundaries
     let graph_start = metadata_end;
-    let (graph_bytes, embedding_bytes) = match metadata.graph_compressed_size {
-        Some(size) => {
-            let graph_end = graph_start + size as usize;
+    let (graph_bytes, embedding_bytes, timeseries_bytes) = match metadata.graph_compressed_size {
+        Some(graph_size) => {
+            let graph_end = graph_start + graph_size as usize;
             if buf.len() < graph_end {
                 return Err(io::Error::other(
                     "v2 file is truncated — graph section incomplete.",
                 ));
             }
-            (&buf[graph_start..graph_end], Some(&buf[graph_end..]))
+            // When embedding_compressed_size is set, we know the exact embedding boundary
+            match metadata.embedding_compressed_size {
+                Some(emb_size) => {
+                    let emb_end = graph_end + emb_size as usize;
+                    let emb_bytes = if emb_size > 0 {
+                        Some(&buf[graph_end..emb_end])
+                    } else {
+                        None
+                    };
+                    let ts_bytes = if buf.len() > emb_end {
+                        Some(&buf[emb_end..])
+                    } else {
+                        None
+                    };
+                    (&buf[graph_start..graph_end], emb_bytes, ts_bytes)
+                }
+                None => {
+                    // Old format: all remaining bytes after graph are embeddings
+                    (&buf[graph_start..graph_end], Some(&buf[graph_end..]), None)
+                }
+            }
         }
-        None => (&buf[graph_start..], None),
+        None => (&buf[graph_start..], None, None),
     };
 
     // Decompress and deserialize graph
@@ -274,6 +335,7 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
     dir_graph.title_field_aliases = metadata.title_field_aliases;
     dir_graph.auto_vacuum_threshold = metadata.auto_vacuum_threshold;
     dir_graph.spatial_configs = metadata.spatial_configs;
+    dir_graph.timeseries_configs = metadata.timeseries_configs;
     dir_graph.save_metadata = SaveMetadata {
         format_version: 2,
         library_version: metadata.library_version,
@@ -288,6 +350,18 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
                     io::Error::other(format!("Failed to deserialize embedding data: {}", e))
                 })?;
             dir_graph.embeddings = embeddings;
+        }
+    }
+
+    // Load timeseries if present
+    if let Some(ts_bytes) = timeseries_bytes {
+        if !ts_bytes.is_empty() {
+            let gz = GzDecoder::new(ts_bytes);
+            let ts_store: HashMap<usize, NodeTimeseries> =
+                bincode_options().deserialize_from(gz).map_err(|e| {
+                    io::Error::other(format!("Failed to deserialize timeseries data: {}", e))
+                })?;
+            dir_graph.timeseries_store = ts_store;
         }
     }
 

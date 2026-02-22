@@ -73,6 +73,15 @@ impl<V> Bindings<V> {
         self.entries.is_empty()
     }
 
+    /// Remove a key and return its value (move, no clone).
+    pub fn remove(&mut self, key: &str) -> Option<V> {
+        if let Some(pos) = self.entries.iter().position(|(k, _)| k == key) {
+            Some(self.entries.swap_remove(pos).1)
+        } else {
+            None
+        }
+    }
+
     /// Convert to HashMap for interop with pattern_matching pre_bindings.
     pub fn to_hashmap(&self) -> HashMap<String, V>
     where

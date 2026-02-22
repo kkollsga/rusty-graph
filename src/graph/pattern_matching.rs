@@ -2,6 +2,7 @@
 // Supports patterns like: (p:Play)-[:HAS_PROSPECT]->(pr:Prospect)-[:BECAME_DISCOVERY]->(d:Discovery)
 
 use crate::datatypes::values::Value;
+use crate::graph::cypher::result::Bindings;
 use crate::graph::filtering_methods::values_equal;
 use crate::graph::schema::DirGraph;
 use petgraph::graph::{EdgeIndex, NodeIndex};
@@ -712,24 +713,32 @@ pub fn parse_pattern(input: &str) -> Result<Pattern, String> {
 pub struct PatternExecutor<'a> {
     graph: &'a DirGraph,
     max_matches: Option<usize>,
-    pre_bindings: HashMap<String, NodeIndex>,
+    pre_bindings: &'a Bindings<NodeIndex>,
     /// When true, node_to_binding() and edge bindings skip cloning
     /// properties/title/id (the Cypher executor only uses `index`).
     lightweight: bool,
     /// Query parameters for resolving $param references in inline properties
-    params: HashMap<String, Value>,
+    params: &'a HashMap<String, Value>,
     /// Optional deadline for aborting long-running pattern execution.
     deadline: Option<Instant>,
 }
+
+/// Static empty params for constructors that don't take parameters.
+static EMPTY_PARAMS: std::sync::LazyLock<HashMap<String, Value>> =
+    std::sync::LazyLock::new(HashMap::new);
+
+/// Static empty bindings for constructors that don't take pre-bindings.
+static EMPTY_BINDINGS: std::sync::LazyLock<Bindings<NodeIndex>> =
+    std::sync::LazyLock::new(Bindings::new);
 
 impl<'a> PatternExecutor<'a> {
     pub fn new(graph: &'a DirGraph, max_matches: Option<usize>) -> Self {
         PatternExecutor {
             graph,
             max_matches,
-            pre_bindings: HashMap::new(),
+            pre_bindings: &EMPTY_BINDINGS,
             lightweight: false,
-            params: HashMap::new(),
+            params: &EMPTY_PARAMS,
             deadline: None,
         }
     }
@@ -741,9 +750,9 @@ impl<'a> PatternExecutor<'a> {
         PatternExecutor {
             graph,
             max_matches,
-            pre_bindings: HashMap::new(),
+            pre_bindings: &EMPTY_BINDINGS,
             lightweight: true,
-            params: HashMap::new(),
+            params: &EMPTY_PARAMS,
             deadline: None,
         }
     }
@@ -752,12 +761,12 @@ impl<'a> PatternExecutor<'a> {
     pub fn new_lightweight_with_params(
         graph: &'a DirGraph,
         max_matches: Option<usize>,
-        params: HashMap<String, Value>,
+        params: &'a HashMap<String, Value>,
     ) -> Self {
         PatternExecutor {
             graph,
             max_matches,
-            pre_bindings: HashMap::new(),
+            pre_bindings: &EMPTY_BINDINGS,
             lightweight: true,
             params,
             deadline: None,
@@ -768,14 +777,14 @@ impl<'a> PatternExecutor<'a> {
     pub fn with_bindings(
         graph: &'a DirGraph,
         max_matches: Option<usize>,
-        pre_bindings: HashMap<String, NodeIndex>,
+        pre_bindings: &'a Bindings<NodeIndex>,
     ) -> Self {
         PatternExecutor {
             graph,
             max_matches,
             pre_bindings,
             lightweight: true,
-            params: HashMap::new(),
+            params: &EMPTY_PARAMS,
             deadline: None,
         }
     }
@@ -783,8 +792,8 @@ impl<'a> PatternExecutor<'a> {
     pub fn with_bindings_and_params(
         graph: &'a DirGraph,
         max_matches: Option<usize>,
-        pre_bindings: HashMap<String, NodeIndex>,
-        params: HashMap<String, Value>,
+        pre_bindings: &'a Bindings<NodeIndex>,
+        params: &'a HashMap<String, Value>,
     ) -> Self {
         PatternExecutor {
             graph,

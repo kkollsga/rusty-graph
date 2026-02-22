@@ -1,0 +1,219 @@
+======================================================================
+KGLITE CYPHER ENGINE BENCHMARK
+======================================================================
+
+Python: 3.12.9 (main, Feb  4 2025, 14:38:38) [Clang 16.0.0 (clang-1600.0.26.6)]
+kglite: 0.5.51
+
+Building test graph: 5K users, 10K products, 50K purchases...
+Graph ready.
+
+
+--- Simple MATCH + RETURN ---
+  MATCH (u:User) RETURN u.name [5K rows]:
+    Mean:   2.455 ms
+    Median: 2.218 ms
+    Min:    2.031 ms
+    StdDev: 0.685 ms
+    Rate:   2,036,442 ops/sec
+  MATCH 4 properties [5K rows]:
+    Mean:   2.993 ms
+    Median: 3.013 ms
+    Min:    2.738 ms
+    StdDev: 0.182 ms
+    Rate:   1,670,527 ops/sec
+  MATCH (p:Product) 2 props [10K rows]:
+    Mean:   4.845 ms
+    Median: 4.803 ms
+    Min:    4.554 ms
+    StdDev: 0.242 ms
+    Rate:   2,064,166 ops/sec
+
+--- MATCH + WHERE ---
+  WHERE equality [~1K results]:
+    Mean:   0.726 ms
+    Median: 0.719 ms
+    Min:    0.628 ms
+    StdDev: 0.063 ms
+    Rate:   1,378,019 ops/sec
+  WHERE comparison (age > 50):
+    Mean:   1.877 ms
+    Median: 1.906 ms
+    Min:    1.720 ms
+    StdDev: 0.095 ms
+    Rate:   533 ops/sec
+  WHERE 3 conditions (AND):
+    Mean:   0.736 ms
+    Median: 0.742 ms
+    Min:    0.660 ms
+    StdDev: 0.054 ms
+    Rate:   1,358 ops/sec
+  WHERE STARTS WITH:
+    Mean:   1.724 ms
+    Median: 1.722 ms
+    Min:    1.532 ms
+    StdDev: 0.135 ms
+    Rate:   580 ops/sec
+
+--- Traversal MATCH ---
+  1-hop traversal LIMIT 100:
+    Mean:   46.196 ms
+    Median: 45.931 ms
+    Min:    44.179 ms
+    StdDev: 1.721 ms
+    Rate:   2,165 ops/sec
+  1-hop WHERE + LIMIT 500:
+    Mean:   8.191 ms
+    Median: 8.088 ms
+    Min:    7.266 ms
+    StdDev: 0.698 ms
+    Rate:   61,046 ops/sec
+  Single user purchases:
+    Mean:   0.079 ms
+    Median: 0.073 ms
+    Min:    0.073 ms
+    StdDev: 0.013 ms
+    Rate:   12,631 ops/sec
+
+--- Aggregation ---
+  count(u) [5K nodes]:
+    Mean:   1.225 ms
+    Median: 1.218 ms
+    Min:    1.096 ms
+    StdDev: 0.103 ms
+    Rate:   817 ops/sec
+  GROUP BY city, count + avg:
+    Mean:   1.727 ms
+    Median: 1.680 ms
+    Min:    1.649 ms
+    StdDev: 0.115 ms
+    Rate:   579 ops/sec
+  GROUP BY, 4 aggregations:
+    Mean:   2.053 ms
+    Median: 2.012 ms
+    Min:    1.972 ms
+    StdDev: 0.127 ms
+    Rate:   487 ops/sec
+  Per-user purchase count TOP 10:
+    Mean:   45.730 ms
+    Median: 45.664 ms
+    Min:    44.400 ms
+    StdDev: 1.214 ms
+    Rate:   22 ops/sec
+
+--- ORDER BY + LIMIT ---
+  ORDER BY salary DESC LIMIT 10:
+    Mean:   1.214 ms
+    Median: 1.178 ms
+    Min:    1.115 ms
+    StdDev: 0.089 ms
+    Rate:   824 ops/sec
+  WHERE + ORDER BY + LIMIT:
+    Mean:   0.303 ms
+    Median: 0.289 ms
+    Min:    0.278 ms
+    StdDev: 0.041 ms
+    Rate:   3,305 ops/sec
+
+--- UNWIND + range ---
+  UNWIND range(1,10):
+    Mean:   0.005 ms
+    Median: 0.004 ms
+    Min:    0.004 ms
+    StdDev: 0.002 ms
+    Rate:   1,978,555 ops/sec
+  UNWIND range(1,100):
+    Mean:   0.026 ms
+    Median: 0.025 ms
+    Min:    0.025 ms
+    StdDev: 0.002 ms
+    Rate:   3,811,979 ops/sec
+  UNWIND range(1,1000):
+    Mean:   1.474 ms
+    Median: 1.505 ms
+    Min:    1.243 ms
+    StdDev: 0.133 ms
+    Rate:   678,537 ops/sec
+  UNWIND range(1,100) + expressions:
+    Mean:   0.056 ms
+    Median: 0.051 ms
+    Min:    0.050 ms
+    StdDev: 0.013 ms
+    Rate:   1,786,110 ops/sec
+
+--- WITH Chaining ---
+  MATCH + WITH WHERE + RETURN:
+    Mean:   4.473 ms
+    Median: 4.159 ms
+    Min:    3.861 ms
+    StdDev: 1.152 ms
+    Rate:   224 ops/sec
+  WITH agg + ORDER BY:
+    Mean:   1.308 ms
+    Median: 1.267 ms
+    Min:    1.229 ms
+    StdDev: 0.114 ms
+    Rate:   765 ops/sec
+
+--- Parameterized Queries ---
+  Inline property {city: 'Bergen'}:
+    Mean:   0.827 ms
+    Median: 0.818 ms
+    Min:    0.688 ms
+    StdDev: 0.129 ms
+    Rate:   1,209 ops/sec
+  Inline prop + ORDER BY + LIMIT:
+    Mean:   0.743 ms
+    Median: 0.700 ms
+    Min:    0.691 ms
+    StdDev: 0.088 ms
+    Rate:   1,347 ops/sec
+
+======================================================================
+CYPHER BENCHMARK SUMMARY
+======================================================================
+
+Benchmark                                        Mean (ms)         Ops/sec
+---------------------------------------------------------------------------
+
+[Simple MATCH]
+MATCH (u:User) RETURN u.name [5K rows]               2.455       2,036,442
+MATCH 4 properties [5K rows]                         2.993       1,670,527
+MATCH (p:Product) 2 props [10K rows]                 4.845       2,064,166
+
+[WHERE Filter]
+WHERE equality [~1K results]                         0.726       1,378,019
+WHERE comparison (age > 50)                          1.877             533
+WHERE 3 conditions (AND)                             0.736           1,358
+WHERE STARTS WITH                                    1.724             580
+
+[Traversal MATCH]
+1-hop traversal LIMIT 100                           46.196           2,165
+1-hop WHERE + LIMIT 500                              8.191          61,046
+Single user purchases                                0.079          12,631
+
+[Aggregation]
+count(u) [5K nodes]                                  1.225             817
+GROUP BY city, count + avg                           1.727             579
+GROUP BY, 4 aggregations                             2.053             487
+Per-user purchase count TOP 10                      45.730              22
+
+[ORDER BY + LIMIT]
+ORDER BY salary DESC LIMIT 10                        1.214             824
+WHERE + ORDER BY + LIMIT                             0.303           3,305
+
+[UNWIND + range]
+UNWIND range(1,10)                                   0.005       1,978,555
+UNWIND range(1,100)                                  0.026       3,811,979
+UNWIND range(1,1000)                                 1.474         678,537
+UNWIND range(1,100) + expressions                    0.056       1,786,110
+
+[WITH Chaining]
+MATCH + WITH WHERE + RETURN                          4.473             224
+WITH agg + ORDER BY                                  1.308             765
+
+[Parameterized]
+Inline property {city: 'Bergen'}                     0.827           1,209
+Inline prop + ORDER BY + LIMIT                       0.743           1,347
+
+======================================================================

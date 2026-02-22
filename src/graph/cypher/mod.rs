@@ -121,6 +121,9 @@ pub fn generate_explain_plan(query: &CypherQuery) -> String {
                     yields.join(", ")
                 )
             }
+            Clause::FusedMatchReturnAggregate { .. } => {
+                "FusedMatchReturnAggregate (optimized MATCH + count)".to_string()
+            }
             Clause::FusedOptionalMatchAggregate { .. } => {
                 "FusedOptionalMatchAggregate (optimized OPTIONAL MATCH + count)".to_string()
             }

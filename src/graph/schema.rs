@@ -481,6 +481,15 @@ pub struct DirGraph {
     /// Persisted as a separate section in v2 .kgl files.
     #[serde(skip)]
     pub(crate) embeddings: HashMap<(String, String), EmbeddingStore>,
+    /// Timeseries configuration per node type: type_name → TimeseriesConfig.
+    /// Declares composite key labels and known channels for auto-resolution.
+    #[serde(default)]
+    pub(crate) timeseries_configs: HashMap<String, super::timeseries::TimeseriesConfig>,
+    /// Per-node timeseries storage: NodeIndex.index() → NodeTimeseries.
+    /// Stored separately from NodeData.properties (like embeddings).
+    /// Persisted as a separate section in v2 .kgl files.
+    #[serde(skip)]
+    pub(crate) timeseries_store: HashMap<usize, super::timeseries::NodeTimeseries>,
     /// If true, Cypher mutations (CREATE, SET, DELETE, REMOVE, MERGE) are rejected
     /// and agent_describe() omits mutation documentation.
     #[serde(skip)]
@@ -514,6 +523,8 @@ impl DirGraph {
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
             embeddings: HashMap::new(),
+            timeseries_configs: HashMap::new(),
+            timeseries_store: HashMap::new(),
             read_only: false,
         }
     }
@@ -542,6 +553,8 @@ impl DirGraph {
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
             embeddings: HashMap::new(),
+            timeseries_configs: HashMap::new(),
+            timeseries_store: HashMap::new(),
             read_only: false,
         }
     }
@@ -549,6 +562,14 @@ impl DirGraph {
     /// Look up spatial config for a node type.
     pub fn get_spatial_config(&self, node_type: &str) -> Option<&SpatialConfig> {
         self.spatial_configs.get(node_type)
+    }
+
+    /// Look up timeseries data for a specific node by its index.
+    pub fn get_node_timeseries(
+        &self,
+        node_index: usize,
+    ) -> Option<&super::timeseries::NodeTimeseries> {
+        self.timeseries_store.get(&node_index)
     }
 
     /// Look up an embedding store by `(&str, &str)` without allocating owned Strings.
@@ -812,6 +833,9 @@ impl DirGraph {
     /// If the property matches the original ID or title field name for this node type,
     /// returns the canonical name ("id" or "title"). Otherwise returns the property unchanged.
     pub fn resolve_alias<'a>(&'a self, node_type: &str, property: &'a str) -> &'a str {
+        if self.id_field_aliases.is_empty() && self.title_field_aliases.is_empty() {
+            return property;
+        }
         if let Some(alias) = self.id_field_aliases.get(node_type) {
             if alias == property {
                 return "id";

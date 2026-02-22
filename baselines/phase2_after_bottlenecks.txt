@@ -1,0 +1,358 @@
+======================================================================
+RUSTY_GRAPH COMPREHENSIVE PERFORMANCE BENCHMARK
+======================================================================
+
+Python version: 3.12.9 (main, Feb  4 2025, 14:38:38) [Clang 16.0.0 (clang-1600.0.26.6)]
+kglite version: 0.5.51
+
+This benchmark establishes baseline metrics for optimization work.
+Run again after implementing fixes to measure improvements.
+
+
+======================================================================
+BENCHMARK 1: Node Creation (Index String Cloning)
+======================================================================
+
+  add_nodes (1,000 nodes):
+    Mean:   3.204 ms
+    Median: 3.178 ms
+    Min:    3.140 ms
+    Max:    3.287 ms
+    StdDev: 0.067 ms
+    Rate:   312,113 ops/sec
+
+  add_nodes (5,000 nodes):
+    Mean:   15.843 ms
+    Median: 15.831 ms
+    Min:    15.774 ms
+    Max:    15.924 ms
+    StdDev: 0.060 ms
+    Rate:   315,600 ops/sec
+
+  add_nodes (10,000 nodes):
+    Mean:   31.194 ms
+    Median: 31.215 ms
+    Min:    30.793 ms
+    Max:    31.447 ms
+    StdDev: 0.245 ms
+    Rate:   320,575 ops/sec
+
+  add_nodes (25,000 nodes):
+    Mean:   81.539 ms
+    Median: 79.014 ms
+    Min:    77.534 ms
+    Max:    94.496 ms
+    StdDev: 7.280 ms
+    Rate:   306,602 ops/sec
+
+======================================================================
+BENCHMARK 2: Data Retrieval (to_node_info Clone)
+======================================================================
+
+  get_nodes (1,000 nodes, 15 props):
+    Mean:   0.930 ms
+    Median: 0.915 ms
+    Min:    0.886 ms
+    Max:    1.014 ms
+    StdDev: 0.049 ms
+    Rate:   1,075,442 ops/sec
+
+  get_nodes (limit 100 of 1,000):
+    Mean:   0.092 ms
+    Median: 0.089 ms
+    Min:    0.089 ms
+    Max:    0.097 ms
+    StdDev: 0.004 ms
+    Rate:   1,091,705 ops/sec
+
+  get_nodes (5,000 nodes, 15 props):
+    Mean:   6.114 ms
+    Median: 6.063 ms
+    Min:    5.699 ms
+    Max:    6.484 ms
+    StdDev: 0.342 ms
+    Rate:   817,762 ops/sec
+
+  get_nodes (limit 100 of 5,000):
+    Mean:   0.098 ms
+    Median: 0.093 ms
+    Min:    0.093 ms
+    Max:    0.116 ms
+    StdDev: 0.010 ms
+    Rate:   1,022,062 ops/sec
+
+  get_nodes (10,000 nodes, 15 props):
+    Mean:   13.708 ms
+    Median: 13.499 ms
+    Min:    12.856 ms
+    Max:    15.207 ms
+    StdDev: 0.889 ms
+    Rate:   729,476 ops/sec
+
+  get_nodes (limit 100 of 10,000):
+    Mean:   0.103 ms
+    Median: 0.097 ms
+    Min:    0.097 ms
+    Max:    0.122 ms
+    StdDev: 0.011 ms
+    Rate:   971,111 ops/sec
+
+======================================================================
+BENCHMARK 3: Connection Retrieval (Properties Clone)
+======================================================================
+
+  get_connections (no node props):
+    Mean:   1.321 ms
+    Median: 1.299 ms
+    Min:    1.287 ms
+    Max:    1.368 ms
+    StdDev: 0.036 ms
+    Rate:   7,572,794 ops/sec
+
+  get_connections (with node props):
+    Mean:   1.296 ms
+    Median: 1.296 ms
+    Min:    1.259 ms
+    Max:    1.336 ms
+    StdDev: 0.035 ms
+    Rate:   7,714,066 ops/sec
+
+======================================================================
+BENCHMARK 4: Complex Filtering (HashMap Recreation)
+======================================================================
+
+  filter (1 condition):
+    Mean:   0.581 ms
+    Median: 0.581 ms
+    Min:    0.563 ms
+    Max:    0.593 ms
+    StdDev: 0.012 ms
+    Rate:   17,200,111 ops/sec
+
+  filter (3 conditions):
+    Mean:   0.889 ms
+    Median: 0.884 ms
+    Min:    0.868 ms
+    Max:    0.911 ms
+    StdDev: 0.018 ms
+    Rate:   11,247,645 ops/sec
+
+  filter (6 conditions):
+    Mean:   1.297 ms
+    Median: 1.293 ms
+    Min:    1.255 ms
+    Max:    1.342 ms
+    StdDev: 0.034 ms
+    Rate:   7,710,547 ops/sec
+
+======================================================================
+BENCHMARK 5: Property Value Access (Value Clone)
+======================================================================
+
+  get_properties (1 prop):
+    Mean:   0.420 ms
+    Median: 0.416 ms
+    Min:    0.405 ms
+    Max:    0.441 ms
+    StdDev: 0.015 ms
+    Rate:   11,917,525 ops/sec
+
+  get_properties (5 props):
+    Mean:   1.715 ms
+    Median: 1.627 ms
+    Min:    1.560 ms
+    Max:    2.008 ms
+    StdDev: 0.193 ms
+    Rate:   14,581,016 ops/sec
+
+  get_unique_values:
+    Mean:   0.320 ms
+    Median: 0.317 ms
+    Min:    0.299 ms
+    Max:    0.350 ms
+    StdDev: 0.020 ms
+    Rate:   15,623,769 ops/sec
+
+======================================================================
+BENCHMARK 6: Traversal Operations
+======================================================================
+
+  traverse (100 -> 5000):
+    Mean:   0.107 ms
+    Median: 0.102 ms
+    Min:    0.102 ms
+    Max:    0.123 ms
+    StdDev: 0.009 ms
+    Rate:   46,765,245 ops/sec
+
+  traverse with filter:
+    Mean:   0.163 ms
+    Median: 0.151 ms
+    Min:    0.148 ms
+    Max:    0.212 ms
+    StdDev: 0.028 ms
+    Rate:   30,698,351 ops/sec
+
+  traverse with target filter:
+    Mean:   0.508 ms
+    Median: 0.514 ms
+    Min:    0.481 ms
+    Max:    0.537 ms
+    StdDev: 0.022 ms
+    Rate:   9,851,409 ops/sec
+
+======================================================================
+BENCHMARK 7: Chained Operations (Selection Cloning)
+======================================================================
+
+  type_filter only:
+    Mean:   0.002 ms
+    Median: 0.001 ms
+    Min:    0.001 ms
+    Max:    0.009 ms
+    StdDev: 0.002 ms
+    Rate:   2,499,871,831 ops/sec
+
+  type_filter + filter:
+    Mean:   0.345 ms
+    Median: 0.344 ms
+    Min:    0.308 ms
+    Max:    0.422 ms
+    StdDev: 0.031 ms
+    Rate:   14,500,988 ops/sec
+
+  type_filter + filter + traverse:
+    Mean:   0.908 ms
+    Median: 0.881 ms
+    Min:    0.853 ms
+    Max:    1.057 ms
+    StdDev: 0.063 ms
+    Rate:   5,509,136 ops/sec
+
+  5 chained operations:
+    Mean:   4.222 ms
+    Median: 4.145 ms
+    Min:    4.088 ms
+    Max:    4.665 ms
+    StdDev: 0.181 ms
+    Rate:   1,184,151 ops/sec
+
+======================================================================
+BENCHMARK 8: Calculations/Aggregations
+======================================================================
+
+  calculate sum:
+    Mean:   2.711 ms
+    Median: 2.693 ms
+    Min:    2.636 ms
+    Max:    2.790 ms
+    StdDev: 0.059 ms
+    Rate:   1,844,497 ops/sec
+
+  calculate avg:
+    Mean:   2.705 ms
+    Median: 2.692 ms
+    Min:    2.642 ms
+    Max:    2.803 ms
+    StdDev: 0.061 ms
+    Rate:   1,848,349 ops/sec
+
+  calculate min:
+    Mean:   2.664 ms
+    Median: 2.651 ms
+    Min:    2.639 ms
+    Max:    2.729 ms
+    StdDev: 0.037 ms
+    Rate:   1,876,812 ops/sec
+
+======================================================================
+BENCHMARK 9: Large Scale Stress Test
+======================================================================
+
+  Creating graph with 50,000 nodes and 100,000 connections...
+  Graph creation: 984.7 ms
+
+  stress: get 10k nodes:
+    Mean:   15.183 ms
+    Median: 15.260 ms
+    Min:    14.820 ms
+    Max:    15.469 ms
+    StdDev: 0.331 ms
+    Rate:   658,627 ops/sec
+
+  stress: complex filter:
+    Mean:   13.898 ms
+    Median: 14.084 ms
+    Min:    13.346 ms
+    Max:    14.263 ms
+    StdDev: 0.486 ms
+    Rate:   3,597,726 ops/sec
+
+  stress: full traversal:
+    Mean:   6.276 ms
+    Median: 6.321 ms
+    Min:    6.122 ms
+    Max:    6.384 ms
+    StdDev: 0.137 ms
+    Rate:   15,934,704 ops/sec
+
+======================================================================
+BENCHMARK SUMMARY
+======================================================================
+
+Benchmark                                        Mean (ms)         Ops/sec
+---------------------------------------------------------------------------
+
+[Node Creation]
+add_nodes (1,000 nodes)                              3.204         312,113
+add_nodes (5,000 nodes)                             15.843         315,600
+add_nodes (10,000 nodes)                            31.194         320,575
+add_nodes (25,000 nodes)                            81.539         306,602
+
+[Data Retrieval]
+get_nodes (1,000 nodes, 15 props)                    0.930       1,075,442
+get_nodes (limit 100 of 1,000)                       0.092       1,091,705
+get_nodes (5,000 nodes, 15 props)                    6.114         817,762
+get_nodes (limit 100 of 5,000)                       0.098       1,022,062
+get_nodes (10,000 nodes, 15 props)                  13.708         729,476
+get_nodes (limit 100 of 10,000)                      0.103         971,111
+
+[Connection Retrieval]
+get_connections (no node props)                      1.321       7,572,794
+get_connections (with node props)                    1.296       7,714,066
+
+[Filtering]
+filter (1 condition)                                 0.581      17,200,111
+filter (3 conditions)                                0.889      11,247,645
+filter (6 conditions)                                1.297       7,710,547
+
+[Property Access]
+get_properties (1 prop)                              0.420      11,917,525
+get_properties (5 props)                             1.715      14,581,016
+get_unique_values                                    0.320      15,623,769
+
+[Traversal]
+traverse (100 -> 5000)                               0.107      46,765,245
+traverse with filter                                 0.163      30,698,351
+traverse with target filter                          0.508       9,851,409
+
+[Chained Operations]
+type_filter only                                     0.002   2,499,871,831
+type_filter + filter                                 0.345      14,500,988
+type_filter + filter + traverse                      0.908       5,509,136
+5 chained operations                                 4.222       1,184,151
+
+[Calculations]
+calculate sum                                        2.711       1,844,497
+calculate avg                                        2.705       1,848,349
+calculate min                                        2.664       1,876,812
+
+[Stress Test]
+stress: create graph                               984.687         152,333
+stress: get 10k nodes                               15.183         658,627
+stress: complex filter                              13.898       3,597,726
+stress: full traversal                               6.276      15,934,704
+
+======================================================================
+Save these results to compare after optimizations!
+======================================================================

@@ -11,6 +11,7 @@ use crate::graph::pattern_matching::{
 };
 use crate::graph::schema::{DirGraph, EdgeData, NodeData};
 use crate::graph::spatial;
+use crate::graph::timeseries;
 use crate::graph::value_operations;
 use crate::graph::vector_search as vs;
 use geo::BoundingRect;
@@ -274,6 +275,10 @@ impl<'a> CypherExecutor<'a> {
                 *limit,
                 result_set,
             ),
+            Clause::FusedMatchReturnAggregate {
+                match_clause,
+                return_clause,
+            } => self.execute_fused_match_return_aggregate(match_clause, return_clause, result_set),
             Clause::Call(c) => self.execute_call(c),
             Clause::Create(_)
             | Clause::Set(_)
@@ -301,6 +306,8 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
+        let limit_hint = clause.limit_hint;
+
         let mut result_rows = if existing.rows.is_empty() {
             // First MATCH: execute patterns to produce initial bindings
             let mut all_rows = Vec::new();
@@ -310,8 +317,8 @@ impl<'a> CypherExecutor<'a> {
                     // First pattern - create initial rows
                     let executor = PatternExecutor::new_lightweight_with_params(
                         self.graph,
-                        None,
-                        self.params.clone(),
+                        limit_hint,
+                        self.params,
                     )
                     .set_deadline(self.deadline);
                     let matches = executor.execute(pattern)?;
@@ -323,11 +330,16 @@ impl<'a> CypherExecutor<'a> {
                     // Pass existing node bindings as pre-bindings to constrain the pattern
                     let mut new_rows = Vec::new();
                     for existing_row in &all_rows {
+                        // Calculate remaining budget for this expansion
+                        let remaining = limit_hint.map(|l| l.saturating_sub(new_rows.len()));
+                        if remaining == Some(0) {
+                            break;
+                        }
                         let executor = PatternExecutor::with_bindings_and_params(
                             self.graph,
-                            None,
-                            existing_row.node_bindings.to_hashmap(),
-                            self.params.clone(),
+                            remaining,
+                            &existing_row.node_bindings,
+                            self.params,
                         )
                         .set_deadline(self.deadline);
                         let matches = executor.execute(pattern)?;
@@ -338,6 +350,12 @@ impl<'a> CypherExecutor<'a> {
                             let mut new_row = existing_row.clone();
                             self.merge_match_into_row(&mut new_row, &m);
                             new_rows.push(new_row);
+                            if limit_hint.is_some_and(|l| new_rows.len() >= l) {
+                                break;
+                            }
+                        }
+                        if limit_hint.is_some_and(|l| new_rows.len() >= l) {
+                            break;
                         }
                     }
                     all_rows = new_rows;
@@ -350,11 +368,15 @@ impl<'a> CypherExecutor<'a> {
 
             for row in &existing.rows {
                 for pattern in &clause.patterns {
+                    let remaining = limit_hint.map(|l| l.saturating_sub(new_rows.len()));
+                    if remaining == Some(0) {
+                        break;
+                    }
                     let executor = PatternExecutor::with_bindings_and_params(
                         self.graph,
-                        None,
-                        row.node_bindings.to_hashmap(),
-                        self.params.clone(),
+                        remaining,
+                        &row.node_bindings,
+                        self.params,
                     )
                     .set_deadline(self.deadline);
                     let matches = executor.execute(pattern)?;
@@ -366,7 +388,13 @@ impl<'a> CypherExecutor<'a> {
                         let mut new_row = row.clone();
                         self.merge_match_into_row(&mut new_row, &m);
                         new_rows.push(new_row);
+                        if limit_hint.is_some_and(|l| new_rows.len() >= l) {
+                            break;
+                        }
                     }
+                }
+                if limit_hint.is_some_and(|l| new_rows.len() >= l) {
+                    break;
                 }
             }
             new_rows
@@ -482,9 +510,8 @@ impl<'a> CypherExecutor<'a> {
         let connection_types: Option<&[String]> = connection_types_vec.as_deref();
 
         // Find matching source and target nodes
-        let executor =
-            PatternExecutor::new_lightweight_with_params(self.graph, None, self.params.clone())
-                .set_deadline(self.deadline);
+        let executor = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
+            .set_deadline(self.deadline);
         let source_nodes = executor.find_matching_nodes_pub(source_pattern)?;
         let target_nodes = executor.find_matching_nodes_pub(target_pattern)?;
 
@@ -766,8 +793,8 @@ impl<'a> CypherExecutor<'a> {
                 let executor = PatternExecutor::with_bindings_and_params(
                     self.graph,
                     None,
-                    row.node_bindings.to_hashmap(),
-                    self.params.clone(),
+                    &row.node_bindings,
+                    self.params,
                 )
                 .set_deadline(self.deadline);
                 let matches = executor.execute(pattern)?;
@@ -804,7 +831,7 @@ impl<'a> CypherExecutor<'a> {
     fn try_count_simple_pattern(
         &self,
         pattern: &crate::graph::pattern_matching::Pattern,
-        bindings: &HashMap<String, NodeIndex>,
+        bindings: &Bindings<NodeIndex>,
     ) -> Option<i64> {
         // Only handle simple 3-element patterns: Node-Edge-Node
         if pattern.elements.len() != 3 {
@@ -937,16 +964,16 @@ impl<'a> CypherExecutor<'a> {
 
             for pattern in &match_clause.patterns {
                 // Fast-path: direct edge traversal when one end is pre-bound
-                let node_map = row.node_bindings.to_hashmap();
-                if let Some(fast_count) = self.try_count_simple_pattern(pattern, &node_map) {
+                if let Some(fast_count) = self.try_count_simple_pattern(pattern, &row.node_bindings)
+                {
                     match_count += fast_count;
                 } else {
                     // Fall back to full PatternExecutor
                     let executor = PatternExecutor::with_bindings_and_params(
                         self.graph,
                         None,
-                        node_map,
-                        self.params.clone(),
+                        &row.node_bindings,
+                        self.params,
                     )
                     .set_deadline(self.deadline);
                     let matches = executor.execute(pattern)?;
@@ -1011,6 +1038,107 @@ impl<'a> CypherExecutor<'a> {
         }
 
         Ok(result)
+    }
+
+    /// Fused MATCH + RETURN with count() aggregation.
+    /// Instead of materializing all (node, edge, node) rows and then grouping,
+    /// match only the first-pattern nodes (group keys) and count edges directly.
+    fn execute_fused_match_return_aggregate(
+        &self,
+        match_clause: &MatchClause,
+        return_clause: &ReturnClause,
+        existing: ResultSet,
+    ) -> Result<ResultSet, String> {
+        // The MATCH must have exactly 1 pattern with 3 elements (validated by planner)
+        let pattern = &match_clause.patterns[0];
+
+        // Extract first-node pattern for group-key matching
+        let first_node_pattern = match &pattern.elements[0] {
+            PatternElement::Node(np) => np,
+            _ => return Err("FusedMatchReturnAggregate: expected node pattern".into()),
+        };
+        let first_var = first_node_pattern
+            .variable
+            .as_ref()
+            .ok_or("FusedMatchReturnAggregate: first node must have variable")?;
+
+        // Build a single-node pattern for matching group keys
+        let first_only_pattern = crate::graph::pattern_matching::Pattern {
+            elements: vec![pattern.elements[0].clone()],
+        };
+
+        // Match first-pattern nodes (group keys)
+        let executor = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
+            .set_deadline(self.deadline);
+        let first_matches = executor.execute(&first_only_pattern)?;
+
+        // Identify which RETURN items are group keys vs aggregates
+        let mut group_key_indices = Vec::new();
+        let mut count_indices = Vec::new();
+        for (i, item) in return_clause.items.iter().enumerate() {
+            if is_aggregate_expression(&item.expression) {
+                count_indices.push(i);
+            } else {
+                group_key_indices.push(i);
+            }
+        }
+
+        let mut result_rows = Vec::with_capacity(first_matches.len());
+
+        for m in &first_matches {
+            // Extract the bound node index for the first variable
+            let node_idx = m.bindings.iter().find_map(|(name, binding)| {
+                if name == first_var {
+                    match binding {
+                        MatchBinding::Node { index, .. } | MatchBinding::NodeRef(index) => {
+                            Some(*index)
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            });
+            let Some(node_idx) = node_idx else {
+                continue;
+            };
+
+            // Count edges via try_count_simple_pattern (O(degree), no row allocation)
+            let mut bindings_for_count = Bindings::with_capacity(1);
+            bindings_for_count.insert(first_var.clone(), node_idx);
+            let match_count = self
+                .try_count_simple_pattern(pattern, &bindings_for_count)
+                .unwrap_or(0);
+
+            // Build a temporary row for evaluating group-key expressions
+            let mut tmp_row = ResultRow::new();
+            tmp_row.node_bindings.insert(first_var.clone(), node_idx);
+
+            // Build projected values
+            let mut projected = Bindings::with_capacity(return_clause.items.len());
+
+            for &idx in &group_key_indices {
+                let item = &return_clause.items[idx];
+                let key = return_item_column_name(item);
+                let val = self.evaluate_expression(&item.expression, &tmp_row)?;
+                projected.insert(key, val);
+            }
+
+            for &idx in &count_indices {
+                let item = &return_clause.items[idx];
+                let key = return_item_column_name(item);
+                projected.insert(key, Value::Int64(match_count));
+            }
+
+            let mut new_row = ResultRow::from_projected(projected);
+            new_row.node_bindings.insert(first_var.clone(), node_idx);
+            result_rows.push(new_row);
+        }
+
+        Ok(ResultSet {
+            rows: result_rows,
+            columns: existing.columns,
+        })
     }
 
     /// Check if a pattern match is compatible with existing bindings in a row.
@@ -1383,8 +1511,8 @@ impl<'a> CypherExecutor<'a> {
                     let executor = PatternExecutor::with_bindings_and_params(
                         self.graph,
                         None,
-                        row.node_bindings.to_hashmap(),
-                        self.params.clone(),
+                        &row.node_bindings,
+                        self.params,
                     )
                     .set_deadline(self.deadline);
                     let matches = executor.execute(pattern)?;
@@ -3211,6 +3339,189 @@ impl<'a> CypherExecutor<'a> {
                     None => Ok(Value::Null),
                 }
             }
+            // ── Timeseries functions ──────────────────────────────────────
+            "ts_at" => {
+                if args.len() != 2 {
+                    return Err("ts_at() requires 2 arguments: (n.channel, '2020-2')".into());
+                }
+                let (ts, channel, config) = self.resolve_timeseries_channel(&args[0], row)?;
+                let date_key = self.resolve_ts_date_arg(&args[1], row)?;
+                let data_depth = timeseries::resolution_depth(&config.resolution).unwrap_or(2);
+                timeseries::validate_query_depth(
+                    date_key.len(),
+                    data_depth,
+                    &config.resolution,
+                    true,
+                )?;
+                match timeseries::find_key_index(&ts.keys, &date_key) {
+                    Some(idx) => {
+                        let v = channel[idx];
+                        if v.is_finite() {
+                            Ok(Value::Float64(v))
+                        } else {
+                            Ok(Value::Null)
+                        }
+                    }
+                    None => Ok(Value::Null),
+                }
+            }
+            "ts_sum" | "ts_avg" | "ts_min" | "ts_max" | "ts_count" => {
+                if args.is_empty() || args.len() > 3 {
+                    return Err(format!(
+                        "{}() requires 1-3 arguments: (n.channel [, 'start'] [, 'end'])",
+                        name
+                    ));
+                }
+                let (ts, channel, config) = self.resolve_timeseries_channel(&args[0], row)?;
+                let data_depth = timeseries::resolution_depth(&config.resolution).unwrap_or(2);
+                let (lo, hi) =
+                    self.resolve_ts_range(ts, &args[1..], row, data_depth, &config.resolution)?;
+                let slice = &channel[lo..hi];
+                match name.to_lowercase().as_str() {
+                    "ts_sum" => Ok(Value::Float64(timeseries::ts_sum(slice))),
+                    "ts_avg" => {
+                        let v = timeseries::ts_avg(slice);
+                        if v.is_nan() {
+                            Ok(Value::Null)
+                        } else {
+                            Ok(Value::Float64(v))
+                        }
+                    }
+                    "ts_min" => {
+                        let v = timeseries::ts_min(slice);
+                        if v.is_infinite() {
+                            Ok(Value::Null)
+                        } else {
+                            Ok(Value::Float64(v))
+                        }
+                    }
+                    "ts_max" => {
+                        let v = timeseries::ts_max(slice);
+                        if v.is_infinite() {
+                            Ok(Value::Null)
+                        } else {
+                            Ok(Value::Float64(v))
+                        }
+                    }
+                    "ts_count" => Ok(Value::Int64(timeseries::ts_count(slice) as i64)),
+                    _ => unreachable!(),
+                }
+            }
+            "ts_first" => {
+                if args.len() != 1 {
+                    return Err("ts_first() requires 1 argument: (n.channel)".into());
+                }
+                let (_, channel, _) = self.resolve_timeseries_channel(&args[0], row)?;
+                match channel.iter().find(|v| v.is_finite()) {
+                    Some(&v) => Ok(Value::Float64(v)),
+                    None => Ok(Value::Null),
+                }
+            }
+            "ts_last" => {
+                if args.len() != 1 {
+                    return Err("ts_last() requires 1 argument: (n.channel)".into());
+                }
+                let (_, channel, _) = self.resolve_timeseries_channel(&args[0], row)?;
+                match channel.iter().rev().find(|v| v.is_finite()) {
+                    Some(&v) => Ok(Value::Float64(v)),
+                    None => Ok(Value::Null),
+                }
+            }
+            "ts_delta" => {
+                if args.len() != 3 {
+                    return Err(
+                        "ts_delta() requires 3 arguments: (n.channel, '2019-12', '2021-1')".into(),
+                    );
+                }
+                let (ts, channel, config) = self.resolve_timeseries_channel(&args[0], row)?;
+                let data_depth = timeseries::resolution_depth(&config.resolution).unwrap_or(2);
+                let k1 = self.resolve_ts_date_arg(&args[1], row)?;
+                let k2 = self.resolve_ts_date_arg(&args[2], row)?;
+                // Use prefix range to find first entry matching each date
+                let (lo1, hi1) = timeseries::find_range(&ts.keys, Some(&k1), Some(&k1), data_depth);
+                let v1 =
+                    if lo1 < hi1 { Some(channel[lo1]) } else { None }.filter(|v| v.is_finite());
+                let (lo2, hi2) = timeseries::find_range(&ts.keys, Some(&k2), Some(&k2), data_depth);
+                let v2 =
+                    if lo2 < hi2 { Some(channel[lo2]) } else { None }.filter(|v| v.is_finite());
+                match (v1, v2) {
+                    (Some(a), Some(b)) => Ok(Value::Float64(b - a)),
+                    _ => Ok(Value::Null),
+                }
+            }
+            "ts_series" => {
+                if args.is_empty() || args.len() > 3 {
+                    return Err(
+                        "ts_series() requires 1-3 arguments: (n.channel [, 'start'] [, 'end'])"
+                            .into(),
+                    );
+                }
+                let (ts, channel, config) = self.resolve_timeseries_channel(&args[0], row)?;
+                let data_depth = timeseries::resolution_depth(&config.resolution).unwrap_or(2);
+                let (lo, hi) =
+                    self.resolve_ts_range(ts, &args[1..], row, data_depth, &config.resolution)?;
+                let mut entries = Vec::with_capacity(hi - lo);
+                for (time_key, &val) in ts.keys[lo..hi].iter().zip(&channel[lo..hi]) {
+                    if time_key.len() == 1 {
+                        entries.push(format!(
+                            "{{\"time\":{},\"value\":{}}}",
+                            time_key[0],
+                            if val.is_finite() {
+                                val.to_string()
+                            } else {
+                                "null".to_string()
+                            }
+                        ));
+                    } else {
+                        let time_str: Vec<String> =
+                            time_key.iter().map(|k| k.to_string()).collect();
+                        entries.push(format!(
+                            "{{\"time\":[{}],\"value\":{}}}",
+                            time_str.join(","),
+                            if val.is_finite() {
+                                val.to_string()
+                            } else {
+                                "null".to_string()
+                            }
+                        ));
+                    }
+                }
+                Ok(Value::String(format!("[{}]", entries.join(","))))
+            }
+            // ── List functions ────────────────────────────────────
+            "range" => {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(
+                        "range() requires 2 or 3 arguments: range(start, end[, step])".into(),
+                    );
+                }
+                let start = as_i64(&self.evaluate_expression(&args[0], row)?)?;
+                let end = as_i64(&self.evaluate_expression(&args[1], row)?)?;
+                let step = if args.len() == 3 {
+                    let s = as_i64(&self.evaluate_expression(&args[2], row)?)?;
+                    if s == 0 {
+                        return Err("range() step must not be zero".into());
+                    }
+                    s
+                } else {
+                    1
+                };
+                let mut vals = Vec::new();
+                let mut cur = start;
+                if step > 0 {
+                    while cur <= end {
+                        vals.push(cur.to_string());
+                        cur += step;
+                    }
+                } else {
+                    while cur >= end {
+                        vals.push(cur.to_string());
+                        cur += step;
+                    }
+                }
+                Ok(Value::String(format!("[{}]", vals.join(","))))
+            }
+
             // Aggregate functions should not be evaluated per-row
             "count" | "sum" | "avg" | "min" | "max" | "collect" | "mean" | "std" => Err(format!(
                 "Aggregate function '{}' cannot be used outside of RETURN/WITH",
@@ -3222,6 +3533,109 @@ impl<'a> CypherExecutor<'a> {
             ),
             _ => Err(format!("Unknown function: {}", name)),
         }
+    }
+
+    // ── Timeseries helpers ─────────────────────────────────────────────
+
+    /// Resolve the first argument of a ts_*() function into the node's timeseries
+    /// data, the specific channel's values, and the timeseries config.
+    /// The argument must be a PropertyAccess (e.g. `f.oil`).
+    fn resolve_timeseries_channel<'b>(
+        &'b self,
+        expr: &Expression,
+        row: &ResultRow,
+    ) -> Result<
+        (
+            &'b timeseries::NodeTimeseries,
+            &'b [f64],
+            &'b timeseries::TimeseriesConfig,
+        ),
+        String,
+    > {
+        let (variable, property) = match expr {
+            Expression::PropertyAccess { variable, property } => (variable, property),
+            _ => {
+                return Err(
+                    "ts_*() first argument must be a property access (e.g. n.channel)".into(),
+                )
+            }
+        };
+        let node_idx = row
+            .node_bindings
+            .get(variable)
+            .ok_or_else(|| format!("ts_*(): variable '{}' is not bound to a node", variable))?;
+        let ts = self
+            .graph
+            .get_node_timeseries(node_idx.index())
+            .ok_or_else(|| format!("ts_*(): node '{}' has no timeseries data", variable))?;
+        let channel = ts.channels.get(property.as_str()).ok_or_else(|| {
+            let available: Vec<&str> = ts.channels.keys().map(|s| s.as_str()).collect();
+            format!(
+                "ts_*(): channel '{}' not found on node '{}'. Available: {:?}",
+                property, variable, available
+            )
+        })?;
+        // Look up the config for this node type
+        let node = self
+            .graph
+            .graph
+            .node_weight(*node_idx)
+            .ok_or("ts_*(): node not found in graph")?;
+        let config = self
+            .graph
+            .timeseries_configs
+            .get(&node.node_type)
+            .ok_or_else(|| {
+                format!(
+                    "ts_*(): no timeseries config for node type '{}'",
+                    node.node_type
+                )
+            })?;
+        Ok((ts, channel, config))
+    }
+
+    /// Parse a date string argument from a ts_*() function call.
+    fn resolve_ts_date_arg(&self, expr: &Expression, row: &ResultRow) -> Result<Vec<i64>, String> {
+        let v = self.evaluate_expression(expr, row)?;
+        match &v {
+            Value::String(s) => timeseries::parse_date_string(s),
+            _ => Err(format!(
+                "ts_*() date argument must be a string like '2020' or '2020-2', got {:?}",
+                v
+            )),
+        }
+    }
+
+    /// Resolve 0-2 range arguments into a `(start_idx, end_idx)` slice range.
+    /// Date string arguments are parsed and validated against the data resolution.
+    fn resolve_ts_range(
+        &self,
+        ts: &timeseries::NodeTimeseries,
+        range_args: &[Expression],
+        row: &ResultRow,
+        key_depth: usize,
+        resolution: &str,
+    ) -> Result<(usize, usize), String> {
+        let start = if !range_args.is_empty() {
+            let k = self.resolve_ts_date_arg(&range_args[0], row)?;
+            timeseries::validate_query_depth(k.len(), key_depth, resolution, false)?;
+            Some(k)
+        } else {
+            None
+        };
+        let end = if range_args.len() >= 2 {
+            let k = self.resolve_ts_date_arg(&range_args[1], row)?;
+            timeseries::validate_query_depth(k.len(), key_depth, resolution, false)?;
+            Some(k)
+        } else {
+            start.clone() // single arg: prefix match (start == end)
+        };
+        Ok(timeseries::find_range(
+            &ts.keys,
+            start.as_deref(),
+            end.as_deref(),
+            key_depth,
+        ))
     }
 
     /// Extract a Vec<f32> from an expression that is either a ListLiteral or a JSON string.
@@ -4559,18 +4973,29 @@ impl<'a> CypherExecutor<'a> {
         }
 
         // RETURN was specified - use its columns
-        let extract_row = |row: &ResultRow| -> Vec<Value> {
-            result_set
-                .columns
-                .iter()
-                .map(|col| row.projected.get(col).cloned().unwrap_or(Value::Null))
-                .collect()
-        };
-
         let rows: Vec<Vec<Value>> = if result_set.rows.len() >= RAYON_THRESHOLD {
-            result_set.rows.par_iter().map(extract_row).collect()
+            let cols = &result_set.columns;
+            result_set
+                .rows
+                .par_iter()
+                .map(|row| {
+                    cols.iter()
+                        .map(|col| row.projected.get(col).cloned().unwrap_or(Value::Null))
+                        .collect()
+                })
+                .collect()
         } else {
-            result_set.rows.iter().map(extract_row).collect()
+            // Move values out of rows (no cloning)
+            let cols = &result_set.columns;
+            result_set
+                .rows
+                .into_iter()
+                .map(|mut row| {
+                    cols.iter()
+                        .map(|col| row.projected.remove(col).unwrap_or(Value::Null))
+                        .collect()
+                })
+                .collect()
         };
 
         Ok(CypherResult {
@@ -5101,6 +5526,7 @@ fn execute_delete(
     // Phase 6: delete nodes
     for &node_idx in &nodes_to_delete {
         graph.graph.remove_node(node_idx);
+        graph.timeseries_store.remove(&node_idx.index());
         stats.nodes_deleted += 1;
     }
 
@@ -5606,7 +6032,11 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
         "title" | "name" => node.title.clone(),
         "type" | "node_type" | "label" => Value::String(node.node_type.clone()),
         _ => {
-            // Check spatial virtual properties (take precedence when configured)
+            // Check real property first (most common case)
+            if let Some(val) = node.properties.get(resolved) {
+                return val.clone();
+            }
+            // Fall through to spatial virtual properties only if not found
             if let Some(config) = graph.get_spatial_config(&node.node_type) {
                 // "location" → synthesize Point from location config
                 if resolved == "location" {
@@ -5649,12 +6079,7 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
                     }
                 }
             }
-
-            // Fall back to real property
-            node.properties
-                .get(resolved)
-                .cloned()
-                .unwrap_or(Value::Null)
+            Value::Null
         }
     }
 }
@@ -5808,6 +6233,16 @@ fn arithmetic_negate(a: &Value) -> Value {
 }
 fn to_integer(val: &Value) -> Value {
     value_operations::to_integer(val)
+}
+fn as_i64(val: &Value) -> Result<i64, String> {
+    match val {
+        Value::Int64(n) => Ok(*n),
+        Value::Float64(f) => Ok(*f as i64),
+        Value::String(s) => s
+            .parse::<i64>()
+            .map_err(|_| format!("Cannot convert '{}' to integer", s)),
+        _ => Err(format!("Expected integer, got {:?}", val)),
+    }
 }
 fn to_float(val: &Value) -> Value {
     value_operations::to_float(val)

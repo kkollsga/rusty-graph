@@ -1,0 +1,153 @@
+======================================================================
+KGLITE TIMESERIES BENCHMARK
+======================================================================
+
+Python: 3.12.9 (main, Feb  4 2025, 14:38:38) [Clang 16.0.0 (clang-1600.0.26.6)]
+kglite: 0.5.51
+
+Scale: 100 fields x 10 years x 12 months = 12,000 data points per channel
+
+--- Bulk Loading (add_timeseries from DataFrame) ---
+  add_timeseries 100 nodes x 120 months:
+    Mean:   2.059 ms
+    Median: 2.085 ms
+    Min:    1.966 ms
+    StdDev: 0.084 ms
+    Rate:   5,828,309 ops/sec
+
+--- Manual Loading (set_time_index + add_ts_channel) ---
+  Manual load 100 nodes x 120 months:
+    Mean:   1.945 ms
+    Median: 1.947 ms
+    Min:    1.923 ms
+    StdDev: 0.020 ms
+    Rate:   51,425 ops/sec
+
+Building graph for retrieval benchmarks...
+Graph ready.
+
+--- Python API Retrieval ---
+  get_timeseries(0) full:
+    Mean:   0.005 ms
+    Median: 0.005 ms
+    Min:    0.004 ms
+    StdDev: 0.001 ms
+    Rate:   212,199 ops/sec
+  get_timeseries(0, channel='oil'):
+    Mean:   0.004 ms
+    Median: 0.004 ms
+    Min:    0.003 ms
+    StdDev: 0.001 ms
+    Rate:   270,262 ops/sec
+  get_timeseries range '2020':
+    Mean:   0.001 ms
+    Median: 0.001 ms
+    Min:    0.001 ms
+    StdDev: 0.002 ms
+    Rate:   706,940 ops/sec
+  get_timeseries x 100 nodes:
+    Mean:   0.443 ms
+    Median: 0.444 ms
+    Min:    0.433 ms
+    StdDev: 0.011 ms
+    Rate:   225,585 ops/sec
+
+--- Cypher ts_* Functions ---
+  ts_sum all fields 1yr [100 rows]:
+    Mean:   0.095 ms
+    Median: 0.085 ms
+    Min:    0.083 ms
+    StdDev: 0.028 ms
+    Rate:   1,054,483 ops/sec
+  ts_avg all fields 1yr [100 rows]:
+    Mean:   0.080 ms
+    Median: 0.077 ms
+    Min:    0.076 ms
+    StdDev: 0.008 ms
+    Rate:   1,255,622 ops/sec
+  ts_at all fields [100 rows]:
+    Mean:   0.093 ms
+    Median: 0.078 ms
+    Min:    0.066 ms
+    StdDev: 0.035 ms
+    Rate:   1,076,234 ops/sec
+  ts_sum in WHERE filter:
+    Mean:   0.112 ms
+    Median: 0.107 ms
+    Min:    0.106 ms
+    StdDev: 0.011 ms
+    Rate:   8,952 ops/sec
+  ts_delta + ORDER BY LIMIT 10:
+    Mean:   0.065 ms
+    Median: 0.062 ms
+    Min:    0.061 ms
+    StdDev: 0.009 ms
+    Rate:   15,489 ops/sec
+  ts_series 1yr (12 points):
+    Mean:   0.013 ms
+    Median: 0.012 ms
+    Min:    0.012 ms
+    StdDev: 0.004 ms
+    Rate:   75,806 ops/sec
+  UNWIND years + ts_sum (10 yr):
+    Mean:   0.015 ms
+    Median: 0.014 ms
+    Min:    0.014 ms
+    StdDev: 0.002 ms
+    Rate:   689,460 ops/sec
+  2-channel ts_sum + ORDER BY:
+    Mean:   0.067 ms
+    Median: 0.065 ms
+    Min:    0.064 ms
+    StdDev: 0.007 ms
+    Rate:   14,863 ops/sec
+
+--- Save / Load ---
+  save 100 nodes + ts:
+    Mean:   12.814 ms
+    Median: 12.608 ms
+    Min:    12.381 ms
+    StdDev: 0.512 ms
+    Rate:   78 ops/sec
+  load 100 nodes + ts:
+    Mean:   1.368 ms
+    Median: 1.366 ms
+    Min:    1.357 ms
+    StdDev: 0.012 ms
+    Rate:   731 ops/sec
+  File size: 188.2 KB
+
+======================================================================
+TIMESERIES BENCHMARK SUMMARY
+======================================================================
+
+Benchmark                                        Mean (ms)         Ops/sec
+---------------------------------------------------------------------------
+
+[Bulk Loading]
+add_timeseries 100 nodes x 120 months                2.059       5,828,309
+
+[Manual Loading]
+Manual load 100 nodes x 120 months                   1.945          51,425
+
+[Python Retrieval]
+get_timeseries(0) full                               0.005         212,199
+get_timeseries(0, channel='oil')                     0.004         270,262
+get_timeseries range '2020'                          0.001         706,940
+get_timeseries x 100 nodes                           0.443         225,585
+
+[Cypher ts_*]
+ts_sum all fields 1yr [100 rows]                     0.095       1,054,483
+ts_avg all fields 1yr [100 rows]                     0.080       1,255,622
+ts_at all fields [100 rows]                          0.093       1,076,234
+ts_sum in WHERE filter                               0.112           8,952
+ts_delta + ORDER BY LIMIT 10                         0.065          15,489
+ts_series 1yr (12 points)                            0.013          75,806
+UNWIND years + ts_sum (10 yr)                        0.015         689,460
+2-channel ts_sum + ORDER BY                          0.067          14,863
+
+[Save / Load]
+save 100 nodes + ts                                 12.814              78
+load 100 nodes + ts                                  1.368             731
+
+======================================================================
