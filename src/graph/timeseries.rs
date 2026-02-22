@@ -1,9 +1,10 @@
 // src/graph/timeseries.rs
 //
-// Per-node timeseries storage: a sorted time index with multiple aligned float channels.
+// Per-node timeseries storage: a sorted NaiveDate index with multiple aligned float channels.
 // Follows the embeddings pattern — data lives in DirGraph::timeseries_store,
 // separate from NodeData.properties.
 
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -13,7 +14,6 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct TimeseriesConfig {
     /// Time resolution: "year", "month", or "day".
-    /// Determines key depth (year=1, month=2, day=3) and date-string validation.
     #[serde(default)]
     pub resolution: String,
     /// Known channel names (informational, for introspection).
@@ -28,194 +28,132 @@ pub struct TimeseriesConfig {
     pub bin_type: Option<String>,
 }
 
-/// A single node's timeseries data: a sorted time index with multiple value channels.
+/// A single node's timeseries data: a sorted NaiveDate index with multiple value channels.
 /// Stored in `DirGraph::timeseries_store`, keyed by `NodeIndex.index()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeTimeseries {
-    /// Sorted composite time keys. Key depth matches the resolution:
-    /// year → `[2020]`, month → `[2020, 2]`, day → `[2020, 2, 15]`.
-    pub keys: Vec<Vec<i64>>,
+    /// Sorted NaiveDate keys. Resolution determines granularity:
+    /// year → 2020-01-01, month → 2020-02-01, day → 2020-02-15.
+    pub keys: Vec<NaiveDate>,
     /// Channel name → values array (must have same length as `keys`). NaN = missing.
     pub channels: HashMap<String, Vec<f64>>,
 }
 
+/// Precision level of a parsed date query string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatePrecision {
+    Year,
+    Month,
+    Day,
+}
+
 // ─── Resolution helpers ─────────────────────────────────────────────────────
 
-/// Map resolution string to key depth. Returns Err for unknown resolutions.
-pub fn resolution_depth(resolution: &str) -> Result<usize, String> {
+/// Validate a resolution string.
+pub fn validate_resolution(resolution: &str) -> Result<(), String> {
     match resolution {
-        "year" => Ok(1),
-        "month" => Ok(2),
-        "day" => Ok(3),
-        "hour" => Ok(4),
-        "minute" => Ok(5),
+        "year" | "month" | "day" => Ok(()),
         _ => Err(format!(
-            "Unknown timeseries resolution '{}'. Expected: year, month, day, hour, minute",
+            "Unknown timeseries resolution '{}'. Expected: year, month, or day",
             resolution
         )),
     }
 }
 
-/// Map key depth back to a resolution string. Used for auto-detection.
-pub fn depth_to_resolution(depth: usize) -> Result<&'static str, String> {
-    match depth {
-        1 => Ok("year"),
-        2 => Ok("month"),
-        3 => Ok("day"),
-        4 => Ok("hour"),
-        5 => Ok("minute"),
+// ─── Date-string parsing ────────────────────────────────────────────────────
+
+/// Parse a date query string into a NaiveDate and its precision.
+///
+/// Supported formats:
+/// - `"2020"` → `(2020-01-01, Year)`
+/// - `"2020-2"` or `"2020-02"` → `(2020-02-01, Month)`
+/// - `"2020-2-15"` → `(2020-02-15, Day)`
+pub fn parse_date_query(s: &str) -> Result<(NaiveDate, DatePrecision), String> {
+    let trimmed = s.trim();
+    let parts: Vec<&str> = trimmed.split('-').collect();
+
+    match parts.len() {
+        1 => {
+            let year = parts[0]
+                .parse::<i32>()
+                .map_err(|_| format!("Invalid year '{}' in date string '{}'", parts[0], s))?;
+            let date = NaiveDate::from_ymd_opt(year, 1, 1)
+                .ok_or_else(|| format!("Invalid date: year {} out of range", year))?;
+            Ok((date, DatePrecision::Year))
+        }
+        2 => {
+            let year = parts[0]
+                .parse::<i32>()
+                .map_err(|_| format!("Invalid year '{}' in date string '{}'", parts[0], s))?;
+            let month = parts[1]
+                .parse::<u32>()
+                .map_err(|_| format!("Invalid month '{}' in date string '{}'", parts[1], s))?;
+            let date = NaiveDate::from_ymd_opt(year, month, 1)
+                .ok_or_else(|| format!("Invalid date: {}-{} out of range", year, month))?;
+            Ok((date, DatePrecision::Month))
+        }
+        3 => {
+            let year = parts[0]
+                .parse::<i32>()
+                .map_err(|_| format!("Invalid year '{}' in date string '{}'", parts[0], s))?;
+            let month = parts[1]
+                .parse::<u32>()
+                .map_err(|_| format!("Invalid month '{}' in date string '{}'", parts[1], s))?;
+            let day = parts[2]
+                .parse::<u32>()
+                .map_err(|_| format!("Invalid day '{}' in date string '{}'", parts[2], s))?;
+            let date = NaiveDate::from_ymd_opt(year, month, day)
+                .ok_or_else(|| format!("Invalid date: {}-{}-{} out of range", year, month, day))?;
+            Ok((date, DatePrecision::Day))
+        }
         _ => Err(format!(
-            "Invalid key depth {}. Expected 1-5 (year through minute)",
-            depth
+            "Invalid date string '{}'. Expected: 'YYYY', 'YYYY-M', or 'YYYY-M-D'",
+            s
         )),
     }
 }
 
-/// Validate a resolution string.
-pub fn validate_resolution(resolution: &str) -> Result<(), String> {
-    resolution_depth(resolution).map(|_| ())
+/// Expand a date to the end of its precision period.
+/// Year: 2020-01-01 → 2020-12-31, Month: 2020-02-01 → 2020-02-29, Day: identity.
+pub fn expand_end(date: NaiveDate, precision: DatePrecision) -> NaiveDate {
+    match precision {
+        DatePrecision::Year => NaiveDate::from_ymd_opt(date.year(), 12, 31).unwrap_or(date),
+        DatePrecision::Month => {
+            // Last day of the month: go to first of next month, subtract 1 day
+            if date.month() == 12 {
+                NaiveDate::from_ymd_opt(date.year() + 1, 1, 1)
+            } else {
+                NaiveDate::from_ymd_opt(date.year(), date.month() + 1, 1)
+            }
+            .and_then(|d| d.pred_opt())
+            .unwrap_or(date)
+        }
+        DatePrecision::Day => date,
+    }
 }
 
-// ─── Date-string parsing ────────────────────────────────────────────────────
-
-/// Parse a date string into a composite key.
-///
-/// Supported formats:
-/// - `"2020"` → `[2020]`
-/// - `"2020-2"` → `[2020, 2]`
-/// - `"2020-2-15"` → `[2020, 2, 15]`
-/// - `"2020-2-15 10"` → `[2020, 2, 15, 10]`
-/// - `"2020-2-15 10:30"` → `[2020, 2, 15, 10, 30]`
-pub fn parse_date_string(s: &str) -> Result<Vec<i64>, String> {
-    let trimmed = s.trim();
-
-    // Split into date part and optional time part (separated by space or 'T')
-    let (date_part, time_part) = if let Some(idx) = trimmed.find([' ', 'T']) {
-        (&trimmed[..idx], Some(trimmed[idx + 1..].trim()))
-    } else {
-        (trimmed, None)
-    };
-
-    // Parse date components: YYYY-M-D
-    let date_parts: Vec<&str> = date_part.split('-').collect();
-    if date_parts.is_empty() || date_parts.len() > 3 {
-        return Err(format!(
-            "Invalid date string '{}'. Expected: 'YYYY', 'YYYY-M', or 'YYYY-M-D'",
-            s
-        ));
-    }
-
-    let labels = ["year", "month", "day", "hour", "minute"];
-    let mut key = Vec::with_capacity(5);
-
-    for (i, part) in date_parts.iter().enumerate() {
-        let val = part
-            .parse::<i64>()
-            .map_err(|_| format!("Invalid {} '{}' in date string '{}'", labels[i], part, s))?;
-        key.push(val);
-    }
-
-    // Parse time components: HH:MM (only valid if we have a full date YYYY-M-D)
-    if let Some(tp) = time_part {
-        if date_parts.len() < 3 {
-            return Err(format!(
-                "Time component requires a full date (YYYY-M-D) in '{}'",
-                s
-            ));
-        }
-        let time_parts: Vec<&str> = tp.split(':').collect();
-        if time_parts.is_empty() || time_parts.len() > 2 {
-            return Err(format!(
-                "Invalid time component in '{}'. Expected: 'HH' or 'HH:MM'",
-                s
-            ));
-        }
-        for (j, part) in time_parts.iter().enumerate() {
-            let idx = 3 + j; // hour=3, minute=4
-            let val = part.parse::<i64>().map_err(|_| {
-                format!("Invalid {} '{}' in date string '{}'", labels[idx], part, s)
-            })?;
-            key.push(val);
-        }
-    }
-
-    if key.len() > 5 {
-        return Err(format!(
-            "Too many components in date string '{}' (max 5: year, month, day, hour, minute)",
-            s
-        ));
-    }
-
-    Ok(key)
-}
-
-/// Validate that query depth is compatible with data resolution.
-/// For exact lookups (ts_at, ts_delta): query depth must equal data depth.
-/// For range queries (ts_sum, etc.): query depth must be ≤ data depth.
-pub fn validate_query_depth(
-    query_depth: usize,
-    data_depth: usize,
-    resolution: &str,
-    exact: bool,
-) -> Result<(), String> {
-    if exact {
-        if query_depth != data_depth {
-            return Err(format!(
-                "Exact lookup requires {} date components for '{}' resolution, got {}",
-                data_depth, resolution, query_depth
-            ));
-        }
-    } else if query_depth > data_depth {
-        let depth_name = match query_depth {
-            1 => "year",
-            2 => "month",
-            3 => "day",
-            4 => "hour",
-            5 => "minute",
-            _ => "unknown",
-        };
-        return Err(format!(
-            "Query precision '{}' (depth {}) exceeds data resolution '{}' (depth {})",
-            depth_name, query_depth, resolution, data_depth
-        ));
-    }
-    Ok(())
-}
+use chrono::Datelike;
 
 // ─── Lookup helpers ──────────────────────────────────────────────────────────
 
-/// Binary search for an exact composite key. Returns the index if found.
-pub fn find_key_index(keys: &[Vec<i64>], target: &[i64]) -> Option<usize> {
-    keys.binary_search_by(|k| k.as_slice().cmp(target)).ok()
+/// Binary search for an exact NaiveDate key. Returns the index if found.
+pub fn find_key_index(keys: &[NaiveDate], target: NaiveDate) -> Option<usize> {
+    keys.binary_search(&target).ok()
 }
 
 /// Find the slice range `[start_idx, end_idx)` for keys in the inclusive range
-/// `[start, end]`. Supports prefix matching: if start/end have fewer components
-/// than the keys, pads start with `i64::MIN` and end with `i64::MAX`.
+/// `[start, end]`. None means unbounded.
 pub fn find_range(
-    keys: &[Vec<i64>],
-    start: Option<&[i64]>,
-    end: Option<&[i64]>,
-    key_depth: usize,
+    keys: &[NaiveDate],
+    start: Option<NaiveDate>,
+    end: Option<NaiveDate>,
 ) -> (usize, usize) {
     let lo = match start {
-        Some(s) => {
-            let mut padded = s.to_vec();
-            while padded.len() < key_depth {
-                padded.push(i64::MIN);
-            }
-            keys.partition_point(|k| k.as_slice() < padded.as_slice())
-        }
+        Some(s) => keys.partition_point(|k| *k < s),
         None => 0,
     };
     let hi = match end {
-        Some(e) => {
-            let mut padded = e.to_vec();
-            while padded.len() < key_depth {
-                padded.push(i64::MAX);
-            }
-            keys.partition_point(|k| k.as_slice() <= padded.as_slice())
-        }
+        Some(e) => keys.partition_point(|k| *k <= e),
         None => keys.len(),
     };
     (lo, hi)
@@ -268,6 +206,14 @@ pub fn ts_count(values: &[f64]) -> usize {
     values.iter().filter(|v| v.is_finite()).count()
 }
 
+// ─── Conversion helpers ─────────────────────────────────────────────────────
+
+/// Build a NaiveDate from year + month + day.
+pub fn date_from_ymd(year: i32, month: u32, day: u32) -> Result<NaiveDate, String> {
+    NaiveDate::from_ymd_opt(year, month, day)
+        .ok_or_else(|| format!("Invalid date: {}-{}-{}", year, month, day))
+}
+
 // ─── Validation ──────────────────────────────────────────────────────────────
 
 /// Validate that a channel's length matches the time index length.
@@ -286,12 +232,12 @@ pub fn validate_channel_length(
     }
 }
 
-/// Validate that keys are sorted in ascending order.
-pub fn validate_keys_sorted(keys: &[Vec<i64>]) -> Result<(), String> {
+/// Validate that NaiveDate keys are sorted in ascending order.
+pub fn validate_keys_sorted(keys: &[NaiveDate]) -> Result<(), String> {
     for w in keys.windows(2) {
         if w[0] >= w[1] {
             return Err(format!(
-                "Time index keys are not strictly sorted: {:?} >= {:?}",
+                "Time index keys are not strictly sorted: {} >= {}",
                 w[0], w[1]
             ));
         }
@@ -303,118 +249,117 @@ pub fn validate_keys_sorted(keys: &[Vec<i64>]) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_resolution_depth() {
-        assert_eq!(resolution_depth("year").unwrap(), 1);
-        assert_eq!(resolution_depth("month").unwrap(), 2);
-        assert_eq!(resolution_depth("day").unwrap(), 3);
-        assert_eq!(resolution_depth("hour").unwrap(), 4);
-        assert_eq!(resolution_depth("minute").unwrap(), 5);
-        assert!(resolution_depth("invalid").is_err());
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
     }
 
     #[test]
-    fn test_depth_to_resolution() {
-        assert_eq!(depth_to_resolution(1).unwrap(), "year");
-        assert_eq!(depth_to_resolution(2).unwrap(), "month");
-        assert_eq!(depth_to_resolution(3).unwrap(), "day");
-        assert_eq!(depth_to_resolution(4).unwrap(), "hour");
-        assert_eq!(depth_to_resolution(5).unwrap(), "minute");
-        assert!(depth_to_resolution(0).is_err());
-        assert!(depth_to_resolution(6).is_err());
+    fn test_validate_resolution() {
+        assert!(validate_resolution("year").is_ok());
+        assert!(validate_resolution("month").is_ok());
+        assert!(validate_resolution("day").is_ok());
+        assert!(validate_resolution("hour").is_err());
+        assert!(validate_resolution("invalid").is_err());
     }
 
     #[test]
-    fn test_parse_date_string() {
-        // Date-only formats
-        assert_eq!(parse_date_string("2020").unwrap(), vec![2020]);
-        assert_eq!(parse_date_string("2020-2").unwrap(), vec![2020, 2]);
-        assert_eq!(parse_date_string("2020-02").unwrap(), vec![2020, 2]);
-        assert_eq!(parse_date_string("2020-2-15").unwrap(), vec![2020, 2, 15]);
-        // Date+time formats
-        assert_eq!(
-            parse_date_string("2020-1-15 10").unwrap(),
-            vec![2020, 1, 15, 10]
-        );
-        assert_eq!(
-            parse_date_string("2020-01-15 10:30").unwrap(),
-            vec![2020, 1, 15, 10, 30]
-        );
-        // ISO format with T separator
-        assert_eq!(
-            parse_date_string("2020-01-15T10:30").unwrap(),
-            vec![2020, 1, 15, 10, 30]
-        );
+    fn test_parse_date_query() {
+        // Year
+        let (date, prec) = parse_date_query("2020").unwrap();
+        assert_eq!(date, d(2020, 1, 1));
+        assert_eq!(prec, DatePrecision::Year);
+
+        // Month
+        let (date, prec) = parse_date_query("2020-2").unwrap();
+        assert_eq!(date, d(2020, 2, 1));
+        assert_eq!(prec, DatePrecision::Month);
+
+        // Month with leading zero
+        let (date, prec) = parse_date_query("2020-02").unwrap();
+        assert_eq!(date, d(2020, 2, 1));
+        assert_eq!(prec, DatePrecision::Month);
+
+        // Day
+        let (date, prec) = parse_date_query("2020-2-15").unwrap();
+        assert_eq!(date, d(2020, 2, 15));
+        assert_eq!(prec, DatePrecision::Day);
+
         // Whitespace tolerance
-        assert_eq!(
-            parse_date_string("  2020-01-15 10:30  ").unwrap(),
-            vec![2020, 1, 15, 10, 30]
-        );
+        let (date, _) = parse_date_query("  2020  ").unwrap();
+        assert_eq!(date, d(2020, 1, 1));
+
         // Error cases
-        assert!(parse_date_string("abc").is_err());
-        assert!(parse_date_string("2020-abc").is_err());
-        // Time without full date
-        assert!(parse_date_string("2020-01 10:30").is_err());
+        assert!(parse_date_query("abc").is_err());
+        assert!(parse_date_query("2020-abc").is_err());
+        assert!(parse_date_query("2020-13").is_err()); // invalid month
+        assert!(parse_date_query("2020-2-30").is_err()); // invalid day
     }
 
     #[test]
-    fn test_validate_query_depth() {
-        // Range queries: depth ≤ data depth
-        assert!(validate_query_depth(1, 2, "month", false).is_ok()); // year on month data
-        assert!(validate_query_depth(2, 2, "month", false).is_ok()); // month on month data
-        assert!(validate_query_depth(3, 2, "month", false).is_err()); // day on month data
-
-        // Exact queries: depth must equal
-        assert!(validate_query_depth(2, 2, "month", true).is_ok());
-        assert!(validate_query_depth(1, 2, "month", true).is_err());
+    fn test_expand_end() {
+        // Year
+        assert_eq!(
+            expand_end(d(2020, 1, 1), DatePrecision::Year),
+            d(2020, 12, 31)
+        );
+        // Month (Feb leap year)
+        assert_eq!(
+            expand_end(d(2020, 2, 1), DatePrecision::Month),
+            d(2020, 2, 29)
+        );
+        // Month (Feb non-leap)
+        assert_eq!(
+            expand_end(d(2021, 2, 1), DatePrecision::Month),
+            d(2021, 2, 28)
+        );
+        // Month (December)
+        assert_eq!(
+            expand_end(d(2020, 12, 1), DatePrecision::Month),
+            d(2020, 12, 31)
+        );
+        // Day (identity)
+        assert_eq!(
+            expand_end(d(2020, 6, 15), DatePrecision::Day),
+            d(2020, 6, 15)
+        );
     }
 
     #[test]
     fn test_find_key_index() {
-        let keys = vec![vec![2020, 1], vec![2020, 2], vec![2020, 3], vec![2021, 1]];
-        assert_eq!(find_key_index(&keys, &[2020, 2]), Some(1));
-        assert_eq!(find_key_index(&keys, &[2020, 4]), None);
-        assert_eq!(find_key_index(&keys, &[2021, 1]), Some(3));
+        let keys = vec![d(2020, 1, 1), d(2020, 2, 1), d(2020, 3, 1), d(2021, 1, 1)];
+        assert_eq!(find_key_index(&keys, d(2020, 2, 1)), Some(1));
+        assert_eq!(find_key_index(&keys, d(2020, 4, 1)), None);
+        assert_eq!(find_key_index(&keys, d(2021, 1, 1)), Some(3));
     }
 
     #[test]
-    fn test_find_range_full_depth() {
+    fn test_find_range() {
         let keys = vec![
-            vec![2019, 12],
-            vec![2020, 1],
-            vec![2020, 2],
-            vec![2020, 3],
-            vec![2021, 1],
+            d(2019, 12, 1),
+            d(2020, 1, 1),
+            d(2020, 2, 1),
+            d(2020, 3, 1),
+            d(2021, 1, 1),
         ];
-        // Exact month range: Feb through Apr 2020
+        // Exact month range: Feb through Mar 2020
         assert_eq!(
-            find_range(&keys, Some(&[2020, 2]), Some(&[2020, 3]), 2),
+            find_range(&keys, Some(d(2020, 2, 1)), Some(d(2020, 3, 1))),
             (2, 4)
         );
         // Single month
         assert_eq!(
-            find_range(&keys, Some(&[2020, 2]), Some(&[2020, 2]), 2),
+            find_range(&keys, Some(d(2020, 2, 1)), Some(d(2020, 2, 1))),
             (2, 3)
         );
-    }
-
-    #[test]
-    fn test_find_range_prefix() {
-        let keys = vec![
-            vec![2019, 12],
-            vec![2020, 1],
-            vec![2020, 2],
-            vec![2020, 3],
-            vec![2021, 1],
-        ];
-        // Year prefix on month-depth data: "2020" → all months in 2020
-        assert_eq!(find_range(&keys, Some(&[2020]), Some(&[2020]), 2), (1, 4));
-        // Year range: 2020-2021
-        assert_eq!(find_range(&keys, Some(&[2020]), Some(&[2021]), 2), (1, 5));
+        // Year range on month data: all of 2020
+        assert_eq!(
+            find_range(&keys, Some(d(2020, 1, 1)), Some(d(2020, 12, 31))),
+            (1, 4)
+        );
         // Everything
-        assert_eq!(find_range(&keys, None, None, 2), (0, 5));
+        assert_eq!(find_range(&keys, None, None), (0, 5));
         // From 2020 onward
-        assert_eq!(find_range(&keys, Some(&[2020]), None, 2), (1, 5));
+        assert_eq!(find_range(&keys, Some(d(2020, 1, 1)), None), (1, 5));
     }
 
     #[test]
@@ -443,9 +388,16 @@ mod tests {
 
     #[test]
     fn test_validate_keys_sorted() {
-        assert!(validate_keys_sorted(&[vec![1], vec![2], vec![3]]).is_ok());
-        assert!(validate_keys_sorted(&[vec![2020, 1], vec![2020, 2]]).is_ok());
-        assert!(validate_keys_sorted(&[vec![2], vec![1]]).is_err());
-        assert!(validate_keys_sorted(&[vec![1], vec![1]]).is_err()); // duplicates
+        assert!(validate_keys_sorted(&[d(2020, 1, 1), d(2020, 2, 1), d(2020, 3, 1)]).is_ok());
+        assert!(validate_keys_sorted(&[d(2020, 2, 1), d(2020, 1, 1)]).is_err());
+        assert!(validate_keys_sorted(&[d(2020, 1, 1), d(2020, 1, 1)]).is_err());
+        // duplicates
+    }
+
+    #[test]
+    fn test_date_from_ymd() {
+        assert_eq!(date_from_ymd(2020, 6, 15).unwrap(), d(2020, 6, 15));
+        assert_eq!(date_from_ymd(2020, 6, 1).unwrap(), d(2020, 6, 1));
+        assert!(date_from_ymd(2020, 13, 1).is_err());
     }
 }

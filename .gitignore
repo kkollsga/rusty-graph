@@ -6,6 +6,7 @@
 /.pytest_cache/
 /data/
 /dev-documentation/
+/bench/
 
 # Ignore Rust build artifacts (keep wheels for distribution)
 /target/

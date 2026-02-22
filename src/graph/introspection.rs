@@ -56,6 +56,43 @@ pub struct NeighborsSchema {
     pub incoming: Vec<NeighborConnection>,
 }
 
+/// Controls output verbosity of `compute_agent_description()`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DetailLevel {
+    Full,
+    Compact,
+    Auto,
+}
+
+impl DetailLevel {
+    /// Parse from an optional string. `None` or `"auto"` → `Auto`.
+    pub fn from_str_opt(s: Option<&str>) -> Result<Self, String> {
+        match s {
+            None | Some("auto") => Ok(Self::Auto),
+            Some("full") => Ok(Self::Full),
+            Some("compact") => Ok(Self::Compact),
+            Some(other) => Err(format!(
+                "Invalid detail level '{}'. Expected 'auto', 'full', or 'compact'.",
+                other
+            )),
+        }
+    }
+
+    /// Resolve `Auto` into `Full` or `Compact` based on graph complexity.
+    fn resolve(self, num_types: usize) -> Self {
+        match self {
+            Self::Auto => {
+                if num_types <= 15 {
+                    Self::Full
+                } else {
+                    Self::Compact
+                }
+            }
+            other => other,
+        }
+    }
+}
+
 // ── Core functions ──────────────────────────────────────────────────────────
 
 /// Scan all edges once to compute per-connection-type stats.
@@ -407,7 +444,6 @@ const API_QUERY: &str = r#"    <method sig="cypher(query, *, to_df=False, params
     <method sig="properties(node_type, max_values=20)">Per-property stats: type, non_null, unique, values.</method>
     <method sig="sample(node_type, n=5)">Returns first N nodes as ResultView.</method>
     <method sig="save(path) / load(path)">Persist and reload the graph.</method>
-  </api>
 "#;
 
 /// Static XML: Cypher reference — clauses through expressions (read-write mode).
@@ -443,10 +479,22 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Build a minimal XML description of the graph for AI agents.
-/// Only includes embedding and spatial sections when the graph actually uses those features.
-pub fn compute_agent_description(graph: &DirGraph) -> String {
+/// Build an XML description of the graph for AI agents.
+///
+/// `detail` controls verbosity:
+/// - `Full`: all properties, values, full API reference.
+/// - `Compact`: one-liner per type, condensed API, exploration tips.
+/// - `Auto`: resolves to `Full` (≤15 types) or `Compact` (>15 types).
+///
+/// `include_fluent`: when `true`, includes the fluent API section.
+pub fn compute_agent_description(
+    graph: &DirGraph,
+    detail: DetailLevel,
+    include_fluent: bool,
+) -> String {
     let overview = compute_schema(graph);
+    let detail = detail.resolve(overview.node_types.len());
+    let is_compact = detail == DetailLevel::Compact;
     let has_embeddings = !graph.embeddings.is_empty();
     let has_timeseries = !graph.timeseries_configs.is_empty();
     let has_spatial = !graph.spatial_configs.is_empty()
@@ -461,8 +509,11 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     let mut xml = String::with_capacity(4096);
 
     xml.push_str(&format!(
-        "<kglite version=\"{}\" nodes=\"{}\" edges=\"{}\">\n",
-        graph.save_metadata.library_version, overview.node_count, overview.edge_count
+        "<kglite version=\"{}\" nodes=\"{}\" edges=\"{}\" detail=\"{}\">\n",
+        graph.save_metadata.library_version,
+        overview.node_count,
+        overview.edge_count,
+        if is_compact { "compact" } else { "full" }
     ));
 
     // Quick start — actionable tips at the very top
@@ -479,7 +530,28 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     // Node types
     if overview.node_types.is_empty() {
         xml.push_str("  <node_types/>\n");
+    } else if is_compact {
+        // ── Compact mode: one-liner per type, no properties ──
+        xml.push_str("  <node_types hint=\"Use properties(type_name) or sample(type_name) to explore any type in detail\">\n");
+        for (nt, info) in &overview.node_types {
+            let prop_count = info.properties.len();
+            let mut attrs = format!(
+                "name=\"{}\" count=\"{}\" props=\"{}\"",
+                xml_escape(nt),
+                info.count,
+                prop_count
+            );
+            if let Some(id_alias) = graph.id_field_aliases.get(nt) {
+                attrs.push_str(&format!(" id_alias=\"{}\"", xml_escape(id_alias)));
+            }
+            if let Some(title_alias) = graph.title_field_aliases.get(nt) {
+                attrs.push_str(&format!(" title_alias=\"{}\"", xml_escape(title_alias)));
+            }
+            xml.push_str(&format!("    <type {}/>\n", attrs));
+        }
+        xml.push_str("  </node_types>\n");
     } else {
+        // ── Full mode: detailed property schemas with value enumerations ──
         xml.push_str("  <node_types>\n");
         for (nt, info) in &overview.node_types {
             let mut alias_attrs = String::new();
@@ -507,8 +579,11 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
                 let mut props: Vec<(&String, &String)> = info.properties.iter().collect();
                 props.sort_by_key(|(k, _)| k.as_str());
 
-                // Collect unique values per property for low-cardinality display
+                // Collect unique values per property for low-cardinality display.
+                // Skip the scan entirely for large types without property indices —
+                // they almost never have ≤15 unique values.
                 const MAX_DISPLAY_VALS: usize = 15;
+                const MAX_SCAN_NODES: usize = 100;
                 let mut prop_values: HashMap<&str, Vec<String>> = HashMap::new();
                 if let Some(indices) = graph.type_indices.get(nt) {
                     for (pname, ptype) in &props {
@@ -516,9 +591,36 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
                         if ptype.eq_ignore_ascii_case("uniqueid") {
                             continue;
                         }
+
+                        // Fast path: use property index if available (O(1))
+                        if *pname != "title" {
+                            if let Some(idx_map) =
+                                graph.property_indices.get(&(nt.clone(), pname.to_string()))
+                            {
+                                if idx_map.len() <= MAX_DISPLAY_VALS {
+                                    let mut sorted: Vec<String> = idx_map
+                                        .keys()
+                                        .filter(|v| !is_null_value(v))
+                                        .map(value_display_compact)
+                                        .collect();
+                                    sorted.sort();
+                                    if !sorted.is_empty() {
+                                        prop_values.insert(pname.as_str(), sorted);
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+
+                        // No index: skip scan for large types (unlikely to be low-cardinality)
+                        if indices.len() > MAX_SCAN_NODES {
+                            continue;
+                        }
+
+                        // Slow path: scan nodes (only for small types ≤ MAX_SCAN_NODES)
                         let mut unique_vals: HashSet<String> = HashSet::new();
                         let mut exceeded = false;
-                        for &idx in indices {
+                        for &idx in indices.iter() {
                             if let Some(node) = graph.get_node(idx) {
                                 let val = match pname.as_str() {
                                     "title" => Some(&node.title),
@@ -581,8 +683,8 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
         }
         xml.push_str("  </connections>\n");
 
-        // Workflow recipes for code graphs — group edges by use case
-        if has_code_entities {
+        // Workflow recipes for code graphs — only in full mode
+        if !is_compact && has_code_entities {
             xml.push_str(
                 "  <workflows hint=\"Common query patterns using the edge types above\">\n",
             );
@@ -721,13 +823,36 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
         xml.push_str("  </timeseries>\n");
     }
 
-    // API methods — exploration (code graphs only) + fluent + query tools
+    // API methods — exploration (code graphs, full mode only) + fluent (opt-in) + query tools
     xml.push_str("  <api>\n");
-    if has_code_entities {
+    if !is_compact && has_code_entities {
         xml.push_str(API_CODE_EXPLORATION);
     }
-    xml.push_str(API_FLUENT);
+    if include_fluent {
+        xml.push_str(API_FLUENT);
+    }
     xml.push_str(API_QUERY);
+
+    // Exploration guidance — compact mode only
+    if is_compact {
+        xml.push_str("  </api>\n");
+        xml.push_str(
+            "  <explore hint=\"Compact schema. Use these to drill into specific types:\">\n",
+        );
+        xml.push_str(
+            "    <tip>properties('TypeName') — property stats with types and sample values</tip>\n",
+        );
+        xml.push_str("    <tip>sample('TypeName', 5) — inspect actual nodes</tip>\n");
+        xml.push_str(
+            "    <tip>cypher(\"MATCH (n:TypeName) RETURN n LIMIT 3\") — raw node data</tip>\n",
+        );
+        xml.push_str(
+            "    <tip>agent_describe(detail='full') — full description with all property details</tip>\n",
+        );
+        xml.push_str("  </explore>\n");
+    } else {
+        xml.push_str("  </api>\n");
+    }
 
     // Cypher reference (read-only mode omits mutation clauses)
     if graph.read_only {
@@ -753,7 +878,7 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     }
     if has_timeseries {
         functions.push_str(
-            ", ts_at, ts_sum, ts_avg, ts_min, ts_max, ts_count, \
+            ", date, ts_at, ts_sum, ts_avg, ts_min, ts_max, ts_count, \
              ts_first, ts_last, ts_series, ts_delta",
         );
     }
@@ -797,8 +922,9 @@ pub fn compute_agent_description(graph: &DirGraph) -> String {
     if has_timeseries {
         xml.push_str(
             "      <note>ts_*() functions operate on per-node timeseries channels. First arg is n.channel_name (PropertyAccess). \
-             Range args are date strings: ts_sum(n.ch) = all, ts_sum(n.ch, '2020') = year 2020, ts_sum(n.ch, '2020-2', '2020-6') = Feb-Jun. \
-             Query precision must not exceed data resolution (e.g. '2020-2-15' errors on month data). NaN values are skipped.</note>\n",
+             Range args are date strings: ts_sum(n.ch) = all, ts_sum(n.ch, '2025') = year 2025, ts_sum(n.ch, '2025-2', '2025-6') = Feb-Jun. \
+             Date args can also be DateTime edge properties for temporal joins: ts_sum(p.ch, r.from_date, r.to_date). \
+             Null date args are treated as open-ended (no bound). date('2025-06-15') creates a DateTime value. NaN values are skipped.</note>\n",
         );
     }
     if has_code_entities {

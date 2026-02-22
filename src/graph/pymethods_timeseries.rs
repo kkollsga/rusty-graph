@@ -5,6 +5,7 @@
 use super::timeseries::{self, NodeTimeseries, TimeseriesConfig};
 use super::{get_graph_mut, KnowledgeGraph};
 use crate::datatypes::py_in;
+use chrono::NaiveDate;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
@@ -73,41 +74,31 @@ impl KnowledgeGraph {
 
     /// Set the sorted time index for a specific node.
     ///
+    /// Accepts either:
+    /// - A list of date strings: `["2020-01", "2020-02"]`
+    /// - A list of integer lists for backwards compat: `[[2020, 1], [2020, 2]]`
+    ///
     /// If the node already has a timeseries, this replaces its time index
     /// and clears all channels (since they would no longer align).
-    /// Key depth must match the resolution set via `set_timeseries()`.
     #[pyo3(signature = (node_id, keys))]
-    fn set_time_index(&mut self, node_id: &Bound<'_, PyAny>, keys: Vec<Vec<i64>>) -> PyResult<()> {
-        timeseries::validate_keys_sorted(&keys)
+    fn set_time_index(
+        &mut self,
+        node_id: &Bound<'_, PyAny>,
+        keys: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let date_keys = parse_keys_from_python(keys)?;
+
+        timeseries::validate_keys_sorted(&date_keys)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         let graph = get_graph_mut(&mut self.inner);
         let id_val = py_in::py_value_to_value(node_id)?;
         let node_idx = find_node_by_id(graph, &id_val)?;
 
-        // Validate key depth against resolution if config exists
-        if let Some(node) = graph.graph.node_weight(node_idx) {
-            let nt = node.node_type.clone();
-            if let Some(config) = graph.timeseries_configs.get(&nt) {
-                if let Ok(expected_depth) = timeseries::resolution_depth(&config.resolution) {
-                    if let Some(first_key) = keys.first() {
-                        if first_key.len() != expected_depth {
-                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "Key depth {} does not match resolution '{}' (expected {})",
-                                first_key.len(),
-                                config.resolution,
-                                expected_depth
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-
         graph.timeseries_store.insert(
             node_idx.index(),
             NodeTimeseries {
-                keys,
+                keys: date_keys,
                 channels: HashMap::new(),
             },
         );
@@ -161,8 +152,9 @@ impl KnowledgeGraph {
     /// Groups rows by `fk`, sorts by `time_key`, and attaches the resulting
     /// timeseries to matching nodes (found by node ID).
     ///
-    /// `resolution` is required if `set_timeseries()` has not been called for
-    /// this node type. The number of `time_key` columns must match the resolution depth.
+    /// `time_key` accepts either:
+    /// - A list of column names for composite keys: `["year", "month"]` — combined into NaiveDate
+    /// - A single column name (as 1-element list): `["date"]` — parsed as date strings
     ///
     /// `channels` accepts either:
     /// - a list of column names (used as channel names): `["oil", "gas"]`
@@ -182,7 +174,7 @@ impl KnowledgeGraph {
         resolution: Option<String>,
         units: Option<HashMap<String, String>>,
     ) -> PyResult<Py<PyAny>> {
-        // Resolve resolution: parameter > existing config > error
+        // Resolve resolution: parameter > existing config > auto-detect
         let graph_ref = &self.inner;
         let resolved_resolution = if let Some(r) = resolution {
             timeseries::validate_resolution(&r)
@@ -191,23 +183,18 @@ impl KnowledgeGraph {
         } else if let Some(config) = graph_ref.timeseries_configs.get(&node_type) {
             config.resolution.clone()
         } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "No resolution specified and no existing config. \
-                 Pass resolution= or call set_timeseries() first.",
-            ));
+            // Auto-detect from time_key column count
+            match time_key.len() {
+                1 => "month".to_string(), // default for single-column date strings
+                2 => "month".to_string(),
+                3 => "day".to_string(),
+                _ => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Cannot auto-detect resolution. Pass resolution= or call set_timeseries() first.",
+                    ));
+                }
+            }
         };
-
-        // Validate time_key column count matches resolution
-        let expected_depth = timeseries::resolution_depth(&resolved_resolution)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
-        if time_key.len() != expected_depth {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Resolution '{}' requires {} time_key columns, got {}",
-                resolved_resolution,
-                expected_depth,
-                time_key.len()
-            )));
-        }
 
         // Parse channels: dict or list
         let channel_map: Vec<(String, String)> = if let Ok(d) = data
@@ -233,19 +220,53 @@ impl KnowledgeGraph {
         // Extract columns from DataFrame as Python lists
         let fk_col: Vec<Py<PyAny>> = data.get_item(&fk)?.call_method0("tolist")?.extract()?;
 
-        let mut time_cols: Vec<Vec<i64>> = Vec::with_capacity(time_key.len());
-        for tk in &time_key {
-            let col: Vec<i64> = data.get_item(tk)?.call_method0("tolist")?.extract()?;
-            time_cols.push(col);
-        }
+        // Build NaiveDate keys from time columns
+        let n_rows = fk_col.len();
+        let date_keys: Vec<NaiveDate> = if time_key.len() == 1 {
+            // Single column: parse as date strings
+            let raw: Vec<String> = data
+                .get_item(&time_key[0])?
+                .call_method1("astype", ("str",))?
+                .call_method0("tolist")?
+                .extract()?;
+            raw.iter()
+                .map(|s| {
+                    timeseries::parse_date_query(s)
+                        .map(|(d, _)| d)
+                        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+                })
+                .collect::<PyResult<Vec<_>>>()?
+        } else {
+            // Multiple columns: combine year + month [+ day] → NaiveDate
+            let mut int_cols: Vec<Vec<i64>> = Vec::with_capacity(time_key.len());
+            for tk in &time_key {
+                let col: Vec<i64> = data.get_item(tk)?.call_method0("tolist")?.extract()?;
+                int_cols.push(col);
+            }
+            (0..n_rows)
+                .map(|i| {
+                    let year = int_cols[0][i] as i32;
+                    let month = if int_cols.len() > 1 {
+                        int_cols[1][i] as u32
+                    } else {
+                        1
+                    };
+                    let day = if int_cols.len() > 2 {
+                        int_cols[2][i] as u32
+                    } else {
+                        1
+                    };
+                    timeseries::date_from_ymd(year, month, day)
+                        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+                })
+                .collect::<PyResult<Vec<_>>>()?
+        };
 
         let mut value_cols: Vec<(String, Vec<f64>)> = Vec::with_capacity(channel_map.len());
         for (ch_name, col_name) in &channel_map {
             let col: Vec<f64> = data.get_item(col_name)?.call_method0("tolist")?.extract()?;
             value_cols.push((ch_name.clone(), col));
         }
-
-        let n_rows = fk_col.len();
 
         // Group row indices by FK value
         let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
@@ -279,23 +300,12 @@ impl KnowledgeGraph {
                 }
             };
 
-            // Sort row indices by time key
+            // Sort row indices by date key
             let mut sorted_rows: Vec<usize> = row_indices.clone();
-            sorted_rows.sort_by(|&a, &b| {
-                for tc in &time_cols {
-                    match tc[a].cmp(&tc[b]) {
-                        std::cmp::Ordering::Equal => continue,
-                        other => return other,
-                    }
-                }
-                std::cmp::Ordering::Equal
-            });
+            sorted_rows.sort_by(|&a, &b| date_keys[a].cmp(&date_keys[b]));
 
-            // Build composite keys
-            let keys: Vec<Vec<i64>> = sorted_rows
-                .iter()
-                .map(|&ri| time_cols.iter().map(|tc| tc[ri]).collect())
-                .collect();
+            // Build NaiveDate keys
+            let keys: Vec<NaiveDate> = sorted_rows.iter().map(|&ri| date_keys[ri]).collect();
 
             // Build channels
             let mut channels_data: HashMap<String, Vec<f64>> = HashMap::new();
@@ -378,28 +388,27 @@ impl KnowledgeGraph {
         };
 
         // Parse date strings and compute range
-        let start_key = start
+        let start_date = start
             .as_ref()
-            .map(|s| timeseries::parse_date_string(s))
+            .map(|s| timeseries::parse_date_query(s).map(|(d, _)| d))
             .transpose()
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
-        let end_key = end
+        let end_date = end
             .as_ref()
-            .map(|s| timeseries::parse_date_string(s))
+            .map(|s| {
+                timeseries::parse_date_query(s).map(|(d, prec)| timeseries::expand_end(d, prec))
+            })
             .transpose()
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
-        let key_depth = ts.keys.first().map(|k| k.len()).unwrap_or(1);
-        let (lo, hi) = timeseries::find_range(
-            &ts.keys,
-            start_key.as_deref(),
-            end_key.as_deref(),
-            key_depth,
-        );
+        let (lo, hi) = timeseries::find_range(&ts.keys, start_date, end_date);
         let keys_slice = &ts.keys[lo..hi];
 
         let result = PyDict::new(py);
-        let keys_py = PyList::new(py, keys_slice.iter().map(|k| PyList::new(py, k).unwrap()))?;
+        let keys_py = PyList::new(
+            py,
+            keys_slice.iter().map(|d| d.format("%Y-%m-%d").to_string()),
+        )?;
         result.set_item("keys", keys_py)?;
 
         if let Some(ch_name) = channel {
@@ -427,7 +436,7 @@ impl KnowledgeGraph {
         Ok(result.into_any().unbind())
     }
 
-    /// Get the time index for a node, or None.
+    /// Get the time index for a node as ISO date strings, or None.
     #[pyo3(signature = (node_id,))]
     fn get_time_index(&self, py: Python<'_>, node_id: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let graph = &self.inner;
@@ -436,7 +445,8 @@ impl KnowledgeGraph {
 
         match graph.get_node_timeseries(node_idx.index()) {
             Some(ts) => {
-                let keys_py = PyList::new(py, ts.keys.iter().map(|k| PyList::new(py, k).unwrap()))?;
+                let keys_py =
+                    PyList::new(py, ts.keys.iter().map(|d| d.format("%Y-%m-%d").to_string()))?;
                 Ok(keys_py.into_any().unbind())
             }
             None => Ok(py.None()),
@@ -470,6 +480,39 @@ fn ts_config_to_py(py: Python<'_>, config: &TimeseriesConfig) -> PyResult<Py<PyA
 use super::schema::DirGraph;
 use crate::datatypes::values::Value;
 use petgraph::graph::NodeIndex;
+
+/// Parse time index keys from Python — accepts either list[str] or list[list[int]].
+fn parse_keys_from_python(keys: &Bound<'_, PyAny>) -> PyResult<Vec<NaiveDate>> {
+    // Try as list of strings first
+    if let Ok(strings) = keys.extract::<Vec<String>>() {
+        return strings
+            .iter()
+            .map(|s| {
+                timeseries::parse_date_query(s)
+                    .map(|(d, _)| d)
+                    .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+            })
+            .collect();
+    }
+
+    // Try as list of list[int] (backwards compat)
+    if let Ok(int_lists) = keys.extract::<Vec<Vec<i64>>>() {
+        return int_lists
+            .iter()
+            .map(|parts| {
+                let year = parts.first().copied().unwrap_or(2000) as i32;
+                let month = parts.get(1).copied().unwrap_or(1) as u32;
+                let day = parts.get(2).copied().unwrap_or(1) as u32;
+                timeseries::date_from_ymd(year, month, day)
+                    .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+            })
+            .collect();
+    }
+
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+        "keys must be a list of date strings or a list of integer lists",
+    ))
+}
 
 /// Find a node by its ID value, scanning all type indices (mutable).
 fn find_node_by_id(graph: &mut DirGraph, id: &Value) -> PyResult<NodeIndex> {

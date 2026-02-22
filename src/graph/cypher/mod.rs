@@ -139,6 +139,28 @@ pub fn generate_explain_plan(query: &CypherQuery) -> String {
                     limit
                 )
             }
+            Clause::FusedCountAll { .. } => {
+                "FusedCountAll (optimized MATCH (n) RETURN count(n))".to_string()
+            }
+            Clause::FusedCountByType { .. } => {
+                "FusedCountByType (optimized MATCH (n) RETURN n.type, count(n))".to_string()
+            }
+            Clause::FusedCountEdgesByType { .. } => {
+                "FusedCountEdgesByType (optimized MATCH ()-[r]->() RETURN type(r), count(*))"
+                    .to_string()
+            }
+            Clause::FusedCountTypedNode { node_type, .. } => {
+                format!(
+                    "FusedCountTypedNode (optimized MATCH (n:{}) RETURN count(n))",
+                    node_type
+                )
+            }
+            Clause::FusedCountTypedEdge { edge_type, .. } => {
+                format!(
+                    "FusedCountTypedEdge (optimized MATCH ()-[r:{}]->() RETURN count(*))",
+                    edge_type
+                )
+            }
         };
         lines.push(format!("  {}. {}", step, desc));
     }

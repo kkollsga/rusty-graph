@@ -1,4 +1,4 @@
-"""Tests for Cypher ts_*() timeseries functions with date-string syntax."""
+"""Tests for Cypher ts_*() timeseries functions with NaiveDate keys."""
 
 import pytest
 import pandas as pd
@@ -20,13 +20,13 @@ def ts_graph():
     # TROLL: 2019-12 through 2021-01
     g.set_time_index(
         1,
-        [[2019, 12], [2020, 1], [2020, 2], [2020, 3], [2021, 1]],
+        ["2019-12", "2020-01", "2020-02", "2020-03", "2021-01"],
     )
     g.add_ts_channel(1, "oil", [0.9, 1.0, 1.5, 2.0, 3.0])
     g.add_ts_channel(1, "gas", [0.1, 0.2, 0.3, 0.4, 0.5])
 
     # EKOFISK: 2020-01 through 2020-03
-    g.set_time_index(2, [[2020, 1], [2020, 2], [2020, 3]])
+    g.set_time_index(2, ["2020-01", "2020-02", "2020-03"])
     g.add_ts_channel(2, "oil", [0.5, 0.6, 0.7])
 
     return g
@@ -49,12 +49,13 @@ def test_ts_at_missing_key(ts_graph):
     assert result[0]["val"] is None
 
 
-def test_ts_at_wrong_depth(ts_graph):
-    """ts_at on month data with year-only key should error."""
-    with pytest.raises(Exception, match="Exact lookup requires"):
-        ts_graph.cypher(
-            "MATCH (f:Field {title: 'TROLL'}) RETURN ts_at(f.oil, '2020') AS val"
-        )
+def test_ts_at_year_returns_jan(ts_graph):
+    """ts_at with year precision returns the Jan 1 value (first-of-year key)."""
+    result = ts_graph.cypher(
+        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_at(f.oil, '2020') AS val"
+    )
+    # '2020' → NaiveDate(2020-01-01) → matches 2020-01-01 key → oil = 1.0
+    assert result[0]["val"] == 1.0
 
 
 # ── ts_sum ────────────────────────────────────────────────────────────────
@@ -134,7 +135,7 @@ def test_ts_count_with_nan():
     df = pd.DataFrame({"id": [1], "title": ["S"]})
     g.add_nodes(df, "Sensor", "id", "title")
     g.set_timeseries("Sensor", resolution="year", channels=["temp"])
-    g.set_time_index(1, [[1], [2], [3]])
+    g.set_time_index(1, ["0001", "0002", "0003"])
     g.add_ts_channel(1, "temp", [1.0, float("nan"), 3.0])
     result = g.cypher("MATCH (s:Sensor) RETURN ts_count(s.temp) AS val")
     assert result[0]["val"] == 2
@@ -185,7 +186,7 @@ def test_ts_series(ts_graph):
     )
     series = result[0]["val"]  # auto-parsed from JSON to native Python list
     assert len(series) == 3
-    assert series[0]["time"] == [2020, 1]
+    assert series[0]["time"] == "2020-01-01"
     assert series[0]["value"] == 0.5
     assert series[2]["value"] == 0.7
 
@@ -198,23 +199,15 @@ def test_ts_series_with_range(ts_graph):
     assert len(series) == 3  # 3 months in 2020
 
 
-# ── Precision validation ─────────────────────────────────────────────────
+# ── Day precision on month data ──────────────────────────────────────────
 
 
-def test_day_query_on_month_data_errors(ts_graph):
-    """Querying with day precision on month-resolution data should error."""
-    with pytest.raises(Exception, match="exceeds data resolution"):
-        ts_graph.cypher(
-            "MATCH (f:Field {title: 'TROLL'}) RETURN ts_sum(f.oil, '2020-2-15') AS val"
-        )
-
-
-def test_day_range_on_month_data_errors(ts_graph):
-    """Day-precision range on month data should error."""
-    with pytest.raises(Exception, match="exceeds data resolution"):
-        ts_graph.cypher(
-            "MATCH (f:Field) RETURN ts_sum(f.oil, '2020-1-1', '2020-3-15') AS val"
-        )
+def test_day_query_on_month_data_returns_zero(ts_graph):
+    """Day precision on month data returns 0 (no matching keys, not an error)."""
+    result = ts_graph.cypher(
+        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_sum(f.oil, '2020-2-15') AS val"
+    )
+    assert result[0]["val"] == 0.0
 
 
 # ── WHERE clause filtering ───────────────────────────────────────────────
@@ -282,14 +275,81 @@ def test_nan_skipped_in_sum():
     df = pd.DataFrame({"id": [1], "title": ["S"]})
     g.add_nodes(df, "Sensor", "id", "title")
     g.set_timeseries("Sensor", resolution="year", channels=["temp"])
-    g.set_time_index(1, [[1], [2], [3]])
+    g.set_time_index(1, ["0001", "0002", "0003"])
     g.add_ts_channel(1, "temp", [1.0, float("nan"), 3.0])
     result = g.cypher("MATCH (s:Sensor) RETURN ts_sum(s.temp) AS val")
     assert abs(result[0]["val"] - 4.0) < 1e-10
 
 
+# ── Temporal join tests ──────────────────────────────────────────────────
+
+
+def test_ts_sum_with_datetime_edge_args():
+    """ts_sum with DateTime edge properties as date range arguments."""
+    g = kglite.KnowledgeGraph()
+
+    # Create nodes
+    companies = pd.DataFrame({"id": [1], "title": ["VE"]})
+    fields = pd.DataFrame({"id": [10], "title": ["TROLL"]})
+    profiles = pd.DataFrame({"id": [100], "title": ["TROLL_PROD"]})
+    g.add_nodes(companies, "Company", "id", "title")
+    g.add_nodes(fields, "Field", "id", "title")
+    g.add_nodes(profiles, "ProductionProfile", "id", "title")
+
+    # Create edges with date properties
+    g.cypher("""
+        MATCH (f:Field {title: 'TROLL'}), (c:Company {title: 'VE'})
+        CREATE (f)-[:HAS_LICENSEE {share: 30.0, from_date: date('2020-01-01'), to_date: date('2020-12-31')}]->(c)
+    """)
+    g.cypher("""
+        MATCH (p:ProductionProfile {title: 'TROLL_PROD'}), (f:Field {title: 'TROLL'})
+        CREATE (p)-[:OF_FIELD]->(f)
+    """)
+
+    # Add timeseries
+    g.set_timeseries("ProductionProfile", resolution="month", channels=["oil"])
+    g.set_time_index(100, [f"2020-{m:02d}" for m in range(1, 13)])
+    g.add_ts_channel(100, "oil", [float(m) for m in range(1, 13)])
+
+    # Query: ts_sum with edge date props
+    result = g.cypher("""
+        MATCH (c:Company {title: 'VE'})-[r:HAS_LICENSEE]-(f:Field)-[:OF_FIELD]-(p:ProductionProfile)
+        RETURN ts_sum(p.oil, r.from_date, r.to_date) AS total,
+               ts_sum(p.oil, r.from_date, r.to_date) * r.share / 100 AS equity
+    """)
+    assert len(result) == 1
+    assert abs(result[0]["total"] - 78.0) < 1e-10  # 1+2+...+12
+    assert abs(result[0]["equity"] - 23.4) < 1e-10  # 78 * 0.3
+
+
+def test_ts_sum_with_null_end_date():
+    """Null end date = open-ended range (no upper bound)."""
+    g = kglite.KnowledgeGraph()
+
+    companies = pd.DataFrame({"id": [1], "title": ["VE"]})
+    profiles = pd.DataFrame({"id": [100], "title": ["P"]})
+    g.add_nodes(companies, "Company", "id", "title")
+    g.add_nodes(profiles, "ProductionProfile", "id", "title")
+
+    # Edge with null to_date (open-ended licence)
+    g.cypher("""
+        MATCH (p:ProductionProfile {title: 'P'}), (c:Company {title: 'VE'})
+        CREATE (p)-[:LICENSED_TO {from_date: date('2020-06-01'), to_date: null}]->(c)
+    """)
+
+    g.set_timeseries("ProductionProfile", resolution="month", channels=["oil"])
+    g.set_time_index(100, [f"2020-{m:02d}" for m in range(1, 13)])
+    g.add_ts_channel(100, "oil", [float(m) for m in range(1, 13)])
+
+    # Null to_date means no upper bound — sum from June onwards
+    result = g.cypher("""
+        MATCH (p:ProductionProfile)-[r:LICENSED_TO]-(c:Company)
+        RETURN ts_sum(p.oil, r.from_date, r.to_date) AS total
+    """)
+    assert abs(result[0]["total"] - 63.0) < 1e-10  # 6+7+8+9+10+11+12
+
+
 # ── Real-world example queries ──────────────────────────────────────────
-# Tests for the example use-cases discussed in design review.
 
 
 @pytest.fixture
@@ -304,7 +364,7 @@ def production_graph():
     )
 
     # TROLL: 2019-01 through 2020-12 (24 months)
-    troll_keys = [[y, m] for y in [2019, 2020] for m in range(1, 13)]
+    troll_keys = [f"{y}-{m:02d}" for y in [2019, 2020] for m in range(1, 13)]
     # Oil: ramp from 1.0 to 2.4 over 24 months
     troll_oil = [1.0 + 0.06 * i for i in range(24)]
     g.set_time_index(1, troll_keys)
@@ -312,7 +372,7 @@ def production_graph():
     g.add_ts_channel(1, "gas", [v * 0.1 for v in troll_oil])
 
     # EKOFISK: 2020-01 through 2020-12 (12 months)
-    eko_keys = [[2020, m] for m in range(1, 13)]
+    eko_keys = [f"2020-{m:02d}" for m in range(1, 13)]
     eko_oil = [0.5 + 0.02 * i for i in range(12)]
     g.set_time_index(2, eko_keys)
     g.add_ts_channel(2, "oil", eko_oil)
@@ -368,7 +428,7 @@ def test_latest_recorded_month_via_series(production_graph):
     """)
     series = result[0]["data"]
     last = series[-1]
-    assert last["time"] == [2020, 12]
+    assert last["time"] == "2020-12-01"
 
 
 def test_first_production_record_via_series(production_graph):
@@ -379,7 +439,7 @@ def test_first_production_record_via_series(production_graph):
     """)
     series = result[0]["data"]
     first = series[0]
-    assert first["time"] == [2019, 1]
+    assert first["time"] == "2019-01-01"
 
 
 def test_top_producers_order_by(production_graph):

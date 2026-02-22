@@ -1,0 +1,569 @@
+"""Tests for kglite.blueprint.from_blueprint()."""
+
+import json
+import pytest
+import pandas as pd
+import kglite
+from kglite.blueprint import from_blueprint
+
+
+# ── Helpers ──────────────────────────────────────────────────────────
+
+
+def _write_csv(path, df):
+    """Write a DataFrame as CSV."""
+    df.to_csv(path, index=False)
+
+
+def _write_blueprint(path, bp):
+    """Write a blueprint dict as JSON."""
+    with open(path, "w") as f:
+        json.dump(bp, f)
+
+
+def _minimal_blueprint(tmp_path):
+    """Create a minimal blueprint with Person nodes + KNOWS edges."""
+    persons = pd.DataFrame(
+        {
+            "person_id": [1, 2, 3],
+            "name": ["Alice", "Bob", "Charlie"],
+            "age": [28, 35, 42],
+            "city": ["Oslo", "Bergen", "Oslo"],
+        }
+    )
+    _write_csv(tmp_path / "persons.csv", persons)
+
+    knows = pd.DataFrame(
+        {"source_id": [1, 2], "target_id": [2, 3]}
+    )
+    _write_csv(tmp_path / "knows.csv", knows)
+
+    bp = {
+        "settings": {"root": str(tmp_path)},
+        "nodes": {
+            "Person": {
+                "csv": "persons.csv",
+                "pk": "person_id",
+                "title": "name",
+                "properties": {
+                    "age": "int",
+                    "city": "string",
+                },
+                "skipped": [],
+                "connections": {
+                    "junction_edges": {
+                        "KNOWS": {
+                            "csv": "knows.csv",
+                            "source_fk": "source_id",
+                            "target": "Person",
+                            "target_fk": "target_id",
+                            "properties": [],
+                        }
+                    }
+                },
+            }
+        },
+    }
+    bp_path = tmp_path / "blueprint.json"
+    _write_blueprint(bp_path, bp)
+    return bp_path
+
+
+# ── Tests ────────────────────────────────────────────────────────────
+
+
+class TestBasicLoading:
+    def test_load_nodes_and_edges(self, tmp_path):
+        bp_path = _minimal_blueprint(tmp_path)
+        graph = from_blueprint(bp_path, save=False)
+
+        # Check nodes
+        result = graph.cypher(
+            "MATCH (p:Person) RETURN p.name ORDER BY p.name"
+        )
+        names = [r["p.name"] for r in result]
+        assert names == ["Alice", "Bob", "Charlie"]
+
+    def test_node_properties(self, tmp_path):
+        bp_path = _minimal_blueprint(tmp_path)
+        graph = from_blueprint(bp_path, save=False)
+
+        alice = graph.get_node_by_id("Person", 1)
+        assert alice is not None
+        assert alice["title"] == "Alice"
+        assert alice["age"] == 28
+        assert alice["city"] == "Oslo"
+
+    def test_junction_edges(self, tmp_path):
+        bp_path = _minimal_blueprint(tmp_path)
+        graph = from_blueprint(bp_path, save=False)
+
+        result = graph.cypher(
+            "MATCH (a:Person)-[:KNOWS]->(b:Person) "
+            "RETURN a.name AS src, b.name AS tgt ORDER BY src"
+        )
+        edges = [(r["src"], r["tgt"]) for r in result]
+        assert edges == [("Alice", "Bob"), ("Bob", "Charlie")]
+
+    def test_verbose_mode(self, tmp_path, capsys):
+        bp_path = _minimal_blueprint(tmp_path)
+        from_blueprint(bp_path, save=False, verbose=True)
+        captured = capsys.readouterr()
+        assert "Loading blueprint" in captured.out
+        assert "Person" in captured.out
+
+    def test_top_level_import(self):
+        """Verify from_blueprint is importable from kglite top level."""
+        assert hasattr(kglite, "from_blueprint")
+        assert kglite.from_blueprint is from_blueprint
+
+
+class TestFKEdges:
+    def test_fk_edges(self, tmp_path):
+        companies = pd.DataFrame(
+            {"company_id": [10, 20], "name": ["Acme", "Globex"]}
+        )
+        persons = pd.DataFrame(
+            {
+                "person_id": [1, 2, 3],
+                "name": ["Alice", "Bob", "Charlie"],
+                "company_id": [10, 20, 10],
+            }
+        )
+        _write_csv(tmp_path / "companies.csv", companies)
+        _write_csv(tmp_path / "persons.csv", persons)
+
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Company": {
+                    "csv": "companies.csv",
+                    "pk": "company_id",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                },
+                "Person": {
+                    "csv": "persons.csv",
+                    "pk": "person_id",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": ["company_id"],
+                    "connections": {
+                        "fk_edges": {
+                            "WORKS_AT": {
+                                "target": "Company",
+                                "fk": "company_id",
+                            }
+                        }
+                    },
+                },
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+
+        result = graph.cypher(
+            "MATCH (p:Person)-[:WORKS_AT]->(c:Company) "
+            "RETURN p.name AS person, c.name AS company ORDER BY person"
+        )
+        edges = [(r["person"], r["company"]) for r in result]
+        assert edges == [
+            ("Alice", "Acme"),
+            ("Bob", "Globex"),
+            ("Charlie", "Acme"),
+        ]
+
+
+class TestSubNodes:
+    def test_sub_nodes_with_parent_fk(self, tmp_path):
+        fields = pd.DataFrame(
+            {"field_id": [1, 2], "name": ["Troll", "Ekofisk"]}
+        )
+        reserves = pd.DataFrame(
+            {
+                "field_id": [1, 1, 2],
+                "year": [2020, 2021, 2020],
+                "oil": [100.0, 110.0, 200.0],
+            }
+        )
+        _write_csv(tmp_path / "fields.csv", fields)
+        _write_csv(tmp_path / "reserves.csv", reserves)
+
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Field": {
+                    "csv": "fields.csv",
+                    "pk": "field_id",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                    "sub_nodes": {
+                        "Reserve": {
+                            "csv": "reserves.csv",
+                            "pk": "auto",
+                            "title": "year",
+                            "parent_fk": "field_id",
+                            "properties": {"oil": "float"},
+                            "skipped": ["field_id"],
+                            "connections": {
+                                "fk_edges": {
+                                    "OF_FIELD": {
+                                        "target": "Field",
+                                        "fk": "field_id",
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+
+        # Check sub-nodes created
+        result = graph.cypher(
+            "MATCH (r:Reserve) RETURN r.oil ORDER BY r.oil"
+        )
+        oils = [r["r.oil"] for r in result]
+        assert oils == [100.0, 110.0, 200.0]
+
+        # Check edges to parent
+        result = graph.cypher(
+            "MATCH (r:Reserve)-[:OF_FIELD]->(f:Field) "
+            "RETURN f.title AS field, r.oil ORDER BY r.oil"
+        )
+        assert len(result) == 3
+        assert result[0]["field"] == "Troll"
+
+
+class TestManualNodes:
+    def test_manual_nodes_from_fk_values(self, tmp_path):
+        fields = pd.DataFrame(
+            {
+                "field_id": [1, 2, 3],
+                "name": ["Troll", "Ekofisk", "Ormen Lange"],
+                "area": ["North Sea", "North Sea", "Norwegian Sea"],
+            }
+        )
+        _write_csv(tmp_path / "fields.csv", fields)
+
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Ocean": {
+                    "pk": "name",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                },
+                "Field": {
+                    "csv": "fields.csv",
+                    "pk": "field_id",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": ["area"],
+                    "connections": {
+                        "fk_edges": {
+                            "IN_OCEAN": {
+                                "target": "Ocean",
+                                "fk": "area",
+                            }
+                        }
+                    },
+                },
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+
+        # Check manual nodes created
+        result = graph.cypher(
+            "MATCH (o:Ocean) RETURN o.title ORDER BY o.title"
+        )
+        names = [r["o.title"] for r in result]
+        assert names == ["North Sea", "Norwegian Sea"]
+
+        # Check FK edges to manual nodes
+        result = graph.cypher(
+            "MATCH (f:Field)-[:IN_OCEAN]->(o:Ocean) "
+            "RETURN f.title AS field, o.title AS ocean ORDER BY field"
+        )
+        assert len(result) == 3
+
+
+class TestAutoId:
+    def test_pk_auto_generates_sequential_ids(self, tmp_path):
+        items = pd.DataFrame({"name": ["A", "B", "C"]})
+        _write_csv(tmp_path / "items.csv", items)
+
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Item": {
+                    "csv": "items.csv",
+                    "pk": "auto",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+
+        result = graph.cypher(
+            "MATCH (i:Item) RETURN i.id, i.title ORDER BY i.id"
+        )
+        ids = [r["i.id"] for r in result]
+        assert ids == [1, 2, 3]
+
+
+class TestFilter:
+    def test_filter_rows(self, tmp_path):
+        items = pd.DataFrame(
+            {
+                "item_id": [1, 2, 3, 4],
+                "name": ["A", "B", "C", "D"],
+                "status": ["Active", "Inactive", "Active", "Active"],
+            }
+        )
+        _write_csv(tmp_path / "items.csv", items)
+
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Item": {
+                    "csv": "items.csv",
+                    "pk": "item_id",
+                    "title": "name",
+                    "properties": {"status": "string"},
+                    "skipped": [],
+                    "filter": {"status": "Active"},
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+
+        result = graph.cypher("MATCH (i:Item) RETURN i.title ORDER BY i.title")
+        names = [r["i.title"] for r in result]
+        assert names == ["A", "C", "D"]
+
+
+class TestTimeseries:
+    def test_timeseries_sub_node(self, tmp_path):
+        fields = pd.DataFrame({"field_id": [1, 2], "name": ["Troll", "Ekofisk"]})
+        production = pd.DataFrame(
+            {
+                "field_id": [1, 1, 1, 2, 2, 2],
+                "name": ["Troll"] * 3 + ["Ekofisk"] * 3,
+                "prfYear": [2020, 2020, 2020, 2020, 2020, 2020],
+                "prfMonth": [1, 2, 3, 1, 2, 3],
+                "prfOil": [1.0, 1.5, 2.0, 0.5, 0.6, 0.7],
+                "prfGas": [0.1, 0.2, 0.3, 0.05, 0.06, 0.07],
+            }
+        )
+        _write_csv(tmp_path / "fields.csv", fields)
+        _write_csv(tmp_path / "production.csv", production)
+
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Field": {
+                    "csv": "fields.csv",
+                    "pk": "field_id",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                    "sub_nodes": {
+                        "Production": {
+                            "csv": "production.csv",
+                            "pk": "field_id",
+                            "title": "name",
+                            "parent_fk": "field_id",
+                            "properties": {},
+                            "skipped": ["field_id", "name"],
+                            "timeseries": {
+                                "time_key": {
+                                    "year": "prfYear",
+                                    "month": "prfMonth",
+                                },
+                                "resolution": "month",
+                                "channels": {
+                                    "oil": "prfOil",
+                                    "gas": "prfGas",
+                                },
+                                "units": {
+                                    "oil": "MSm3",
+                                    "gas": "BSm3",
+                                },
+                            },
+                            "connections": {
+                                "fk_edges": {
+                                    "OF_FIELD": {
+                                        "target": "Field",
+                                        "fk": "field_id",
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+
+        # Check timeseries data is accessible
+        result = graph.cypher(
+            "MATCH (p:Production) "
+            "RETURN p.title, ts_sum(p.oil, '2020') AS total_oil "
+            "ORDER BY total_oil DESC"
+        )
+        assert len(result) == 2
+        # Troll: 1.0 + 1.5 + 2.0 = 4.5
+        assert result[0]["total_oil"] == pytest.approx(4.5)
+        assert result[0]["p.title"] == "Troll"
+
+
+class TestSaveOutput:
+    def test_save_to_output_path(self, tmp_path):
+        bp_path = _minimal_blueprint(tmp_path)
+
+        # Add output to blueprint
+        with open(bp_path) as f:
+            bp = json.load(f)
+        bp["settings"]["output"] = "output/graph.kgl"
+        _write_blueprint(bp_path, bp)
+
+        graph = from_blueprint(bp_path, save=True)
+        assert (tmp_path / "output" / "graph.kgl").exists()
+
+        # Verify saved graph can be loaded
+        loaded = kglite.load(str(tmp_path / "output" / "graph.kgl"))
+        result = loaded.cypher("MATCH (p:Person) RETURN count(p) AS n")
+        assert result[0]["n"] == 3
+
+    def test_no_save_when_disabled(self, tmp_path):
+        bp_path = _minimal_blueprint(tmp_path)
+        with open(bp_path) as f:
+            bp = json.load(f)
+        bp["settings"]["output"] = "output/graph.kgl"
+        _write_blueprint(bp_path, bp)
+
+        from_blueprint(bp_path, save=False)
+        assert not (tmp_path / "output" / "graph.kgl").exists()
+
+
+class TestErrorHandling:
+    def test_missing_blueprint_file(self):
+        with pytest.raises(FileNotFoundError, match="Blueprint file not found"):
+            from_blueprint("/nonexistent/blueprint.json")
+
+    def test_missing_csv_is_nonfatal(self, tmp_path):
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Missing": {
+                    "csv": "nonexistent.csv",
+                    "pk": "id",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+        # Graph should still be created, just empty
+        assert graph.cypher("MATCH (n) RETURN count(n) AS n")[0]["n"] == 0
+
+    def test_missing_fk_column_is_nonfatal(self, tmp_path):
+        items = pd.DataFrame({"item_id": [1], "name": ["A"]})
+        _write_csv(tmp_path / "items.csv", items)
+
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Item": {
+                    "csv": "items.csv",
+                    "pk": "item_id",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                    "connections": {
+                        "fk_edges": {
+                            "BAD_EDGE": {
+                                "target": "Other",
+                                "fk": "nonexistent_col",
+                            }
+                        }
+                    },
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+        # Node loaded, edge skipped
+        assert graph.cypher("MATCH (i:Item) RETURN count(i) AS n")[0]["n"] == 1
+
+
+class TestJunctionEdgeProperties:
+    def test_junction_edge_with_properties(self, tmp_path):
+        persons = pd.DataFrame({"person_id": [1, 2], "name": ["Alice", "Bob"]})
+        movies = pd.DataFrame({"movie_id": [10, 20], "title": ["Film A", "Film B"]})
+        ratings = pd.DataFrame(
+            {
+                "person_id": [1, 1, 2],
+                "movie_id": [10, 20, 10],
+                "score": [5, 3, 4],
+            }
+        )
+        _write_csv(tmp_path / "persons.csv", persons)
+        _write_csv(tmp_path / "movies.csv", movies)
+        _write_csv(tmp_path / "ratings.csv", ratings)
+
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Person": {
+                    "csv": "persons.csv",
+                    "pk": "person_id",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                    "connections": {
+                        "junction_edges": {
+                            "RATED": {
+                                "csv": "ratings.csv",
+                                "source_fk": "person_id",
+                                "target": "Movie",
+                                "target_fk": "movie_id",
+                                "properties": ["score"],
+                            }
+                        }
+                    },
+                },
+                "Movie": {
+                    "csv": "movies.csv",
+                    "pk": "movie_id",
+                    "title": "title",
+                    "properties": {},
+                    "skipped": [],
+                },
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+
+        result = graph.cypher(
+            "MATCH (p:Person)-[r:RATED]->(m:Movie) "
+            "RETURN p.name, m.title, r.score ORDER BY p.name, m.title"
+        )
+        assert len(result) == 3
+        assert result[0]["r.score"] == 5
+        assert result[0]["p.name"] == "Alice"
+        assert result[0]["m.title"] == "Film A"

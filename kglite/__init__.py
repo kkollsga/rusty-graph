@@ -9,6 +9,7 @@ from .kglite import (  # explicit re-exports for type checkers
     ResultIter,
     load,
 )
+from .blueprint import from_blueprint
 
 __all__ = [
     "__version__",
@@ -17,4 +18,5 @@ __all__ = [
     "ResultView",
     "ResultIter",
     "load",
+    "from_blueprint",
 ]

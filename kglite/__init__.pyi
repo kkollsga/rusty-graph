@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Optional, Protocol, Union, overload, runtime_checkable
 
 import pandas as pd
@@ -179,6 +180,41 @@ def load(path: str) -> KnowledgeGraph:
         A new KnowledgeGraph with the loaded data.
     """
     ...
+
+
+def from_blueprint(
+    blueprint_path: Union[str, Path],
+    *,
+    verbose: bool = False,
+    save: bool = True,
+) -> KnowledgeGraph:
+    """Build a KnowledgeGraph from a JSON blueprint and CSV files.
+
+    The blueprint JSON describes all node types, properties, connections,
+    timeseries, and data sources. CSV paths in the blueprint are resolved
+    relative to ``settings.root``.
+
+    Args:
+        blueprint_path: Path to the blueprint JSON file.
+        verbose: If True, print progress information during loading.
+        save: If True and the blueprint specifies an ``output`` path,
+            save the graph to that path after building.
+
+    Returns:
+        A new KnowledgeGraph populated from the blueprint.
+
+    Raises:
+        FileNotFoundError: If the blueprint file is missing.
+        ValueError: If the blueprint JSON is malformed.
+
+    Example::
+
+        import kglite
+
+        graph = kglite.from_blueprint("blueprint.json", verbose=True)
+    """
+    ...
+
 
 class KnowledgeGraph:
     """A high-performance knowledge graph with typed nodes, connections, and
@@ -1136,12 +1172,32 @@ class KnowledgeGraph:
         """Return a text summary of the graph schema (node types, connections)."""
         ...
 
-    def agent_describe(self) -> str:
-        """Return a minimal XML string describing this graph for AI agents.
+    def agent_describe(
+        self,
+        detail: str | None = None,
+        include_fluent: bool = False,
+    ) -> str:
+        """Return an XML string describing this graph for AI agents.
+
+        Args:
+            detail: Level of detail for node type schemas.
+
+                - ``'auto'`` (default / ``None``): picks ``'full'`` when the
+                  graph has ≤15 node types, ``'compact'`` otherwise.
+                - ``'full'``: every property with type and sample values.
+                - ``'compact'``: one-liner per type (name, count, prop count).
+                  Includes exploration tips so the agent can drill deeper
+                  with ``properties()``, ``sample()``, or Cypher queries.
+
+            include_fluent: If ``True``, include the fluent filter/count/
+                statistics pipeline in the API section.  Default ``False``
+                (the fluent API is Python-side sugar, not needed for
+                Cypher-based agent workflows).
 
         The output is a self-contained XML document covering:
-        - Graph structure: node types with counts and property schemas,
-          connection types with counts and endpoint types, indexes.
+
+        - Graph structure: node types with counts and property schemas
+          (or compact summaries), connection types, indexes.
         - Supported Cypher subset: clauses, patterns, operators, functions.
         - Key API methods with signatures.
 
@@ -1151,6 +1207,12 @@ class KnowledgeGraph:
         Example::
 
             prompt = f"You have a knowledge graph:\\n{graph.agent_describe()}\\nAnswer the question."
+
+            # Force full detail on a large graph:
+            full = graph.agent_describe(detail='full')
+
+            # Include fluent API docs:
+            with_fluent = graph.agent_describe(include_fluent=True)
         """
         ...
 
@@ -2207,18 +2269,18 @@ class KnowledgeGraph:
     def set_time_index(
         self,
         node_id: Any,
-        keys: list[list[int]],
+        keys: Union[list[str], list[list[int]]],
     ) -> None:
         """Set the sorted time index for a specific node.
 
         If the node already has a timeseries, this replaces its time index
-        and clears all channels. Key depth must match the resolution set
-        via ``set_timeseries()``.
+        and clears all channels.
 
         Args:
             node_id: The node's unique ID.
-            keys: Sorted list of composite time keys,
-                e.g. ``[[2020, 1], [2020, 2], ...]`` for month resolution.
+            keys: Sorted list of date strings (e.g. ``['2020-01', '2020-02']``)
+                or composite integer keys for backwards compat
+                (e.g. ``[[2020, 1], [2020, 2]]``).
         """
         ...
 
@@ -2257,16 +2319,21 @@ class KnowledgeGraph:
         Groups rows by ``fk``, sorts by ``time_key``, and attaches the
         resulting timeseries to matching nodes (found by node ID).
 
+        Time keys are combined into NaiveDate internally:
+        - Single column: parsed as date strings (``'2020-06'``)
+        - Multiple columns: combined as year + month [+ day] → NaiveDate
+
         Args:
             node_type: Target node type.
             data: Source DataFrame.
             fk: Foreign key column in ``data`` linking to node IDs.
-            time_key: Column(s) forming the composite time key.
-                Count must match resolution depth (2 for month, 3 for day).
+            time_key: Column(s) for time keys. If single column, values
+                are parsed as date strings. If multiple, combined as
+                year + month [+ day].
             channels: Either a list of column names (used as channel names)
                 or a dict mapping ``{channel_name: column_name}``.
             resolution: Time granularity (``'year'``, ``'month'``, ``'day'``).
-                Required if ``set_timeseries()`` has not been called.
+                Auto-detected from time_key count if not specified.
             units: Optional channel→unit map, merged into config.
 
         Returns:
@@ -2300,8 +2367,8 @@ class KnowledgeGraph:
     def get_time_index(
         self,
         node_id: Any,
-    ) -> Optional[list[list[int]]]:
-        """Get the time index for a node, or ``None``."""
+    ) -> Optional[list[str]]:
+        """Get the time index for a node as ISO date strings, or ``None``."""
         ...
 
     # ── Embedding / Vector Search ──────────────────────────────────────────

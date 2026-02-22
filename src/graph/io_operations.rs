@@ -108,6 +108,10 @@ struct FileMetadata {
     /// When present, bytes after graph_compressed_size contain the embedding section.
     #[serde(default)]
     graph_compressed_size: Option<u64>,
+    /// Timeseries data version: 1 = Vec<Vec<i64>> keys (legacy), 2 = NaiveDate keys.
+    /// Files with version < 2 must be rebuilt.
+    #[serde(default = "default_ts_data_version")]
+    timeseries_data_version: u32,
     /// Compressed size of the embedding section in bytes.
     /// When present (along with graph_compressed_size), the timeseries section
     /// follows after graph + embedding sections.
@@ -117,6 +121,10 @@ struct FileMetadata {
 
 fn default_auto_vacuum_threshold() -> Option<f64> {
     Some(0.3)
+}
+
+fn default_ts_data_version() -> u32 {
+    1 // Legacy files without this field used Vec<Vec<i64>> keys
 }
 
 // ─── Save ────────────────────────────────────────────────────────────────────
@@ -182,6 +190,7 @@ pub fn write_graph_to_file(graph: &DirGraph, path: &str) -> io::Result<()> {
         auto_vacuum_threshold: graph.auto_vacuum_threshold,
         spatial_configs: graph.spatial_configs.clone(),
         timeseries_configs: graph.timeseries_configs.clone(),
+        timeseries_data_version: 2, // NaiveDate keys
         graph_compressed_size: if has_extra_sections {
             Some(graph_compressed.len() as u64)
         } else {
@@ -356,12 +365,23 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
     // Load timeseries if present
     if let Some(ts_bytes) = timeseries_bytes {
         if !ts_bytes.is_empty() {
-            let gz = GzDecoder::new(ts_bytes);
-            let ts_store: HashMap<usize, NodeTimeseries> =
-                bincode_options().deserialize_from(gz).map_err(|e| {
-                    io::Error::other(format!("Failed to deserialize timeseries data: {}", e))
-                })?;
-            dir_graph.timeseries_store = ts_store;
+            if metadata.timeseries_data_version < 2 {
+                // Legacy format (Vec<Vec<i64>> keys) — skip loading timeseries data.
+                // The graph structure and configs are still loaded; timeseries data
+                // must be re-imported from source.
+                eprintln!(
+                    "Warning: Timeseries data in this file uses legacy format (v{}). \
+                     Timeseries data was not loaded — please re-import from source data.",
+                    metadata.timeseries_data_version
+                );
+            } else {
+                let gz = GzDecoder::new(ts_bytes);
+                let ts_store: HashMap<usize, NodeTimeseries> =
+                    bincode_options().deserialize_from(gz).map_err(|e| {
+                        io::Error::other(format!("Failed to deserialize timeseries data: {}", e))
+                    })?;
+                dir_graph.timeseries_store = ts_store;
+            }
         }
     }
 

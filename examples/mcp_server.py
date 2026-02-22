@@ -131,10 +131,13 @@ mcp = FastMCP(
 
 @mcp.tool()
 def graph_overview() -> str:
-    """ALWAYS call this tool first. Returns the full schema of the knowledge
-    graph (node types with properties, edge types, indexes), a Cypher query
-    reference, and available API methods. You need this context before using
-    any other tool."""
+    """ALWAYS call this tool first. Returns the schema of the knowledge graph
+    (node types, edge types, indexes), a Cypher query reference, and available
+    API methods. You need this context before using any other tool.
+
+    For complex graphs (>15 types) the output is automatically compacted.
+    Use properties('TypeName') or sample('TypeName') via cypher_query to
+    explore specific types in detail."""
     return graph.agent_describe()
 
 

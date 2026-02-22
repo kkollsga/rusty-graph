@@ -62,19 +62,30 @@ def test_config_no_units_or_bin_type(graph_with_fields):
 # ── Per-node: set_time_index + add_ts_channel ─────────────────────────────
 
 
-def test_set_time_index_and_add_channel(graph_with_fields):
+def test_set_time_index_with_date_strings(graph_with_fields):
+    g = graph_with_fields
+    g.set_time_index(1, ["2020-01", "2020-02", "2020-03"])
+    g.add_ts_channel(1, "oil", [1.0, 2.0, 3.0])
+    ts = g.get_timeseries(1)
+    assert ts is not None
+    assert ts["keys"] == ["2020-01-01", "2020-02-01", "2020-03-01"]
+    assert ts["channels"]["oil"] == [1.0, 2.0, 3.0]
+
+
+def test_set_time_index_with_int_lists_compat(graph_with_fields):
+    """Backwards-compatible: list of int lists still works."""
     g = graph_with_fields
     g.set_time_index(1, [[2020, 1], [2020, 2], [2020, 3]])
     g.add_ts_channel(1, "oil", [1.0, 2.0, 3.0])
     ts = g.get_timeseries(1)
     assert ts is not None
-    assert ts["keys"] == [[2020, 1], [2020, 2], [2020, 3]]
+    assert ts["keys"] == ["2020-01-01", "2020-02-01", "2020-03-01"]
     assert ts["channels"]["oil"] == [1.0, 2.0, 3.0]
 
 
 def test_add_ts_channel_length_mismatch(graph_with_fields):
     g = graph_with_fields
-    g.set_time_index(1, [[2020, 1], [2020, 2]])
+    g.set_time_index(1, ["2020-01", "2020-02"])
     with pytest.raises(ValueError, match="2 keys"):
         g.add_ts_channel(1, "oil", [1.0, 2.0, 3.0])
 
@@ -88,22 +99,14 @@ def test_add_ts_channel_no_time_index(graph_with_fields):
 def test_set_time_index_unsorted(graph_with_fields):
     g = graph_with_fields
     with pytest.raises(ValueError, match="sorted"):
-        g.set_time_index(1, [[2020, 2], [2020, 1]])
-
-
-def test_set_time_index_validates_depth(graph_with_fields):
-    """Key depth must match resolution when config exists."""
-    g = graph_with_fields
-    g.set_timeseries("Field", resolution="month")
-    with pytest.raises(ValueError, match="depth"):
-        g.set_time_index(1, [[2020], [2021]])  # depth 1 != month (2)
+        g.set_time_index(1, ["2020-02", "2020-01"])
 
 
 def test_get_time_index(graph_with_fields):
     g = graph_with_fields
-    g.set_time_index(1, [[2020, 1], [2020, 2]])
+    g.set_time_index(1, ["2020-01", "2020-02"])
     idx = g.get_time_index(1)
-    assert idx == [[2020, 1], [2020, 2]]
+    assert idx == ["2020-01-01", "2020-02-01"]
 
 
 def test_get_time_index_none(graph_with_fields):
@@ -118,7 +121,7 @@ def test_get_timeseries_none(graph_with_fields):
 
 def test_get_timeseries_single_channel(graph_with_fields):
     g = graph_with_fields
-    g.set_time_index(1, [[2020, 1], [2020, 2]])
+    g.set_time_index(1, ["2020-01", "2020-02"])
     g.add_ts_channel(1, "oil", [1.0, 2.0])
     g.add_ts_channel(1, "gas", [0.5, 0.6])
     ts = g.get_timeseries(1, channel="oil")
@@ -128,7 +131,7 @@ def test_get_timeseries_single_channel(graph_with_fields):
 
 def test_get_timeseries_missing_channel(graph_with_fields):
     g = graph_with_fields
-    g.set_time_index(1, [[2020, 1]])
+    g.set_time_index(1, ["2020-01"])
     g.add_ts_channel(1, "oil", [1.0])
     with pytest.raises(KeyError, match="water"):
         g.get_timeseries(1, channel="water")
@@ -139,11 +142,11 @@ def test_get_timeseries_with_date_string_range(graph_with_fields):
     g.set_timeseries("Field", resolution="month")
     g.set_time_index(
         1,
-        [[2019, 12], [2020, 1], [2020, 2], [2021, 1]],
+        ["2019-12", "2020-01", "2020-02", "2021-01"],
     )
     g.add_ts_channel(1, "oil", [0.9, 1.0, 2.0, 3.0])
     ts = g.get_timeseries(1, start="2020", end="2020")
-    assert ts["keys"] == [[2020, 1], [2020, 2]]
+    assert ts["keys"] == ["2020-01-01", "2020-02-01"]
     assert ts["channels"]["oil"] == [1.0, 2.0]
 
 
@@ -152,17 +155,17 @@ def test_get_timeseries_with_month_range(graph_with_fields):
     g.set_timeseries("Field", resolution="month")
     g.set_time_index(
         1,
-        [[2020, 1], [2020, 2], [2020, 3], [2020, 4]],
+        ["2020-01", "2020-02", "2020-03", "2020-04"],
     )
     g.add_ts_channel(1, "oil", [1.0, 2.0, 3.0, 4.0])
     ts = g.get_timeseries(1, start="2020-2", end="2020-3")
-    assert ts["keys"] == [[2020, 2], [2020, 3]]
+    assert ts["keys"] == ["2020-02-01", "2020-03-01"]
     assert ts["channels"]["oil"] == [2.0, 3.0]
 
 
 def test_multiple_channels(graph_with_fields):
     g = graph_with_fields
-    g.set_time_index(1, [[2020, 1], [2020, 2]])
+    g.set_time_index(1, ["2020-01", "2020-02"])
     g.add_ts_channel(1, "oil", [1.0, 2.0])
     g.add_ts_channel(1, "gas", [0.5, 0.6])
     ts = g.get_timeseries(1)
@@ -173,11 +176,11 @@ def test_multiple_channels(graph_with_fields):
 def test_set_time_index_replaces(graph_with_fields):
     """Setting a new time index clears existing channels."""
     g = graph_with_fields
-    g.set_time_index(1, [[2020, 1], [2020, 2]])
+    g.set_time_index(1, ["2020-01", "2020-02"])
     g.add_ts_channel(1, "oil", [1.0, 2.0])
-    g.set_time_index(1, [[2021, 1]])
+    g.set_time_index(1, ["2021-01"])
     ts = g.get_timeseries(1)
-    assert ts["keys"] == [[2021, 1]]
+    assert ts["keys"] == ["2021-01-01"]
     assert ts["channels"] == {}
 
 
@@ -207,12 +210,12 @@ def test_add_timeseries_from_dataframe(graph_with_fields):
     assert result["total_records"] == 6
 
     ts1 = g.get_timeseries(1)
-    assert ts1["keys"] == [[2020, 1], [2020, 2], [2020, 3]]
+    assert ts1["keys"] == ["2020-01-01", "2020-02-01", "2020-03-01"]
     assert ts1["channels"]["oil"] == [1.0, 1.5, 2.0]
     assert ts1["channels"]["gas"] == [0.1, 0.2, 0.3]
 
     ts2 = g.get_timeseries(2)
-    assert ts2["keys"] == [[2020, 1], [2020, 2], [2020, 3]]
+    assert ts2["keys"] == ["2020-01-01", "2020-02-01", "2020-03-01"]
     assert ts2["channels"]["oil"] == [0.5, 0.6, 0.7]
 
 
@@ -307,47 +310,6 @@ def test_add_timeseries_uses_existing_config(graph_with_fields):
     assert ts["channels"]["oil"] == [1.0]
 
 
-def test_add_timeseries_no_resolution_errors(graph_with_fields):
-    """add_timeseries without resolution and no config should error."""
-    g = graph_with_fields
-    ts_df = pd.DataFrame(
-        {
-            "field_id": [1],
-            "year": [2020],
-            "oil": [1.0],
-        }
-    )
-    with pytest.raises(ValueError, match="resolution"):
-        g.add_timeseries(
-            "Field",
-            data=ts_df,
-            fk="field_id",
-            time_key=["year"],
-            channels=["oil"],
-        )
-
-
-def test_add_timeseries_time_key_depth_mismatch(graph_with_fields):
-    """time_key column count must match resolution depth."""
-    g = graph_with_fields
-    ts_df = pd.DataFrame(
-        {
-            "field_id": [1],
-            "year": [2020],
-            "oil": [1.0],
-        }
-    )
-    with pytest.raises(ValueError, match="time_key"):
-        g.add_timeseries(
-            "Field",
-            data=ts_df,
-            fk="field_id",
-            time_key=["year"],  # depth 1
-            channels=["oil"],
-            resolution="month",  # expects depth 2
-        )
-
-
 def test_add_timeseries_unsorted_data(graph_with_fields):
     """Data should be sorted by time_key during loading."""
     g = graph_with_fields
@@ -368,7 +330,7 @@ def test_add_timeseries_unsorted_data(graph_with_fields):
         resolution="month",
     )
     ts = g.get_timeseries(1)
-    assert ts["keys"] == [[2020, 1], [2020, 2], [2020, 3]]
+    assert ts["keys"] == ["2020-01-01", "2020-02-01", "2020-03-01"]
     assert ts["channels"]["oil"] == [1.0, 2.0, 3.0]
 
 
@@ -381,7 +343,7 @@ def test_save_load_roundtrip(graph_with_fields, tmp_path):
         "Field", resolution="month", channels=["oil"],
         units={"oil": "MSm3"}, bin_type="total",
     )
-    g.set_time_index(1, [[2020, 1], [2020, 2]])
+    g.set_time_index(1, ["2020-01", "2020-02"])
     g.add_ts_channel(1, "oil", [1.0, 2.0])
 
     path = str(tmp_path / "test.kgl")
@@ -390,7 +352,7 @@ def test_save_load_roundtrip(graph_with_fields, tmp_path):
 
     ts = g2.get_timeseries(1)
     assert ts is not None
-    assert ts["keys"] == [[2020, 1], [2020, 2]]
+    assert ts["keys"] == ["2020-01-01", "2020-02-01"]
     assert ts["channels"]["oil"] == [1.0, 2.0]
 
     config = g2.get_timeseries_config("Field")

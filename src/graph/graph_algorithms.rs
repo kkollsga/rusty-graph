@@ -907,9 +907,10 @@ pub fn pagerank(
         node_to_idx[node.index()] = i;
     }
 
-    // Pre-build adjacency list: for each node i, store list of target indices
-    // This avoids graph traversal in the hot loop
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    // Pre-build reverse adjacency list: for each target j, store list of source indices.
+    // Pull-based formulation: each target reads from its in-neighbors independently,
+    // enabling rayon parallelization (no write conflicts on new_pr[j]).
+    let mut in_adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut out_degrees: Vec<usize> = vec![0; n];
     for edge in graph.graph.edge_references() {
         if let Some(types) = &connection_types {
@@ -919,7 +920,7 @@ pub fn pagerank(
         }
         let src_i = node_to_idx[edge.source().index()];
         let tgt_i = node_to_idx[edge.target().index()];
-        adj[src_i].push(tgt_i);
+        in_adj[tgt_i].push(src_i);
         out_degrees[src_i] += 1;
     }
 
@@ -944,6 +945,7 @@ pub fn pagerank(
 
     let teleport = (1.0 - damping_factor) / n as f64;
     let inv_n = 1.0 / n as f64;
+    let use_parallel = n >= 4096;
 
     // Iterative computation
     for _iteration in 0..max_iterations {
@@ -954,36 +956,53 @@ pub fn pagerank(
             }
         }
 
-        // Calculate dangling node contribution (vectorized over bitmask)
-        let mut dangling_sum: f64 = 0.0;
-        for i in 0..n {
-            if is_dangling[i] {
-                dangling_sum += pr[i];
-            }
-        }
+        // Calculate dangling node contribution
+        let dangling_sum: f64 = if use_parallel {
+            use rayon::prelude::*;
+            (0..n)
+                .into_par_iter()
+                .filter(|&i| is_dangling[i])
+                .map(|i| pr[i])
+                .sum()
+        } else {
+            (0..n).filter(|&i| is_dangling[i]).map(|i| pr[i]).sum()
+        };
         let base_score = teleport + damping_factor * dangling_sum * inv_n;
 
-        // Reset new_pr to base score (teleport + dangling contribution)
-        for score in new_pr.iter_mut() {
-            *score = base_score;
-        }
-
-        // Add contributions from outgoing links
-        // Using precomputed inv_out_degrees avoids division in hot loop
-        for i in 0..n {
-            let contrib = inv_out_degrees[i] * pr[i];
-            if contrib > 0.0 {
-                for &j in &adj[i] {
-                    new_pr[j] += contrib;
+        // Pull-based PageRank: each target j computes its own score independently.
+        // No write conflicts → parallelizable with rayon.
+        if use_parallel {
+            use rayon::prelude::*;
+            new_pr.par_iter_mut().enumerate().for_each(|(j, score)| {
+                let mut s = base_score;
+                for &src in &in_adj[j] {
+                    s += inv_out_degrees[src] * pr[src];
                 }
+                *score = s;
+            });
+        } else {
+            for j in 0..n {
+                let mut s = base_score;
+                for &src in &in_adj[j] {
+                    s += inv_out_degrees[src] * pr[src];
+                }
+                new_pr[j] = s;
             }
         }
 
         // Check for convergence (L1 norm)
-        let mut diff: f64 = 0.0;
-        for i in 0..n {
-            diff += (pr[i] - new_pr[i]).abs();
-        }
+        let diff: f64 = if use_parallel {
+            use rayon::prelude::*;
+            pr.par_iter()
+                .zip(new_pr.par_iter())
+                .map(|(a, b)| (a - b).abs())
+                .sum()
+        } else {
+            pr.iter()
+                .zip(new_pr.iter())
+                .map(|(a, b)| (a - b).abs())
+                .sum()
+        };
 
         std::mem::swap(&mut pr, &mut new_pr);
 
@@ -1288,6 +1307,9 @@ pub fn louvain_communities(
 
     let m = total_weight;
     let two_m = 2.0 * m;
+    // Precompute loop-invariant division terms as multipliers
+    let inv_m = 1.0 / m;
+    let resolution_over_two_m_sq = resolution / (two_m * two_m);
 
     // Vec-based community weight tracking (reused across iterations)
     let mut comm_weight: Vec<f64> = vec![0.0; n];
@@ -1308,6 +1330,7 @@ pub fn louvain_communities(
         for i in 0..n {
             let current_community = community[i];
             let k_i = degree[i];
+            let k_i_res = k_i * resolution_over_two_m_sq; // precomputed per node
 
             // Compute weight from node i to each neighboring community
             touched_comms.clear();
@@ -1335,9 +1358,8 @@ pub fn louvain_communities(
                 let sigma_cand = sigma_tot[cand_community];
                 let sigma_curr = sigma_tot[current_community] - k_i;
 
-                let gain_add = k_i_in_cand / m - resolution * sigma_cand * k_i / (two_m * two_m);
-                let loss_remove =
-                    k_i_in_current / m - resolution * sigma_curr * k_i / (two_m * two_m);
+                let gain_add = k_i_in_cand * inv_m - sigma_cand * k_i_res;
+                let loss_remove = k_i_in_current * inv_m - sigma_curr * k_i_res;
                 let delta = gain_add - loss_remove;
 
                 if delta > best_delta {

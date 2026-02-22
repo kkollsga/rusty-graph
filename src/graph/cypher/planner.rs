@@ -13,11 +13,286 @@ use std::collections::HashMap;
 pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<String, Value>) {
     push_where_into_match(query, params);
     push_limit_into_match(query, graph);
+    fuse_count_short_circuits(query);
     fuse_optional_match_aggregate(query);
     fuse_match_return_aggregate(query);
     fuse_vector_score_order_limit(query);
     fuse_order_by_top_k(query);
     reorder_predicates_by_cost(query);
+}
+
+/// Fuse MATCH + RETURN into O(1)/O(types) count short-circuits.
+///
+/// Detects three patterns and replaces them with specialized fused clauses:
+/// - `MATCH (n) RETURN count(n)` → `FusedCountAll` (O(1))
+/// - `MATCH (n) RETURN n.type, count(n)` → `FusedCountByType` (O(types))
+/// - `MATCH ()-[r]->() RETURN type(r), count(*)` → `FusedCountEdgesByType` (O(E) single pass)
+///
+/// Any trailing ORDER BY / LIMIT clauses are left in place since they
+/// operate on the tiny fused result set.
+fn fuse_count_short_circuits(query: &mut CypherQuery) {
+    if query.clauses.len() < 2 {
+        return;
+    }
+
+    // First two clauses must be Match + Return
+    let is_match_return = matches!(
+        (&query.clauses[0], &query.clauses[1]),
+        (Clause::Match(_), Clause::Return(_))
+    );
+    if !is_match_return {
+        return;
+    }
+
+    let match_clause = if let Clause::Match(m) = &query.clauses[0] {
+        m
+    } else {
+        return;
+    };
+    let return_clause = if let Clause::Return(r) = &query.clauses[1] {
+        r
+    } else {
+        return;
+    };
+
+    // No DISTINCT on RETURN
+    if return_clause.distinct {
+        return;
+    }
+
+    // Must have exactly 1 pattern
+    if match_clause.patterns.len() != 1 {
+        return;
+    }
+    let pat = &match_clause.patterns[0];
+
+    // ---- Pattern A: MATCH (n) RETURN count(n) / count(*) ----
+    //   Also handles: MATCH (n:Type) RETURN count(n)  → FusedCountTypedNode
+    if pat.elements.len() == 1 {
+        let node = match &pat.elements[0] {
+            PatternElement::Node(np) => np,
+            _ => return,
+        };
+        // Cannot short-circuit with property filters
+        if node.properties.is_some() {
+            return;
+        }
+
+        let node_var = node.variable.as_deref();
+
+        // Typed node count: MATCH (n:Type) RETURN count(n)
+        if let Some(ref node_type) = node.node_type {
+            if return_clause.items.len() == 1
+                && is_count_of_var_or_star(&return_clause.items[0].expression, node_var)
+            {
+                let alias = return_item_column_name(&return_clause.items[0]);
+                let nt = node_type.clone();
+                query.clauses.drain(0..2);
+                query.clauses.insert(
+                    0,
+                    Clause::FusedCountTypedNode {
+                        node_type: nt,
+                        alias,
+                    },
+                );
+            }
+            return;
+        }
+
+        if return_clause.items.len() == 1 {
+            // Single item: must be count(var) or count(*)
+            let item = &return_clause.items[0];
+            if !is_count_of_var_or_star(&item.expression, node_var) {
+                return;
+            }
+            let alias = return_item_column_name(item);
+            // Replace Match + Return with FusedCountAll; keep trailing clauses
+            query.clauses.drain(0..2);
+            query.clauses.insert(0, Clause::FusedCountAll { alias });
+            return;
+        }
+
+        if return_clause.items.len() == 2 {
+            // Two items: one must be n.type / labels(n), the other count(var) / count(*)
+            let (type_idx, count_idx) = identify_type_count_pair(&return_clause.items, node_var);
+            if let Some((ti, ci)) = type_idx.zip(count_idx) {
+                let type_alias = return_item_column_name(&return_clause.items[ti]);
+                let count_alias = return_item_column_name(&return_clause.items[ci]);
+                query.clauses.drain(0..2);
+                query.clauses.insert(
+                    0,
+                    Clause::FusedCountByType {
+                        type_alias,
+                        count_alias,
+                    },
+                );
+                return;
+            }
+        }
+        return;
+    }
+
+    // ---- Pattern C: MATCH ()-[r]->() RETURN type(r), count(*) ----
+    //   Also handles: MATCH ()-[r:Type]->() RETURN count(*)  → FusedCountTypedEdge
+    if pat.elements.len() == 3 {
+        let src_node = match &pat.elements[0] {
+            PatternElement::Node(np) => np,
+            _ => return,
+        };
+        let edge = match &pat.elements[1] {
+            PatternElement::Edge(ep) => ep,
+            _ => return,
+        };
+        let tgt_node = match &pat.elements[2] {
+            PatternElement::Node(np) => np,
+            _ => return,
+        };
+
+        // Both nodes must be anonymous/unfiltered
+        if src_node.node_type.is_some()
+            || src_node.properties.is_some()
+            || tgt_node.node_type.is_some()
+            || tgt_node.properties.is_some()
+        {
+            return;
+        }
+
+        // Edge must have no property filters or var_length
+        if edge.properties.is_some() || edge.var_length.is_some() {
+            return;
+        }
+
+        let edge_var = edge.variable.as_deref();
+
+        // Sub-pattern C1: Typed edge count — MATCH ()-[r:Type]->() RETURN count(*)
+        if let Some(ref edge_type) = edge.connection_type {
+            if return_clause.items.len() == 1
+                && is_count_of_var_or_star(&return_clause.items[0].expression, edge_var)
+            {
+                let alias = return_item_column_name(&return_clause.items[0]);
+                let et = edge_type.clone();
+                query.clauses.drain(0..2);
+                query.clauses.insert(
+                    0,
+                    Clause::FusedCountTypedEdge {
+                        edge_type: et,
+                        alias,
+                    },
+                );
+            }
+            return;
+        }
+
+        // Sub-pattern C2: Untyped edge count by type — MATCH ()-[r]->() RETURN type(r), count(*)
+        if return_clause.items.len() != 2 {
+            return;
+        }
+
+        // Identify type(r) and count(*) / count(r)
+        let (type_idx, count_idx) = identify_edge_type_count_pair(&return_clause.items, edge_var);
+        if let Some((ti, ci)) = type_idx.zip(count_idx) {
+            let type_alias = return_item_column_name(&return_clause.items[ti]);
+            let count_alias = return_item_column_name(&return_clause.items[ci]);
+            query.clauses.drain(0..2);
+            query.clauses.insert(
+                0,
+                Clause::FusedCountEdgesByType {
+                    type_alias,
+                    count_alias,
+                },
+            );
+        }
+    }
+}
+
+/// Check if an expression is `count(var)`, `count(*)`, or `count()` matching the given variable.
+fn is_count_of_var_or_star(expr: &Expression, node_var: Option<&str>) -> bool {
+    if let Expression::FunctionCall {
+        name,
+        args,
+        distinct,
+    } = expr
+    {
+        if name.to_lowercase() != "count" || *distinct {
+            return false;
+        }
+        if args.len() == 1 {
+            return match &args[0] {
+                Expression::Star => true,
+                Expression::Variable(v) => node_var.is_some_and(|nv| v == nv),
+                _ => false,
+            };
+        }
+    }
+    false
+}
+
+/// For `RETURN n.type, count(n)` — identify which item is the type accessor and which is the count.
+/// Returns (type_item_index, count_item_index) or (None, None) if pattern doesn't match.
+fn identify_type_count_pair(
+    items: &[ReturnItem],
+    node_var: Option<&str>,
+) -> (Option<usize>, Option<usize>) {
+    let mut type_idx = None;
+    let mut count_idx = None;
+
+    for (i, item) in items.iter().enumerate() {
+        if is_count_of_var_or_star(&item.expression, node_var) {
+            count_idx = Some(i);
+        } else if is_node_type_accessor(&item.expression, node_var) {
+            type_idx = Some(i);
+        }
+    }
+    (type_idx, count_idx)
+}
+
+/// Check if expression is `n.type`, `n.node_type`, `n.label`, or `labels(n)`.
+fn is_node_type_accessor(expr: &Expression, node_var: Option<&str>) -> bool {
+    match expr {
+        Expression::PropertyAccess { variable, property } => {
+            let is_type_prop = matches!(property.as_str(), "type" | "node_type" | "label");
+            is_type_prop && node_var.is_some_and(|nv| variable == nv)
+        }
+        Expression::FunctionCall { name, args, .. } => {
+            if name.to_lowercase() == "labels" && args.len() == 1 {
+                if let Expression::Variable(v) = &args[0] {
+                    return node_var.is_some_and(|nv| v == nv);
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// For `RETURN type(r), count(*)` — identify edge type function and count.
+fn identify_edge_type_count_pair(
+    items: &[ReturnItem],
+    edge_var: Option<&str>,
+) -> (Option<usize>, Option<usize>) {
+    let mut type_idx = None;
+    let mut count_idx = None;
+
+    for (i, item) in items.iter().enumerate() {
+        if is_count_of_var_or_star(&item.expression, edge_var) {
+            count_idx = Some(i);
+        } else if is_edge_type_function(&item.expression, edge_var) {
+            type_idx = Some(i);
+        }
+    }
+    (type_idx, count_idx)
+}
+
+/// Check if expression is `type(r)`.
+fn is_edge_type_function(expr: &Expression, edge_var: Option<&str>) -> bool {
+    if let Expression::FunctionCall { name, args, .. } = expr {
+        if name.to_lowercase() == "type" && args.len() == 1 {
+            if let Expression::Variable(v) = &args[0] {
+                return edge_var.is_some_and(|ev| v == ev);
+            }
+        }
+    }
+    false
 }
 
 /// Push simple equality predicates from WHERE into MATCH pattern properties.
@@ -313,28 +588,62 @@ fn fuse_match_return_aggregate(query: &mut CypherQuery) {
             continue;
         }
 
-        // Check MATCH: exactly 1 pattern with 3 elements (node-edge-node)
-        let (first_var, second_var, edge_has_props, second_has_props) =
-            if let Clause::Match(m) = &query.clauses[i] {
-                if m.patterns.len() != 1 || m.patterns[0].elements.len() != 3 {
+        // Check MATCH: exactly 1 pattern with 3 or 5 elements
+        let (first_var, second_var, edge_has_props, second_has_props) = if let Clause::Match(m) =
+            &query.clauses[i]
+        {
+            let n_elems = m.patterns[0].elements.len();
+            if m.patterns.len() != 1 || (n_elems != 3 && n_elems != 5) {
+                i += 1;
+                continue;
+            }
+            let pat = &m.patterns[0];
+            let first_var = match &pat.elements[0] {
+                PatternElement::Node(np) => np.variable.clone(),
+                _ => {
                     i += 1;
                     continue;
                 }
-                let pat = &m.patterns[0];
-                let first_var = match &pat.elements[0] {
-                    PatternElement::Node(np) => np.variable.clone(),
+            };
+            let edge_has_props = match &pat.elements[1] {
+                PatternElement::Edge(ep) => ep.properties.is_some() || ep.var_length.is_some(),
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+
+            if n_elems == 5 {
+                // 5-element: (a)-[e1]->(b)<-[e2]-(c)
+                // Middle node (elements[2]) must have no properties
+                let mid_has_props = match &pat.elements[2] {
+                    PatternElement::Node(np) => np.properties.is_some(),
                     _ => {
                         i += 1;
                         continue;
                     }
                 };
-                let edge_has_props = match &pat.elements[1] {
+                let edge2_has_props = match &pat.elements[3] {
                     PatternElement::Edge(ep) => ep.properties.is_some() || ep.var_length.is_some(),
                     _ => {
                         i += 1;
                         continue;
                     }
                 };
+                let (last_var, last_has_props) = match &pat.elements[4] {
+                    PatternElement::Node(np) => (np.variable.clone(), np.properties.is_some()),
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                if mid_has_props || edge2_has_props || last_has_props {
+                    i += 1;
+                    continue;
+                }
+                (first_var, last_var, edge_has_props, false)
+            } else {
+                // 3-element: (a)-[e]->(b)
                 let (second_var, second_has_props) = match &pat.elements[2] {
                     PatternElement::Node(np) => (np.variable.clone(), np.properties.is_some()),
                     _ => {
@@ -343,10 +652,11 @@ fn fuse_match_return_aggregate(query: &mut CypherQuery) {
                     }
                 };
                 (first_var, second_var, edge_has_props, second_has_props)
-            } else {
-                i += 1;
-                continue;
-            };
+            }
+        } else {
+            i += 1;
+            continue;
+        };
 
         // try_count_simple_pattern requires no property filters on edge or second node
         if edge_has_props || second_has_props {
@@ -419,7 +729,14 @@ fn fuse_match_return_aggregate(query: &mut CypherQuery) {
                         }
                     }
                 }
-                has_count && all_valid
+                // Don't fuse when ALL items are aggregates (no group keys).
+                // The standard execute_return_with_aggregation handles this
+                // correctly as a single-group aggregate over all rows.
+                let has_group_keys = r
+                    .items
+                    .iter()
+                    .any(|item| !is_aggregate_expression(&item.expression));
+                has_count && all_valid && has_group_keys
             }
         } else {
             false
@@ -1290,6 +1607,9 @@ impl TextScoreCollector {
             | Expression::Literal(_)
             | Expression::Parameter(_)
             | Expression::Star => Ok(()),
+            Expression::IsNull(inner) | Expression::IsNotNull(inner) => {
+                self.rewrite_expr(inner, params)
+            }
         }
     }
 

@@ -73,6 +73,30 @@ pub enum Clause {
         /// LIMIT k value
         limit: usize,
     },
+    /// Optimizer-generated: MATCH (n) RETURN count(n) → graph.node_count() in O(1).
+    FusedCountAll {
+        alias: String,
+    },
+    /// Optimizer-generated: MATCH (n) RETURN n.type, count(n) → iterate type_indices in O(types).
+    FusedCountByType {
+        type_alias: String,
+        count_alias: String,
+    },
+    /// Optimizer-generated: MATCH ()-[r]->() RETURN type(r), count(*) → single edge scan.
+    FusedCountEdgesByType {
+        type_alias: String,
+        count_alias: String,
+    },
+    /// Optimizer-generated: MATCH (n:Type) RETURN count(n) → type_indices[type].len() in O(1).
+    FusedCountTypedNode {
+        node_type: String,
+        alias: String,
+    },
+    /// Optimizer-generated: MATCH ()-[r:Type]->() RETURN count(*) → single-pass edge scan.
+    FusedCountTypedEdge {
+        edge_type: String,
+        alias: String,
+    },
 }
 
 // ============================================================================
@@ -218,6 +242,10 @@ pub enum Expression {
         variable: String,
         items: Vec<MapProjectionItem>,
     },
+    /// IS NULL expression: expr IS NULL → bool
+    IsNull(Box<Expression>),
+    /// IS NOT NULL expression: expr IS NOT NULL → bool
+    IsNotNull(Box<Expression>),
 }
 
 /// A single item in a map projection.

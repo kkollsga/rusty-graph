@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.53] - 2026-02-23
+
+### Added
+
+- `from_blueprint()` — build a complete KnowledgeGraph from a JSON blueprint and CSV files. Supports core nodes, sub-nodes, FK edges, junction edges, timeseries, geometry conversion, filters, manual nodes (from FK values), and auto-generated IDs
+- Cypher `date()` function — converts date strings to DateTime values: `date('2020-01-15')`
+- `property_types` on blueprint junction edges for automatic type conversion (e.g. epoch millis → DateTime)
+- Temporal join support: `ts_*()` functions accept DateTime edge properties and null values as date range arguments
+- Cypher `IS NULL` / `IS NOT NULL` now supported as expressions in RETURN/WITH (e.g. `RETURN x IS NULL AS flag`)
+- `agent_describe(detail, include_fluent)` — optional detail level adapts output to graph complexity. Graphs with >15 types auto-select compact mode (~5-8x smaller output). Fluent API docs excluded by default (opt-in via `include_fluent=True`)
+
+### Changed
+
+- **Performance**: `agent_describe()` 27x faster (1.3s → 48ms) via property index fast path and scan capping
+- **Performance**: `MATCH (n) RETURN count(n)` short-circuits to O(1) via `FusedCountAll` (was ~266ms, now sub-ms)
+- **Performance**: `MATCH (n) RETURN n.type, count(n)` short-circuits to O(types) via `FusedCountByType` (was ~727ms, now sub-ms)
+- **Performance**: `MATCH ()-[r]->() RETURN type(r), count(*)` short-circuits to O(E) single-pass via `FusedCountEdgesByType` (was ~822ms, now ~3ms)
+- **Performance**: `MATCH (n:Type) RETURN count(n)` short-circuits to O(1) via `FusedCountTypedNode` (reads type index length directly)
+- **Performance**: `MATCH ()-[r:Type]->() RETURN count(*)` short-circuits via `FusedCountTypedEdge` (single-pass edge filter)
+- **Performance**: Edge type counts cached in DirGraph with lazy invalidation on mutations
+- **Performance**: Multi-hop fused aggregation for 5-element patterns (e.g. `MATCH (a)-[]->(b)<-[]-(c) RETURN a.x, count(*)`) traverses without materializing intermediate rows
+- **Performance**: Regex `=~` operator caches compiled patterns per query execution (compile once, match many)
+- **Performance**: PageRank uses pull-based iteration with rayon parallelization for large graphs (3-4x speedup)
+- **Performance**: Louvain community detection precomputes loop-invariant division terms
+- Timeseries keys stored as `NaiveDate` instead of composite integer arrays (`Vec<Vec<i64>>`)
+- `set_time_index()` now accepts date strings (`['2020-01', '2020-02']`) in addition to integer lists
+- `get_time_index()` returns ISO date strings (`['2020-01-01', '2020-02-01']`) instead of integer lists
+- `get_timeseries()` keys returned as ISO date strings
+- `ts_series()` output uses ISO date strings for time keys (e.g. `"2020-01-01"` instead of `[2020, 1]`)
+- Null date arguments to `ts_*()` treated as open-ended ranges (no bound)
+- Timeseries data format bumped (v2); legacy files skip timeseries loading with a warning
+
+### Fixed
+
+- `MATCH (a)-[]->(b) RETURN count(*)` with all-aggregate RETURN (no group keys) now correctly returns a single row instead of per-node rows
+- `ORDER BY` on DateTime properties with `LIMIT` now returns correct results (FusedOrderByTopK optimization extended to handle DateTime, UniqueId, and Boolean sort keys)
+- `ORDER BY` on String/Point properties with `LIMIT` now falls back to standard sort instead of returning empty results
+
 ## [0.5.52] - 2026-02-22
 
 ### Added

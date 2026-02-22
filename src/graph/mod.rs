@@ -924,8 +924,8 @@ impl KnowledgeGraph {
                     .call_method0("tolist")?
                     .extract()?;
 
-                // Read time keys
-                let time_keys: Vec<Vec<i64>> = match &ts_cfg.time {
+                // Read time keys as NaiveDate
+                let time_keys: Vec<chrono::NaiveDate> = match &ts_cfg.time {
                     TimeSpec::StringColumn(col_name) => {
                         let raw: Vec<String> = data
                             .get_item(col_name)?
@@ -933,7 +933,7 @@ impl KnowledgeGraph {
                             .call_method0("tolist")?
                             .extract()?;
                         raw.iter()
-                            .map(|s| timeseries::parse_date_string(s))
+                            .map(|s| timeseries::parse_date_query(s).map(|(d, _)| d))
                             .collect::<Result<Vec<_>, _>>()
                             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
                     }
@@ -945,28 +945,40 @@ impl KnowledgeGraph {
                             int_cols.push(col);
                         }
                         (0..n_rows)
-                            .map(|i| int_cols.iter().map(|c| c[i]).collect())
-                            .collect()
+                            .map(|i| {
+                                let year = int_cols[0][i] as i32;
+                                let month = if int_cols.len() > 1 {
+                                    int_cols[1][i] as u32
+                                } else {
+                                    1
+                                };
+                                let day = if int_cols.len() > 2 {
+                                    int_cols[2][i] as u32
+                                } else {
+                                    1
+                                };
+                                timeseries::date_from_ymd(year, month, day)
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
                     }
                 };
 
-                // Auto-detect or validate resolution
-                let detected_depth = time_keys.first().map(|k| k.len()).unwrap_or(2);
+                // Resolve resolution
                 let resolved_resolution = if let Some(ref r) = ts_cfg.resolution {
-                    // Validate explicit resolution matches key depth
-                    let expected = timeseries::resolution_depth(r)
+                    timeseries::validate_resolution(r)
                         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
-                    if expected != detected_depth {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Resolution '{}' expects {} time components but data has {}",
-                            r, expected, detected_depth
-                        )));
-                    }
                     r.clone()
                 } else {
-                    timeseries::depth_to_resolution(detected_depth)
-                        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
-                        .to_string()
+                    // Auto-detect from time spec
+                    match &ts_cfg.time {
+                        TimeSpec::SeparateColumns(cols) => match cols.len() {
+                            1 => "year".to_string(),
+                            2 => "month".to_string(),
+                            _ => "day".to_string(),
+                        },
+                        TimeSpec::StringColumn(_) => "month".to_string(),
+                    }
                 };
 
                 // Read channel columns
@@ -1010,9 +1022,9 @@ impl KnowledgeGraph {
                     let mut sorted = row_indices.clone();
                     sorted.sort_by(|&a, &b| time_keys[a].cmp(&time_keys[b]));
 
-                    // Build NodeTimeseries
-                    let keys: Vec<Vec<i64>> =
-                        sorted.iter().map(|&i| time_keys[i].clone()).collect();
+                    // Build NodeTimeseries with NaiveDate keys
+                    let keys: Vec<chrono::NaiveDate> =
+                        sorted.iter().map(|&i| time_keys[i]).collect();
                     let channels: HashMap<String, Vec<f64>> = value_cols
                         .iter()
                         .map(|(name, col)| (name.clone(), sorted.iter().map(|&i| col[i]).collect()))
@@ -3520,8 +3532,15 @@ impl KnowledgeGraph {
     }
 
     /// Return a minimal XML string describing this graph for AI agents.
-    fn agent_describe(&self) -> PyResult<String> {
-        Ok(introspection::compute_agent_description(&self.inner))
+    #[pyo3(signature = (detail=None, include_fluent=false))]
+    fn agent_describe(&self, detail: Option<String>, include_fluent: bool) -> PyResult<String> {
+        let level = introspection::DetailLevel::from_str_opt(detail.as_deref())
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        Ok(introspection::compute_agent_description(
+            &self.inner,
+            level,
+            include_fluent,
+        ))
     }
 
     fn get_selection(&self) -> PyResult<String> {

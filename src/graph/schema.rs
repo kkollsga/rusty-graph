@@ -476,6 +476,10 @@ pub struct DirGraph {
     /// RwLock allows concurrent reads from parallel row evaluation.
     #[serde(skip)]
     pub(crate) wkt_cache: Arc<RwLock<HashMap<String, Arc<geo::Geometry<f64>>>>>,
+    /// Lazy edge-type count cache — avoids O(E) rescan for FusedCountEdgesByType.
+    /// Invalidated on edge mutations (add/remove).
+    #[serde(skip)]
+    pub(crate) edge_type_counts_cache: Arc<RwLock<Option<HashMap<String, usize>>>>,
     /// Columnar embedding storage: (node_type, property_name) -> EmbeddingStore.
     /// Stored separately from NodeData.properties — invisible to normal node API.
     /// Persisted as a separate section in v2 .kgl files.
@@ -522,6 +526,7 @@ impl DirGraph {
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
+            edge_type_counts_cache: Arc::new(RwLock::new(None)),
             embeddings: HashMap::new(),
             timeseries_configs: HashMap::new(),
             timeseries_store: HashMap::new(),
@@ -552,6 +557,7 @@ impl DirGraph {
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
+            edge_type_counts_cache: Arc::new(RwLock::new(None)),
             embeddings: HashMap::new(),
             timeseries_configs: HashMap::new(),
             timeseries_store: HashMap::new(),
@@ -757,6 +763,30 @@ impl DirGraph {
         for edge in self.graph.edge_weights() {
             self.connection_types.insert(edge.connection_type.clone());
         }
+    }
+
+    /// Compute edge counts grouped by connection type. Lazily cached.
+    pub fn get_edge_type_counts(&self) -> HashMap<String, usize> {
+        // Fast path: return cached result
+        {
+            let read = self.edge_type_counts_cache.read().unwrap();
+            if let Some(ref cached) = *read {
+                return cached.clone();
+            }
+        }
+        // Slow path: compute O(E) and cache
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for edge in self.graph.edge_weights() {
+            *counts.entry(edge.connection_type.clone()).or_insert(0) += 1;
+        }
+        let mut write = self.edge_type_counts_cache.write().unwrap();
+        *write = Some(counts.clone());
+        counts
+    }
+
+    /// Invalidate the edge type count cache (call after edge mutations).
+    pub(crate) fn invalidate_edge_type_counts_cache(&self) {
+        *self.edge_type_counts_cache.write().unwrap() = None;
     }
 
     // ========================================================================

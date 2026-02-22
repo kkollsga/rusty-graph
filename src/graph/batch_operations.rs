@@ -411,6 +411,9 @@ impl ConnectionBatchProcessor {
             }
         }
 
+        // Invalidate edge type count cache after edge mutations
+        graph.invalidate_edge_type_counts_cache();
+
         // Update metrics
         self.metrics.processing_time += start.elapsed().as_secs_f64();
         self.metrics.batch_count += 1;

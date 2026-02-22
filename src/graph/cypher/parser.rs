@@ -585,7 +585,16 @@ impl CypherParser {
 
         let left = self.parse_expression()?;
 
-        // Check for IS NULL / IS NOT NULL
+        // parse_expression() may have already consumed IS NULL / IS NOT NULL
+        // and returned Expression::IsNull/IsNotNull — convert to Predicate form
+        if let Expression::IsNull(inner) = left {
+            return Ok(Predicate::IsNull(*inner));
+        }
+        if let Expression::IsNotNull(inner) = left {
+            return Ok(Predicate::IsNotNull(*inner));
+        }
+
+        // Check for IS NULL / IS NOT NULL (fallback for non-expression contexts)
         if self.check(&CypherToken::Is) {
             self.advance(); // consume IS
             if self.check(&CypherToken::Not) {
@@ -722,7 +731,20 @@ impl CypherParser {
     /// Parse an expression with operator precedence:
     /// additive (+, -) < multiplicative (*, /) < unary (-) < primary
     fn parse_expression(&mut self) -> Result<Expression, String> {
-        self.parse_additive_expression()
+        let expr = self.parse_additive_expression()?;
+        // Check for IS NULL / IS NOT NULL postfix
+        if self.peek() == Some(&CypherToken::Is) {
+            self.advance(); // consume IS
+            if self.peek() == Some(&CypherToken::Not) {
+                self.advance(); // consume NOT
+                self.expect(&CypherToken::Null)?;
+                return Ok(Expression::IsNotNull(Box::new(expr)));
+            } else {
+                self.expect(&CypherToken::Null)?;
+                return Ok(Expression::IsNull(Box::new(expr)));
+            }
+        }
+        Ok(expr)
     }
 
     fn parse_additive_expression(&mut self) -> Result<Expression, String> {
