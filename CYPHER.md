@@ -120,12 +120,12 @@ graph.cypher("""
 | `nodes(p)` | Nodes in a path |
 | `relationships(p)` | Relationships in a path |
 | `point(lat, lon)` | Create a geographic point |
-| `distance(a, b)` | Haversine distance (km); geometry-aware |
+| `distance(a, b)` | Geodesic distance (m); geometry-aware |
 | `contains(a, b)` | Does a's geometry contain b? |
 | `intersects(a, b)` | Do geometries intersect? |
 | `centroid(n)` | Centroid of geometry → Point |
-| `area(n)` | Geodesic area (km²) |
-| `perimeter(n)` | Geodesic perimeter/length (km) |
+| `area(n)` | Geodesic area (m²) |
+| `perimeter(n)` | Geodesic perimeter/length (m) |
 | `latitude(point)` | Extract latitude from point |
 | `longitude(point)` | Extract longitude from point |
 | `text_score(n, prop, query)` | Semantic similarity (auto-embeds query text; requires `set_embedder()`) |
@@ -147,13 +147,13 @@ Built-in spatial functions for geographic queries. All node-aware functions auto
 | Function | Returns | Description |
 |----------|---------|-------------|
 | `point(lat, lon)` | Point | Create a geographic point |
-| `distance(a, b)` | Float (km) | Haversine distance; geometry-aware (0 if inside/touching) |
-| `distance(lat1, lon1, lat2, lon2)` | Float (km) | Haversine distance (4-arg shorthand) |
+| `distance(a, b)` | Float (m) | Geodesic distance (WGS84); geometry-aware (0 if inside/touching) |
+| `distance(lat1, lon1, lat2, lon2)` | Float (m) | Geodesic distance (4-arg shorthand) |
 | `contains(a, b)` | Boolean | Does a's geometry contain b? (point-in-polygon or geometry containment) |
 | `intersects(a, b)` | Boolean | Do geometries intersect? |
 | `centroid(n)` | Point | Centroid of geometry (node or WKT string) |
-| `area(n)` | Float (km²) | Geodesic area of polygon (node or WKT string) |
-| `perimeter(n)` | Float (km) | Geodesic perimeter/length (node or WKT string) |
+| `area(n)` | Float (m²) | Geodesic area of polygon (node or WKT string) |
+| `perimeter(n)` | Float (m) | Geodesic perimeter/length (node or WKT string) |
 | `latitude(point)` | Float | Extract latitude component |
 | `longitude(point)` | Float | Extract longitude component |
 
@@ -175,7 +175,7 @@ graph.cypher("""
 
 graph.cypher("""
     MATCH (n:Field)
-    RETURN n.name, area(n) AS area_km2, centroid(n) AS center
+    RETURN n.name, area(n) AS area_m2, centroid(n) AS center
 """)
 
 # Geometry-aware distance
@@ -186,14 +186,14 @@ graph.cypher("""
 
 graph.cypher("""
     MATCH (n:Field)
-    WHERE distance(point(60.5, 3.5), n.geometry) < 10.0
+    WHERE distance(point(60.5, 3.5), n.geometry) < 10000.0
     RETURN n.name
 """)  # 0 if point inside polygon, closest boundary otherwise
 
-# Distance filtering — cities within 100km of Oslo
+# Distance filtering — cities within 100 km of Oslo
 graph.cypher("""
     MATCH (n:City)
-    WHERE distance(n, point(59.91, 10.75)) < 100.0
+    WHERE distance(n, point(59.91, 10.75)) < 100000.0
     RETURN n.name
     ORDER BY distance(n, point(59.91, 10.75))
 """)

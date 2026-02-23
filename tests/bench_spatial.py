@@ -171,13 +171,13 @@ def run_benchmarks():
     bench("area(a) — 50 rows",
           lambda: g_small.cypher("""
               MATCH (a:Area)
-              RETURN a.name, area(a) AS km2
+              RETURN a.name, area(a) AS m2
           """).to_list())
 
     bench("perimeter(a) — 50 rows",
           lambda: g_small.cypher("""
               MATCH (a:Area)
-              RETURN a.name, perimeter(a) AS km
+              RETURN a.name, perimeter(a) AS m
           """).to_list())
 
     # ── Medium graph: 200 areas × 500 cities ──────────────────────────
@@ -210,13 +210,13 @@ def run_benchmarks():
     bench("centroid + area + perimeter — 200 rows",
           lambda: g_med.cypher("""
               MATCH (a:Area)
-              RETURN a.name, centroid(a) AS c, area(a) AS km2, perimeter(a) AS km
+              RETURN a.name, centroid(a) AS c, area(a) AS m2, perimeter(a) AS m
           """).to_list())
 
     bench("distance(point, a.geometry) — 200 rows, geom-aware",
           lambda: g_med.cypher("""
               MATCH (a:Area)
-              WHERE distance(point(60.0, 10.0), a.geometry) < 100
+              WHERE distance(point(60.0, 10.0), a.geometry) < 100000
               RETURN a.name
           """).to_list())
 

@@ -1107,12 +1107,12 @@ graph.type_filter('Field').near_point_km(center_lat=60.5, center_lon=3.2, max_di
 # Cypher distance between nodes — resolves via location, falls back to geometry centroid
 graph.cypher("""
     MATCH (a:Field {name:'Troll'}), (b:Field {name:'Draugen'})
-    RETURN distance(a, b) AS dist_km
+    RETURN distance(a, b) AS dist_m
 """)
 
 # Node-aware spatial functions — auto-resolve geometry from spatial config
 graph.cypher("MATCH (c:City), (a:Area) WHERE contains(a, c) RETURN c.name, a.name")
-graph.cypher("MATCH (n:Field) RETURN n.name, area(n) AS km2, centroid(n) AS center")
+graph.cypher("MATCH (n:Field) RETURN n.name, area(n) AS m2, centroid(n) AS center")
 graph.cypher("MATCH (a:Field), (b:Field) WHERE intersects(a, b) RETURN a.name, b.name")
 
 # Geometry-aware distance — 0 if inside/touching, boundary distance otherwise

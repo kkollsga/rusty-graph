@@ -98,13 +98,13 @@ class TestPoint:
 
 class TestDistance:
     def test_distance_two_points(self, geo_graph):
-        """Oslo to Bergen should be ~305 km."""
+        """Oslo to Bergen should be ~305 km (~305,000 m)."""
         rows = geo_graph.cypher(
             "MATCH (n:City) WHERE n.title = 'Oslo' "
             "RETURN distance(point(59.91, 10.75), point(60.39, 5.32)) AS d"
         ).to_list()
         d = rows[0]["d"]
-        assert 300 < d < 310
+        assert 300_000 < d < 310_000
 
     def test_distance_four_args(self, geo_graph):
         """4-arg shorthand should give same result."""
@@ -113,7 +113,7 @@ class TestDistance:
             "RETURN distance(59.91, 10.75, 60.39, 5.32) AS d"
         ).to_list()
         d = rows[0]["d"]
-        assert 300 < d < 310
+        assert 300_000 < d < 310_000
 
     def test_distance_same_point(self, geo_graph):
         rows = geo_graph.cypher(
@@ -126,7 +126,7 @@ class TestDistance:
         """Filter cities within 50km of Oslo."""
         rows = geo_graph.cypher(
             "MATCH (n:City) "
-            "WHERE distance(point(n.latitude, n.longitude), point(59.91, 10.75)) < 50.0 "
+            "WHERE distance(point(n.latitude, n.longitude), point(59.91, 10.75)) < 50000.0 "
             "RETURN n.title AS name ORDER BY name"
         ).to_list()
         names = [r["name"] for r in rows]
@@ -143,7 +143,7 @@ class TestDistance:
             "ORDER BY dist"
         ).to_list()
         assert rows[0]["name"] == "Oslo"
-        assert rows[0]["dist"] < 1.0
+        assert rows[0]["dist"] < 1000.0
 
     def test_distance_with_traversal(self, geo_graph):
         """Combine graph traversal with spatial filtering."""
@@ -156,7 +156,7 @@ class TestDistance:
         ).to_list()
         assert len(rows) >= 1
         # Closest pair should be Oslo-Drammen (~40km)
-        assert rows[0]["dist"] < 50.0
+        assert rows[0]["dist"] < 50_000.0
 
     def test_distance_wrong_arg_count(self, geo_graph):
         with pytest.raises(Exception, match="distance.*requires"):
@@ -321,5 +321,5 @@ class TestSpatialAggregation:
             "RETURN min(distance(point(n.latitude, n.longitude), point(59.91, 10.75))) AS min_d, "
             "max(distance(point(n.latitude, n.longitude), point(59.91, 10.75))) AS max_d"
         ).to_list()
-        assert rows[0]["min_d"] < 1.0  # Oslo to itself ~ 0
-        assert rows[0]["max_d"] > 300  # Farthest city > 300km
+        assert rows[0]["min_d"] < 1000.0  # Oslo to itself ~ 0
+        assert rows[0]["max_d"] > 300_000  # Farthest city > 300km

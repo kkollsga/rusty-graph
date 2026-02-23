@@ -446,14 +446,14 @@ class TestNodeAwareSpatialFunctions:
         assert abs(c['longitude'] - 5.0) < 0.1
 
     def test_area_node(self, field_graph):
-        """area(n) returns km² from geometry config."""
+        """area(n) returns m² from geometry config."""
         rv = field_graph.cypher("""
             MATCH (n:Field {name: 'Troll'})
             RETURN area(n) AS a
         """)
         a = rv[0]['a']
         assert isinstance(a, float)
-        assert a > 0  # ~1 degree × 1 degree polygon → >1000 km²
+        assert a > 0  # ~1 degree × 1 degree polygon (area in m²)
 
     def test_area_wkt(self):
         """area('POLYGON(...)') backward compat."""
@@ -467,14 +467,14 @@ class TestNodeAwareSpatialFunctions:
         assert rv[0]['a'] > 0
 
     def test_perimeter_node(self, field_graph):
-        """perimeter(n) returns km from geometry config."""
+        """perimeter(n) returns meters from geometry config."""
         rv = field_graph.cypher("""
             MATCH (n:Field {name: 'Troll'})
             RETURN perimeter(n) AS p
         """)
         p = rv[0]['p']
         assert isinstance(p, float)
-        assert p > 0  # perimeter of ~1° × 1° polygon
+        assert p > 0  # perimeter of ~1° × 1° polygon (meters)
 
     def test_contains_named_shape(self, well_graph):
         """contains(a.boundary, point(...)) with named shapes."""

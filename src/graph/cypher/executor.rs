@@ -53,7 +53,7 @@ struct DistanceFilterSpec {
     lon_prop: String,
     center_lat: f64,
     center_lon: f64,
-    threshold_km: f64,
+    threshold: f64,
     less_than: bool,
     inclusive: bool,
 }
@@ -1469,17 +1469,17 @@ impl<'a> CypherExecutor<'a> {
                     Some(v) => v,
                     None => return false,
                 };
-                let dist = spatial::haversine_distance(lat, lon, spec.center_lat, spec.center_lon);
+                let dist = spatial::geodesic_distance(lat, lon, spec.center_lat, spec.center_lon);
                 if spec.less_than {
                     if spec.inclusive {
-                        dist <= spec.threshold_km
+                        dist <= spec.threshold
                     } else {
-                        dist < spec.threshold_km
+                        dist < spec.threshold
                     }
                 } else if spec.inclusive {
-                    dist >= spec.threshold_km
+                    dist >= spec.threshold
                 } else {
-                    dist > spec.threshold_km
+                    dist > spec.threshold
                 }
             });
             self.check_deadline()?;
@@ -1856,14 +1856,13 @@ impl<'a> CypherExecutor<'a> {
                 };
 
                 // threshold must be a literal number
-                let threshold_km = match threshold_expr {
+                let threshold = match threshold_expr {
                     Expression::Literal(val) => value_operations::value_to_f64(val)?,
                     _ => return None,
                 };
 
                 // dist_expr must be distance(...)
-                let spec =
-                    Self::extract_distance_call(dist_expr, threshold_km, less_than, inclusive)?;
+                let spec = Self::extract_distance_call(dist_expr, threshold, less_than, inclusive)?;
                 Some((spec, None))
             }
             Predicate::And(left, right) => {
@@ -1884,7 +1883,7 @@ impl<'a> CypherExecutor<'a> {
     /// Extract a DistanceFilterSpec from a `distance(...)` function call expression.
     fn extract_distance_call(
         expr: &Expression,
-        threshold_km: f64,
+        threshold: f64,
         less_than: bool,
         inclusive: bool,
     ) -> Option<DistanceFilterSpec> {
@@ -1903,7 +1902,7 @@ impl<'a> CypherExecutor<'a> {
                         lon_prop,
                         center_lat,
                         center_lon,
-                        threshold_km,
+                        threshold,
                         less_than,
                         inclusive,
                     })
@@ -1923,7 +1922,7 @@ impl<'a> CypherExecutor<'a> {
                         lon_prop,
                         center_lat,
                         center_lon,
-                        threshold_km,
+                        threshold,
                         less_than,
                         inclusive,
                     })
@@ -3218,7 +3217,7 @@ impl<'a> CypherExecutor<'a> {
                         (
                             Some(ResolvedSpatial::Point(lat1, lon1)),
                             Some(ResolvedSpatial::Point(lat2, lon2)),
-                        ) => Ok(Value::Float64(spatial::haversine_distance(
+                        ) => Ok(Value::Float64(spatial::geodesic_distance(
                             lat1, lon1, lat2, lon2,
                         ))),
                         (
@@ -3228,13 +3227,13 @@ impl<'a> CypherExecutor<'a> {
                         | (
                             Some(ResolvedSpatial::Geometry(g, _)),
                             Some(ResolvedSpatial::Point(lat, lon)),
-                        ) => Ok(Value::Float64(spatial::point_to_geometry_distance_km(
+                        ) => Ok(Value::Float64(spatial::point_to_geometry_distance_m(
                             lat, lon, &g,
                         )?)),
                         (
                             Some(ResolvedSpatial::Geometry(g1, _)),
                             Some(ResolvedSpatial::Geometry(g2, _)),
-                        ) => Ok(Value::Float64(spatial::geometry_to_geometry_distance_km(
+                        ) => Ok(Value::Float64(spatial::geometry_to_geometry_distance_m(
                             &g1, &g2,
                         )?)),
                         _ => Err("distance() with 2 args requires Point values or nodes \
@@ -3255,7 +3254,7 @@ impl<'a> CypherExecutor<'a> {
                     let lon2 =
                         value_operations::value_to_f64(&self.evaluate_expression(&args[3], row)?)
                             .ok_or("distance(): args must be numeric")?;
-                    Ok(Value::Float64(spatial::haversine_distance(
+                    Ok(Value::Float64(spatial::geodesic_distance(
                         lat1, lon1, lat2, lon2,
                     )))
                 }
@@ -3406,7 +3405,7 @@ impl<'a> CypherExecutor<'a> {
                     .ok_or("area(): arg must resolve to a polygon geometry")?;
                 match &resolved {
                     ResolvedSpatial::Geometry(g, _) => {
-                        Ok(Value::Float64(spatial::geometry_area_km2(g)?))
+                        Ok(Value::Float64(spatial::geometry_area_m2(g)?))
                     }
                     ResolvedSpatial::Point(_, _) => {
                         Err("area(): arg must be a polygon geometry, not a point".into())
@@ -3422,7 +3421,7 @@ impl<'a> CypherExecutor<'a> {
                     .ok_or("perimeter(): arg must resolve to a geometry")?;
                 match &resolved {
                     ResolvedSpatial::Geometry(g, _) => {
-                        Ok(Value::Float64(spatial::geometry_perimeter_km(g)?))
+                        Ok(Value::Float64(spatial::geometry_perimeter_m(g)?))
                     }
                     ResolvedSpatial::Point(_, _) => {
                         Err("perimeter(): arg must be a geometry, not a point".into())

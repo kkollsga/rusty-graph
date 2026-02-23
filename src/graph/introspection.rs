@@ -658,7 +658,7 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
         xml.push_str("    <timeseries hint=\"ts_avg(n.ch, start?, end?), ts_sum, ts_min, ts_max, ts_count, ts_first, ts_last, ts_delta, ts_at, ts_series — date args: 'YYYY', 'YYYY-M', 'YYYY-M-D' or DateTime properties. NaN skipped.\"/>\n");
     }
     if has_spatial {
-        xml.push_str("    <spatial hint=\"distance(a,b), contains(a,b), intersects(a,b), centroid(n), area(n), perimeter(n)\"/>\n");
+        xml.push_str("    <spatial hint=\"distance(a,b)→m, contains(a,b), intersects(a,b), centroid(n), area(n)→m², perimeter(n)→m\"/>\n");
     }
     if has_embeddings {
         xml.push_str(

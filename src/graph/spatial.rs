@@ -2,8 +2,8 @@
 // Provides spatial filtering and geometry operations on graph nodes
 
 use geo::geometry::{Geometry, LineString, Point, Polygon};
-use geo::Geodesic;
 use geo::{Centroid, Closest, ClosestPoint, Contains, GeodesicArea, Intersects, Length, Rect};
+use geo::{Distance, Geodesic};
 use petgraph::graph::NodeIndex;
 use wkt::TryFromWkt;
 
@@ -120,30 +120,15 @@ pub fn near_point(
     Ok(matching_nodes)
 }
 
-/// Earth's mean radius in kilometers
-const EARTH_RADIUS_KM: f64 = 6371.0;
-
-/// Calculate the Haversine distance between two points in kilometers
-///
-/// This gives the great-circle distance between two points on a sphere,
-/// which is more accurate than Euclidean distance for geographic coordinates.
-pub(crate) fn haversine_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    let lat1_rad = lat1.to_radians();
-    let lat2_rad = lat2.to_radians();
-    let delta_lat = (lat2 - lat1).to_radians();
-    let delta_lon = (lon2 - lon1).to_radians();
-
-    let a = (delta_lat / 2.0).sin().powi(2)
-        + lat1_rad.cos() * lat2_rad.cos() * (delta_lon / 2.0).sin().powi(2);
-    let c = 2.0 * a.sqrt().asin();
-
-    EARTH_RADIUS_KM * c
+/// Geodesic distance between two points in meters (WGS84 ellipsoid, Karney algorithm).
+#[inline]
+pub(crate) fn geodesic_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    Geodesic::distance(Point::new(lon1, lat1), Point::new(lon2, lat2))
 }
 
 /// Filter nodes within a certain distance of a point (in kilometers)
 ///
-/// Uses the Haversine formula to calculate accurate great-circle distances
-/// on the Earth's surface.
+/// Uses geodesic distance (WGS84 ellipsoid) for accurate calculations.
 ///
 /// # Arguments
 /// * `graph` - The graph to filter
@@ -152,7 +137,7 @@ pub(crate) fn haversine_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> 
 /// * `lon_field` - Name of the longitude field
 /// * `center_lat` - Center point latitude
 /// * `center_lon` - Center point longitude
-/// * `max_distance_km` - Maximum distance in kilometers
+/// * `max_distance_km` - Maximum distance in kilometers (converted to meters internally)
 pub fn near_point_km(
     graph: &DirGraph,
     selection: &CurrentSelection,
@@ -181,8 +166,8 @@ pub fn near_point_km(
             let lon = node.properties.get(lon_field).and_then(value_to_f64);
 
             if let (Some(lat), Some(lon)) = (lat, lon) {
-                let distance = haversine_distance(center_lat, center_lon, lat, lon);
-                if distance <= max_distance_km {
+                let distance = geodesic_distance(center_lat, center_lon, lat, lon);
+                if distance <= max_distance_km * 1000.0 {
                     matching_nodes.push(node_idx);
                 }
             }
@@ -224,19 +209,19 @@ pub(crate) fn geometry_centroid(geom: &Geometry<f64>) -> Result<(f64, f64), Stri
     }
 }
 
-/// Geodesic area of a geometry in km²
-pub(crate) fn geometry_area_km2(geom: &Geometry<f64>) -> Result<f64, String> {
+/// Geodesic area of a geometry in m² (WGS84 ellipsoid).
+pub(crate) fn geometry_area_m2(geom: &Geometry<f64>) -> Result<f64, String> {
     let area_m2 = match geom {
         Geometry::Polygon(p) => p.geodesic_area_unsigned(),
         Geometry::MultiPolygon(mp) => mp.geodesic_area_unsigned(),
         Geometry::Rect(r) => rect_to_polygon(r).geodesic_area_unsigned(),
         _ => return Err("area() requires a polygon geometry".into()),
     };
-    Ok(area_m2 / 1_000_000.0) // m² → km²
+    Ok(area_m2)
 }
 
-/// Geodesic perimeter/length of a geometry in km
-pub(crate) fn geometry_perimeter_km(geom: &Geometry<f64>) -> Result<f64, String> {
+/// Geodesic perimeter/length of a geometry in meters (WGS84 ellipsoid).
+pub(crate) fn geometry_perimeter_m(geom: &Geometry<f64>) -> Result<f64, String> {
     let length_m = match geom {
         Geometry::Polygon(p) => p.exterior().length::<Geodesic>(),
         Geometry::MultiPolygon(mp) => mp.iter().map(|p| p.exterior().length::<Geodesic>()).sum(),
@@ -245,7 +230,7 @@ pub(crate) fn geometry_perimeter_km(geom: &Geometry<f64>) -> Result<f64, String>
         Geometry::Rect(r) => rect_to_polygon(r).exterior().length::<Geodesic>(),
         _ => return Err("perimeter() requires a polygon or line geometry".into()),
     };
-    Ok(length_m / 1000.0) // m → km
+    Ok(length_m)
 }
 
 /// Does geometry contain a point?
@@ -273,8 +258,8 @@ pub(crate) fn geometry_contains_geometry(a: &Geometry<f64>, b: &Geometry<f64>) -
     }
 }
 
-/// Distance from a point to a geometry: 0 if inside, haversine to closest boundary otherwise.
-pub(crate) fn point_to_geometry_distance_km(
+/// Distance from a point to a geometry in meters: 0 if inside, geodesic to closest boundary.
+pub(crate) fn point_to_geometry_distance_m(
     lat: f64,
     lon: f64,
     geom: &Geometry<f64>,
@@ -294,14 +279,14 @@ pub(crate) fn point_to_geometry_distance_km(
         _ => return Err("Unsupported geometry for distance".into()),
     };
     match closest {
-        Closest::SinglePoint(cp) => Ok(haversine_distance(lat, lon, cp.y(), cp.x())),
-        Closest::Intersection(cp) => Ok(haversine_distance(lat, lon, cp.y(), cp.x())),
+        Closest::SinglePoint(cp) => Ok(geodesic_distance(lat, lon, cp.y(), cp.x())),
+        Closest::Intersection(cp) => Ok(geodesic_distance(lat, lon, cp.y(), cp.x())),
         Closest::Indeterminate => Err("Cannot determine closest point".into()),
     }
 }
 
-/// Distance between two geometries: 0 if intersecting, centroid-to-centroid otherwise.
-pub(crate) fn geometry_to_geometry_distance_km(
+/// Distance between two geometries in meters: 0 if intersecting, centroid-to-centroid otherwise.
+pub(crate) fn geometry_to_geometry_distance_m(
     g1: &Geometry<f64>,
     g2: &Geometry<f64>,
 ) -> Result<f64, String> {
@@ -310,13 +295,12 @@ pub(crate) fn geometry_to_geometry_distance_km(
     }
     let (lat1, lon1) = geometry_centroid(g1)?;
     let (lat2, lon2) = geometry_centroid(g2)?;
-    Ok(haversine_distance(lat1, lon1, lat2, lon2))
+    Ok(geodesic_distance(lat1, lon1, lat2, lon2))
 }
 
 /// Filter nodes within distance of a point using WKT geometry centroids
 ///
-/// Uses the Haversine formula to calculate accurate great-circle distances
-/// from geometry centroids to a query point.
+/// Uses geodesic distance (WGS84 ellipsoid) from geometry centroids to a query point.
 ///
 /// # Arguments
 /// * `graph` - The graph to filter
@@ -324,7 +308,7 @@ pub(crate) fn geometry_to_geometry_distance_km(
 /// * `geometry_field` - Name of the field containing WKT geometry
 /// * `center_lat` - Center point latitude
 /// * `center_lon` - Center point longitude
-/// * `max_distance_km` - Maximum distance in kilometers
+/// * `max_distance_km` - Maximum distance in kilometers (converted to meters internally)
 pub fn near_point_km_from_geometry(
     graph: &DirGraph,
     selection: &CurrentSelection,
@@ -352,8 +336,8 @@ pub fn near_point_km_from_geometry(
 
             if let Some(Value::String(wkt_str)) = wkt_value {
                 if let Ok((lat, lon)) = wkt_centroid(wkt_str) {
-                    let distance = haversine_distance(center_lat, center_lon, lat, lon);
-                    if distance <= max_distance_km {
+                    let distance = geodesic_distance(center_lat, center_lon, lat, lon);
+                    if distance <= max_distance_km * 1000.0 {
                         matching_nodes.push(node_idx);
                     }
                 }
