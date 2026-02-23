@@ -2113,44 +2113,26 @@ class KnowledgeGraph:
         """
         ...
 
-    def near_point_km(
+    def near_point_m(
         self,
         center_lat: float,
         center_lon: float,
-        max_distance_km: float,
+        max_distance_m: float,
         lat_field: Optional[str] = None,
         lon_field: Optional[str] = None,
     ) -> KnowledgeGraph:
-        """Filter nodes within a distance (in km) using the Haversine formula.
+        """Filter nodes within a distance (in meters) using geodesic calculation.
 
-        More accurate than :meth:`near_point`.
-
-        Args:
-            center_lat: Center latitude.
-            center_lon: Center longitude.
-            max_distance_km: Maximum distance in kilometres.
-            lat_field: Latitude property name. Default ``'latitude'``.
-            lon_field: Longitude property name. Default ``'longitude'``.
-
-        Returns:
-            A new KnowledgeGraph with nearby nodes.
-        """
-        ...
-
-    def near_point_km_from_wkt(
-        self,
-        center_lat: float,
-        center_lon: float,
-        max_distance_km: float,
-        geometry_field: Optional[str] = None,
-    ) -> KnowledgeGraph:
-        """Filter nodes by distance using WKT geometry centroids.
+        Uses WGS84 ellipsoid for accurate Earth-surface distances.
+        Falls back to geometry centroid when lat/lon fields are missing
+        but a WKT geometry is configured via ``set_spatial``.
 
         Args:
             center_lat: Center latitude.
             center_lon: Center longitude.
-            max_distance_km: Maximum distance in kilometres.
-            geometry_field: WKT geometry property name. Default ``'geometry'``.
+            max_distance_m: Maximum distance in meters.
+            lat_field: Latitude property name. Default from spatial config or ``'latitude'``.
+            lon_field: Longitude property name. Default from spatial config or ``'longitude'``.
 
         Returns:
             A new KnowledgeGraph with nearby nodes.

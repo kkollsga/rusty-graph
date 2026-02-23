@@ -32,6 +32,7 @@ pub fn within_bounds(
     max_lat: f64,
     min_lon: f64,
     max_lon: f64,
+    geom_fallback: Option<&str>,
 ) -> Result<Vec<NodeIndex>, String> {
     // Get nodes from current selection
     let level_count = selection.get_level_count();
@@ -49,11 +50,7 @@ pub fn within_bounds(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            let lat = node.properties.get(lat_field).and_then(value_to_f64);
-            let lon = node.properties.get(lon_field).and_then(value_to_f64);
-
-            if let (Some(lat), Some(lon)) = (lat, lon) {
-                // Use simple numeric comparison
+            if let Some((lat, lon)) = node_location(node, lat_field, lon_field, geom_fallback) {
                 if lat >= min_lat && lat <= max_lat && lon >= min_lon && lon <= max_lon {
                     matching_nodes.push(node_idx);
                 }
@@ -78,6 +75,7 @@ pub fn within_bounds(
 /// * `center_lat` - Center point latitude
 /// * `center_lon` - Center point longitude
 /// * `max_distance` - Maximum distance in degrees
+#[allow(clippy::too_many_arguments)]
 pub fn near_point(
     graph: &DirGraph,
     selection: &CurrentSelection,
@@ -86,6 +84,7 @@ pub fn near_point(
     center_lat: f64,
     center_lon: f64,
     max_distance: f64,
+    geom_fallback: Option<&str>,
 ) -> Result<Vec<NodeIndex>, String> {
     // Get nodes from current selection
     let level_count = selection.get_level_count();
@@ -102,10 +101,7 @@ pub fn near_point(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            let lat = node.properties.get(lat_field).and_then(value_to_f64);
-            let lon = node.properties.get(lon_field).and_then(value_to_f64);
-
-            if let (Some(lat), Some(lon)) = (lat, lon) {
+            if let Some((lat, lon)) = node_location(node, lat_field, lon_field, geom_fallback) {
                 // Simple Euclidean distance in degrees
                 let d_lat = lat - center_lat;
                 let d_lon = lon - center_lon;
@@ -126,26 +122,20 @@ pub(crate) fn geodesic_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f
     Geodesic::distance(Point::new(lon1, lat1), Point::new(lon2, lat2))
 }
 
-/// Filter nodes within a certain distance of a point (in kilometers)
+/// Filter nodes within a certain distance of a point (in meters).
 ///
 /// Uses geodesic distance (WGS84 ellipsoid) for accurate calculations.
-///
-/// # Arguments
-/// * `graph` - The graph to filter
-/// * `selection` - Current selection to filter from
-/// * `lat_field` - Name of the latitude field
-/// * `lon_field` - Name of the longitude field
-/// * `center_lat` - Center point latitude
-/// * `center_lon` - Center point longitude
-/// * `max_distance_km` - Maximum distance in kilometers (converted to meters internally)
-pub fn near_point_km(
+/// Falls back to geometry centroid when lat/lon fields are missing.
+#[allow(clippy::too_many_arguments)]
+pub fn near_point_m(
     graph: &DirGraph,
     selection: &CurrentSelection,
     lat_field: &str,
     lon_field: &str,
     center_lat: f64,
     center_lon: f64,
-    max_distance_km: f64,
+    max_distance_m: f64,
+    geom_fallback: Option<&str>,
 ) -> Result<Vec<NodeIndex>, String> {
     // Get nodes from current selection
     let level_count = selection.get_level_count();
@@ -162,12 +152,9 @@ pub fn near_point_km(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            let lat = node.properties.get(lat_field).and_then(value_to_f64);
-            let lon = node.properties.get(lon_field).and_then(value_to_f64);
-
-            if let (Some(lat), Some(lon)) = (lat, lon) {
+            if let Some((lat, lon)) = node_location(node, lat_field, lon_field, geom_fallback) {
                 let distance = geodesic_distance(center_lat, center_lon, lat, lon);
-                if distance <= max_distance_km * 1000.0 {
+                if distance <= max_distance_m {
                     matching_nodes.push(node_idx);
                 }
             }
@@ -296,56 +283,6 @@ pub(crate) fn geometry_to_geometry_distance_m(
     let (lat1, lon1) = geometry_centroid(g1)?;
     let (lat2, lon2) = geometry_centroid(g2)?;
     Ok(geodesic_distance(lat1, lon1, lat2, lon2))
-}
-
-/// Filter nodes within distance of a point using WKT geometry centroids
-///
-/// Uses geodesic distance (WGS84 ellipsoid) from geometry centroids to a query point.
-///
-/// # Arguments
-/// * `graph` - The graph to filter
-/// * `selection` - Current selection to filter from
-/// * `geometry_field` - Name of the field containing WKT geometry
-/// * `center_lat` - Center point latitude
-/// * `center_lon` - Center point longitude
-/// * `max_distance_km` - Maximum distance in kilometers (converted to meters internally)
-pub fn near_point_km_from_geometry(
-    graph: &DirGraph,
-    selection: &CurrentSelection,
-    geometry_field: &str,
-    center_lat: f64,
-    center_lon: f64,
-    max_distance_km: f64,
-) -> Result<Vec<NodeIndex>, String> {
-    // Get nodes from current selection
-    let level_count = selection.get_level_count();
-    let nodes: Vec<NodeIndex> = if level_count > 0 {
-        selection
-            .get_level(level_count - 1)
-            .map(|l| l.get_all_nodes())
-            .unwrap_or_default()
-    } else {
-        return Ok(Vec::new());
-    };
-
-    let mut matching_nodes = Vec::new();
-
-    for node_idx in nodes {
-        if let Some(node) = graph.graph.node_weight(node_idx) {
-            let wkt_value = node.properties.get(geometry_field);
-
-            if let Some(Value::String(wkt_str)) = wkt_value {
-                if let Ok((lat, lon)) = wkt_centroid(wkt_str) {
-                    let distance = geodesic_distance(center_lat, center_lon, lat, lon);
-                    if distance <= max_distance_km * 1000.0 {
-                        matching_nodes.push(node_idx);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(matching_nodes)
 }
 
 /// Filter nodes whose WKT polygon contains a query point
@@ -496,12 +433,39 @@ fn value_to_f64(value: &Value) -> Option<f64> {
     }
 }
 
+/// Extract (lat, lon) from a node, trying lat/lon fields first,
+/// then falling back to the centroid of a WKT geometry field.
+fn node_location(
+    node: &crate::graph::schema::NodeData,
+    lat_field: &str,
+    lon_field: &str,
+    geom_fallback: Option<&str>,
+) -> Option<(f64, f64)> {
+    let lat = node.properties.get(lat_field).and_then(value_to_f64);
+    let lon = node.properties.get(lon_field).and_then(value_to_f64);
+    if let (Some(lat), Some(lon)) = (lat, lon) {
+        return Some((lat, lon));
+    }
+    // Fallback: geometry centroid
+    if let Some(geom_field) = geom_fallback {
+        if let Some(Value::String(wkt)) = node.properties.get(geom_field) {
+            if let Ok(geom) = parse_wkt(wkt) {
+                if let Ok((lat, lon)) = geometry_centroid(&geom) {
+                    return Some((lat, lon));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Calculate the centroid of nodes in a selection
 pub fn calculate_centroid(
     graph: &DirGraph,
     selection: &CurrentSelection,
     lat_field: &str,
     lon_field: &str,
+    geom_fallback: Option<&str>,
 ) -> Option<(f64, f64)> {
     let level_count = selection.get_level_count();
     let nodes: Vec<NodeIndex> = if level_count > 0 {
@@ -519,10 +483,7 @@ pub fn calculate_centroid(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            let lat = node.properties.get(lat_field).and_then(value_to_f64);
-            let lon = node.properties.get(lon_field).and_then(value_to_f64);
-
-            if let (Some(lat), Some(lon)) = (lat, lon) {
+            if let Some((lat, lon)) = node_location(node, lat_field, lon_field, geom_fallback) {
                 sum_lat += lat;
                 sum_lon += lon;
                 count += 1;
@@ -543,6 +504,7 @@ pub fn get_bounds(
     selection: &CurrentSelection,
     lat_field: &str,
     lon_field: &str,
+    geom_fallback: Option<&str>,
 ) -> Option<(f64, f64, f64, f64)> {
     let level_count = selection.get_level_count();
     let nodes: Vec<NodeIndex> = if level_count > 0 {
@@ -562,10 +524,7 @@ pub fn get_bounds(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            let lat = node.properties.get(lat_field).and_then(value_to_f64);
-            let lon = node.properties.get(lon_field).and_then(value_to_f64);
-
-            if let (Some(lat), Some(lon)) = (lat, lon) {
+            if let Some((lat, lon)) = node_location(node, lat_field, lon_field, geom_fallback) {
                 min_lat = min_lat.min(lat);
                 max_lat = max_lat.max(lat);
                 min_lon = min_lon.min(lon);

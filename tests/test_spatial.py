@@ -21,7 +21,7 @@ def geo_graph():
 
 @pytest.fixture
 def wkt_graph():
-    """Graph with WKT geometry data."""
+    """Graph with WKT geometry data (no lat/lon, geometry only)."""
     graph = KnowledgeGraph()
     df = pd.DataFrame({
         'id': [1, 2, 3],
@@ -32,7 +32,9 @@ def wkt_graph():
             'POLYGON((10 50, 15 50, 15 55, 10 55, 10 50))',
         ],
     })
-    graph.add_nodes(df, 'Field', 'id', 'name')
+    graph.add_nodes(df, 'Field', 'id', 'name', column_types={
+        'wkt_geometry': 'geometry',
+    })
     return graph
 
 
@@ -64,23 +66,23 @@ class TestWithinBounds:
 
 
 class TestNearPoint:
-    def test_near_point_km(self, geo_graph):
-        result = geo_graph.type_filter('Location').near_point_km(
-            center_lat=60.0, center_lon=3.0, max_distance_km=100.0,
+    def test_near_point_m(self, geo_graph):
+        result = geo_graph.type_filter('Location').near_point_m(
+            center_lat=60.0, center_lon=3.0, max_distance_m=100_000.0,
             lat_field='latitude', lon_field='longitude',
         )
         assert result.node_count() > 0
 
     def test_near_point_no_matches(self, geo_graph):
-        result = geo_graph.type_filter('Location').near_point_km(
-            center_lat=0.0, center_lon=0.0, max_distance_km=1.0,
+        result = geo_graph.type_filter('Location').near_point_m(
+            center_lat=0.0, center_lon=0.0, max_distance_m=1000.0,
             lat_field='latitude', lon_field='longitude',
         )
         assert result.node_count() == 0
 
     def test_near_point_large_radius(self, geo_graph):
-        result = geo_graph.type_filter('Location').near_point_km(
-            center_lat=60.0, center_lon=3.0, max_distance_km=1000.0,
+        result = geo_graph.type_filter('Location').near_point_m(
+            center_lat=60.0, center_lon=3.0, max_distance_m=1_000_000.0,
             lat_field='latitude', lon_field='longitude',
         )
         assert result.node_count() == 10
@@ -105,10 +107,10 @@ class TestWKTOperations:
         centroid = wkt_graph.wkt_centroid('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))')
         assert centroid is not None
 
-    def test_near_point_km_from_wkt(self, wkt_graph):
-        result = wkt_graph.type_filter('Field').near_point_km_from_wkt(
-            center_lat=60.0, center_lon=3.0, max_distance_km=500.0,
-            geometry_field='wkt_geometry',
+    def test_near_point_m_geometry_fallback(self, wkt_graph):
+        """near_point_m falls back to geometry centroid when no lat/lon."""
+        result = wkt_graph.type_filter('Field').near_point_m(
+            center_lat=60.0, center_lon=3.0, max_distance_m=500_000.0,
         )
         assert result.node_count() >= 1
 

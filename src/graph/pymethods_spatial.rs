@@ -104,6 +104,14 @@ fn resolve_geometry_field<'a>(
     "geometry"
 }
 
+/// Resolve the geometry fallback field from spatial config.
+/// Returns Some(field_name) if the node type has a geometry config, None otherwise.
+fn resolve_geom_fallback<'a>(graph: &'a DirGraph, selection: &CowSelection) -> Option<&'a str> {
+    let node_type = selection.first_node_type(graph)?;
+    let config = graph.get_spatial_config(&node_type)?;
+    config.geometry.as_deref()
+}
+
 #[pymethods]
 impl KnowledgeGraph {
     // ========================================================================
@@ -146,6 +154,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Self> {
         let (lat_field, lon_field) =
             resolve_lat_lon_fields(&self.inner, &self.selection, lat_field, lon_field);
+        let geom_fb = resolve_geom_fallback(&self.inner, &self.selection);
 
         let matching_nodes = spatial::within_bounds(
             &self.inner,
@@ -156,6 +165,7 @@ impl KnowledgeGraph {
             max_lat,
             min_lon,
             max_lon,
+            geom_fb,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
@@ -219,6 +229,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Self> {
         let (lat_field, lon_field) =
             resolve_lat_lon_fields(&self.inner, &self.selection, lat_field, lon_field);
+        let geom_fb = resolve_geom_fallback(&self.inner, &self.selection);
 
         let matching_nodes = spatial::near_point(
             &self.inner,
@@ -228,6 +239,7 @@ impl KnowledgeGraph {
             center_lat,
             center_lon,
             max_distance,
+            geom_fb,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
@@ -252,18 +264,18 @@ impl KnowledgeGraph {
         Ok(new_kg)
     }
 
-    /// Filter nodes within a certain distance of a point (in kilometers).
+    /// Filter nodes within a certain distance of a point (in meters).
     ///
-    /// Uses the Haversine formula to calculate accurate great-circle distances
-    /// on the Earth's surface. This is more accurate than `near_point()` which
-    /// uses Euclidean distance in degrees.
+    /// Uses geodesic distance (WGS84 ellipsoid) for accurate calculations.
+    /// When a node has no lat/lon fields but has a configured WKT geometry,
+    /// the geometry centroid is used as a fallback.
     ///
     /// Args:
     ///     center_lat: Center point latitude
     ///     center_lon: Center point longitude
-    ///     max_distance_km: Maximum distance in kilometers
-    ///     lat_field: Name of the latitude property (default: 'latitude')
-    ///     lon_field: Name of the longitude property (default: 'longitude')
+    ///     max_distance_m: Maximum distance in meters
+    ///     lat_field: Name of the latitude property (default: from spatial config or 'latitude')
+    ///     lon_field: Name of the longitude property (default: from spatial config or 'longitude')
     ///
     /// Returns:
     ///     A new KnowledgeGraph with only nodes within the distance
@@ -271,96 +283,33 @@ impl KnowledgeGraph {
     /// Example:
     ///     ```python
     ///     # Find discoveries within 50km of a point
-    ///     nearby = graph.type_filter('Discovery').near_point_km(
+    ///     nearby = graph.type_filter('Discovery').near_point_m(
     ///         center_lat=60.0, center_lon=5.0,
-    ///         max_distance_km=50.0
+    ///         max_distance_m=50000.0
     ///     )
     ///     ```
-    #[pyo3(signature = (center_lat, center_lon, max_distance_km, lat_field=None, lon_field=None))]
-    fn near_point_km(
+    #[pyo3(signature = (center_lat, center_lon, max_distance_m, lat_field=None, lon_field=None))]
+    fn near_point_m(
         &mut self,
         center_lat: f64,
         center_lon: f64,
-        max_distance_km: f64,
+        max_distance_m: f64,
         lat_field: Option<&str>,
         lon_field: Option<&str>,
     ) -> PyResult<Self> {
         let (lat_field, lon_field) =
             resolve_lat_lon_fields(&self.inner, &self.selection, lat_field, lon_field);
+        let geom_fb = resolve_geom_fallback(&self.inner, &self.selection);
 
-        let matching_nodes = spatial::near_point_km(
+        let matching_nodes = spatial::near_point_m(
             &self.inner,
             &self.selection,
             lat_field,
             lon_field,
             center_lat,
             center_lon,
-            max_distance_km,
-        )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
-
-        // Create new selection with matching nodes
-        let mut new_kg = self.clone();
-        new_kg.selection.clear(); // clear() already adds a fresh level
-        if let Some(level) = new_kg.selection.get_level_mut(0) {
-            if !matching_nodes.is_empty() {
-                level.add_selection(None, matching_nodes.clone());
-            }
-            level
-                .operations
-                .push(SelectionOperation::Custom("near_point_km".to_string()));
-        }
-
-        // Record plan step
-        new_kg.selection.add_plan_step(
-            PlanStep::new("NEAR_POINT_KM", None, matching_nodes.len())
-                .with_actual_rows(matching_nodes.len()),
-        );
-
-        Ok(new_kg)
-    }
-
-    /// Filter nodes within distance of a point using WKT geometry centroids.
-    ///
-    /// Uses the centroid of WKT geometries (polygons, etc.) to calculate distance.
-    /// This eliminates the need for external libraries like shapely when working
-    /// with polygon geometries.
-    ///
-    /// Args:
-    ///     center_lat: Center point latitude
-    ///     center_lon: Center point longitude
-    ///     max_distance_km: Maximum distance in kilometers
-    ///     geometry_field: Name of the WKT geometry property (default: 'geometry')
-    ///
-    /// Returns:
-    ///     A new KnowledgeGraph with only nodes whose geometry centroid is within distance
-    ///
-    /// Example:
-    ///     ```python
-    ///     # Find prospects (with WKT polygons) within 50km of a point
-    ///     nearby = graph.type_filter('Prospect').near_point_km_from_wkt(
-    ///         center_lat=61.4, center_lon=4.0,
-    ///         max_distance_km=50.0,
-    ///         geometry_field='shape'
-    ///     )
-    ///     ```
-    #[pyo3(signature = (center_lat, center_lon, max_distance_km, geometry_field=None))]
-    fn near_point_km_from_wkt(
-        &mut self,
-        center_lat: f64,
-        center_lon: f64,
-        max_distance_km: f64,
-        geometry_field: Option<&str>,
-    ) -> PyResult<Self> {
-        let geometry_field = resolve_geometry_field(&self.inner, &self.selection, geometry_field);
-
-        let matching_nodes = spatial::near_point_km_from_geometry(
-            &self.inner,
-            &self.selection,
-            geometry_field,
-            center_lat,
-            center_lon,
-            max_distance_km,
+            max_distance_m,
+            geom_fb,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
@@ -373,12 +322,12 @@ impl KnowledgeGraph {
             }
             level
                 .operations
-                .push(SelectionOperation::Custom("near_point_km_wkt".to_string()));
+                .push(SelectionOperation::Custom("near_point_m".to_string()));
         }
 
         // Record plan step
         new_kg.selection.add_plan_step(
-            PlanStep::new("NEAR_POINT_KM_WKT", None, matching_nodes.len())
+            PlanStep::new("NEAR_POINT_M", None, matching_nodes.len())
                 .with_actual_rows(matching_nodes.len()),
         );
 
@@ -526,8 +475,9 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         let (lat_field, lon_field) =
             resolve_lat_lon_fields(&self.inner, &self.selection, lat_field, lon_field);
+        let geom_fb = resolve_geom_fallback(&self.inner, &self.selection);
 
-        match spatial::get_bounds(&self.inner, &self.selection, lat_field, lon_field) {
+        match spatial::get_bounds(&self.inner, &self.selection, lat_field, lon_field, geom_fb) {
             Some((min_lat, max_lat, min_lon, max_lon)) => {
                 if as_shapely {
                     make_shapely_box(py, min_lat, max_lat, min_lon, max_lon)
@@ -572,8 +522,15 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         let (lat_field, lon_field) =
             resolve_lat_lon_fields(&self.inner, &self.selection, lat_field, lon_field);
+        let geom_fb = resolve_geom_fallback(&self.inner, &self.selection);
 
-        match spatial::calculate_centroid(&self.inner, &self.selection, lat_field, lon_field) {
+        match spatial::calculate_centroid(
+            &self.inner,
+            &self.selection,
+            lat_field,
+            lon_field,
+            geom_fb,
+        ) {
             Some((lat, lon)) => {
                 if as_shapely {
                     make_shapely_point(py, lat, lon)

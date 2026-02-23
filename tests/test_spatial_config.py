@@ -273,10 +273,10 @@ class TestVirtualProperties:
 
 
 class TestPymethodsAutoResolution:
-    def test_near_point_km_auto_resolve(self, field_graph):
-        """near_point_km() works without explicit lat_field/lon_field."""
-        result = field_graph.type_filter('Field').near_point_km(
-            center_lat=60.5, center_lon=3.5, max_distance_km=100.0,
+    def test_near_point_m_auto_resolve(self, field_graph):
+        """near_point_m() works without explicit lat_field/lon_field."""
+        result = field_graph.type_filter('Field').near_point_m(
+            center_lat=60.5, center_lon=3.5, max_distance_m=100_000.0,
         )
         assert result.node_count() >= 1
 
@@ -312,6 +312,62 @@ class TestPymethodsAutoResolution:
             lat=60.5, lon=3.5,
         )
         assert result.node_count() >= 1
+
+
+# ── Geometry centroid fallback (no lat/lon) ──────────────────────────
+
+
+class TestGeometryCentroidFallback:
+    """Fluent API methods fall back to geometry centroid when location is missing."""
+
+    @pytest.fixture
+    def prospect_graph(self):
+        """Graph with Prospect nodes that have only WKT geometry (no lat/lon)."""
+        graph = KnowledgeGraph()
+        df = pd.DataFrame({
+            'id': [1, 2, 3],
+            'name': ['Alpha', 'Beta', 'Gamma'],
+            'wkt_geometry': [
+                'POLYGON((3 60, 4 60, 4 61, 3 61, 3 60))',   # centroid ~(60.5, 3.5)
+                'POLYGON((7 64, 8 64, 8 65, 7 65, 7 64))',   # centroid ~(64.5, 7.5)
+                'POLYGON((6 65, 7 65, 7 66, 6 66, 6 65))',   # centroid ~(65.5, 6.5)
+            ],
+        })
+        graph.add_nodes(df, 'Prospect', 'id', 'name', column_types={
+            'wkt_geometry': 'geometry',
+        })
+        return graph
+
+    def test_near_point_m_fallback(self, prospect_graph):
+        """near_point_m() uses geometry centroid when no lat/lon."""
+        result = prospect_graph.type_filter('Prospect').near_point_m(
+            center_lat=60.5, center_lon=3.5, max_distance_m=50_000.0,
+        )
+        assert result.node_count() == 1  # only Alpha
+        nodes = result.get_nodes()
+        assert nodes[0]['title'] == 'Alpha'
+
+    def test_within_bounds_fallback(self, prospect_graph):
+        """within_bounds() uses geometry centroid when no lat/lon."""
+        result = prospect_graph.type_filter('Prospect').within_bounds(
+            min_lat=60.0, max_lat=61.0, min_lon=3.0, max_lon=4.0,
+        )
+        assert result.node_count() == 1  # only Alpha
+
+    def test_get_bounds_fallback(self, prospect_graph):
+        """get_bounds() uses geometry centroids when no lat/lon."""
+        bounds = prospect_graph.type_filter('Prospect').get_bounds()
+        assert bounds is not None
+        # All three centroids should be included
+        assert bounds['min_lat'] < 61.0
+        assert bounds['max_lat'] > 65.0
+
+    def test_get_centroid_fallback(self, prospect_graph):
+        """get_centroid() uses geometry centroids when no lat/lon."""
+        centroid = prospect_graph.type_filter('Prospect').get_centroid()
+        assert centroid is not None
+        # Average of ~(60.5, 3.5), ~(64.5, 7.5), ~(65.5, 6.5)
+        assert 63.0 < centroid['latitude'] < 64.0
 
 
 # ── Save/Load roundtrip ──────────────────────────────────────────────
