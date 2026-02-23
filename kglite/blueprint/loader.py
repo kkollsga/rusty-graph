@@ -118,6 +118,13 @@ class BlueprintLoader:
         # Phase 3: Sub-nodes
         self._load_nodes(sub_specs, phase_name="sub-nodes")
 
+        # Phase 3b: Register parent types for supporting node tiers
+        for sub in sub_specs:
+            sub_type = sub["_node_type"]
+            parent = sub["_parent_type"]
+            if sub_type in self._loaded_types:
+                self.graph.set_parent_type(sub_type, parent)
+
         # Phase 4: FK edges
         self._load_fk_edges(core_specs + sub_specs)
 

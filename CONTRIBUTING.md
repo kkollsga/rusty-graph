@@ -33,7 +33,7 @@ src/                          # Rust core (PyO3 bindings)
     mod.rs                    # KnowledgeGraph struct + Python methods
     schema.rs                 # DirGraph, NodeData, EdgeData
     cypher/                   # Cypher query engine (parser, AST, executor)
-    introspection.rs          # agent_describe() output
+    introspection.rs          # describe() output
     ...
 kglite/                       # Python package
   __init__.pyi                # Type stubs for the Rust extension

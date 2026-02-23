@@ -420,3 +420,164 @@ class TestWithSeeding:
         result = g.cypher("WITH [1, 2, 3] AS items UNWIND items AS x RETURN x")
         values = [r['x'] for r in result]
         assert values == [1, 2, 3]
+
+
+# ========================================================================
+# Math functions
+# ========================================================================
+
+class TestMathFunctions:
+    """Tests for abs, ceil, floor, round, sqrt, sign."""
+
+    def test_abs_integer(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN abs(-5) AS val")
+        assert result[0]['val'] == 5
+
+    def test_abs_float(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN abs(-3.14) AS val")
+        assert abs(result[0]['val'] - 3.14) < 1e-10
+
+    def test_abs_positive_unchanged(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN abs(42) AS val")
+        assert result[0]['val'] == 42
+
+    def test_ceil(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN ceil(2.3) AS val")
+        assert result[0]['val'] == 3.0
+
+    def test_ceil_negative(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN ceil(-2.7) AS val")
+        assert result[0]['val'] == -2.0
+
+    def test_ceiling_alias(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN ceiling(2.3) AS val")
+        assert result[0]['val'] == 3.0
+
+    def test_floor(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN floor(2.7) AS val")
+        assert result[0]['val'] == 2.0
+
+    def test_floor_negative(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN floor(-2.3) AS val")
+        assert result[0]['val'] == -3.0
+
+    def test_round(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN round(2.5) AS val")
+        assert result[0]['val'] == 3.0
+
+    def test_round_down(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN round(2.4) AS val")
+        assert result[0]['val'] == 2.0
+
+    def test_sqrt(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN sqrt(16) AS val")
+        assert result[0]['val'] == 4.0
+
+    def test_sqrt_negative_returns_null(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN sqrt(-1) AS val")
+        assert result[0]['val'] is None
+
+    def test_sign_negative(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN sign(-5) AS val")
+        assert result[0]['val'] == -1
+
+    def test_sign_zero(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN sign(0) AS val")
+        assert result[0]['val'] == 0
+
+    def test_sign_positive(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN sign(3.7) AS val")
+        assert result[0]['val'] == 1
+
+    def test_null_propagation(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN abs(null) AS a, ceil(null) AS b, round(null) AS c")
+        assert result[0]['a'] is None
+        assert result[0]['b'] is None
+        assert result[0]['c'] is None
+
+    def test_math_in_unwind_pipeline(self):
+        """Math functions work in UNWIND pipeline."""
+        g = rg.KnowledgeGraph()
+        result = g.cypher("""
+            UNWIND [1.1, 2.5, 3.9, -4.2] AS x
+            RETURN x, round(x) AS rounded, abs(x) AS absolute
+            ORDER BY x
+        """)
+        assert len(result) == 4
+        assert result[0]['rounded'] == -4.0
+        assert result[0]['absolute'] == 4.2
+        assert result[2]['rounded'] == 3.0
+
+
+# ========================================================================
+# String coercion on +
+# ========================================================================
+
+class TestStringCoercion:
+    """Tests for automatic string coercion when + has a string operand."""
+
+    def test_int_plus_string(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN 2024 + '-06' AS val")
+        assert result[0]['val'] == '2024-06'
+
+    def test_string_plus_int(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN 'year: ' + 2024 AS val")
+        assert result[0]['val'] == 'year: 2024'
+
+    def test_float_plus_string(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN 3.14 + ' pi' AS val")
+        assert result[0]['val'] == '3.14 pi'
+
+    def test_bool_plus_string(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN 'is: ' + true AS val")
+        assert result[0]['val'] == 'is: true'
+
+    def test_string_plus_null_returns_null(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN 'hello' + null AS val")
+        assert result[0]['val'] is None
+
+    def test_unwind_int_string_concat(self):
+        """The original failing case: UNWIND integer + string literal."""
+        g = rg.KnowledgeGraph()
+        result = g.cypher("""
+            UNWIND [2020, 2021, 2022] AS yr
+            RETURN yr + '-6' AS period
+            ORDER BY period
+        """)
+        assert len(result) == 3
+        assert result[0]['period'] == '2020-6'
+        assert result[1]['period'] == '2021-6'
+        assert result[2]['period'] == '2022-6'
+
+    def test_string_plus_string_still_works(self):
+        """Ensure the existing String + String case is not broken."""
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN 'hello' + ' world' AS val")
+        assert result[0]['val'] == 'hello world'
+
+    def test_int_plus_int_still_works(self):
+        """Ensure numeric + numeric is not affected."""
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN 3 + 4 AS val")
+        assert result[0]['val'] == 7

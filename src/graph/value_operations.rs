@@ -44,10 +44,17 @@ pub fn to_float(val: &Value) -> Value {
 // ============================================================================
 
 /// Add two Values. Returns Null for incompatible types.
+/// When one operand is a String, the other is coerced to string and concatenated
+/// (unless the other is Null, which propagates).
 pub fn arithmetic_add(a: &Value, b: &Value) -> Value {
     match (a, b) {
         (Value::Int64(x), Value::Int64(y)) => Value::Int64(x + y),
         (Value::String(x), Value::String(y)) => Value::String(format!("{}{}", x, y)),
+        // Null propagation for string ops
+        (Value::String(_), Value::Null) | (Value::Null, Value::String(_)) => Value::Null,
+        // String coercion: if one side is String, coerce the other and concatenate
+        (Value::String(s), other) => Value::String(format!("{}{}", s, format_value_compact(other))),
+        (other, Value::String(s)) => Value::String(format!("{}{}", format_value_compact(other), s)),
         _ => match (value_to_f64(a), value_to_f64(b)) {
             (Some(x), Some(y)) => Value::Float64(x + y),
             _ => Value::Null,
@@ -302,10 +309,36 @@ mod tests {
     }
 
     #[test]
-    fn test_add_incompatible() {
+    fn test_add_string_coercion() {
+        // String + Int → String concatenation
         assert_eq!(
             arithmetic_add(&Value::String("a".into()), &Value::Int64(1)),
+            Value::String("a1".into())
+        );
+        // Int + String → String concatenation
+        assert_eq!(
+            arithmetic_add(&Value::Int64(2024), &Value::String("-06".into())),
+            Value::String("2024-06".into())
+        );
+        // Float + String → String concatenation
+        assert_eq!(
+            arithmetic_add(&Value::Float64(3.14), &Value::String(" pi".into())),
+            Value::String("3.14 pi".into())
+        );
+        // String + Null → Null (propagation)
+        assert_eq!(
+            arithmetic_add(&Value::String("val: ".into()), &Value::Null),
             Value::Null
+        );
+        // Null + String → Null (propagation)
+        assert_eq!(
+            arithmetic_add(&Value::Null, &Value::String("x".into())),
+            Value::Null
+        );
+        // Bool + String → String concatenation
+        assert_eq!(
+            arithmetic_add(&Value::Boolean(true), &Value::String(" ok".into())),
+            Value::String("true ok".into())
         );
     }
 

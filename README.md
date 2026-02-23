@@ -120,7 +120,7 @@ KGLite is designed to work as a self-contained knowledge layer for AI agents. No
 ### The idea
 
 1. **Load or build a graph** from your data (DataFrames, CSVs, APIs)
-2. **Give the agent `agent_describe()`** — a single XML string containing the full schema, Cypher reference, property values, and embedding info
+2. **Give the agent `describe()`** — a progressive-disclosure XML schema that scales from tiny to massive graphs
 3. **The agent writes Cypher queries** using `graph.cypher()` — no other API to learn
 4. **Semantic search works natively** — `text_score()` in Cypher, backed by any embedding model you wrap
 
@@ -129,7 +129,7 @@ No vector database, no graph database, no infrastructure. The graph lives in mem
 ### Quick setup
 
 ```python
-xml = graph.agent_describe()  # schema + Cypher reference + property values as XML
+xml = graph.describe()  # inventory overview — types, connections, Cypher extensions
 prompt = f"You have a knowledge graph:\n{xml}\nAnswer the user's question using graph.cypher()."
 ```
 
@@ -145,9 +145,9 @@ graph = kglite.load("my_graph.kgl")
 mcp = FastMCP("knowledge-graph")
 
 @mcp.tool()
-def describe() -> str:
+def describe(types: list[str] | None = None) -> str:
     """Get the graph schema and Cypher reference."""
-    return graph.agent_describe()
+    return graph.describe(types=types)
 
 @mcp.tool()
 def query(cypher: str) -> str:
@@ -158,7 +158,7 @@ def query(cypher: str) -> str:
 mcp.run(transport="stdio")
 ```
 
-The agent calls `describe()` once to learn the schema, then uses `query()` for everything — traversals, aggregations, filtering, and semantic search via `text_score()`.
+The agent calls `describe()` once to learn the schema, then uses `query()` for everything — traversals, aggregations, filtering, and semantic search via `text_score()`. For large graphs, call `describe(types=['Field', 'Well'])` to drill into specific types.
 
 For code graphs, additional tools make exploration easier — see `examples/mcp_server.py` for a full example with `find_entity`, `read_source`, and `entity_context` tools.
 
@@ -194,17 +194,18 @@ The model wrapper works with any provider — OpenAI, Cohere, local sentence-tra
 
 ### Tips for agent prompts
 
-1. **Start with `agent_describe()`** — gives the agent schema, types, property names with sample values, counts, and full Cypher syntax in one XML string
-2. **Use `properties(type)`** for deeper column discovery — shows types, nullability, unique counts, and sample values
-3. **Use `sample(type, n=3)`** before writing queries — lets the agent see real data shapes
-4. **Prefer Cypher** over the fluent API in agent contexts — closer to natural language, easier for LLMs to generate
-5. **Use parameters** (`params={'x': val}`) to prevent injection when passing user input to queries
-6. **ResultView is lazy** — agents can call `len(result)` to check row count without converting all rows
+1. **Start with `describe()`** — gives the agent an inventory of types with capability flags, connection map, and non-standard Cypher extensions
+2. **Drill into types with `describe(types=['Field'])`** — shows properties, connections, timeseries/spatial config, supporting children, and sample nodes
+3. **Use `properties(type)`** for deeper column discovery — shows types, nullability, unique counts, and sample values
+4. **Use `sample(type, n=3)`** before writing queries — lets the agent see real data shapes
+5. **Prefer Cypher** over the fluent API in agent contexts — closer to natural language, easier for LLMs to generate
+6. **Use parameters** (`params={'x': val}`) to prevent injection when passing user input to queries
+7. **ResultView is lazy** — agents can call `len(result)` to check row count without converting all rows
 
-### What `agent_describe()` returns
+### What `describe()` returns
 
-- **Dynamic** (per-graph): node types with counts, property names/types/sample values, connection types with endpoints, indexes, field aliases, embedding stores, timeseries metadata (resolution, channels, units, bin type)
-- **Static** (always the same): supported Cypher clauses, WHERE operators, functions (including spatial, semantic, and timeseries), mutation syntax, notes
+- **Inventory mode** (`describe()`): node types as compact descriptors `TypeName[size,complexity,flags]` sorted by count, connection map, Cypher extensions (timeseries, spatial, etc.). Core/supporting type tiers hide child types behind `+N` suffixes. For small graphs (≤15 types), full detail is inlined automatically.
+- **Focused mode** (`describe(types=['Field'])`): detailed properties with types, connection topology, timeseries/spatial config, supporting children, and sample nodes.
 
 ---
 
@@ -421,19 +422,21 @@ graph.indexes()
 # ]
 ```
 
-### `agent_describe()` — AI agent context
+### `describe()` — AI agent context
 
-Returns a self-contained XML string summarizing the graph structure and supported Cypher syntax. Designed to be included directly in an LLM prompt:
+Progressive-disclosure schema description designed for AI agents. Scales from tiny to massive graphs.
 
 ```python
-xml = graph.agent_describe()
-prompt = f"You have a knowledge graph:\n{xml}\nAnswer the user's question using cypher()."
+# Inventory overview — types, connections, Cypher extensions
+xml = graph.describe()
+
+# Focused detail for specific types — properties, connections, samples
+detail = graph.describe(types=['Field', 'Well'])
 ```
 
-The output includes:
+**Inventory mode** (no args): compact descriptors `TypeName[size,complexity,flags]` sorted by count descending, connection map, non-standard Cypher extensions. Supporting types hidden behind `+N` suffixes on their parent. For small graphs (≤15 types), full detail is inlined automatically.
 
-- **Dynamic** (per-graph): node types with counts and property schemas, connection types, indexes, timeseries config (when present)
-- **Static** (always the same): supported Cypher subset, key API methods, single-label model notes
+**Focused mode** (`types=[...]`): detailed properties with types, connection topology, timeseries/spatial config, `<supporting>` children, and sample nodes.
 
 ---
 
@@ -1444,7 +1447,7 @@ graph.properties("Person")            # per-property stats (type, non_null, uniq
 graph.neighbors_schema("Person")      # connection topology (outgoing/incoming)
 graph.sample("Person", n=3)           # inspect actual nodes
 graph.connection_types()              # all edge types with counts and endpoint types
-graph.agent_describe()                # XML description for AI agents
+graph.describe()                      # XML description for AI agents
 ```
 
 ### Loading Phases
@@ -1829,7 +1832,8 @@ graph.properties('Person', max_values=50)     # → include values list for up t
 graph.neighbors_schema('Person')              # → outgoing/incoming connection topology
 graph.sample('Person', n=5)                   # → first N nodes as ResultView
 graph.indexes()                               # → all indexes with type info
-graph.agent_describe()                        # → XML string for LLM prompt context
+graph.describe()                              # → XML inventory for AI agents
+graph.describe(types=['Person'])              # → focused detail for specific types
 ```
 
 ### Algorithms

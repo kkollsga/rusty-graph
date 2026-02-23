@@ -2904,7 +2904,7 @@ impl KnowledgeGraph {
     /// Set or query read-only mode for the Cypher layer.
     ///
     /// When enabled, all Cypher mutation queries (CREATE, SET, DELETE, REMOVE,
-    /// MERGE) are rejected with an error, and `agent_describe()` omits mutation
+    /// MERGE) are rejected with an error, and `describe()` omits mutation
     /// documentation.  Read-only queries (MATCH, RETURN, CALL, etc.) are
     /// unaffected.
     ///
@@ -3531,16 +3531,39 @@ impl KnowledgeGraph {
         Ok(schema_string)
     }
 
-    /// Return a minimal XML string describing this graph for AI agents.
-    #[pyo3(signature = (detail=None, include_fluent=false))]
-    fn agent_describe(&self, detail: Option<String>, include_fluent: bool) -> PyResult<String> {
-        let level = introspection::DetailLevel::from_str_opt(detail.as_deref())
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
-        Ok(introspection::compute_agent_description(
-            &self.inner,
-            level,
-            include_fluent,
-        ))
+    /// Mark a node type as a supporting (child) type of a parent core type.
+    ///
+    /// Supporting types are hidden from the `describe()` inventory and instead
+    /// appear in the `<supporting>` section when the parent type is inspected.
+    /// Their capabilities (timeseries, spatial, etc.) bubble up to the parent.
+    #[pyo3(signature = (node_type, parent_type))]
+    fn set_parent_type(&mut self, node_type: String, parent_type: String) -> PyResult<()> {
+        if !self.inner.type_indices.contains_key(&node_type) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Node type '{}' not found",
+                node_type
+            )));
+        }
+        if !self.inner.type_indices.contains_key(&parent_type) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Parent type '{}' not found",
+                parent_type
+            )));
+        }
+        let graph = get_graph_mut(&mut self.inner);
+        graph.parent_types.insert(node_type, parent_type);
+        Ok(())
+    }
+
+    /// Return an XML description of this graph for AI agents (progressive disclosure).
+    ///
+    /// Two modes:
+    /// - `describe()` → Inventory overview (or full detail if ≤15 types)
+    /// - `describe(types=["Field", "Well"])` → Focused detail for specific types
+    #[pyo3(signature = (types=None))]
+    fn describe(&self, types: Option<Vec<String>>) -> PyResult<String> {
+        introspection::compute_description(&self.inner, types.as_deref())
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }
 
     fn get_selection(&self) -> PyResult<String> {

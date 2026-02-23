@@ -462,6 +462,11 @@ pub struct DirGraph {
     /// Used for alias resolution: querying by original column name maps to the `title` field.
     #[serde(default)]
     pub(crate) title_field_aliases: HashMap<String, String>,
+    /// Parent type for supporting node types: child_type → parent_type.
+    /// If a type has an entry here, it is a "supporting" type that belongs to the parent.
+    /// Types without an entry are "core" types (shown in describe() inventory).
+    #[serde(default)]
+    pub(crate) parent_types: HashMap<String, String>,
     /// Auto-vacuum threshold: if Some(t), vacuum() is triggered automatically after
     /// DELETE operations when fragmentation_ratio exceeds t and tombstones > 100.
     /// Default: Some(0.3). Set to None to disable.
@@ -495,7 +500,7 @@ pub struct DirGraph {
     #[serde(skip)]
     pub(crate) timeseries_store: HashMap<usize, super::timeseries::NodeTimeseries>,
     /// If true, Cypher mutations (CREATE, SET, DELETE, REMOVE, MERGE) are rejected
-    /// and agent_describe() omits mutation documentation.
+    /// and describe() omits mutation documentation.
     #[serde(skip)]
     pub(crate) read_only: bool,
 }
@@ -523,6 +528,7 @@ impl DirGraph {
             save_metadata: SaveMetadata::current(),
             id_field_aliases: HashMap::new(),
             title_field_aliases: HashMap::new(),
+            parent_types: HashMap::new(),
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -554,6 +560,7 @@ impl DirGraph {
             save_metadata: SaveMetadata::default(),
             id_field_aliases: HashMap::new(),
             title_field_aliases: HashMap::new(),
+            parent_types: HashMap::new(),
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),

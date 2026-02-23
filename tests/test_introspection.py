@@ -272,106 +272,364 @@ class TestIndexes:
         assert types == {'equality', 'composite'}
 
 
-# ── agent_describe() ──────────────────────────────────────────────────────
+# ── describe() ─────────────────────────────────────────────────────────────
 
 import xml.etree.ElementTree as ET
 
 
-class TestAgentDescribe:
+class TestDescribe:
+    """Tests for the new describe() method (progressive disclosure)."""
+
+    # -- Inventory mode (no args) -- small graph auto-inlines detail --
+
     def test_returns_string(self, small_graph):
-        result = small_graph.agent_describe()
+        result = small_graph.describe()
         assert isinstance(result, str)
 
     def test_is_valid_xml(self, small_graph):
-        root = ET.fromstring(small_graph.agent_describe())
-        assert root.tag == 'kglite'
+        root = ET.fromstring(small_graph.describe())
+        assert root.tag == 'graph'
 
     def test_root_attributes(self, small_graph):
-        root = ET.fromstring(small_graph.agent_describe())
+        root = ET.fromstring(small_graph.describe())
         assert root.attrib['nodes'] == '3'
         assert root.attrib['edges'] == '3'
 
-    def test_node_types_present(self, small_graph):
-        root = ET.fromstring(small_graph.agent_describe())
-        types = root.findall('.//node_types/type')
+    def test_conventions_present(self, small_graph):
+        root = ET.fromstring(small_graph.describe())
+        conv = root.find('conventions')
+        assert conv is not None
+        assert '.id' in conv.text
+        assert '.title' in conv.text
+
+    def test_no_cypher_ref(self, small_graph):
+        """describe() should NOT include a full Cypher reference."""
+        root = ET.fromstring(small_graph.describe())
+        assert root.find('cypher_ref') is None
+
+    def test_connections_present(self, social_graph):
+        root = ET.fromstring(social_graph.describe())
+        conns = root.findall('.//connections/conn')
+        conn_types = {c.attrib['type'] for c in conns}
+        assert 'KNOWS' in conn_types
+        assert 'WORKS_AT' in conn_types
+
+    def test_extensions_present(self, small_graph):
+        root = ET.fromstring(small_graph.describe())
+        ext = root.find('extensions')
+        assert ext is not None
+        # Algorithms should always be present
+        alg = ext.find('algorithms')
+        assert alg is not None
+
+    def test_empty_graph(self):
+        g = KnowledgeGraph()
+        root = ET.fromstring(g.describe())
+        assert root.attrib['nodes'] == '0'
+        assert root.attrib['edges'] == '0'
+
+    # -- Small graph: auto-inlined detail --
+
+    def test_small_graph_inlines_types(self, small_graph):
+        """≤15 types → full detail for all types inline."""
+        root = ET.fromstring(small_graph.describe())
+        types = root.findall('.//types/type')
         assert len(types) == 1
         assert types[0].attrib['name'] == 'Person'
-        assert types[0].attrib['count'] == '3'
 
-    def test_node_properties_listed(self, small_graph):
-        root = ET.fromstring(small_graph.agent_describe())
-        person = root.find(".//node_types/type[@name='Person']")
-        prop_names = {p.attrib['name'] for p in person.findall('prop')}
+    def test_small_graph_has_properties(self, small_graph):
+        root = ET.fromstring(small_graph.describe())
+        person = root.find(".//types/type[@name='Person']")
+        props = person.findall('.//properties/prop')
+        prop_names = {p.attrib['name'] for p in props}
         assert 'age' in prop_names
         assert 'city' in prop_names
 
-    def test_builtin_fields_not_in_props(self, small_graph):
-        """Built-in fields (type, title, id) should be in notes, not per-type props."""
-        root = ET.fromstring(small_graph.agent_describe())
-        person = root.find(".//node_types/type[@name='Person']")
-        prop_names = {p.attrib['name'] for p in person.findall('prop')}
+    def test_small_graph_excludes_builtins(self, small_graph):
+        """Built-in fields (type, title, id) should NOT be in properties."""
+        root = ET.fromstring(small_graph.describe())
+        person = root.find(".//types/type[@name='Person']")
+        props = person.findall('.//properties/prop')
+        prop_names = {p.attrib['name'] for p in props}
         assert 'type' not in prop_names
         assert 'title' not in prop_names
         assert 'id' not in prop_names
 
-    def test_connections_present(self, small_graph):
-        root = ET.fromstring(small_graph.agent_describe())
-        conns = root.findall('.//connections/conn')
-        assert len(conns) == 1
-        assert conns[0].attrib['type'] == 'KNOWS'
-        assert conns[0].attrib['from'] == 'Person'
-        assert conns[0].attrib['to'] == 'Person'
+    def test_small_graph_has_samples(self, small_graph):
+        root = ET.fromstring(small_graph.describe())
+        person = root.find(".//types/type[@name='Person']")
+        samples = person.findall('.//samples/node')
+        assert len(samples) > 0
+        assert 'title' in samples[0].attrib
 
-    def test_multiple_types(self, social_graph):
-        root = ET.fromstring(social_graph.agent_describe())
-        type_names = {t.attrib['name'] for t in root.findall('.//node_types/type')}
+    def test_small_graph_has_connections_topology(self, social_graph):
+        root = ET.fromstring(social_graph.describe())
+        person = root.find(".//types/type[@name='Person']")
+        out_conns = person.findall('.//connections/out')
+        assert any(c.attrib['type'] == 'WORKS_AT' for c in out_conns)
+
+    # -- Large graph: flat descriptor format --
+
+    def test_large_graph_flat_types(self, large_schema_graph):
+        """>15 types → flat comma-separated list, no inline detail."""
+        root = ET.fromstring(large_schema_graph.describe())
+        types_el = root.find('types')
+        # Should have text content (comma-separated descriptors), not <band> children
+        assert types_el.findall('band') == []
+        assert types_el.text is not None and len(types_el.text.strip()) > 0
+
+    def test_large_graph_descriptor_format(self, large_schema_graph):
+        """Descriptors should be Name[size,complexity] format."""
+        root = ET.fromstring(large_schema_graph.describe())
+        types_text = root.find('types').text.strip()
+        # Should contain descriptors like Type0[l,vl], Type5[m,h], etc.
+        import re
+        descriptors = re.findall(r'\w+\[\w+,\w+(?:,\w+)*\]', types_text)
+        assert len(descriptors) == 20
+
+    def test_large_graph_has_hint(self, large_schema_graph):
+        root = ET.fromstring(large_schema_graph.describe())
+        hint = root.find('hint')
+        assert hint is not None
+        assert 'describe' in hint.text
+
+    def test_large_graph_has_types_count(self, large_schema_graph):
+        root = ET.fromstring(large_schema_graph.describe())
+        types_el = root.find('types')
+        assert 'count' in types_el.attrib
+        assert int(types_el.attrib['count']) > 15
+
+    # -- Focused detail mode (types= arg) --
+
+    def test_focused_returns_detail(self, social_graph):
+        root = ET.fromstring(social_graph.describe(types=['Person']))
+        person = root.find(".//type[@name='Person']")
+        assert person is not None
+        assert person.find('properties') is not None
+        assert person.find('samples') is not None
+
+    def test_focused_connections_topology(self, social_graph):
+        root = ET.fromstring(social_graph.describe(types=['Person']))
+        person = root.find(".//type[@name='Person']")
+        out_conns = person.findall('.//connections/out')
+        assert any(c.attrib['type'] == 'WORKS_AT' for c in out_conns)
+        in_conns = person.findall('.//connections/in')
+        assert any(c.attrib['type'] == 'KNOWS' for c in in_conns)
+
+    def test_focused_multiple_types(self, social_graph):
+        root = ET.fromstring(social_graph.describe(types=['Person', 'Company']))
+        type_names = {t.attrib['name'] for t in root.findall('.//type')}
         assert type_names == {'Person', 'Company'}
 
-    def test_multiple_connection_types(self, social_graph):
-        root = ET.fromstring(social_graph.agent_describe())
-        conn_types = {c.attrib['type'] for c in root.findall('.//connections/conn')}
-        assert conn_types == {'KNOWS', 'WORKS_AT'}
+    def test_focused_no_extensions(self, social_graph):
+        """Focused mode should NOT include extensions section."""
+        root = ET.fromstring(social_graph.describe(types=['Person']))
+        assert root.find('extensions') is None
 
-    def test_indexes_section(self, small_graph):
-        small_graph.create_index('Person', 'city')
-        root = ET.fromstring(small_graph.agent_describe())
-        idxs = root.findall('.//indexes/idx')
-        assert len(idxs) == 1
-        assert idxs[0].attrib['on'] == 'Person.city'
+    def test_focused_invalid_type_raises(self, small_graph):
+        with pytest.raises(ValueError):
+            small_graph.describe(types=['NonExistent'])
 
-    def test_empty_graph(self):
-        g = KnowledgeGraph()
-        root = ET.fromstring(g.agent_describe())
-        assert root.attrib['nodes'] == '0'
-        assert root.attrib['edges'] == '0'
-        assert root.findall('.//node_types/type') == []
+    def test_focused_error_lists_available(self, social_graph):
+        """Error message should list available types."""
+        try:
+            social_graph.describe(types=['Bogus'])
+        except ValueError as e:
+            msg = str(e)
+            assert 'Person' in msg
+            assert 'Company' in msg
 
-    def test_cypher_ref_present(self, small_graph):
-        root = ET.fromstring(small_graph.agent_describe())
-        cypher_ref = root.find('cypher_ref')
-        assert cypher_ref is not None
-        assert cypher_ref.find('clauses') is not None
-        assert cypher_ref.find('functions') is not None
-        assert cypher_ref.find('not_supported') is not None
+    # -- Extensions conditional --
 
-    def test_api_section_present(self, small_graph):
-        root = ET.fromstring(small_graph.agent_describe())
-        api = root.find('api')
-        assert api is not None
-        sigs = [m.attrib['sig'] for m in api.findall('method')]
-        assert any('cypher' in s for s in sigs)
+    def test_no_timeseries_extension_without_ts(self, social_graph):
+        root = ET.fromstring(social_graph.describe())
+        ext = root.find('extensions')
+        assert ext.find('timeseries') is None
 
-    def test_static_sections_identical(self, small_graph, social_graph):
-        """The cypher_ref and api sections should be identical across graphs."""
-        root1 = ET.fromstring(small_graph.agent_describe())
-        root2 = ET.fromstring(social_graph.agent_describe())
-        ref1 = ET.tostring(root1.find('cypher_ref'), encoding='unicode')
-        ref2 = ET.tostring(root2.find('cypher_ref'), encoding='unicode')
-        assert ref1 == ref2
+    def test_no_spatial_extension_without_spatial(self, social_graph):
+        root = ET.fromstring(social_graph.describe())
+        ext = root.find('extensions')
+        assert ext.find('spatial') is None
 
-    def test_notes_mention_builtins(self, small_graph):
-        root = ET.fromstring(small_graph.agent_describe())
-        notes_xml = ET.tostring(root.find('.//notes'), encoding='unicode')
-        assert 'type' in notes_xml
-        assert 'title' in notes_xml
-        assert 'id' in notes_xml
+
+# ── Tiered describe() ────────────────────────────────────────────────────
+
+
+class TestDescribeTiers:
+    """Tests for core/supporting node tiers in describe()."""
+
+    # -- set_parent_type API --
+
+    def test_set_parent_type_basic(self, social_graph):
+        """set_parent_type succeeds for valid types."""
+        social_graph.set_parent_type('Company', 'Person')
+
+    def test_set_parent_type_invalid_child(self, social_graph):
+        with pytest.raises(ValueError, match='not found'):
+            social_graph.set_parent_type('Bogus', 'Person')
+
+    def test_set_parent_type_invalid_parent(self, social_graph):
+        with pytest.raises(ValueError, match='not found'):
+            social_graph.set_parent_type('Company', 'Bogus')
+
+    # -- Inventory only shows core types --
+
+    def test_inventory_core_only(self, tiered_graph):
+        """Inventory should only list core types when tiers are set."""
+        result = tiered_graph.describe()
+        root = ET.fromstring(result)
+        types_el = root.find('types')
+        types_text = types_el.text.strip() if types_el.text else ''
+        # Core types should be present
+        assert 'Project' in types_text
+        assert 'Facility' in types_text
+        assert 'Region' in types_text
+        # Supporting types should NOT be listed as standalone entries
+        assert 'ProjectBudget[' not in types_text
+        assert 'ProjectPhase[' not in types_text
+        assert 'FacilitySpec[' not in types_text
+
+    def test_inventory_core_supporting_counts(self, tiered_graph):
+        """Types element should have core= and supporting= attributes."""
+        root = ET.fromstring(tiered_graph.describe())
+        types_el = root.find('types')
+        assert types_el.attrib['core'] == '17'  # 3 domain + 14 filler
+        assert types_el.attrib['supporting'] == '3'
+
+    def test_inventory_plus_n_suffix(self, tiered_graph):
+        """Parent types should have +N suffix showing child count."""
+        root = ET.fromstring(tiered_graph.describe())
+        types_text = root.find('types').text.strip()
+        # Project has 2 children (ProjectBudget, ProjectPhase)
+        assert '+2' in types_text
+        # Facility has 1 child (FacilitySpec)
+        assert '+1' in types_text
+
+    # -- Descriptor format --
+
+    def test_descriptor_format_with_flags(self, tiered_graph):
+        """Descriptors should use Name[size,complexity,flags] format."""
+        root = ET.fromstring(tiered_graph.describe())
+        types_text = root.find('types').text.strip()
+        import re
+        # Facility has location → should have 'loc' flag
+        facility_match = re.search(r'Facility\[(\w+,\w+(?:,\w+)*)\]', types_text)
+        assert facility_match is not None
+        parts = facility_match.group(1).split(',')
+        assert len(parts) >= 2  # at least size,complexity
+        assert parts[0] in ('vs', 's', 'm', 'l', 'vl')  # size tier
+        assert parts[1] in ('vl', 'l', 'm', 'h', 'vh')  # complexity
+
+    # -- Capability bubbling --
+
+    def test_capability_bubbling_ts(self, tiered_graph):
+        """ProjectBudget has timeseries → Project descriptor should show ts."""
+        root = ET.fromstring(tiered_graph.describe())
+        types_text = root.find('types').text.strip()
+        import re
+        project_match = re.search(r'Project\[([^\]]+)\]', types_text)
+        assert project_match is not None
+        flags = project_match.group(1)
+        assert 'ts' in flags
+
+    # -- Connection map excludes supporting→parent edges --
+
+    def test_connection_map_excludes_of_edges(self, tiered_graph):
+        """OF_PROJECT, OF_FACILITY edges should be excluded from connections."""
+        root = ET.fromstring(tiered_graph.describe())
+        conns = root.findall('.//connections/conn')
+        conn_types = {c.attrib['type'] for c in conns}
+        assert 'OF_PROJECT' not in conn_types
+        assert 'OF_FACILITY' not in conn_types
+
+    def test_connection_map_includes_core_edges(self, tiered_graph):
+        """Core→core edges should still be in connections."""
+        root = ET.fromstring(tiered_graph.describe())
+        conns = root.findall('.//connections/conn')
+        conn_types = {c.attrib['type'] for c in conns}
+        assert 'HAS_PROJECT' in conn_types
+        assert 'HAS_FACILITY' in conn_types
+
+    # -- Focused detail: supporting section --
+
+    def test_focused_detail_supporting_section(self, tiered_graph):
+        """Focused detail for a parent type should include <supporting> section."""
+        root = ET.fromstring(tiered_graph.describe(types=['Project']))
+        project = root.find(".//type[@name='Project']")
+        supporting = project.find('supporting')
+        assert supporting is not None
+        text = supporting.text
+        assert 'ProjectBudget' in text
+        assert 'ProjectPhase' in text
+
+    def test_focused_detail_supporting_descriptors(self, tiered_graph):
+        """Supporting section should use compact descriptor format."""
+        root = ET.fromstring(tiered_graph.describe(types=['Project']))
+        project = root.find(".//type[@name='Project']")
+        supporting_text = project.find('supporting').text
+        import re
+        # Should have descriptor format Name[size,complexity]
+        descriptors = re.findall(r'\w+\[\w+,\w+(?:,\w+)*\]', supporting_text)
+        assert len(descriptors) == 2  # ProjectBudget and ProjectPhase
+
+    def test_focused_detail_no_supporting_for_leaf(self, tiered_graph):
+        """Types without children should NOT have a <supporting> section."""
+        root = ET.fromstring(tiered_graph.describe(types=['Region']))
+        region = root.find(".//type[@name='Region']")
+        assert region.find('supporting') is None
+
+    # -- No tiers = backwards compat --
+
+    def test_no_tiers_all_types_shown(self, social_graph):
+        """When no parent_types set, all types appear in inventory."""
+        root = ET.fromstring(social_graph.describe())
+        # social_graph has 2 types (Person, Company) → auto-inlined detail
+        types = root.findall('.//types/type')
+        type_names = {t.attrib['name'] for t in types}
+        assert type_names == {'Person', 'Company'}
+
+    def test_no_tiers_count_attribute(self, large_schema_graph):
+        """Without tiers, types element uses count= not core=/supporting=."""
+        root = ET.fromstring(large_schema_graph.describe())
+        types_el = root.find('types')
+        assert 'count' in types_el.attrib
+        assert 'core' not in types_el.attrib
+        assert 'supporting' not in types_el.attrib
+
+
+# ── Read-only describe() ─────────────────────────────────────────────────
+
+
+class TestDescribeReadOnly:
+    """Tests for read-only mode in describe()."""
+
+    def test_read_only_notice_in_inventory(self, social_graph):
+        """Read-only graph should include <read-only> element."""
+        social_graph.read_only(True)
+        root = ET.fromstring(social_graph.describe())
+        ro = root.find('read-only')
+        assert ro is not None
+        assert 'CREATE' in ro.text
+        assert 'SET' in ro.text
+        assert 'DELETE' in ro.text
+        assert 'REMOVE' in ro.text
+        assert 'MERGE' in ro.text
+
+    def test_no_read_only_notice_when_writable(self, social_graph):
+        """Writable graph should NOT include <read-only> element."""
+        root = ET.fromstring(social_graph.describe())
+        assert root.find('read-only') is None
+
+    def test_read_only_notice_in_focused_detail(self, social_graph):
+        """Focused detail should also show read-only notice."""
+        social_graph.read_only(True)
+        root = ET.fromstring(social_graph.describe(types=['Person']))
+        ro = root.find('read-only')
+        assert ro is not None
+
+    def test_read_only_notice_in_large_inventory(self, large_schema_graph):
+        """Large graph inventory should show read-only notice."""
+        large_schema_graph.read_only(True)
+        root = ET.fromstring(large_schema_graph.describe())
+        ro = root.find('read-only')
+        assert ro is not None

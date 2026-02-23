@@ -29,7 +29,7 @@ make lint                    # fmt --check + clippy (run before pushing)
 - **Cypher engine** (`src/graph/cypher/`): parser → AST → executor pipeline. Supports MATCH, WHERE, RETURN, CREATE, SET, DELETE, aggregations, path patterns.
 - **Code tree parser** (`kglite/code_tree/`): language-specific parsers in `parsers/`, graph builder in `builder.py`. Outputs a `KnowledgeGraph` with code entities.
 - **MCP server** (`examples/mcp_server.py`): FastMCP server exposing the graph to AI agents.
-- **Introspection** (`src/graph/introspection.rs`): `agent_describe()` generates XML schema description for AI agent consumption.
+- **Introspection** (`src/graph/introspection.rs`): `describe()` generates XML schema description for AI agent consumption.
 
 ## Key Patterns
 
@@ -56,7 +56,7 @@ Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`
 
 When adding a new `#[pymethods]` function:
 1. `src/graph/mod.rs` — the implementation
-2. `src/graph/introspection.rs` — add to `agent_describe()` API section + notes
+2. `src/graph/introspection.rs` — add to `describe()` output if relevant
 3. `kglite/__init__.pyi` — type stub
 4. `examples/mcp_server.py` — MCP tool (if agent-facing)
 5. `CHANGELOG.md` — `[Unreleased]` → Added

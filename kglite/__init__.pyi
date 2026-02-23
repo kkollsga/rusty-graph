@@ -878,7 +878,7 @@ class KnowledgeGraph:
         """Set or query read-only mode for the Cypher layer.
 
         When enabled, all Cypher mutation queries (CREATE, SET, DELETE, REMOVE,
-        MERGE) are rejected, and ``agent_describe()`` omits mutation docs.
+        MERGE) are rejected, and ``describe()`` omits mutation docs.
 
         Args:
             enabled: If ``True``, enable read-only mode. If ``False``, disable.
@@ -1172,47 +1172,66 @@ class KnowledgeGraph:
         """Return a text summary of the graph schema (node types, connections)."""
         ...
 
-    def agent_describe(
-        self,
-        detail: str | None = None,
-        include_fluent: bool = False,
-    ) -> str:
-        """Return an XML string describing this graph for AI agents.
+    def set_parent_type(self, node_type: str, parent_type: str) -> None:
+        """Declare a node type as a supporting child of a parent type.
+
+        Supporting types are hidden from the ``describe()`` inventory and
+        instead appear in the ``<supporting>`` section when the parent type
+        is inspected.  Their capabilities (timeseries, spatial, etc.) bubble
+        up to the parent descriptor.
 
         Args:
-            detail: Level of detail for node type schemas.
+            node_type: The supporting (child) node type.
+            parent_type: The core (parent) node type.
 
-                - ``'auto'`` (default / ``None``): picks ``'full'`` when the
-                  graph has ≤15 node types, ``'compact'`` otherwise.
-                - ``'full'``: every property with type and sample values.
-                - ``'compact'``: one-liner per type (name, count, prop count).
-                  Includes exploration tips so the agent can drill deeper
-                  with ``properties()``, ``sample()``, or Cypher queries.
-
-            include_fluent: If ``True``, include the fluent filter/count/
-                statistics pipeline in the API section.  Default ``False``
-                (the fluent API is Python-side sugar, not needed for
-                Cypher-based agent workflows).
-
-        The output is a self-contained XML document covering:
-
-        - Graph structure: node types with counts and property schemas
-          (or compact summaries), connection types, indexes.
-        - Supported Cypher subset: clauses, patterns, operators, functions.
-        - Key API methods with signatures.
-
-        Designed to be included directly in an LLM prompt so an agent
-        can autonomously query the graph using ``cypher()``.
+        Raises:
+            ValueError: If either type does not exist in the graph.
 
         Example::
 
-            prompt = f"You have a knowledge graph:\\n{graph.agent_describe()}\\nAnswer the question."
+            graph.set_parent_type('ProductionProfile', 'Field')
+            graph.set_parent_type('FieldReserves', 'Field')
+        """
+        ...
 
-            # Force full detail on a large graph:
-            full = graph.agent_describe(detail='full')
+    def describe(
+        self,
+        types: list[str] | None = None,
+    ) -> str:
+        """Return an XML description of this graph for AI agents.
 
-            # Include fluent API docs:
-            with_fluent = graph.agent_describe(include_fluent=True)
+        Progressive disclosure: starts with a compact inventory, then
+        the agent drills into specific types on demand.
+
+        Two modes:
+
+        - ``describe()`` — Inventory overview: flat list of core types
+          sorted by count, each with a compact descriptor
+          ``TypeName[size,complexity,flags]`` (e.g. ``Field[m,m,geo,ts]``).
+          Supporting types appear as ``+N`` suffixes on their parent.
+          Includes connection map and Cypher extensions.  For graphs
+          with ≤15 core types, returns full detail inline automatically.
+
+        - ``describe(types=['Field', 'Well'])`` — Focused detail for
+          specific types: property schemas with types/unique counts/
+          sample values, connection topology, timeseries/spatial/
+          embedding config, sample nodes, and a ``<supporting>`` section
+          listing child types when applicable.
+
+        Args:
+            types: Optional list of node type names to get detail for.
+                When omitted, returns the inventory overview.
+
+        Example::
+
+            # Get overview
+            overview = graph.describe()
+
+            # Drill into specific types
+            detail = graph.describe(types=['Field', 'ProductionProfile'])
+
+        Raises:
+            ValueError: If any type in *types* does not exist.
         """
         ...
 

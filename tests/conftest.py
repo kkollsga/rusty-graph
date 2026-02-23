@@ -97,6 +97,41 @@ def social_graph():
 
 
 @pytest.fixture
+def large_schema_graph():
+    """Graph with >15 node types for compact inventory testing.
+
+    Creates 20 types with varying node counts and property counts:
+    - Types 0-4:  Large (>1000 nodes), few properties
+    - Types 5-14: Medium (101-500 nodes), moderate properties
+    - Types 15-19: Small (10-50 nodes), many properties
+    """
+    graph = KnowledgeGraph()
+    for i in range(20):
+        if i < 5:
+            n_nodes = 1200 + i * 100
+            extra_cols = {f'prop_{j}': [j] * n_nodes for j in range(3)}
+        elif i < 15:
+            n_nodes = 150 + i * 20
+            extra_cols = {f'prop_{j}': [j] * n_nodes for j in range(10)}
+        else:
+            n_nodes = 10 + i
+            extra_cols = {f'prop_{j}': [j] * n_nodes for j in range(20)}
+        df = pd.DataFrame({
+            'item_id': list(range(n_nodes)),
+            'name': [f'Type{i}_Item_{j}' for j in range(n_nodes)],
+            **extra_cols,
+        })
+        graph.add_nodes(df, f'Type{i}', 'item_id', 'name')
+    # Add some connections
+    edges = pd.DataFrame({
+        'from_id': list(range(100)),
+        'to_id': list(range(100, 200)),
+    })
+    graph.add_connections(edges, 'LINKS', 'Type0', 'from_id', 'Type1', 'to_id')
+    return graph
+
+
+@pytest.fixture
 def petroleum_graph():
     """Domain graph: Play/Prospect/Discovery/Estimate with temporal and spatial data.
 
@@ -171,5 +206,125 @@ def petroleum_graph():
     })
     graph.add_connections(prospect_estimate, 'HAS_ESTIMATE', 'Prospect', 'prospect_id',
                           'Estimate', 'estimate_id', columns=['weight'])
+
+    return graph
+
+
+@pytest.fixture
+def tiered_graph():
+    """Graph with core/supporting tiers for describe() tier testing.
+
+    Core types: Region (3), Project (100), Facility (50)
+    Supporting types: ProjectBudget (200, parent=Project),
+                      ProjectPhase (150, parent=Project),
+                      FacilitySpec (80, parent=Facility)
+    Connections: HAS_PROJECT (Region→Project), HAS_FACILITY (Region→Facility),
+                 OF_PROJECT (ProjectBudget→Project, ProjectPhase→Project),
+                 OF_FACILITY (FacilitySpec→Facility)
+
+    ProjectBudget has timeseries data (simulated via ts metadata).
+    """
+    graph = KnowledgeGraph()
+
+    # Core: Region
+    regions = pd.DataFrame({
+        'region_id': [1, 2, 3],
+        'name': ['North', 'South', 'East'],
+    })
+    graph.add_nodes(regions, 'Region', 'region_id', 'name')
+
+    # Core: Project
+    projects = pd.DataFrame({
+        'project_id': list(range(1, 101)),
+        'name': [f'Project_{i}' for i in range(1, 101)],
+        'status': ['Active'] * 60 + ['Completed'] * 40,
+    })
+    graph.add_nodes(projects, 'Project', 'project_id', 'name')
+
+    # Core: Facility
+    facilities = pd.DataFrame({
+        'facility_id': list(range(1, 51)),
+        'name': [f'Facility_{i}' for i in range(1, 51)],
+        'latitude': [60.0 + i * 0.1 for i in range(50)],
+        'longitude': [5.0 + i * 0.1 for i in range(50)],
+    })
+    graph.add_nodes(facilities, 'Facility', 'facility_id', 'name',
+                    column_types={'latitude': 'location.lat', 'longitude': 'location.lon'})
+
+    # Supporting: ProjectBudget (parent=Project)
+    budgets = pd.DataFrame({
+        'budget_id': list(range(1, 201)),
+        'name': [f'Budget_{i}' for i in range(1, 201)],
+        'amount': [1000000.0 * i for i in range(1, 201)],
+    })
+    graph.add_nodes(budgets, 'ProjectBudget', 'budget_id', 'name')
+
+    # Supporting: ProjectPhase (parent=Project)
+    phases = pd.DataFrame({
+        'phase_id': list(range(1, 151)),
+        'name': [f'Phase_{i}' for i in range(1, 151)],
+        'phase_type': ['Planning'] * 50 + ['Execution'] * 50 + ['Closing'] * 50,
+    })
+    graph.add_nodes(phases, 'ProjectPhase', 'phase_id', 'name')
+
+    # Supporting: FacilitySpec (parent=Facility)
+    specs = pd.DataFrame({
+        'spec_id': list(range(1, 81)),
+        'name': [f'Spec_{i}' for i in range(1, 81)],
+        'capacity': [100.0 * i for i in range(1, 81)],
+    })
+    graph.add_nodes(specs, 'FacilitySpec', 'spec_id', 'name')
+
+    # Connections
+    region_project = pd.DataFrame({
+        'region_id': [(i % 3) + 1 for i in range(100)],
+        'project_id': list(range(1, 101)),
+    })
+    graph.add_connections(region_project, 'HAS_PROJECT', 'Region', 'region_id',
+                          'Project', 'project_id')
+
+    region_facility = pd.DataFrame({
+        'region_id': [(i % 3) + 1 for i in range(50)],
+        'facility_id': list(range(1, 51)),
+    })
+    graph.add_connections(region_facility, 'HAS_FACILITY', 'Region', 'region_id',
+                          'Facility', 'facility_id')
+
+    of_project_budget = pd.DataFrame({
+        'budget_id': list(range(1, 201)),
+        'project_id': [(i % 100) + 1 for i in range(200)],
+    })
+    graph.add_connections(of_project_budget, 'OF_PROJECT', 'ProjectBudget', 'budget_id',
+                          'Project', 'project_id')
+
+    of_project_phase = pd.DataFrame({
+        'phase_id': list(range(1, 151)),
+        'project_id': [(i % 100) + 1 for i in range(150)],
+    })
+    graph.add_connections(of_project_phase, 'OF_PROJECT', 'ProjectPhase', 'phase_id',
+                          'Project', 'project_id')
+
+    of_facility_spec = pd.DataFrame({
+        'spec_id': list(range(1, 81)),
+        'facility_id': [(i % 50) + 1 for i in range(80)],
+    })
+    graph.add_connections(of_facility_spec, 'OF_FACILITY', 'FacilitySpec', 'spec_id',
+                          'Facility', 'facility_id')
+
+    # Add filler core types to push above 15 core types (triggers inventory path)
+    for i in range(14):
+        filler = pd.DataFrame({
+            'filler_id': list(range(10 + i * 5)),
+            'name': [f'Filler{i}_{j}' for j in range(10 + i * 5)],
+        })
+        graph.add_nodes(filler, f'Filler{i}', 'filler_id', 'name')
+
+    # Set parent types (tiers)
+    graph.set_parent_type('ProjectBudget', 'Project')
+    graph.set_parent_type('ProjectPhase', 'Project')
+    graph.set_parent_type('FacilitySpec', 'Facility')
+
+    # Add timeseries metadata to ProjectBudget so capability bubbling can be tested
+    graph.set_timeseries('ProjectBudget', resolution='year')
 
     return graph

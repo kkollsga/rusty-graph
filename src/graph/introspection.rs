@@ -56,41 +56,155 @@ pub struct NeighborsSchema {
     pub incoming: Vec<NeighborConnection>,
 }
 
-/// Controls output verbosity of `compute_agent_description()`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum DetailLevel {
-    Full,
-    Compact,
-    Auto,
+// ── Describe helpers ────────────────────────────────────────────────────────
+
+/// Capability flags for a node type (used by `describe()`).
+struct TypeCapabilities {
+    has_timeseries: bool,
+    has_location: bool,
+    has_geometry: bool,
+    has_embeddings: bool,
 }
 
-impl DetailLevel {
-    /// Parse from an optional string. `None` or `"auto"` → `Auto`.
-    pub fn from_str_opt(s: Option<&str>) -> Result<Self, String> {
-        match s {
-            None | Some("auto") => Ok(Self::Auto),
-            Some("full") => Ok(Self::Full),
-            Some("compact") => Ok(Self::Compact),
-            Some(other) => Err(format!(
-                "Invalid detail level '{}'. Expected 'auto', 'full', or 'compact'.",
-                other
-            )),
+impl TypeCapabilities {
+    /// Format inline capability flags: "ts", "geo", "loc", "vec".
+    fn flags_csv(&self) -> String {
+        let mut flags = Vec::new();
+        if self.has_timeseries {
+            flags.push("ts");
         }
+        if self.has_geometry {
+            flags.push("geo");
+        }
+        if self.has_location && !self.has_geometry {
+            flags.push("loc");
+        }
+        if self.has_embeddings {
+            flags.push("vec");
+        }
+        flags.join(",")
     }
 
-    /// Resolve `Auto` into `Full` or `Compact` based on graph complexity.
-    fn resolve(self, num_types: usize) -> Self {
-        match self {
-            Self::Auto => {
-                if num_types <= 15 {
-                    Self::Full
-                } else {
-                    Self::Compact
-                }
-            }
-            other => other,
+    /// Merge another type's capabilities into this one (for bubbling up).
+    fn merge(&mut self, other: &TypeCapabilities) {
+        self.has_timeseries |= other.has_timeseries;
+        self.has_location |= other.has_location;
+        self.has_geometry |= other.has_geometry;
+        self.has_embeddings |= other.has_embeddings;
+    }
+}
+
+/// Property complexity marker based on property count.
+fn property_complexity(count: usize) -> &'static str {
+    match count {
+        0..=3 => "vl",
+        4..=8 => "l",
+        9..=15 => "m",
+        16..=30 => "h",
+        _ => "vh",
+    }
+}
+
+/// Size tier for node count: vs (<10), s (10-99), m (100-999), l (1K-9999), vl (10K+).
+fn size_tier(count: usize) -> &'static str {
+    match count {
+        0..=9 => "vs",
+        10..=99 => "s",
+        100..=999 => "m",
+        1000..=9999 => "l",
+        _ => "vl",
+    }
+}
+
+/// Format a compact type descriptor: `Name[size,complexity,flags]` or `Name[size,complexity]`.
+fn format_type_descriptor(
+    name: &str,
+    count: usize,
+    prop_count: usize,
+    caps: &TypeCapabilities,
+) -> String {
+    let size = size_tier(count);
+    let complexity = property_complexity(prop_count);
+    let flags = caps.flags_csv();
+    if flags.is_empty() {
+        format!("{}[{},{}]", xml_escape(name), size, complexity)
+    } else {
+        format!("{}[{},{},{}]", xml_escape(name), size, complexity, flags)
+    }
+}
+
+/// Bubble capabilities from supporting types up to their parent core types.
+fn bubble_capabilities(
+    caps: &mut HashMap<String, TypeCapabilities>,
+    parent_types: &HashMap<String, String>,
+) {
+    // Collect child caps first to avoid borrow issues
+    let child_caps: Vec<(String, TypeCapabilities)> = parent_types
+        .iter()
+        .filter_map(|(child, parent)| {
+            caps.get(child).map(|c| {
+                (
+                    parent.clone(),
+                    TypeCapabilities {
+                        has_timeseries: c.has_timeseries,
+                        has_location: c.has_location,
+                        has_geometry: c.has_geometry,
+                        has_embeddings: c.has_embeddings,
+                    },
+                )
+            })
+        })
+        .collect();
+    for (parent, child_cap) in &child_caps {
+        if let Some(parent_cap) = caps.get_mut(parent) {
+            parent_cap.merge(child_cap);
         }
     }
+}
+
+/// Count supporting children per parent type.
+fn children_counts(parent_types: &HashMap<String, String>) -> HashMap<String, usize> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for parent in parent_types.values() {
+        *counts.entry(parent.clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// Detect capabilities for all node types in the graph.
+fn compute_type_capabilities(graph: &DirGraph) -> HashMap<String, TypeCapabilities> {
+    let mut caps: HashMap<String, TypeCapabilities> = HashMap::new();
+
+    for node_type in graph.type_indices.keys() {
+        let mut tc = TypeCapabilities {
+            has_timeseries: false,
+            has_location: false,
+            has_geometry: false,
+            has_embeddings: false,
+        };
+
+        // Timeseries
+        tc.has_timeseries = graph.timeseries_configs.contains_key(node_type);
+
+        // Spatial
+        if let Some(sc) = graph.spatial_configs.get(node_type) {
+            tc.has_location = sc.location.is_some() || !sc.points.is_empty();
+            tc.has_geometry = sc.geometry.is_some() || !sc.shapes.is_empty();
+        }
+
+        // Also check metadata for point-type fields (no SpatialConfig set)
+        if !tc.has_location {
+            if let Some(meta) = graph.node_type_metadata.get(node_type) {
+                tc.has_location = meta.values().any(|t| t.eq_ignore_ascii_case("point"));
+            }
+        }
+
+        // Embeddings
+        tc.has_embeddings = graph.embeddings.keys().any(|(nt, _)| nt == node_type);
+
+        caps.insert(node_type.clone(), tc);
+    }
+    caps
 }
 
 // ── Core functions ──────────────────────────────────────────────────────────
@@ -416,377 +530,237 @@ pub fn compute_sample<'a>(
     Ok(result)
 }
 
-// ── Agent description ──────────────────────────────────────────────────────
+// ── Describe: shared XML writers ────────────────────────────────────────────
 
-/// Static XML: code-entity exploration methods (only for code graphs).
-const API_CODE_EXPLORATION: &str = r#"    <exploration hint="Use these FIRST to understand the codebase">
-    <method sig="find(name, node_type=None, match_type=None)">Search code entities by name. match_type: 'exact' (default), 'contains' (substring), 'starts_with'. Returns type, qualified_name, file_path, line_number.</method>
-    <method sig="source(name, node_type=None)">Get source location: file_path, line_number, end_line, signature. Resolves qualified names directly.</method>
-    <method sig="context(name, node_type=None, hops=None)">Full neighborhood of an entity: properties + relationships grouped by edge type.</method>
-    <method sig="toc(file_path)">Table of contents for a source file: all entities sorted by line_number.</method>
-    </exploration>
-"#;
-
-/// Static XML: fluent API selection methods (always present).
-const API_FLUENT: &str = r#"    <fluent hint="Selection-based pipeline — chain methods to narrow, filter, and aggregate">
-    <method sig="filter(conditions)">AND filter. Operators: =, &gt;, &lt;, &gt;=, &lt;=, in, contains, starts_with, ends_with, regex (=~), is_null, is_not_null, not_contains, not_in, not_starts_with, not_ends_with, not_regex.</method>
-    <method sig="filter_any([cond1, cond2, ...])">OR filter — keeps nodes matching ANY condition set.</method>
-    <method sig="has_connection(type, direction='any')">Keep nodes with at least one edge of the given type. direction: 'outgoing', 'incoming', 'any'.</method>
-    <method sig="offset(n)">Skip first N nodes (pagination). Combine with max_nodes() for pages.</method>
-    <method sig="count(group_by='prop')">Count nodes grouped by a property. Returns {value: count}.</method>
-    <method sig="statistics('prop', group_by='prop')">Descriptive stats grouped by a property. Returns {value: {count, mean, std, min, max, sum}}.</method>
-    </fluent>
-"#;
-
-/// Static XML: query tools (always present).
-const API_QUERY: &str = r#"    <method sig="cypher(query, *, to_df=False, params=None)">Primary query interface. Returns ResultView (lazy) or DataFrame with to_df=True.</method>
-    <method sig="schema()">Returns dict: node_types, connection_types, indexes, node_count, edge_count.</method>
-    <method sig="properties(node_type, max_values=20)">Per-property stats: type, non_null, unique, values.</method>
-    <method sig="sample(node_type, n=5)">Returns first N nodes as ResultView.</method>
-    <method sig="save(path) / load(path)">Persist and reload the graph.</method>
-"#;
-
-/// Static XML: Cypher reference — clauses through expressions (read-write mode).
-const CYPHER_REF_BASE: &str = r#"  <cypher_ref>
-    <clauses>MATCH, OPTIONAL MATCH, WHERE, RETURN, WITH, ORDER BY, SKIP, LIMIT, UNWIND, UNION, UNION ALL, CREATE, SET, DELETE, DETACH DELETE, REMOVE, MERGE, CALL...YIELD, EXPLAIN</clauses>
-    <patterns>(n:Type), (n:Type {key: val}), (n {key: val}), (n), -[:REL]-&gt;, &lt;-[:REL]-, -[:REL]-, -[:REL*1..3]-&gt;, p = shortestPath(...)</patterns>
-    <where>=, &lt;&gt;, &lt;, &gt;, &lt;=, &gt;=, =~ (regex), AND, OR, NOT, IS NULL, IS NOT NULL, IN [...], CONTAINS, STARTS WITH, ENDS WITH, EXISTS { pattern }, EXISTS(( pattern ))</where>
-    <return>n.prop, r.prop, AS alias, DISTINCT, arithmetic (+, -, *, /), map projections n {.prop1, .prop2}</return>
-    <aggregation>count(*), count(expr), sum, avg, min, max, collect, std</aggregation>
-    <expressions>CASE WHEN...THEN...ELSE...END, $param, [x IN list WHERE ... | expr], list[index], list[start..end]</expressions>
-"#;
-
-/// Static XML: Cypher reference — clauses through expressions (read-only mode).
-const CYPHER_REF_BASE_RO: &str = r#"  <cypher_ref mode="read-only">
-    <clauses>MATCH, OPTIONAL MATCH, WHERE, RETURN, WITH, ORDER BY, SKIP, LIMIT, UNWIND, UNION, UNION ALL, CALL...YIELD, EXPLAIN</clauses>
-    <patterns>(n:Type), (n:Type {key: val}), (n {key: val}), (n), -[:REL]-&gt;, &lt;-[:REL]-, -[:REL]-, -[:REL*1..3]-&gt;, p = shortestPath(...)</patterns>
-    <where>=, &lt;&gt;, &lt;, &gt;, &lt;=, &gt;=, =~ (regex), AND, OR, NOT, IS NULL, IS NOT NULL, IN [...], CONTAINS, STARTS WITH, ENDS WITH, EXISTS { pattern }, EXISTS(( pattern ))</where>
-    <return>n.prop, r.prop, AS alias, DISTINCT, arithmetic (+, -, *, /), map projections n {.prop1, .prop2}</return>
-    <aggregation>count(*), count(expr), sum, avg, min, max, collect, std</aggregation>
-    <expressions>CASE WHEN...THEN...ELSE...END, $param, [x IN list WHERE ... | expr], list[index], list[start..end]</expressions>
-"#;
-
-/// Static XML: Cypher mutations and unsupported features (read-write mode only).
-const CYPHER_REF_MUTATIONS: &str = r#"    <mutations>CREATE (n:Label {props}), CREATE (a)-[:TYPE]-&gt;(b), SET n.prop = expr, DELETE, DETACH DELETE, REMOVE n.prop, MERGE...ON CREATE SET...ON MATCH SET</mutations>
-    <not_supported>FOREACH, subqueries, SET n:Label, REMOVE n:Label, multi-label, list comprehension patterns</not_supported>
-"#;
-
-/// Minimal XML escaping for attribute values.
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+/// Write the `<conventions>` element.
+fn write_conventions(xml: &mut String, caps: &HashMap<String, TypeCapabilities>) {
+    let mut specials: Vec<&str> = Vec::new();
+    if caps.values().any(|c| c.has_location) {
+        specials.push("location");
+    }
+    if caps.values().any(|c| c.has_geometry) {
+        specials.push("geometry");
+    }
+    if caps.values().any(|c| c.has_timeseries) {
+        specials.push("timeseries");
+    }
+    if caps.values().any(|c| c.has_embeddings) {
+        specials.push("embeddings");
+    }
+    if specials.is_empty() {
+        xml.push_str("  <conventions>All nodes have .id and .title</conventions>\n");
+    } else {
+        xml.push_str(&format!(
+            "  <conventions>All nodes have .id and .title. Some have: {}</conventions>\n",
+            specials.join(", ")
+        ));
+    }
 }
 
-/// Build an XML description of the graph for AI agents.
-///
-/// `detail` controls verbosity:
-/// - `Full`: all properties, values, full API reference.
-/// - `Compact`: one-liner per type, condensed API, exploration tips.
-/// - `Auto`: resolves to `Full` (≤15 types) or `Compact` (>15 types).
-///
-/// `include_fluent`: when `true`, includes the fluent API section.
-pub fn compute_agent_description(
-    graph: &DirGraph,
-    detail: DetailLevel,
-    include_fluent: bool,
-) -> String {
-    let overview = compute_schema(graph);
-    let detail = detail.resolve(overview.node_types.len());
-    let is_compact = detail == DetailLevel::Compact;
-    let has_embeddings = !graph.embeddings.is_empty();
+/// Write a `<read-only>` element when the graph is in read-only mode.
+fn write_read_only_notice(xml: &mut String, graph: &DirGraph) {
+    if graph.read_only {
+        xml.push_str(
+            "  <read-only>Cypher mutations disabled: CREATE, SET, DELETE, REMOVE, MERGE</read-only>\n",
+        );
+    }
+}
+
+/// Write the `<connections>` element from global edge stats.
+/// When `parent_types` is non-empty, filter out connections where ALL source types
+/// are supporting children of the target type (the implicit OF_* pattern).
+fn write_connection_map(xml: &mut String, graph: &DirGraph) {
+    let conn_stats = compute_connection_type_stats(graph);
+    let has_tiers = !graph.parent_types.is_empty();
+
+    let filtered: Vec<&ConnectionTypeStats> = conn_stats
+        .iter()
+        .filter(|ct| {
+            if !has_tiers {
+                return true;
+            }
+            // Filter out connections where ALL sources are children of the single target
+            if ct.target_types.len() == 1 {
+                let target = &ct.target_types[0];
+                let all_sources_are_children = ct.source_types.iter().all(|src| {
+                    graph
+                        .parent_types
+                        .get(src)
+                        .is_some_and(|parent| parent == target)
+                });
+                if all_sources_are_children {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    if filtered.is_empty() {
+        xml.push_str("  <connections/>\n");
+    } else {
+        xml.push_str("  <connections>\n");
+        for ct in &filtered {
+            // When tiers are active, filter supporting types from source/target lists
+            let sources: Vec<&str> = if has_tiers {
+                ct.source_types
+                    .iter()
+                    .filter(|s| !graph.parent_types.contains_key(*s))
+                    .map(|s| s.as_str())
+                    .collect()
+            } else {
+                ct.source_types.iter().map(|s| s.as_str()).collect()
+            };
+            let targets: Vec<&str> = if has_tiers {
+                ct.target_types
+                    .iter()
+                    .filter(|s| !graph.parent_types.contains_key(*s))
+                    .map(|s| s.as_str())
+                    .collect()
+            } else {
+                ct.target_types.iter().map(|s| s.as_str()).collect()
+            };
+            if sources.is_empty() || targets.is_empty() {
+                continue;
+            }
+            xml.push_str(&format!(
+                "    <conn type=\"{}\" from=\"{}\" to=\"{}\"/>\n",
+                xml_escape(&ct.connection_type),
+                sources.join(","),
+                targets.join(","),
+            ));
+        }
+        xml.push_str("  </connections>\n");
+    }
+}
+
+/// Write the `<extensions>` element — only sections the graph actually uses.
+fn write_extensions(xml: &mut String, graph: &DirGraph) {
     let has_timeseries = !graph.timeseries_configs.is_empty();
     let has_spatial = !graph.spatial_configs.is_empty()
         || graph
             .node_type_metadata
             .values()
             .any(|props| props.values().any(|t| t.eq_ignore_ascii_case("point")));
-    let has_code_entities = ["Function", "Struct", "Class", "Enum", "Trait"]
-        .iter()
-        .any(|t| graph.type_indices.contains_key(*t));
+    let has_embeddings = !graph.embeddings.is_empty();
 
-    let mut xml = String::with_capacity(4096);
+    if !has_timeseries && !has_spatial && !has_embeddings {
+        // Always include algorithms — they're always available
+        xml.push_str("  <extensions>\n");
+        xml.push_str("    <algorithms hint=\"CALL pagerank/betweenness/degree/closeness/louvain/label_propagation/connected_components({params}) YIELD node, score|community\"/>\n");
+        xml.push_str("  </extensions>\n");
+        return;
+    }
+
+    xml.push_str("  <extensions>\n");
+
+    if has_timeseries {
+        xml.push_str("    <timeseries hint=\"ts_avg(n.ch, start?, end?), ts_sum, ts_min, ts_max, ts_count, ts_first, ts_last, ts_delta, ts_at, ts_series — date args: 'YYYY', 'YYYY-M', 'YYYY-M-D' or DateTime properties. NaN skipped.\"/>\n");
+    }
+    if has_spatial {
+        xml.push_str("    <spatial hint=\"distance(a,b), contains(a,b), intersects(a,b), centroid(n), area(n), perimeter(n)\"/>\n");
+    }
+    if has_embeddings {
+        xml.push_str(
+            "    <semantic hint=\"text_score(n, 'col', 'query text') — similarity 0..1\"/>\n",
+        );
+    }
+    xml.push_str("    <algorithms hint=\"CALL pagerank/betweenness/degree/closeness/louvain/label_propagation/connected_components({params}) YIELD node, score|community\"/>\n");
+    xml.push_str("  </extensions>\n");
+}
+
+/// Write full detail for a single node type: properties, connections,
+/// timeseries/spatial/embedding config, and sample nodes.
+fn write_type_detail(
+    xml: &mut String,
+    graph: &DirGraph,
+    node_type: &str,
+    caps: &TypeCapabilities,
+    indent: &str,
+) {
+    let count = graph
+        .type_indices
+        .get(node_type)
+        .map(|v| v.len())
+        .unwrap_or(0);
+
+    let mut alias_attrs = String::new();
+    if let Some(id_alias) = graph.id_field_aliases.get(node_type) {
+        alias_attrs.push_str(&format!(" id_alias=\"{}\"", xml_escape(id_alias)));
+    }
+    if let Some(title_alias) = graph.title_field_aliases.get(node_type) {
+        alias_attrs.push_str(&format!(" title_alias=\"{}\"", xml_escape(title_alias)));
+    }
 
     xml.push_str(&format!(
-        "<kglite version=\"{}\" nodes=\"{}\" edges=\"{}\" detail=\"{}\">\n",
-        graph.save_metadata.library_version,
-        overview.node_count,
-        overview.edge_count,
-        if is_compact { "compact" } else { "full" }
+        "{}<type name=\"{}\" count=\"{}\"{}>\n",
+        indent,
+        xml_escape(node_type),
+        count,
+        alias_attrs
     ));
 
-    // Quick start — actionable tips at the very top
-    if has_code_entities {
-        xml.push_str("  <quick_start>\n");
-        xml.push_str("    <tip>Find code by name — faster than grep: MATCH (f:Function {name: 'foo'}) RETURN f.file_path, f.line_number, f.end_line</tip>\n");
-        xml.push_str("    <tip>Read code by qualified name — no file path needed: read_source(qualified_name=\"MyClass.method\")</tip>\n");
-        xml.push_str("    <tip>Trace call chains: MATCH (f:Function {name: 'x'})-[:CALLS*1..3]->(g) RETURN g.name, g.file_path</tip>\n");
-        xml.push_str("    <tip>Node id IS the qualified_name (e.g. 'package.module.Class.method'). Use with find(), source(), context().</tip>\n");
-        xml.push_str("    <tip>Use find(name, match_type='contains') for fuzzy search. Use toc(file_path) for file overview. Use context(name) for relationships.</tip>\n");
-        xml.push_str("  </quick_start>\n");
-    }
-
-    // Node types
-    if overview.node_types.is_empty() {
-        xml.push_str("  <node_types/>\n");
-    } else if is_compact {
-        // ── Compact mode: one-liner per type, no properties ──
-        xml.push_str("  <node_types hint=\"Use properties(type_name) or sample(type_name) to explore any type in detail\">\n");
-        for (nt, info) in &overview.node_types {
-            let prop_count = info.properties.len();
-            let mut attrs = format!(
-                "name=\"{}\" count=\"{}\" props=\"{}\"",
-                xml_escape(nt),
-                info.count,
-                prop_count
-            );
-            if let Some(id_alias) = graph.id_field_aliases.get(nt) {
-                attrs.push_str(&format!(" id_alias=\"{}\"", xml_escape(id_alias)));
-            }
-            if let Some(title_alias) = graph.title_field_aliases.get(nt) {
-                attrs.push_str(&format!(" title_alias=\"{}\"", xml_escape(title_alias)));
-            }
-            xml.push_str(&format!("    <type {}/>\n", attrs));
-        }
-        xml.push_str("  </node_types>\n");
-    } else {
-        // ── Full mode: detailed property schemas with value enumerations ──
-        xml.push_str("  <node_types>\n");
-        for (nt, info) in &overview.node_types {
-            let mut alias_attrs = String::new();
-            if let Some(id_alias) = graph.id_field_aliases.get(nt) {
-                alias_attrs.push_str(&format!(" id_alias=\"{}\"", xml_escape(id_alias)));
-            }
-            if let Some(title_alias) = graph.title_field_aliases.get(nt) {
-                alias_attrs.push_str(&format!(" title_alias=\"{}\"", xml_escape(title_alias)));
-            }
-
-            if info.properties.is_empty() {
-                xml.push_str(&format!(
-                    "    <type name=\"{}\" count=\"{}\"{}/>\n",
-                    xml_escape(nt),
-                    info.count,
-                    alias_attrs
-                ));
-            } else {
-                xml.push_str(&format!(
-                    "    <type name=\"{}\" count=\"{}\"{}>\n",
-                    xml_escape(nt),
-                    info.count,
-                    alias_attrs
-                ));
-                let mut props: Vec<(&String, &String)> = info.properties.iter().collect();
-                props.sort_by_key(|(k, _)| k.as_str());
-
-                // Collect unique values per property for low-cardinality display.
-                // Skip the scan entirely for large types without property indices —
-                // they almost never have ≤15 unique values.
-                const MAX_DISPLAY_VALS: usize = 15;
-                const MAX_SCAN_NODES: usize = 100;
-                let mut prop_values: HashMap<&str, Vec<String>> = HashMap::new();
-                if let Some(indices) = graph.type_indices.get(nt) {
-                    for (pname, ptype) in &props {
-                        // Skip UniqueId — always unique, not useful for WHERE clauses
-                        if ptype.eq_ignore_ascii_case("uniqueid") {
-                            continue;
-                        }
-
-                        // Fast path: use property index if available (O(1))
-                        if *pname != "title" {
-                            if let Some(idx_map) =
-                                graph.property_indices.get(&(nt.clone(), pname.to_string()))
-                            {
-                                if idx_map.len() <= MAX_DISPLAY_VALS {
-                                    let mut sorted: Vec<String> = idx_map
-                                        .keys()
-                                        .filter(|v| !is_null_value(v))
-                                        .map(value_display_compact)
-                                        .collect();
-                                    sorted.sort();
-                                    if !sorted.is_empty() {
-                                        prop_values.insert(pname.as_str(), sorted);
-                                    }
-                                }
-                                continue;
-                            }
-                        }
-
-                        // No index: skip scan for large types (unlikely to be low-cardinality)
-                        if indices.len() > MAX_SCAN_NODES {
-                            continue;
-                        }
-
-                        // Slow path: scan nodes (only for small types ≤ MAX_SCAN_NODES)
-                        let mut unique_vals: HashSet<String> = HashSet::new();
-                        let mut exceeded = false;
-                        for &idx in indices.iter() {
-                            if let Some(node) = graph.get_node(idx) {
-                                let val = match pname.as_str() {
-                                    "title" => Some(&node.title),
-                                    _ => node.properties.get(*pname),
-                                };
-                                if let Some(v) = val {
-                                    if !is_null_value(v) {
-                                        unique_vals.insert(value_display_compact(v));
-                                        if unique_vals.len() > MAX_DISPLAY_VALS {
-                                            exceeded = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if !exceeded && !unique_vals.is_empty() {
-                            let mut sorted: Vec<String> = unique_vals.into_iter().collect();
-                            sorted.sort();
-                            prop_values.insert(pname.as_str(), sorted);
-                        }
+    // Properties (exclude builtins: type, title, id)
+    if let Ok(stats) = compute_property_stats(graph, node_type, 15) {
+        let filtered: Vec<&PropertyStatInfo> = stats
+            .iter()
+            .filter(|p| !matches!(p.property_name.as_str(), "type" | "title" | "id"))
+            .filter(|p| p.non_null > 0)
+            .collect();
+        if !filtered.is_empty() {
+            xml.push_str(&format!("{}  <properties>\n", indent));
+            for prop in &filtered {
+                let mut attrs = format!(
+                    "name=\"{}\" type=\"{}\" unique=\"{}\"",
+                    xml_escape(&prop.property_name),
+                    xml_escape(&prop.type_string),
+                    prop.unique
+                );
+                if let Some(ref vals) = prop.values {
+                    if !vals.is_empty() {
+                        let val_strs: Vec<String> =
+                            vals.iter().map(value_display_compact).collect();
+                        attrs.push_str(&format!(" vals=\"{}\"", xml_escape(&val_strs.join("|"))));
                     }
                 }
-
-                for (pname, ptype) in &props {
-                    if let Some(vals) = prop_values.get(pname.as_str()) {
-                        xml.push_str(&format!(
-                            "      <prop name=\"{}\" type=\"{}\" vals=\"{}\"/>\n",
-                            xml_escape(pname),
-                            xml_escape(ptype),
-                            xml_escape(&vals.join("|"))
-                        ));
-                    } else {
-                        xml.push_str(&format!(
-                            "      <prop name=\"{}\" type=\"{}\"/>\n",
-                            xml_escape(pname),
-                            xml_escape(ptype)
-                        ));
-                    }
-                }
-                xml.push_str("    </type>\n");
+                xml.push_str(&format!("{}    <prop {}/>\n", indent, attrs));
             }
-        }
-        xml.push_str("  </node_types>\n");
-    }
-
-    // Connections
-    if overview.connection_types.is_empty() {
-        xml.push_str("  <connections/>\n");
-    } else {
-        xml.push_str("  <connections>\n");
-        for ct in &overview.connection_types {
-            xml.push_str(&format!(
-                "    <conn type=\"{}\" count=\"{}\" from=\"{}\" to=\"{}\"/>\n",
-                xml_escape(&ct.connection_type),
-                ct.count,
-                ct.source_types.join(","),
-                ct.target_types.join(","),
-            ));
-        }
-        xml.push_str("  </connections>\n");
-
-        // Workflow recipes for code graphs — only in full mode
-        if !is_compact && has_code_entities {
-            xml.push_str(
-                "  <workflows hint=\"Common query patterns using the edge types above\">\n",
-            );
-            xml.push_str("    <workflow name=\"Call graph\">CALLS edges link Function→Function. Use [:CALLS*1..N] for transitive callers/callees.\n      Example: MATCH (f:Function {name: 'main'})-[:CALLS*1..2]->(g) RETURN g.name, g.file_path</workflow>\n");
-            xml.push_str("    <workflow name=\"Inheritance\">EXTENDS (class→class), IMPLEMENTS (class→trait/interface).\n      Example: MATCH (s)-[:IMPLEMENTS]->(t {name: 'Display'}) RETURN s.name, s.file_path</workflow>\n");
-            xml.push_str("    <workflow name=\"File structure\">DEFINES (Module→entities), HAS_SOURCE (entity→File).\n      Example: MATCH (m:Module)-[:DEFINES]->(f:Function) WHERE m.name = 'utils' RETURN f.name</workflow>\n");
-            xml.push_str("    <workflow name=\"Dependencies\">IMPORTS (Module→Module), DEPENDS_ON (Project→Dependency).\n      Example: MATCH (m:Module)-[:IMPORTS]->(dep) RETURN dep.name, count(*) ORDER BY count(*) DESC</workflow>\n");
-            xml.push_str("  </workflows>\n");
+            xml.push_str(&format!("{}  </properties>\n", indent));
         }
     }
 
-    // Indexes
-    if overview.indexes.is_empty() {
-        xml.push_str("  <indexes/>\n");
-    } else {
-        xml.push_str("  <indexes>\n");
-        for idx in &overview.indexes {
-            xml.push_str(&format!("    <idx on=\"{}\"/>\n", xml_escape(idx)));
-        }
-        xml.push_str("  </indexes>\n");
-    }
-
-    // Embeddings (only when graph has embedding data)
-    if has_embeddings {
-        xml.push_str("  <embeddings>\n");
-        let mut emb_keys: Vec<&(String, String)> = graph.embeddings.keys().collect();
-        emb_keys.sort();
-        for (node_type, prop_name) in emb_keys {
-            if let Some(store) = graph
-                .embeddings
-                .get(&(node_type.clone(), prop_name.clone()))
-            {
-                // Show text column name (strip _emb suffix) for text_score() usage
-                let text_col = prop_name.strip_suffix("_emb").unwrap_or(prop_name.as_str());
+    // Connections (neighbors)
+    if let Ok(neighbors) = compute_neighbors_schema(graph, node_type) {
+        if !neighbors.outgoing.is_empty() || !neighbors.incoming.is_empty() {
+            xml.push_str(&format!("{}  <connections>\n", indent));
+            for nc in &neighbors.outgoing {
                 xml.push_str(&format!(
-                    "    <emb type=\"{}\" text_col=\"{}\" dim=\"{}\" count=\"{}\"/>\n",
-                    xml_escape(node_type),
-                    xml_escape(text_col),
-                    store.dimension,
-                    store.len()
+                    "{}    <out type=\"{}\" target=\"{}\" count=\"{}\"/>\n",
+                    indent,
+                    xml_escape(&nc.connection_type),
+                    xml_escape(&nc.other_type),
+                    nc.count
                 ));
             }
+            for nc in &neighbors.incoming {
+                xml.push_str(&format!(
+                    "{}    <in type=\"{}\" source=\"{}\" count=\"{}\"/>\n",
+                    indent,
+                    xml_escape(&nc.connection_type),
+                    xml_escape(&nc.other_type),
+                    nc.count
+                ));
+            }
+            xml.push_str(&format!("{}  </connections>\n", indent));
         }
-        xml.push_str("  </embeddings>\n");
     }
 
-    // Spatial config section — shows configured spatial types for distance auto-resolution
-    if !graph.spatial_configs.is_empty() {
-        xml.push_str("  <spatial hint=\"distance(a,b), contains(a,b), intersects(a,b), centroid(n), area(n), perimeter(n) — all auto-resolve via spatial config\">\n");
-        let mut sorted_types: Vec<_> = graph.spatial_configs.iter().collect();
-        sorted_types.sort_by_key(|(k, _)| k.as_str());
-        for (node_type, config) in sorted_types {
-            let mut attrs = format!("name=\"{}\"", xml_escape(node_type));
-            if let Some((lat, lon)) = &config.location {
+    // Timeseries config
+    if caps.has_timeseries {
+        if let Some(config) = graph.timeseries_configs.get(node_type) {
+            let mut attrs = format!("resolution=\"{}\"", xml_escape(&config.resolution));
+            if !config.channels.is_empty() {
                 attrs.push_str(&format!(
-                    " location=\"{},{}\"",
-                    xml_escape(lat),
-                    xml_escape(lon)
-                ));
-            }
-            if let Some(geom) = &config.geometry {
-                attrs.push_str(&format!(" geometry=\"{}\"", xml_escape(geom)));
-            }
-            if config.points.is_empty() && config.shapes.is_empty() {
-                xml.push_str(&format!("    <type {}/>\n", attrs));
-            } else {
-                xml.push_str(&format!("    <type {}>\n", attrs));
-                let mut sorted_points: Vec<_> = config.points.iter().collect();
-                sorted_points.sort_by_key(|(k, _)| k.as_str());
-                for (name, (lat, lon)) in sorted_points {
-                    xml.push_str(&format!(
-                        "      <point name=\"{}\" fields=\"{},{}\"/>\n",
-                        xml_escape(name),
-                        xml_escape(lat),
-                        xml_escape(lon)
-                    ));
-                }
-                let mut sorted_shapes: Vec<_> = config.shapes.iter().collect();
-                sorted_shapes.sort_by_key(|(k, _)| k.as_str());
-                for (name, field) in sorted_shapes {
-                    xml.push_str(&format!(
-                        "      <shape name=\"{}\" field=\"{}\"/>\n",
-                        xml_escape(name),
-                        xml_escape(field)
-                    ));
-                }
-                xml.push_str("    </type>\n");
-            }
-        }
-        xml.push_str("  </spatial>\n");
-    }
-
-    // Timeseries config section
-    if has_timeseries {
-        xml.push_str("  <timeseries hint=\"ts_sum(n.ch, '2020'), ts_avg(n.ch), ts_at(n.ch, '2020-2'), ts_min/max/count/first/last/series/delta — per-node timeseries aggregation\">\n");
-        let mut sorted_types: Vec<_> = graph.timeseries_configs.iter().collect();
-        sorted_types.sort_by_key(|(k, _)| k.as_str());
-        for (node_type, config) in sorted_types {
-            let channels_attr = if config.channels.is_empty() {
-                String::new()
-            } else {
-                format!(
                     " channels=\"{}\"",
                     config
                         .channels
@@ -794,147 +768,323 @@ pub fn compute_agent_description(
                         .map(|c| xml_escape(c))
                         .collect::<Vec<_>>()
                         .join(",")
-                )
-            };
-            let units_attr = if config.units.is_empty() {
-                String::new()
-            } else {
+                ));
+            }
+            if !config.units.is_empty() {
                 let units_str: Vec<String> = config
                     .units
                     .iter()
                     .map(|(k, v)| format!("{}={}", xml_escape(k), xml_escape(v)))
                     .collect();
-                format!(" units=\"{}\"", units_str.join(","))
+                attrs.push_str(&format!(" units=\"{}\"", units_str.join(",")));
+            }
+            xml.push_str(&format!("{}  <timeseries {}/>\n", indent, attrs));
+        }
+    }
+
+    // Spatial config
+    if caps.has_location || caps.has_geometry {
+        if let Some(config) = graph.spatial_configs.get(node_type) {
+            let mut attrs = String::new();
+            if let Some((lat, lon)) = &config.location {
+                attrs.push_str(&format!(
+                    "location=\"{},{}\"",
+                    xml_escape(lat),
+                    xml_escape(lon)
+                ));
+            }
+            if let Some(geom) = &config.geometry {
+                if !attrs.is_empty() {
+                    attrs.push(' ');
+                }
+                attrs.push_str(&format!("geometry=\"{}\"", xml_escape(geom)));
+            }
+            if !attrs.is_empty() {
+                xml.push_str(&format!("{}  <spatial {}/>\n", indent, attrs));
+            }
+        }
+    }
+
+    // Embedding config
+    if caps.has_embeddings {
+        for ((nt, prop_name), store) in &graph.embeddings {
+            if nt == node_type {
+                let text_col = prop_name.strip_suffix("_emb").unwrap_or(prop_name.as_str());
+                xml.push_str(&format!(
+                    "{}  <embeddings text_col=\"{}\" dim=\"{}\" count=\"{}\"/>\n",
+                    indent,
+                    xml_escape(text_col),
+                    store.dimension,
+                    store.len()
+                ));
+            }
+        }
+    }
+
+    // Supporting children (if this is a core type with children)
+    {
+        let children: Vec<&String> = graph
+            .parent_types
+            .iter()
+            .filter(|(_, parent)| parent.as_str() == node_type)
+            .map(|(child, _)| child)
+            .collect();
+        if !children.is_empty() {
+            let empty_caps = TypeCapabilities {
+                has_timeseries: false,
+                has_location: false,
+                has_geometry: false,
+                has_embeddings: false,
             };
-            let bin_attr = config
-                .bin_type
-                .as_ref()
-                .map(|bt| format!(" bin_type=\"{}\"", xml_escape(bt)))
-                .unwrap_or_default();
+            // Compute caps for children (direct, not bubbled)
+            let child_caps = compute_type_capabilities(graph);
+            let mut child_strs: Vec<(usize, String)> = children
+                .iter()
+                .map(|child| {
+                    let count = graph.type_indices.get(*child).map(|v| v.len()).unwrap_or(0);
+                    let prop_count = graph
+                        .node_type_metadata
+                        .get(*child)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    let tc = child_caps.get(*child).unwrap_or(&empty_caps);
+                    (count, format_type_descriptor(child, count, prop_count, tc))
+                })
+                .collect();
+            child_strs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            let strs: Vec<&str> = child_strs.iter().map(|(_, s)| s.as_str()).collect();
             xml.push_str(&format!(
-                "    <type name=\"{}\" resolution=\"{}\"{}{}{}/>\n",
-                xml_escape(node_type),
-                xml_escape(&config.resolution),
-                channels_attr,
-                units_attr,
-                bin_attr,
+                "{}  <supporting>{}</supporting>\n",
+                indent,
+                strs.join(", ")
             ));
         }
-        xml.push_str("  </timeseries>\n");
     }
 
-    // API methods — exploration (code graphs, full mode only) + fluent (opt-in) + query tools
-    xml.push_str("  <api>\n");
-    if !is_compact && has_code_entities {
-        xml.push_str(API_CODE_EXPLORATION);
+    // Sample nodes (2 samples)
+    if let Ok(samples) = compute_sample(graph, node_type, 2) {
+        if !samples.is_empty() {
+            xml.push_str(&format!("{}  <samples>\n", indent));
+            for node in samples {
+                let mut attrs = format!(
+                    "id=\"{}\" title=\"{}\"",
+                    xml_escape(&value_display_compact(&node.id)),
+                    xml_escape(&value_display_compact(&node.title))
+                );
+                // Include up to 4 non-null custom properties
+                let mut prop_count = 0;
+                let mut sorted_props: Vec<(&String, &Value)> = node.properties.iter().collect();
+                sorted_props.sort_by_key(|(k, _)| k.as_str());
+                for (k, v) in sorted_props {
+                    if !is_null_value(v) && prop_count < 4 {
+                        attrs.push_str(&format!(
+                            " {}=\"{}\"",
+                            xml_escape(k),
+                            xml_escape(&value_display_compact(v))
+                        ));
+                        prop_count += 1;
+                    }
+                }
+                xml.push_str(&format!("{}    <node {}/>\n", indent, attrs));
+            }
+            xml.push_str(&format!("{}  </samples>\n", indent));
+        }
     }
-    if include_fluent {
-        xml.push_str(API_FLUENT);
-    }
-    xml.push_str(API_QUERY);
 
-    // Exploration guidance — compact mode only
-    if is_compact {
-        xml.push_str("  </api>\n");
-        xml.push_str(
-            "  <explore hint=\"Compact schema. Use these to drill into specific types:\">\n",
-        );
-        xml.push_str(
-            "    <tip>properties('TypeName') — property stats with types and sample values</tip>\n",
-        );
-        xml.push_str("    <tip>sample('TypeName', 5) — inspect actual nodes</tip>\n");
-        xml.push_str(
-            "    <tip>cypher(\"MATCH (n:TypeName) RETURN n LIMIT 3\") — raw node data</tip>\n",
-        );
-        xml.push_str(
-            "    <tip>agent_describe(detail='full') — full description with all property details</tip>\n",
-        );
-        xml.push_str("  </explore>\n");
+    xml.push_str(&format!("{}</type>\n", indent));
+}
+
+// ── Describe: builders ─────────────────────────────────────────────────────
+
+/// Build inventory for complex graphs (>15 types): size bands with
+/// complexity markers and capability flags.
+fn build_inventory(graph: &DirGraph) -> String {
+    let mut caps = compute_type_capabilities(graph);
+    bubble_capabilities(&mut caps, &graph.parent_types);
+    let child_counts = children_counts(&graph.parent_types);
+    let has_tiers = !graph.parent_types.is_empty();
+    let empty_caps = TypeCapabilities {
+        has_timeseries: false,
+        has_location: false,
+        has_geometry: false,
+        has_embeddings: false,
+    };
+
+    let mut xml = String::with_capacity(2048);
+
+    xml.push_str(&format!(
+        "<graph nodes=\"{}\" edges=\"{}\">\n",
+        graph.graph.node_count(),
+        graph.graph.edge_count()
+    ));
+
+    write_conventions(&mut xml, &caps);
+    write_read_only_notice(&mut xml, graph);
+
+    // Collect types: if tiers active, only core types; otherwise all types
+    let mut entries: Vec<(String, usize, usize)> = graph
+        .type_indices
+        .iter()
+        .filter(|(nt, _)| !has_tiers || !graph.parent_types.contains_key(*nt))
+        .map(|(nt, indices)| {
+            let prop_count = graph
+                .node_type_metadata
+                .get(nt)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            (nt.clone(), indices.len(), prop_count)
+        })
+        .collect();
+    // Sort by count descending, then alphabetically
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let core_count = entries.len();
+    let supporting_count = graph.parent_types.len();
+    if has_tiers {
+        xml.push_str(&format!(
+            "  <types core=\"{}\" supporting=\"{}\">\n    ",
+            core_count, supporting_count
+        ));
     } else {
-        xml.push_str("  </api>\n");
+        xml.push_str(&format!("  <types count=\"{}\">\n    ", core_count));
     }
 
-    // Cypher reference (read-only mode omits mutation clauses)
-    if graph.read_only {
-        xml.push_str(CYPHER_REF_BASE_RO);
-    } else {
-        xml.push_str(CYPHER_REF_BASE);
-    }
+    let type_strs: Vec<String> = entries
+        .iter()
+        .map(|(nt, count, prop_count)| {
+            let tc = caps.get(nt).unwrap_or(&empty_caps);
+            let desc = format_type_descriptor(nt, *count, *prop_count, tc);
+            let children = child_counts.get(nt).copied().unwrap_or(0);
+            if children > 0 {
+                format!("{} +{}", desc, children)
+            } else {
+                desc
+            }
+        })
+        .collect();
+    xml.push_str(&type_strs.join(", "));
+    xml.push_str("\n  </types>\n");
 
-    // Functions list — conditionally include spatial and embedding functions
-    let mut functions = String::from(
-        "toUpper, toLower, toString, toInteger, toFloat, size, length, \
-         type, id, labels, coalesce, nodes(p), relationships(p), \
-         split, replace, substring, left, right, trim, ltrim, rtrim, reverse",
-    );
-    if has_spatial {
-        functions.push_str(
-            ", point, distance, contains, intersects, centroid, area, perimeter, \
-             latitude, longitude",
-        );
-    }
-    if has_embeddings {
-        functions.push_str(", text_score");
-    }
-    if has_timeseries {
-        functions.push_str(
-            ", date, ts_at, ts_sum, ts_avg, ts_min, ts_max, ts_count, \
-             ts_first, ts_last, ts_series, ts_delta",
-        );
-    }
-    xml.push_str(&format!("    <functions>{}</functions>\n", functions));
+    write_connection_map(&mut xml, graph);
+    write_extensions(&mut xml, graph);
 
-    if graph.read_only {
-        xml.push_str(
-            "    <not_supported>FOREACH, subqueries, SET n:Label, REMOVE n:Label, multi-label, \
-             list comprehension patterns, CREATE, SET, DELETE, REMOVE, MERGE (read-only mode)</not_supported>\n",
-        );
-    } else {
-        xml.push_str(CYPHER_REF_MUTATIONS);
-    }
-
-    // CALL procedures
-    xml.push_str("    <procedures hint=\"CALL name({params}) YIELD columns — then use WHERE/RETURN/ORDER BY/LIMIT as usual\">\n");
-    xml.push_str("      <proc name=\"pagerank\" params=\"damping_factor(0.85), max_iterations(100), tolerance(1e-6), connection_types\" yields=\"node, score\">Importance via incoming links.</proc>\n");
-    xml.push_str("      <proc name=\"betweenness\" params=\"normalized(true), sample_size, connection_types\" yields=\"node, score\">Bridge nodes on shortest paths.</proc>\n");
-    xml.push_str("      <proc name=\"degree\" params=\"normalized(true), connection_types\" yields=\"node, score\">Connection count per node.</proc>\n");
-    xml.push_str("      <proc name=\"closeness\" params=\"normalized(true), connection_types\" yields=\"node, score\">Proximity to all other nodes.</proc>\n");
-    xml.push_str("      <proc name=\"louvain\" params=\"resolution(1.0), weight_property, connection_types\" yields=\"node, community\">Community detection via modularity.</proc>\n");
-    xml.push_str("      <proc name=\"label_propagation\" params=\"max_iterations(100), connection_types\" yields=\"node, community\">Community detection via label spread.</proc>\n");
-    xml.push_str("      <proc name=\"connected_components\" params=\"\" yields=\"node, component\">Weakly connected component membership.</proc>\n");
-    xml.push_str("    </procedures>\n");
-
-    // Notes — technical details (workflow tips are in <quick_start>)
-    xml.push_str("    <notes>\n");
-    xml.push_str("      <note>Each node has exactly one type. labels(n) returns a string, not a list.</note>\n");
-    xml.push_str("      <note>Built-in node fields: type, title, id. Access via n.type, n.title, n.id.</note>\n");
-    xml.push_str("      <note>Label-optional MATCH: (n {name: 'x'}) searches all node types. Use n.type or labels(n) to see the type.</note>\n");
-    xml.push_str("      <note>If a node type has id_alias/title_alias attributes, the original column name also works as a property accessor (e.g. n.npdid resolves to n.id).</note>\n");
-    xml.push_str("      <note>Each cypher() call is atomic. Params via $param syntax. to_df=True returns a pandas DataFrame.</note>\n");
     xml.push_str(
-        "      <note>CALL proc() YIELD node, score — node is a node binding (use node.title, node.type, etc. in RETURN/WHERE).</note>\n",
+        "  <hint>Use describe(types=['TypeName']) for properties, children, connections, and samples.</hint>\n",
     );
-    if has_embeddings {
-        xml.push_str(
-            "      <note>text_score(n, 'col', 'query') — semantic similarity (0..1). Use text_col value from &lt;emb&gt; as 'col'. Usable in WHERE/RETURN/ORDER BY.</note>\n",
-        );
-    }
-    if has_timeseries {
-        xml.push_str(
-            "      <note>ts_*() functions operate on per-node timeseries channels. First arg is n.channel_name (PropertyAccess). \
-             Range args are date strings: ts_sum(n.ch) = all, ts_sum(n.ch, '2025') = year 2025, ts_sum(n.ch, '2025-2', '2025-6') = Feb-Jun. \
-             Date args can also be DateTime edge properties for temporal joins: ts_sum(p.ch, r.from_date, r.to_date). \
-             Null date args are treated as open-ended (no bound). date('2025-06-15') creates a DateTime value. NaN values are skipped.</note>\n",
-        );
-    }
-    if has_code_entities {
-        xml.push_str(
-            "      <note>Qualified name formats — Rust: crate::module::Type::method, Python: package.module.Class.method, TS/JS: module.Class.method.</note>\n",
-        );
-    }
-    xml.push_str("    </notes>\n");
-    xml.push_str("  </cypher_ref>\n");
-    xml.push_str("</kglite>");
-
+    xml.push_str("</graph>");
     xml
+}
+
+/// Build inventory with inline detail for simple graphs (≤15 types).
+fn build_inventory_with_detail(graph: &DirGraph) -> String {
+    let mut caps = compute_type_capabilities(graph);
+    bubble_capabilities(&mut caps, &graph.parent_types);
+    let mut xml = String::with_capacity(4096);
+
+    xml.push_str(&format!(
+        "<graph nodes=\"{}\" edges=\"{}\">\n",
+        graph.graph.node_count(),
+        graph.graph.edge_count()
+    ));
+
+    write_conventions(&mut xml, &caps);
+    write_read_only_notice(&mut xml, graph);
+
+    // Full detail for each type (core only if tiers active)
+    let has_tiers = !graph.parent_types.is_empty();
+    let mut type_names: Vec<&String> = graph
+        .type_indices
+        .keys()
+        .filter(|nt| !has_tiers || !graph.parent_types.contains_key(*nt))
+        .collect();
+    type_names.sort();
+
+    xml.push_str("  <types>\n");
+    let empty_caps = TypeCapabilities {
+        has_timeseries: false,
+        has_location: false,
+        has_geometry: false,
+        has_embeddings: false,
+    };
+    for nt in type_names {
+        let tc = caps.get(nt).unwrap_or(&empty_caps);
+        write_type_detail(&mut xml, graph, nt, tc, "    ");
+    }
+    xml.push_str("  </types>\n");
+
+    write_connection_map(&mut xml, graph);
+    write_extensions(&mut xml, graph);
+
+    xml.push_str("</graph>");
+    xml
+}
+
+/// Build focused detail for specific requested types.
+fn build_focused_detail(graph: &DirGraph, types: &[String]) -> Result<String, String> {
+    // Validate all types exist
+    for t in types {
+        if !graph.type_indices.contains_key(t) {
+            return Err(format!("Node type '{}' not found. Available: {}", t, {
+                let mut names: Vec<&String> = graph.type_indices.keys().collect();
+                names.sort();
+                names
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }));
+        }
+    }
+
+    let caps = compute_type_capabilities(graph);
+    let empty_caps = TypeCapabilities {
+        has_timeseries: false,
+        has_location: false,
+        has_geometry: false,
+        has_embeddings: false,
+    };
+    let mut xml = String::with_capacity(2048);
+    xml.push_str("<graph>\n");
+    write_read_only_notice(&mut xml, graph);
+
+    for t in types {
+        let tc = caps.get(t).unwrap_or(&empty_caps);
+        write_type_detail(&mut xml, graph, t, tc, "  ");
+    }
+
+    xml.push_str("</graph>");
+    Ok(xml)
+}
+
+// ── Describe: entry point ──────────────────────────────────────────────────
+
+/// Build an XML description of the graph for AI agents (progressive disclosure).
+///
+/// - `types = None` → Inventory mode. If ≤15 types, auto-inlines full detail.
+/// - `types = Some(list)` → Focused detail for the requested types only.
+pub fn compute_description(graph: &DirGraph, types: Option<&[String]>) -> Result<String, String> {
+    match types {
+        Some(requested) if !requested.is_empty() => build_focused_detail(graph, requested),
+        _ => {
+            // Count core types only (exclude supporting types)
+            let core_count = graph
+                .type_indices
+                .keys()
+                .filter(|nt| !graph.parent_types.contains_key(*nt))
+                .count();
+            if core_count <= 15 {
+                Ok(build_inventory_with_detail(graph))
+            } else {
+                Ok(build_inventory(graph))
+            }
+        }
+    }
+}
+
+/// Minimal XML escaping for attribute values.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }

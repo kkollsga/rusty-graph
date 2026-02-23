@@ -130,15 +130,23 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def graph_overview() -> str:
-    """ALWAYS call this tool first. Returns the schema of the knowledge graph
-    (node types, edge types, indexes), a Cypher query reference, and available
-    API methods. You need this context before using any other tool.
+def graph_overview(types: list[str] | None = None) -> str:
+    """Get the graph schema, type details, and available Cypher extensions.
 
-    For complex graphs (>15 types) the output is automatically compacted.
-    Use properties('TypeName') or sample('TypeName') via cypher_query to
-    explore specific types in detail."""
-    return graph.agent_describe()
+    Call with no arguments first to get the inventory overview — node types
+    grouped by size with capability flags, connection map, and non-standard
+    Cypher functions (timeseries, spatial, etc.). Standard Cypher works as
+    expected and is not repeated here.
+
+    Then call with specific type names for detailed property schemas,
+    connection topology, timeseries/spatial config, and sample nodes:
+      graph_overview(types=["Field", "ProductionProfile"])
+
+    For simple graphs (<=15 types), the first call returns everything."""
+    try:
+        return graph.describe(types=types)
+    except Exception as e:
+        return f"describe error: {e}"
 
 
 @mcp.tool()

@@ -1262,7 +1262,7 @@ fn estimate_expression_cost(expr: &Expression) -> u32 {
                 "size" | "length" | "type" | "id" => 2,
                 "tolower" | "toupper" | "trim" | "ltrim" | "rtrim" => 3,
                 "substring" | "replace" | "split" => 5,
-                "abs" | "ceil" | "floor" | "round" | "sqrt" | "sign" => 2,
+                "abs" | "ceil" | "ceiling" | "floor" | "round" | "sqrt" | "sign" => 2,
                 "vector_score" => 200, // Embedding lookup + similarity computation
                 _ => 5,                // Unknown functions get moderate cost
             };

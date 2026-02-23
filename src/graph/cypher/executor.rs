@@ -3706,6 +3706,72 @@ impl<'a> CypherExecutor<'a> {
                 Ok(Value::String(format!("[{}]", vals.join(","))))
             }
 
+            // ── Numeric math functions ──────────────────────────
+            "abs" => {
+                let val = self.evaluate_expression(&args[0], row)?;
+                match val {
+                    Value::Int64(n) => Ok(Value::Int64(n.abs())),
+                    Value::Float64(f) => Ok(Value::Float64(f.abs())),
+                    Value::Null => Ok(Value::Null),
+                    _ => match value_to_f64(&val) {
+                        Some(f) => Ok(Value::Float64(f.abs())),
+                        None => Ok(Value::Null),
+                    },
+                }
+            }
+            "ceil" | "ceiling" => {
+                let val = self.evaluate_expression(&args[0], row)?;
+                match val {
+                    Value::Null => Ok(Value::Null),
+                    _ => match value_to_f64(&val) {
+                        Some(f) => Ok(Value::Float64(f.ceil())),
+                        None => Ok(Value::Null),
+                    },
+                }
+            }
+            "floor" => {
+                let val = self.evaluate_expression(&args[0], row)?;
+                match val {
+                    Value::Null => Ok(Value::Null),
+                    _ => match value_to_f64(&val) {
+                        Some(f) => Ok(Value::Float64(f.floor())),
+                        None => Ok(Value::Null),
+                    },
+                }
+            }
+            "round" => {
+                let val = self.evaluate_expression(&args[0], row)?;
+                match val {
+                    Value::Null => Ok(Value::Null),
+                    _ => match value_to_f64(&val) {
+                        Some(f) => Ok(Value::Float64(f.round())),
+                        None => Ok(Value::Null),
+                    },
+                }
+            }
+            "sqrt" => {
+                let val = self.evaluate_expression(&args[0], row)?;
+                match val {
+                    Value::Null => Ok(Value::Null),
+                    _ => match value_to_f64(&val) {
+                        Some(f) if f >= 0.0 => Ok(Value::Float64(f.sqrt())),
+                        _ => Ok(Value::Null),
+                    },
+                }
+            }
+            "sign" => {
+                let val = self.evaluate_expression(&args[0], row)?;
+                match val {
+                    Value::Null => Ok(Value::Null),
+                    _ => match value_to_f64(&val) {
+                        Some(f) if f > 0.0 => Ok(Value::Int64(1)),
+                        Some(f) if f < 0.0 => Ok(Value::Int64(-1)),
+                        Some(_) => Ok(Value::Int64(0)),
+                        None => Ok(Value::Null),
+                    },
+                }
+            }
+
             // Aggregate functions should not be evaluated per-row
             "count" | "sum" | "avg" | "min" | "max" | "collect" | "mean" | "std" => Err(format!(
                 "Aggregate function '{}' cannot be used outside of RETURN/WITH",

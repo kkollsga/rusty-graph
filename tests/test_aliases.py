@@ -166,17 +166,15 @@ class TestMultipleNodeTypes:
         assert result[0]["n.npdid_ref"] == 1
 
 
-class TestAgentDescribeAliases:
-    """agent_describe() should include alias info in XML."""
+class TestDescribeAliases:
+    """describe() should include alias info in XML."""
 
     def test_aliases_in_xml(self, graph_with_aliases):
-        xml = graph_with_aliases.agent_describe()
+        xml = graph_with_aliases.describe()
         assert 'id_alias="npdid"' in xml
         assert 'title_alias="prospect_name"' in xml
 
     def test_no_aliases_when_default(self, graph_default_fields):
-        xml = graph_default_fields.agent_describe()
-        # Check that no alias attributes appear on the <type> element
-        # (the static notes section mentions "id_alias" as documentation, so check the attribute pattern)
+        xml = graph_default_fields.describe()
         assert 'id_alias="' not in xml
         assert 'title_alias="' not in xml
