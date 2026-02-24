@@ -782,6 +782,11 @@ impl CypherParser {
                         break;
                     }
                 }
+                Some(CypherToken::DoublePipe) => {
+                    self.advance();
+                    let right = self.parse_multiplicative_expression()?;
+                    left = Expression::Concat(Box::new(left), Box::new(right));
+                }
                 _ => break,
             }
         }

@@ -438,6 +438,13 @@ detail = graph.describe(types=['Field', 'Well'])
 
 **Focused mode** (`types=[...]`): detailed properties with types, connection topology, timeseries/spatial config, `<supporting>` children, and sample nodes.
 
+**Cypher reference** (`cypher=True`): full language reference including all supported clauses, operators (`||`, `=~`, `IN`, etc.), built-in functions, predicates, and examples. Useful for AI agents discovering available Cypher features.
+
+```python
+# Full Cypher language reference
+ref = graph.describe(cypher=True)
+```
+
 ---
 
 ## Cypher Queries
@@ -1066,6 +1073,44 @@ result = graph.louvain_communities(weight_property='strength', resolution=1.5)
 result = graph.label_propagation(max_iterations=100)
 ```
 
+### Clustering
+
+General-purpose clustering via Cypher `CALL cluster()`. Reads nodes from a preceding MATCH clause.
+
+```python
+# Spatial DBSCAN — auto-detects lat/lon from set_spatial() config
+result = graph.cypher("""
+    MATCH (f:Field)
+    CALL cluster({method: 'dbscan', eps: 50000, min_points: 2})
+    YIELD node, cluster
+    RETURN cluster, count(*) AS n, collect(node.name) AS fields
+    ORDER BY n DESC
+""")
+
+# Property-based K-means — cluster on explicit numeric properties
+result = graph.cypher("""
+    MATCH (w:Wellbore)
+    CALL cluster({
+        properties: ['totalDepth', 'bottomHoleTemp'],
+        method: 'kmeans', k: 5, normalize: true
+    })
+    YIELD node, cluster
+    RETURN cluster, count(*) AS n
+""")
+```
+
+| Parameter | Type | Default | Notes |
+|-----------|------|---------|-------|
+| `method` | string | `"dbscan"` | `"dbscan"` or `"kmeans"` |
+| `properties` | list | (none) | If omitted, uses spatial config |
+| `eps` | float | 0.5 | DBSCAN neighborhood radius (meters for spatial, raw units for properties) |
+| `min_points` | int | 3 | DBSCAN minimum neighbors for core point |
+| `k` | int | 5 | K-means cluster count |
+| `max_iterations` | int | 100 | K-means iteration limit |
+| `normalize` | bool | false | Min-max scale features to [0,1] before clustering |
+
+Noise points (DBSCAN only) get `cluster = -1`. Filter with `WHERE cluster >= 0`.
+
 ### Node Degrees
 
 ```python
@@ -1102,7 +1147,7 @@ With spatial types declared, queries become simpler:
 
 ```python
 # Auto-resolves location fields — no lat_field/lon_field needed
-graph.type_filter('Field').near_point_km(center_lat=60.5, center_lon=3.2, max_distance_km=50.0)
+graph.type_filter('Field').near_point_m(center_lat=60.5, center_lon=3.2, max_distance_m=50000.0)
 
 # Cypher distance between nodes — resolves via location, falls back to geometry centroid
 graph.cypher("""
@@ -1161,11 +1206,11 @@ graph.type_filter('Discovery').within_bounds(
 )
 ```
 
-### Distance Queries (Haversine)
+### Distance Queries (Geodesic)
 
 ```python
-graph.type_filter('Wellbore').near_point_km(
-    center_lat=60.5, center_lon=3.2, max_distance_km=50.0
+graph.type_filter('Wellbore').near_point_m(
+    center_lat=60.5, center_lon=3.2, max_distance_m=50000.0
 )
 ```
 

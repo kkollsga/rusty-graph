@@ -203,6 +203,8 @@ pub enum Expression {
     Subtract(Box<Expression>, Box<Expression>),
     Multiply(Box<Expression>, Box<Expression>),
     Divide(Box<Expression>, Box<Expression>),
+    /// String concatenation: expr || expr
+    Concat(Box<Expression>, Box<Expression>),
     /// Unary negation: -n.value
     Negate(Box<Expression>),
     /// Star (*) for count(*)

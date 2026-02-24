@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 pub mod batch_operations;
 pub mod calculations;
+pub mod clustering;
 pub mod cypher;
 pub mod data_retrieval;
 pub mod debugging;
@@ -3557,12 +3558,13 @@ impl KnowledgeGraph {
 
     /// Return an XML description of this graph for AI agents (progressive disclosure).
     ///
-    /// Two modes:
+    /// Three modes:
     /// - `describe()` → Inventory overview (or full detail if ≤15 types)
     /// - `describe(types=["Field", "Well"])` → Focused detail for specific types
-    #[pyo3(signature = (types=None))]
-    fn describe(&self, types: Option<Vec<String>>) -> PyResult<String> {
-        introspection::compute_description(&self.inner, types.as_deref())
+    /// - `describe(cypher=True)` → Append full Cypher language reference
+    #[pyo3(signature = (types=None, cypher=false))]
+    fn describe(&self, types: Option<Vec<String>>, cypher: bool) -> PyResult<String> {
+        introspection::compute_description(&self.inner, types.as_deref(), cypher)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }
 

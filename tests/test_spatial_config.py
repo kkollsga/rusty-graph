@@ -203,16 +203,16 @@ class TestDistanceAutoResolution:
         assert isinstance(dist, float)
         assert dist > 0
 
-    def test_distance_no_config_errors(self):
-        """distance(a, b) without spatial config gives a clear error."""
+    def test_distance_no_config_returns_null(self):
+        """distance(a, b) without spatial config returns None (Null)."""
         graph = KnowledgeGraph()
         df = pd.DataFrame({'id': [1, 2], 'name': ['A', 'B']})
         graph.add_nodes(df, 'Thing', 'id', 'name')
-        with pytest.raises(Exception, match="spatial config"):
-            graph.cypher("""
-                MATCH (a:Thing {name: 'A'}), (b:Thing {name: 'B'})
-                RETURN distance(a, b)
-            """)
+        rv = graph.cypher("""
+            MATCH (a:Thing {name: 'A'}), (b:Thing {name: 'B'})
+            RETURN distance(a, b) AS dist
+        """)
+        assert rv[0]['dist'] is None
 
 
 # ── Virtual properties in Cypher ─────────────────────────────────────

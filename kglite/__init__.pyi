@@ -1197,6 +1197,7 @@ class KnowledgeGraph:
     def describe(
         self,
         types: list[str] | None = None,
+        cypher: bool = False,
     ) -> str:
         """Return an XML description of this graph for AI agents.
 

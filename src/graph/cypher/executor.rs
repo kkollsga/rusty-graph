@@ -4,6 +4,7 @@
 use super::ast::*;
 use super::result::*;
 use crate::datatypes::values::Value;
+use crate::graph::clustering;
 use crate::graph::filtering_methods;
 use crate::graph::graph_algorithms;
 use crate::graph::pattern_matching::{
@@ -353,7 +354,7 @@ impl<'a> CypherExecutor<'a> {
                     columns: vec![alias.clone()],
                 })
             }
-            Clause::Call(c) => self.execute_call(c),
+            Clause::Call(c) => self.execute_call(c, result_set),
             Clause::Create(_)
             | Clause::Set(_)
             | Clause::Delete(_)
@@ -2093,7 +2094,8 @@ impl<'a> CypherExecutor<'a> {
             Expression::Add(l, r)
             | Expression::Subtract(l, r)
             | Expression::Multiply(l, r)
-            | Expression::Divide(l, r) => {
+            | Expression::Divide(l, r)
+            | Expression::Concat(l, r) => {
                 Self::is_row_independent(l) && Self::is_row_independent(r)
             }
             Expression::Negate(inner) => Self::is_row_independent(inner),
@@ -2149,6 +2151,10 @@ impl<'a> CypherExecutor<'a> {
                 Box::new(self.fold_constants_expr(r)),
             ),
             Expression::Divide(l, r) => Expression::Divide(
+                Box::new(self.fold_constants_expr(l)),
+                Box::new(self.fold_constants_expr(r)),
+            ),
+            Expression::Concat(l, r) => Expression::Concat(
                 Box::new(self.fold_constants_expr(l)),
                 Box::new(self.fold_constants_expr(r)),
             ),
@@ -2281,6 +2287,11 @@ impl<'a> CypherExecutor<'a> {
                 let l = self.evaluate_expression(left, row)?;
                 let r = self.evaluate_expression(right, row)?;
                 Ok(arithmetic_div(&l, &r))
+            }
+            Expression::Concat(left, right) => {
+                let l = self.evaluate_expression(left, row)?;
+                let r = self.evaluate_expression(right, row)?;
+                Ok(value_operations::string_concat(&l, &r))
             }
             Expression::Negate(inner) => {
                 let val = self.evaluate_expression(inner, row)?;
@@ -3236,9 +3247,10 @@ impl<'a> CypherExecutor<'a> {
                         ) => Ok(Value::Float64(spatial::geometry_to_geometry_distance_m(
                             &g1, &g2,
                         )?)),
-                        _ => Err("distance() with 2 args requires Point values or nodes \
-                                 with spatial config (location or geometry)"
-                            .into()),
+                        // One or both sides have no spatial data (e.g. node
+                        // exists but geometry field is NULL) → propagate Null
+                        // so WHERE distance(a, b) < X simply filters them out.
+                        _ => Ok(Value::Null),
                     }
                 }
                 4 => {
@@ -3743,7 +3755,20 @@ impl<'a> CypherExecutor<'a> {
                 match val {
                     Value::Null => Ok(Value::Null),
                     _ => match value_to_f64(&val) {
-                        Some(f) => Ok(Value::Float64(f.round())),
+                        Some(f) => {
+                            if args.len() >= 2 {
+                                let prec = self.evaluate_expression(&args[1], row)?;
+                                let d = match &prec {
+                                    Value::Int64(i) => *i as i32,
+                                    Value::Float64(fl) => *fl as i32,
+                                    _ => 0,
+                                };
+                                let factor = 10f64.powi(d);
+                                Ok(Value::Float64((f * factor).round() / factor))
+                            } else {
+                                Ok(Value::Float64(f.round()))
+                            }
+                        }
                         None => Ok(Value::Null),
                     },
                 }
@@ -4400,6 +4425,11 @@ impl<'a> CypherExecutor<'a> {
                 let r = self.evaluate_aggregate_with_rows(right, rows)?;
                 Ok(value_operations::arithmetic_div(&l, &r))
             }
+            Expression::Concat(left, right) => {
+                let l = self.evaluate_aggregate_with_rows(left, rows)?;
+                let r = self.evaluate_aggregate_with_rows(right, rows)?;
+                Ok(value_operations::string_concat(&l, &r))
+            }
             // Non-aggregate expression in an aggregation context - evaluate with first row
             _ => {
                 if let Some(row) = rows.first() {
@@ -4886,7 +4916,7 @@ impl<'a> CypherExecutor<'a> {
     // CALL (graph algorithm procedures)
     // ========================================================================
 
-    fn execute_call(&self, clause: &CallClause) -> Result<ResultSet, String> {
+    fn execute_call(&self, clause: &CallClause, existing: ResultSet) -> Result<ResultSet, String> {
         self.check_deadline()?;
 
         let proc_name = clause.procedure_name.to_lowercase();
@@ -4902,12 +4932,13 @@ impl<'a> CypherExecutor<'a> {
             | "closeness_centrality" => &["node", "score"],
             "louvain" | "louvain_communities" | "label_propagation" => &["node", "community"],
             "connected_components" | "weakly_connected_components" => &["node", "component"],
+            "cluster" => &["node", "cluster"],
             "list_procedures" => &["name", "description", "yield_columns"],
             _ => {
                 return Err(format!(
                     "Unknown procedure '{}'. Available: pagerank, betweenness, degree, \
                      closeness, louvain, label_propagation, connected_components, \
-                     list_procedures",
+                     cluster, list_procedures",
                     clause.procedure_name
                 ));
             }
@@ -5027,6 +5058,7 @@ impl<'a> CypherExecutor<'a> {
                 }
                 rows
             }
+            "cluster" => self.execute_call_cluster(&params, &clause.yield_items, &existing)?,
             "list_procedures" => {
                 let procedures = [
                     (
@@ -5063,6 +5095,11 @@ impl<'a> CypherExecutor<'a> {
                         "connected_components",
                         "Find weakly connected components",
                         "node, component",
+                    ),
+                    (
+                        "cluster",
+                        "Cluster nodes by spatial location or numeric properties (DBSCAN/K-means). Reads from preceding MATCH.",
+                        "node, cluster",
                     ),
                     (
                         "list_procedures",
@@ -5116,6 +5153,200 @@ impl<'a> CypherExecutor<'a> {
             map.insert(key.clone(), val);
         }
         Ok(map)
+    }
+
+    /// Execute CALL cluster() — cluster nodes from the preceding MATCH result set.
+    fn execute_call_cluster(
+        &self,
+        params: &HashMap<String, Value>,
+        yield_items: &[YieldItem],
+        existing: &ResultSet,
+    ) -> Result<Vec<ResultRow>, String> {
+        // Extract parameters
+        let method = call_param_opt_string(params, "method")
+            .unwrap_or_else(|| "dbscan".to_string())
+            .to_lowercase();
+        let eps = call_param_f64(params, "eps", 0.5);
+        let min_points = call_param_usize(params, "min_points", 3);
+        let k = call_param_usize(params, "k", 5);
+        let max_iterations = call_param_usize(params, "max_iterations", 100);
+        let normalize = call_param_bool(params, "normalize", false);
+
+        // Extract property list (if given)
+        let properties: Option<Vec<String>> = params.get("properties").and_then(|v| {
+            let items = parse_list_value(v);
+            if items.is_empty() {
+                return None;
+            }
+            let strs: Vec<String> = items
+                .into_iter()
+                .filter_map(|item| match item {
+                    Value::String(s) => Some(s),
+                    _ => None,
+                })
+                .collect();
+            if strs.is_empty() {
+                None
+            } else {
+                Some(strs)
+            }
+        });
+
+        // Collect unique node indices from the existing result set
+        let mut node_indices: Vec<NodeIndex> = Vec::new();
+        let mut seen: HashSet<NodeIndex> = HashSet::new();
+        for row in &existing.rows {
+            for (_, &idx) in row.node_bindings.iter() {
+                if seen.insert(idx) {
+                    node_indices.push(idx);
+                }
+            }
+        }
+
+        if node_indices.is_empty() {
+            return Err("cluster() requires a preceding MATCH clause that binds nodes".to_string());
+        }
+
+        // Validate method
+        if method != "dbscan" && method != "kmeans" {
+            return Err(format!(
+                "Unknown clustering method '{}'. Available: dbscan, kmeans",
+                method
+            ));
+        }
+
+        // Build feature vectors and run clustering
+        let assignments = if let Some(ref prop_names) = properties {
+            // ── Explicit property mode ──
+            // Extract numeric features from named properties
+            let mut features: Vec<Vec<f64>> = Vec::new();
+            let mut valid_indices: Vec<usize> = Vec::new(); // indices into node_indices
+
+            for (i, &idx) in node_indices.iter().enumerate() {
+                if let Some(node) = self.graph.graph.node_weight(idx) {
+                    let mut vals = Vec::with_capacity(prop_names.len());
+                    let mut all_present = true;
+                    for prop in prop_names {
+                        if let Some(val) = node.properties.get(prop) {
+                            if let Some(f) = value_to_f64(val) {
+                                vals.push(f);
+                            } else {
+                                all_present = false;
+                                break;
+                            }
+                        } else {
+                            all_present = false;
+                            break;
+                        }
+                    }
+                    if all_present {
+                        features.push(vals);
+                        valid_indices.push(i);
+                    }
+                }
+            }
+
+            if features.is_empty() {
+                return Err(format!(
+                    "No nodes have all required numeric properties: {:?}",
+                    prop_names
+                ));
+            }
+
+            if normalize {
+                clustering::normalize_features(&mut features);
+            }
+
+            let cluster_assignments = match method.as_str() {
+                "dbscan" => {
+                    let dm = clustering::euclidean_distance_matrix(&features);
+                    clustering::dbscan(&dm, eps, min_points)
+                }
+                "kmeans" => clustering::kmeans(&features, k, max_iterations),
+                _ => unreachable!(),
+            };
+
+            // Map back to original node_indices
+            cluster_assignments
+                .into_iter()
+                .map(|ca| (node_indices[valid_indices[ca.index]], ca.cluster))
+                .collect::<Vec<_>>()
+        } else {
+            // ── Spatial mode ──
+            // Auto-detect lat/lon from spatial config
+            let mut points: Vec<(f64, f64)> = Vec::new();
+            let mut valid_indices: Vec<usize> = Vec::new();
+
+            for (i, &idx) in node_indices.iter().enumerate() {
+                if let Some(node) = self.graph.graph.node_weight(idx) {
+                    // Try spatial config for this node type
+                    if let Some(config) = self.graph.get_spatial_config(&node.node_type) {
+                        let (lat_f, lon_f) = config
+                            .location
+                            .as_ref()
+                            .map(|(a, b)| (a.as_str(), b.as_str()))
+                            .unwrap_or(("latitude", "longitude"));
+                        let geom_fallback = config.geometry.as_deref();
+
+                        if let Some((lat, lon)) =
+                            spatial::node_location(node, lat_f, lon_f, geom_fallback)
+                        {
+                            points.push((lat, lon));
+                            valid_indices.push(i);
+                        }
+                    }
+                }
+            }
+
+            if points.is_empty() {
+                return Err(
+                    "No nodes have spatial data. Either configure spatial fields with \
+                     set_spatial_config() or provide explicit 'properties' parameter."
+                        .to_string(),
+                );
+            }
+
+            let cluster_assignments = match method.as_str() {
+                "dbscan" => {
+                    let dm = clustering::haversine_distance_matrix(&points);
+                    clustering::dbscan(&dm, eps, min_points)
+                }
+                "kmeans" => {
+                    // For spatial k-means, convert to feature vectors [lat, lon]
+                    let features: Vec<Vec<f64>> =
+                        points.iter().map(|(lat, lon)| vec![*lat, *lon]).collect();
+                    clustering::kmeans(&features, k, max_iterations)
+                }
+                _ => unreachable!(),
+            };
+
+            cluster_assignments
+                .into_iter()
+                .map(|ca| (node_indices[valid_indices[ca.index]], ca.cluster))
+                .collect::<Vec<_>>()
+        };
+
+        // Build result rows
+        let mut rows = Vec::with_capacity(assignments.len());
+        for (node_idx, cluster_id) in &assignments {
+            let mut row = ResultRow::new();
+            for item in yield_items {
+                let alias = item.alias.as_deref().unwrap_or(&item.name);
+                match item.name.as_str() {
+                    "node" => {
+                        row.node_bindings.insert(alias.to_string(), *node_idx);
+                    }
+                    "cluster" => {
+                        row.projected
+                            .insert(alias.to_string(), Value::Int64(*cluster_id));
+                    }
+                    _ => {}
+                }
+            }
+            rows.push(row);
+        }
+
+        Ok(rows)
     }
 
     /// Convert centrality results to ResultRows with node bindings + score.
@@ -6173,7 +6404,8 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
         Expression::Add(l, r)
         | Expression::Subtract(l, r)
         | Expression::Multiply(l, r)
-        | Expression::Divide(l, r) => is_aggregate_expression(l) || is_aggregate_expression(r),
+        | Expression::Divide(l, r)
+        | Expression::Concat(l, r) => is_aggregate_expression(l) || is_aggregate_expression(r),
         Expression::Negate(inner) => is_aggregate_expression(inner),
         Expression::Case {
             when_clauses,
@@ -6256,6 +6488,9 @@ fn expression_to_string(expr: &Expression) -> String {
         Expression::Divide(l, r) => {
             format!("{} / {}", expression_to_string(l), expression_to_string(r))
         }
+        Expression::Concat(l, r) => {
+            format!("{} || {}", expression_to_string(l), expression_to_string(r))
+        }
         Expression::Negate(inner) => format!("-{}", expression_to_string(inner)),
         Expression::ListLiteral(items) => {
             let items_str: Vec<String> = items.iter().map(expression_to_string).collect();
@@ -6319,9 +6554,13 @@ fn evaluate_comparison(
     right: &Value,
     regex_cache: Option<&RwLock<HashMap<String, regex::Regex>>>,
 ) -> Result<bool, String> {
+    // Three-valued logic: comparisons involving Null propagate Null → false
+    // (except IS NULL / IS NOT NULL which are handled elsewhere, and
+    // Equals/NotEquals which handle Null explicitly via values_equal).
     match op {
         ComparisonOp::Equals => Ok(filtering_methods::values_equal(left, right)),
         ComparisonOp::NotEquals => Ok(!filtering_methods::values_equal(left, right)),
+        _ if matches!(left, Value::Null) || matches!(right, Value::Null) => Ok(false),
         ComparisonOp::LessThan => {
             Ok(filtering_methods::compare_values(left, right) == Some(std::cmp::Ordering::Less))
         }

@@ -435,7 +435,7 @@ fn value_to_f64(value: &Value) -> Option<f64> {
 
 /// Extract (lat, lon) from a node, trying lat/lon fields first,
 /// then falling back to the centroid of a WKT geometry field.
-fn node_location(
+pub(crate) fn node_location(
     node: &crate::graph::schema::NodeData,
     lat_field: &str,
     lon_field: &str,

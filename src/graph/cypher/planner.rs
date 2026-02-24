@@ -1531,7 +1531,8 @@ impl TextScoreCollector {
             Expression::Add(l, r)
             | Expression::Subtract(l, r)
             | Expression::Multiply(l, r)
-            | Expression::Divide(l, r) => {
+            | Expression::Divide(l, r)
+            | Expression::Concat(l, r) => {
                 self.rewrite_expr(l, params)?;
                 self.rewrite_expr(r, params)?;
                 Ok(())

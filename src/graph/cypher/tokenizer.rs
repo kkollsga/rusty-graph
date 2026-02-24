@@ -82,9 +82,10 @@ pub enum CypherToken {
     RegexMatch, // =~
 
     // Arithmetic
-    Plus,  // +
-    Slash, // /
-    Pipe,  // |
+    Plus,       // +
+    Slash,      // /
+    Pipe,       // |
+    DoublePipe, // ||
 
     // Literals and identifiers
     Identifier(String),
@@ -170,8 +171,13 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
                 i += 1;
             }
             '|' => {
-                tokens.push(CypherToken::Pipe);
-                i += 1;
+                if i + 1 < len && chars[i + 1] == '|' {
+                    tokens.push(CypherToken::DoublePipe);
+                    i += 2;
+                } else {
+                    tokens.push(CypherToken::Pipe);
+                    i += 1;
+                }
             }
             '=' => {
                 if i + 1 < chars.len() && chars[i + 1] == '~' {

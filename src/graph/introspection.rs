@@ -644,14 +644,6 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
             .any(|props| props.values().any(|t| t.eq_ignore_ascii_case("point")));
     let has_embeddings = !graph.embeddings.is_empty();
 
-    if !has_timeseries && !has_spatial && !has_embeddings {
-        // Always include algorithms — they're always available
-        xml.push_str("  <extensions>\n");
-        xml.push_str("    <algorithms hint=\"CALL pagerank/betweenness/degree/closeness/louvain/label_propagation/connected_components({params}) YIELD node, score|community\"/>\n");
-        xml.push_str("  </extensions>\n");
-        return;
-    }
-
     xml.push_str("  <extensions>\n");
 
     if has_timeseries {
@@ -665,8 +657,58 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
             "    <semantic hint=\"text_score(n, 'col', 'query text') — similarity 0..1\"/>\n",
         );
     }
-    xml.push_str("    <algorithms hint=\"CALL pagerank/betweenness/degree/closeness/louvain/label_propagation/connected_components({params}) YIELD node, score|community\"/>\n");
+    xml.push_str("    <algorithms hint=\"CALL pagerank/betweenness/degree/closeness/louvain/label_propagation/connected_components/cluster({params}) YIELD node, score|community|cluster\"/>\n");
+    xml.push_str("    <cypher hint=\"MATCH, WHERE, RETURN, WITH, ORDER BY, SKIP, LIMIT, UNION [ALL], UNWIND, CASE, CREATE/SET/DELETE/MERGE. Use describe(cypher=true) for operators, functions, and predicates.\"/>\n");
     xml.push_str("  </extensions>\n");
+}
+
+/// Write the full `<cypher>` language reference (progressive disclosure level 2).
+fn write_cypher_reference(xml: &mut String) {
+    xml.push_str("<cypher>\n");
+    xml.push_str("  <clauses>MATCH, OPTIONAL MATCH, WHERE, RETURN [DISTINCT], WITH, ORDER BY [DESC], SKIP, LIMIT, UNWIND expr AS var, UNION [ALL], CASE WHEN/THEN/ELSE/END, CREATE, SET, DELETE, REMOVE, MERGE</clauses>\n");
+    xml.push_str("  <operators>\n");
+    xml.push_str("    <math>+ - * /</math>\n");
+    xml.push_str("    <string>|| (concatenation)</string>\n");
+    xml.push_str("    <comparison>= &lt;&gt; &lt; &gt; &lt;= &gt;= IN</comparison>\n");
+    xml.push_str("    <logical>AND OR NOT XOR</logical>\n");
+    xml.push_str("    <null>IS NULL, IS NOT NULL</null>\n");
+    xml.push_str("    <regex>=~ 'pattern'</regex>\n");
+    xml.push_str("    <string_predicates>CONTAINS, STARTS WITH, ENDS WITH</string_predicates>\n");
+    xml.push_str("  </operators>\n");
+    xml.push_str("  <functions>\n");
+    xml.push_str("    <math>abs, ceil, floor, round(x [,decimals]), sqrt, sign, log, exp, pow, pi, rand, toInteger, toFloat</math>\n");
+    xml.push_str("    <string>toString, toUpper, toLower, trim, lTrim, rTrim, replace, substring, left, right, split, reverse, size</string>\n");
+    xml.push_str("    <aggregate>count, sum, avg, min, max, collect, stDev</aggregate>\n");
+    xml.push_str("    <list>size, head, tail, last, range, keys, labels, type</list>\n");
+    xml.push_str("    <null>coalesce(expr, ...) — first non-null</null>\n");
+    xml.push_str("  </functions>\n");
+    xml.push_str("  <patterns>\n");
+    xml.push_str(
+        "    (n:Label), (n:Label {prop: val}), (a)-[:TYPE]-&gt;(b), (a)-[:TYPE*1..3]-&gt;(b),\n",
+    );
+    xml.push_str("    [x IN list WHERE pred | expr] — list comprehension,\n");
+    xml.push_str("    n {.prop1, .prop2} — map projection\n");
+    xml.push_str("  </patterns>\n");
+    xml.push_str("  <examples>\n");
+    xml.push_str("    <ex desc=\"string predicate\">WHERE n.name CONTAINS 'oil'</ex>\n");
+    xml.push_str("    <ex desc=\"regex match\">WHERE n.name =~ '35/9-.*'</ex>\n");
+    xml.push_str(
+        "    <ex desc=\"null coalesce\">RETURN coalesce(n.nickname, n.name) AS label</ex>\n",
+    );
+    xml.push_str("    <ex desc=\"concat\">RETURN n.quadrant || '/' || n.block AS qb</ex>\n");
+    xml.push_str("    <ex desc=\"union\">MATCH (a:Field) RETURN a.name UNION MATCH (b:Discovery) RETURN b.name</ex>\n");
+    xml.push_str(
+        "    <ex desc=\"unwind\">UNWIND ['A','B','C'] AS x MATCH (n {code: x}) RETURN n</ex>\n",
+    );
+    xml.push_str("    <ex desc=\"list comprehension\">[x IN collect(n.name) WHERE x STARTS WITH '35']</ex>\n");
+    xml.push_str(
+        "    <ex desc=\"case\">CASE WHEN n.depth &gt; 3000 THEN 'deep' ELSE 'shallow' END</ex>\n",
+    );
+    xml.push_str(
+        "    <ex desc=\"round precision\">round(distance(a, b) / 1000.0, 1) AS dist_km</ex>\n",
+    );
+    xml.push_str("  </examples>\n");
+    xml.push_str("</cypher>\n");
 }
 
 /// Write full detail for a single node type: properties, connections,
@@ -1062,9 +1104,14 @@ fn build_focused_detail(graph: &DirGraph, types: &[String]) -> Result<String, St
 ///
 /// - `types = None` → Inventory mode. If ≤15 types, auto-inlines full detail.
 /// - `types = Some(list)` → Focused detail for the requested types only.
-pub fn compute_description(graph: &DirGraph, types: Option<&[String]>) -> Result<String, String> {
-    match types {
-        Some(requested) if !requested.is_empty() => build_focused_detail(graph, requested),
+/// - `cypher = true` → Append full Cypher language reference (operators, functions, examples).
+pub fn compute_description(
+    graph: &DirGraph,
+    types: Option<&[String]>,
+    cypher: bool,
+) -> Result<String, String> {
+    let mut result = match types {
+        Some(requested) if !requested.is_empty() => build_focused_detail(graph, requested)?,
         _ => {
             // Count core types only (exclude supporting types)
             let core_count = graph
@@ -1073,12 +1120,17 @@ pub fn compute_description(graph: &DirGraph, types: Option<&[String]>) -> Result
                 .filter(|nt| !graph.parent_types.contains_key(*nt))
                 .count();
             if core_count <= 15 {
-                Ok(build_inventory_with_detail(graph))
+                build_inventory_with_detail(graph)
             } else {
-                Ok(build_inventory(graph))
+                build_inventory(graph)
             }
         }
+    };
+    if cypher {
+        result.push('\n');
+        write_cypher_reference(&mut result);
     }
+    Ok(result)
 }
 
 /// Minimal XML escaping for attribute values.

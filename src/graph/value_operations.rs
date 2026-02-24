@@ -173,6 +173,19 @@ pub fn format_value_compact(val: &Value) -> String {
     }
 }
 
+/// String concatenation (|| operator). Null propagates: if either side is Null, returns Null.
+/// Non-string values are converted to their compact string representation.
+pub fn string_concat(a: &Value, b: &Value) -> Value {
+    match (a, b) {
+        (Value::Null, _) | (_, Value::Null) => Value::Null,
+        _ => Value::String(format!(
+            "{}{}",
+            format_value_compact(a),
+            format_value_compact(b)
+        )),
+    }
+}
+
 /// Write a compact value representation into an existing buffer (avoids allocation).
 pub fn format_value_compact_into(buf: &mut String, val: &Value) {
     use std::fmt::Write;

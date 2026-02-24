@@ -205,10 +205,33 @@ graph.cypher("""
 """)
 ```
 
-## Arithmetic
+## Math Functions
+
+| Function | Description |
+|----------|-------------|
+| `abs(x)` | Absolute value |
+| `ceil(x)` / `ceiling(x)` | Round up to integer |
+| `floor(x)` | Round down to integer |
+| `round(x)` | Round to nearest integer |
+| `round(x, d)` | Round to `d` decimal places (e.g. `round(3.14159, 2)` → 3.14) |
+| `sqrt(x)` | Square root |
+| `sign(x)` | Sign: -1, 0, or 1 |
+| `log(x)` | Natural logarithm |
+| `exp(x)` | e^x |
+| `pow(x, y)` | x^y |
+| `pi()` | π constant |
+| `rand()` | Random float [0, 1) |
+
+## Arithmetic & String Concatenation
 
 ```python
 graph.cypher("MATCH (n:Product) RETURN n.title, n.price * 1.25 AS price_with_tax")
+
+# String concatenation with ||
+graph.cypher("MATCH (n:Person) RETURN n.first || ' ' || n.last AS fullname")
+
+# || auto-converts non-strings; null propagates
+graph.cypher("RETURN 'block-' || 35 AS label")  # → "block-35"
 ```
 
 ## CASE Expressions
@@ -546,7 +569,7 @@ graph.cypher("MATCH (f:Field) RETURN ts_at(f.oil, '2020')")
 | **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN` |
 | **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val}`, `p = shortestPath(...)` |
 | **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern }`, `EXISTS(( pattern ))` |
-| **RETURN** | `n.prop`, `r.prop`, `AS` aliases, `DISTINCT`, arithmetic `+`/`-`/`*`/`/`, map projections `n {.prop1, .prop2}` |
+| **RETURN** | `n.prop`, `r.prop`, `AS` aliases, `DISTINCT`, arithmetic `+`/`-`/`*`/`/`, string concat `\|\|`, map projections `n {.prop1, .prop2}` |
 | **Aggregation** | `count(*)`, `count(expr)`, `sum`, `avg`/`mean`, `min`, `max`, `collect`, `std` |
 | **Expressions** | `CASE WHEN...THEN...ELSE...END`, `$param`, `[x IN list WHERE ... \| expr]` |
 | **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `length`, `type`, `id`, `labels`, `coalesce`, `nodes(p)`, `relationships(p)` |
@@ -554,4 +577,6 @@ graph.cypher("MATCH (f:Field) RETURN ts_at(f.oil, '2020')")
 | **Semantic** | `text_score(n, prop, query [, metric])` — auto-embeds query via `set_embedder()`, cosine/dot_product/euclidean |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
-| **Not supported** | `CALL`/stored procedures, `FOREACH`, subqueries, `SET n:Label` (label mutation), `REMOVE n:Label`, multi-label |
+| **Procedures** | `CALL pagerank/betweenness/degree/closeness() YIELD node, score`, `CALL louvain/label_propagation() YIELD node, community`, `CALL connected_components() YIELD node, component`, `CALL cluster({method, ...}) YIELD node, cluster` |
+| **Operators** | `+`, `-`, `*`, `/`, `\|\|` (string concat), `=~` (regex), `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS NULL`, `IS NOT NULL` |
+| **Not supported** | `FOREACH`, subqueries (`CALL {}`), `SET n:Label` (label mutation), `REMOVE n:Label`, multi-label |
