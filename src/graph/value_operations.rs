@@ -170,6 +170,7 @@ pub fn format_value_compact(val: &Value) -> String {
         Value::DateTime(v) => v.format("%Y-%m-%d").to_string(),
         Value::Point { lat, lon } => format!("point({}, {})", lat, lon),
         Value::Null => "null".to_string(),
+        Value::NodeRef(idx) => format!("node#{}", idx),
     }
 }
 
@@ -204,6 +205,7 @@ pub fn format_value_compact_into(buf: &mut String, val: &Value) {
         Value::DateTime(v) => write!(buf, "{}", v.format("%Y-%m-%d")).unwrap(),
         Value::Point { lat, lon } => write!(buf, "point({}, {})", lat, lon).unwrap(),
         Value::Null => buf.push_str("null"),
+        Value::NodeRef(idx) => write!(buf, "node#{}", idx).unwrap(),
     }
 }
 

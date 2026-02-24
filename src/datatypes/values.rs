@@ -32,8 +32,15 @@ pub enum Value {
     String(String),
     Boolean(bool),
     DateTime(NaiveDate),
-    Point { lat: f64, lon: f64 },
+    Point {
+        lat: f64,
+        lon: f64,
+    },
     Null,
+    /// Internal: petgraph NodeIndex reference, used to preserve node identity
+    /// through collect() → index → WITH → property access pipelines.
+    /// Never persisted — only exists during Cypher execution.
+    NodeRef(u32),
 }
 
 // Implement Eq for Value
@@ -65,6 +72,7 @@ impl Ord for Value {
                 Value::String(_) => 5,
                 Value::DateTime(_) => 6,
                 Value::Point { .. } => 7,
+                Value::NodeRef(_) => 8,
             }
         }
         match (self, other) {
@@ -99,6 +107,7 @@ impl Ord for Value {
                 .partial_cmp(b_lat)
                 .unwrap_or(Ordering::Equal)
                 .then(a_lon.partial_cmp(b_lon).unwrap_or(Ordering::Equal)),
+            (Value::NodeRef(a), Value::NodeRef(b)) => a.cmp(b),
             // Cross-variant: order by discriminant
             _ => disc(self).cmp(&disc(other)),
         }
@@ -137,6 +146,7 @@ impl Hash for Value {
                 lon.to_bits().hash(state);
             }
             Value::Null => 0.hash(state),
+            Value::NodeRef(v) => v.hash(state),
         }
     }
 }
@@ -416,6 +426,7 @@ pub fn format_value(value: &Value) -> String {
         Value::DateTime(v) => format!("\"{}\"", v.format("%Y-%m-%d")),
         Value::Point { lat, lon } => format!("point({}, {})", lat, lon),
         Value::Null => "NULL".to_string(),
+        Value::NodeRef(idx) => format!("node#{}", idx),
     }
 }
 

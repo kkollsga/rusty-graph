@@ -2247,11 +2247,10 @@ impl<'a> CypherExecutor<'a> {
                 if let Some(val) = row.projected.get(name) {
                     return Ok(val.clone());
                 }
-                // For node variables, return a representative value (the node's title)
+                // For node variables, return a NodeRef (preserves identity
+                // through collect → index → WITH → property-access)
                 if let Some(&idx) = row.node_bindings.get(name) {
-                    if let Some(node) = self.graph.graph.node_weight(idx) {
-                        return Ok(node_to_map_value(node));
-                    }
+                    return Ok(Value::NodeRef(idx.index() as u32));
                 }
                 // Edge variable — return connection_type as representative value
                 if let Some(edge) = row.edge_bindings.get(name) {
@@ -2873,6 +2872,14 @@ impl<'a> CypherExecutor<'a> {
 
         // Fall back to projected values (scalar aliases from WITH)
         if let Some(val) = row.projected.get(variable) {
+            // NodeRef in projected → resolve the actual node property
+            if let Value::NodeRef(idx) = val {
+                let node_idx = petgraph::graph::NodeIndex::new(*idx as usize);
+                if let Some(node) = self.graph.graph.node_weight(node_idx) {
+                    return Ok(resolve_node_property(node, property, self.graph));
+                }
+                return Ok(Value::Null);
+            }
             return Ok(val.clone());
         }
 
@@ -5832,6 +5839,7 @@ fn value_type_name(v: &Value) -> String {
         Value::DateTime(_) => "DateTime",
         Value::Point { .. } => "Point",
         Value::Null => "Null",
+        Value::NodeRef(_) => "NodeRef",
     }
     .to_string()
 }
@@ -6717,6 +6725,12 @@ fn parse_list_value(val: &Value) -> Vec<Value> {
                         Value::Null
                     } else {
                         let unquoted = trimmed_item.trim_matches(|c| c == '"' || c == '\'');
+                        // Recognise serialised node references from collect()
+                        if let Some(idx_str) = unquoted.strip_prefix("__nref:") {
+                            if let Ok(idx) = idx_str.parse::<u32>() {
+                                return Value::NodeRef(idx);
+                            }
+                        }
                         Value::String(unquoted.to_string())
                     }
                 })
@@ -6771,6 +6785,7 @@ fn format_value_json(val: &Value) -> String {
         Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
         Value::Null => "null".to_string(),
         Value::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
+        Value::NodeRef(idx) => format!("\"__nref:{}\"", idx),
         _ => format_value_compact(val),
     }
 }

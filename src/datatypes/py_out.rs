@@ -38,6 +38,8 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
             Ok(dict.into_any().unbind())
         }
         Value::Null => Ok(py.None()),
+        // NodeRef should be resolved before reaching Python; fallback to index
+        Value::NodeRef(idx) => idx.into_py_any(py),
     }
 }
 

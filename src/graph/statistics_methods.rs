@@ -170,6 +170,7 @@ fn calculate_stats_for_nodes(
                             Value::UniqueId(_) => "unique_id",
                             Value::Point { .. } => "point",
                             Value::Null => "null",
+                            Value::NodeRef(_) => "noderef",
                         });
                     }
                 }

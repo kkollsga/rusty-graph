@@ -7,12 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.60] - 2026-02-24
+
+### Added
+
+- `describe(cypher=True)` tier 1 hint now highlights KGLite-specific features (||, =~, coalesce, CALL procedures, distance/contains)
+- `describe(cypher=True)` tier 2 includes `<not_supported>` section and spatial functions group
+- `describe()` overview connection map includes `count` attribute per connection type
+- `describe()` connections hint only shown when graph has edges
+- `describe(cypher=['spatial'])` topic with distance, contains, intersects, centroid, area, perimeter docs
+
 ## [0.5.59] - 2026-02-24
 
 ### Added
 
 - `bug_report(query, result, expected, description)` — file Cypher bug reports to `reported_bugs.md`. Timestamped, version-tagged entries prepended to top of file. Input sanitised against HTML/code injection
 - `KnowledgeGraph.explain_mcp()` — static method returning a self-contained XML quickstart for setting up a KGLite MCP server (server template, core/optional tools, Claude registration config)
+
+### Fixed
+
+- `collect(node)[0].property` now returns the actual property value instead of the node's title. Previously, `WITH f, collect(fr)[0] AS lr RETURN lr.oil` would return the node title for every property access. Node identity is now preserved through collect→index→WITH pipelines via internal `Value::NodeRef` references
 
 ## [0.5.58] - 2026-02-24
 

@@ -106,6 +106,28 @@ fn extract_cypher_param(obj: Option<&Bound<'_, PyAny>>) -> PyResult<introspectio
     ))
 }
 
+/// Resolve any `Value::NodeRef` in Cypher result rows to node titles.
+/// Called just before Python conversion so that NodeRef (an internal
+/// representation used to preserve node identity through collect/WITH)
+/// is never exposed to Python.
+fn resolve_noderefs(
+    graph: &petgraph::stable_graph::StableDiGraph<schema::NodeData, schema::EdgeData>,
+    rows: &mut [Vec<Value>],
+) {
+    for row in rows.iter_mut() {
+        for val in row.iter_mut() {
+            if let Value::NodeRef(idx) = val {
+                let node_idx = petgraph::graph::NodeIndex::new(*idx as usize);
+                if let Some(node) = graph.node_weight(node_idx) {
+                    *val = node.title.clone();
+                } else {
+                    *val = Value::Null;
+                }
+            }
+        }
+    }
+}
+
 /// Main knowledge graph type exposed to Python via PyO3.
 ///
 /// Wraps a `DirGraph` behind an `Arc` for cheap cloning (read-heavy workloads).
@@ -3519,6 +3541,7 @@ impl KnowledgeGraph {
                         Some(Value::UniqueId(u)) => u.to_string(),
                         Some(Value::DateTime(d)) => d.to_string(),
                         Some(Value::Point { lat, lon }) => format!("({}, {})", lat, lon),
+                        Some(Value::NodeRef(idx)) => format!("node#{}", idx),
                         Some(Value::Null) | None => "null".to_string(),
                     };
                     *groups.entry(key).or_insert(0) += 1;
@@ -4569,7 +4592,7 @@ impl KnowledgeGraph {
             // Mutation path: needs exclusive borrow
             let mut this = slf.borrow_mut();
             let graph = get_graph_mut(&mut this.inner);
-            let result =
+            let mut result =
                 cypher::execute_mutable(graph, &parsed, param_map, deadline).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                         "Cypher execution error: {}",
@@ -4588,6 +4611,8 @@ impl KnowledgeGraph {
             if let Some(ref stats) = result.stats {
                 this.last_mutation_stats = Some(stats.clone());
             }
+            // Resolve NodeRef values to node titles before Python conversion
+            resolve_noderefs(&this.inner.graph, &mut result.rows);
             // Convert to Python
             if to_df {
                 let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
@@ -4618,7 +4643,10 @@ impl KnowledgeGraph {
             })?;
             let columns = result.columns;
             let stats = result.stats;
-            let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
+            // Resolve NodeRef values to node titles before Python conversion
+            let mut rows = result.rows;
+            resolve_noderefs(&inner.graph, &mut rows);
+            let preprocessed = cypher::py_convert::preprocess_values_owned(rows);
             if to_df {
                 cypher::py_convert::preprocessed_result_to_dataframe(py, &columns, &preprocessed)
             } else {

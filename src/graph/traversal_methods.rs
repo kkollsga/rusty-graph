@@ -402,6 +402,7 @@ pub fn get_children_properties(
                                 format!("point({}, {})", lat, lon)
                             }
                             Some(Value::Null) => "null".to_string(),
+                            Some(Value::NodeRef(idx)) => format!("node#{}", idx),
                             None => continue,
                         };
 

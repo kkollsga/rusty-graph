@@ -333,6 +333,7 @@ fn value_type_name(v: &Value) -> &'static str {
         Value::UniqueId(_) => "uniqueid",
         Value::Point { .. } => "point",
         Value::Null => "unknown",
+        Value::NodeRef(_) => "noderef",
     }
 }
 
@@ -361,6 +362,7 @@ fn value_display_compact(v: &Value) -> String {
         Value::DateTime(d) => d.to_string(),
         Value::UniqueId(u) => u.to_string(),
         Value::Point { lat, lon } => format!("({},{})", lat, lon),
+        Value::NodeRef(idx) => format!("node#{}", idx),
         Value::Null => String::new(),
     }
 }
@@ -1090,6 +1092,17 @@ fn write_topic_match(xml: &mut String) {
     xml.push_str("      <ex desc=\"inline property filter\">MATCH (n:Field {status: 'active'}) RETURN n</ex>\n");
     xml.push_str("      <ex desc=\"optional match\">MATCH (a:Field) OPTIONAL MATCH (a)-[:HAS]-&gt;(b:Well) RETURN a.name, b.name</ex>\n");
     xml.push_str("    </examples>\n");
+    xml.push_str("    <pitfall name=\"cartesian product from multiple OPTIONAL MATCH\">\n");
+    xml.push_str(
+        "      Multiple OPTIONAL MATCH clauses create a cross-product of all matched paths.\n",
+    );
+    xml.push_str(
+        "      If a node connects to 10 prospects × 5 plays × 3 licences = 150 rows per node.\n",
+    );
+    xml.push_str("      Fix: break with WITH to collapse dimensions before expanding the next.\n");
+    xml.push_str("      <bad>MATCH (w:Well) OPTIONAL MATCH (w)-[:A]-&gt;(a) OPTIONAL MATCH (w)-[:B]-&gt;(b) OPTIONAL MATCH (w)-[:C]-&gt;(c) RETURN w, collect(a), collect(b), collect(c)</bad>\n");
+    xml.push_str("      <good>MATCH (w:Well) OPTIONAL MATCH (w)-[:A]-&gt;(a) WITH w, collect(DISTINCT a.title) AS as_ OPTIONAL MATCH (w)-[:B]-&gt;(b) WITH w, as_, collect(DISTINCT b.title) AS bs OPTIONAL MATCH (w)-[:C]-&gt;(c) RETURN w.title, as_, bs, collect(DISTINCT c.title) AS cs</good>\n");
+    xml.push_str("    </pitfall>\n");
     xml.push_str("  </MATCH>\n");
 }
 

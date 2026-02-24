@@ -397,6 +397,7 @@ fn value_to_string(value: &Value) -> String {
         Value::UniqueId(id) => id.to_string(),
         Value::Point { lat, lon } => format!("point({}, {})", lat, lon),
         Value::Null => String::new(),
+        Value::NodeRef(idx) => format!("node#{}", idx),
     }
 }
 
@@ -425,6 +426,7 @@ fn json_value(value: &Value) -> String {
         Value::UniqueId(id) => id.to_string(),
         Value::Point { lat, lon } => format!("{{\"lat\":{},\"lon\":{}}}", lat, lon),
         Value::Null => "null".to_string(),
+        Value::NodeRef(idx) => idx.to_string(),
     }
 }
 

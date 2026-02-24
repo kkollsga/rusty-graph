@@ -581,3 +581,93 @@ class TestStringCoercion:
         g = rg.KnowledgeGraph()
         result = g.cypher("RETURN 3 + 4 AS val")
         assert result[0]['val'] == 7
+
+
+# ========================================================================
+# collect(node)[index] property access (regression: #collect-noderef)
+# ========================================================================
+
+
+class TestCollectNodePropertyAccess:
+    """Regression tests for collect(node)[0] returning the node's title
+    string instead of preserving the node object for property access.
+
+    Bug: WITH f, collect(fr)[0] AS lr  →  lr.prop returned lr's title for
+    every property instead of the actual property value.
+    """
+
+    @pytest.fixture
+    def reserves_graph(self):
+        g = rg.KnowledgeGraph()
+        g.cypher("CREATE (f:Field {name: 'ULA'})")
+        g.cypher(
+            "CREATE (fr:FieldReserves {title: '2025-12-31', oil: 158.185, gas: 87.706})"
+        )
+        g.cypher(
+            "CREATE (fr2:FieldReserves {title: '2024-01-01', oil: 150.0, gas: 80.0})"
+        )
+        g.cypher(
+            "MATCH (fr:FieldReserves {title: '2025-12-31'}), (f:Field {name: 'ULA'}) "
+            "CREATE (fr)-[:OF_FIELD]->(f)"
+        )
+        g.cypher(
+            "MATCH (fr:FieldReserves {title: '2024-01-01'}), (f:Field {name: 'ULA'}) "
+            "CREATE (fr)-[:OF_FIELD]->(f)"
+        )
+        return g
+
+    def test_collect_index_property_access(self, reserves_graph):
+        """collect(node)[0].prop should return the actual property, not title."""
+        result = reserves_graph.cypher(
+            "MATCH (fr:FieldReserves)-[:OF_FIELD]->(f:Field {name: 'ULA'}) "
+            "WITH f, fr ORDER BY fr.title DESC "
+            "WITH f, collect(fr)[0] AS lr "
+            "RETURN lr.oil AS oil, lr.gas AS gas"
+        )
+        assert len(result) == 1
+        assert result[0]["oil"] == 158.185
+        assert result[0]["gas"] == 87.706
+
+    def test_collect_index_negative(self, reserves_graph):
+        """collect(node)[-1] should access the last element."""
+        result = reserves_graph.cypher(
+            "MATCH (fr:FieldReserves)-[:OF_FIELD]->(f:Field {name: 'ULA'}) "
+            "WITH f, fr ORDER BY fr.title DESC "
+            "WITH f, collect(fr)[-1] AS lr "
+            "RETURN lr.oil AS oil"
+        )
+        assert len(result) == 1
+        assert result[0]["oil"] == 150.0
+
+    def test_collect_index_title_still_works(self, reserves_graph):
+        """collect(node)[0].title should still return the title."""
+        result = reserves_graph.cypher(
+            "MATCH (fr:FieldReserves)-[:OF_FIELD]->(f:Field {name: 'ULA'}) "
+            "WITH f, fr ORDER BY fr.title DESC "
+            "WITH f, collect(fr)[0] AS lr "
+            "RETURN lr.title AS t"
+        )
+        assert result[0]["t"] == "2025-12-31"
+
+    def test_collect_index_bare_variable(self, reserves_graph):
+        """RETURN lr (without property) should still show the title."""
+        result = reserves_graph.cypher(
+            "MATCH (fr:FieldReserves)-[:OF_FIELD]->(f:Field {name: 'ULA'}) "
+            "WITH f, fr ORDER BY fr.title DESC "
+            "WITH f, collect(fr)[0] AS lr "
+            "RETURN lr"
+        )
+        assert result[0]["lr"] == "2025-12-31"
+
+    def test_collect_scalar_property_unchanged(self, reserves_graph):
+        """collect(node.prop)[0] should still work for scalar properties."""
+        result = reserves_graph.cypher(
+            "MATCH (fr:FieldReserves)-[:OF_FIELD]->(f:Field {name: 'ULA'}) "
+            "WITH f, collect(fr.oil) AS oils "
+            "RETURN oils"
+        )
+        assert len(result) == 1
+        oils_str = result[0]["oils"]
+        # oils should be a JSON-style list string
+        assert "158.185" in str(oils_str)
+        assert "150.0" in str(oils_str)

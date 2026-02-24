@@ -228,6 +228,7 @@ fn get_value_type_name(value: &Value) -> String {
         Value::UniqueId(_) => "integer".to_string(),
         Value::Point { .. } => "point".to_string(),
         Value::Null => "null".to_string(),
+        Value::NodeRef(_) => "noderef".to_string(),
     }
 }
 
