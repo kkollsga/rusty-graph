@@ -124,6 +124,17 @@ class ResultView:
         """Mutation statistics, or ``None`` for read queries / non-cypher results."""
         ...
 
+    @property
+    def profile(self) -> Optional[list[dict[str, Any]]]:
+        """PROFILE execution statistics, or ``None`` for non-profiled queries.
+
+        Each dict has keys: ``clause`` (str), ``rows_in`` (int),
+        ``rows_out`` (int), ``elapsed_us`` (int).
+
+        Only populated when the query is prefixed with ``PROFILE``.
+        """
+        ...
+
     def head(self, n: int = 5) -> ResultView:
         """Return a new ResultView with the first *n* rows (default 5)."""
         ...
@@ -2633,17 +2644,20 @@ class KnowledgeGraph:
         """
         ...
 
-    def begin(self) -> Transaction:
-        """Begin a transaction — returns a Transaction with a working copy of the graph.
+    def begin(self, timeout_ms: Optional[int] = None) -> Transaction:
+        """Begin a read-write transaction — returns a Transaction with a working copy.
 
         Creates a snapshot (deep-clone) of the current graph state. All mutations
         within the transaction are isolated until ``commit()`` is called. If rolled
         back (or dropped without committing), no changes are applied.
 
-        Note:
-            The snapshot is a full deep-clone of the graph, so creating a
-            transaction on a very large graph has a one-time memory cost
-            proportional to graph size. Embeddings are not cloned.
+        Uses optimistic concurrency control: ``commit()`` will raise
+        ``RuntimeError`` if the graph was modified by another transaction since
+        ``begin()`` was called.
+
+        Args:
+            timeout_ms: Optional transaction-level timeout in milliseconds.
+                If set, all operations after the deadline raise ``TimeoutError``.
 
         Can be used as a context manager::
 
@@ -2654,43 +2668,80 @@ class KnowledgeGraph:
         """
         ...
 
+    def begin_read(self, timeout_ms: Optional[int] = None) -> Transaction:
+        """Begin a read-only transaction — O(1) cost, zero memory overhead.
+
+        Returns a Transaction backed by an Arc reference to the current graph
+        state. Mutations (CREATE, SET, DELETE, REMOVE, MERGE) are rejected.
+
+        Ideal for concurrent read-heavy workloads (e.g. MCP server agents)
+        where you want a consistent snapshot without the cost of a full clone.
+
+        Args:
+            timeout_ms: Optional transaction-level timeout in milliseconds.
+
+        Can be used as a context manager::
+
+            with graph.begin_read() as tx:
+                result = tx.cypher("MATCH (n:Person) RETURN n.name")
+                # auto-closes on exit (no commit needed)
+        """
+        ...
+
 
 class Transaction:
     """An isolated transaction on a KnowledgeGraph.
 
-    Created via :meth:`KnowledgeGraph.begin`. Mutations are applied to a
-    working copy and only become visible in the original graph after
-    :meth:`commit`. If an exception occurs (or :meth:`rollback` is called),
-    all changes are discarded.
+    Created via :meth:`KnowledgeGraph.begin` (read-write) or
+    :meth:`KnowledgeGraph.begin_read` (read-only).
 
-    Isolation semantics:
-        - **Snapshot isolation**: ``begin()`` clones the entire graph. The
-          transaction sees a frozen snapshot from the moment it was created.
-        - **Write isolation**: mutations inside the transaction modify only the
-          working copy. The original graph is untouched until ``commit()``.
+    Read-write transactions:
+        - **Snapshot isolation**: ``begin()`` clones the entire graph.
+        - **Write isolation**: mutations modify only the working copy.
+        - **Optimistic concurrency control**: ``commit()`` checks that the
+          graph version hasn't changed since ``begin()``. If another transaction
+          committed in between, ``RuntimeError`` is raised.
         - **Commit**: replaces the original graph's data atomically.
-        - **No concurrent-transaction guarantees**: if two transactions exist
-          simultaneously, whichever commits last wins (last-writer-wins). There
-          is no conflict detection or merge.
+
+    Read-only transactions (``begin_read()``):
+        - O(1) creation cost (Arc reference, no deep clone).
+        - Mutations are rejected with ``RuntimeError``.
+        - ``commit()`` is a no-op; ``rollback()`` releases the snapshot.
     """
+
+    @property
+    def is_read_only(self) -> bool:
+        """Whether this is a read-only transaction."""
+        ...
 
     def cypher(
         self,
         query: str,
         params: dict[str, Any] | None = None,
         to_df: bool = False,
+        timeout_ms: Optional[int] = None,
     ) -> ResultView | pd.DataFrame:
         """Execute a Cypher query within this transaction.
 
         Same interface as :meth:`KnowledgeGraph.cypher` but operates on
-        the transaction's working copy.
+        the transaction's working copy (or Arc snapshot for read-only).
+
+        Args:
+            query: Cypher query string. Supports ``EXPLAIN`` and ``PROFILE`` prefixes.
+            params: Optional query parameters.
+            to_df: If True, return a pandas DataFrame.
+            timeout_ms: Per-query timeout in milliseconds (merged with transaction deadline).
         """
         ...
 
     def commit(self) -> None:
         """Commit the transaction — apply all changes to the original graph.
 
+        For read-only transactions, this is a no-op.
         After commit, the transaction cannot be used again.
+
+        Raises:
+            RuntimeError: If the graph was modified since ``begin()`` (OCC conflict).
         """
         ...
 

@@ -503,6 +503,10 @@ pub struct DirGraph {
     /// and describe() omits mutation documentation.
     #[serde(skip)]
     pub(crate) read_only: bool,
+    /// Monotonically increasing version counter — incremented on every mutation.
+    /// Used for optimistic concurrency control in transactions.
+    #[serde(skip, default)]
+    pub(crate) version: u64,
 }
 
 fn default_auto_vacuum_threshold() -> Option<f64> {
@@ -537,6 +541,7 @@ impl DirGraph {
             timeseries_configs: HashMap::new(),
             timeseries_store: HashMap::new(),
             read_only: false,
+            version: 0,
         }
     }
 
@@ -569,6 +574,7 @@ impl DirGraph {
             timeseries_configs: HashMap::new(),
             timeseries_store: HashMap::new(),
             read_only: false,
+            version: 0,
         }
     }
 

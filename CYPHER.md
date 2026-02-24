@@ -454,7 +454,8 @@ df = graph.cypher("""
 
 ## EXPLAIN
 
-Prefix any Cypher query with `EXPLAIN` to see the query plan without executing it:
+Prefix any Cypher query with `EXPLAIN` to see the query plan without executing it.
+Returns a `ResultView` with columns `[step, operation, estimated_rows]`:
 
 ```python
 plan = graph.cypher("""
@@ -464,13 +465,40 @@ plan = graph.cypher("""
     WITH p, count(f) AS friends
     RETURN p.name, friends
 """)
-print(plan)
-# Query Plan:
-#   1. NodeScan (MATCH) :Person
-#   2. FusedOptionalMatchAggregate (optimized OPTIONAL MATCH + count)
-#   3. Projection (RETURN) [p.name, friends]
-# Optimizations: optional_match_fusion=1
+for row in plan:
+    print(row)
+# {'step': 1, 'operation': 'Match :Person', 'estimated_rows': 500}
+# {'step': 2, 'operation': 'FusedOptionalMatchAggregate', 'estimated_rows': 1}
+# {'step': 3, 'operation': 'Projection (RETURN)', 'estimated_rows': None}
 ```
+
+Cardinality estimates use `type_indices` counts when available, `None` otherwise.
+
+## PROFILE
+
+Prefix any Cypher query with `PROFILE` to execute AND collect per-clause statistics.
+Returns a normal `ResultView` with results, plus a `.profile` property:
+
+```python
+result = graph.cypher("""
+    PROFILE
+    MATCH (p:Person)
+    WHERE p.age > 30
+    RETURN p.name, p.age
+""")
+# result contains the normal query results
+for row in result:
+    print(row)
+
+# result.profile contains execution stats
+for step in result.profile:
+    print(step)
+# {'clause': 'Match :Person', 'rows_in': 0, 'rows_out': 500, 'elapsed_us': 120}
+# {'clause': 'Where', 'rows_in': 500, 'rows_out': 200, 'elapsed_us': 45}
+# {'clause': 'Projection (RETURN)', 'rows_in': 200, 'rows_out': 200, 'elapsed_us': 30}
+```
+
+For non-profiled queries, `result.profile` is `None`.
 
 ## Timeseries Functions
 
@@ -566,17 +594,93 @@ graph.cypher("MATCH (f:Field) RETURN ts_at(f.oil, '2020')")
 
 | Category | Supported |
 |----------|-----------|
-| **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN` |
+| **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN`, `PROFILE` |
 | **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val}`, `p = shortestPath(...)` |
 | **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern }`, `EXISTS(( pattern ))` |
 | **RETURN** | `n.prop`, `r.prop`, `AS` aliases, `DISTINCT`, arithmetic `+`/`-`/`*`/`/`, string concat `\|\|`, map projections `n {.prop1, .prop2}` |
 | **Aggregation** | `count(*)`, `count(expr)`, `sum`, `avg`/`mean`, `min`, `max`, `collect`, `std` |
 | **Expressions** | `CASE WHEN...THEN...ELSE...END`, `$param`, `[x IN list WHERE ... \| expr]` |
-| **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `length`, `type`, `id`, `labels`, `coalesce`, `nodes(p)`, `relationships(p)` |
+| **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `length`, `type`, `id`, `labels`, `coalesce`, `nodes(p)`, `relationships(p)`, `round` |
 | **Spatial** | `point(lat, lon)`, `distance(a, b)`, `contains(a, b)`, `intersects(a, b)`, `centroid(n)`, `area(n)`, `perimeter(n)`, `latitude(point)`, `longitude(point)` |
 | **Semantic** | `text_score(n, prop, query [, metric])` — auto-embeds query via `set_embedder()`, cosine/dot_product/euclidean |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
 | **Procedures** | `CALL pagerank/betweenness/degree/closeness() YIELD node, score`, `CALL louvain/label_propagation() YIELD node, community`, `CALL connected_components() YIELD node, component`, `CALL cluster({method, ...}) YIELD node, cluster` |
 | **Operators** | `+`, `-`, `*`, `/`, `\|\|` (string concat), `=~` (regex), `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS NULL`, `IS NOT NULL` |
-| **Not supported** | `FOREACH`, subqueries (`CALL {}`), `SET n:Label` (label mutation), `REMOVE n:Label`, multi-label |
+
+## openCypher Compatibility Matrix
+
+Clause-by-clause comparison with the openCypher specification.
+
+### Clauses
+
+| Clause | Status | Notes |
+|--------|--------|-------|
+| `MATCH` | Full | Node patterns, relationship patterns, variable-length paths, `shortestPath` |
+| `OPTIONAL MATCH` | Full | Automatic fusion optimization with aggregation |
+| `WHERE` | Full | All comparison, logical, string, and pattern operators |
+| `RETURN` | Full | Aliases, `DISTINCT`, expressions, map projections |
+| `WITH` | Full | Aggregation passthrough, grouping, chained subqueries |
+| `ORDER BY` | Full | Multi-column, `ASC`/`DESC`, fused top-k optimization |
+| `SKIP` / `LIMIT` | Full | |
+| `UNWIND` | Full | List expansion, works with `collect()` round-trips |
+| `UNION` / `UNION ALL` | Full | |
+| `CREATE` | Full | Nodes, relationships, inline properties |
+| `SET` | Full | `n.prop = expr`, `n += {map}` |
+| `DELETE` / `DETACH DELETE` | Full | |
+| `REMOVE` | Full | `REMOVE n.prop` — property removal |
+| `MERGE` | Full | `ON CREATE SET`, `ON MATCH SET` |
+| `EXPLAIN` | Full | Structured `ResultView` with cardinality estimates |
+| `PROFILE` | Full | Execute + per-clause stats (rows_in, rows_out, elapsed_us) |
+| `CALL ... YIELD` | Full | Built-in graph algorithm procedures |
+| `FOREACH` | Not supported | Use `UNWIND` + `CREATE`/`SET` instead |
+| `CALL {}` subqueries | Not supported | Use `WITH` chaining or multiple `cypher()` calls |
+| `LOAD CSV` | Not supported | By design — use Python `pandas`/`csv` for better control |
+
+### Expressions & Operators
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Arithmetic (`+`, `-`, `*`, `/`) | Full | |
+| String concat (`\|\|`) | Full | |
+| Comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`) | Full | |
+| Boolean (`AND`, `OR`, `NOT`) | Full | |
+| `IS NULL` / `IS NOT NULL` | Full | |
+| `IN [list]` | Full | |
+| `CONTAINS` / `STARTS WITH` / `ENDS WITH` | Full | |
+| `=~` regex | Full | |
+| `CASE WHEN...THEN...ELSE...END` | Full | |
+| Parameter references (`$param`) | Full | |
+| List comprehensions (`[x IN list WHERE ... \| expr]`) | Full | |
+| `EXISTS { pattern }` | Full | Brace `{}` and parenthesis `(( ))` syntax |
+| Map projections (`n {.prop1, .prop2}`) | Full | |
+
+### Scalar & Aggregation Functions
+
+| Function | Status | Notes |
+|----------|--------|-------|
+| `count(*)`, `count(expr)` | Full | With `DISTINCT` support |
+| `sum`, `avg`/`mean`, `min`, `max` | Full | |
+| `collect` | Full | |
+| `std` | Full | Standard deviation |
+| `toUpper`, `toLower`, `toString` | Full | |
+| `toInteger`, `toFloat` | Full | |
+| `size`, `length` | Full | |
+| `type(r)` | Full | Returns relationship type |
+| `id(n)` | Full | Returns node id |
+| `labels(n)` | Full | Returns single label (string, not list — single-label model) |
+| `coalesce` | Full | |
+| `round(x [, precision])` | Full | |
+| `nodes(p)`, `relationships(p)` | Full | Path decomposition |
+
+### Architectural Differences from Neo4j
+
+| Feature | KGLite | Neo4j | Rationale |
+|---------|--------|-------|-----------|
+| Labels per node | Single label | Multiple | Simplifies indexing, type_indices are `HashMap<String, Vec<NodeIndex>>` |
+| `labels(n)` return type | `String` | `List[String]` | Single-label model |
+| `SET n:Label` | Not supported | Supported | Single-label model — change type via `SET n.type = 'NewType'` |
+| Storage | In-memory (petgraph) | Disk-based | Embedded use case, explicit `save()`/`load()` |
+| Transactions | Snapshot isolation + OCC | Full ACID | GIL serializes Python access; OCC catches conflicts |
+| Indexing | Type indices + vector index | Schema indexes | Automatic type-based lookup, no manual `CREATE INDEX` |
+| `LOAD CSV` | Not supported | Supported | Python ecosystem (pandas) preferred for data loading |

@@ -114,13 +114,16 @@ impl CypherParser {
     // ========================================================================
 
     pub fn parse_query(&mut self) -> Result<CypherQuery, String> {
-        // Check for EXPLAIN prefix
-        let explain = if self.check(&CypherToken::Explain) {
+        // Check for EXPLAIN or PROFILE prefix
+        let mut explain = false;
+        let mut profile = false;
+        if self.check(&CypherToken::Explain) {
             self.advance();
-            true
-        } else {
-            false
-        };
+            explain = true;
+        } else if self.check(&CypherToken::Profile) {
+            self.advance();
+            profile = true;
+        }
 
         let mut clauses = Vec::new();
 
@@ -197,7 +200,11 @@ impl CypherParser {
             return Err("Empty query".to_string());
         }
 
-        Ok(CypherQuery { clauses, explain })
+        Ok(CypherQuery {
+            clauses,
+            explain,
+            profile,
+        })
     }
 
     // ========================================================================

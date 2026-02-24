@@ -6,7 +6,7 @@ use super::py_convert::{
     preprocess_values_owned, preprocessed_result_to_dataframe, preprocessed_value_to_py,
     stats_to_py, PreProcessedValue,
 };
-use super::result::{CypherResult, MutationStats};
+use super::result::{ClauseStats, CypherResult, MutationStats};
 use crate::datatypes::values::Value;
 use crate::graph::graph_algorithms::CentralityResult;
 use crate::graph::schema::{DirGraph, NodeData};
@@ -24,6 +24,7 @@ pub struct ResultView {
     columns: Vec<String>,
     rows: Vec<Vec<PreProcessedValue>>,
     stats: Option<MutationStats>,
+    profile: Option<Vec<ClauseStats>>,
 }
 
 // ========================================================================
@@ -37,11 +38,13 @@ impl ResultView {
         columns: Vec<String>,
         rows: Vec<Vec<PreProcessedValue>>,
         stats: Option<MutationStats>,
+        profile: Option<Vec<ClauseStats>>,
     ) -> Self {
         ResultView {
             columns,
             rows,
             stats,
+            profile,
         }
     }
 
@@ -52,6 +55,7 @@ impl ResultView {
             columns: result.columns,
             rows,
             stats: result.stats,
+            profile: result.profile,
         }
     }
 
@@ -84,6 +88,7 @@ impl ResultView {
             columns,
             rows,
             stats: None,
+            profile: None,
         }
     }
 
@@ -128,6 +133,7 @@ impl ResultView {
             columns,
             rows,
             stats: None,
+            profile: None,
         }
     }
 
@@ -206,6 +212,7 @@ impl ResultView {
                     columns: self.columns.clone(),
                     rows: sliced_rows,
                     stats: None,
+                    profile: None,
                 },
             )
             .map(|v| v.into_any())
@@ -243,6 +250,27 @@ impl ResultView {
         }
     }
 
+    /// PROFILE execution statistics, or None for non-profiled queries.
+    /// Returns a list of dicts with keys: clause, rows_in, rows_out, elapsed_us.
+    #[getter]
+    fn profile(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.profile {
+            Some(steps) => {
+                let list = pyo3::types::PyList::empty(py);
+                for step in steps {
+                    let dict = PyDict::new(py);
+                    dict.set_item("clause", &step.clause_name)?;
+                    dict.set_item("rows_in", step.rows_in)?;
+                    dict.set_item("rows_out", step.rows_out)?;
+                    dict.set_item("elapsed_us", step.elapsed_us)?;
+                    list.append(dict)?;
+                }
+                Ok(list.into_any().unbind())
+            }
+            None => Ok(py.None()),
+        }
+    }
+
     /// Convert all rows to a Python list of dicts (full materialization).
     fn to_list(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let list = pyo3::types::PyList::empty(py);
@@ -260,6 +288,7 @@ impl ResultView {
             columns: self.columns.clone(),
             rows: self.rows[..take].to_vec(),
             stats: None,
+            profile: None,
         }
     }
 
@@ -272,6 +301,7 @@ impl ResultView {
             columns: self.columns.clone(),
             rows: self.rows[start..].to_vec(),
             stats: None,
+            profile: None,
         }
     }
 

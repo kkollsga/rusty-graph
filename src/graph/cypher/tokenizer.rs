@@ -49,6 +49,7 @@ pub enum CypherToken {
     False,
     Exists,
     Explain,
+    Profile,
     Call,
     Yield,
 
@@ -408,6 +409,7 @@ fn identifier_to_token(ident: String) -> CypherToken {
         "CONTAINS" => CypherToken::Contains,
         "EXISTS" => CypherToken::Exists,
         "EXPLAIN" => CypherToken::Explain,
+        "PROFILE" => CypherToken::Profile,
         "CALL" => CypherToken::Call,
         "YIELD" => CypherToken::Yield,
         _ => CypherToken::Identifier(ident),
@@ -459,6 +461,7 @@ pub fn token_to_keyword_name(token: &CypherToken) -> Option<String> {
         CypherToken::False => "false",
         CypherToken::Exists => "exists",
         CypherToken::Explain => "explain",
+        CypherToken::Profile => "profile",
         CypherToken::Call => "call",
         CypherToken::Yield => "yield",
         _ => return None,

@@ -978,6 +978,8 @@ fn write_cypher_overview(xml: &mut String) {
     xml.push_str(
         "    <clause name=\"MERGE\">Match existing or create new (upsert pattern).</clause>\n",
     );
+    xml.push_str("    <clause name=\"EXPLAIN\">Prefix to show query plan as ResultView [step, operation, estimated_rows] without executing.</clause>\n");
+    xml.push_str("    <clause name=\"PROFILE\">Prefix to execute and collect per-clause stats. Result has .profile with [clause, rows_in, rows_out, elapsed_us].</clause>\n");
     xml.push_str("  </clauses>\n");
 
     // Operators
@@ -1019,7 +1021,15 @@ fn write_cypher_overview(xml: &mut String) {
     // Patterns
     xml.push_str("  <patterns>(n:Label), (n {prop: val}), (a)-[:TYPE]-&gt;(b), (a)-[:T*1..3]-&gt;(b), [x IN list WHERE pred | expr], n {.p1, .p2}</patterns>\n");
 
-    xml.push_str("  <not_supported>CALL {} subqueries, FOREACH, CREATE INDEX, shortestPath(), variable-length weighted paths</not_supported>\n");
+    xml.push_str("  <limitations>\n");
+    xml.push_str("    <item feature=\"FOREACH\" workaround=\"UNWIND list AS x CREATE/SET ... (equivalent result)\"/>\n");
+    xml.push_str("    <item feature=\"CALL {} subqueries\" workaround=\"Use WITH chaining or multiple cypher() calls\"/>\n");
+    xml.push_str("    <item feature=\"LOAD CSV\" workaround=\"Use Python pandas/csv, then CREATE nodes from dicts\"/>\n");
+    xml.push_str("    <item feature=\"CREATE INDEX\" note=\"Type indices are automatic; no manual index management needed\"/>\n");
+    xml.push_str("    <item feature=\"Multi-label nodes\" note=\"Single label per node. labels(n) returns string, not list. Change type via SET n.type = 'NewType'\"/>\n");
+    xml.push_str("    <item feature=\"SET n:Label / REMOVE n:Label\" workaround=\"SET n.type = 'NewType' to change node type\"/>\n");
+    xml.push_str("    <item feature=\"Variable-length weighted paths\" note=\"Unweighted variable-length paths (*1..3) are supported\"/>\n");
+    xml.push_str("  </limitations>\n");
     xml.push_str("  <hint>Use describe(cypher=['MATCH','cluster','spatial',...]) for detailed docs with examples.</hint>\n");
     xml.push_str("</cypher>\n");
 }
@@ -1027,7 +1037,7 @@ fn write_cypher_overview(xml: &mut String) {
 // ── Cypher tier 3: topic detail functions ──────────────────────────────────
 
 const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, RETURN, WITH, ORDER BY, UNWIND, UNION, \
-    CASE, CREATE, SET, DELETE, MERGE, operators, functions, patterns, spatial, \
+    CASE, CREATE, SET, DELETE, MERGE, EXPLAIN, PROFILE, operators, functions, patterns, spatial, \
     pagerank, betweenness, degree, closeness, louvain, \
     label_propagation, connected_components, cluster";
 
@@ -1069,6 +1079,8 @@ fn write_cypher_topics(xml: &mut String, topics: &[String]) -> Result<(), String
             }
             "CLUSTER" => write_topic_cluster(xml),
             "SPATIAL" => write_topic_spatial(xml),
+            "EXPLAIN" => write_topic_explain(xml),
+            "PROFILE" => write_topic_profile(xml),
             _ => {
                 return Err(format!(
                     "Unknown Cypher topic '{}'. Available: {}",
@@ -1426,6 +1438,31 @@ fn write_topic_cluster(xml: &mut String) {
     xml.push_str("      <ex desc=\"spatial K-means\">MATCH (s:Station) CALL cluster({method: 'kmeans', k: 4}) YIELD node, cluster RETURN cluster, count(*) AS n</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </cluster>\n");
+}
+
+fn write_topic_explain(xml: &mut String) {
+    xml.push_str("  <EXPLAIN>\n");
+    xml.push_str("    <desc>Show query plan without executing. Returns a ResultView with columns [step, operation, estimated_rows].</desc>\n");
+    xml.push_str("    <syntax>EXPLAIN &lt;any Cypher query&gt;</syntax>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"basic plan\">EXPLAIN MATCH (n:Person) WHERE n.age &gt; 30 RETURN n.name</ex>\n");
+    xml.push_str("      <ex desc=\"inspect fused optimization\">EXPLAIN MATCH (n:Person) RETURN count(n)</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("    <notes>Cardinality estimates use type_indices counts. Fused optimizations shown as single steps.</notes>\n");
+    xml.push_str("  </EXPLAIN>\n");
+}
+
+fn write_topic_profile(xml: &mut String) {
+    xml.push_str("  <PROFILE>\n");
+    xml.push_str("    <desc>Execute query AND collect per-clause statistics. Returns normal results with a .profile property.</desc>\n");
+    xml.push_str("    <syntax>PROFILE &lt;any Cypher query&gt;</syntax>\n");
+    xml.push_str("    <profile_columns>clause (str), rows_in (int), rows_out (int), elapsed_us (int)</profile_columns>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"profile read query\">PROFILE MATCH (n:Person) WHERE n.age &gt; 30 RETURN n.name</ex>\n");
+    xml.push_str("      <ex desc=\"profile mutation\">PROFILE CREATE (n:Temp {val: 1})</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("    <notes>Access stats via result.profile (list of dicts). None for non-profiled queries.</notes>\n");
+    xml.push_str("  </PROFILE>\n");
 }
 
 fn write_topic_spatial(xml: &mut String) {

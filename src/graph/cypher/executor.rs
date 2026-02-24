@@ -160,6 +160,77 @@ struct VectorScoreCache {
     similarity_fn: fn(&[f32], &[f32]) -> f32,
 }
 
+/// Human-readable name for a Clause variant, used in PROFILE and EXPLAIN output.
+pub fn clause_display_name(clause: &Clause) -> String {
+    match clause {
+        Clause::Match(m) => {
+            let types: Vec<&str> = m
+                .patterns
+                .iter()
+                .flat_map(|p| p.elements.iter())
+                .filter_map(|e| {
+                    if let PatternElement::Node(n) = e {
+                        n.node_type.as_deref()
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if types.is_empty() {
+                "Match".into()
+            } else {
+                format!("Match :{}", types.join(", :"))
+            }
+        }
+        Clause::OptionalMatch(m) => {
+            let types: Vec<&str> = m
+                .patterns
+                .iter()
+                .flat_map(|p| p.elements.iter())
+                .filter_map(|e| {
+                    if let PatternElement::Node(n) = e {
+                        n.node_type.as_deref()
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if types.is_empty() {
+                "OptionalMatch".into()
+            } else {
+                format!("OptionalMatch :{}", types.join(", :"))
+            }
+        }
+        Clause::Where(_) => "Where".into(),
+        Clause::Return(_) => "Return".into(),
+        Clause::With(_) => "With".into(),
+        Clause::OrderBy(_) => "OrderBy".into(),
+        Clause::Skip(_) => "Skip".into(),
+        Clause::Limit(_) => "Limit".into(),
+        Clause::Unwind(_) => "Unwind".into(),
+        Clause::Union(_) => "Union".into(),
+        Clause::Create(_) => "Create".into(),
+        Clause::Set(_) => "Set".into(),
+        Clause::Delete(_) => "Delete".into(),
+        Clause::Remove(_) => "Remove".into(),
+        Clause::Merge(_) => "Merge".into(),
+        Clause::Call(_) => "Call".into(),
+        Clause::FusedOptionalMatchAggregate { .. } => "FusedOptionalMatchAggregate".into(),
+        Clause::FusedVectorScoreTopK { .. } => "FusedVectorScoreTopK".into(),
+        Clause::FusedMatchReturnAggregate { .. } => "FusedMatchReturnAggregate".into(),
+        Clause::FusedOrderByTopK { .. } => "FusedOrderByTopK".into(),
+        Clause::FusedCountAll { .. } => "FusedCountAll".into(),
+        Clause::FusedCountByType { .. } => "FusedCountByType".into(),
+        Clause::FusedCountEdgesByType { .. } => "FusedCountEdgesByType".into(),
+        Clause::FusedCountTypedNode { node_type, .. } => {
+            format!("FusedCountTypedNode :{node_type}")
+        }
+        Clause::FusedCountTypedEdge { edge_type, .. } => {
+            format!("FusedCountTypedEdge :{edge_type}")
+        }
+    }
+}
+
 /// Executes parsed Cypher queries against a `DirGraph`.
 ///
 /// Processes a pipeline of clauses (MATCH → WHERE → RETURN, etc.) by
@@ -209,6 +280,8 @@ impl<'a> CypherExecutor<'a> {
     /// Execute a parsed Cypher query (read-only)
     pub fn execute(&self, query: &CypherQuery) -> Result<CypherResult, String> {
         let mut result_set = ResultSet::new();
+        let profiling = query.profile;
+        let mut profile_stats: Vec<ClauseStats> = Vec::new();
 
         for (i, clause) in query.clauses.iter().enumerate() {
             self.check_deadline()?;
@@ -225,12 +298,29 @@ impl<'a> CypherExecutor<'a> {
             {
                 result_set.rows.push(ResultRow::new());
             }
-            result_set = self.execute_single_clause(clause, result_set)?;
+
+            if profiling {
+                let rows_in = result_set.rows.len();
+                let start = std::time::Instant::now();
+                result_set = self.execute_single_clause(clause, result_set)?;
+                let elapsed = start.elapsed();
+                profile_stats.push(ClauseStats {
+                    clause_name: clause_display_name(clause),
+                    rows_in,
+                    rows_out: result_set.rows.len(),
+                    elapsed_us: elapsed.as_micros() as u64,
+                });
+            } else {
+                result_set = self.execute_single_clause(clause, result_set)?;
+            }
         }
 
         // Convert ResultSet to CypherResult
         let mut result = self.finalize_result(result_set)?;
         result.stats = None;
+        if profiling {
+            result.profile = Some(profile_stats);
+        }
         Ok(result)
     }
 
@@ -5514,6 +5604,7 @@ impl<'a> CypherExecutor<'a> {
                 columns,
                 rows,
                 stats: None,
+                profile: None,
             });
         }
 
@@ -5547,6 +5638,7 @@ impl<'a> CypherExecutor<'a> {
             columns: result_set.columns,
             rows,
             stats: None,
+            profile: None,
         })
     }
 }
@@ -5579,6 +5671,8 @@ pub fn execute_mutable(
 ) -> Result<CypherResult, String> {
     let mut result_set = ResultSet::new();
     let mut stats = MutationStats::default();
+    let profiling = query.profile;
+    let mut profile_stats: Vec<ClauseStats> = Vec::new();
 
     for (i, clause) in query.clauses.iter().enumerate() {
         if let Some(dl) = deadline {
@@ -5593,6 +5687,14 @@ pub fn execute_mutable(
         {
             result_set.rows.push(ResultRow::new());
         }
+
+        let rows_in = if profiling { result_set.rows.len() } else { 0 };
+        let start = if profiling {
+            Some(Instant::now())
+        } else {
+            None
+        };
+
         match clause {
             // Write clauses: mutate graph directly
             Clause::Create(create) => {
@@ -5616,15 +5718,26 @@ pub fn execute_mutable(
                 result_set = executor.execute_single_clause(clause, result_set)?;
             }
         }
+
+        if let Some(s) = start {
+            profile_stats.push(ClauseStats {
+                clause_name: clause_display_name(clause),
+                rows_in,
+                rows_out: result_set.rows.len(),
+                elapsed_us: s.elapsed().as_micros() as u64,
+            });
+        }
     }
 
     // Finalize: if RETURN was in the query, finalize with column projection
     let has_return = query.clauses.iter().any(|c| matches!(c, Clause::Return(_)));
+    let profile = if profiling { Some(profile_stats) } else { None };
 
     if has_return || !result_set.columns.is_empty() {
         let executor = CypherExecutor::with_params(graph, &params, deadline);
         let mut result = executor.finalize_result(result_set)?;
         result.stats = Some(stats);
+        result.profile = profile;
         Ok(result)
     } else {
         // No RETURN: return empty result with stats
@@ -5632,6 +5745,7 @@ pub fn execute_mutable(
             columns: Vec::new(),
             rows: Vec::new(),
             stats: Some(stats),
+            profile,
         })
     }
 }

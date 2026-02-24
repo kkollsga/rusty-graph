@@ -202,6 +202,15 @@ impl ResultSet {
 // Final Output
 // ============================================================================
 
+/// Per-clause execution statistics collected during PROFILE mode.
+#[derive(Debug, Clone)]
+pub struct ClauseStats {
+    pub clause_name: String,
+    pub rows_in: usize,
+    pub rows_out: usize,
+    pub elapsed_us: u64,
+}
+
 /// Mutation statistics returned from CREATE/SET/DELETE queries
 #[derive(Debug, Clone, Default)]
 pub struct MutationStats {
@@ -219,6 +228,7 @@ pub struct CypherResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
     pub stats: Option<MutationStats>,
+    pub profile: Option<Vec<ClauseStats>>,
 }
 
 impl CypherResult {
@@ -227,6 +237,7 @@ impl CypherResult {
             columns: Vec::new(),
             rows: Vec::new(),
             stats: None,
+            profile: None,
         }
     }
 }

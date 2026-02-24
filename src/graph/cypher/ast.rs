@@ -13,6 +13,7 @@ use crate::graph::pattern_matching::Pattern;
 pub struct CypherQuery {
     pub clauses: Vec<Clause>,
     pub explain: bool,
+    pub profile: bool,
 }
 
 /// Each clause in the query pipeline

@@ -1164,7 +1164,8 @@ class TestCypherTextScore:
             "text_score(n, 'summary', 'artificial intelligence') AS score "
             "ORDER BY score DESC LIMIT 2"
         )
-        assert "FusedVectorScoreTopK" in plan
+        ops = [r['operation'] for r in plan.to_list()]
+        assert any("FusedVectorScoreTopK" in op for op in ops)
 
     def test_text_score_load_unload_lifecycle(self):
         """text_score triggers embedder load/unload lifecycle."""

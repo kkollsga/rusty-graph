@@ -281,5 +281,5 @@ class TestCallExplain:
             RETURN node.name, score
             ORDER BY score DESC LIMIT 10
         """)
-        text = str(result)
-        assert 'ProcedureCall' in text or 'pagerank' in text
+        ops = [r['operation'] for r in result.to_list()]
+        assert any('Call' in op for op in ops)

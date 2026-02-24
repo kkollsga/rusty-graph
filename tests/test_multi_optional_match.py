@@ -598,9 +598,9 @@ class TestFusionStillWorksForSingleOptionalMatch:
             WITH x, count(y) AS cnt
             RETURN x.name, cnt
         """)
-        plan_str = str(plan)
-        assert 'FusedOptionalMatchAggregate' in plan_str or 'fused' in plan_str.lower(), \
-            f"Expected fusion in plan, got: {plan_str}"
+        ops = [r['operation'] for r in plan.to_list()]
+        assert any('FusedOptionalMatchAggregate' in op for op in ops), \
+            f"Expected fusion in plan, got: {ops}"
 
     def test_explain_no_fusion_for_multi_optional_with_distinct(self):
         """EXPLAIN should NOT show fusion for multi-OPTIONAL-MATCH + count(DISTINCT)."""
@@ -614,6 +614,6 @@ class TestFusionStillWorksForSingleOptionalMatch:
             WITH x, count(DISTINCT a) AS ca, count(DISTINCT b) AS cb
             RETURN x.name, ca, cb
         """)
-        plan_str = str(plan)
-        assert 'FusedOptionalMatchAggregate' not in plan_str, \
-            f"Should not fuse multi-OPTIONAL-MATCH + DISTINCT, got: {plan_str}"
+        ops = [r['operation'] for r in plan.to_list()]
+        assert not any('FusedOptionalMatchAggregate' in op for op in ops), \
+            f"Should not fuse multi-OPTIONAL-MATCH + DISTINCT, got: {ops}"

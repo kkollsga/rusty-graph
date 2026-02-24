@@ -177,6 +177,14 @@ pub struct Transaction {
     working: Option<DirGraph>,
     /// Whether commit() was called
     committed: bool,
+    /// Read-only transactions hold an Arc snapshot instead of a mutable clone
+    read_only: bool,
+    /// Arc snapshot for read-only transactions (O(1) to create, zero memory overhead)
+    snapshot: Option<Arc<DirGraph>>,
+    /// Graph version at `begin()` time — used for optimistic concurrency control
+    base_version: u64,
+    /// Optional transaction-level deadline — all operations fail after this instant
+    deadline: Option<std::time::Instant>,
 }
 
 impl Clone for KnowledgeGraph {
@@ -685,7 +693,9 @@ fn parse_inline_timeseries(ts_dict: &Bound<'_, PyDict>) -> PyResult<InlineTimese
 /// including all nodes, edges, and indices. In read-heavy workloads this is fine,
 /// but be aware that a lingering reference can cause unexpected memory spikes on mutation.
 pub(super) fn get_graph_mut(arc: &mut Arc<DirGraph>) -> &mut DirGraph {
-    Arc::make_mut(arc)
+    let graph = Arc::make_mut(arc);
+    graph.version += 1;
+    graph
 }
 
 /// Lightweight centrality result conversion: returns {title: score} dict.
@@ -4572,10 +4582,12 @@ impl KnowledgeGraph {
             cypher::optimize(&mut parsed, &this.inner, &param_map);
         }
 
-        // EXPLAIN: return query plan as string without executing
+        // EXPLAIN: return structured query plan without executing
         if parsed.explain {
-            let plan = cypher::generate_explain_plan(&parsed);
-            return Ok(plan.into_pyobject(py)?.into_any().unbind());
+            let this = slf.borrow();
+            let result = cypher::generate_explain_result(&parsed, &this.inner);
+            let view = cypher::ResultView::from_cypher_result(result);
+            return Py::new(py, view).map(|v| v.into_any());
         }
 
         if cypher::is_mutation_query(&parsed) {
@@ -4643,6 +4655,7 @@ impl KnowledgeGraph {
             })?;
             let columns = result.columns;
             let stats = result.stats;
+            let profile = result.profile;
             // Resolve NodeRef values to node titles before Python conversion
             let mut rows = result.rows;
             resolve_noderefs(&inner.graph, &mut rows);
@@ -4650,7 +4663,8 @@ impl KnowledgeGraph {
             if to_df {
                 cypher::py_convert::preprocessed_result_to_dataframe(py, &columns, &preprocessed)
             } else {
-                let view = cypher::ResultView::from_preprocessed(columns, preprocessed, stats);
+                let view =
+                    cypher::ResultView::from_preprocessed(columns, preprocessed, stats, profile);
                 Py::new(py, view).map(|v| v.into_any())
             }
         }
@@ -4699,15 +4713,57 @@ impl KnowledgeGraph {
     ///         tx.cypher("CREATE (n:Person {name: 'Bob', age: 25})")
     ///         # auto-commits on success, auto-rollbacks on exception
     ///     ```
-    fn begin(slf: Py<Self>) -> PyResult<Transaction> {
-        let working = Python::attach(|py| {
+    #[pyo3(signature = (timeout_ms=None))]
+    fn begin(slf: Py<Self>, timeout_ms: Option<u64>) -> PyResult<Transaction> {
+        let (working, version) = Python::attach(|py| {
             let kg = slf.borrow(py);
-            (*kg.inner).clone()
+            ((*kg.inner).clone(), kg.inner.version)
         });
+        let deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
         Ok(Transaction {
             owner: slf,
             working: Some(working),
             committed: false,
+            read_only: false,
+            snapshot: None,
+            base_version: version,
+            deadline,
+        })
+    }
+
+    /// Begin a read-only transaction — O(1) cost, zero memory overhead.
+    ///
+    /// Returns a Transaction backed by an Arc reference to the current graph
+    /// state. Mutations (CREATE, SET, DELETE, REMOVE, MERGE) are rejected.
+    ///
+    /// Ideal for concurrent read-heavy workloads (e.g. MCP server agents)
+    /// where you want a consistent snapshot without the cost of a full clone.
+    ///
+    /// Can also be used as a context manager:
+    ///
+    /// Example:
+    ///     ```python
+    ///     with graph.begin_read() as tx:
+    ///         result = tx.cypher("MATCH (n:Person) RETURN n.name")
+    ///         # auto-closes on exit (no commit needed)
+    ///     ```
+    #[pyo3(signature = (timeout_ms=None))]
+    fn begin_read(slf: Py<Self>, timeout_ms: Option<u64>) -> PyResult<Transaction> {
+        let (snapshot, version) = Python::attach(|py| {
+            let kg = slf.borrow(py);
+            (Arc::clone(&kg.inner), kg.inner.version)
+        });
+        let deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        Ok(Transaction {
+            owner: slf,
+            working: None,
+            committed: false,
+            read_only: true,
+            snapshot: Some(snapshot),
+            base_version: version,
+            deadline,
         })
     }
 }
@@ -4730,6 +4786,12 @@ impl Transaction {
     ///
     /// Returns:
     ///     Query results (same format as KnowledgeGraph.cypher).
+    /// Whether this is a read-only transaction.
+    #[getter]
+    fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
     #[pyo3(signature = (query, params=None, to_df=false, timeout_ms=None))]
     fn cypher(
         &mut self,
@@ -4739,14 +4801,24 @@ impl Transaction {
         to_df: bool,
         timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
-        let deadline =
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        // Check transaction-level deadline first
+        if let Some(tx_deadline) = self.deadline {
+            if std::time::Instant::now() >= tx_deadline {
+                return Err(PyErr::new::<pyo3::exceptions::PyTimeoutError, _>(
+                    "Transaction timed out",
+                ));
+            }
+        }
 
-        let working = self.working.as_mut().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "Transaction already committed or rolled back",
-            )
-        })?;
+        // Merge per-query timeout with transaction deadline (use the earlier one)
+        let query_deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline = match (self.deadline, query_deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
 
         // Convert params
         let param_map: HashMap<String, Value> = match params {
@@ -4762,51 +4834,141 @@ impl Transaction {
             None => HashMap::new(),
         };
 
-        // Parse and optimize
-        let mut parsed = cypher::parse_cypher(query).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Cypher parse error: {}", e))
-        })?;
-        cypher::optimize(&mut parsed, working, &param_map);
+        if self.read_only {
+            // Read-only transaction: execute against Arc snapshot
+            let graph = self.snapshot.as_ref().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "Read-only transaction already closed",
+                )
+            })?;
 
-        // Execute
-        let result = if cypher::is_mutation_query(&parsed) {
-            cypher::execute_mutable(working, &parsed, param_map, deadline).map_err(|e| {
+            let mut parsed = cypher::parse_cypher(query).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Cypher parse error: {}",
+                    e
+                ))
+            })?;
+            cypher::optimize(&mut parsed, graph, &param_map);
+
+            if parsed.explain {
+                let result = cypher::generate_explain_result(&parsed, graph);
+                let view = cypher::ResultView::from_cypher_result(result);
+                return Py::new(py, view).map(|v| v.into_any());
+            }
+
+            if cypher::is_mutation_query(&parsed) {
+                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "Read-only transaction does not support mutations \
+                     (CREATE, SET, DELETE, REMOVE, MERGE). Use begin() for read-write.",
+                ));
+            }
+
+            let executor = cypher::CypherExecutor::with_params(graph, &param_map, deadline);
+            let result = executor.execute(&parsed).map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                     "Cypher execution error: {}",
                     e
                 ))
-            })?
+            })?;
+
+            if to_df {
+                let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
+                cypher::py_convert::preprocessed_result_to_dataframe(
+                    py,
+                    &result.columns,
+                    &preprocessed,
+                )
+            } else {
+                let view = cypher::ResultView::from_cypher_result(result);
+                Py::new(py, view).map(|v| v.into_any())
+            }
         } else {
-            let executor = cypher::CypherExecutor::with_params(working, &param_map, deadline);
-            executor.execute(&parsed).map_err(|e| {
+            // Read-write transaction: execute against mutable working copy
+            let working = self.working.as_mut().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "Transaction already committed or rolled back",
+                )
+            })?;
+
+            let mut parsed = cypher::parse_cypher(query).map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Cypher execution error: {}",
+                    "Cypher parse error: {}",
                     e
                 ))
-            })?
-        };
+            })?;
+            cypher::optimize(&mut parsed, working, &param_map);
 
-        if to_df {
-            let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
-            cypher::py_convert::preprocessed_result_to_dataframe(py, &result.columns, &preprocessed)
-        } else {
-            let view = cypher::ResultView::from_cypher_result(result);
-            Py::new(py, view).map(|v| v.into_any())
+            if parsed.explain {
+                let result = cypher::generate_explain_result(&parsed, working);
+                let view = cypher::ResultView::from_cypher_result(result);
+                return Py::new(py, view).map(|v| v.into_any());
+            }
+
+            let result = if cypher::is_mutation_query(&parsed) {
+                cypher::execute_mutable(working, &parsed, param_map, deadline).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Cypher execution error: {}",
+                        e
+                    ))
+                })?
+            } else {
+                let executor = cypher::CypherExecutor::with_params(working, &param_map, deadline);
+                executor.execute(&parsed).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Cypher execution error: {}",
+                        e
+                    ))
+                })?
+            };
+
+            if to_df {
+                let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
+                cypher::py_convert::preprocessed_result_to_dataframe(
+                    py,
+                    &result.columns,
+                    &preprocessed,
+                )
+            } else {
+                let view = cypher::ResultView::from_cypher_result(result);
+                Py::new(py, view).map(|v| v.into_any())
+            }
         }
     }
 
     /// Commit the transaction — apply all changes to the original graph.
     ///
+    /// For read-only transactions, this is a no-op.
     /// After commit, the transaction cannot be used again.
     fn commit(&mut self) -> PyResult<()> {
+        if self.read_only {
+            // Read-only: just release the snapshot
+            self.snapshot = None;
+            self.committed = true;
+            return Ok(());
+        }
+
         let working = self.working.take().ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Transaction already committed or rolled back",
             )
         })?;
 
+        // Optimistic concurrency control: check version hasn't changed
+        let current_version = Python::attach(|py| {
+            let kg = self.owner.borrow(py);
+            kg.inner.version
+        });
+        if current_version != self.base_version {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Transaction conflict: graph was modified since begin(). \
+                 Retry the transaction.",
+            ));
+        }
+
         Python::attach(|py| {
             let mut kg = self.owner.borrow_mut(py);
+            let mut working = working;
+            working.version = current_version + 1;
             kg.inner = Arc::new(working);
             kg.selection = CowSelection::new();
         });
@@ -4819,6 +4981,15 @@ impl Transaction {
     ///
     /// After rollback, the transaction cannot be used again.
     fn rollback(&mut self) -> PyResult<()> {
+        if self.read_only {
+            if self.snapshot.is_none() {
+                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "Transaction already committed or rolled back",
+                ));
+            }
+            self.snapshot = None;
+            return Ok(());
+        }
         if self.working.is_none() {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Transaction already committed or rolled back",
@@ -4840,7 +5011,13 @@ impl Transaction {
         _exc_val: Option<&Bound<'_, pyo3::types::PyAny>>,
         _exc_tb: Option<&Bound<'_, pyo3::types::PyAny>>,
     ) -> PyResult<bool> {
-        if self.working.is_none() {
+        let is_active = if self.read_only {
+            self.snapshot.is_some()
+        } else {
+            self.working.is_some()
+        };
+
+        if !is_active {
             // Already committed or rolled back
             return Ok(false);
         }
@@ -4848,6 +5025,7 @@ impl Transaction {
         if exc_type.is_some() {
             // Exception occurred — rollback
             self.working = None;
+            self.snapshot = None;
         } else {
             // No exception — commit
             self.commit()?;

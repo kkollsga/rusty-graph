@@ -452,10 +452,11 @@ class TestDescribeCypherTiers:
         assert "contains" in desc
         assert "<examples>" in desc
 
-    def test_tier2_has_not_supported(self):
+    def test_tier2_has_limitations(self):
         g = KnowledgeGraph()
         desc = g.describe(cypher=True)
-        assert "<not_supported>" in desc
+        assert "<limitations>" in desc
+        assert "FOREACH" in desc
         assert "subqueries" in desc.lower()
 
     def test_tier2_has_spatial_functions(self):
