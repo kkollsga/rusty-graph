@@ -17,5 +17,9 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Compiled extension modules (built by maturin develop)
+*.so
+*.pyd
+
 # macOS system files
 .DS_Store
