@@ -130,23 +130,39 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def graph_overview(types: list[str] | None = None) -> str:
-    """Get the graph schema, type details, and available Cypher extensions.
+def graph_overview(
+    types: list[str] | None = None,
+    connections: bool | list[str] | None = None,
+    cypher: bool | list[str] | None = None,
+) -> str:
+    """Get graph schema, connection details, or Cypher language reference.
 
-    Call with no arguments first to get the inventory overview — node types
-    grouped by size with capability flags, connection map, and non-standard
-    Cypher functions (timeseries, spatial, etc.). Standard Cypher works as
-    expected and is not repeated here.
+    Three independent axes — call with no args first for the overview, then
+    drill into specific areas:
 
-    Then call with specific type names for detailed property schemas,
-    connection topology, timeseries/spatial config, and sample nodes:
-      graph_overview(types=["Field", "ProductionProfile"])
+      graph_overview()                            — inventory of node types
+      graph_overview(types=["Field"])             — property schemas, samples
+      graph_overview(connections=True)            — all connection types overview
+      graph_overview(connections=["BELONGS_TO"])  — deep-dive with properties
+      graph_overview(cypher=True)                 — Cypher clauses, functions, procedures
+      graph_overview(cypher=["cluster","MATCH"])  — detailed docs with examples
 
-    For simple graphs (<=15 types), the first call returns everything."""
+    For simple graphs (<=15 types), the first call returns full detail inline."""
     try:
-        return graph.describe(types=types)
+        return graph.describe(types=types, connections=connections, cypher=cypher)
     except Exception as e:
         return f"describe error: {e}"
+
+
+@mcp.tool()
+def bug_report(query: str, result: str, expected: str, description: str) -> str:
+    """File a Cypher bug report. Writes a timestamped, version-tagged entry
+    to reported_bugs.md (newest first). Use this when a Cypher query returns
+    incorrect results or behaves unexpectedly."""
+    try:
+        return graph.bug_report(query, result, expected, description)
+    except Exception as e:
+        return f"bug_report error: {e}"
 
 
 @mcp.tool()

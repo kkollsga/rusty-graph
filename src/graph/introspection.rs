@@ -56,6 +56,26 @@ pub struct NeighborsSchema {
     pub incoming: Vec<NeighborConnection>,
 }
 
+/// Level of Cypher documentation requested via `describe(cypher=...)`.
+pub enum CypherDetail {
+    /// No Cypher docs (default).
+    Off,
+    /// Tier 2: compact reference listing — all clauses, operators, functions, procedures.
+    Overview,
+    /// Tier 3: detailed docs with params and examples for specific topics.
+    Topics(Vec<String>),
+}
+
+/// Level of connection documentation requested via `describe(connections=...)`.
+pub enum ConnectionDetail {
+    /// No standalone connection docs (default — connections shown in inventory).
+    Off,
+    /// Overview: all connection types with count, endpoints, property names.
+    Overview,
+    /// Deep-dive: specific connection types with per-pair counts, property stats, samples.
+    Topics(Vec<String>),
+}
+
 // ── Describe helpers ────────────────────────────────────────────────────────
 
 /// Capability flags for a node type (used by `describe()`).
@@ -624,14 +644,279 @@ fn write_connection_map(xml: &mut String, graph: &DirGraph) {
                 continue;
             }
             xml.push_str(&format!(
-                "    <conn type=\"{}\" from=\"{}\" to=\"{}\"/>\n",
+                "    <conn type=\"{}\" count=\"{}\" from=\"{}\" to=\"{}\"/>\n",
                 xml_escape(&ct.connection_type),
+                ct.count,
                 sources.join(","),
                 targets.join(","),
             ));
         }
         xml.push_str("  </connections>\n");
     }
+}
+
+/// Compute property stats for edges of a given connection type.
+fn compute_edge_property_stats(
+    graph: &DirGraph,
+    connection_type: &str,
+    max_values: usize,
+) -> Vec<PropertyStatInfo> {
+    let mut all_props: HashSet<String> = HashSet::new();
+    let mut total_edges: usize = 0;
+
+    // First pass: discover property names
+    for edge_ref in graph.graph.edge_references() {
+        let ed = edge_ref.weight();
+        if ed.connection_type == connection_type {
+            total_edges += 1;
+            for key in ed.properties.keys() {
+                all_props.insert(key.clone());
+            }
+        }
+    }
+
+    if all_props.is_empty() {
+        return Vec::new();
+    }
+
+    let mut prop_names: Vec<String> = all_props.into_iter().collect();
+    prop_names.sort();
+
+    let mut results = Vec::new();
+    for prop_name in &prop_names {
+        let mut non_null: usize = 0;
+        let mut value_set: HashSet<Value> = HashSet::new();
+        let mut first_type: Option<&'static str> = None;
+
+        for edge_ref in graph.graph.edge_references() {
+            let ed = edge_ref.weight();
+            if ed.connection_type != connection_type {
+                continue;
+            }
+            if let Some(v) = ed.properties.get(prop_name) {
+                if !is_null_value(v) {
+                    non_null += 1;
+                    value_set.insert(v.clone());
+                    if first_type.is_none() {
+                        first_type = Some(value_type_name(v));
+                    }
+                }
+            }
+        }
+
+        let unique = value_set.len();
+        let values = if max_values > 0 && unique <= max_values && unique > 0 {
+            let mut vals: Vec<Value> = value_set.into_iter().collect();
+            vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            Some(vals)
+        } else {
+            None
+        };
+
+        results.push(PropertyStatInfo {
+            property_name: prop_name.clone(),
+            type_string: first_type.unwrap_or("unknown").to_string(),
+            non_null,
+            unique,
+            values,
+        });
+    }
+    let _ = total_edges; // used implicitly by context
+    results
+}
+
+/// Connections overview: all connection types with count, endpoints, property names.
+fn write_connections_overview(xml: &mut String, graph: &DirGraph) {
+    let conn_stats = compute_connection_type_stats(graph);
+    if conn_stats.is_empty() {
+        xml.push_str("<connections/>\n");
+        return;
+    }
+    xml.push_str("<connections>\n");
+    for ct in &conn_stats {
+        // Collect property names for this connection type
+        let prop_names: Vec<String> = {
+            let mut props: HashSet<String> = HashSet::new();
+            for edge_ref in graph.graph.edge_references() {
+                let ed = edge_ref.weight();
+                if ed.connection_type == ct.connection_type {
+                    for key in ed.properties.keys() {
+                        props.insert(key.clone());
+                    }
+                }
+            }
+            let mut sorted: Vec<String> = props.into_iter().collect();
+            sorted.sort();
+            sorted
+        };
+
+        let props_attr = if prop_names.is_empty() {
+            String::new()
+        } else {
+            format!(" properties=\"{}\"", xml_escape(&prop_names.join(",")))
+        };
+
+        xml.push_str(&format!(
+            "  <conn type=\"{}\" count=\"{}\" from=\"{}\" to=\"{}\"{}/>\n",
+            xml_escape(&ct.connection_type),
+            ct.count,
+            ct.source_types.join(","),
+            ct.target_types.join(","),
+            props_attr,
+        ));
+    }
+    xml.push_str("</connections>\n");
+}
+
+/// Connections deep-dive: per-pair counts, property stats, sample edges.
+fn write_connections_detail(
+    xml: &mut String,
+    graph: &DirGraph,
+    topics: &[String],
+) -> Result<(), String> {
+    // Validate all connection types exist
+    let conn_stats = compute_connection_type_stats(graph);
+    let valid_types: HashSet<&str> = conn_stats
+        .iter()
+        .map(|c| c.connection_type.as_str())
+        .collect();
+    for topic in topics {
+        if !valid_types.contains(topic.as_str()) {
+            let mut available: Vec<&str> = valid_types.iter().copied().collect();
+            available.sort();
+            return Err(format!(
+                "Connection type '{}' not found. Available: {}",
+                topic,
+                available.join(", ")
+            ));
+        }
+    }
+
+    xml.push_str("<connections>\n");
+    for topic in topics {
+        let ct = conn_stats
+            .iter()
+            .find(|c| c.connection_type == *topic)
+            .unwrap();
+
+        xml.push_str(&format!(
+            "  <{} count=\"{}\">\n",
+            xml_escape(&ct.connection_type),
+            ct.count
+        ));
+
+        // Per source→target pair counts
+        let mut pair_counts: HashMap<(String, String), usize> = HashMap::new();
+        for edge_ref in graph.graph.edge_references() {
+            let ed = edge_ref.weight();
+            if ed.connection_type != *topic {
+                continue;
+            }
+            let src_type = graph
+                .get_node(edge_ref.source())
+                .map(|n| n.node_type.clone())
+                .unwrap_or_default();
+            let tgt_type = graph
+                .get_node(edge_ref.target())
+                .map(|n| n.node_type.clone())
+                .unwrap_or_default();
+            *pair_counts.entry((src_type, tgt_type)).or_insert(0) += 1;
+        }
+        let mut pairs: Vec<((String, String), usize)> = pair_counts.into_iter().collect();
+        pairs.sort_by(|a, b| b.1.cmp(&a.1));
+
+        xml.push_str("    <endpoints>\n");
+        for ((src, tgt), count) in &pairs {
+            xml.push_str(&format!(
+                "      <pair from=\"{}\" to=\"{}\" count=\"{}\"/>\n",
+                xml_escape(src),
+                xml_escape(tgt),
+                count
+            ));
+        }
+        xml.push_str("    </endpoints>\n");
+
+        // Edge property stats
+        let prop_stats = compute_edge_property_stats(graph, topic, 15);
+        if !prop_stats.is_empty() {
+            xml.push_str("    <properties>\n");
+            for ps in &prop_stats {
+                if ps.non_null == 0 {
+                    continue;
+                }
+                let vals_attr = match &ps.values {
+                    Some(vals) if !vals.is_empty() => {
+                        let vals_str: Vec<String> =
+                            vals.iter().map(value_display_compact).collect();
+                        format!(" vals=\"{}\"", xml_escape(&vals_str.join("|")))
+                    }
+                    _ => String::new(),
+                };
+                xml.push_str(&format!(
+                    "      <prop name=\"{}\" type=\"{}\" non_null=\"{}\" unique=\"{}\"{}/>\n",
+                    xml_escape(&ps.property_name),
+                    xml_escape(&ps.type_string),
+                    ps.non_null,
+                    ps.unique,
+                    vals_attr,
+                ));
+            }
+            xml.push_str("    </properties>\n");
+        }
+
+        // Sample edges (first 2)
+        xml.push_str("    <samples>\n");
+        let mut sample_count = 0;
+        for edge_ref in graph.graph.edge_references() {
+            let ed = edge_ref.weight();
+            if ed.connection_type != *topic {
+                continue;
+            }
+            if sample_count >= 2 {
+                break;
+            }
+            let src_label = graph
+                .get_node(edge_ref.source())
+                .map(|n| format!("{}:{}", n.node_type, value_display_compact(&n.title)))
+                .unwrap_or_default();
+            let tgt_label = graph
+                .get_node(edge_ref.target())
+                .map(|n| format!("{}:{}", n.node_type, value_display_compact(&n.title)))
+                .unwrap_or_default();
+
+            let mut attrs = format!(
+                "from=\"{}\" to=\"{}\"",
+                xml_escape(&src_label),
+                xml_escape(&tgt_label),
+            );
+            // Add up to 4 edge properties
+            let mut prop_count = 0;
+            let mut keys: Vec<&String> = ed.properties.keys().collect();
+            keys.sort();
+            for key in keys {
+                if prop_count >= 4 {
+                    break;
+                }
+                if let Some(v) = ed.properties.get(key) {
+                    if !is_null_value(v) {
+                        attrs.push_str(&format!(
+                            " {}=\"{}\"",
+                            xml_escape(key),
+                            xml_escape(&value_display_compact(v))
+                        ));
+                        prop_count += 1;
+                    }
+                }
+            }
+            xml.push_str(&format!("      <edge {}/>\n", attrs));
+            sample_count += 1;
+        }
+        xml.push_str("    </samples>\n");
+
+        xml.push_str(&format!("  </{}>\n", xml_escape(&ct.connection_type)));
+    }
+    xml.push_str("</connections>\n");
+    Ok(())
 }
 
 /// Write the `<extensions>` element — only sections the graph actually uses.
@@ -658,57 +943,499 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
         );
     }
     xml.push_str("    <algorithms hint=\"CALL pagerank/betweenness/degree/closeness/louvain/label_propagation/connected_components/cluster({params}) YIELD node, score|community|cluster\"/>\n");
-    xml.push_str("    <cypher hint=\"MATCH, WHERE, RETURN, WITH, ORDER BY, SKIP, LIMIT, UNION [ALL], UNWIND, CASE, CREATE/SET/DELETE/MERGE. Use describe(cypher=true) for operators, functions, and predicates.\"/>\n");
+    xml.push_str("    <cypher hint=\"Full Cypher with extensions: ||, =~, coalesce(), CALL cluster/pagerank/louvain/..., distance(), contains(). describe(cypher=True) for reference, describe(cypher=['topic']) for detailed docs.\"/>\n");
+    if graph.graph.edge_count() > 0 {
+        xml.push_str("    <connections hint=\"describe(connections=True) for all connection types, describe(connections=['TYPE']) for deep-dive with properties and samples.\"/>\n");
+    }
+    xml.push_str("    <bug_report hint=\"bug_report(query, result, expected, description) — file a Cypher bug report to reported_bugs.md.\"/>\n");
     xml.push_str("  </extensions>\n");
 }
 
-/// Write the full `<cypher>` language reference (progressive disclosure level 2).
-fn write_cypher_reference(xml: &mut String) {
+/// Tier 2: compact Cypher reference — all clauses, operators, functions, procedures.
+/// No examples. Ends with hint to use tier 3.
+fn write_cypher_overview(xml: &mut String) {
     xml.push_str("<cypher>\n");
-    xml.push_str("  <clauses>MATCH, OPTIONAL MATCH, WHERE, RETURN [DISTINCT], WITH, ORDER BY [DESC], SKIP, LIMIT, UNWIND expr AS var, UNION [ALL], CASE WHEN/THEN/ELSE/END, CREATE, SET, DELETE, REMOVE, MERGE</clauses>\n");
+
+    // Clauses
+    xml.push_str("  <clauses>\n");
+    xml.push_str("    <clause name=\"MATCH\">Pattern-match nodes and relationships. OPTIONAL MATCH for left-join semantics.</clause>\n");
+    xml.push_str("    <clause name=\"WHERE\">Filter by predicate (comparison, null check, regex, string predicates).</clause>\n");
+    xml.push_str("    <clause name=\"RETURN\">Project columns. Supports DISTINCT, aliases (AS), aggregations.</clause>\n");
+    xml.push_str("    <clause name=\"WITH\">Intermediate projection, aggregation, and variable scoping.</clause>\n");
+    xml.push_str("    <clause name=\"ORDER BY\">Sort results. Append DESC for descending. Combine with SKIP n, LIMIT n.</clause>\n");
+    xml.push_str("    <clause name=\"UNWIND\">Expand a list into individual rows: UNWIND expr AS var.</clause>\n");
+    xml.push_str(
+        "    <clause name=\"UNION\">Combine result sets. UNION ALL keeps duplicates.</clause>\n",
+    );
+    xml.push_str("    <clause name=\"CASE\">Conditional expression: CASE WHEN cond THEN val ... ELSE val END.</clause>\n");
+    xml.push_str(
+        "    <clause name=\"CREATE\">Create nodes and relationships with properties.</clause>\n",
+    );
+    xml.push_str("    <clause name=\"SET\">Set or update node/relationship properties.</clause>\n");
+    xml.push_str("    <clause name=\"DELETE\">Delete nodes/relationships. REMOVE to drop individual properties.</clause>\n");
+    xml.push_str(
+        "    <clause name=\"MERGE\">Match existing or create new (upsert pattern).</clause>\n",
+    );
+    xml.push_str("  </clauses>\n");
+
+    // Operators
     xml.push_str("  <operators>\n");
-    xml.push_str("    <math>+ - * /</math>\n");
-    xml.push_str("    <string>|| (concatenation)</string>\n");
-    xml.push_str("    <comparison>= &lt;&gt; &lt; &gt; &lt;= &gt;= IN</comparison>\n");
-    xml.push_str("    <logical>AND OR NOT XOR</logical>\n");
-    xml.push_str("    <null>IS NULL, IS NOT NULL</null>\n");
-    xml.push_str("    <regex>=~ 'pattern'</regex>\n");
-    xml.push_str("    <string_predicates>CONTAINS, STARTS WITH, ENDS WITH</string_predicates>\n");
+    xml.push_str("    <group name=\"math\">+ - * /</group>\n");
+    xml.push_str("    <group name=\"string\">|| (concatenation)</group>\n");
+    xml.push_str("    <group name=\"comparison\">= &lt;&gt; &lt; &gt; &lt;= &gt;= IN</group>\n");
+    xml.push_str("    <group name=\"logical\">AND OR NOT XOR</group>\n");
+    xml.push_str("    <group name=\"null\">IS NULL, IS NOT NULL</group>\n");
+    xml.push_str("    <group name=\"regex\">=~ 'pattern'</group>\n");
+    xml.push_str("    <group name=\"predicates\">CONTAINS, STARTS WITH, ENDS WITH</group>\n");
     xml.push_str("  </operators>\n");
+
+    // Functions
     xml.push_str("  <functions>\n");
-    xml.push_str("    <math>abs, ceil, floor, round(x [,decimals]), sqrt, sign, log, exp, pow, pi, rand, toInteger, toFloat</math>\n");
-    xml.push_str("    <string>toString, toUpper, toLower, trim, lTrim, rTrim, replace, substring, left, right, split, reverse, size</string>\n");
-    xml.push_str("    <aggregate>count, sum, avg, min, max, collect, stDev</aggregate>\n");
-    xml.push_str("    <list>size, head, tail, last, range, keys, labels, type</list>\n");
-    xml.push_str("    <null>coalesce(expr, ...) — first non-null</null>\n");
+    xml.push_str("    <group name=\"math\">abs, ceil, floor, round(x [,decimals]), sqrt, sign, toInteger, toFloat</group>\n");
+    xml.push_str("    <group name=\"string\">toString, toUpper, toLower, trim, lTrim, rTrim, replace, substring, left, right, split, reverse</group>\n");
+    xml.push_str(
+        "    <group name=\"aggregate\">count, sum, avg, min, max, collect, stDev</group>\n",
+    );
+    xml.push_str(
+        "    <group name=\"graph\">size, length, id, labels, type, coalesce, range, keys</group>\n",
+    );
+    xml.push_str("    <group name=\"spatial\">distance(a,b)→m, contains(a,b), intersects(a,b), centroid(n), area(n)→m², perimeter(n)→m</group>\n");
     xml.push_str("  </functions>\n");
-    xml.push_str("  <patterns>\n");
-    xml.push_str(
-        "    (n:Label), (n:Label {prop: val}), (a)-[:TYPE]-&gt;(b), (a)-[:TYPE*1..3]-&gt;(b),\n",
-    );
-    xml.push_str("    [x IN list WHERE pred | expr] — list comprehension,\n");
-    xml.push_str("    n {.prop1, .prop2} — map projection\n");
-    xml.push_str("  </patterns>\n");
-    xml.push_str("  <examples>\n");
-    xml.push_str("    <ex desc=\"string predicate\">WHERE n.name CONTAINS 'oil'</ex>\n");
-    xml.push_str("    <ex desc=\"regex match\">WHERE n.name =~ '35/9-.*'</ex>\n");
-    xml.push_str(
-        "    <ex desc=\"null coalesce\">RETURN coalesce(n.nickname, n.name) AS label</ex>\n",
-    );
-    xml.push_str("    <ex desc=\"concat\">RETURN n.quadrant || '/' || n.block AS qb</ex>\n");
-    xml.push_str("    <ex desc=\"union\">MATCH (a:Field) RETURN a.name UNION MATCH (b:Discovery) RETURN b.name</ex>\n");
-    xml.push_str(
-        "    <ex desc=\"unwind\">UNWIND ['A','B','C'] AS x MATCH (n {code: x}) RETURN n</ex>\n",
-    );
-    xml.push_str("    <ex desc=\"list comprehension\">[x IN collect(n.name) WHERE x STARTS WITH '35']</ex>\n");
-    xml.push_str(
-        "    <ex desc=\"case\">CASE WHEN n.depth &gt; 3000 THEN 'deep' ELSE 'shallow' END</ex>\n",
-    );
-    xml.push_str(
-        "    <ex desc=\"round precision\">round(distance(a, b) / 1000.0, 1) AS dist_km</ex>\n",
-    );
-    xml.push_str("  </examples>\n");
+
+    // Procedures
+    xml.push_str("  <procedures>\n");
+    xml.push_str("    <proc name=\"pagerank\" yields=\"node, score\">PageRank centrality for all nodes.</proc>\n");
+    xml.push_str("    <proc name=\"betweenness\" yields=\"node, score\">Betweenness centrality for all nodes.</proc>\n");
+    xml.push_str("    <proc name=\"degree\" yields=\"node, score\">Degree centrality for all nodes.</proc>\n");
+    xml.push_str("    <proc name=\"closeness\" yields=\"node, score\">Closeness centrality for all nodes.</proc>\n");
+    xml.push_str("    <proc name=\"louvain\" yields=\"node, community\">Community detection (Louvain algorithm).</proc>\n");
+    xml.push_str("    <proc name=\"label_propagation\" yields=\"node, community\">Community detection (label propagation).</proc>\n");
+    xml.push_str("    <proc name=\"connected_components\" yields=\"node, component\">Weakly connected components.</proc>\n");
+    xml.push_str("    <proc name=\"cluster\" yields=\"node, cluster\">DBSCAN/K-means clustering on spatial or property data.</proc>\n");
+    xml.push_str("  </procedures>\n");
+
+    // Patterns
+    xml.push_str("  <patterns>(n:Label), (n {prop: val}), (a)-[:TYPE]-&gt;(b), (a)-[:T*1..3]-&gt;(b), [x IN list WHERE pred | expr], n {.p1, .p2}</patterns>\n");
+
+    xml.push_str("  <not_supported>CALL {} subqueries, FOREACH, CREATE INDEX, shortestPath(), variable-length weighted paths</not_supported>\n");
+    xml.push_str("  <hint>Use describe(cypher=['MATCH','cluster','spatial',...]) for detailed docs with examples.</hint>\n");
     xml.push_str("</cypher>\n");
+}
+
+// ── Cypher tier 3: topic detail functions ──────────────────────────────────
+
+const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, RETURN, WITH, ORDER BY, UNWIND, UNION, \
+    CASE, CREATE, SET, DELETE, MERGE, operators, functions, patterns, spatial, \
+    pagerank, betweenness, degree, closeness, louvain, \
+    label_propagation, connected_components, cluster";
+
+/// Tier 3: detailed Cypher docs for specific topics with params and examples.
+fn write_cypher_topics(xml: &mut String, topics: &[String]) -> Result<(), String> {
+    // Empty list → tier 2 overview
+    if topics.is_empty() {
+        write_cypher_overview(xml);
+        return Ok(());
+    }
+
+    xml.push_str("<cypher>\n");
+    for topic in topics {
+        let key = topic.to_uppercase();
+        match key.as_str() {
+            "MATCH" => write_topic_match(xml),
+            "WHERE" => write_topic_where(xml),
+            "RETURN" => write_topic_return(xml),
+            "WITH" => write_topic_with(xml),
+            "ORDER BY" | "ORDERBY" | "ORDER_BY" => write_topic_order_by(xml),
+            "UNWIND" => write_topic_unwind(xml),
+            "UNION" => write_topic_union(xml),
+            "CASE" => write_topic_case(xml),
+            "CREATE" => write_topic_create(xml),
+            "SET" => write_topic_set(xml),
+            "DELETE" | "REMOVE" => write_topic_delete(xml),
+            "MERGE" => write_topic_merge(xml),
+            "OPERATORS" => write_topic_operators(xml),
+            "FUNCTIONS" => write_topic_functions(xml),
+            "PATTERNS" => write_topic_patterns(xml),
+            "PAGERANK" => write_topic_pagerank(xml),
+            "BETWEENNESS" => write_topic_betweenness(xml),
+            "DEGREE" => write_topic_degree(xml),
+            "CLOSENESS" => write_topic_closeness(xml),
+            "LOUVAIN" => write_topic_louvain(xml),
+            "LABEL_PROPAGATION" | "LABELPROPAGATION" => write_topic_label_propagation(xml),
+            "CONNECTED_COMPONENTS" | "CONNECTEDCOMPONENTS" => {
+                write_topic_connected_components(xml);
+            }
+            "CLUSTER" => write_topic_cluster(xml),
+            "SPATIAL" => write_topic_spatial(xml),
+            _ => {
+                return Err(format!(
+                    "Unknown Cypher topic '{}'. Available: {}",
+                    topic, CYPHER_TOPIC_LIST
+                ));
+            }
+        }
+    }
+    xml.push_str("</cypher>\n");
+    Ok(())
+}
+
+fn write_topic_match(xml: &mut String) {
+    xml.push_str("  <MATCH>\n");
+    xml.push_str("    <desc>Pattern-match nodes and relationships. OPTIONAL MATCH returns nulls for non-matching patterns (left join).</desc>\n");
+    xml.push_str("    <syntax>MATCH (n:Label {prop: val})-[r:TYPE]-&gt;(m)</syntax>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"all nodes of type\">MATCH (n:Field) RETURN n.name</ex>\n");
+    xml.push_str("      <ex desc=\"with relationship\">MATCH (a:Person)-[:KNOWS]-&gt;(b) RETURN a.name, b.name</ex>\n");
+    xml.push_str("      <ex desc=\"variable-length path\">MATCH (a)-[:KNOWS*1..3]-&gt;(b) RETURN a, b</ex>\n");
+    xml.push_str("      <ex desc=\"inline property filter\">MATCH (n:Field {status: 'active'}) RETURN n</ex>\n");
+    xml.push_str("      <ex desc=\"optional match\">MATCH (a:Field) OPTIONAL MATCH (a)-[:HAS]-&gt;(b:Well) RETURN a.name, b.name</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </MATCH>\n");
+}
+
+fn write_topic_where(xml: &mut String) {
+    xml.push_str("  <WHERE>\n");
+    xml.push_str("    <desc>Filter results by predicate. Supports comparison, null checks, regex, string predicates, boolean logic.</desc>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"comparison\">WHERE n.depth &gt; 3000</ex>\n");
+    xml.push_str("      <ex desc=\"string contains\">WHERE n.name CONTAINS 'oil'</ex>\n");
+    xml.push_str("      <ex desc=\"starts/ends with\">WHERE n.name STARTS WITH '35/'</ex>\n");
+    xml.push_str("      <ex desc=\"regex\">WHERE n.name =~ '35/9-.*'</ex>\n");
+    xml.push_str("      <ex desc=\"null check\">WHERE n.depth IS NOT NULL</ex>\n");
+    xml.push_str("      <ex desc=\"IN list\">WHERE n.status IN ['active', 'planned']</ex>\n");
+    xml.push_str("      <ex desc=\"boolean\">WHERE n.depth &gt; 1000 AND n.temp &lt; 100</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </WHERE>\n");
+}
+
+fn write_topic_return(xml: &mut String) {
+    xml.push_str("  <RETURN>\n");
+    xml.push_str("    <desc>Project columns to output. Supports DISTINCT, aliases (AS), expressions, aggregations.</desc>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"basic\">RETURN n.name, n.depth</ex>\n");
+    xml.push_str("      <ex desc=\"alias\">RETURN n.name AS field_name</ex>\n");
+    xml.push_str("      <ex desc=\"distinct\">RETURN DISTINCT n.status</ex>\n");
+    xml.push_str(
+        "      <ex desc=\"expression\">RETURN n.name || ' (' || n.status || ')' AS label</ex>\n",
+    );
+    xml.push_str("      <ex desc=\"aggregation\">RETURN n.status, count(*) AS n, collect(n.name) AS names</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </RETURN>\n");
+}
+
+fn write_topic_with(xml: &mut String) {
+    xml.push_str("  <WITH>\n");
+    xml.push_str("    <desc>Intermediate projection and aggregation. Creates a new scope — only variables listed in WITH are available in subsequent clauses.</desc>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"filter after aggregation\">MATCH (n:Field) WITH n.area AS area, count(*) AS c WHERE c &gt; 5 RETURN area, c</ex>\n");
+    xml.push_str("      <ex desc=\"pipe between matches\">MATCH (a:Field) WITH a MATCH (a)-[:HAS]-&gt;(b) RETURN a.name, b.name</ex>\n");
+    xml.push_str("      <ex desc=\"limit intermediate\">MATCH (n:Field) WITH n ORDER BY n.name LIMIT 10 RETURN n.name</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </WITH>\n");
+}
+
+fn write_topic_order_by(xml: &mut String) {
+    xml.push_str("  <ORDER_BY>\n");
+    xml.push_str("    <desc>Sort results. Default ascending; append DESC for descending. Combine with SKIP and LIMIT for pagination.</desc>\n");
+    xml.push_str("    <syntax>ORDER BY expr [DESC] [SKIP n] [LIMIT n]</syntax>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"ascending\">ORDER BY n.name</ex>\n");
+    xml.push_str("      <ex desc=\"descending\">ORDER BY n.depth DESC</ex>\n");
+    xml.push_str("      <ex desc=\"pagination\">ORDER BY n.name SKIP 20 LIMIT 10</ex>\n");
+    xml.push_str("      <ex desc=\"multi-key\">ORDER BY n.status, n.name DESC</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </ORDER_BY>\n");
+}
+
+fn write_topic_unwind(xml: &mut String) {
+    xml.push_str("  <UNWIND>\n");
+    xml.push_str("    <desc>Expand a list expression into individual rows. Each element becomes a new row bound to the alias.</desc>\n");
+    xml.push_str("    <syntax>UNWIND expression AS variable</syntax>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"literal list\">UNWIND ['A','B','C'] AS x MATCH (n {code: x}) RETURN n</ex>\n");
+    xml.push_str("      <ex desc=\"collected list\">MATCH (n:Field) WITH collect(n.name) AS names UNWIND names AS name RETURN name</ex>\n");
+    xml.push_str("      <ex desc=\"range\">UNWIND range(1, 10) AS i RETURN i</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </UNWIND>\n");
+}
+
+fn write_topic_union(xml: &mut String) {
+    xml.push_str("  <UNION>\n");
+    xml.push_str("    <desc>Combine result sets from two queries. UNION removes duplicates; UNION ALL keeps all rows. Column names must match.</desc>\n");
+    xml.push_str("    <syntax>query1 UNION [ALL] query2</syntax>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"basic union\">MATCH (a:Field) RETURN a.name AS name UNION MATCH (b:Discovery) RETURN b.name AS name</ex>\n");
+    xml.push_str("      <ex desc=\"union all\">MATCH (a:Field) RETURN a.name AS name UNION ALL MATCH (b:Field) RETURN b.name AS name</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </UNION>\n");
+}
+
+fn write_topic_case(xml: &mut String) {
+    xml.push_str("  <CASE>\n");
+    xml.push_str("    <desc>Conditional expression. Two forms: simple (CASE expr WHEN val THEN ...) and generic (CASE WHEN cond THEN ...).</desc>\n");
+    xml.push_str("    <syntax>CASE WHEN condition THEN value [WHEN ... THEN ...] [ELSE default] END</syntax>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"generic\">RETURN CASE WHEN n.depth &gt; 3000 THEN 'deep' WHEN n.depth &gt; 1000 THEN 'medium' ELSE 'shallow' END AS category</ex>\n");
+    xml.push_str("      <ex desc=\"simple\">RETURN CASE n.status WHEN 'PRODUCING' THEN 'active' WHEN 'SHUT DOWN' THEN 'closed' ELSE 'other' END</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </CASE>\n");
+}
+
+fn write_topic_create(xml: &mut String) {
+    xml.push_str("  <CREATE>\n");
+    xml.push_str("    <desc>Create new nodes and relationships with properties.</desc>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str(
+        "      <ex desc=\"node\">CREATE (:Field {name: 'Troll', status: 'PRODUCING'})</ex>\n",
+    );
+    xml.push_str("      <ex desc=\"relationship\">MATCH (a:Field {name: 'Troll'}), (b:Company {name: 'Equinor'}) CREATE (a)-[:OPERATED_BY]-&gt;(b)</ex>\n");
+    xml.push_str("      <ex desc=\"with properties\">MATCH (a:Field), (b:Well) WHERE a.name = b.field CREATE (b)-[:BELONGS_TO {since: 2020}]-&gt;(a)</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </CREATE>\n");
+}
+
+fn write_topic_set(xml: &mut String) {
+    xml.push_str("  <SET>\n");
+    xml.push_str("    <desc>Set or update properties on existing nodes/relationships.</desc>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"set property\">MATCH (n:Field {name: 'Troll'}) SET n.status = 'SHUT DOWN'</ex>\n");
+    xml.push_str("      <ex desc=\"set multiple\">MATCH (n:Field {name: 'Troll'}) SET n.status = 'SHUT DOWN', n.end_year = 2025</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </SET>\n");
+}
+
+fn write_topic_delete(xml: &mut String) {
+    xml.push_str("  <DELETE>\n");
+    xml.push_str("    <desc>Delete nodes or relationships. REMOVE drops individual properties from a node.</desc>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"delete node\">MATCH (n:Field {name: 'Test'}) DELETE n</ex>\n");
+    xml.push_str(
+        "      <ex desc=\"delete relationship\">MATCH (a)-[r:OLD_REL]-&gt;(b) DELETE r</ex>\n",
+    );
+    xml.push_str("      <ex desc=\"remove property\">MATCH (n:Field {name: 'Troll'}) REMOVE n.temp_flag</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </DELETE>\n");
+}
+
+fn write_topic_merge(xml: &mut String) {
+    xml.push_str("  <MERGE>\n");
+    xml.push_str("    <desc>Match existing node/relationship or create if it doesn't exist (upsert). ON CREATE SET and ON MATCH SET for conditional property updates.</desc>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"basic\">MERGE (n:Field {name: 'Troll'})</ex>\n");
+    xml.push_str("      <ex desc=\"on create\">MERGE (n:Field {name: 'Troll'}) ON CREATE SET n.created = 2025</ex>\n");
+    xml.push_str("      <ex desc=\"on match\">MERGE (n:Field {name: 'Troll'}) ON MATCH SET n.updated = 2025</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </MERGE>\n");
+}
+
+fn write_topic_operators(xml: &mut String) {
+    xml.push_str("  <operators>\n");
+    xml.push_str("    <desc>All supported operators with semantics.</desc>\n");
+    xml.push_str("    <group name=\"math\" desc=\"Arithmetic\">+ (add), - (subtract), * (multiply), / (divide)</group>\n");
+    xml.push_str("    <group name=\"string\" desc=\"String concatenation\">|| — null propagates: 'a' || null = null. Auto-converts numbers: 'v' || 42 = 'v42'.</group>\n");
+    xml.push_str("    <group name=\"comparison\" desc=\"Comparison\">= (equal), &lt;&gt; (not equal), &lt;, &gt;, &lt;=, &gt;=, IN (list membership)</group>\n");
+    xml.push_str("    <group name=\"logical\" desc=\"Boolean\">AND, OR, NOT, XOR</group>\n");
+    xml.push_str("    <group name=\"null\" desc=\"Null checks\">IS NULL, IS NOT NULL</group>\n");
+    xml.push_str("    <group name=\"regex\" desc=\"Regex match\">=~ 'pattern' — Java-style regex, case-sensitive by default. Use (?i) for case-insensitive.</group>\n");
+    xml.push_str("    <group name=\"predicates\" desc=\"String predicates\">CONTAINS, STARTS WITH, ENDS WITH — case-sensitive substring checks.</group>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str(
+        "      <ex desc=\"concat with number\">RETURN n.name || '-' || n.block AS label</ex>\n",
+    );
+    xml.push_str("      <ex desc=\"regex case-insensitive\">WHERE n.name =~ '(?i)troll.*'</ex>\n");
+    xml.push_str("      <ex desc=\"IN list\">WHERE n.status IN ['PRODUCING', 'SHUT DOWN']</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </operators>\n");
+}
+
+fn write_topic_functions(xml: &mut String) {
+    xml.push_str("  <functions>\n");
+    xml.push_str("    <desc>All built-in functions grouped by category.</desc>\n");
+    xml.push_str("    <group name=\"math\">abs(x), ceil(x)/ceiling(x), floor(x), round(x [,decimals]), sqrt(x), sign(x), toInteger(x)/toInt(x), toFloat(x)</group>\n");
+    xml.push_str("    <group name=\"string\">toString(x), toUpper(s), toLower(s), trim(s), lTrim(s), rTrim(s), replace(s,from,to), substring(s,start[,len]), left(s,n), right(s,n), split(s,delim), reverse(s), size(s)</group>\n");
+    xml.push_str("    <group name=\"aggregate\">count(*)/count(expr), sum(expr), avg(expr), min(expr), max(expr), collect(expr), stDev(expr)/std(expr)</group>\n");
+    xml.push_str("    <group name=\"graph\">size(list), length(path), id(node), labels(node), type(rel), coalesce(expr,...) — first non-null, range(start,end[,step]), keys(node)</group>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str(
+        "      <ex desc=\"round precision\">RETURN round(n.depth / 1000.0, 1) AS depth_km</ex>\n",
+    );
+    xml.push_str("      <ex desc=\"coalesce\">RETURN coalesce(n.nickname, n.name) AS label</ex>\n");
+    xml.push_str("      <ex desc=\"string\">RETURN toLower(n.name) AS lower_name</ex>\n");
+    xml.push_str("      <ex desc=\"aggregate\">RETURN n.status, count(*) AS n, avg(n.depth) AS avg_depth</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </functions>\n");
+}
+
+fn write_topic_patterns(xml: &mut String) {
+    xml.push_str("  <patterns>\n");
+    xml.push_str("    <desc>Pattern syntax for matching graph structures.</desc>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"labeled node\">(n:Field)</ex>\n");
+    xml.push_str("      <ex desc=\"inline properties\">(n:Field {status: 'active'})</ex>\n");
+    xml.push_str("      <ex desc=\"directed relationship\">(a)-[:BELONGS_TO]-&gt;(b)</ex>\n");
+    xml.push_str(
+        "      <ex desc=\"variable-length\">(a)-[:KNOWS*1..3]-&gt;(b) — path length 1 to 3</ex>\n",
+    );
+    xml.push_str("      <ex desc=\"any relationship\">(a)--&gt;(b) or (a)-[r]-&gt;(b)</ex>\n");
+    xml.push_str("      <ex desc=\"list comprehension\">[x IN collect(n.name) WHERE x STARTS WITH '35']</ex>\n");
+    xml.push_str("      <ex desc=\"map projection\">n {.name, .status} — returns {name: ..., status: ...}</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </patterns>\n");
+}
+
+// ── Procedure deep-dive functions ──────────────────────────────────────────
+
+fn write_topic_pagerank(xml: &mut String) {
+    xml.push_str("  <pagerank>\n");
+    xml.push_str("    <desc>Compute PageRank centrality for all nodes. Higher score = more influential.</desc>\n");
+    xml.push_str("    <syntax>CALL pagerank({params}) YIELD node, score</syntax>\n");
+    xml.push_str("    <params>\n");
+    xml.push_str("      <param name=\"damping_factor\" type=\"float\" default=\"0.85\">Probability of following a link vs random jump.</param>\n");
+    xml.push_str("      <param name=\"max_iterations\" type=\"int\" default=\"100\">Convergence iteration limit.</param>\n");
+    xml.push_str("      <param name=\"tolerance\" type=\"float\" default=\"1e-6\">Convergence threshold.</param>\n");
+    xml.push_str("      <param name=\"connection_types\" type=\"string|list\">Filter to specific relationship types.</param>\n");
+    xml.push_str("    </params>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"basic\">CALL pagerank() YIELD node, score RETURN node.name, score ORDER BY score DESC LIMIT 10</ex>\n");
+    xml.push_str("      <ex desc=\"filtered\">CALL pagerank({connection_types: 'CITES'}) YIELD node, score RETURN node.name, score ORDER BY score DESC</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </pagerank>\n");
+}
+
+fn write_topic_betweenness(xml: &mut String) {
+    xml.push_str("  <betweenness>\n");
+    xml.push_str("    <desc>Compute betweenness centrality. High score = node lies on many shortest paths (bridge/broker).</desc>\n");
+    xml.push_str("    <syntax>CALL betweenness({params}) YIELD node, score</syntax>\n");
+    xml.push_str("    <params>\n");
+    xml.push_str("      <param name=\"normalized\" type=\"bool\" default=\"true\">Normalize scores to 0..1 range.</param>\n");
+    xml.push_str("      <param name=\"sample_size\" type=\"int\" optional=\"true\">Approximate by sampling N source nodes (faster for large graphs).</param>\n");
+    xml.push_str("      <param name=\"connection_types\" type=\"string|list\">Filter to specific relationship types.</param>\n");
+    xml.push_str("    </params>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"basic\">CALL betweenness() YIELD node, score RETURN node.name, score ORDER BY score DESC LIMIT 10</ex>\n");
+    xml.push_str("      <ex desc=\"sampled\">CALL betweenness({sample_size: 100}) YIELD node, score RETURN node.name, round(score, 4) ORDER BY score DESC</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </betweenness>\n");
+}
+
+fn write_topic_degree(xml: &mut String) {
+    xml.push_str("  <degree>\n");
+    xml.push_str("    <desc>Compute degree centrality (number of connections per node, optionally normalized).</desc>\n");
+    xml.push_str("    <syntax>CALL degree({params}) YIELD node, score</syntax>\n");
+    xml.push_str("    <params>\n");
+    xml.push_str("      <param name=\"normalized\" type=\"bool\" default=\"true\">Normalize by max possible degree.</param>\n");
+    xml.push_str("      <param name=\"connection_types\" type=\"string|list\">Filter to specific relationship types.</param>\n");
+    xml.push_str("    </params>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"basic\">CALL degree() YIELD node, score RETURN node.name, score ORDER BY score DESC LIMIT 10</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </degree>\n");
+}
+
+fn write_topic_closeness(xml: &mut String) {
+    xml.push_str("  <closeness>\n");
+    xml.push_str("    <desc>Compute closeness centrality (inverse of average shortest path distance). High = close to all others.</desc>\n");
+    xml.push_str("    <syntax>CALL closeness({params}) YIELD node, score</syntax>\n");
+    xml.push_str("    <params>\n");
+    xml.push_str("      <param name=\"normalized\" type=\"bool\" default=\"true\">Normalize scores.</param>\n");
+    xml.push_str("      <param name=\"connection_types\" type=\"string|list\">Filter to specific relationship types.</param>\n");
+    xml.push_str("    </params>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"basic\">CALL closeness() YIELD node, score RETURN node.name, score ORDER BY score DESC LIMIT 10</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </closeness>\n");
+}
+
+fn write_topic_louvain(xml: &mut String) {
+    xml.push_str("  <louvain>\n");
+    xml.push_str("    <desc>Community detection using the Louvain algorithm. Assigns each node a community ID.</desc>\n");
+    xml.push_str("    <syntax>CALL louvain({params}) YIELD node, community</syntax>\n");
+    xml.push_str("    <params>\n");
+    xml.push_str("      <param name=\"resolution\" type=\"float\" default=\"1.0\">Higher = more/smaller communities, lower = fewer/larger.</param>\n");
+    xml.push_str("      <param name=\"weight_property\" type=\"string\" optional=\"true\">Edge property to use as weight.</param>\n");
+    xml.push_str("      <param name=\"connection_types\" type=\"string|list\">Filter to specific relationship types.</param>\n");
+    xml.push_str("    </params>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"basic\">CALL louvain() YIELD node, community RETURN community, count(*) AS size, collect(node.name) AS members ORDER BY size DESC</ex>\n");
+    xml.push_str("      <ex desc=\"high resolution\">CALL louvain({resolution: 2.0}) YIELD node, community RETURN community, count(*) AS size ORDER BY size DESC</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </louvain>\n");
+}
+
+fn write_topic_label_propagation(xml: &mut String) {
+    xml.push_str("  <label_propagation>\n");
+    xml.push_str("    <desc>Community detection using label propagation. Fast, non-deterministic. Each node adopts its neighbors' majority label.</desc>\n");
+    xml.push_str("    <syntax>CALL label_propagation({params}) YIELD node, community</syntax>\n");
+    xml.push_str("    <params>\n");
+    xml.push_str("      <param name=\"max_iterations\" type=\"int\" default=\"100\">Iteration limit.</param>\n");
+    xml.push_str("      <param name=\"connection_types\" type=\"string|list\">Filter to specific relationship types.</param>\n");
+    xml.push_str("    </params>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"basic\">CALL label_propagation() YIELD node, community RETURN community, count(*) AS size ORDER BY size DESC</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </label_propagation>\n");
+}
+
+fn write_topic_connected_components(xml: &mut String) {
+    xml.push_str("  <connected_components>\n");
+    xml.push_str("    <desc>Find weakly connected components. Nodes in the same component can reach each other ignoring edge direction.</desc>\n");
+    xml.push_str("    <syntax>CALL connected_components() YIELD node, component</syntax>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"basic\">CALL connected_components() YIELD node, component RETURN component, count(*) AS size ORDER BY size DESC</ex>\n");
+    xml.push_str("      <ex desc=\"find isolated\">CALL connected_components() YIELD node, component WITH component, count(*) AS size WHERE size = 1 RETURN count(*) AS isolated_nodes</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </connected_components>\n");
+}
+
+fn write_topic_cluster(xml: &mut String) {
+    xml.push_str("  <cluster>\n");
+    xml.push_str("    <desc>Cluster nodes using DBSCAN or K-means. Reads nodes from preceding MATCH clause.</desc>\n");
+    xml.push_str("    <syntax>MATCH (n:Type) CALL cluster({params}) YIELD node, cluster RETURN ...</syntax>\n");
+    xml.push_str("    <modes>\n");
+    xml.push_str("      <spatial>Omit 'properties' — auto-detects lat/lon from set_spatial() config. Uses haversine distance. eps is in meters. Geometry centroids used as fallback for WKT types.</spatial>\n");
+    xml.push_str("      <property>Specify properties: ['col1','col2'] — euclidean distance on numeric values. Use normalize: true when feature scales differ.</property>\n");
+    xml.push_str("    </modes>\n");
+    xml.push_str("    <params>\n");
+    xml.push_str("      <param name=\"method\" type=\"string\" default=\"dbscan\">'dbscan' or 'kmeans'.</param>\n");
+    xml.push_str("      <param name=\"eps\" type=\"float\" default=\"0.5\">DBSCAN: max neighborhood distance. In meters for spatial mode.</param>\n");
+    xml.push_str("      <param name=\"min_points\" type=\"int\" default=\"3\">DBSCAN: min neighbors to form a core point.</param>\n");
+    xml.push_str(
+        "      <param name=\"k\" type=\"int\" default=\"5\">K-means: number of clusters.</param>\n",
+    );
+    xml.push_str("      <param name=\"max_iterations\" type=\"int\" default=\"100\">K-means: iteration limit.</param>\n");
+    xml.push_str("      <param name=\"normalize\" type=\"bool\" default=\"false\">Property mode: scale features to [0,1] before clustering.</param>\n");
+    xml.push_str("      <param name=\"properties\" type=\"list\" optional=\"true\">Numeric property names for property mode. Omit for spatial mode.</param>\n");
+    xml.push_str("    </params>\n");
+    xml.push_str("    <yields>node (the matched node), cluster (int — cluster ID; -1 = noise for DBSCAN)</yields>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"spatial DBSCAN\">MATCH (f:Field) CALL cluster({method: 'dbscan', eps: 50000, min_points: 2}) YIELD node, cluster RETURN cluster, count(*) AS n, collect(node.name) AS fields ORDER BY n DESC</ex>\n");
+    xml.push_str("      <ex desc=\"property K-means\">MATCH (w:Well) CALL cluster({properties: ['depth', 'temperature'], method: 'kmeans', k: 3, normalize: true}) YIELD node, cluster RETURN cluster, collect(node.name) AS wells</ex>\n");
+    xml.push_str("      <ex desc=\"spatial K-means\">MATCH (s:Station) CALL cluster({method: 'kmeans', k: 4}) YIELD node, cluster RETURN cluster, count(*) AS n</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </cluster>\n");
+}
+
+fn write_topic_spatial(xml: &mut String) {
+    xml.push_str("  <spatial>\n");
+    xml.push_str("    <desc>Spatial functions for geographic queries. Requires set_spatial() config on the node type (location or geometry). All distance/area/perimeter results are in meters.</desc>\n");
+    xml.push_str("    <setup>Python: g.set_spatial('Field', location=('lat', 'lon')) or g.set_spatial('Area', geometry='wkt')</setup>\n");
+    xml.push_str("    <functions>\n");
+    xml.push_str("      <fn name=\"distance(a, b)\">Geodesic distance in meters between two spatial nodes. Returns Null if either node has no location.</fn>\n");
+    xml.push_str("      <fn name=\"contains(a, b)\">True if geometry a fully contains geometry b (or point b).</fn>\n");
+    xml.push_str("      <fn name=\"intersects(a, b)\">True if geometries a and b overlap.</fn>\n");
+    xml.push_str(
+        "      <fn name=\"centroid(n)\">Returns {lat, lon} centroid of node's geometry.</fn>\n",
+    );
+    xml.push_str("      <fn name=\"area(n)\">Area of node's geometry in m².</fn>\n");
+    xml.push_str("      <fn name=\"perimeter(n)\">Perimeter of node's geometry in meters.</fn>\n");
+    xml.push_str("    </functions>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"distance between nodes\">MATCH (a:Field {name: 'Troll'}), (b:Field {name: 'Ekofisk'}) RETURN distance(a, b) / 1000.0 AS km</ex>\n");
+    xml.push_str("      <ex desc=\"nearest neighbors\">MATCH (a:Field {name: 'Troll'}), (b:Field) WHERE a &lt;&gt; b RETURN b.name, round(distance(a, b) / 1000.0, 1) AS km ORDER BY km LIMIT 5</ex>\n");
+    xml.push_str("      <ex desc=\"contains check\">MATCH (area:Block), (w:Well) WHERE contains(area, w) RETURN area.name, collect(w.name) AS wells</ex>\n");
+    xml.push_str("      <ex desc=\"area calculation\">MATCH (b:Block) RETURN b.name, round(area(b) / 1e6, 1) AS km2</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </spatial>\n");
 }
 
 /// Write full detail for a single node type: properties, connections,
@@ -1102,15 +1829,43 @@ fn build_focused_detail(graph: &DirGraph, types: &[String]) -> Result<String, St
 
 /// Build an XML description of the graph for AI agents (progressive disclosure).
 ///
-/// - `types = None` → Inventory mode. If ≤15 types, auto-inlines full detail.
-/// - `types = Some(list)` → Focused detail for the requested types only.
-/// - `cypher = true` → Append full Cypher language reference (operators, functions, examples).
+/// Three independent axes:
+/// - `types` → Node type deep-dive (None=inventory, Some=focused detail).
+/// - `connections` → Connection type docs (Off=in inventory, Overview=all, Topics=specific).
+/// - `cypher` → Cypher language reference (Off=hint, Overview=compact, Topics=detailed).
+///
+/// When `connections` or `cypher` is not Off, only those tracks are returned (no node inventory).
 pub fn compute_description(
     graph: &DirGraph,
     types: Option<&[String]>,
-    cypher: bool,
+    connections: &ConnectionDetail,
+    cypher: &CypherDetail,
 ) -> Result<String, String> {
-    let mut result = match types {
+    // If connections or cypher is requested, return only those tracks
+    let standalone =
+        !matches!(connections, ConnectionDetail::Off) || !matches!(cypher, CypherDetail::Off);
+
+    if standalone {
+        let mut result = String::with_capacity(4096);
+        match connections {
+            ConnectionDetail::Off => {}
+            ConnectionDetail::Overview => write_connections_overview(&mut result, graph),
+            ConnectionDetail::Topics(ref topics) => {
+                write_connections_detail(&mut result, graph, topics)?;
+            }
+        }
+        match cypher {
+            CypherDetail::Off => {}
+            CypherDetail::Overview => write_cypher_overview(&mut result),
+            CypherDetail::Topics(ref topics) => {
+                write_cypher_topics(&mut result, topics)?;
+            }
+        }
+        return Ok(result);
+    }
+
+    // Normal describe — inventory or focused detail
+    let result = match types {
         Some(requested) if !requested.is_empty() => build_focused_detail(graph, requested)?,
         _ => {
             // Count core types only (exclude supporting types)
@@ -1126,10 +1881,6 @@ pub fn compute_description(
             }
         }
     };
-    if cypher {
-        result.push('\n');
-        write_cypher_reference(&mut result);
-    }
     Ok(result)
 }
 
@@ -1139,4 +1890,142 @@ fn xml_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+// ── MCP quickstart ──────────────────────────────────────────────────────────
+
+/// Return a self-contained XML quickstart for setting up a KGLite MCP server.
+///
+/// Static content — no graph instance needed.
+pub fn mcp_quickstart() -> String {
+    format!(
+        r##"<mcp_quickstart version="{version}">
+
+  <setup>
+    <install>pip install kglite fastmcp</install>
+    <server><![CDATA[
+import kglite
+from fastmcp import FastMCP
+
+graph = kglite.load("your_graph.kgl")
+mcp = FastMCP("my-graph", instructions="Knowledge graph. Call graph_overview first.")
+
+@mcp.tool()
+def graph_overview(
+    types: list[str] | None = None,
+    connections: bool | list[str] | None = None,
+    cypher: bool | list[str] | None = None,
+) -> str:
+    """Get graph schema, connection details, or Cypher language reference.
+
+    Three independent axes — call with no args first for the overview:
+      graph_overview()                            — inventory of node types
+      graph_overview(types=["Field"])             — property schemas, samples
+      graph_overview(connections=True)            — all connection types overview
+      graph_overview(connections=["BELONGS_TO"])  — deep-dive with properties
+      graph_overview(cypher=True)                 — Cypher clauses, functions, procedures
+      graph_overview(cypher=["cluster","MATCH"])  — detailed docs with examples"""
+    return graph.describe(types=types, connections=connections, cypher=cypher)
+
+@mcp.tool()
+def cypher_query(query: str) -> str:
+    """Run a Cypher query against the knowledge graph.
+
+    Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, aggregations,
+    path traversals, CREATE, SET, DELETE, and CALL procedures.
+    Returns up to 200 rows as formatted text."""
+    result = graph.cypher(query)
+    if len(result) == 0:
+        return "Query returned no results."
+    rows = [str(dict(row)) for row in result[:200]]
+    header = f"Returned {{len(result)}} row(s)"
+    if len(result) > 200:
+        header += " (showing first 200)"
+    return header + ":\n" + "\n".join(rows)
+
+@mcp.tool()
+def bug_report(query: str, result: str, expected: str, description: str) -> str:
+    """File a Cypher bug report to reported_bugs.md.
+
+    Writes a timestamped, version-tagged entry (newest first).
+    Use when a query returns incorrect or unexpected results."""
+    return graph.bug_report(query, result, expected, description)
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+]]></server>
+  </setup>
+
+  <core_tools desc="Essential — include all three in every MCP server">
+    <tool name="graph_overview" method="graph.describe()" args="types, connections, cypher">
+      Schema introspection with 3-tier progressive disclosure.
+      The agent's entry point — always expose this.
+    </tool>
+    <tool name="cypher_query" method="graph.cypher()" args="query">
+      Execute Cypher queries. MATCH/WHERE/RETURN/CREATE/SET/DELETE,
+      aggregations, CALL procedures (pagerank, cluster, etc.).
+    </tool>
+    <tool name="bug_report" method="graph.bug_report()" args="query, result, expected, description">
+      File bug reports to reported_bugs.md. Input is sanitised.
+    </tool>
+  </core_tools>
+
+  <optional_tools desc="Add based on your use case">
+    <tool name="find_entity" method="graph.find()" args="name, node_type?, match_type?">
+      Search nodes by name. match_type: 'exact' (default), 'contains', 'starts_with'.
+      Useful for code graphs where entities have qualified names.
+    </tool>
+    <tool name="read_source" method="graph.source()" args="names, node_type?">
+      Resolve entity names to file paths and line ranges.
+      Returns source code locations for code navigation.
+    </tool>
+    <tool name="entity_context" method="graph.context()" args="name, node_type?, hops?">
+      Get neighborhood of a node — related entities within N hops.
+      Good for understanding how entities connect.
+    </tool>
+    <tool name="file_toc" method="graph.toc()" args="file_path">
+      Table of contents for a file — lists all entities sorted by line.
+      Only relevant for code-tree graphs.
+    </tool>
+    <tool name="grep_source" custom="true">
+      Text search across source files. Not built-in — implement with
+      your own file-reading logic or expose graph.cypher() with
+      CONTAINS/STARTS WITH/=~ for in-graph text search.
+    </tool>
+  </optional_tools>
+
+  <register_with_claude>
+    <claude_desktop desc="Add to Claude Desktop config">
+      <file>~/Library/Application Support/Claude/claude_desktop_config.json</file>
+      <config><![CDATA[
+{{
+  "mcpServers": {{
+    "my-graph": {{
+      "command": "python",
+      "args": ["/absolute/path/to/mcp_server.py"]
+    }}
+  }}
+}}
+]]></config>
+    </claude_desktop>
+    <claude_code desc="Add to Claude Code config">
+      <file>.claude/settings.json (project) or ~/.claude/settings.json (global)</file>
+      <config><![CDATA[
+{{
+  "mcpServers": {{
+    "my-graph": {{
+      "command": "python",
+      "args": ["/absolute/path/to/mcp_server.py"]
+    }}
+  }}
+}}
+]]></config>
+    </claude_code>
+    <note>Restart Claude after editing config. The server appears as an MCP tool provider.</note>
+  </register_with_claude>
+
+</mcp_quickstart>
+"##,
+        version = env!("CARGO_PKG_VERSION"),
+    )
 }

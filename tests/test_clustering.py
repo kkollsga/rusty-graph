@@ -326,27 +326,384 @@ class TestStringConcat:
         assert result[0]["code"] == "AB"
 
 
-class TestDescribeCypher:
-    """Test describe(cypher=True) returns Cypher language reference."""
+class TestDescribeCypherTiers:
+    """Test 3-tier progressive Cypher documentation."""
 
-    def test_describe_cypher_false_no_cypher_block(self):
+    # -- Tier 1: hint in extensions --
+
+    def test_tier1_cypher_hint(self):
         g = KnowledgeGraph()
         desc = g.describe()
-        # Should have the hint but not the full <cypher> block
         assert "cypher" in desc.lower()
+        assert "cluster" in desc.lower()
 
-    def test_describe_cypher_true_has_reference(self):
+    # -- Tier 2: overview (cypher=True) --
+
+    def test_tier2_has_clauses_and_procedures(self):
         g = KnowledgeGraph()
         desc = g.describe(cypher=True)
         assert "<cypher>" in desc
         assert "<clauses>" in desc
+        assert "MATCH" in desc
+        assert "WHERE" in desc
+        assert "<procedures>" in desc
+        assert "cluster" in desc
+        assert "pagerank" in desc
+
+    def test_tier2_has_operators_and_functions(self):
+        g = KnowledgeGraph()
+        desc = g.describe(cypher=True)
         assert "<operators>" in desc
         assert "<functions>" in desc
-        assert "coalesce" in desc
-        assert "CONTAINS" in desc
         assert "||" in desc
+        assert "CONTAINS" in desc
+        assert "coalesce" in desc
 
-    def test_describe_cluster_in_algorithms(self):
+    def test_tier2_no_graph_schema(self):
+        """cypher=True should NOT include node types or inventory."""
         g = KnowledgeGraph()
+        g.cypher("CREATE (:Field {name: 'Troll'})")
+        desc = g.describe(cypher=True)
+        assert "<cypher>" in desc
+        # Should not have graph inventory
+        assert "<graph" not in desc
+        assert "Field" not in desc
+
+    def test_tier2_has_hint_for_tier3(self):
+        g = KnowledgeGraph()
+        desc = g.describe(cypher=True)
+        assert "describe(cypher=[" in desc
+
+    # -- Tier 3: topic detail (cypher=list) --
+
+    def test_tier3_cluster_detail(self):
+        g = KnowledgeGraph()
+        desc = g.describe(cypher=["cluster"])
+        assert "<cluster>" in desc
+        assert "<params>" in desc
+        assert "<examples>" in desc
+        assert "spatial" in desc.lower()
+        assert "property" in desc.lower()
+
+    def test_tier3_match_detail(self):
+        g = KnowledgeGraph()
+        desc = g.describe(cypher=["MATCH"])
+        assert "<MATCH>" in desc
+        assert "<examples>" in desc
+
+    def test_tier3_multiple_topics(self):
+        g = KnowledgeGraph()
+        desc = g.describe(cypher=["MATCH", "cluster", "WHERE"])
+        assert "<MATCH>" in desc
+        assert "<cluster>" in desc
+        assert "<WHERE>" in desc
+
+    def test_tier3_case_insensitive(self):
+        g = KnowledgeGraph()
+        desc1 = g.describe(cypher=["match"])
+        desc2 = g.describe(cypher=["MATCH"])
+        assert "<MATCH>" in desc1
+        assert "<MATCH>" in desc2
+
+    def test_tier3_unknown_topic_error(self):
+        g = KnowledgeGraph()
+        with pytest.raises(ValueError, match="Unknown Cypher topic"):
+            g.describe(cypher=["nonexistent"])
+
+    def test_tier3_error_lists_available(self):
+        g = KnowledgeGraph()
+        try:
+            g.describe(cypher=["bogus"])
+        except ValueError as e:
+            msg = str(e)
+            assert "MATCH" in msg
+            assert "cluster" in msg
+
+    def test_tier3_empty_list_gives_overview(self):
+        g = KnowledgeGraph()
+        desc = g.describe(cypher=[])
+        assert "<clauses>" in desc
+        assert "<procedures>" in desc
+
+    def test_tier3_operators_detail(self):
+        g = KnowledgeGraph()
+        desc = g.describe(cypher=["operators"])
+        assert "<operators>" in desc
+        assert "concatenation" in desc
+
+    def test_tier3_functions_detail(self):
+        g = KnowledgeGraph()
+        desc = g.describe(cypher=["functions"])
+        assert "<functions>" in desc
+        assert "round" in desc
+
+    def test_tier3_pagerank_detail(self):
+        g = KnowledgeGraph()
+        desc = g.describe(cypher=["pagerank"])
+        assert "<pagerank>" in desc
+        assert "<params>" in desc
+        assert "damping_factor" in desc
+
+    def test_tier3_spatial_detail(self):
+        g = KnowledgeGraph()
+        desc = g.describe(cypher=["spatial"])
+        assert "<spatial>" in desc
+        assert "distance" in desc
+        assert "contains" in desc
+        assert "<examples>" in desc
+
+    def test_tier2_has_not_supported(self):
+        g = KnowledgeGraph()
+        desc = g.describe(cypher=True)
+        assert "<not_supported>" in desc
+        assert "subqueries" in desc.lower()
+
+    def test_tier2_has_spatial_functions(self):
+        g = KnowledgeGraph()
+        desc = g.describe(cypher=True)
+        assert "distance" in desc
+        assert "spatial" in desc.lower()
+
+    # -- Backward compat --
+
+    def test_cypher_false_same_as_none(self):
+        g = KnowledgeGraph()
+        r1 = g.describe()
+        r2 = g.describe(cypher=False)
+        assert r1 == r2
+
+    def test_cypher_invalid_type_raises(self):
+        g = KnowledgeGraph()
+        with pytest.raises(TypeError):
+            g.describe(cypher=42)
+
+    def test_no_connections_hint_without_edges(self):
+        """Connections hint should not appear in graphs with no edges."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Thing {name: 'A'})")
         desc = g.describe()
-        assert "cluster" in desc.lower()
+        assert "connections hint" not in desc
+
+    def test_connections_hint_with_edges(self):
+        """Connections hint should appear when graph has edges."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:A {name: 'a'})")
+        g.cypher("CREATE (:B {name: 'b'})")
+        g.cypher("MATCH (a:A), (b:B) CREATE (a)-[:KNOWS]->(b)")
+        desc = g.describe()
+        assert "connections hint" in desc or "describe(connections=" in desc
+
+    def test_overview_connection_map_has_counts(self):
+        """Overview connection map should include count attribute."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:A {name: 'a1'})")
+        g.cypher("CREATE (:A {name: 'a2'})")
+        g.cypher("CREATE (:B {name: 'b'})")
+        g.cypher("MATCH (a:A), (b:B) CREATE (a)-[:LINKS]->(b)")
+        desc = g.describe()
+        assert 'count="2"' in desc
+
+
+class TestDescribeConnections:
+    """Test describe(connections=...) for connection type progressive disclosure."""
+
+    @pytest.fixture
+    def connected_graph(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Field {name: 'Troll'})")
+        g.cypher("CREATE (:Field {name: 'Ekofisk'})")
+        g.cypher("CREATE (:Well {name: 'W1'})")
+        g.cypher("CREATE (:Well {name: 'W2'})")
+        g.cypher("CREATE (:Company {name: 'Equinor'})")
+        g.cypher("""
+            MATCH (w:Well {name: 'W1'}), (f:Field {name: 'Troll'})
+            CREATE (w)-[:BELONGS_TO {since: 1995}]->(f)
+        """)
+        g.cypher("""
+            MATCH (w:Well {name: 'W2'}), (f:Field {name: 'Ekofisk'})
+            CREATE (w)-[:BELONGS_TO {since: 2001}]->(f)
+        """)
+        g.cypher("""
+            MATCH (c:Company {name: 'Equinor'}), (f:Field {name: 'Troll'})
+            CREATE (c)-[:OPERATES]->(f)
+        """)
+        return g
+
+    # -- connections=True: overview --
+
+    def test_connections_overview(self, connected_graph):
+        desc = connected_graph.describe(connections=True)
+        assert "<connections>" in desc
+        assert "BELONGS_TO" in desc
+        assert "OPERATES" in desc
+        assert "count=" in desc
+
+    def test_connections_overview_has_endpoints(self, connected_graph):
+        desc = connected_graph.describe(connections=True)
+        assert "Well" in desc
+        assert "Field" in desc
+
+    def test_connections_overview_has_properties(self, connected_graph):
+        desc = connected_graph.describe(connections=True)
+        assert "since" in desc
+
+    def test_connections_overview_no_graph_schema(self, connected_graph):
+        desc = connected_graph.describe(connections=True)
+        assert "<graph" not in desc
+
+    # -- connections=list: deep-dive --
+
+    def test_connections_detail(self, connected_graph):
+        desc = connected_graph.describe(connections=["BELONGS_TO"])
+        assert "<BELONGS_TO" in desc
+        assert "<endpoints>" in desc
+        assert "<properties>" in desc
+        assert "<samples>" in desc
+
+    def test_connections_detail_has_pair_counts(self, connected_graph):
+        desc = connected_graph.describe(connections=["BELONGS_TO"])
+        assert "pair" in desc
+        assert "Well" in desc
+        assert "Field" in desc
+
+    def test_connections_detail_unknown_error(self, connected_graph):
+        with pytest.raises(ValueError, match="not found"):
+            connected_graph.describe(connections=["BOGUS"])
+
+    def test_connections_detail_error_lists_available(self, connected_graph):
+        try:
+            connected_graph.describe(connections=["BOGUS"])
+        except ValueError as e:
+            msg = str(e)
+            assert "BELONGS_TO" in msg
+
+    def test_connections_invalid_type_raises(self, connected_graph):
+        with pytest.raises(TypeError):
+            connected_graph.describe(connections=42)
+
+    # -- Combined --
+
+    def test_connections_and_cypher_combined(self, connected_graph):
+        desc = connected_graph.describe(connections=True, cypher=True)
+        assert "<connections>" in desc
+        assert "<cypher>" in desc
+
+
+# ── Bug Report ───────────────────────────────────────────────────────────────
+
+
+class TestBugReport:
+    """Tests for bug_report() method."""
+
+    @pytest.fixture()
+    def graph(self):
+        return KnowledgeGraph()
+
+    @pytest.fixture()
+    def tmp_report_path(self, tmp_path):
+        return str(tmp_path / "reported_bugs.md")
+
+    def test_creates_file(self, graph, tmp_report_path):
+        msg = graph.bug_report(
+            "MATCH (n) RETURN n",
+            "empty",
+            "5 rows",
+            "no results",
+            path=tmp_report_path,
+        )
+        assert "saved" in msg.lower()
+        import pathlib
+
+        content = pathlib.Path(tmp_report_path).read_text()
+        assert "# KGLite Bug Reports" in content
+        assert "### Bug Report" in content
+        assert "MATCH (n) RETURN n" in content
+        assert "no results" in content
+
+    def test_has_timestamp_and_version(self, graph, tmp_report_path):
+        graph.bug_report("q", "r", "e", "d", path=tmp_report_path)
+        import pathlib
+
+        content = pathlib.Path(tmp_report_path).read_text()
+        assert "UTC" in content
+        assert "KGLite v" in content
+
+    def test_prepends_new_reports(self, graph, tmp_report_path):
+        graph.bug_report("q1", "r1", "e1", "first report", path=tmp_report_path)
+        graph.bug_report("q2", "r2", "e2", "second report", path=tmp_report_path)
+        import pathlib
+
+        content = pathlib.Path(tmp_report_path).read_text()
+        pos_second = content.index("second report")
+        pos_first = content.index("first report")
+        assert pos_second < pos_first, "new report should appear before old"
+
+    def test_has_all_sections(self, graph, tmp_report_path):
+        graph.bug_report("my query", "my result", "my expected", "my desc", path=tmp_report_path)
+        import pathlib
+
+        content = pathlib.Path(tmp_report_path).read_text()
+        assert "**Query:**" in content
+        assert "**Result:**" in content
+        assert "**Expected:**" in content
+        assert "**Description:**" in content
+
+    def test_has_separators(self, graph, tmp_report_path):
+        graph.bug_report("q1", "r1", "e1", "d1", path=tmp_report_path)
+        graph.bug_report("q2", "r2", "e2", "d2", path=tmp_report_path)
+        import pathlib
+
+        content = pathlib.Path(tmp_report_path).read_text()
+        assert content.count("---") >= 2, "each report should have a separator"
+
+    def test_sanitizes_html(self, graph, tmp_report_path):
+        graph.bug_report(
+            "<script>alert('xss')</script>",
+            "result",
+            "expected",
+            "desc",
+            path=tmp_report_path,
+        )
+        import pathlib
+
+        content = pathlib.Path(tmp_report_path).read_text()
+        assert "<script>" not in content
+
+    def test_sanitizes_triple_backticks(self, graph, tmp_report_path):
+        graph.bug_report(
+            "normal query",
+            "```break out",
+            "expected",
+            "desc",
+            path=tmp_report_path,
+        )
+        import pathlib
+
+        content = pathlib.Path(tmp_report_path).read_text()
+        # Triple backticks in user input should be escaped
+        assert "\\`\\`\\`" in content
+
+    def test_sanitizes_javascript_protocol(self, graph, tmp_report_path):
+        graph.bug_report(
+            "query",
+            "[click](javascript:alert(1))",
+            "expected",
+            "desc",
+            path=tmp_report_path,
+        )
+        import pathlib
+
+        content = pathlib.Path(tmp_report_path).read_text()
+        assert "javascript:" not in content
+
+    def test_default_path(self, graph, monkeypatch, tmp_path):
+        """Without path= argument, writes to reported_bugs.md in cwd."""
+        monkeypatch.chdir(tmp_path)
+        graph.bug_report("q", "r", "e", "d")
+        import pathlib
+
+        assert (tmp_path / "reported_bugs.md").exists()
+
+    def test_describe_mentions_bug_report(self, graph):
+        desc = graph.describe()
+        assert "bug_report" in desc

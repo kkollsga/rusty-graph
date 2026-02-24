@@ -1197,42 +1197,87 @@ class KnowledgeGraph:
     def describe(
         self,
         types: list[str] | None = None,
-        cypher: bool = False,
+        connections: bool | list[str] | None = None,
+        cypher: bool | list[str] | None = None,
     ) -> str:
         """Return an XML description of this graph for AI agents.
 
-        Progressive disclosure: starts with a compact inventory, then
-        the agent drills into specific types on demand.
+        Three independent axes for progressive disclosure:
 
-        Two modes:
+        **Node types** (``types`` parameter):
 
-        - ``describe()`` — Inventory overview: flat list of core types
-          sorted by count, each with a compact descriptor
-          ``TypeName[size,complexity,flags]`` (e.g. ``Field[m,m,geo,ts]``).
-          Supporting types appear as ``+N`` suffixes on their parent.
-          Includes connection map and Cypher extensions.  For graphs
-          with ≤15 core types, returns full detail inline automatically.
-
+        - ``describe()`` — Inventory overview with compact type descriptors.
         - ``describe(types=['Field', 'Well'])`` — Focused detail for
-          specific types: property schemas with types/unique counts/
-          sample values, connection topology, timeseries/spatial/
-          embedding config, sample nodes, and a ``<supporting>`` section
-          listing child types when applicable.
+          specific types with properties, connections, and samples.
+
+        **Connections** (``connections`` parameter):
+
+        - ``describe(connections=True)`` — All connection types with count,
+          source/target node types, and property names.
+        - ``describe(connections=['BELONGS_TO'])`` — Deep-dive with per-pair
+          counts, property stats with sample values, and sample edges.
+
+        **Cypher** (``cypher`` parameter):
+
+        - ``describe(cypher=True)`` — Compact Cypher reference: all clauses,
+          operators, functions, and procedures with 1-line descriptions.
+        - ``describe(cypher=['cluster', 'MATCH'])`` — Detailed docs with
+          parameters and examples for specific topics.
+
+        When ``connections`` or ``cypher`` is set, only those tracks are
+        returned (no node inventory).
 
         Args:
-            types: Optional list of node type names to get detail for.
-                When omitted, returns the inventory overview.
+            types: Node type names for focused detail.
+            connections: True for overview, list for deep-dive into specific types.
+            cypher: True for compact reference, list for detailed topic docs.
+
+        Raises:
+            ValueError: If any type/connection/topic is not found.
+            TypeError: If connections or cypher has wrong type.
+        """
+        ...
+
+    def bug_report(
+        self,
+        query: str,
+        result: str,
+        expected: str,
+        description: str,
+        path: str | None = None,
+    ) -> str:
+        """File a Cypher bug report to ``reported_bugs.md``.
+
+        Appends a timestamped, version-tagged report to the top of the file
+        (creating it if needed).  All inputs are sanitised against code
+        injection (HTML tags, ``javascript:`` URIs, triple-backtick breakout).
+
+        Args:
+            query: The Cypher query that triggered the bug.
+            result: The actual result you got.
+            expected: The result you expected.
+            description: Free-text explanation.
+            path: Optional file path (default: ``reported_bugs.md`` in cwd).
+
+        Returns:
+            Confirmation message with the file path.
+
+        Raises:
+            IOError: If the file cannot be written.
+        """
+        ...
+
+    @staticmethod
+    def explain_mcp() -> str:
+        """Return a self-contained XML quickstart for setting up a KGLite MCP server.
+
+        Includes a ready-to-use server template with core tools (graph_overview,
+        cypher_query, bug_report), optional tools (find_entity, read_source, etc.),
+        and Claude Desktop / Claude Code registration config.
 
         Example::
 
-            # Get overview
-            overview = graph.describe()
-
-            # Drill into specific types
-            detail = graph.describe(types=['Field', 'ProductionProfile'])
-
-        Raises:
-            ValueError: If any type in *types* does not exist.
+            print(KnowledgeGraph.explain_mcp())
         """
         ...
 

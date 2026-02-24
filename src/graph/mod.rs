@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub mod batch_operations;
+pub mod bug_report;
 pub mod calculations;
 pub mod clustering;
 pub mod cypher;
@@ -52,6 +53,58 @@ use schema::{
 
 /// Embedding column data extracted from a DataFrame: `[(column_name, [(node_id, embedding)])]`
 type EmbeddingColumnData = Vec<(String, Vec<(Value, Vec<f32>)>)>;
+
+/// Extract `ConnectionDetail` from a Python `bool | list[str] | None` parameter.
+fn extract_detail_param(
+    obj: Option<&Bound<'_, PyAny>>,
+    param_name: &str,
+) -> PyResult<introspection::ConnectionDetail> {
+    let Some(obj) = obj else {
+        return Ok(introspection::ConnectionDetail::Off);
+    };
+    if let Ok(b) = obj.extract::<bool>() {
+        return Ok(if b {
+            introspection::ConnectionDetail::Overview
+        } else {
+            introspection::ConnectionDetail::Off
+        });
+    }
+    if let Ok(list) = obj.cast::<PyList>() {
+        let topics: Vec<String> = list
+            .iter()
+            .map(|item| item.extract::<String>())
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(introspection::ConnectionDetail::Topics(topics));
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "{} must be bool or list of strings",
+        param_name
+    )))
+}
+
+/// Extract `CypherDetail` from a Python `bool | list[str] | None` parameter.
+fn extract_cypher_param(obj: Option<&Bound<'_, PyAny>>) -> PyResult<introspection::CypherDetail> {
+    let Some(obj) = obj else {
+        return Ok(introspection::CypherDetail::Off);
+    };
+    if let Ok(b) = obj.extract::<bool>() {
+        return Ok(if b {
+            introspection::CypherDetail::Overview
+        } else {
+            introspection::CypherDetail::Off
+        });
+    }
+    if let Ok(list) = obj.cast::<PyList>() {
+        let topics: Vec<String> = list
+            .iter()
+            .map(|item| item.extract::<String>())
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(introspection::CypherDetail::Topics(topics));
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "cypher must be bool or list of strings",
+    ))
+}
 
 /// Main knowledge graph type exposed to Python via PyO3.
 ///
@@ -3558,14 +3611,60 @@ impl KnowledgeGraph {
 
     /// Return an XML description of this graph for AI agents (progressive disclosure).
     ///
-    /// Three modes:
-    /// - `describe()` → Inventory overview (or full detail if ≤15 types)
-    /// - `describe(types=["Field", "Well"])` → Focused detail for specific types
-    /// - `describe(cypher=True)` → Append full Cypher language reference
-    #[pyo3(signature = (types=None, cypher=false))]
-    fn describe(&self, types: Option<Vec<String>>, cypher: bool) -> PyResult<String> {
-        introspection::compute_description(&self.inner, types.as_deref(), cypher)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+    /// Three independent axes:
+    /// - `types` → Node type detail (None=inventory, list=focused)
+    /// - `connections` → Connection type docs (True=overview, list=deep-dive)
+    /// - `cypher` → Cypher language reference (True=compact, list=detailed topics)
+    ///
+    /// When `connections` or `cypher` is set, only those tracks are returned.
+    #[pyo3(signature = (types=None, connections=None, cypher=None))]
+    fn describe(
+        &self,
+        types: Option<Vec<String>>,
+        connections: Option<&Bound<'_, PyAny>>,
+        cypher: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<String> {
+        let conn_detail = extract_detail_param(connections, "connections")?;
+        let cypher_detail = extract_cypher_param(cypher)?;
+        introspection::compute_description(
+            &self.inner,
+            types.as_deref(),
+            &conn_detail,
+            &cypher_detail,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+    }
+
+    /// File a bug report to `reported_bugs.md`.
+    ///
+    /// Appends a timestamped, version-tagged report to the top of the file
+    /// (creating it if needed). All inputs are sanitised against code injection.
+    ///
+    /// - `query` — The Cypher query that triggered the bug.
+    /// - `result` — The actual result you got.
+    /// - `expected` — The result you expected.
+    /// - `description` — Free-text explanation.
+    /// - `path` — Optional file path (default: `reported_bugs.md` in cwd).
+    #[pyo3(signature = (query, result, expected, description, path=None))]
+    fn bug_report(
+        &self,
+        query: &str,
+        result: &str,
+        expected: &str,
+        description: &str,
+        path: Option<&str>,
+    ) -> PyResult<String> {
+        bug_report::write_bug_report(query, result, expected, description, path)
+            .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)
+    }
+
+    /// Return a self-contained XML quickstart for setting up a KGLite MCP server.
+    ///
+    /// Includes: server code template, core/optional tool descriptions,
+    /// and Claude Desktop / Claude Code registration config.
+    #[staticmethod]
+    fn explain_mcp() -> String {
+        introspection::mcp_quickstart()
     }
 
     fn get_selection(&self) -> PyResult<String> {
