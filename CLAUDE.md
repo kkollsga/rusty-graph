@@ -62,6 +62,14 @@ When adding a new `#[pymethods]` function:
 5. `CHANGELOG.md` — `[Unreleased]` → Added
 6. `README.md` — if it's a major feature
 
+## Git Push Protocol
+
+**NEVER push to git without explicit user approval.** Before pushing:
+
+1. Ask the user to confirm the new version number (bump patch by +0.0.1 from current)
+2. Once confirmed, update `Cargo.toml` version and promote `[Unreleased]` in `CHANGELOG.md` to the confirmed version
+3. Commit, then push only after the user approves
+
 ## Version
 
 Single source of truth: `Cargo.toml` line 3. `pyproject.toml` reads it dynamically via maturin.
