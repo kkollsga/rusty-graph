@@ -1,0 +1,288 @@
+"""Tests for Cypher temporal filtering functions: valid_at, valid_during."""
+
+import pytest
+import pandas as pd
+from kglite import KnowledgeGraph
+
+
+@pytest.fixture
+def temporal_graph():
+    """Graph with temporal properties on both nodes and edges.
+
+    Employees:
+      Alice:   hire_date=2015-01-01, end_date=2020-12-31
+      Bob:     hire_date=2018-06-01, end_date=NULL (still employed)
+      Charlie: hire_date=2020-03-15, end_date=NULL (still employed)
+      Diana:   hire_date=NULL,       end_date=NULL (unknown bounds)
+      Eve:     hire_date=2010-01-01, end_date=2019-06-30
+
+    Companies: Acme, Globex
+
+    WORKS_AT edges (with start_date/end_date):
+      Alice  -> Acme   (2015-01-01 to 2020-12-31)
+      Bob    -> Acme   (2018-06-01 to NULL)
+      Charlie-> Globex (2020-03-15 to NULL)
+      Diana  -> Globex (NULL to NULL)
+      Eve    -> Acme   (2010-01-01 to 2019-06-30)
+      Alice  -> Globex (2021-01-01 to NULL)
+    """
+    graph = KnowledgeGraph()
+
+    employees = pd.DataFrame({
+        'emp_id': [1, 2, 3, 4, 5],
+        'name': ['Alice', 'Bob', 'Charlie', 'Diana', 'Eve'],
+        'hire_date': ['2015-01-01', '2018-06-01', '2020-03-15', None, '2010-01-01'],
+        'end_date': ['2020-12-31', None, None, None, '2019-06-30'],
+    })
+    graph.add_nodes(employees, 'Employee', 'emp_id', 'name')
+
+    companies = pd.DataFrame({
+        'comp_id': [10, 20],
+        'name': ['Acme', 'Globex'],
+    })
+    graph.add_nodes(companies, 'Company', 'comp_id', 'name')
+
+    employment = pd.DataFrame({
+        'emp_id': [1, 2, 3, 4, 5, 1],
+        'comp_id': [10, 10, 20, 20, 10, 20],
+        'start_date': ['2015-01-01', '2018-06-01', '2020-03-15', None, '2010-01-01', '2021-01-01'],
+        'end_date': ['2020-12-31', None, None, None, '2019-06-30', None],
+    })
+    graph.add_connections(
+        employment, 'WORKS_AT', 'Employee', 'emp_id',
+        'Company', 'comp_id', columns=['start_date', 'end_date']
+    )
+
+    return graph
+
+
+# ── valid_at on nodes ────────────────────────────────────────────────────────
+
+class TestValidAtNodes:
+    def test_basic_match(self, temporal_graph):
+        """Mid-2019: Alice, Bob, Eve, Diana active; Charlie not yet hired."""
+        rows = temporal_graph.cypher(
+            "MATCH (e:Employee) "
+            "WHERE valid_at(e, '2019-01-01', 'hire_date', 'end_date') "
+            "RETURN e.title ORDER BY e.title"
+        )
+        names = [r['e.title'] for r in rows]
+        assert 'Alice' in names
+        assert 'Bob' in names
+        assert 'Eve' in names
+        assert 'Diana' in names  # NULL/NULL = always valid
+        assert 'Charlie' not in names  # starts 2020
+
+    def test_null_from_open_start(self, temporal_graph):
+        """Diana (NULL hire_date) should be valid at any date."""
+        rows = temporal_graph.cypher(
+            "MATCH (e:Employee) "
+            "WHERE valid_at(e, '2000-01-01', 'hire_date', 'end_date') "
+            "RETURN e.title"
+        )
+        names = {r['e.title'] for r in rows}
+        assert 'Diana' in names
+
+    def test_null_to_open_end(self, temporal_graph):
+        """Far future: only people with NULL end_date still valid."""
+        rows = temporal_graph.cypher(
+            "MATCH (e:Employee) "
+            "WHERE valid_at(e, '2025-01-01', 'hire_date', 'end_date') "
+            "RETURN e.title"
+        )
+        names = {r['e.title'] for r in rows}
+        assert 'Bob' in names       # 2018-NULL
+        assert 'Charlie' in names   # 2020-NULL
+        assert 'Diana' in names     # NULL-NULL
+        assert 'Alice' not in names  # ended 2020
+        assert 'Eve' not in names    # ended 2019
+
+    def test_both_null_always_valid(self, temporal_graph):
+        """Diana (both NULL) matches even very old dates."""
+        rows = temporal_graph.cypher(
+            "MATCH (e:Employee {title: 'Diana'}) "
+            "WHERE valid_at(e, '1900-01-01', 'hire_date', 'end_date') "
+            "RETURN e.title"
+        )
+        assert len(rows) == 1
+        assert rows[0]['e.title'] == 'Diana'
+
+    def test_outside_range(self, temporal_graph):
+        """Alice ended 2020-12-31, not valid in 2021."""
+        rows = temporal_graph.cypher(
+            "MATCH (e:Employee {title: 'Alice'}) "
+            "WHERE valid_at(e, '2021-06-01', 'hire_date', 'end_date') "
+            "RETURN e.title"
+        )
+        assert len(rows) == 0
+
+
+# ── valid_at on edges ────────────────────────────────────────────────────────
+
+class TestValidAtEdges:
+    def test_basic_edge_match(self, temporal_graph):
+        """Mid-2019: Alice@Acme, Bob@Acme, Eve@Acme, Diana@Globex active."""
+        rows = temporal_graph.cypher(
+            "MATCH (e:Employee)-[r:WORKS_AT]->(c:Company) "
+            "WHERE valid_at(r, '2019-01-01', 'start_date', 'end_date') "
+            "RETURN e.title, c.title ORDER BY e.title"
+        )
+        pairs = {(r['e.title'], r['c.title']) for r in rows}
+        assert ('Alice', 'Acme') in pairs
+        assert ('Bob', 'Acme') in pairs
+        assert ('Eve', 'Acme') in pairs
+        assert ('Diana', 'Globex') in pairs
+        # Charlie starts 2020, Alice@Globex starts 2021
+        assert ('Charlie', 'Globex') not in pairs
+        assert ('Alice', 'Globex') not in pairs
+
+    def test_edge_null_end(self, temporal_graph):
+        """Far future: only edges with NULL end_date active."""
+        rows = temporal_graph.cypher(
+            "MATCH (e:Employee)-[r:WORKS_AT]->(c:Company) "
+            "WHERE valid_at(r, '2025-01-01', 'start_date', 'end_date') "
+            "RETURN e.title, c.title"
+        )
+        pairs = {(r['e.title'], r['c.title']) for r in rows}
+        assert ('Bob', 'Acme') in pairs       # NULL end
+        assert ('Charlie', 'Globex') in pairs  # NULL end
+        assert ('Alice', 'Globex') in pairs    # 2021-NULL
+        assert ('Diana', 'Globex') in pairs    # NULL-NULL
+        assert ('Alice', 'Acme') not in pairs  # ended 2020
+        assert ('Eve', 'Acme') not in pairs    # ended 2019
+
+    def test_edge_with_node_filter(self, temporal_graph):
+        """Combine temporal edge filter with node property filter."""
+        rows = temporal_graph.cypher(
+            "MATCH (e:Employee)-[r:WORKS_AT]->(c:Company {title: 'Acme'}) "
+            "WHERE valid_at(r, '2019-01-01', 'start_date', 'end_date') "
+            "RETURN e.title ORDER BY e.title"
+        )
+        names = [r['e.title'] for r in rows]
+        assert names == ['Alice', 'Bob', 'Eve']
+
+
+# ── valid_during ─────────────────────────────────────────────────────────────
+
+class TestValidDuring:
+    def test_basic_overlap(self, temporal_graph):
+        """2019 range: overlaps Alice (2015-2020), Bob (2018-NULL), Eve (2010-2019), Diana (NULL-NULL)."""
+        rows = temporal_graph.cypher(
+            "MATCH (e:Employee) "
+            "WHERE valid_during(e, '2019-01-01', '2019-12-31', 'hire_date', 'end_date') "
+            "RETURN e.title"
+        )
+        names = {r['e.title'] for r in rows}
+        assert 'Alice' in names   # 2015-2020 overlaps 2019
+        assert 'Bob' in names     # 2018-NULL overlaps 2019
+        assert 'Eve' in names     # 2010-2019 overlaps 2019
+        assert 'Diana' in names   # NULL-NULL overlaps everything
+        assert 'Charlie' not in names  # 2020-NULL starts after 2019
+
+    def test_edge_overlap(self, temporal_graph):
+        """2020 range on edges."""
+        rows = temporal_graph.cypher(
+            "MATCH (e:Employee)-[r:WORKS_AT]->(c:Company) "
+            "WHERE valid_during(r, '2020-01-01', '2020-12-31', 'start_date', 'end_date') "
+            "RETURN e.title, c.title"
+        )
+        pairs = {(r['e.title'], r['c.title']) for r in rows}
+        assert ('Alice', 'Acme') in pairs     # 2015-2020 overlaps 2020
+        assert ('Bob', 'Acme') in pairs       # 2018-NULL overlaps 2020
+        assert ('Charlie', 'Globex') in pairs  # 2020-NULL overlaps 2020
+        assert ('Diana', 'Globex') in pairs   # NULL-NULL overlaps everything
+
+    def test_no_overlap(self, temporal_graph):
+        """Eve (2010-2019) doesn't overlap 2020-2025."""
+        rows = temporal_graph.cypher(
+            "MATCH (e:Employee {title: 'Eve'}) "
+            "WHERE valid_during(e, '2020-01-01', '2025-12-31', 'hire_date', 'end_date') "
+            "RETURN e.title"
+        )
+        assert len(rows) == 0
+
+
+# ── DateTime property values ─────────────────────────────────────────────────
+
+class TestValidAtWithDatetime:
+    """petroleum_graph has Estimate nodes with DateTime date_from/date_to."""
+
+    def test_estimate_datetime_fields(self, petroleum_graph):
+        """First 25 estimates: 2020-01-01 to 2020-12-31. Mid-2020 should match all 25."""
+        rows = petroleum_graph.cypher(
+            "MATCH (e:Estimate) "
+            "WHERE valid_at(e, '2020-06-15', 'date_from', 'date_to') "
+            "RETURN count(*) AS n"
+        )
+        assert rows[0]['n'] == 25
+
+    def test_estimate_with_date_function(self, petroleum_graph):
+        """date() function should also work."""
+        rows = petroleum_graph.cypher(
+            "MATCH (e:Estimate) "
+            "WHERE valid_at(e, date('2020-06-15'), 'date_from', 'date_to') "
+            "RETURN count(*) AS n"
+        )
+        assert rows[0]['n'] == 25
+
+    def test_prospect_string_fields(self, petroleum_graph):
+        """Prospect date_from/date_to are strings. All 20 active mid-2022."""
+        rows = petroleum_graph.cypher(
+            "MATCH (p:Prospect) "
+            "WHERE valid_at(p, '2022-06-15', 'date_from', 'date_to') "
+            "RETURN count(*) AS n"
+        )
+        # First 10: 2020-01-01 to 2025-12-31 ✓, Last 10: 2019-01-01 to 2023-12-31 ✓
+        assert rows[0]['n'] == 20
+
+
+# ── Error handling ───────────────────────────────────────────────────────────
+
+class TestTemporalErrors:
+    def test_wrong_arg_count_valid_at(self, temporal_graph):
+        with pytest.raises(Exception, match="4 arguments"):
+            temporal_graph.cypher(
+                "MATCH (e:Employee) "
+                "WHERE valid_at(e, '2020-01-01', 'hire_date') RETURN e"
+            )
+
+    def test_wrong_arg_count_valid_during(self, temporal_graph):
+        with pytest.raises(Exception, match="5 arguments"):
+            temporal_graph.cypher(
+                "MATCH (e:Employee) "
+                "WHERE valid_during(e, '2020-01-01', '2020-12-31', 'hire_date') RETURN e"
+            )
+
+    def test_first_arg_not_variable(self, temporal_graph):
+        with pytest.raises(Exception, match="variable"):
+            temporal_graph.cypher(
+                "MATCH (e:Employee) "
+                "WHERE valid_at('not_a_var', '2020-01-01', 'hire_date', 'end_date') RETURN e"
+            )
+
+
+# ── Combined with other predicates ──────────────────────────────────────────
+
+class TestTemporalCombined:
+    def test_with_and(self, temporal_graph):
+        """Temporal filter AND string filter."""
+        rows = temporal_graph.cypher(
+            "MATCH (e:Employee) "
+            "WHERE valid_at(e, '2019-06-01', 'hire_date', 'end_date') "
+            "  AND e.title STARTS WITH 'A' "
+            "RETURN e.title"
+        )
+        assert len(rows) == 1
+        assert rows[0]['e.title'] == 'Alice'
+
+    def test_with_or(self, temporal_graph):
+        """Temporal filter OR exact match."""
+        rows = temporal_graph.cypher(
+            "MATCH (e:Employee) "
+            "WHERE valid_at(e, '2025-01-01', 'hire_date', 'end_date') "
+            "  OR e.title = 'Alice' "
+            "RETURN e.title ORDER BY e.title"
+        )
+        names = [r['e.title'] for r in rows]
+        assert 'Alice' in names  # matched via OR
+        assert 'Bob' in names    # matched via valid_at

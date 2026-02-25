@@ -267,6 +267,171 @@ pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStat
     result
 }
 
+/// Set of node types that participate in at least one edge (as source or target).
+fn compute_connected_types(conn_stats: &[ConnectionTypeStats]) -> HashSet<String> {
+    let mut connected = HashSet::new();
+    for ct in conn_stats {
+        for s in &ct.source_types {
+            connected.insert(s.clone());
+        }
+        for t in &ct.target_types {
+            connected.insert(t.clone());
+        }
+    }
+    connected
+}
+
+/// Set of unordered (TypeA, TypeB) pairs directly connected by at least one edge type.
+fn compute_connected_type_pairs(conn_stats: &[ConnectionTypeStats]) -> HashSet<(String, String)> {
+    let mut pairs = HashSet::new();
+    for ct in conn_stats {
+        for s in &ct.source_types {
+            for t in &ct.target_types {
+                // Store both orderings so lookup is direction-independent
+                pairs.insert((s.clone(), t.clone()));
+                pairs.insert((t.clone(), s.clone()));
+            }
+        }
+    }
+    pairs
+}
+
+/// A candidate join between two disconnected types based on property value overlap.
+struct JoinCandidate {
+    left_type: String,
+    left_prop: String,
+    left_unique: usize,
+    right_type: String,
+    right_prop: String,
+    right_unique: usize,
+    overlap: usize,
+}
+
+/// Check whether two property type strings are compatible for join candidate comparison.
+/// Metadata types use Rust names: "String", "Int64", "Float64", "UniqueId", etc.
+fn types_compatible(left: &str, right: &str) -> bool {
+    let is_str = |t: &str| {
+        t.eq_ignore_ascii_case("string")
+            || t.eq_ignore_ascii_case("uniqueid")
+            || t.eq_ignore_ascii_case("str")
+    };
+    let is_num = |t: &str| {
+        t.eq_ignore_ascii_case("int64")
+            || t.eq_ignore_ascii_case("float64")
+            || t.eq_ignore_ascii_case("int")
+            || t.eq_ignore_ascii_case("float")
+    };
+    (is_str(left) && is_str(right)) || (is_num(left) && is_num(right))
+}
+
+/// Sample up to `max` unique non-null values from a type's property.
+fn sample_unique_values(
+    graph: &DirGraph,
+    node_type: &str,
+    property: &str,
+    max: usize,
+) -> HashSet<String> {
+    let mut unique = HashSet::new();
+    if let Some(indices) = graph.type_indices.get(node_type) {
+        for &idx in indices {
+            if unique.len() >= max {
+                break;
+            }
+            if let Some(node) = graph.get_node(idx) {
+                if let Some(val) = node.properties.get(property) {
+                    if !is_null_value(val) {
+                        let s = match val {
+                            Value::String(s) => s.clone(),
+                            Value::Int64(n) => n.to_string(),
+                            Value::Float64(f) => f.to_string(),
+                            Value::UniqueId(id) => id.to_string(),
+                            _ => format!("{:?}", val),
+                        };
+                        unique.insert(s);
+                    }
+                }
+            }
+        }
+    }
+    unique
+}
+
+/// Find join candidates between disconnected core type pairs.
+fn compute_join_candidates(
+    graph: &DirGraph,
+    connected_pairs: &HashSet<(String, String)>,
+    max_candidates: usize,
+    max_sample: usize,
+) -> Vec<JoinCandidate> {
+    // Collect core types (exclude supporting types)
+    let mut core_types: Vec<&String> = graph
+        .type_indices
+        .keys()
+        .filter(|nt| !graph.parent_types.contains_key(*nt))
+        .collect();
+    core_types.sort();
+
+    let mut candidates: Vec<JoinCandidate> = Vec::new();
+
+    // Check all unordered pairs of disconnected core types
+    for i in 0..core_types.len() {
+        if candidates.len() >= max_candidates * 3 {
+            break; // Early exit: we have enough raw candidates
+        }
+        for j in (i + 1)..core_types.len() {
+            let left = core_types[i];
+            let right = core_types[j];
+
+            // Skip already-connected pairs
+            if connected_pairs.contains(&(left.clone(), right.clone())) {
+                continue;
+            }
+
+            let left_meta = match graph.node_type_metadata.get(left) {
+                Some(m) => m,
+                None => continue,
+            };
+            let right_meta = match graph.node_type_metadata.get(right) {
+                Some(m) => m,
+                None => continue,
+            };
+
+            // Find shared property names with compatible types
+            for (prop, left_type) in left_meta {
+                if let Some(right_type) = right_meta.get(prop) {
+                    if types_compatible(left_type, right_type) {
+                        let left_vals = sample_unique_values(graph, left, prop, max_sample);
+                        if left_vals.is_empty() {
+                            continue;
+                        }
+                        let right_vals = sample_unique_values(graph, right, prop, max_sample);
+                        if right_vals.is_empty() {
+                            continue;
+                        }
+                        let overlap = left_vals.intersection(&right_vals).count();
+                        if overlap > 0 {
+                            candidates.push(JoinCandidate {
+                                left_type: left.clone(),
+                                left_prop: prop.clone(),
+                                left_unique: left_vals.len(),
+                                right_type: right.clone(),
+                                right_prop: prop.clone(),
+                                right_unique: right_vals.len(),
+                                overlap,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort by overlap descending, truncate
+    candidates.sort_by(|a, b| b.overlap.cmp(&a.overlap));
+    candidates.truncate(max_candidates);
+    candidates
+}
+
 /// Full schema overview: node types, connection types, indexes, totals.
 pub fn compute_schema(graph: &DirGraph) -> SchemaOverview {
     // Node types from type_indices
@@ -591,8 +756,7 @@ fn write_read_only_notice(xml: &mut String, graph: &DirGraph) {
 /// Write the `<connections>` element from global edge stats.
 /// When `parent_types` is non-empty, filter out connections where ALL source types
 /// are supporting children of the target type (the implicit OF_* pattern).
-fn write_connection_map(xml: &mut String, graph: &DirGraph) {
-    let conn_stats = compute_connection_type_stats(graph);
+fn write_connection_map(xml: &mut String, graph: &DirGraph, conn_stats: &[ConnectionTypeStats]) {
     let has_tiers = !graph.parent_types.is_empty();
 
     let filtered: Vec<&ConnectionTypeStats> = conn_stats
@@ -949,8 +1113,75 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
     if graph.graph.edge_count() > 0 {
         xml.push_str("    <connections hint=\"describe(connections=True) for all connection types, describe(connections=['TYPE']) for deep-dive with properties and samples.\"/>\n");
     }
+    xml.push_str("    <temporal hint=\"valid_at(entity, date, 'from', 'to'), valid_during(entity, start, end, 'from', 'to') — temporal filtering on nodes/edges. NULL = open-ended.\"/>\n");
     xml.push_str("    <bug_report hint=\"bug_report(query, result, expected, description) — file a Cypher bug report to reported_bugs.md.\"/>\n");
     xml.push_str("  </extensions>\n");
+}
+
+/// Write `<exploration_hints>` — disconnected types and join candidates.
+/// Skipped for graphs with < 2 types or 0 edges (all disconnected = not useful).
+fn write_exploration_hints(xml: &mut String, graph: &DirGraph, conn_stats: &[ConnectionTypeStats]) {
+    let type_count = graph.type_indices.len();
+    let edge_count = graph.graph.edge_count();
+
+    // Guard: not useful for trivial graphs or when there are no edges at all
+    if type_count < 2 || edge_count == 0 {
+        return;
+    }
+
+    let connected_types = compute_connected_types(conn_stats);
+    let connected_pairs = compute_connected_type_pairs(conn_stats);
+
+    // Find disconnected types (core types with zero connections)
+    let mut disconnected: Vec<(&String, usize)> = graph
+        .type_indices
+        .iter()
+        .filter(|(nt, _)| !graph.parent_types.contains_key(*nt) && !connected_types.contains(*nt))
+        .map(|(nt, indices)| (nt, indices.len()))
+        .collect();
+    disconnected.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    disconnected.truncate(10);
+
+    // Compute join candidates
+    let join_candidates = compute_join_candidates(graph, &connected_pairs, 5, 100);
+
+    // Nothing to report
+    if disconnected.is_empty() && join_candidates.is_empty() {
+        return;
+    }
+
+    xml.push_str("  <exploration_hints>\n");
+
+    if !disconnected.is_empty() {
+        xml.push_str("    <disconnected>\n");
+        for (nt, count) in &disconnected {
+            xml.push_str(&format!(
+                "      <type name=\"{}\" nodes=\"{}\" hint=\"No connections to other types\"/>\n",
+                xml_escape(nt),
+                count
+            ));
+        }
+        xml.push_str("    </disconnected>\n");
+    }
+
+    if !join_candidates.is_empty() {
+        xml.push_str("    <join_candidates>\n");
+        for c in &join_candidates {
+            xml.push_str(&format!(
+                "      <candidate left=\"{}.{}\" left_unique=\"{}\" right=\"{}.{}\" right_unique=\"{}\" overlap=\"{}\" hint=\"Possible name-based link\"/>\n",
+                xml_escape(&c.left_type),
+                xml_escape(&c.left_prop),
+                c.left_unique,
+                xml_escape(&c.right_type),
+                xml_escape(&c.right_prop),
+                c.right_unique,
+                c.overlap
+            ));
+        }
+        xml.push_str("    </join_candidates>\n");
+    }
+
+    xml.push_str("  </exploration_hints>\n");
 }
 
 /// Tier 2: compact Cypher reference — all clauses, operators, functions, procedures.
@@ -1004,6 +1235,7 @@ fn write_cypher_overview(xml: &mut String) {
         "    <group name=\"graph\">size, length, id, labels, type, coalesce, range, keys</group>\n",
     );
     xml.push_str("    <group name=\"spatial\">distance(a,b)→m, contains(a,b), intersects(a,b), centroid(n), area(n)→m², perimeter(n)→m</group>\n");
+    xml.push_str("    <group name=\"temporal\">valid_at(entity, date, 'from', 'to'), valid_during(entity, start, end, 'from', 'to')</group>\n");
     xml.push_str("  </functions>\n");
 
     // Procedures
@@ -1038,7 +1270,7 @@ fn write_cypher_overview(xml: &mut String) {
 
 const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, RETURN, WITH, ORDER BY, UNWIND, UNION, \
     CASE, CREATE, SET, DELETE, MERGE, EXPLAIN, PROFILE, operators, functions, patterns, spatial, \
-    pagerank, betweenness, degree, closeness, louvain, \
+    temporal, pagerank, betweenness, degree, closeness, louvain, \
     label_propagation, connected_components, cluster";
 
 /// Tier 3: detailed Cypher docs for specific topics with params and examples.
@@ -1079,6 +1311,7 @@ fn write_cypher_topics(xml: &mut String, topics: &[String]) -> Result<(), String
             }
             "CLUSTER" => write_topic_cluster(xml),
             "SPATIAL" => write_topic_spatial(xml),
+            "TEMPORAL" => write_topic_temporal(xml),
             "EXPLAIN" => write_topic_explain(xml),
             "PROFILE" => write_topic_profile(xml),
             _ => {
@@ -1488,6 +1721,28 @@ fn write_topic_spatial(xml: &mut String) {
     xml.push_str("  </spatial>\n");
 }
 
+fn write_topic_temporal(xml: &mut String) {
+    xml.push_str("  <temporal>\n");
+    xml.push_str("    <desc>Temporal filtering functions for date-range validity checks on nodes and relationships. Works with any date/datetime string or DateTime properties. NULL fields are treated as open-ended boundaries.</desc>\n");
+    xml.push_str("    <functions>\n");
+    xml.push_str("      <fn name=\"valid_at(entity, date, 'from_field', 'to_field')\">True if entity.from_field &lt;= date &lt;= entity.to_field. NULL from_field = valid since beginning. NULL to_field = still valid.</fn>\n");
+    xml.push_str("      <fn name=\"valid_during(entity, start, end, 'from_field', 'to_field')\">True if entity's validity period overlaps [start, end]. Overlap: entity.from_field &lt;= end AND entity.to_field &gt;= start. NULL = open-ended.</fn>\n");
+    xml.push_str("    </functions>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"node valid at date\">MATCH (e:Estimate) WHERE valid_at(e, '2020-06-15', 'date_from', 'date_to') RETURN e.title, e.value</ex>\n");
+    xml.push_str("      <ex desc=\"edge valid at date\">MATCH (a)-[r:EMPLOYED_AT]->(b) WHERE valid_at(r, '2023-01-01', 'start_date', 'end_date') RETURN a.name, b.name</ex>\n");
+    xml.push_str("      <ex desc=\"range overlap\">MATCH (p:Prospect) WHERE valid_during(p, '2021-01-01', '2022-12-31', 'date_from', 'date_to') RETURN p.title</ex>\n");
+    xml.push_str("      <ex desc=\"with date()\">MATCH (e:Estimate) WHERE valid_at(e, date('2020-06-15'), 'date_from', 'date_to') RETURN e.title</ex>\n");
+    xml.push_str("      <ex desc=\"open-ended\">MATCH (c:Contract) WHERE valid_at(c, '2025-01-01', 'start_date', 'end_date') RETURN c.title -- NULL end_date = still valid</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("    <null_semantics>\n");
+    xml.push_str("      <rule>NULL from_field = valid since the beginning (always passes the from check)</rule>\n");
+    xml.push_str("      <rule>NULL to_field = still valid / open-ended (always passes the to check)</rule>\n");
+    xml.push_str("      <rule>Both NULL = always valid (returns true)</rule>\n");
+    xml.push_str("    </null_semantics>\n");
+    xml.push_str("  </temporal>\n");
+}
+
 /// Write full detail for a single node type: properties, connections,
 /// timeseries/spatial/embedding config, and sample nodes.
 fn write_type_detail(
@@ -1784,8 +2039,10 @@ fn build_inventory(graph: &DirGraph) -> String {
     xml.push_str(&type_strs.join(", "));
     xml.push_str("\n  </types>\n");
 
-    write_connection_map(&mut xml, graph);
+    let conn_stats = compute_connection_type_stats(graph);
+    write_connection_map(&mut xml, graph, &conn_stats);
     write_extensions(&mut xml, graph);
+    write_exploration_hints(&mut xml, graph, &conn_stats);
 
     xml.push_str(
         "  <hint>Use describe(types=['TypeName']) for properties, children, connections, and samples.</hint>\n",
@@ -1831,8 +2088,10 @@ fn build_inventory_with_detail(graph: &DirGraph) -> String {
     }
     xml.push_str("  </types>\n");
 
-    write_connection_map(&mut xml, graph);
+    let conn_stats = compute_connection_type_stats(graph);
+    write_connection_map(&mut xml, graph, &conn_stats);
     write_extensions(&mut xml, graph);
+    write_exploration_hints(&mut xml, graph, &conn_stats);
 
     xml.push_str("</graph>");
     xml

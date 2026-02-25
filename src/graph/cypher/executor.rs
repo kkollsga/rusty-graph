@@ -2311,7 +2311,8 @@ impl<'a> CypherExecutor<'a> {
             | Expression::MapProjection { .. }
             | Expression::MapLiteral(_)
             | Expression::IsNull(_)
-            | Expression::IsNotNull(_) => false,
+            | Expression::IsNotNull(_)
+            | Expression::QuantifiedList { .. } => false,
         }
     }
 
@@ -2727,6 +2728,69 @@ impl<'a> CypherExecutor<'a> {
             Expression::IsNotNull(inner) => {
                 let val = self.evaluate_expression(inner, row)?;
                 Ok(Value::Boolean(!matches!(val, Value::Null)))
+            }
+            Expression::QuantifiedList {
+                quantifier,
+                variable,
+                list_expr,
+                filter,
+            } => {
+                let list_val = self.evaluate_expression(list_expr, row)?;
+                let items = parse_list_value(&list_val);
+
+                let result = match quantifier {
+                    ListQuantifier::Any => {
+                        let mut found = false;
+                        for item in items {
+                            let mut temp_row = row.clone();
+                            temp_row.projected.insert(variable.clone(), item);
+                            if self.evaluate_predicate(filter, &temp_row)? {
+                                found = true;
+                                break;
+                            }
+                        }
+                        found
+                    }
+                    ListQuantifier::All => {
+                        let mut all_pass = true;
+                        for item in items {
+                            let mut temp_row = row.clone();
+                            temp_row.projected.insert(variable.clone(), item);
+                            if !self.evaluate_predicate(filter, &temp_row)? {
+                                all_pass = false;
+                                break;
+                            }
+                        }
+                        all_pass
+                    }
+                    ListQuantifier::None => {
+                        let mut none_pass = true;
+                        for item in items {
+                            let mut temp_row = row.clone();
+                            temp_row.projected.insert(variable.clone(), item);
+                            if self.evaluate_predicate(filter, &temp_row)? {
+                                none_pass = false;
+                                break;
+                            }
+                        }
+                        none_pass
+                    }
+                    ListQuantifier::Single => {
+                        let mut count = 0;
+                        for item in items {
+                            let mut temp_row = row.clone();
+                            temp_row.projected.insert(variable.clone(), item);
+                            if self.evaluate_predicate(filter, &temp_row)? {
+                                count += 1;
+                                if count > 1 {
+                                    break;
+                                }
+                            }
+                        }
+                        count == 1
+                    }
+                };
+                Ok(Value::Boolean(result))
             }
         }
     }
@@ -4018,6 +4082,97 @@ impl<'a> CypherExecutor<'a> {
                         None => Ok(Value::Null),
                     },
                 }
+            }
+
+            // ── Temporal filtering functions ──────────────────────────────
+            "valid_at" => {
+                // valid_at(entity, date, 'from_field', 'to_field') → Boolean
+                // True when entity.from_field <= date AND entity.to_field >= date.
+                // NULL fields = open-ended (always pass).
+                if args.len() != 4 {
+                    return Err(
+                        "valid_at() requires 4 arguments: (entity, date, from_field, to_field)"
+                            .into(),
+                    );
+                }
+                let var_name =
+                    match &args[0] {
+                        Expression::Variable(v) => v,
+                        _ => return Err(
+                            "valid_at(): first argument must be a node or relationship variable"
+                                .into(),
+                        ),
+                    };
+                let date_val = self.evaluate_expression(&args[1], row)?;
+                let from_field = match self.evaluate_expression(&args[2], row)? {
+                    Value::String(s) => s,
+                    _ => return Err("valid_at(): from_field (3rd arg) must be a string".into()),
+                };
+                let to_field = match self.evaluate_expression(&args[3], row)? {
+                    Value::String(s) => s,
+                    _ => return Err("valid_at(): to_field (4th arg) must be a string".into()),
+                };
+                let from_val = self.resolve_property(var_name, &from_field, row)?;
+                let to_val = self.resolve_property(var_name, &to_field, row)?;
+                // NULL = open-ended boundary
+                let from_ok = match &from_val {
+                    Value::Null => true,
+                    _ => {
+                        evaluate_comparison(&from_val, &ComparisonOp::LessThanEq, &date_val, None)?
+                    }
+                };
+                let to_ok = match &to_val {
+                    Value::Null => true,
+                    _ => {
+                        evaluate_comparison(&to_val, &ComparisonOp::GreaterThanEq, &date_val, None)?
+                    }
+                };
+                Ok(Value::Boolean(from_ok && to_ok))
+            }
+            "valid_during" => {
+                // valid_during(entity, start, end, 'from_field', 'to_field') → Boolean
+                // Overlap: entity.from_field <= end AND entity.to_field >= start.
+                // NULL fields = open-ended (always pass).
+                if args.len() != 5 {
+                    return Err(
+                        "valid_during() requires 5 arguments: (entity, start, end, from_field, to_field)"
+                            .into(),
+                    );
+                }
+                let var_name = match &args[0] {
+                    Expression::Variable(v) => v,
+                    _ => return Err(
+                        "valid_during(): first argument must be a node or relationship variable"
+                            .into(),
+                    ),
+                };
+                let start_val = self.evaluate_expression(&args[1], row)?;
+                let end_val = self.evaluate_expression(&args[2], row)?;
+                let from_field = match self.evaluate_expression(&args[3], row)? {
+                    Value::String(s) => s,
+                    _ => return Err("valid_during(): from_field (4th arg) must be a string".into()),
+                };
+                let to_field = match self.evaluate_expression(&args[4], row)? {
+                    Value::String(s) => s,
+                    _ => return Err("valid_during(): to_field (5th arg) must be a string".into()),
+                };
+                let from_val = self.resolve_property(var_name, &from_field, row)?;
+                let to_val = self.resolve_property(var_name, &to_field, row)?;
+                // Overlap: entity.from <= query_end AND entity.to >= query_start
+                let from_ok = match &from_val {
+                    Value::Null => true,
+                    _ => evaluate_comparison(&from_val, &ComparisonOp::LessThanEq, &end_val, None)?,
+                };
+                let to_ok = match &to_val {
+                    Value::Null => true,
+                    _ => evaluate_comparison(
+                        &to_val,
+                        &ComparisonOp::GreaterThanEq,
+                        &start_val,
+                        None,
+                    )?,
+                };
+                Ok(Value::Boolean(from_ok && to_ok))
             }
 
             // Aggregate functions should not be evaluated per-row
@@ -6877,6 +7032,25 @@ fn expression_to_string(expr: &Expression) -> String {
         }
         Expression::IsNull(inner) => format!("{} IS NULL", expression_to_string(inner)),
         Expression::IsNotNull(inner) => format!("{} IS NOT NULL", expression_to_string(inner)),
+        Expression::QuantifiedList {
+            quantifier,
+            variable,
+            list_expr,
+            ..
+        } => {
+            let qname = match quantifier {
+                ListQuantifier::Any => "any",
+                ListQuantifier::All => "all",
+                ListQuantifier::None => "none",
+                ListQuantifier::Single => "single",
+            };
+            format!(
+                "{}({} IN {} WHERE ...)",
+                qname,
+                variable,
+                expression_to_string(list_expr)
+            )
+        }
     }
 }
 
@@ -9027,5 +9201,213 @@ mod tests {
         assert_eq!(result.rows.len(), 2);
         assert_eq!(result.rows[0].get(1), Some(&Value::Int64(3))); // X: 3
         assert_eq!(result.rows[1].get(1), Some(&Value::Int64(1))); // Y: 1
+    }
+
+    // ========================================================================
+    // List Quantifier Predicate Tests
+    // ========================================================================
+
+    #[test]
+    fn test_list_predicate_any() {
+        let graph = DirGraph::new();
+        let q = super::super::parser::parse_cypher(
+            "WITH [1, 2, 3, 4, 5] AS nums \
+             RETURN any(x IN nums WHERE x > 3) AS result",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(true)));
+    }
+
+    #[test]
+    fn test_list_predicate_any_false() {
+        let graph = DirGraph::new();
+        let q = super::super::parser::parse_cypher(
+            "WITH [1, 2, 3] AS nums \
+             RETURN any(x IN nums WHERE x > 10) AS result",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(false)));
+    }
+
+    #[test]
+    fn test_list_predicate_all() {
+        let graph = DirGraph::new();
+        let q = super::super::parser::parse_cypher(
+            "WITH [2, 4, 6] AS nums \
+             RETURN all(x IN nums WHERE x > 0) AS result",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(true)));
+    }
+
+    #[test]
+    fn test_list_predicate_all_false() {
+        let graph = DirGraph::new();
+        let q = super::super::parser::parse_cypher(
+            "WITH [2, 4, 6] AS nums \
+             RETURN all(x IN nums WHERE x > 3) AS result",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(false)));
+    }
+
+    #[test]
+    fn test_list_predicate_none() {
+        let graph = DirGraph::new();
+        let q = super::super::parser::parse_cypher(
+            "WITH [1, 2, 3] AS nums \
+             RETURN none(x IN nums WHERE x > 10) AS result",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(true)));
+    }
+
+    #[test]
+    fn test_list_predicate_none_false() {
+        let graph = DirGraph::new();
+        let q = super::super::parser::parse_cypher(
+            "WITH [1, 2, 3] AS nums \
+             RETURN none(x IN nums WHERE x > 2) AS result",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(false)));
+    }
+
+    #[test]
+    fn test_list_predicate_single() {
+        let graph = DirGraph::new();
+        let q = super::super::parser::parse_cypher(
+            "WITH [1, 2, 3] AS nums \
+             RETURN single(x IN nums WHERE x > 2) AS result",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(true)));
+    }
+
+    #[test]
+    fn test_list_predicate_single_false_multiple() {
+        let graph = DirGraph::new();
+        let q = super::super::parser::parse_cypher(
+            "WITH [1, 2, 3] AS nums \
+             RETURN single(x IN nums WHERE x > 1) AS result",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(false)));
+    }
+
+    #[test]
+    fn test_list_predicate_in_where_clause() {
+        // The user's actual use case: any(w IN list WHERE w.prop IS NOT NULL)
+        let mut graph = DirGraph::new();
+        let setup = super::super::parser::parse_cypher(
+            "CREATE (a:Well {name: 'W1', depth: 100}), \
+             (b:Well {name: 'W2'}), \
+             (c:Well {name: 'W3', depth: 300})",
+        )
+        .unwrap();
+        execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+
+        let q = super::super::parser::parse_cypher(
+            "MATCH (w:Well) \
+             WITH collect(w.depth) AS depths \
+             WHERE any(d IN depths WHERE d IS NOT NULL) \
+             RETURN size(depths) AS count",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        // any(d IN depths WHERE d IS NOT NULL) should be true (W1 and W3 have depth)
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_list_predicate_with_is_not_null() {
+        // Matches the user's real use case: any(w IN values WHERE w IS NOT NULL)
+        let graph = DirGraph::new();
+        let q = super::super::parser::parse_cypher(
+            "WITH [1, null, 3, null, 5] AS values \
+             RETURN any(v IN values WHERE v IS NOT NULL) AS has_value, \
+                    all(v IN values WHERE v IS NOT NULL) AS all_present, \
+                    none(v IN values WHERE v IS NOT NULL) AS none_present",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(true))); // any: true
+        assert_eq!(result.rows[0].get(1), Some(&Value::Boolean(false))); // all: false
+        assert_eq!(result.rows[0].get(2), Some(&Value::Boolean(false))); // none: false
+    }
+
+    #[test]
+    fn test_list_predicate_collected_nodes_property_access() {
+        // User's exact pattern: collect nodes, then any(w IN wells WHERE w.prop IS NOT NULL)
+        let mut graph = DirGraph::new();
+        let setup = super::super::parser::parse_cypher(
+            "CREATE (a:Well {name: 'W1', formation: 'Sandstone'}), \
+             (b:Well {name: 'W2'}), \
+             (c:Well {name: 'W3', formation: 'Limestone'})",
+        )
+        .unwrap();
+        execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+
+        // any() with collected node property access
+        let q = super::super::parser::parse_cypher(
+            "MATCH (w:Well) \
+             WITH collect(w) AS wells \
+             RETURN any(x IN wells WHERE x.formation IS NOT NULL) AS has_formation",
+        )
+        .unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(true)));
+
+        // all() — should be false (W2 has no formation)
+        let q2 = super::super::parser::parse_cypher(
+            "MATCH (w:Well) \
+             WITH collect(w) AS wells \
+             RETURN all(x IN wells WHERE x.formation IS NOT NULL) AS all_have",
+        )
+        .unwrap();
+        let executor2 = CypherExecutor::with_params(&graph, &no_params, None);
+        let result2 = executor2.execute(&q2).unwrap();
+        assert_eq!(result2.rows.len(), 1);
+        assert_eq!(result2.rows[0].get(0), Some(&Value::Boolean(false)));
     }
 }

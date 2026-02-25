@@ -253,6 +253,23 @@ pub enum Expression {
     /// Map literal: {key: expr, key2: expr, ...}
     /// Evaluates to a JSON-like map object.
     MapLiteral(Vec<(String, Expression)>),
+    /// List quantifier: any(x IN list WHERE pred), all(...), none(...), single(...)
+    /// Evaluates to a boolean Value.
+    QuantifiedList {
+        quantifier: ListQuantifier,
+        variable: String,
+        list_expr: Box<Expression>,
+        filter: Box<Predicate>,
+    },
+}
+
+/// Quantifier type for list predicate functions
+#[derive(Debug, Clone)]
+pub enum ListQuantifier {
+    Any,
+    All,
+    None,
+    Single,
 }
 
 /// A single item in a map projection.

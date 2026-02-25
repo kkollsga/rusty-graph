@@ -1,5 +1,6 @@
 """Tests for schema introspection methods."""
 
+import pandas as pd
 import pytest
 from kglite import KnowledgeGraph
 
@@ -633,3 +634,128 @@ class TestDescribeReadOnly:
         root = ET.fromstring(large_schema_graph.describe())
         ro = root.find('read-only')
         assert ro is not None
+
+
+# ── Exploration Hints ────────────────────────────────────────────────────────
+
+class TestExplorationHints:
+    def test_disconnected_types_shown(self):
+        """Disconnected types appear in <exploration_hints>."""
+        g = KnowledgeGraph()
+        # Two connected types + one orphan
+        df_a = pd.DataFrame({'id': [1, 2], 'name': ['A1', 'A2']})
+        g.add_nodes(df_a, 'TypeA', 'id', 'name')
+        df_b = pd.DataFrame({'id': [10, 20], 'name': ['B1', 'B2']})
+        g.add_nodes(df_b, 'TypeB', 'id', 'name')
+        df_orphan = pd.DataFrame({'id': [100, 200, 300], 'name': ['O1', 'O2', 'O3']})
+        g.add_nodes(df_orphan, 'Orphan', 'id', 'name')
+        # Connect A -> B
+        edges = pd.DataFrame({'from': [1, 2], 'to': [10, 20]})
+        g.add_connections(edges, 'LINKS', 'TypeA', 'from', 'TypeB', 'to')
+
+        root = ET.fromstring(g.describe())
+        hints = root.find('exploration_hints')
+        assert hints is not None
+        disc = hints.find('disconnected')
+        assert disc is not None
+        types = [t.get('name') for t in disc.findall('type')]
+        assert 'Orphan' in types
+        assert 'TypeA' not in types
+        assert 'TypeB' not in types
+
+    def test_no_hints_empty_graph(self):
+        """Empty graph has no exploration_hints section."""
+        g = KnowledgeGraph()
+        root = ET.fromstring(g.describe())
+        assert root.find('exploration_hints') is None
+
+    def test_no_hints_zero_edges(self):
+        """Nodes but no edges → no exploration_hints (all disconnected = not useful)."""
+        g = KnowledgeGraph()
+        df_a = pd.DataFrame({'id': [1], 'name': ['A1']})
+        g.add_nodes(df_a, 'TypeA', 'id', 'name')
+        df_b = pd.DataFrame({'id': [2], 'name': ['B1']})
+        g.add_nodes(df_b, 'TypeB', 'id', 'name')
+        root = ET.fromstring(g.describe())
+        assert root.find('exploration_hints') is None
+
+    def test_no_disconnected_when_all_connected(self):
+        """All types have edges → no <disconnected> section."""
+        g = KnowledgeGraph()
+        df_a = pd.DataFrame({'id': [1], 'name': ['A1']})
+        g.add_nodes(df_a, 'TypeA', 'id', 'name')
+        df_b = pd.DataFrame({'id': [10], 'name': ['B1']})
+        g.add_nodes(df_b, 'TypeB', 'id', 'name')
+        edges = pd.DataFrame({'from': [1], 'to': [10]})
+        g.add_connections(edges, 'LINKS', 'TypeA', 'from', 'TypeB', 'to')
+
+        root = ET.fromstring(g.describe())
+        hints = root.find('exploration_hints')
+        # No disconnected types, and join candidates only for disconnected pairs,
+        # so hints section should be absent entirely
+        assert hints is None
+
+    def test_join_candidates_property_overlap(self):
+        """Two disconnected types with overlapping property values → join candidate."""
+        g = KnowledgeGraph()
+        # TypeA and TypeB share 'region' property with overlapping values
+        df_a = pd.DataFrame({
+            'id': [1, 2, 3],
+            'name': ['A1', 'A2', 'A3'],
+            'region': ['North', 'South', 'East'],
+        })
+        g.add_nodes(df_a, 'TypeA', 'id', 'name')
+        df_b = pd.DataFrame({
+            'id': [10, 20, 30],
+            'name': ['B1', 'B2', 'B3'],
+            'region': ['North', 'West', 'East'],
+        })
+        g.add_nodes(df_b, 'TypeB', 'id', 'name')
+        # TypeC connects to TypeA to make the graph have edges
+        df_c = pd.DataFrame({'id': [100], 'name': ['C1']})
+        g.add_nodes(df_c, 'TypeC', 'id', 'name')
+        edges = pd.DataFrame({'from': [100], 'to': [1]})
+        g.add_connections(edges, 'LINKS', 'TypeC', 'from', 'TypeA', 'to')
+
+        root = ET.fromstring(g.describe())
+        hints = root.find('exploration_hints')
+        assert hints is not None
+        jc = hints.find('join_candidates')
+        assert jc is not None
+        candidates = jc.findall('candidate')
+        # TypeA and TypeB share region with 2 overlapping values (North, East)
+        assert len(candidates) >= 1
+        attrs = candidates[0].attrib
+        # The candidate should reference TypeA/TypeB.region
+        left_right = {attrs['left'], attrs['right']}
+        assert 'TypeA.region' in left_right or 'TypeB.region' in left_right
+        assert int(attrs['overlap']) == 2
+
+    def test_join_candidates_not_for_connected_pairs(self):
+        """Already-connected type pairs don't appear as join candidates."""
+        g = KnowledgeGraph()
+        df_a = pd.DataFrame({
+            'id': [1, 2],
+            'name': ['A1', 'A2'],
+            'region': ['North', 'South'],
+        })
+        g.add_nodes(df_a, 'TypeA', 'id', 'name')
+        df_b = pd.DataFrame({
+            'id': [10, 20],
+            'name': ['B1', 'B2'],
+            'region': ['North', 'South'],
+        })
+        g.add_nodes(df_b, 'TypeB', 'id', 'name')
+        # Connect them — they share 'region' but are already connected
+        edges = pd.DataFrame({'from': [1], 'to': [10]})
+        g.add_connections(edges, 'LINKS', 'TypeA', 'from', 'TypeB', 'to')
+
+        root = ET.fromstring(g.describe())
+        hints = root.find('exploration_hints')
+        # Either no hints or no join_candidates section
+        if hints is not None:
+            jc = hints.find('join_candidates')
+            if jc is not None:
+                for c in jc.findall('candidate'):
+                    pair = {c.get('left').split('.')[0], c.get('right').split('.')[0]}
+                    assert pair != {'TypeA', 'TypeB'}

@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""
-MCP server exposing a KGLite knowledge graph over stdio.
+"""MCP server exposing a KGLite knowledge graph to Claude.
 
-Loads a .kgl graph file and exposes Cypher query access for
-Claude Code / Claude Desktop via the Model Context Protocol.
+Loads any .kgl graph file and provides Cypher query access via MCP (stdio).
+Works with graphs built by legal_graph.py, code_graph.py, spatial_graph.py,
+or any other KGLite graph.
 
 Tools:
-    graph_overview  — schema, Cypher reference, and example queries
-    cypher_query    — run any Cypher query (including text_score() for semantic search)
-    find_entity     — search code entities by name across all types
-    read_source     — resolve entities to source locations (file, line range, line count)
-    entity_context  — get full neighborhood of a code entity
+    graph_overview  — progressive schema disclosure (types, connections, Cypher ref)
+    cypher_query    — run any Cypher query (returns up to 200 rows)
+    bug_report      — file a timestamped Cypher bug report
+
+Code graph tools (auto-enabled when the graph has Function/Class nodes):
+    find_entity     — search code entities by name
+    read_source     — resolve entities to source file locations
+    entity_context  — get neighborhood of a code entity
 
 Usage:
-    python mcp_server.py                          # uses default graph.kgl
-    python mcp_server.py --graph my_data.kgl      # custom graph file
+    python mcp_server.py --graph legal_graph.kgl
+    python mcp_server.py --graph my_codebase.kgl --embedder all-MiniLM-L6-v2
 
-Claude Desktop config (~/.claude/claude_desktop_config.json):
+Claude Desktop config:
     {
       "mcpServers": {
         "my-graph": {
@@ -34,100 +37,45 @@ from pathlib import Path
 import kglite
 from mcp.server.fastmcp import FastMCP
 
-# ---------------------------------------------------------------------------
-# Generic embedder wrapper
-# ---------------------------------------------------------------------------
+# -- Args & loading --------------------------------------------------------
 
-class EmbedderModel:
-    """
-    Generic wrapper that turns any sentence-transformers model into a
-    KGLite-compatible embedder (requires .dimension and .embed()).
+parser = argparse.ArgumentParser(description="KGLite MCP Server")
+parser.add_argument("--graph", default="graph.kgl", help="Path to .kgl file")
+parser.add_argument("--embedder", default=None, help="sentence-transformers model (optional)")
+parser.add_argument("--name", default="KGLite Graph", help="Server display name")
+args = parser.parse_args()
 
-    Usage:
-        embedder = EmbedderModel("all-MiniLM-L6-v2")
-        graph.set_embedder(embedder)
-        graph.embed_texts("Article", "summary")
-
-    You can also subclass this and override embed() to use any embedding
-    backend (OpenAI, Cohere, local ONNX, etc.).
-    """
-
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2", **kwargs):
-        from sentence_transformers import SentenceTransformer
-
-        self._model = SentenceTransformer(model_name, **kwargs)
-        self.dimension: int = self._model.get_sentence_embedding_dimension()
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        """Embed a batch of texts and return a list of float vectors."""
-        return self._model.encode(texts, show_progress_bar=False).tolist()
-
-
-# ---------------------------------------------------------------------------
-# CLI arguments
-# ---------------------------------------------------------------------------
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="KGLite MCP Server")
-    parser.add_argument(
-        "--graph",
-        type=str,
-        default="graph.kgl",
-        help="Path to the .kgl graph file (default: graph.kgl)",
-    )
-    parser.add_argument(
-        "--embedder",
-        type=str,
-        default=None,
-        help="Sentence-transformers model name to enable semantic search (optional)",
-    )
-    parser.add_argument(
-        "--name",
-        type=str,
-        default="KGLite Graph",
-        help="Display name for the MCP server (default: 'KGLite Graph')",
-    )
-    return parser.parse_args()
-
-
-# ---------------------------------------------------------------------------
-# Graph loading
-# ---------------------------------------------------------------------------
-
-args = parse_args()
 graph_path = Path(args.graph)
-
 if not graph_path.exists():
     print(f"ERROR: {graph_path} not found.", file=sys.stderr)
     sys.exit(1)
 
 graph = kglite.load(str(graph_path))
 
-# Optional: register an embedder for text_score() support in Cypher
 if args.embedder:
-    graph.set_embedder(EmbedderModel(args.embedder))
+    from sentence_transformers import SentenceTransformer
 
-# ---------------------------------------------------------------------------
-# MCP server
-# ---------------------------------------------------------------------------
+    class Embedder:
+        def __init__(self, model_name):
+            self._model = SentenceTransformer(model_name)
+            self.dimension = self._model.get_sentence_embedding_dimension()
 
-schema_info = graph.schema()
-node_count = schema_info.get("node_count", "?")
-edge_count = schema_info.get("edge_count", "?")
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            return self._model.encode(texts, show_progress_bar=False).tolist()
 
+    graph.set_embedder(Embedder(args.embedder))
+
+# -- MCP server ------------------------------------------------------------
+
+schema = graph.schema()
 mcp = FastMCP(
     args.name,
     instructions=(
-        f"Knowledge graph with {node_count} nodes and {edge_count} edges. "
-        "Call graph_overview first to learn the schema and Cypher reference, "
-        "then use cypher_query to run queries."
+        f"Knowledge graph with {schema['node_count']} nodes and {schema['edge_count']} edges. "
+        "Call graph_overview() first to learn the schema, then cypher_query() to query."
     ),
 )
 
-
-# ---------------------------------------------------------------------------
-# Tools
-# ---------------------------------------------------------------------------
 
 @mcp.tool()
 def graph_overview(
@@ -137,199 +85,116 @@ def graph_overview(
 ) -> str:
     """Get graph schema, connection details, or Cypher language reference.
 
-    Three independent axes — call with no args first for the overview, then
-    drill into specific areas:
-
+    Three independent axes — call with no args first for the overview:
       graph_overview()                            — inventory of node types
-      graph_overview(types=["Field"])             — property schemas, samples
-      graph_overview(connections=True)            — all connection types overview
-      graph_overview(connections=["BELONGS_TO"])  — deep-dive with properties
-      graph_overview(cypher=True)                 — Cypher clauses, functions, procedures
-      graph_overview(cypher=["cluster","MATCH"])  — detailed docs with examples
-
-    For simple graphs (<=15 types), the first call returns full detail inline."""
+      graph_overview(types=["Type"])              — property schemas, samples
+      graph_overview(connections=True)            — all connection types
+      graph_overview(connections=["CITES"])        — deep-dive with properties
+      graph_overview(cypher=True)                 — Cypher reference
+      graph_overview(cypher=["temporal","MATCH"])  — detailed docs with examples
+    """
     try:
         return graph.describe(types=types, connections=connections, cypher=cypher)
     except Exception as e:
-        return f"describe error: {e}"
-
-
-@mcp.tool()
-def bug_report(query: str, result: str, expected: str, description: str) -> str:
-    """File a Cypher bug report. Writes a timestamped, version-tagged entry
-    to reported_bugs.md (newest first). Use this when a Cypher query returns
-    incorrect results or behaves unexpectedly."""
-    try:
-        return graph.bug_report(query, result, expected, description)
-    except Exception as e:
-        return f"bug_report error: {e}"
+        return f"Error: {e}"
 
 
 @mcp.tool()
 def cypher_query(query: str) -> str:
-    """Run a Cypher query against the knowledge graph. Supports MATCH, WHERE,
-    RETURN, ORDER BY, LIMIT, aggregations, path traversals, CREATE, SET,
-    DELETE, and more. Tip: label-optional patterns like (n {name: 'x'})
-    search across all node types. Use CONTAINS, STARTS WITH, or =~ (regex)
-    in WHERE for flexible text matching. Call graph_overview first if you
-    need the schema. Returns up to 200 rows as formatted text."""
+    """Run a Cypher query against the knowledge graph. Returns up to 200 rows.
+
+    Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, WITH, OPTIONAL MATCH,
+    UNWIND, UNION, CREATE, SET, DELETE, MERGE, aggregations, path patterns,
+    CALL procedures (pagerank, louvain, etc.), and spatial/temporal functions.
+    Call graph_overview() first if you need the schema."""
     try:
         result = graph.cypher(query)
         if len(result) == 0:
-            return "Query returned no results."
-        rows = []
-        for row in result:
-            rows.append(str(dict(row)))
-            if len(rows) >= 200:
-                break
-        header = f"Returned {len(result)} row(s)"
+            return "No results."
+        rows = [str(dict(row)) for row in result[:200]]
+        header = f"{len(result)} row(s)"
         if len(result) > 200:
             header += " (showing first 200)"
         return header + ":\n" + "\n".join(rows)
     except Exception as e:
-        return f"Cypher query error: {e}"
+        return f"Cypher error: {e}"
 
 
 @mcp.tool()
-def find_entity(
-    name: str,
-    node_type: str | None = None,
-    match_type: str | None = None,
-) -> str:
-    """Search code entities by name across all types (Function, Struct, Class,
-    Enum, Trait, etc.). Faster than cypher_query for entity lookups — use this
-    when you know part or all of an entity name. Returns matching entities with
-    qualified_name, file_path, and line_number. Use qualified_name with
-    read_source or entity_context for exact lookups.
-
-    match_type: 'exact' (default), 'contains' (case-insensitive substring),
-    or 'starts_with' (case-insensitive prefix)."""
+def bug_report(query: str, result: str, expected: str, description: str) -> str:
+    """File a Cypher bug report to reported_bugs.md."""
     try:
-        results = graph.find(name, node_type=node_type, match_type=match_type)
-        if not results:
-            return f"No code entities found matching '{name}'."
-        lines = [f"Found {len(results)} match(es) for '{name}':"]
-        for r in results:
-            qn = r.get("qualified_name", r.get("id", "?"))
-            fp = r.get("file_path", "?")
-            ln = r.get("line_number", "?")
-            lines.append(f"  {r.get('type', '?')}: {qn}  ({fp}:{ln})")
-        return "\n".join(lines)
+        return graph.bug_report(query, result, expected, description)
     except Exception as e:
-        return f"find_entity error: {e}"
+        return f"Error: {e}"
 
 
-@mcp.tool()
-def read_source(names: list[str], node_type: str | None = None) -> str:
-    """Resolve one or more code entity names to their source file locations.
-    Returns file_path, line_number, end_line, and line_count for each entity.
-    Use the file_path and line range to read the actual source code with your
-    file-reading tool. Accepts simple names or qualified_names. Use find_entity
-    first if a name is ambiguous (multiple matches)."""
-    try:
-        results = graph.source(names, node_type=node_type)
-        lines = []
-        for r in results:
-            name = r.get("name", "?")
-            if r.get("error"):
-                lines.append(f"{name}: {r['error']}")
-            elif r.get("ambiguous"):
-                matches = r.get("matches", [])
-                lines.append(f"{name}: ambiguous ({len(matches)} matches) — use find_entity to disambiguate")
-            else:
-                fp = r.get("file_path", "?")
-                ln = r.get("line_number", "?")
-                el = r.get("end_line", "?")
-                lc = r.get("line_count", "?")
-                qn = r.get("qualified_name", "")
-                sig = r.get("signature", "")
-                lines.append(f"{r.get('type', '?')}: {qn}")
-                lines.append(f"  file: {fp}:{ln}-{el} ({lc} lines)")
-                if sig:
-                    lines.append(f"  signature: {sig}")
-        return "\n".join(lines)
-    except Exception as e:
-        return f"read_source error: {e}"
+# -- Code graph tools (auto-enabled for code_tree graphs) ------------------
 
+CODE_TYPES = {"Function", "Class", "Struct", "Enum", "Module", "File"}
+has_code = bool(CODE_TYPES & set(schema.get("node_types", {}).keys()))
 
-@mcp.tool()
-def entity_context(name: str, node_type: str | None = None, hops: int = 1) -> str:
-    """Get the full neighborhood of a code entity — shows all relationships
-    grouped by type (HAS_METHOD, CALLS, called_by, USES_TYPE, DEFINES, etc.).
-    Use this to understand how an entity connects to the rest of the codebase
-    (what it calls, what calls it, what types it uses, etc.). Accepts a name
-    or qualified_name. Set hops > 1 for multi-hop expansion."""
-    try:
-        import json
-        ctx = graph.context(name, node_type=node_type, hops=hops)
-        if ctx.get("error"):
-            return ctx["error"]
-        if ctx.get("ambiguous"):
-            matches = ctx.get("matches", [])
-            lines = [f"Ambiguous name '{name}' — {len(matches)} matches:"]
-            for m in matches:
-                qn = m.get("qualified_name", m.get("id", "?"))
-                lines.append(f"  {m.get('type', '?')}: {qn}")
-            lines.append("Use a qualified_name for an exact match.")
+if has_code:
+
+    @mcp.tool()
+    def find_entity(
+        name: str,
+        node_type: str | None = None,
+        match_type: str | None = None,
+    ) -> str:
+        """Search code entities by name. Returns qualified_name, file_path, line.
+
+        match_type: 'exact' (default), 'contains', or 'starts_with'."""
+        try:
+            results = graph.find(name, node_type=node_type, match_type=match_type)
+            if not results:
+                return f"No entities matching '{name}'."
+            lines = [f"{len(results)} match(es):"]
+            for r in results:
+                qn = r.get("qualified_name", r.get("id", "?"))
+                lines.append(f"  {r.get('type', '?')}: {qn}  ({r.get('file_path', '?')}:{r.get('line_number', '?')})")
             return "\n".join(lines)
-        return json.dumps(ctx, indent=2, default=str)
-    except Exception as e:
-        return f"entity_context error: {e}"
+        except Exception as e:
+            return f"Error: {e}"
+
+    @mcp.tool()
+    def read_source(names: list[str], node_type: str | None = None) -> str:
+        """Resolve code entity names to source file locations.
+        Returns file_path, line range, and signature."""
+        try:
+            results = graph.source(names, node_type=node_type)
+            lines = []
+            for r in results:
+                if r.get("error"):
+                    lines.append(f"{r.get('name', '?')}: {r['error']}")
+                elif r.get("ambiguous"):
+                    lines.append(f"{r.get('name', '?')}: ambiguous — use find_entity to disambiguate")
+                else:
+                    sig = f"  {r['signature']}" if r.get("signature") else ""
+                    lines.append(f"{r.get('type', '?')}: {r.get('qualified_name', '?')}")
+                    lines.append(f"  {r.get('file_path', '?')}:{r.get('line_number', '?')}-{r.get('end_line', '?')}{sig}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error: {e}"
+
+    @mcp.tool()
+    def entity_context(name: str, node_type: str | None = None, hops: int = 1) -> str:
+        """Get all relationships of a code entity (calls, callers, methods, types).
+        Set hops > 1 for multi-hop expansion."""
+        try:
+            import json
+            ctx = graph.context(name, node_type=node_type, hops=hops)
+            if ctx.get("error"):
+                return ctx["error"]
+            if ctx.get("ambiguous"):
+                matches = ctx.get("matches", [])
+                return f"Ambiguous: {len(matches)} matches. Use a qualified_name."
+            return json.dumps(ctx, indent=2, default=str)
+        except Exception as e:
+            return f"Error: {e}"
 
 
-@mcp.tool()
-def file_toc(file_path: str) -> str:
-    """Get the table of contents for a source file — all code entities
-    (functions, classes, structs, etc.) defined in it, sorted by line number.
-    Use this to understand what a file contains before diving into specific
-    entities with read_source or entity_context. Returns entity types, names,
-    qualified_names, and line ranges."""
-    try:
-        result = graph.toc(file_path)
-        if result.get("error"):
-            return result["error"]
-        entities = result.get("entities", [])
-        if not entities:
-            return f"No code entities found in {file_path}."
-        summary = result.get("summary", {})
-        summary_str = ", ".join(f"{v} {k}(s)" for k, v in sorted(summary.items()))
-        lines = [f"File: {file_path}  ({summary_str})"]
-        for e in entities:
-            sig = e.get("signature", "")
-            sig_str = f"  {sig}" if sig else ""
-            lines.append(
-                f"  L{e['line_number']}-{e['end_line']}  {e['type']}: {e['name']}"
-                f"  ({e['qualified_name']}){sig_str}"
-            )
-        return "\n".join(lines)
-    except Exception as e:
-        return f"file_toc error: {e}"
+# -- Main ------------------------------------------------------------------
 
-
-@mcp.tool()
-def call_trace(name: str, depth: int = 3, direction: str = "outgoing") -> str:
-    """Trace the call chain of a function — what it calls (outgoing) or
-    what calls it (incoming). Returns a list of function calls up to N
-    levels deep. Use this to understand execution flow.
-
-    direction: 'outgoing' (what does it call?) or 'incoming' (what calls it?)"""
-    arrow = "-[:CALLS*1..{}]->".format(depth) if direction == "outgoing" else "<-[:CALLS*1..{}]-".format(depth)
-    query = f"MATCH (f:Function {{name: '{name}'}}){arrow}(g:Function) RETURN DISTINCT g.name AS name, g.qualified_name AS qname, g.file_path AS file"
-    try:
-        results = graph.cypher(query)
-        if len(results) == 0:
-            return f"No {'callees' if direction == 'outgoing' else 'callers'} found for '{name}'."
-        label = "calls" if direction == "outgoing" else "called by"
-        lines = [f"'{name}' {label} ({len(results)} functions, depth {depth}):"]
-        for r in results:
-            lines.append(f"  {r.get('qname', r.get('name', '?'))}  ({r.get('file', '?')})")
-        return "\n".join(lines)
-    except Exception as e:
-        return f"call_trace error: {e}"
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     mcp.run(transport="stdio")

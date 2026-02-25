@@ -114,11 +114,19 @@ graph.cypher("""
 | `type(r)` | Relationship type |
 | `id(n)` | Node ID |
 | `labels(n)` | Node type (string, not list — single-label) |
+| `date(str)` | Parse date string to DateTime (`date('2020-01-15')`) |
 | `coalesce(a, b, ...)` | First non-null argument |
 | `range(start, end [, step])` | Generate integer list (inclusive); default step = 1 |
 | `length(p)` | Path hop count |
 | `nodes(p)` | Nodes in a path |
 | `relationships(p)` | Relationships in a path |
+| `split(str, delim)` | Split string into list |
+| `replace(str, search, repl)` | Replace all occurrences |
+| `substring(str, start [, len])` | Extract substring |
+| `left(str, n)` / `right(str, n)` | First/last n characters |
+| `trim(str)` | Remove leading/trailing whitespace |
+| `ltrim(str)` / `rtrim(str)` | Left/right trim |
+| `reverse(str)` | Reverse a string |
 | `point(lat, lon)` | Create a geographic point |
 | `distance(a, b)` | Geodesic distance (m); geometry-aware |
 | `contains(a, b)` | Does a's geometry contain b? |
@@ -128,6 +136,8 @@ graph.cypher("""
 | `perimeter(n)` | Geodesic perimeter/length (m) |
 | `latitude(point)` | Extract latitude from point |
 | `longitude(point)` | Extract longitude from point |
+| `valid_at(e, date, 'from', 'to')` | Temporal point-in-time filter (nodes or edges) |
+| `valid_during(e, start, end, 'from', 'to')` | Temporal range overlap filter |
 | `text_score(n, prop, query)` | Semantic similarity (auto-embeds query text; requires `set_embedder()`) |
 | `text_score(n, prop, query, metric)` | With explicit metric (`'cosine'`, `'dot_product'`, `'euclidean'`) |
 | `ts_sum(n.ch [, 'start'] [, 'end'])` | Sum of timeseries values (date-string range) |
@@ -205,6 +215,50 @@ graph.cypher("""
 """)
 ```
 
+## Temporal Functions
+
+Date-range filtering on nodes and relationships with explicit field names.
+
+| Function | Description |
+|----------|-------------|
+| `valid_at(entity, date, 'from_field', 'to_field')` | True if entity is active at a point in time |
+| `valid_during(entity, start, end, 'from_field', 'to_field')` | True if entity's range overlaps the given interval |
+
+**NULL semantics:** NULL `from` = valid since beginning. NULL `to` = still valid. Both NULL = always valid.
+
+```python
+# Nodes active at a point in time
+graph.cypher("""
+    MATCH (e:Employee)
+    WHERE valid_at(e, '2020-06-15', 'hire_date', 'end_date')
+    RETURN e.name
+""")
+
+# Relationships active at a point in time
+graph.cypher("""
+    MATCH (e:Employee)-[r:WORKS_AT]->(c:Company)
+    WHERE valid_at(r, '2020-06-15', 'start_date', 'end_date')
+    RETURN e.name, c.name
+""")
+
+# Overlap: entities active during a range
+graph.cypher("""
+    MATCH (r:Regulation)
+    WHERE valid_during(r, '2020-01-01', '2022-12-31', 'effective_from', 'effective_to')
+    RETURN r.name
+""")
+
+# Combine with other predicates
+graph.cypher("""
+    MATCH (e:Employee)-[r:WORKS_AT]->(c:Company {name: 'Acme'})
+    WHERE valid_at(r, '2019-01-01', 'start_date', 'end_date')
+    RETURN e.name ORDER BY e.name
+""")
+
+# Works with date() function too
+graph.cypher("MATCH (e:Estimate) WHERE valid_at(e, date('2020-06-15'), 'date_from', 'date_to') RETURN count(*)")
+```
+
 ## Math Functions
 
 | Function | Description |
@@ -221,6 +275,26 @@ graph.cypher("""
 | `pow(x, y)` | x^y |
 | `pi()` | π constant |
 | `rand()` | Random float [0, 1) |
+
+## String Functions
+
+| Function | Description |
+|----------|-------------|
+| `split(str, delim)` | Split string into list |
+| `replace(str, search, repl)` | Replace all occurrences of `search` with `repl` |
+| `substring(str, start [, len])` | Extract substring (0-indexed) |
+| `left(str, n)` | First `n` characters |
+| `right(str, n)` | Last `n` characters |
+| `trim(str)` | Remove leading/trailing whitespace |
+| `ltrim(str)` / `rtrim(str)` | Left/right trim |
+| `reverse(str)` | Reverse a string |
+
+```python
+graph.cypher("RETURN split('a,b,c', ',') AS parts")         # ["a", "b", "c"]
+graph.cypher("RETURN replace('hello world', 'world', 'cypher') AS s")  # "hello cypher"
+graph.cypher("RETURN substring('hello', 1, 3) AS s")        # "ell"
+graph.cypher("RETURN left('hello', 2) AS l, right('hello', 2) AS r")  # "he", "lo"
+```
 
 ## Arithmetic & String Concatenation
 
@@ -279,6 +353,61 @@ graph.cypher("""
 
 > **Note:** List comprehensions require at least one row in the pipeline. Use `UNWIND [1] AS _` or a preceding `MATCH`/`WITH` to provide the row context.
 
+## List Quantifier Predicates
+
+`any(x IN list WHERE pred)`, `all(...)`, `none(...)`, `single(...)` — test list elements against a predicate:
+
+| Function | Returns `true` when |
+|----------|---------------------|
+| `any(x IN list WHERE pred)` | At least one element satisfies the predicate |
+| `all(x IN list WHERE pred)` | Every element satisfies the predicate |
+| `none(x IN list WHERE pred)` | No element satisfies the predicate |
+| `single(x IN list WHERE pred)` | Exactly one element satisfies the predicate |
+
+```python
+# any: at least one friend over 30
+graph.cypher("""
+    MATCH (p:Person)-[:KNOWS]->(f:Person)
+    WITH p, collect(f.age) AS ages
+    WHERE any(a IN ages WHERE a > 30)
+    RETURN p.name
+""")
+
+# all: every item costs less than 100
+graph.cypher("""
+    MATCH (o:Order)-[:CONTAINS]->(i:Item)
+    WITH o, collect(i.price) AS prices
+    WHERE all(p IN prices WHERE p < 100)
+    RETURN o.id
+""")
+
+# none / single
+graph.cypher("RETURN none(x IN [1, 2, 3] WHERE x < 0) AS all_positive")   # true
+graph.cypher("RETURN single(x IN [1, 2, 3] WHERE x = 2) AS has_one_two")  # true
+```
+
+Works in WHERE, RETURN, and WITH clauses.
+
+## List Slicing
+
+`expr[start..end]` syntax — slice lists with optional start/end bounds and negative indices:
+
+```python
+# Slice collected values
+graph.cypher("""
+    MATCH (p:Person)
+    WITH collect(p.name) AS names
+    RETURN names[0..3] AS first_three
+""")
+
+# Open-ended slices
+graph.cypher("RETURN [1,2,3,4,5][2..] AS from_idx_2")    # [3, 4, 5]
+graph.cypher("RETURN [1,2,3,4,5][..3] AS first_three")    # [1, 2, 3]
+
+# Negative indices (from end)
+graph.cypher("RETURN [1,2,3,4,5][-2..] AS last_two")      # [4, 5]
+```
+
 ## Map Projections
 
 `n {.prop1, .prop2, alias: expr}` syntax — select specific properties from a node:
@@ -297,6 +426,27 @@ graph.cypher("""
 # System properties (id, type) work too
 graph.cypher("MATCH (p:Person) RETURN p {.name, .type, .id} AS info LIMIT 1")
 # [{'info': {'name': 'Alice', 'type': 'Person', 'id': 1}}]
+```
+
+## Map Literals
+
+`{key: expr, key2: expr}` syntax — construct map objects in RETURN, WITH, or anywhere an expression is valid:
+
+```python
+# Build a map from node properties
+graph.cypher("""
+    MATCH (p:Person)
+    RETURN {name: p.name, age: p.age} AS info
+""")
+
+# Computed values in map literals
+graph.cypher("""
+    MATCH (p:Person)
+    RETURN {name: p.name, next_age: p.age + 1} AS info
+""")
+
+# Map literals in WITH
+graph.cypher("WITH {x: 1, y: 2} AS point RETURN point")
 ```
 
 ## Parameters
@@ -338,6 +488,27 @@ graph.cypher("""
 """)
 ```
 
+## Variable Binding in MATCH Patterns
+
+Variables from `WITH` or `UNWIND` can be used as values in inline pattern properties:
+
+```python
+# Scalar variable in pattern property
+graph.cypher("""
+    WITH 'Oslo' AS city
+    MATCH (p:Person {city: city})
+    RETURN p.name
+""")
+
+# UNWIND + pattern variable — batch lookups
+graph.cypher("""
+    UNWIND ['Alice', 'Bob'] AS name
+    MATCH (p:Person {name: name})
+    RETURN p.name, p.age
+    ORDER BY p.age
+""")
+```
+
 ## Variable-Length Paths
 
 ```python
@@ -350,14 +521,24 @@ graph.cypher("MATCH (a:Person)-[:KNOWS*2]->(b:Person) RETURN a.name, b.name")
 
 ## WHERE EXISTS
 
-Check for subpattern existence. Both brace `{ }` and parenthesis `(( ))` syntax are supported:
+Check for subpattern existence. Brace `{ }`, parenthesis `(( ))`, and inline pattern syntax are all supported:
 
 ```python
 # Brace syntax
 graph.cypher("MATCH (p:Person) WHERE EXISTS { (p)-[:KNOWS]->(:Person) } RETURN p.name")
 
+# With optional MATCH keyword and WHERE clause inside
+graph.cypher("""
+    MATCH (p:Person)
+    WHERE EXISTS { MATCH (p)-[:KNOWS]->(f:Person) WHERE f.age > 30 }
+    RETURN p.name
+""")
+
 # Parenthesis syntax (equivalent)
 graph.cypher("MATCH (p:Person) WHERE EXISTS((p)-[:KNOWS]->(:Person)) RETURN p.name")
+
+# Inline pattern predicate (shorthand for EXISTS)
+graph.cypher("MATCH (p:Person) WHERE (p)-[:KNOWS]->(:Person) RETURN p.name")
 
 # Negation
 graph.cypher("""
@@ -595,17 +776,20 @@ graph.cypher("MATCH (f:Field) RETURN ts_at(f.oil, '2020')")
 | Category | Supported |
 |----------|-----------|
 | **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN`, `PROFILE` |
-| **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val}`, `p = shortestPath(...)` |
-| **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern }`, `EXISTS(( pattern ))` |
-| **RETURN** | `n.prop`, `r.prop`, `AS` aliases, `DISTINCT`, arithmetic `+`/`-`/`*`/`/`, string concat `\|\|`, map projections `n {.prop1, .prop2}` |
+| **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val, key: $param, key: var}`, `p = shortestPath(...)` |
+| **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern WHERE ... }`, `EXISTS(( pattern ))`, inline pattern predicates, `any/all/none/single(x IN list WHERE ...)` |
+| **RETURN** | `n.prop`, `r.prop`, `AS` aliases, `DISTINCT`, arithmetic `+`/`-`/`*`/`/`, string concat `\|\|`, map projections `n {.prop}`, map literals `{k: expr}`, list slicing `[i..j]` |
 | **Aggregation** | `count(*)`, `count(expr)`, `sum`, `avg`/`mean`, `min`, `max`, `collect`, `std` |
-| **Expressions** | `CASE WHEN...THEN...ELSE...END`, `$param`, `[x IN list WHERE ... \| expr]` |
-| **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `length`, `type`, `id`, `labels`, `coalesce`, `nodes(p)`, `relationships(p)`, `round` |
+| **Expressions** | `CASE WHEN...THEN...ELSE...END`, `$param`, `[x IN list WHERE ... \| expr]`, `any/all/none/single(...)` |
+| **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `length`, `type`, `id`, `labels`, `coalesce`, `date`, `range`, `nodes(p)`, `relationships(p)`, `round` |
+| **String** | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse` |
+| **Math** | `abs`, `ceil`/`ceiling`, `floor`, `round`, `sqrt`, `sign`, `log`, `exp`, `pow`, `pi`, `rand` |
 | **Spatial** | `point(lat, lon)`, `distance(a, b)`, `contains(a, b)`, `intersects(a, b)`, `centroid(n)`, `area(n)`, `perimeter(n)`, `latitude(point)`, `longitude(point)` |
+| **Temporal** | `valid_at(entity, date, 'from', 'to')`, `valid_during(entity, start, end, 'from', 'to')` — NULL = open-ended |
 | **Semantic** | `text_score(n, prop, query [, metric])` — auto-embeds query via `set_embedder()`, cosine/dot_product/euclidean |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
-| **Procedures** | `CALL pagerank/betweenness/degree/closeness() YIELD node, score`, `CALL louvain/label_propagation() YIELD node, community`, `CALL connected_components() YIELD node, component`, `CALL cluster({method, ...}) YIELD node, cluster` |
+| **Procedures** | `CALL pagerank/betweenness/degree/closeness() YIELD node, score`, `CALL louvain/label_propagation() YIELD node, community`, `CALL connected_components() YIELD node, component`, `CALL cluster({method, ...}) YIELD node, cluster`, `CALL list_procedures()` |
 | **Operators** | `+`, `-`, `*`, `/`, `\|\|` (string concat), `=~` (regex), `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS NULL`, `IS NOT NULL` |
 
 ## openCypher Compatibility Matrix
@@ -642,18 +826,22 @@ Clause-by-clause comparison with the openCypher specification.
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Arithmetic (`+`, `-`, `*`, `/`) | Full | |
-| String concat (`\|\|`) | Full | |
-| Comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`) | Full | |
+| String concat (`\|\|`) | Full | Auto-converts non-strings |
+| Comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`) | Full | Three-valued logic (Null = false) |
 | Boolean (`AND`, `OR`, `NOT`) | Full | |
-| `IS NULL` / `IS NOT NULL` | Full | |
+| `IS NULL` / `IS NOT NULL` | Full | Also works as expressions in RETURN/WITH |
 | `IN [list]` | Full | |
 | `CONTAINS` / `STARTS WITH` / `ENDS WITH` | Full | |
-| `=~` regex | Full | |
-| `CASE WHEN...THEN...ELSE...END` | Full | |
-| Parameter references (`$param`) | Full | |
+| `=~` regex | Full | Compiled and cached per query |
+| `CASE WHEN...THEN...ELSE...END` | Full | Simple and generic forms |
+| Parameter references (`$param`) | Full | In WHERE, pattern properties, and expressions |
 | List comprehensions (`[x IN list WHERE ... \| expr]`) | Full | |
-| `EXISTS { pattern }` | Full | Brace `{}` and parenthesis `(( ))` syntax |
+| List slicing (`expr[start..end]`) | Full | Open-ended, negative indices |
+| List quantifiers (`any/all/none/single(x IN list WHERE ...)`) | Full | |
+| `EXISTS { pattern WHERE ... }` | Full | Brace `{}`, parenthesis `(( ))`, inline pattern, with WHERE |
 | Map projections (`n {.prop1, .prop2}`) | Full | |
+| Map literals (`{key: expr}`) | Full | |
+| Variable binding in pattern properties | Full | `WITH val AS x MATCH ({prop: x})` |
 
 ### Scalar & Aggregation Functions
 
@@ -665,13 +853,19 @@ Clause-by-clause comparison with the openCypher specification.
 | `std` | Full | Standard deviation |
 | `toUpper`, `toLower`, `toString` | Full | |
 | `toInteger`, `toFloat` | Full | |
-| `size`, `length` | Full | |
+| `size`, `length` | Full | Strings, lists, and paths |
 | `type(r)` | Full | Returns relationship type |
 | `id(n)` | Full | Returns node id |
 | `labels(n)` | Full | Returns single label (string, not list — single-label model) |
+| `date(str)` | Full | Parse date string to DateTime |
 | `coalesce` | Full | |
+| `range(start, end [, step])` | Full | Inclusive integer range |
 | `round(x [, precision])` | Full | |
 | `nodes(p)`, `relationships(p)` | Full | Path decomposition |
+| String functions | Full | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse` |
+| Math functions | Full | `abs`, `ceil`, `floor`, `sqrt`, `sign`, `log`, `exp`, `pow`, `pi`, `rand` |
+| Spatial functions | Full | `point`, `distance`, `contains`, `intersects`, `centroid`, `area`, `perimeter` |
+| Temporal functions | Full | `valid_at`, `valid_during` — NULL = open-ended |
 
 ### Architectural Differences from Neo4j
 

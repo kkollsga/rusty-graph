@@ -980,12 +980,25 @@ impl CypherParser {
                 Ok(Expression::Parameter(name))
             }
 
-            // Identifier: could be variable, property access, or function call
+            // Identifier: could be variable, property access, function call, or list quantifier
             Some(CypherToken::Identifier(name)) => {
                 self.advance();
 
-                // Check for function call: identifier(
+                // Check for list quantifier: any/none/single(var IN list WHERE pred)
                 if self.check(&CypherToken::LParen) {
+                    let quantifier = match name.to_lowercase().as_str() {
+                        "any" => Some(ListQuantifier::Any),
+                        "none" => Some(ListQuantifier::None),
+                        "single" => Some(ListQuantifier::Single),
+                        _ => None,
+                    };
+                    if let Some(q) = quantifier {
+                        if matches!(self.peek_at(1), Some(CypherToken::Identifier(_)))
+                            && self.peek_at(2) == Some(&CypherToken::In)
+                        {
+                            return self.parse_list_quantifier_expr(q);
+                        }
+                    }
                     return self.parse_function_call(name);
                 }
 
@@ -1012,6 +1025,16 @@ impl CypherParser {
             Some(CypherToken::LBrace) => {
                 self.advance(); // consume {
                 self.parse_map_literal()
+            }
+
+            // ALL(var IN list WHERE pred) — ALL is a keyword token
+            Some(CypherToken::All)
+                if self.peek_at(1) == Some(&CypherToken::LParen)
+                    && matches!(self.peek_at(2), Some(CypherToken::Identifier(_)))
+                    && self.peek_at(3) == Some(&CypherToken::In) =>
+            {
+                self.advance(); // consume ALL
+                self.parse_list_quantifier_expr(ListQuantifier::All)
             }
 
             // Keywords that can also be function names when followed by (
@@ -1222,6 +1245,42 @@ impl CypherParser {
             list_expr: Box::new(list_expr),
             filter,
             map_expr,
+        })
+    }
+
+    /// Parse list quantifier expression: (variable IN list_expr WHERE predicate)
+    /// The quantifier keyword has been consumed; LParen is next.
+    fn parse_list_quantifier_expr(
+        &mut self,
+        quantifier: ListQuantifier,
+    ) -> Result<Expression, String> {
+        self.expect(&CypherToken::LParen)?;
+
+        // Variable name
+        let variable = match self.advance().cloned() {
+            Some(CypherToken::Identifier(name)) => name,
+            other => {
+                return Err(format!(
+                    "Expected variable name in list predicate, got {:?}",
+                    other
+                ))
+            }
+        };
+
+        self.expect(&CypherToken::In)?;
+        let list_expr = self.parse_expression()?;
+
+        // WHERE predicate
+        self.expect(&CypherToken::Where)?;
+        let predicate = self.parse_predicate()?;
+
+        self.expect(&CypherToken::RParen)?;
+
+        Ok(Expression::QuantifiedList {
+            quantifier,
+            variable,
+            list_expr: Box::new(list_expr),
+            filter: Box::new(predicate),
         })
     }
 
