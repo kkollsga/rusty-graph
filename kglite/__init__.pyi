@@ -1853,6 +1853,56 @@ class KnowledgeGraph:
         """
         ...
 
+    def export_csv(
+        self,
+        path: str,
+        *,
+        selection_only: Optional[bool] = None,
+        verbose: bool = False,
+    ) -> dict[str, Any]:
+        """Export to an organized CSV directory tree with blueprint.
+
+        Creates a directory structure with one CSV per node type and one
+        per connection type, plus a ``blueprint.json`` for round-trip
+        re-import via :func:`from_blueprint`.
+
+        Output structure::
+
+            path/
+            ├── nodes/
+            │   ├── Person.csv
+            │   ├── Company.csv
+            │   └── Person/          # sub-nodes nested under parent
+            │       └── Skill.csv
+            ├── connections/
+            │   ├── WORKS_AT.csv
+            │   └── KNOWS.csv
+            └── blueprint.json
+
+        Node CSVs have columns: ``id``, ``title``, then all properties.
+        Connection CSVs: ``source_id``, ``source_type``, ``target_id``,
+        ``target_type``, then edge properties.
+
+        Only connections where **both** endpoints are in the selection
+        are exported.
+
+        Args:
+            path: Output directory (created if it doesn't exist).
+            selection_only: Export only selected nodes. Default:
+                ``True`` if a selection exists, ``False`` otherwise.
+            verbose: Print progress information during export.
+
+        Returns:
+            Summary dict with keys ``output_dir``, ``nodes`` (type → count),
+            ``connections`` (type → count), ``files_written``.
+
+        Example::
+
+            graph.export_csv('output/')
+            graph.type_filter('Person').export_csv('output/', verbose=True)
+        """
+        ...
+
     def export_string(
         self,
         format: str,

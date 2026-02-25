@@ -8,7 +8,8 @@ use crate::graph::clustering;
 use crate::graph::filtering_methods;
 use crate::graph::graph_algorithms;
 use crate::graph::pattern_matching::{
-    EdgeDirection, MatchBinding, PatternElement, PatternExecutor, PatternMatch,
+    EdgeDirection, MatchBinding, Pattern, PatternElement, PatternExecutor, PatternMatch,
+    PropertyMatcher,
 };
 use crate::graph::schema::{DirGraph, EdgeData, NodeData};
 use crate::graph::spatial;
@@ -456,6 +457,55 @@ impl<'a> CypherExecutor<'a> {
     }
 
     // ========================================================================
+    // Variable resolution for pattern properties
+    // ========================================================================
+
+    /// Resolve `EqualsVar(name)` references in pattern properties against the
+    /// current row's projected values. Converts them to `Equals(value)` so
+    /// the PatternExecutor can match them. Enables:
+    ///   `WITH "Oslo" AS city MATCH (n:Person {city: city}) RETURN n`
+    fn resolve_pattern_vars(&self, pattern: &Pattern, row: &ResultRow) -> Pattern {
+        let mut resolved = pattern.clone();
+        for element in &mut resolved.elements {
+            let props = match element {
+                PatternElement::Node(np) => &mut np.properties,
+                PatternElement::Edge(ep) => &mut ep.properties,
+            };
+            if let Some(props) = props {
+                for matcher in props.values_mut() {
+                    if let PropertyMatcher::EqualsVar(name) = matcher {
+                        // Check projected scalars (WITH ... AS varName)
+                        if let Some(val) = row.projected.get(name) {
+                            *matcher = PropertyMatcher::Equals(val.clone());
+                        }
+                        // Could extend to resolve node property access (a.prop)
+                        // but the pattern tokenizer doesn't support dotted names yet
+                    }
+                }
+            }
+        }
+        resolved
+    }
+
+    /// Check if a pattern contains any EqualsVar references that need resolution.
+    fn pattern_has_vars(pattern: &Pattern) -> bool {
+        for element in &pattern.elements {
+            let props = match element {
+                PatternElement::Node(np) => &np.properties,
+                PatternElement::Edge(ep) => &ep.properties,
+            };
+            if let Some(props) = props {
+                for matcher in props.values() {
+                    if matches!(matcher, PropertyMatcher::EqualsVar(_)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    // ========================================================================
     // MATCH
     // ========================================================================
 
@@ -493,13 +543,24 @@ impl<'a> CypherExecutor<'a> {
                 } else {
                     // Subsequent patterns: use shared-variable join
                     // Pass existing node bindings as pre-bindings to constrain the pattern
-                    let mut new_rows = Vec::new();
-                    for existing_row in &all_rows {
+                    let has_vars = Self::pattern_has_vars(pattern);
+                    // Move rows out so we can iterate by value (enables move-on-last)
+                    let old_rows = std::mem::take(&mut all_rows);
+                    let mut new_rows = Vec::with_capacity(old_rows.len());
+                    for mut existing_row in old_rows {
                         // Calculate remaining budget for this expansion
                         let remaining = limit_hint.map(|l| l.saturating_sub(new_rows.len()));
                         if remaining == Some(0) {
                             break;
                         }
+                        // Resolve EqualsVar references against current row
+                        let resolved;
+                        let pat = if has_vars {
+                            resolved = self.resolve_pattern_vars(pattern, &existing_row);
+                            &resolved
+                        } else {
+                            pattern
+                        };
                         let executor = PatternExecutor::with_bindings_and_params(
                             self.graph,
                             remaining,
@@ -507,13 +568,22 @@ impl<'a> CypherExecutor<'a> {
                             self.params,
                         )
                         .set_deadline(self.deadline);
-                        let matches = executor.execute(pattern)?;
-                        for m in matches {
-                            if !self.bindings_compatible(existing_row, &m) {
-                                continue;
+                        let matches = executor.execute(pat)?;
+                        // Collect compatible matches for move-on-last optimization
+                        let compatible: Vec<_> = matches
+                            .iter()
+                            .filter(|m| self.bindings_compatible(&existing_row, m))
+                            .collect();
+                        let total = compatible.len();
+                        for (i, m) in compatible.into_iter().enumerate() {
+                            if i + 1 == total {
+                                // Last compatible match: move row instead of cloning
+                                self.merge_match_into_row(&mut existing_row, m);
+                                new_rows.push(existing_row);
+                                break;
                             }
                             let mut new_row = existing_row.clone();
-                            self.merge_match_into_row(&mut new_row, &m);
+                            self.merge_match_into_row(&mut new_row, m);
                             new_rows.push(new_row);
                             if limit_hint.is_some_and(|l| new_rows.len() >= l) {
                                 break;
@@ -529,7 +599,7 @@ impl<'a> CypherExecutor<'a> {
             all_rows
         } else {
             // Subsequent MATCH: expand each existing row with new patterns
-            let mut new_rows = Vec::new();
+            let mut new_rows = Vec::with_capacity(existing.rows.len());
 
             for row in &existing.rows {
                 for pattern in &clause.patterns {
@@ -537,6 +607,14 @@ impl<'a> CypherExecutor<'a> {
                     if remaining == Some(0) {
                         break;
                     }
+                    // Resolve EqualsVar references against current row
+                    let resolved;
+                    let pat = if Self::pattern_has_vars(pattern) {
+                        resolved = self.resolve_pattern_vars(pattern, row);
+                        &resolved
+                    } else {
+                        pattern
+                    };
                     let executor = PatternExecutor::with_bindings_and_params(
                         self.graph,
                         remaining,
@@ -544,14 +622,14 @@ impl<'a> CypherExecutor<'a> {
                         self.params,
                     )
                     .set_deadline(self.deadline);
-                    let matches = executor.execute(pattern)?;
+                    let matches = executor.execute(pat)?;
 
-                    for m in matches {
-                        if !self.bindings_compatible(row, &m) {
+                    for m in &matches {
+                        if !self.bindings_compatible(row, m) {
                             continue;
                         }
                         let mut new_row = row.clone();
-                        self.merge_match_into_row(&mut new_row, &m);
+                        self.merge_match_into_row(&mut new_row, m);
                         new_rows.push(new_row);
                         if limit_hint.is_some_and(|l| new_rows.len() >= l) {
                             break;
@@ -949,12 +1027,20 @@ impl<'a> CypherExecutor<'a> {
             });
         }
 
-        let mut new_rows = Vec::new();
+        let mut new_rows = Vec::with_capacity(existing.rows.len());
 
         for row in &existing.rows {
             let mut found_any = false;
 
             for pattern in &clause.patterns {
+                // Resolve EqualsVar references against current row
+                let resolved;
+                let pat = if Self::pattern_has_vars(pattern) {
+                    resolved = self.resolve_pattern_vars(pattern, row);
+                    &resolved
+                } else {
+                    pattern
+                };
                 let executor = PatternExecutor::with_bindings_and_params(
                     self.graph,
                     None,
@@ -962,7 +1048,7 @@ impl<'a> CypherExecutor<'a> {
                     self.params,
                 )
                 .set_deadline(self.deadline);
-                let matches = executor.execute(pattern)?;
+                let matches = executor.execute(pat)?;
 
                 for m in &matches {
                     if !self.bindings_compatible(row, m) {
@@ -1772,6 +1858,14 @@ impl<'a> CypherExecutor<'a> {
                 // Execute each pattern and check if any match is compatible
                 // with the current row's bindings (outer variables must match)
                 for pattern in patterns {
+                    // Resolve EqualsVar references against current row
+                    let resolved;
+                    let pat = if Self::pattern_has_vars(pattern) {
+                        resolved = self.resolve_pattern_vars(pattern, row);
+                        &resolved
+                    } else {
+                        pattern
+                    };
                     let executor = PatternExecutor::with_bindings_and_params(
                         self.graph,
                         None,
@@ -1779,7 +1873,7 @@ impl<'a> CypherExecutor<'a> {
                         self.params,
                     )
                     .set_deadline(self.deadline);
-                    let matches = executor.execute(pattern)?;
+                    let matches = executor.execute(pat)?;
                     let found = matches.iter().any(|m| self.bindings_compatible(row, m));
                     if !found {
                         return Ok(false);
@@ -2196,6 +2290,7 @@ impl<'a> CypherExecutor<'a> {
             | Expression::IndexAccess { .. }
             | Expression::ListSlice { .. }
             | Expression::MapProjection { .. }
+            | Expression::MapLiteral(_)
             | Expression::IsNull(_)
             | Expression::IsNotNull(_) => false,
         }
@@ -2497,6 +2592,19 @@ impl<'a> CypherExecutor<'a> {
                     }
                 }
                 Ok(Value::Null)
+            }
+
+            Expression::MapLiteral(entries) => {
+                let mut props = Vec::new();
+                for (key, expr) in entries {
+                    let val = self.evaluate_expression(expr, row)?;
+                    props.push(format!(
+                        "{}: {}",
+                        format_value_json(&Value::String(key.clone())),
+                        format_value_json(&val)
+                    ));
+                }
+                Ok(Value::String(format!("{{{}}}", props.join(", "))))
             }
 
             Expression::IndexAccess { expr, index } => {
@@ -4981,24 +5089,30 @@ impl<'a> CypherExecutor<'a> {
         self.check_deadline()?;
         let mut new_rows = Vec::new();
 
-        let source_rows = result_set.rows;
-
-        for row in &source_rows {
-            let val = self.evaluate_expression(&clause.expression, row)?;
+        // Use into_iter to own rows — enables move-on-last optimization
+        for mut row in result_set.rows {
+            let val = self.evaluate_expression(&clause.expression, &row)?;
             match val {
                 Value::String(s) if s.starts_with('[') && s.ends_with(']') => {
                     let items = split_list_top_level(&s);
-                    for item_str in items {
-                        let mut new_row = row.clone();
+                    let total = items.len();
+                    for (i, item_str) in items.into_iter().enumerate() {
                         let parsed_val = parse_value_string(item_str.trim());
+                        if i + 1 == total {
+                            // Last item: move row instead of cloning
+                            row.projected.insert(clause.alias.clone(), parsed_val);
+                            new_rows.push(row);
+                            break;
+                        }
+                        let mut new_row = row.clone();
                         new_row.projected.insert(clause.alias.clone(), parsed_val);
                         new_rows.push(new_row);
                     }
                 }
                 _ => {
-                    let mut new_row = row.clone();
-                    new_row.projected.insert(clause.alias.clone(), val);
-                    new_rows.push(new_row);
+                    // Single value: move directly (no clone needed)
+                    row.projected.insert(clause.alias.clone(), val);
+                    new_rows.push(row);
                 }
             }
         }
@@ -6316,9 +6430,8 @@ fn execute_merge(
 
     let mut new_rows = Vec::with_capacity(source_rows.len());
 
-    for row in &source_rows {
-        let mut new_row = row.clone();
-
+    // Use into_iter to own rows — avoids cloning each row upfront
+    for mut new_row in source_rows {
         // Try to match the MERGE pattern
         let matched = try_match_merge_pattern(graph, &merge.pattern, &new_row, params)?;
 
@@ -6425,27 +6538,96 @@ fn try_match_merge_pattern(
                     })
                     .collect::<Result<Vec<_>, _>>()?;
 
-                // Search type_indices for a matching node
-                if let Some(type_indices) = graph.type_indices.get(label) {
-                    for &idx in type_indices {
-                        if let Some(node) = graph.graph.node_weight(idx) {
-                            // Match "name"/"title" to the node's title field,
-                            // consistent with pattern_matching::node_matches_properties
-                            let all_match = expected_props.iter().all(|(key, expected)| {
-                                let value = if *key == "name" || *key == "title" {
-                                    node.get_field_ref("title")
-                                } else {
-                                    node.get_field_ref(key)
-                                };
-                                value == Some(expected)
-                            });
-                            if all_match {
-                                let mut result_row = ResultRow::new();
-                                if let Some(ref var) = node_pat.variable {
-                                    result_row.node_bindings.insert(var.clone(), idx);
-                                }
-                                return Ok(Some(result_row));
+                // Helper: verify a candidate node matches all expected properties
+                let node_matches_all = |idx: NodeIndex, props: &[(&str, Value)]| -> bool {
+                    if let Some(node) = graph.graph.node_weight(idx) {
+                        props.iter().all(|(key, expected)| {
+                            let value = if *key == "name" || *key == "title" {
+                                node.get_field_ref("title")
+                            } else {
+                                node.get_field_ref(key)
+                            };
+                            value == Some(expected)
+                        })
+                    } else {
+                        false
+                    }
+                };
+
+                let build_result = |idx: NodeIndex| -> ResultRow {
+                    let mut result_row = ResultRow::new();
+                    if let Some(ref var) = node_pat.variable {
+                        result_row.node_bindings.insert(var.clone(), idx);
+                    }
+                    result_row
+                };
+
+                // --- Index-accelerated matching ---
+
+                // 1. If pattern contains "id" property, use O(1) id_index lookup
+                if let Some((_, id_value)) = expected_props.iter().find(|(k, _)| *k == "id") {
+                    if let Some(idx) = graph.lookup_by_id_readonly(label, id_value) {
+                        // ID matched — verify remaining properties (if any)
+                        if expected_props.len() == 1 || node_matches_all(idx, &expected_props) {
+                            return Ok(Some(build_result(idx)));
+                        }
+                    }
+                    return Ok(None);
+                }
+
+                // 2. Single non-id property: try property index
+                if expected_props.len() == 1 {
+                    let (key, ref value) = expected_props[0];
+                    // Map name/title aliases to the stored field name
+                    let index_key = if key == "name" || key == "title" {
+                        "title"
+                    } else {
+                        key
+                    };
+                    if let Some(candidates) = graph.lookup_by_index(label, index_key, value) {
+                        for &idx in &candidates {
+                            if node_matches_all(idx, &expected_props) {
+                                return Ok(Some(build_result(idx)));
                             }
+                        }
+                        return Ok(None);
+                    }
+                    // No index — fall through to linear scan
+                }
+
+                // 3. Multi-property: try composite index
+                if expected_props.len() >= 2 {
+                    // Build sorted key/value arrays for composite lookup
+                    // (exclude id/name/title which use special storage)
+                    let mut indexable: Vec<(&str, &Value)> = expected_props
+                        .iter()
+                        .filter(|(k, _)| *k != "id" && *k != "name" && *k != "title")
+                        .map(|(k, v)| (*k, v))
+                        .collect();
+                    if indexable.len() >= 2 {
+                        indexable.sort_by(|a, b| a.0.cmp(b.0));
+                        let names: Vec<String> =
+                            indexable.iter().map(|(k, _)| k.to_string()).collect();
+                        let values: Vec<Value> =
+                            indexable.iter().map(|(_, v)| (*v).clone()).collect();
+                        if let Some(candidates) =
+                            graph.lookup_by_composite_index(label, &names, &values)
+                        {
+                            for &idx in &candidates {
+                                if node_matches_all(idx, &expected_props) {
+                                    return Ok(Some(build_result(idx)));
+                                }
+                            }
+                            return Ok(None);
+                        }
+                    }
+                }
+
+                // 4. Fall back to linear scan (no index covers the pattern)
+                if let Some(type_nodes) = graph.type_indices.get(label) {
+                    for &idx in type_nodes {
+                        if node_matches_all(idx, &expected_props) {
+                            return Ok(Some(build_result(idx)));
                         }
                     }
                 }
@@ -6566,6 +6748,9 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
                 false
             }
         }),
+        Expression::MapLiteral(entries) => entries
+            .iter()
+            .any(|(_, expr)| is_aggregate_expression(expr)),
         _ => false,
     }
 }
@@ -6663,6 +6848,13 @@ fn expression_to_string(expr: &Expression) -> String {
                 })
                 .collect();
             format!("{} {{{}}}", variable, items_str.join(", "))
+        }
+        Expression::MapLiteral(entries) => {
+            let items_str: Vec<String> = entries
+                .iter()
+                .map(|(key, expr)| format!("{}: {}", key, expression_to_string(expr)))
+                .collect();
+            format!("{{{}}}", items_str.join(", "))
         }
         Expression::IsNull(inner) => format!("{} IS NULL", expression_to_string(inner)),
         Expression::IsNotNull(inner) => format!("{} IS NOT NULL", expression_to_string(inner)),

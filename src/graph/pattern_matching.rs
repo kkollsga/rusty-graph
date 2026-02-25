@@ -75,6 +75,10 @@ pub enum PropertyMatcher {
     Equals(Value),
     /// Deferred parameter resolution: matched at execution time from params map
     EqualsParam(String),
+    /// Deferred variable resolution: resolved against projected row values
+    /// from WITH/UNWIND before pattern matching. Example:
+    /// `WITH "Oslo" AS city MATCH (n:Person {city: city})`
+    EqualsVar(String),
 }
 
 // ============================================================================
@@ -664,6 +668,12 @@ impl Parser {
                         if let Some(Token::Parameter(name)) = self.advance().cloned() {
                             props.insert(key, PropertyMatcher::EqualsParam(name));
                         }
+                    } else if let Some(Token::Identifier(_)) = self.peek() {
+                        // Bare identifier → variable reference from outer scope
+                        // e.g. WITH "Oslo" AS city MATCH (n {city: city})
+                        if let Some(Token::Identifier(name)) = self.advance().cloned() {
+                            props.insert(key, PropertyMatcher::EqualsVar(name));
+                        }
                     } else {
                         let value = self.parse_value()?;
                         props.insert(key, PropertyMatcher::Equals(value));
@@ -1071,35 +1081,39 @@ impl<'a> PatternExecutor<'a> {
             }
         }
 
-        let candidates: Vec<NodeIndex> = if let Some(ref node_type) = pattern.node_type {
+        if let Some(ref node_type) = pattern.node_type {
             // Try property index acceleration when we have both type and properties
             if let Some(ref props) = pattern.properties {
                 if let Some(indexed) = self.try_index_lookup(node_type, props) {
                     return Ok(indexed);
                 }
             }
-            // Use type index for O(1) lookup
-            self.graph
-                .type_indices
-                .get(node_type)
-                .cloned()
-                .unwrap_or_default()
+            // Use type index — iterate by reference to avoid cloning the Vec
+            let type_nodes = match self.graph.type_indices.get(node_type) {
+                Some(indices) => indices.as_slice(),
+                None => return Ok(vec![]),
+            };
+            if let Some(ref props) = pattern.properties {
+                Ok(type_nodes
+                    .iter()
+                    .copied()
+                    .filter(|&idx| self.node_matches_properties(idx, props))
+                    .collect())
+            } else {
+                Ok(type_nodes.to_vec())
+            }
         } else {
             // No type specified - check all nodes
-            self.graph.graph.node_indices().collect()
-        };
-
-        // Filter by properties if specified
-        let filtered = if let Some(ref props) = pattern.properties {
-            candidates
-                .into_iter()
-                .filter(|&idx| self.node_matches_properties(idx, props))
-                .collect()
-        } else {
-            candidates
-        };
-
-        Ok(filtered)
+            let all_nodes: Vec<NodeIndex> = self.graph.graph.node_indices().collect();
+            if let Some(ref props) = pattern.properties {
+                Ok(all_nodes
+                    .into_iter()
+                    .filter(|&idx| self.node_matches_properties(idx, props))
+                    .collect())
+            } else {
+                Ok(all_nodes)
+            }
+        }
     }
 
     /// Try to use property indexes for faster node lookup.
@@ -1110,13 +1124,15 @@ impl<'a> PatternExecutor<'a> {
         props: &HashMap<String, PropertyMatcher>,
     ) -> Option<Vec<NodeIndex>> {
         // Extract equality values from PropertyMatcher (resolve params)
-        let equality_props: Vec<(&String, &Value)> = props
+        let mut equality_props: Vec<(&String, &Value)> = props
             .iter()
             .filter_map(|(k, v)| match v {
                 PropertyMatcher::Equals(val) => Some((k, val)),
                 PropertyMatcher::EqualsParam(name) => {
                     self.params.get(name.as_str()).map(|val| (k, val))
                 }
+                // EqualsVar should be resolved before reaching here; skip for index lookup
+                PropertyMatcher::EqualsVar(_) => None,
             })
             .collect();
 
@@ -1137,10 +1153,10 @@ impl<'a> PatternExecutor<'a> {
 
         // Try composite index for multi-property patterns
         if equality_props.len() >= 2 {
-            let mut sorted: Vec<(&String, &Value)> = equality_props.clone();
-            sorted.sort_by(|a, b| a.0.cmp(b.0));
-            let names: Vec<String> = sorted.iter().map(|(k, _)| (*k).clone()).collect();
-            let values: Vec<Value> = sorted.iter().map(|(_, v)| (*v).clone()).collect();
+            // Sort in-place — equality_props is a local vec of references, cheap to reorder
+            equality_props.sort_by(|a, b| a.0.cmp(b.0));
+            let names: Vec<String> = equality_props.iter().map(|(k, _)| (*k).clone()).collect();
+            let values: Vec<Value> = equality_props.iter().map(|(_, v)| (*v).clone()).collect();
             if let Some(results) = self
                 .graph
                 .lookup_by_composite_index(node_type, &names, &values)
@@ -1223,6 +1239,9 @@ impl<'a> PatternExecutor<'a> {
                 .params
                 .get(name.as_str())
                 .is_some_and(|expected| values_equal(value, expected)),
+            // EqualsVar should be resolved to Equals before pattern matching.
+            // If it reaches here unresolved, no match is possible.
+            PropertyMatcher::EqualsVar(_) => false,
         }
     }
 

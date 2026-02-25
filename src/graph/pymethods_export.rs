@@ -110,6 +110,101 @@ impl KnowledgeGraph {
         Ok(())
     }
 
+    /// Export graph data to an organized CSV directory tree.
+    ///
+    /// Creates a directory with:
+    /// - `nodes/<Type>.csv` for each node type (with all properties as columns)
+    /// - `connections/<Type>.csv` for each connection type
+    /// - `blueprint.json` for round-trip re-import via `from_blueprint()`
+    ///
+    /// Sub-nodes (types registered with `set_parent_type()`) are nested
+    /// under their parent type's folder: `nodes/<Parent>/<Child>.csv`.
+    ///
+    /// Args:
+    ///     path: Output directory path (created if it doesn't exist)
+    ///     selection_only: If True, export only selected nodes and their connections.
+    ///         Default: True if a selection exists, False otherwise.
+    ///     verbose: If True, print progress information during export.
+    ///
+    /// Returns:
+    ///     A dict with export summary:
+    ///     - "output_dir": str — the output directory path
+    ///     - "nodes": dict[str, int] — node counts per type
+    ///     - "connections": dict[str, int] — connection counts per type
+    ///     - "files_written": int — total files written
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Export entire graph
+    ///     result = graph.export_csv('output/')
+    ///
+    ///     # Export only selected nodes
+    ///     result = graph.type_filter('Person').export_csv('output/')
+    ///
+    ///     # With progress output
+    ///     result = graph.export_csv('output/', verbose=True)
+    ///     ```
+    #[pyo3(signature = (path, selection_only=None, verbose=false))]
+    fn export_csv(
+        &self,
+        path: &str,
+        selection_only: Option<bool>,
+        verbose: bool,
+    ) -> PyResult<Py<PyAny>> {
+        // Check if selection actually has nodes (not just levels)
+        // Same pattern as export_string() — avoids empty export when
+        // add_nodes creates a selection level with 0 nodes.
+        let selection_has_nodes = if self.selection.get_level_count() > 0 {
+            let level_idx = self.selection.get_level_count().saturating_sub(1);
+            self.selection
+                .get_level(level_idx)
+                .map(|l| l.node_count() > 0)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        let use_selection = match selection_only {
+            Some(true) => true,
+            Some(false) => false,
+            None => selection_has_nodes,
+        };
+        let selection: Option<&CurrentSelection> = if use_selection {
+            Some(&self.selection)
+        } else {
+            None
+        };
+
+        let summary = export::to_csv_dir(&self.inner, path, selection, &self.inner.parent_types)
+            .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
+
+        if verbose {
+            for line in &summary.log_lines {
+                println!("{}", line);
+            }
+        }
+
+        Python::attach(|py| {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("output_dir", &summary.output_dir)?;
+
+            let nodes_dict = pyo3::types::PyDict::new(py);
+            for (k, v) in &summary.nodes {
+                nodes_dict.set_item(k, v)?;
+            }
+            dict.set_item("nodes", nodes_dict)?;
+
+            let conn_dict = pyo3::types::PyDict::new(py);
+            for (k, v) in &summary.connections {
+                conn_dict.set_item(k, v)?;
+            }
+            dict.set_item("connections", conn_dict)?;
+
+            dict.set_item("files_written", summary.files_written)?;
+
+            Ok(dict.into())
+        })
+    }
+
     /// Export to a string instead of a file.
     ///
     /// Useful for web APIs or further processing.

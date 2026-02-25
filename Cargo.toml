@@ -1,6 +1,6 @@
 [package]
 name = "kglite"
-version = "0.5.61"
+version = "0.5.62"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 description = "A high-performance graph database with Python bindings written in Rust."

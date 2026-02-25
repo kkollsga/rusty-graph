@@ -1112,3 +1112,146 @@ class TestRange:
     def test_range_step_zero_errors(self, cypher_graph):
         with pytest.raises(RuntimeError, match="step must not be zero"):
             cypher_graph.cypher("UNWIND range(1, 5, 0) AS x RETURN x")
+
+
+# ============================================================================
+# Variable binding in MATCH pattern properties
+# ============================================================================
+
+class TestVariableBindingInPatterns:
+    """WITH/UNWIND variables used in MATCH pattern properties: {prop: varName}."""
+
+    def test_with_scalar_in_match_property(self):
+        """WITH "Alice" AS name MATCH (n:Person {name: name}) RETURN n."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
+        g.cypher("CREATE (:Person {name: 'Bob', age: 25})")
+        result = g.cypher(
+            'WITH "Alice" AS name MATCH (p:Person {name: name}) RETURN p.age AS age'
+        )
+        assert len(result) == 1
+        assert result[0] == {"age": 30}
+
+    def test_unwind_variable_in_match_property(self):
+        """UNWIND names AS name MATCH (n {name: name}) for each value."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
+        g.cypher("CREATE (:Person {name: 'Bob', age: 25})")
+        result = g.cypher(
+            'UNWIND ["Alice", "Bob"] AS name '
+            "MATCH (p:Person {name: name}) RETURN p.name AS name, p.age AS age "
+            "ORDER BY age"
+        )
+        assert len(result) == 2
+        assert result[0] == {"name": "Bob", "age": 25}
+        assert result[1] == {"name": "Alice", "age": 30}
+
+    def test_integer_variable_in_match_property(self):
+        """Integer variable binding in pattern properties."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
+        g.cypher("CREATE (:Person {name: 'Bob', age: 25})")
+        result = g.cypher(
+            "WITH 30 AS target_age MATCH (p:Person {age: target_age}) RETURN p.name AS name"
+        )
+        assert len(result) == 1
+        assert result[0] == {"name": "Alice"}
+
+    def test_variable_no_match_returns_empty(self):
+        """Variable binding that matches nothing returns empty result."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice'})")
+        result = g.cypher(
+            'WITH "Nobody" AS name MATCH (p:Person {name: name}) RETURN p'
+        )
+        assert len(result) == 0
+
+    def test_variable_with_multiple_match_patterns(self):
+        """Variable from first MATCH used in second MATCH pattern."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice', city: 'Oslo'})")
+        g.cypher("CREATE (:City {name: 'Oslo', country: 'Norway'})")
+        result = g.cypher(
+            "MATCH (p:Person {name: 'Alice'}) "
+            "WITH p.city AS city_name "
+            "MATCH (c:City {name: city_name}) "
+            "RETURN c.country AS country"
+        )
+        assert len(result) == 1
+        assert result[0] == {"country": "Norway"}
+
+
+# ============================================================================
+# Map literals in expressions
+# ============================================================================
+
+class TestMapLiterals:
+    """Map literal expressions: {key: expr, key2: expr}."""
+
+    def test_map_literal_in_return(self):
+        """RETURN {name: n.name, age: n.age} AS person_map."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
+        result = g.cypher(
+            "MATCH (n:Person) RETURN {name: n.name, age: n.age} AS m"
+        )
+        assert len(result) == 1
+        m = result[0]["m"]
+        # Result may be a dict (auto-parsed) or JSON string
+        if isinstance(m, str):
+            import json
+            m = json.loads(m)
+        assert m["name"] == "Alice"
+        assert m["age"] == 30
+
+    def test_map_literal_in_with(self):
+        """WITH {x: 1, y: 2} AS point RETURN point."""
+        g = KnowledgeGraph()
+        result = g.cypher("WITH {x: 1, y: 2} AS point RETURN point")
+        assert len(result) == 1
+        m = result[0]["point"]
+        if isinstance(m, str):
+            import json
+            m = json.loads(m)
+        assert m["x"] == 1
+        assert m["y"] == 2
+
+    def test_map_literal_with_expressions(self):
+        """Map literal values can be expressions, not just literals."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
+        result = g.cypher(
+            "MATCH (n:Person) RETURN {name: n.name, next_age: n.age + 1} AS m"
+        )
+        assert len(result) == 1
+        m = result[0]["m"]
+        if isinstance(m, str):
+            import json
+            m = json.loads(m)
+        assert m["name"] == "Alice"
+        assert m["next_age"] == 31
+
+    def test_empty_map_literal(self):
+        """Empty map literal {}."""
+        g = KnowledgeGraph()
+        result = g.cypher("RETURN {} AS m")
+        assert len(result) == 1
+        m = result[0]["m"]
+        if isinstance(m, str):
+            import json
+            m = json.loads(m)
+        assert m == {}
+
+    def test_map_literal_with_string_values(self):
+        """Map literal with string values."""
+        g = KnowledgeGraph()
+        result = g.cypher(
+            'RETURN {status: "active", role: "admin"} AS m'
+        )
+        assert len(result) == 1
+        m = result[0]["m"]
+        if isinstance(m, str):
+            import json
+            m = json.loads(m)
+        assert m["status"] == "active"
+        assert m["role"] == "admin"

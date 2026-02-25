@@ -4,7 +4,8 @@
 use crate::datatypes::values::Value;
 use crate::graph::schema::{CurrentSelection, DirGraph};
 use petgraph::visit::EdgeRef;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::Path;
 
 /// Export the graph (or selection) to GraphML format.
 ///
@@ -367,6 +368,469 @@ pub fn to_csv(
     }
 
     Ok((nodes_csv, edges_csv))
+}
+
+/// Metadata for a single connection type in the blueprint.
+/// (source_type, target_type, property_columns, property_type_map)
+type ConnMeta = (String, String, Vec<String>, BTreeMap<String, String>);
+
+/// Summary of a CSV directory export.
+pub struct ExportSummary {
+    /// Output directory path.
+    pub output_dir: String,
+    /// Node counts per type: type_name → row count.
+    pub nodes: BTreeMap<String, usize>,
+    /// Connection counts per type: connection_type → row count.
+    pub connections: BTreeMap<String, usize>,
+    /// Total files written (CSVs + blueprint.json).
+    pub files_written: usize,
+    /// Log lines for verbose output.
+    pub log_lines: Vec<String>,
+}
+
+/// Export the graph (or selection) to an organized CSV directory tree.
+///
+/// Creates:
+/// - `nodes/<Type>.csv` for each node type (sub-nodes nested under parent)
+/// - `connections/<Type>.csv` for each connection type
+/// - `blueprint.json` for round-trip re-import via `from_blueprint()`
+pub fn to_csv_dir(
+    graph: &DirGraph,
+    output_dir: &str,
+    selection: Option<&CurrentSelection>,
+    parent_types: &HashMap<String, String>,
+) -> Result<ExportSummary, String> {
+    let output = Path::new(output_dir);
+    let mut log_lines = Vec::new();
+    log_lines.push(format!("Exporting to {}...", output_dir));
+
+    // ── 1. Collect selected node indices ─────────────────────────
+    let node_indices = selected_node_indices(graph, selection);
+    let node_set: HashSet<_> = node_indices.iter().copied().collect();
+
+    // ── 2. Group nodes by type ───────────────────────────────────
+    // type_name → Vec<NodeIndex>
+    let mut nodes_by_type: BTreeMap<String, Vec<petgraph::graph::NodeIndex>> = BTreeMap::new();
+    for &idx in &node_indices {
+        if let Some(node) = graph.graph.node_weight(idx) {
+            nodes_by_type
+                .entry(node.node_type.clone())
+                .or_default()
+                .push(idx);
+        }
+    }
+
+    // ── 3. Collect edges between selected nodes, grouped by type ─
+    // conn_type → Vec<(source_idx, target_idx, edge_ref)>
+    struct EdgeInfo {
+        source_idx: petgraph::graph::NodeIndex,
+        target_idx: petgraph::graph::NodeIndex,
+        properties: HashMap<String, Value>,
+    }
+    let mut edges_by_type: BTreeMap<String, Vec<EdgeInfo>> = BTreeMap::new();
+    for &source_idx in &node_indices {
+        for edge in graph.graph.edges(source_idx) {
+            let target_idx = edge.target();
+            if node_set.contains(&target_idx) {
+                let w = edge.weight();
+                edges_by_type
+                    .entry(w.connection_type.clone())
+                    .or_default()
+                    .push(EdgeInfo {
+                        source_idx,
+                        target_idx,
+                        properties: w.properties.clone(),
+                    });
+            }
+        }
+    }
+
+    // ── 4. Create directories ────────────────────────────────────
+    let nodes_dir = output.join("nodes");
+    let connections_dir = output.join("connections");
+    std::fs::create_dir_all(&nodes_dir)
+        .map_err(|e| format!("Failed to create nodes directory: {}", e))?;
+    if !edges_by_type.is_empty() {
+        std::fs::create_dir_all(&connections_dir)
+            .map_err(|e| format!("Failed to create connections directory: {}", e))?;
+    }
+
+    // Create sub-node directories
+    for parent in parent_types.values() {
+        if nodes_by_type.contains_key(parent) {
+            let sub_dir = nodes_dir.join(parent);
+            std::fs::create_dir_all(&sub_dir)
+                .map_err(|e| format!("Failed to create sub-node directory: {}", e))?;
+        }
+    }
+
+    let mut summary = ExportSummary {
+        output_dir: output_dir.to_string(),
+        nodes: BTreeMap::new(),
+        connections: BTreeMap::new(),
+        files_written: 0,
+        log_lines: Vec::new(),
+    };
+
+    // ── 5. Write node CSVs ───────────────────────────────────────
+    // Track property columns and types per node type for the blueprint
+    let mut node_type_columns: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut node_type_prop_types: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+
+    for (node_type, indices) in &nodes_by_type {
+        // First pass: collect the union of all property names
+        let mut prop_names: BTreeSet<String> = BTreeSet::new();
+        for &idx in indices {
+            if let Some(node) = graph.graph.node_weight(idx) {
+                for key in node.properties.keys() {
+                    prop_names.insert(key.clone());
+                }
+            }
+        }
+        let prop_cols: Vec<String> = prop_names.into_iter().collect();
+
+        // Infer property types from first non-null value of each property
+        let mut prop_types: BTreeMap<String, String> = BTreeMap::new();
+        for col in &prop_cols {
+            for &idx in indices {
+                if let Some(node) = graph.graph.node_weight(idx) {
+                    if let Some(val) = node.properties.get(col) {
+                        if !matches!(val, Value::Null) {
+                            prop_types.insert(col.clone(), value_type_name(val));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build CSV
+        let mut csv = String::with_capacity(4096);
+        // Header: id, title, then properties
+        csv.push_str("id,title");
+        for col in &prop_cols {
+            csv.push(',');
+            csv.push_str(&escape_csv(col));
+        }
+        csv.push('\n');
+
+        // Rows
+        for &idx in indices {
+            if let Some(node) = graph.graph.node_weight(idx) {
+                csv.push_str(&escape_csv(&value_to_string(&node.id)));
+                csv.push(',');
+                csv.push_str(&escape_csv(&value_to_string(&node.title)));
+                for col in &prop_cols {
+                    csv.push(',');
+                    if let Some(val) = node.properties.get(col) {
+                        csv.push_str(&escape_csv(&value_to_string(val)));
+                    }
+                }
+                csv.push('\n');
+            }
+        }
+
+        // Determine file path (nested under parent if sub-node)
+        let csv_path = if let Some(parent) = parent_types.get(node_type) {
+            nodes_dir.join(parent).join(format!("{}.csv", node_type))
+        } else {
+            nodes_dir.join(format!("{}.csv", node_type))
+        };
+
+        let relative_path = csv_path
+            .strip_prefix(output)
+            .unwrap_or(&csv_path)
+            .to_string_lossy()
+            .to_string();
+
+        std::fs::write(&csv_path, &csv)
+            .map_err(|e| format!("Failed to write {}: {}", relative_path, e))?;
+
+        log_lines.push(format!(
+            "  {}: {} nodes, {} properties",
+            relative_path,
+            indices.len(),
+            prop_cols.len()
+        ));
+
+        summary.nodes.insert(node_type.clone(), indices.len());
+        summary.files_written += 1;
+        node_type_columns.insert(node_type.clone(), prop_cols);
+        node_type_prop_types.insert(node_type.clone(), prop_types);
+    }
+
+    // ── 6. Write connection CSVs ─────────────────────────────────
+    // Track connection metadata for blueprint
+    let mut conn_meta: BTreeMap<String, ConnMeta> = BTreeMap::new(); // conn_type -> (source_type, target_type, prop_cols, prop_types)
+
+    for (conn_type, edges) in &edges_by_type {
+        // Collect property names across all edges of this type
+        let mut prop_names: BTreeSet<String> = BTreeSet::new();
+        for edge in edges {
+            for key in edge.properties.keys() {
+                prop_names.insert(key.clone());
+            }
+        }
+        let prop_cols: Vec<String> = prop_names.into_iter().collect();
+
+        // Infer property types
+        let mut prop_types: BTreeMap<String, String> = BTreeMap::new();
+        for col in &prop_cols {
+            for edge in edges {
+                if let Some(val) = edge.properties.get(col) {
+                    if !matches!(val, Value::Null) {
+                        prop_types.insert(col.clone(), value_type_name(val));
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Detect source and target types (use first edge)
+        let source_type = edges
+            .first()
+            .and_then(|e| graph.graph.node_weight(e.source_idx))
+            .map(|n| n.node_type.clone())
+            .unwrap_or_default();
+        let target_type = edges
+            .first()
+            .and_then(|e| graph.graph.node_weight(e.target_idx))
+            .map(|n| n.node_type.clone())
+            .unwrap_or_default();
+
+        // Build CSV
+        let mut csv = String::with_capacity(4096);
+        csv.push_str("source_id,source_type,target_id,target_type");
+        for col in &prop_cols {
+            csv.push(',');
+            csv.push_str(&escape_csv(col));
+        }
+        csv.push('\n');
+
+        for edge in edges {
+            let source_id = graph
+                .graph
+                .node_weight(edge.source_idx)
+                .map(|n| value_to_string(&n.id))
+                .unwrap_or_default();
+            let src_type = graph
+                .graph
+                .node_weight(edge.source_idx)
+                .map(|n| n.node_type.clone())
+                .unwrap_or_default();
+            let target_id = graph
+                .graph
+                .node_weight(edge.target_idx)
+                .map(|n| value_to_string(&n.id))
+                .unwrap_or_default();
+            let tgt_type = graph
+                .graph
+                .node_weight(edge.target_idx)
+                .map(|n| n.node_type.clone())
+                .unwrap_or_default();
+
+            csv.push_str(&escape_csv(&source_id));
+            csv.push(',');
+            csv.push_str(&escape_csv(&src_type));
+            csv.push(',');
+            csv.push_str(&escape_csv(&target_id));
+            csv.push(',');
+            csv.push_str(&escape_csv(&tgt_type));
+            for col in &prop_cols {
+                csv.push(',');
+                if let Some(val) = edge.properties.get(col) {
+                    csv.push_str(&escape_csv(&value_to_string(val)));
+                }
+            }
+            csv.push('\n');
+        }
+
+        let csv_path = connections_dir.join(format!("{}.csv", conn_type));
+        let relative_path = csv_path
+            .strip_prefix(output)
+            .unwrap_or(&csv_path)
+            .to_string_lossy()
+            .to_string();
+
+        std::fs::write(&csv_path, &csv)
+            .map_err(|e| format!("Failed to write {}: {}", relative_path, e))?;
+
+        log_lines.push(format!("  {}: {} edges", relative_path, edges.len()));
+
+        summary.connections.insert(conn_type.clone(), edges.len());
+        summary.files_written += 1;
+        conn_meta.insert(
+            conn_type.clone(),
+            (source_type, target_type, prop_cols, prop_types),
+        );
+    }
+
+    // ── 7. Generate blueprint.json ───────────────────────────────
+    let blueprint = build_blueprint(
+        &nodes_by_type,
+        &node_type_columns,
+        &node_type_prop_types,
+        parent_types,
+        &conn_meta,
+        output,
+    );
+    let blueprint_path = output.join("blueprint.json");
+    std::fs::write(&blueprint_path, &blueprint)
+        .map_err(|e| format!("Failed to write blueprint.json: {}", e))?;
+    log_lines.push("  blueprint.json".to_string());
+    summary.files_written += 1;
+
+    // Summary line
+    let total_nodes: usize = summary.nodes.values().sum();
+    let total_edges: usize = summary.connections.values().sum();
+    log_lines.push(format!(
+        "Done: {} nodes, {} edges, {} files written",
+        total_nodes, total_edges, summary.files_written
+    ));
+
+    summary.log_lines = log_lines;
+    Ok(summary)
+}
+
+/// Extract the selected node indices (or all nodes if no selection).
+fn selected_node_indices(
+    graph: &DirGraph,
+    selection: Option<&CurrentSelection>,
+) -> Vec<petgraph::graph::NodeIndex> {
+    if let Some(sel) = selection {
+        let level_idx = sel.get_level_count().saturating_sub(1);
+        if let Some(level) = sel.get_level(level_idx) {
+            level.get_all_nodes()
+        } else {
+            graph.graph.node_indices().collect()
+        }
+    } else {
+        graph.graph.node_indices().collect()
+    }
+}
+
+/// Map a Value variant to a blueprint property type string.
+fn value_type_name(value: &Value) -> String {
+    match value {
+        Value::String(_) => "string".to_string(),
+        Value::Int64(_) => "int".to_string(),
+        Value::Float64(_) => "float".to_string(),
+        Value::Boolean(_) => "bool".to_string(),
+        Value::DateTime(_) => "date".to_string(),
+        Value::UniqueId(_) => "int".to_string(),
+        Value::Point { .. } => "string".to_string(), // serialized as string in CSV
+        Value::Null => "string".to_string(),
+        Value::NodeRef(_) => "int".to_string(),
+    }
+}
+
+/// Build a blueprint.json string for round-trip re-import.
+fn build_blueprint(
+    nodes_by_type: &BTreeMap<String, Vec<petgraph::graph::NodeIndex>>,
+    _node_type_columns: &BTreeMap<String, Vec<String>>,
+    node_type_prop_types: &BTreeMap<String, BTreeMap<String, String>>,
+    parent_types: &HashMap<String, String>,
+    conn_meta: &BTreeMap<String, ConnMeta>,
+    _output_dir: &Path,
+) -> String {
+    let mut json = String::with_capacity(4096);
+    json.push_str("{\n  \"settings\": {\n    \"root\": \".\"\n  },\n  \"nodes\": {");
+
+    let mut first_node = true;
+    for node_type in nodes_by_type.keys() {
+        if !first_node {
+            json.push(',');
+        }
+        first_node = false;
+
+        // Determine CSV path relative to output_dir
+        let csv_rel = if let Some(parent) = parent_types.get(node_type) {
+            format!("nodes/{}/{}.csv", parent, node_type)
+        } else {
+            format!("nodes/{}.csv", node_type)
+        };
+
+        json.push_str(&format!("\n    {}: {{\n", json_string(node_type)));
+        json.push_str(&format!("      \"csv\": {},\n", json_string(&csv_rel)));
+        json.push_str("      \"pk\": \"id\",\n");
+        json.push_str("      \"title\": \"title\"");
+
+        // Properties
+        if let Some(prop_types) = node_type_prop_types.get(node_type) {
+            if !prop_types.is_empty() {
+                json.push_str(",\n      \"properties\": {");
+                let mut first_prop = true;
+                for (col, typ) in prop_types {
+                    if !first_prop {
+                        json.push(',');
+                    }
+                    first_prop = false;
+                    json.push_str(&format!(
+                        "\n        {}: {}",
+                        json_string(col),
+                        json_string(typ)
+                    ));
+                }
+                json.push_str("\n      }");
+            }
+        }
+
+        // Sub-node parent reference
+        if let Some(parent) = parent_types.get(node_type) {
+            json.push_str(&format!(",\n      \"parent\": {}", json_string(parent)));
+        }
+
+        // Connection definitions for this node type
+        let node_conns: Vec<_> = conn_meta
+            .iter()
+            .filter(|(_, (src, _, _, _))| src == node_type)
+            .collect();
+
+        if !node_conns.is_empty() {
+            json.push_str(",\n      \"connections\": {\n        \"junction_edges\": {");
+            let mut first_conn = true;
+            for (conn_type, (_, target_type, prop_cols, _prop_types)) in &node_conns {
+                if !first_conn {
+                    json.push(',');
+                }
+                first_conn = false;
+                let conn_csv = format!("connections/{}.csv", conn_type);
+                json.push_str(&format!(
+                    "\n          {}: {{\n            \"csv\": {},\n            \"source_fk\": \"source_id\",\n            \"target\": {},\n            \"target_fk\": \"target_id\"",
+                    json_string(conn_type),
+                    json_string(&conn_csv),
+                    json_string(target_type)
+                ));
+                // Edge properties (exclude the 4 standard columns)
+                if !prop_cols.is_empty() {
+                    json.push_str(",\n            \"properties\": [");
+                    let mut first_p = true;
+                    for p in prop_cols.iter() {
+                        if !first_p {
+                            json.push_str(", ");
+                        }
+                        first_p = false;
+                        json.push_str(&json_string(p));
+                    }
+                    json.push(']');
+                }
+                json.push_str("\n          }");
+            }
+            json.push_str("\n        }\n      }");
+        }
+
+        json.push_str("\n    }");
+    }
+
+    json.push_str("\n  }\n}\n");
+
+    // Pretty-format via serde_json for consistency (the string is already valid JSON)
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&json) {
+        if let Ok(pretty) = serde_json::to_string_pretty(&parsed) {
+            return pretty;
+        }
+    }
+    json
 }
 
 // Helper functions

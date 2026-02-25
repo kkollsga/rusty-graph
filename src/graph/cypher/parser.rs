@@ -991,6 +991,12 @@ impl CypherParser {
                 }
             }
 
+            // Map literal: {key: expr, key2: expr, ...}
+            Some(CypherToken::LBrace) => {
+                self.advance(); // consume {
+                self.parse_map_literal()
+            }
+
             // Keywords that can also be function names when followed by (
             Some(CypherToken::Contains) if self.peek_at(1) == Some(&CypherToken::LParen) => {
                 self.advance();
@@ -1078,6 +1084,35 @@ impl CypherParser {
         self.expect(&CypherToken::RBrace)?;
 
         Ok(Expression::MapProjection { variable, items })
+    }
+
+    /// Parse map literal: {key: expr, key2: expr, ...}
+    /// The opening LBrace has already been consumed.
+    fn parse_map_literal(&mut self) -> Result<Expression, String> {
+        let mut entries = Vec::new();
+
+        if !self.check(&CypherToken::RBrace) {
+            loop {
+                let key = match self.advance().cloned() {
+                    Some(CypherToken::Identifier(name)) => name,
+                    other => {
+                        return Err(format!("Expected key name in map literal, got {:?}", other))
+                    }
+                };
+                self.expect(&CypherToken::Colon)?;
+                let expr = self.parse_expression()?;
+                entries.push((key, expr));
+
+                if self.check(&CypherToken::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        self.expect(&CypherToken::RBrace)?;
+        Ok(Expression::MapLiteral(entries))
     }
 
     // ========================================================================

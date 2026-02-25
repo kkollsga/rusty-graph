@@ -249,6 +249,9 @@ pub enum Expression {
     IsNull(Box<Expression>),
     /// IS NOT NULL expression: expr IS NOT NULL → bool
     IsNotNull(Box<Expression>),
+    /// Map literal: {key: expr, key2: expr, ...}
+    /// Evaluates to a JSON-like map object.
+    MapLiteral(Vec<(String, Expression)>),
 }
 
 /// A single item in a map projection.

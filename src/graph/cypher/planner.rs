@@ -1602,6 +1602,12 @@ impl TextScoreCollector {
                 }
                 Ok(())
             }
+            Expression::MapLiteral(entries) => {
+                for (_, expr) in entries.iter_mut() {
+                    self.rewrite_expr(expr, params)?;
+                }
+                Ok(())
+            }
             // Leaf nodes
             Expression::PropertyAccess { .. }
             | Expression::Variable(_)
