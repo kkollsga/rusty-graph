@@ -21,5 +21,14 @@ __pycache__/
 *.so
 *.pyd
 
+# IDE and editor settings
+.vscode/
+
+# Performance baselines (dev artifacts)
+/baselines/
+
+# Generated graph files
+*.kgl
+
 # macOS system files
 .DS_Store
