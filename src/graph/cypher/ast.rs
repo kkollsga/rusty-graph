@@ -162,6 +162,7 @@ pub enum Predicate {
     },
     Exists {
         patterns: Vec<Pattern>,
+        where_clause: Option<Box<Predicate>>,
     },
 }
 

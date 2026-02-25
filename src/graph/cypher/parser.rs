@@ -369,6 +369,11 @@ impl CypherParser {
                 break;
             }
 
+            // Stop at WHERE keyword (EXISTS { MATCH ... WHERE ... } subquery)
+            if paren_depth == 0 && bracket_depth == 0 && self.check(&CypherToken::Where) {
+                break;
+            }
+
             let token = self.advance().unwrap().clone();
 
             match &token {
@@ -552,8 +557,18 @@ impl CypherParser {
             if self.check(&CypherToken::LBrace) {
                 self.advance(); // consume {
                 let patterns = self.parse_exists_patterns()?;
+                // Check for optional WHERE clause inside EXISTS { MATCH ... WHERE ... }
+                let where_clause = if self.check(&CypherToken::Where) {
+                    self.advance(); // consume WHERE
+                    Some(Box::new(self.parse_predicate()?))
+                } else {
+                    None
+                };
                 self.expect(&CypherToken::RBrace)?;
-                return Ok(Predicate::Exists { patterns });
+                return Ok(Predicate::Exists {
+                    patterns,
+                    where_clause,
+                });
             } else if self.check(&CypherToken::LParen) {
                 self.advance(); // consume outer (
                                 // Support EXISTS((...)) — inner parens are the pattern
@@ -563,6 +578,7 @@ impl CypherParser {
                     self.expect(&CypherToken::RParen)?; // consume outer )
                     return Ok(Predicate::Exists {
                         patterns: vec![pattern],
+                        where_clause: None,
                     });
                 } else {
                     return Err("EXISTS(...) requires a pattern in parentheses, e.g. EXISTS((n)-[:REL]->())".to_string());
@@ -582,6 +598,7 @@ impl CypherParser {
                 let pattern = crate::graph::pattern_matching::parse_pattern(&pattern_str)?;
                 return Ok(Predicate::Exists {
                     patterns: vec![pattern],
+                    where_clause: None,
                 });
             }
             self.advance(); // consume (

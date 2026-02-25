@@ -1854,7 +1854,10 @@ impl<'a> CypherExecutor<'a> {
                     _ => Ok(false),
                 }
             }
-            Predicate::Exists { patterns } => {
+            Predicate::Exists {
+                patterns,
+                where_clause,
+            } => {
                 // Execute each pattern and check if any match is compatible
                 // with the current row's bindings (outer variables must match)
                 for pattern in patterns {
@@ -1874,7 +1877,23 @@ impl<'a> CypherExecutor<'a> {
                     )
                     .set_deadline(self.deadline);
                     let matches = executor.execute(pat)?;
-                    let found = matches.iter().any(|m| self.bindings_compatible(row, m));
+
+                    let found = if let Some(ref where_pred) = where_clause {
+                        // EXISTS { MATCH ... WHERE ... } — evaluate WHERE against
+                        // a combined row (outer bindings + inner match bindings)
+                        matches.iter().any(|m| {
+                            if !self.bindings_compatible(row, m) {
+                                return false;
+                            }
+                            let mut combined_row = row.clone();
+                            self.merge_match_into_row(&mut combined_row, m);
+                            self.evaluate_predicate(where_pred, &combined_row)
+                                .unwrap_or(false)
+                        })
+                    } else {
+                        matches.iter().any(|m| self.bindings_compatible(row, m))
+                    };
+
                     if !found {
                         return Ok(false);
                     }
