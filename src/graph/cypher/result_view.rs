@@ -486,6 +486,15 @@ fn format_preprocessed_value(pv: &PreProcessedValue) -> String {
     }
 }
 
+/// Truncate a string in the middle if it exceeds `max_len`, keeping both ends visible.
+fn truncate_middle(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_string();
+    }
+    let keep = (max_len - 5) / 2; // 5 chars for " ... "
+    format!("{} ... {}", &s[..keep], &s[s.len() - keep..])
+}
+
 fn format_result_view_multiline(
     columns: &[String],
     rows: &[Vec<PreProcessedValue>],
@@ -509,10 +518,11 @@ fn format_result_view_multiline(
         for (j, val) in row.iter().enumerate() {
             if j < columns.len() {
                 let s = format_preprocessed_value(val);
+                let display = truncate_middle(&s, 80);
                 buf.push_str(&format!(
                     "  {:width$}  {}\n",
                     columns[j],
-                    s,
+                    display,
                     width = key_width
                 ));
             }

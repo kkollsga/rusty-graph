@@ -2337,7 +2337,14 @@ impl KnowledgeGraph {
                 keys.sort();
                 for key in keys {
                     if let Some(val) = node.properties.get(key) {
-                        buf.push_str(&format!("  {}: {}\n", key, format_value(val)));
+                        let s = format_value(val);
+                        let display = if s.len() > 80 {
+                            let keep = (80 - 5) / 2;
+                            format!("{} ... {}", &s[..keep], &s[s.len() - keep..])
+                        } else {
+                            s
+                        };
+                        buf.push_str(&format!("  {}: {}\n", key, display));
                     }
                 }
             }
