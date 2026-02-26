@@ -235,6 +235,10 @@ impl ResultView {
         format!("ResultView({} rows, columns={:?})", self.rows.len(), cols)
     }
 
+    fn __str__(&self) -> String {
+        format_result_view(&self.columns, &self.rows, 50)
+    }
+
     /// Column names as a list of strings.
     #[getter]
     fn columns(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -383,4 +387,55 @@ impl ResultIter {
         self.index += 1;
         Ok(Some(result))
     }
+}
+
+// ========================================================================
+// Pretty-print formatting for ResultView
+// ========================================================================
+
+fn format_preprocessed_value(pv: &PreProcessedValue) -> String {
+    match pv {
+        PreProcessedValue::Plain(v) => crate::datatypes::values::format_value(v),
+        PreProcessedValue::ParsedJson(jv) => {
+            // Compact JSON string
+            serde_json::to_string(jv).unwrap_or_else(|_| "???".to_string())
+        }
+    }
+}
+
+fn format_result_view(columns: &[String], rows: &[Vec<PreProcessedValue>], limit: usize) -> String {
+    if rows.is_empty() {
+        return "(empty result)".to_string();
+    }
+
+    let total = rows.len();
+    let show = total.min(limit);
+
+    // Find the widest column name for alignment
+    let key_width = columns.iter().map(|c| c.len()).max().unwrap_or(0);
+
+    let mut buf = String::with_capacity(show * 200);
+
+    for (i, row) in rows.iter().take(show).enumerate() {
+        if i > 0 {
+            buf.push('\n');
+        }
+        for (j, val) in row.iter().enumerate() {
+            if j < columns.len() {
+                let s = format_preprocessed_value(val);
+                buf.push_str(&format!(
+                    "  {:width$}  {}\n",
+                    columns[j],
+                    s,
+                    width = key_width
+                ));
+            }
+        }
+    }
+
+    if total > show {
+        buf.push_str(&format!("\n... {} of {} rows shown\n", show, total));
+    }
+
+    buf
 }

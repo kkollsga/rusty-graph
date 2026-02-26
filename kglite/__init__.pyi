@@ -179,6 +179,9 @@ class ResultView:
     def __getitem__(self, index: int) -> dict[str, Any]: ...
     def __iter__(self) -> ResultIter: ...
     def __repr__(self) -> str: ...
+    def __str__(self) -> str:
+        """Vertical card format: one key-value per line, rows separated by blank lines."""
+        ...
 
 
 def load(path: str) -> KnowledgeGraph:
@@ -663,6 +666,17 @@ class KnowledgeGraph:
 
         Returns:
             DataFrame with one row per selected node.
+        """
+        ...
+
+    def to_str(self, limit: int = 50) -> str:
+        """Format the current selection as a human-readable string.
+
+        Each node is printed as a block with ``[Type] title (id: x)``
+        header and indented properties, one per line.
+
+        Args:
+            limit: Maximum number of nodes to show. Default ``50``.
         """
         ...
 
@@ -1530,18 +1544,30 @@ class KnowledgeGraph:
         """
         ...
 
-    def sample(self, node_type: str, n: int = 5) -> ResultView:
-        """Return a quick sample of nodes for a given type.
+    @overload
+    def sample(self, node_type: str, n: int = 5) -> ResultView: ...
+    @overload
+    def sample(self, n: int = 5) -> ResultView: ...
+    def sample(self, node_type_or_n: Union[str, int, None] = None, n: Optional[int] = None) -> ResultView:
+        """Return a quick sample of nodes.
+
+        Can be called as:
+
+        - ``sample("Person")`` — sample 5 nodes of the given type
+        - ``sample("Person", 10)`` — sample 10 of that type
+        - ``sample(3)`` — sample 3 nodes from the current selection
+        - ``sample()`` — sample 5 nodes from the current selection
 
         Args:
-            node_type: The node type to sample.
-            n: Number of nodes to return. Default ``5``.
+            node_type_or_n: A node type (str) or sample count (int).
+            n: Sample count when first arg is a node type. Default ``5``.
 
         Returns:
-            List of node dicts (same format as :meth:`collect`).
+            :class:`ResultView` with sampled node rows.
 
         Raises:
-            KeyError: If node_type does not exist.
+            KeyError: If the given node type does not exist.
+            ValueError: If no selection and no node type given.
         """
         ...
 

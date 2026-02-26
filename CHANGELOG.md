@@ -5,6 +5,14 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.68] - 2026-02-26
+
+### Added
+
+- **`to_str(limit=50)`** — format current selection as a human-readable string with `[Type] title (id: x)` headers and indented properties
+- **`print(ResultView)`** — `ResultView.__str__` now renders a vertical card format (one key-value per line) instead of the compact repr, making `print(result)` useful for inspection
+- **`sample()` selection-aware** — `sample()` now works on the current selection (`graph.select('Person').sample(3)`) in addition to the existing `sample('Person', 3)` form
+
 ## [0.5.67] - 2026-02-26
 
 ### Changed

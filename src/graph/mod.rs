@@ -2307,6 +2307,53 @@ impl KnowledgeGraph {
         Ok(df.unbind())
     }
 
+    /// Format the current selection as a human-readable string.
+    ///
+    /// Each node is printed as a block with type, id, title, and all properties.
+    /// The ``limit`` parameter caps the number of nodes shown (default 50).
+    #[pyo3(signature = (limit=50))]
+    fn to_str(&self, limit: usize) -> PyResult<String> {
+        use crate::datatypes::values::format_value;
+
+        let node_indices: Vec<_> = self.selection.current_node_indices().collect();
+        let total = node_indices.len();
+        let show = total.min(limit);
+
+        if total == 0 {
+            return Ok("(empty selection)".to_string());
+        }
+
+        let mut buf = String::with_capacity(show * 200);
+
+        for (i, &idx) in node_indices.iter().take(show).enumerate() {
+            if let Some(node) = self.inner.get_node(idx) {
+                if i > 0 {
+                    buf.push('\n');
+                }
+                buf.push_str(&format!(
+                    "[{}] {} (id: {})\n",
+                    node.node_type,
+                    format_value(&node.title),
+                    format_value(&node.id),
+                ));
+                // Sort property keys for deterministic output
+                let mut keys: Vec<&String> = node.properties.keys().collect();
+                keys.sort();
+                for key in keys {
+                    if let Some(val) = node.properties.get(key) {
+                        buf.push_str(&format!("  {}: {}\n", key, format_value(val)));
+                    }
+                }
+            }
+        }
+
+        if total > show {
+            buf.push_str(&format!("\n... and {} more nodes\n", total - show));
+        }
+
+        Ok(buf)
+    }
+
     /// Returns the count of nodes in the current selection without materialization.
     /// If no selection has been applied, returns the total graph node count.
     /// Much faster than collect() when you only need the count.
@@ -4015,12 +4062,64 @@ impl KnowledgeGraph {
         })
     }
 
-    /// Return a quick sample of nodes for a given type.
-    #[pyo3(signature = (node_type, n=5))]
-    fn sample(&self, node_type: &str, n: usize) -> PyResult<Py<PyAny>> {
-        let nodes = introspection::compute_sample(&self.inner, node_type, n)
-            .map_err(PyErr::new::<pyo3::exceptions::PyKeyError, _>)?;
-        let view = cypher::ResultView::from_nodes(nodes.into_iter());
+    /// Return a quick sample of nodes.
+    ///
+    /// Can be called as:
+    ///   - ``sample("Person")`` — sample 5 nodes of the given type
+    ///   - ``sample("Person", 10)`` — sample 10 nodes of the given type
+    ///   - ``sample(3)`` — sample 3 nodes from the current selection
+    ///   - ``sample()`` — sample 5 nodes from the current selection
+    #[pyo3(signature = (node_type_or_n=None, n=None))]
+    fn sample(
+        &self,
+        node_type_or_n: Option<&Bound<'_, PyAny>>,
+        n: Option<usize>,
+    ) -> PyResult<Py<PyAny>> {
+        let default_n = 5usize;
+
+        // Parse first arg: could be str (node_type) or int (n)
+        let (node_type, count) = match node_type_or_n {
+            Some(arg) => {
+                if let Ok(s) = arg.extract::<String>() {
+                    (Some(s), n.unwrap_or(default_n))
+                } else if let Ok(i) = arg.extract::<usize>() {
+                    (None, i)
+                } else {
+                    return Err(pyo3::exceptions::PyTypeError::new_err(
+                        "sample() first argument must be a node type (str) or count (int)",
+                    ));
+                }
+            }
+            None => (None, n.unwrap_or(default_n)),
+        };
+
+        if let Some(nt) = node_type {
+            let nodes = introspection::compute_sample(&self.inner, &nt, count)
+                .map_err(PyErr::new::<pyo3::exceptions::PyKeyError, _>)?;
+            let view = cypher::ResultView::from_nodes(nodes.into_iter());
+            return Python::attach(|py| Py::new(py, view).map(|v| v.into_any()));
+        }
+
+        // Selection-based: sample from current selection
+        let level_count = self.selection.get_level_count();
+        if level_count == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "sample() requires either a selection or a node_type argument",
+            ));
+        }
+        let last = level_count - 1;
+        let level = self
+            .selection
+            .get_level(last)
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Empty selection"))?;
+        let indices = level.get_all_nodes();
+        let mut result = Vec::with_capacity(count.min(indices.len()));
+        for idx in indices.iter().take(count) {
+            if let Some(node) = self.inner.graph.node_weight(*idx) {
+                result.push(node);
+            }
+        }
+        let view = cypher::ResultView::from_nodes(result.into_iter());
         Python::attach(|py| Py::new(py, view).map(|v| v.into_any()))
     }
 
