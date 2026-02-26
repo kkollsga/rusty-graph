@@ -805,6 +805,95 @@ pub(super) fn community_results_to_py(
     Ok(dict.into())
 }
 
+/// Parse the `method` parameter of `traverse()` — accepts a string or dict.
+///
+/// String shorthand: `method='contains'` → MethodConfig with defaults.
+/// Dict form: `method={'type': 'distance', 'max_m': 5000, 'resolve': 'centroid'}`
+fn parse_method_param(val: &Bound<'_, PyAny>) -> PyResult<traversal_methods::MethodConfig> {
+    use traversal_methods::MethodConfig;
+
+    // Try string first
+    if let Ok(s) = val.extract::<String>() {
+        return Ok(MethodConfig::from_string(s));
+    }
+
+    // Try dict
+    let dict = val.cast::<PyDict>().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "method= must be a string (e.g. 'contains') or a dict (e.g. {'type': 'distance', 'max_m': 5000})"
+        )
+    })?;
+
+    let method_type: String = dict
+        .get_item("type")?
+        .ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(
+                "method dict must contain 'type' key (e.g. {'type': 'contains'})",
+            )
+        })?
+        .extract()?;
+
+    let resolve = if let Some(v) = dict.get_item("resolve")? {
+        let s: String = v.extract()?;
+        Some(MethodConfig::parse_resolve(&s).map_err(pyo3::exceptions::PyValueError::new_err)?)
+    } else {
+        None
+    };
+
+    let max_distance_m: Option<f64> = dict.get_item("max_m")?.map(|v| v.extract()).transpose()?;
+
+    let geometry_field: Option<String> = dict
+        .get_item("geometry")?
+        .map(|v| v.extract())
+        .transpose()?;
+
+    let property: Option<String> = dict
+        .get_item("property")?
+        .map(|v| v.extract())
+        .transpose()?;
+
+    let threshold: Option<f64> = dict
+        .get_item("threshold")?
+        .map(|v| v.extract())
+        .transpose()?;
+
+    let metric: Option<String> = dict.get_item("metric")?.map(|v| v.extract()).transpose()?;
+
+    let algorithm: Option<String> = dict
+        .get_item("algorithm")?
+        .map(|v| v.extract())
+        .transpose()?;
+
+    let features: Option<Vec<String>> = dict
+        .get_item("features")?
+        .map(|v| v.extract())
+        .transpose()?;
+
+    let k: Option<usize> = dict.get_item("k")?.map(|v| v.extract()).transpose()?;
+
+    let eps: Option<f64> = dict.get_item("eps")?.map(|v| v.extract()).transpose()?;
+
+    let min_samples: Option<usize> = dict
+        .get_item("min_samples")?
+        .map(|v| v.extract())
+        .transpose()?;
+
+    Ok(MethodConfig {
+        method_type,
+        resolve,
+        max_distance_m,
+        geometry_field,
+        property,
+        threshold,
+        metric,
+        algorithm,
+        features,
+        k,
+        eps,
+        min_samples,
+    })
+}
+
 #[pymethods]
 impl KnowledgeGraph {
     #[new]
@@ -3156,11 +3245,11 @@ impl KnowledgeGraph {
         }
     }
 
-    #[pyo3(signature = (connection_type, level_index=None, direction=None, filter_target=None, filter_connection=None, sort_target=None, max_nodes=None, new_level=None))]
+    #[pyo3(signature = (connection_type=None, level_index=None, direction=None, filter_target=None, filter_connection=None, sort_target=None, max_nodes=None, new_level=None, method=None))]
     #[allow(clippy::too_many_arguments)]
     fn traverse(
         &mut self,
-        connection_type: String,
+        connection_type: Option<String>,
         level_index: Option<usize>,
         direction: Option<String>,
         filter_target: Option<&Bound<'_, PyDict>>,
@@ -3168,6 +3257,7 @@ impl KnowledgeGraph {
         sort_target: Option<&Bound<'_, PyAny>>,
         max_nodes: Option<usize>,
         new_level: Option<bool>,
+        method: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let mut new_kg = self.clone();
 
@@ -3184,58 +3274,116 @@ impl KnowledgeGraph {
             None
         };
 
-        let conn_conditions = if let Some(cond) = filter_connection {
-            Some(py_in::pydict_to_filter_conditions(cond)?)
+        if let Some(method_val) = method {
+            // ── Comparison-based traversal mode ──
+            let config = parse_method_param(method_val)?;
+
+            let sort_fields = if let Some(spec) = sort_target {
+                Some(py_in::parse_sort_fields(spec, None)?)
+            } else {
+                None
+            };
+
+            traversal_methods::make_comparison_traversal(
+                &self.inner,
+                &mut new_kg.selection,
+                connection_type.as_deref(), // reused as target_type
+                &config,
+                conditions.as_ref(),
+                sort_fields.as_ref(),
+                max_nodes,
+            )
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+            let actual = new_kg
+                .selection
+                .get_level(new_kg.selection.get_level_count().saturating_sub(1))
+                .map(|l| l.node_count())
+                .unwrap_or(0);
+            let plan_label = connection_type.as_deref().unwrap_or(&config.method_type);
+            new_kg.selection.add_plan_step(
+                PlanStep::new("TRAVERSE", Some(plan_label), estimated).with_actual_rows(actual),
+            );
         } else {
-            None
-        };
+            // ── Edge-based traversal mode (existing behavior) ──
+            let ct = connection_type.ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "traverse() requires either connection_type (first arg) or method= parameter",
+                )
+            })?;
 
-        let sort_fields = if let Some(spec) = sort_target {
-            Some(py_in::parse_sort_fields(spec, None)?)
-        } else {
-            None
-        };
+            let conn_conditions = if let Some(cond) = filter_connection {
+                Some(py_in::pydict_to_filter_conditions(cond)?)
+            } else {
+                None
+            };
 
-        traversal_methods::make_traversal(
-            &self.inner,
-            &mut new_kg.selection,
-            connection_type.clone(),
-            level_index,
-            direction,
-            conditions.as_ref(),
-            conn_conditions.as_ref(),
-            sort_fields.as_ref(),
-            max_nodes,
-            new_level,
-        )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+            let sort_fields = if let Some(spec) = sort_target {
+                Some(py_in::parse_sort_fields(spec, None)?)
+            } else {
+                None
+            };
 
-        // Record actual result - use node_count() to avoid allocation
-        let actual = new_kg
-            .selection
-            .get_level(new_kg.selection.get_level_count().saturating_sub(1))
-            .map(|l| l.node_count())
-            .unwrap_or(0);
-        new_kg.selection.add_plan_step(
-            PlanStep::new("TRAVERSE", Some(&connection_type), estimated).with_actual_rows(actual),
-        );
+            traversal_methods::make_traversal(
+                &self.inner,
+                &mut new_kg.selection,
+                ct.clone(),
+                level_index,
+                direction,
+                conditions.as_ref(),
+                conn_conditions.as_ref(),
+                sort_fields.as_ref(),
+                max_nodes,
+                new_level,
+            )
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+            let actual = new_kg
+                .selection
+                .get_level(new_kg.selection.get_level_count().saturating_sub(1))
+                .map(|l| l.node_count())
+                .unwrap_or(0);
+            new_kg.selection.add_plan_step(
+                PlanStep::new("TRAVERSE", Some(&ct), estimated).with_actual_rows(actual),
+            );
+        }
 
         Ok(new_kg)
     }
 
-    fn selection_to_new_connections(
+    #[pyo3(signature = (connection_type, keep_selection=None, conflict_handling=None, properties=None, source_type=None, target_type=None))]
+    fn create_connections(
         &mut self,
         connection_type: String,
         keep_selection: Option<bool>,
         conflict_handling: Option<String>,
+        properties: Option<&Bound<'_, PyDict>>,
+        source_type: Option<String>,
+        target_type: Option<String>,
     ) -> PyResult<Self> {
+        // Convert properties PyDict → HashMap<String, Vec<String>>
+        let copy_properties = if let Some(dict) = properties {
+            let mut map = HashMap::new();
+            for (key, value) in dict.iter() {
+                let type_name: String = key.extract()?;
+                let prop_names: Vec<String> = value.extract()?;
+                map.insert(type_name, prop_names);
+            }
+            Some(map)
+        } else {
+            None
+        };
+
         let graph = get_graph_mut(&mut self.inner);
 
-        let result = maintain_graph::selection_to_new_connections(
+        let result = maintain_graph::create_connections(
             graph,
             &self.selection,
             connection_type,
             conflict_handling,
+            copy_properties,
+            source_type,
+            target_type,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
@@ -3255,6 +3403,78 @@ impl KnowledgeGraph {
         new_kg.add_report(OperationReport::ConnectionOperation(result));
 
         // Just return the new KnowledgeGraph
+        Ok(new_kg)
+    }
+
+    /// Enrich selected (leaf) nodes by copying, renaming, aggregating, or computing
+    /// properties from ancestor nodes in the traversal hierarchy.
+    ///
+    /// The `properties` dict maps source node type → property spec:
+    ///   - `{'B': ['prop_a', 'prop_b']}` — copy listed properties as-is
+    ///   - `{'B': []}` — copy all properties from B
+    ///   - `{'B': {'new_name': 'old_name'}}` — copy with rename
+    ///   - `{'B': {'avg_depth': 'mean(depth)'}}` — aggregate (count, sum, mean, min, max, std, collect)
+    ///   - `{'B': {'dist': 'distance'}}` — spatial compute (distance, area, perimeter, centroid_lat, centroid_lon)
+    #[pyo3(signature = (properties, keep_selection=None))]
+    fn add_properties(
+        &mut self,
+        properties: &Bound<'_, PyDict>,
+        keep_selection: Option<bool>,
+    ) -> PyResult<Self> {
+        use crate::graph::maintain_graph::{add_properties as core_add_properties, PropertySpec};
+
+        // Convert PyDict → HashMap<String, PropertySpec>
+        let mut spec_map: HashMap<String, PropertySpec> = HashMap::new();
+        for (key, value) in properties.iter() {
+            let source_type: String = key.extract()?;
+
+            // Try as list first
+            if let Ok(list) = value.extract::<Vec<String>>() {
+                if list.is_empty() {
+                    spec_map.insert(source_type, PropertySpec::CopyAll);
+                } else {
+                    spec_map.insert(source_type, PropertySpec::CopyList(list));
+                }
+            } else if let Ok(dict) = value.cast::<PyDict>() {
+                // It's a dict: {target_name: source_expr}
+                let mut rename_map: HashMap<String, String> = HashMap::new();
+                for (dk, dv) in dict.iter() {
+                    let target_name: String = dk.extract()?;
+                    let source_expr: String = dv.extract()?;
+                    rename_map.insert(target_name, source_expr);
+                }
+                spec_map.insert(source_type, PropertySpec::RenameMap(rename_map));
+            } else {
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "Value for type '{}' must be a list (copy) or dict (rename/aggregate). Got: {:?}",
+                    source_type,
+                    value.get_type().name()?
+                )));
+            }
+        }
+
+        let graph = get_graph_mut(&mut self.inner);
+        let result = core_add_properties(graph, &self.selection, spec_map)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+        let mut new_kg = KnowledgeGraph {
+            inner: self.inner.clone(),
+            selection: if keep_selection.unwrap_or(true) {
+                self.selection.clone()
+            } else {
+                CowSelection::new()
+            },
+            reports: self.reports.clone(),
+            last_mutation_stats: None,
+            embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
+        };
+
+        // Record plan step
+        new_kg.selection.add_plan_step(
+            PlanStep::new("ADD_PROPERTIES", None, result.nodes_updated)
+                .with_actual_rows(result.properties_set),
+        );
+
         Ok(new_kg)
     }
 

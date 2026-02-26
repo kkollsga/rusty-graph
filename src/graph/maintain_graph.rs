@@ -6,6 +6,7 @@ use crate::graph::batch_operations::{
 use crate::graph::lookups::{CombinedTypeLookup, TypeLookup};
 use crate::graph::reporting::{ConnectionOperationReport, NodeOperationReport};
 use crate::graph::schema::{CurrentSelection, DirGraph};
+use crate::graph::spatial;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 
@@ -513,78 +514,199 @@ fn update_schema_node(
     Ok(())
 }
 
-pub fn selection_to_new_connections(
+pub fn create_connections(
     graph: &mut DirGraph,
     selection: &CurrentSelection,
     connection_type: String,
-    conflict_handling: Option<String>, // Add conflict_handling parameter
+    conflict_handling: Option<String>,
+    copy_properties: Option<HashMap<String, Vec<String>>>, // node_type → prop names to copy onto edge
+    source_type_filter: Option<String>,                    // override source level by node type
+    target_type_filter: Option<String>,                    // override target level by node type
 ) -> Result<ConnectionOperationReport, String> {
-    // Parse conflict handling option
     let conflict_mode = match conflict_handling.as_deref() {
         Some("replace") => ConflictHandling::Replace,
         Some("skip") => ConflictHandling::Skip,
         Some("preserve") => ConflictHandling::Preserve,
-        Some("update") | None => ConflictHandling::Update, // Default
-        Some(other) => return Err(format!(
-            "Unknown conflict handling mode: '{}'. Valid options: 'update' (default), 'replace', 'skip', 'preserve'",
-            other
-        )),
-    };
-
-    // Track errors
-    let mut errors = Vec::new();
-
-    let current_level = selection.get_level_count().saturating_sub(1);
-    let level = match selection.get_level(current_level) {
-        Some(level) if !level.is_empty() => level,
-        _ => {
-            // Return empty report since there's nothing to do
-            let report = ConnectionOperationReport::new(
-                "selection_to_new_connections".to_string(),
-                0,
-                0,
-                0,
-                0.0,
-            );
-            return Ok(report);
+        Some("update") | None => ConflictHandling::Update,
+        Some(other) => {
+            return Err(format!(
+                "Unknown conflict handling mode: '{}'. Valid: 'update' (default), 'replace', 'skip', 'preserve'",
+                other
+            ))
         }
     };
 
-    let mut batch = ConnectionBatchProcessor::new(level.node_count());
-    // Set the conflict handling mode
-    batch.set_conflict_mode(conflict_mode);
+    let level_count = selection.get_level_count();
+    if level_count == 0 {
+        return Ok(ConnectionOperationReport::new(
+            "create_connections".to_string(),
+            0,
+            0,
+            0,
+            0.0,
+        ));
+    }
 
-    let mut skipped = 0;
-    let mut source_type = None;
-    let mut target_type = None;
-
-    for (parent_opt, children) in level.iter_groups() {
-        if let Some(parent) = parent_opt {
-            if source_type.is_none() {
-                if let Some(node) = graph.get_node(*parent) {
-                    source_type = Some(node.node_type.clone());
-                }
-            }
-
-            for &child in children {
-                if target_type.is_none() {
-                    if let Some(node) = graph.get_node(child) {
-                        target_type = Some(node.node_type.clone());
-                    }
-                }
-
-                if let Err(e) =
-                    batch.add_connection(*parent, child, HashMap::new(), graph, &connection_type)
-                {
-                    skipped += 1;
-                    errors.push(format!("Failed to add connection: {}", e));
-                    continue;
+    // --- Determine which level each node type lives at ---
+    let mut type_to_level: HashMap<String, usize> = HashMap::new();
+    for lvl_idx in 0..level_count {
+        if let Some(level) = selection.get_level(lvl_idx) {
+            for node_idx in level.iter_node_indices() {
+                if let Some(node) = graph.get_node(node_idx) {
+                    type_to_level
+                        .entry(node.node_type.clone())
+                        .or_insert(lvl_idx);
                 }
             }
         }
     }
 
-    if let (Some(source), Some(target)) = (source_type, target_type) {
+    // --- Resolve source and target levels ---
+    let source_level = if let Some(ref st) = source_type_filter {
+        *type_to_level.get(st).ok_or_else(|| {
+            format!(
+                "source_type '{}' not found in traversal chain. Available: {:?}",
+                st,
+                type_to_level.keys().collect::<Vec<_>>()
+            )
+        })?
+    } else {
+        0
+    };
+
+    let target_level = if let Some(ref tt) = target_type_filter {
+        *type_to_level.get(tt).ok_or_else(|| {
+            format!(
+                "target_type '{}' not found in traversal chain. Available: {:?}",
+                tt,
+                type_to_level.keys().collect::<Vec<_>>()
+            )
+        })?
+    } else {
+        level_count - 1
+    };
+
+    if source_level >= target_level {
+        return Err(format!(
+            "source level ({}) must be before target level ({})",
+            source_level, target_level
+        ));
+    }
+
+    // --- Build reverse parent maps for levels between source and target ---
+    // child_idx → parent_idx for each level
+    let mut parent_maps: Vec<HashMap<NodeIndex, NodeIndex>> = vec![HashMap::new(); level_count];
+    for (lvl_idx, pmap) in parent_maps.iter_mut().enumerate().skip(1) {
+        if let Some(level) = selection.get_level(lvl_idx) {
+            for (parent_opt, children) in level.iter_groups() {
+                if let Some(parent) = parent_opt {
+                    for &child in children {
+                        pmap.insert(child, *parent);
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Iterate target level, walk up to source, collect properties, create edges ---
+    let target_level_data = match selection.get_level(target_level) {
+        Some(level) if !level.is_empty() => level,
+        _ => {
+            return Ok(ConnectionOperationReport::new(
+                "create_connections".to_string(),
+                0,
+                0,
+                0,
+                0.0,
+            ));
+        }
+    };
+
+    let mut batch = ConnectionBatchProcessor::new(target_level_data.node_count());
+    batch.set_conflict_mode(conflict_mode);
+
+    let mut skipped = 0;
+    let mut errors = Vec::new();
+    let mut detected_source_type = None;
+    let mut detected_target_type = None;
+
+    for (_parent_opt, targets) in target_level_data.iter_groups() {
+        for &target_idx in targets {
+            if detected_target_type.is_none() {
+                if let Some(node) = graph.get_node(target_idx) {
+                    detected_target_type = Some(node.node_type.clone());
+                }
+            }
+
+            // Walk up from target to source through parent maps
+            let mut current = target_idx;
+            // Collect the chain of nodes from target_level back to source_level
+            // chain[0] = node at target_level, chain[last] = node at source_level
+            let mut chain: Vec<(usize, NodeIndex)> = vec![(target_level, target_idx)];
+
+            let mut walk_ok = true;
+            for lvl in (source_level + 1..=target_level).rev() {
+                if let Some(&parent) = parent_maps[lvl].get(&current) {
+                    current = parent;
+                    chain.push((lvl - 1, parent));
+                } else {
+                    // Orphan node at this level — skip
+                    walk_ok = false;
+                    break;
+                }
+            }
+
+            if !walk_ok {
+                skipped += 1;
+                continue;
+            }
+
+            let source_idx = current;
+
+            if detected_source_type.is_none() {
+                if let Some(node) = graph.get_node(source_idx) {
+                    detected_source_type = Some(node.node_type.clone());
+                }
+            }
+
+            // Collect properties from intermediate nodes
+            let edge_props = if let Some(ref prop_spec) = copy_properties {
+                let mut props = HashMap::new();
+                // Walk the chain (which goes target → source), process each node
+                for &(_, node_idx) in &chain {
+                    if let Some(node) = graph.get_node(node_idx) {
+                        if let Some(requested_props) = prop_spec.get(&node.node_type) {
+                            if requested_props.is_empty() {
+                                // Empty list = copy all properties
+                                for (k, v) in &node.properties {
+                                    props.insert(k.clone(), v.clone());
+                                }
+                            } else {
+                                for prop_name in requested_props {
+                                    if let Some(val) = node.properties.get(prop_name) {
+                                        props.insert(prop_name.clone(), val.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                props
+            } else {
+                HashMap::new()
+            };
+
+            if let Err(e) =
+                batch.add_connection(source_idx, target_idx, edge_props, graph, &connection_type)
+            {
+                skipped += 1;
+                errors.push(format!("Failed to add connection: {}", e));
+                continue;
+            }
+        }
+    }
+
+    if let (Some(source), Some(target)) = (detected_source_type, detected_target_type) {
         update_schema_node(
             graph,
             &connection_type,
@@ -594,19 +716,16 @@ pub fn selection_to_new_connections(
         )?;
     }
 
-    // Execute the batch and get the statistics
     let (stats, metrics) = batch.execute(graph, connection_type)?;
 
-    // Create and return the operation report
     let mut report = ConnectionOperationReport::new(
-        "selection_to_new_connections".to_string(),
+        "create_connections".to_string(),
         stats.connections_created,
         skipped,
         stats.properties_tracked,
-        metrics.processing_time * 1000.0, // Convert to milliseconds
+        metrics.processing_time * 1000.0,
     );
 
-    // Add errors if we found any
     if !errors.is_empty() {
         report = report.with_errors(errors);
     }
@@ -748,4 +867,548 @@ pub fn update_node_properties(
     }
 
     Ok(report)
+}
+
+// ── add_properties ──────────────────────────────────────────────────────────
+
+/// Specifies how properties should be copied from a source type.
+#[derive(Debug)]
+pub enum PropertySpec {
+    /// Copy listed properties as-is: `['name', 'status']`
+    CopyList(Vec<String>),
+    /// Copy all properties: `[]`
+    CopyAll,
+    /// Rename/aggregate/spatial: `{'new_name': 'source_expr'}`
+    RenameMap(HashMap<String, String>),
+}
+
+/// Report returned by add_properties().
+pub struct AddPropertiesReport {
+    pub nodes_updated: usize,
+    pub properties_set: usize,
+}
+
+/// Enriches the leaf (most recent) level nodes by copying, renaming, aggregating,
+/// or computing properties from ancestor nodes in the traversal hierarchy.
+pub fn add_properties(
+    graph: &mut DirGraph,
+    selection: &CurrentSelection,
+    property_spec: HashMap<String, PropertySpec>,
+) -> Result<AddPropertiesReport, String> {
+    let level_count = selection.get_level_count();
+    if level_count == 0 {
+        return Ok(AddPropertiesReport {
+            nodes_updated: 0,
+            properties_set: 0,
+        });
+    }
+
+    let target_level = level_count - 1;
+
+    // Build type → level index map
+    let mut type_to_level: HashMap<String, usize> = HashMap::new();
+    for lvl_idx in 0..level_count {
+        if let Some(level) = selection.get_level(lvl_idx) {
+            for node_idx in level.iter_node_indices() {
+                if let Some(node) = graph.get_node(node_idx) {
+                    type_to_level
+                        .entry(node.node_type.clone())
+                        .or_insert(lvl_idx);
+                }
+            }
+        }
+    }
+
+    // Validate requested types exist in the traversal chain
+    for source_type in property_spec.keys() {
+        if !type_to_level.contains_key(source_type) {
+            return Err(format!(
+                "Source type '{}' not found in traversal chain. Available: {:?}",
+                source_type,
+                type_to_level.keys().collect::<Vec<_>>()
+            ));
+        }
+    }
+
+    // Build reverse parent maps: child → parent for each level
+    let mut parent_maps: Vec<HashMap<NodeIndex, NodeIndex>> = vec![HashMap::new(); level_count];
+    for (lvl_idx, pmap) in parent_maps.iter_mut().enumerate().skip(1) {
+        if let Some(level) = selection.get_level(lvl_idx) {
+            for (parent_opt, children) in level.iter_groups() {
+                if let Some(parent) = parent_opt {
+                    for &child in children {
+                        pmap.insert(child, *parent);
+                    }
+                }
+            }
+        }
+    }
+
+    // Check if any spec requires aggregation
+    let has_aggregation = property_spec.values().any(|spec| {
+        if let PropertySpec::RenameMap(map) = spec {
+            map.values().any(|expr| is_aggregate_expr(expr))
+        } else {
+            false
+        }
+    });
+
+    if has_aggregation {
+        return add_properties_aggregate(
+            graph,
+            selection,
+            &property_spec,
+            &type_to_level,
+            &parent_maps,
+            target_level,
+        );
+    }
+
+    // Standard mode: copy/rename from ancestor onto each leaf node
+    let target_level_data = match selection.get_level(target_level) {
+        Some(level) if !level.is_empty() => level,
+        _ => {
+            return Ok(AddPropertiesReport {
+                nodes_updated: 0,
+                properties_set: 0,
+            });
+        }
+    };
+
+    // Collect updates first (to avoid borrow issues with graph)
+    let mut updates: Vec<(NodeIndex, HashMap<String, Value>)> = Vec::new();
+
+    for (_parent_opt, targets) in target_level_data.iter_groups() {
+        for &target_idx in targets {
+            let mut props_to_set: HashMap<String, Value> = HashMap::new();
+
+            for (source_type, spec) in &property_spec {
+                let source_level = match type_to_level.get(source_type) {
+                    Some(&lvl) => lvl,
+                    None => continue,
+                };
+
+                let ancestor_idx =
+                    walk_to_ancestor(target_idx, target_level, source_level, &parent_maps);
+                let ancestor_idx = match ancestor_idx {
+                    Some(idx) => idx,
+                    None => continue,
+                };
+
+                let ancestor_node = match graph.get_node(ancestor_idx) {
+                    Some(n) => n,
+                    None => continue,
+                };
+
+                match spec {
+                    PropertySpec::CopyAll => {
+                        for (k, v) in &ancestor_node.properties {
+                            props_to_set.insert(k.clone(), v.clone());
+                        }
+                    }
+                    PropertySpec::CopyList(prop_names) => {
+                        for prop_name in prop_names {
+                            if let Some(val) = ancestor_node.properties.get(prop_name) {
+                                props_to_set.insert(prop_name.clone(), val.clone());
+                            }
+                        }
+                    }
+                    PropertySpec::RenameMap(map) => {
+                        for (target_name, source_expr) in map {
+                            if is_spatial_compute(source_expr) {
+                                if let Some(val) = compute_spatial_property(
+                                    graph,
+                                    target_idx,
+                                    ancestor_idx,
+                                    source_expr,
+                                ) {
+                                    props_to_set.insert(target_name.clone(), val);
+                                }
+                            } else if let Some(val) = ancestor_node.properties.get(source_expr) {
+                                props_to_set.insert(target_name.clone(), val.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !props_to_set.is_empty() {
+                updates.push((target_idx, props_to_set));
+            }
+        }
+    }
+
+    // Apply updates
+    let mut nodes_updated = 0;
+    let mut properties_set = 0;
+    for (node_idx, props) in updates {
+        if let Some(node) = graph.get_node_mut(node_idx) {
+            let count = props.len();
+            for (k, v) in props {
+                node.properties.insert(k, v);
+            }
+            nodes_updated += 1;
+            properties_set += count;
+        }
+    }
+
+    Ok(AddPropertiesReport {
+        nodes_updated,
+        properties_set,
+    })
+}
+
+fn walk_to_ancestor(
+    start: NodeIndex,
+    start_level: usize,
+    target_level: usize,
+    parent_maps: &[HashMap<NodeIndex, NodeIndex>],
+) -> Option<NodeIndex> {
+    if start_level == target_level {
+        return Some(start);
+    }
+    if target_level >= start_level {
+        return None;
+    }
+    let mut current = start;
+    for lvl in (target_level + 1..=start_level).rev() {
+        current = *parent_maps[lvl].get(&current)?;
+    }
+    Some(current)
+}
+
+fn is_aggregate_expr(expr: &str) -> bool {
+    let trimmed = expr.trim();
+    trimmed == "count(*)"
+        || trimmed.starts_with("sum(")
+        || trimmed.starts_with("mean(")
+        || trimmed.starts_with("avg(")
+        || trimmed.starts_with("min(")
+        || trimmed.starts_with("max(")
+        || trimmed.starts_with("std(")
+        || trimmed.starts_with("collect(")
+}
+
+fn is_spatial_compute(expr: &str) -> bool {
+    matches!(
+        expr.trim(),
+        "distance" | "area" | "perimeter" | "centroid_lat" | "centroid_lon"
+    )
+}
+
+fn extract_agg_property(expr: &str) -> Option<&str> {
+    let trimmed = expr.trim();
+    if trimmed == "count(*)" {
+        return None;
+    }
+    let start = trimmed.find('(')?;
+    let end = trimmed.rfind(')')?;
+    if start + 1 < end {
+        Some(trimmed[start + 1..end].trim())
+    } else {
+        None
+    }
+}
+
+fn compute_spatial_property(
+    graph: &DirGraph,
+    leaf_idx: NodeIndex,
+    ancestor_idx: NodeIndex,
+    spatial_fn: &str,
+) -> Option<Value> {
+    let leaf_node = graph.get_node(leaf_idx)?;
+    let ancestor_node = graph.get_node(ancestor_idx)?;
+    let leaf_spatial = graph.get_spatial_config(&leaf_node.node_type);
+    let ancestor_spatial = graph.get_spatial_config(&ancestor_node.node_type);
+
+    match spatial_fn.trim() {
+        "distance" => {
+            let (lat1, lon1) = resolve_location(leaf_node, leaf_spatial)?;
+            let (lat2, lon2) = resolve_location(ancestor_node, ancestor_spatial)?;
+            Some(Value::Float64(spatial::geodesic_distance(
+                lat1, lon1, lat2, lon2,
+            )))
+        }
+        "area" => {
+            let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
+            spatial::geometry_area_m2(&geom).ok().map(Value::Float64)
+        }
+        "perimeter" => {
+            let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
+            spatial::geometry_perimeter_m(&geom)
+                .ok()
+                .map(Value::Float64)
+        }
+        "centroid_lat" => {
+            let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
+            spatial::geometry_centroid(&geom)
+                .ok()
+                .map(|(lat, _)| Value::Float64(lat))
+        }
+        "centroid_lon" => {
+            let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
+            spatial::geometry_centroid(&geom)
+                .ok()
+                .map(|(_, lon)| Value::Float64(lon))
+        }
+        _ => None,
+    }
+}
+
+fn resolve_location(
+    node: &crate::graph::schema::NodeData,
+    spatial_config: Option<&crate::graph::schema::SpatialConfig>,
+) -> Option<(f64, f64)> {
+    let sc = spatial_config?;
+    if let Some((ref lat_f, ref lon_f)) = sc.location {
+        let lat = mg_value_to_f64(node.properties.get(lat_f)?)?;
+        let lon = mg_value_to_f64(node.properties.get(lon_f)?)?;
+        return Some((lat, lon));
+    }
+    if let Some(ref geom_f) = sc.geometry {
+        if let Some(Value::String(wkt)) = node.properties.get(geom_f) {
+            if let Ok(geom) = spatial::parse_wkt(wkt) {
+                return spatial::geometry_centroid(&geom).ok();
+            }
+        }
+    }
+    None
+}
+
+fn resolve_geometry(
+    node: &crate::graph::schema::NodeData,
+    spatial_config: Option<&crate::graph::schema::SpatialConfig>,
+) -> Option<geo::geometry::Geometry<f64>> {
+    let sc = spatial_config?;
+    let geom_field = sc.geometry.as_deref()?;
+    match node.properties.get(geom_field) {
+        Some(Value::String(wkt)) => spatial::parse_wkt(wkt).ok(),
+        _ => None,
+    }
+}
+
+fn mg_value_to_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::Float64(f) => Some(*f),
+        Value::Int64(i) => Some(*i as f64),
+        Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+/// Aggregation mode: groups leaf nodes by ancestor and computes aggregate values.
+#[allow(clippy::too_many_arguments)]
+fn add_properties_aggregate(
+    graph: &mut DirGraph,
+    selection: &CurrentSelection,
+    property_spec: &HashMap<String, PropertySpec>,
+    type_to_level: &HashMap<String, usize>,
+    parent_maps: &[HashMap<NodeIndex, NodeIndex>],
+    target_level: usize,
+) -> Result<AddPropertiesReport, String> {
+    let target_level_data = match selection.get_level(target_level) {
+        Some(level) if !level.is_empty() => level,
+        _ => {
+            return Ok(AddPropertiesReport {
+                nodes_updated: 0,
+                properties_set: 0,
+            });
+        }
+    };
+
+    let mut updates: HashMap<NodeIndex, HashMap<String, Value>> = HashMap::new();
+
+    for (source_type, spec) in property_spec {
+        let source_level = match type_to_level.get(source_type) {
+            Some(&lvl) => lvl,
+            None => continue,
+        };
+
+        match spec {
+            PropertySpec::CopyList(props) => {
+                for (_parent_opt, targets) in target_level_data.iter_groups() {
+                    for &target_idx in targets {
+                        if let Some(ancestor_idx) =
+                            walk_to_ancestor(target_idx, target_level, source_level, parent_maps)
+                        {
+                            if let Some(ancestor_node) = graph.get_node(ancestor_idx) {
+                                for prop_name in props {
+                                    if let Some(val) = ancestor_node.properties.get(prop_name) {
+                                        updates
+                                            .entry(target_idx)
+                                            .or_default()
+                                            .insert(prop_name.clone(), val.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            PropertySpec::CopyAll => {
+                for (_parent_opt, targets) in target_level_data.iter_groups() {
+                    for &target_idx in targets {
+                        if let Some(ancestor_idx) =
+                            walk_to_ancestor(target_idx, target_level, source_level, parent_maps)
+                        {
+                            if let Some(ancestor_node) = graph.get_node(ancestor_idx) {
+                                for (k, v) in &ancestor_node.properties {
+                                    updates
+                                        .entry(target_idx)
+                                        .or_default()
+                                        .insert(k.clone(), v.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            PropertySpec::RenameMap(rename_map) => {
+                for (target_name, source_expr) in rename_map {
+                    if is_aggregate_expr(source_expr) {
+                        let agg_prop = extract_agg_property(source_expr);
+
+                        // Group leaf nodes by ancestor at source_level
+                        let mut groups: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
+                        for (_parent_opt, targets) in target_level_data.iter_groups() {
+                            for &target_idx in targets {
+                                if let Some(ancestor) = walk_to_ancestor(
+                                    target_idx,
+                                    target_level,
+                                    source_level,
+                                    parent_maps,
+                                ) {
+                                    groups.entry(ancestor).or_default().push(target_idx);
+                                }
+                            }
+                        }
+
+                        for (ancestor_idx, leaf_indices) in &groups {
+                            let values: Vec<f64> = if let Some(prop) = agg_prop {
+                                leaf_indices
+                                    .iter()
+                                    .filter_map(|&idx| {
+                                        graph.get_node(idx).and_then(|n| {
+                                            n.properties.get(prop).and_then(mg_value_to_f64)
+                                        })
+                                    })
+                                    .collect()
+                            } else {
+                                vec![]
+                            };
+
+                            let agg_value =
+                                compute_aggregate(source_expr, &values, leaf_indices.len());
+                            updates
+                                .entry(*ancestor_idx)
+                                .or_default()
+                                .insert(target_name.clone(), agg_value);
+                        }
+                    } else if is_spatial_compute(source_expr) {
+                        for (_parent_opt, targets) in target_level_data.iter_groups() {
+                            for &target_idx in targets {
+                                if let Some(ancestor_idx) = walk_to_ancestor(
+                                    target_idx,
+                                    target_level,
+                                    source_level,
+                                    parent_maps,
+                                ) {
+                                    if let Some(val) = compute_spatial_property(
+                                        graph,
+                                        target_idx,
+                                        ancestor_idx,
+                                        source_expr,
+                                    ) {
+                                        updates
+                                            .entry(target_idx)
+                                            .or_default()
+                                            .insert(target_name.clone(), val);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Simple rename
+                        for (_parent_opt, targets) in target_level_data.iter_groups() {
+                            for &target_idx in targets {
+                                if let Some(ancestor_idx) = walk_to_ancestor(
+                                    target_idx,
+                                    target_level,
+                                    source_level,
+                                    parent_maps,
+                                ) {
+                                    if let Some(ancestor_node) = graph.get_node(ancestor_idx) {
+                                        if let Some(val) = ancestor_node.properties.get(source_expr)
+                                        {
+                                            updates
+                                                .entry(target_idx)
+                                                .or_default()
+                                                .insert(target_name.clone(), val.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut nodes_updated = 0;
+    let mut properties_set = 0;
+
+    for (node_idx, props) in updates {
+        if let Some(node) = graph.get_node_mut(node_idx) {
+            let count = props.len();
+            for (k, v) in props {
+                node.properties.insert(k, v);
+            }
+            nodes_updated += 1;
+            properties_set += count;
+        }
+    }
+
+    Ok(AddPropertiesReport {
+        nodes_updated,
+        properties_set,
+    })
+}
+
+fn compute_aggregate(expr: &str, values: &[f64], count: usize) -> Value {
+    let trimmed = expr.trim();
+    if trimmed == "count(*)" {
+        return Value::Int64(count as i64);
+    }
+    if trimmed.starts_with("collect(") {
+        let s = values
+            .iter()
+            .map(|v| format!("{}", v))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Value::String(s);
+    }
+    if values.is_empty() {
+        return Value::Null;
+    }
+    if trimmed.starts_with("sum(") {
+        Value::Float64(values.iter().sum())
+    } else if trimmed.starts_with("mean(") || trimmed.starts_with("avg(") {
+        Value::Float64(values.iter().sum::<f64>() / values.len() as f64)
+    } else if trimmed.starts_with("min(") {
+        Value::Float64(values.iter().copied().fold(f64::INFINITY, f64::min))
+    } else if trimmed.starts_with("max(") {
+        Value::Float64(values.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+    } else if trimmed.starts_with("std(") {
+        if values.len() < 2 {
+            Value::Float64(0.0)
+        } else {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let variance =
+                values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
+            Value::Float64(variance.sqrt())
+        }
+    } else {
+        Value::Null
+    }
 }

@@ -1034,7 +1034,7 @@ class KnowledgeGraph:
 
     def traverse(
         self,
-        connection_type: str,
+        connection_type: Optional[str] = None,
         level_index: Optional[int] = None,
         direction: Optional[str] = None,
         filter_target: Optional[dict[str, Any]] = None,
@@ -1042,39 +1042,208 @@ class KnowledgeGraph:
         sort_target: Optional[Union[str, list[tuple[str, bool]]]] = None,
         max_nodes: Optional[int] = None,
         new_level: Optional[bool] = None,
+        method: Optional[Union[str, dict[str, Any]]] = None,
     ) -> KnowledgeGraph:
-        """Traverse connections from the current selection.
+        """Traverse connections or discover relationships via comparison methods.
+
+        **Edge-based mode** (default, no ``method``):
+            Follow explicit graph edges of a given type.
+
+        **Comparison-based mode** (``method=`` specified):
+            Discover source→target pairs via spatial, semantic, or clustering
+            comparisons. The first arg becomes **target node type** instead of
+            connection type.
 
         Args:
-            connection_type: Edge type to follow (e.g. ``'KNOWS'``).
-            level_index: Source level in the hierarchy.
-            direction: ``'outgoing'`` (default), ``'incoming'``, or ``'both'``.
+            connection_type: Edge type to follow (edge mode) or target node type
+                (comparison mode). Required for edge mode and spatial/semantic methods.
+            level_index: Source level in the hierarchy (edge mode only).
+            direction: ``'outgoing'``, ``'incoming'``, or both (edge mode only).
             filter_target: Filter conditions for target nodes.
-            filter_connection: Filter conditions for edge properties.
-            sort_target: Sort target nodes.
+            filter_connection: Filter conditions for edge properties (edge mode only).
+            sort_target: Sort target nodes per source.
             max_nodes: Limit target nodes per source.
-            new_level: Add targets as a new hierarchy level. Default ``True``.
+            new_level: Add targets as a new hierarchy level (edge mode). Default ``True``.
+            method: Comparison method — a string for simple cases, or a dict with
+                method-specific settings.
+
+                **String shorthand** (no extra settings needed)::
+
+                    method='contains'
+                    method='intersects'
+
+                **Dict form** with settings:
+
+                Spatial containment::
+
+                    method={'type': 'contains'}
+                    method={'type': 'contains', 'resolve': 'geometry'}
+                    method={'type': 'contains', 'resolve': 'centroid', 'geometry': 'wkt_field'}
+
+                Spatial intersection::
+
+                    method={'type': 'intersects'}
+                    method={'type': 'intersects', 'geometry': 'wkt_field'}
+
+                Distance::
+
+                    method={'type': 'distance', 'max_m': 5000}
+                    method={'type': 'distance', 'max_m': 5000, 'resolve': 'centroid'}
+                    method={'type': 'distance', 'max_m': 5000, 'resolve': 'closest'}
+
+                Semantic similarity::
+
+                    method={'type': 'text_score', 'property': 'abstract', 'threshold': 0.85}
+                    method={'type': 'text_score', 'property': 'abstract', 'threshold': 0.85, 'metric': 'cosine'}
+
+                Clustering::
+
+                    method={'type': 'cluster', 'algorithm': 'kmeans', 'k': 10, 'features': ['lat', 'lon']}
+                    method={'type': 'cluster', 'algorithm': 'dbscan', 'eps': 5000, 'min_samples': 3, 'features': ['lat', 'lon']}
+
+                **Dict keys:**
+
+                - ``type`` (required): ``'contains'``, ``'intersects'``, ``'distance'``, ``'text_score'``, ``'cluster'``
+                - ``resolve``: How polygon geometries are interpreted (overrides default location → centroid fallback):
+                  ``'centroid'`` (geometry centroid), ``'closest'`` (nearest boundary point), ``'geometry'`` (full polygon)
+                - ``max_m``: Max distance in meters (distance method)
+                - ``geometry``: Override geometry field name (spatial methods)
+                - ``property``: Embedding property name (text_score)
+                - ``threshold``: Min similarity score (text_score). Default 0.0
+                - ``metric``: ``'cosine'`` (default), ``'dot_product'``, ``'euclidean'`` (text_score)
+                - ``algorithm``: ``'kmeans'`` or ``'dbscan'`` (cluster)
+                - ``features``: Feature property names (cluster)
+                - ``k``: Number of clusters (kmeans)
+                - ``eps``: Neighborhood radius (dbscan)
+                - ``min_samples``: Min cluster size (dbscan). Default 5
 
         Returns:
-            A new KnowledgeGraph with traversed nodes selected.
+            A new KnowledgeGraph with matched/grouped nodes selected.
+
+        Examples::
+
+            # Edge-based (existing)
+            graph.type_filter('Person').traverse('KNOWS')
+
+            # Spatial containment (string shorthand)
+            graph.type_filter('Structure').traverse('Well', method='contains')
+
+            # Spatial containment with resolve
+            graph.type_filter('Structure').traverse('Field',
+                method={'type': 'contains', 'resolve': 'geometry'})
+
+            # Distance with threshold
+            graph.type_filter('Platform').traverse('Well',
+                method={'type': 'distance', 'max_m': 5000})
+
+            # Distance using closest boundary point
+            graph.type_filter('Structure').traverse('Well',
+                method={'type': 'distance', 'max_m': 5000, 'resolve': 'closest'})
+
+            # Semantic similarity
+            graph.type_filter('Article').traverse('Article',
+                method={'type': 'text_score', 'property': 'abstract', 'threshold': 0.85},
+                max_nodes=5)
+
+            # Clustering
+            graph.type_filter('Well').traverse(
+                method={'type': 'cluster', 'algorithm': 'kmeans', 'k': 5,
+                        'features': ['latitude', 'longitude']})
         """
         ...
 
-    def selection_to_new_connections(
+    def create_connections(
         self,
         connection_type: str,
         keep_selection: Optional[bool] = None,
         conflict_handling: Optional[str] = None,
+        properties: Optional[dict[str, list[str]]] = None,
+        source_type: Optional[str] = None,
+        target_type: Optional[str] = None,
     ) -> KnowledgeGraph:
-        """Create new connections from the current parent-child selection.
+        """Create connections from the traversal hierarchy.
+
+        By default, creates edges from the top-level ancestor (first
+        traversal level) to the leaf nodes (last level). Use
+        ``source_type`` / ``target_type`` to choose different levels.
 
         Args:
-            connection_type: Label for the new edges.
+            connection_type: Label for the new edges (e.g. ``'A_TO_C'``).
             keep_selection: Preserve selection. Default ``False``.
-            conflict_handling: ``'update'``, ``'skip'``, or ``None``.
+            conflict_handling: ``'update'`` (default), ``'replace'``, ``'skip'``,
+                or ``'preserve'``.
+            properties: Copy properties from intermediate nodes onto the new
+                edges. Dict mapping node type to property names:
+                ``{'TypeB': ['score', 'weight']}``.
+                An empty list copies all properties from that type.
+            source_type: Node type to use as source (default: first level).
+            target_type: Node type to use as target (default: last level).
 
         Returns:
             A new KnowledgeGraph with the connections added.
+
+        Example::
+
+            # After traversal A → B → C, create direct A → C edges
+            # with B's 'score' property copied onto each edge
+            graph.type_filter('A') \\
+                .traverse('REL_AB') \\
+                .traverse('REL_BC') \\
+                .create_connections('A_TO_C',
+                    properties={'B': ['score']})
+        """
+        ...
+
+    def add_properties(
+        self,
+        properties: dict[str, Union[list[str], dict[str, str]]],
+        keep_selection: Optional[bool] = None,
+    ) -> KnowledgeGraph:
+        """Enrich selected nodes with properties from ancestor nodes in the traversal chain.
+
+        Copies, renames, aggregates, or computes spatial properties from nodes
+        at other levels of the selection hierarchy onto the current leaf nodes.
+
+        Args:
+            properties: Dict mapping source node type → property spec:
+
+                - ``{'B': ['name', 'status']}`` — copy listed properties as-is
+                - ``{'B': []}`` — copy all properties from B
+                - ``{'B': {'new_name': 'old_name'}}`` — copy with rename
+                - ``{'B': {'avg_depth': 'mean(depth)'}}`` — aggregate functions:
+                  ``count(*)``, ``sum(prop)``, ``mean(prop)``, ``min(prop)``,
+                  ``max(prop)``, ``std(prop)``, ``collect(prop)``
+                - ``{'B': {'dist': 'distance'}}`` — spatial compute:
+                  ``distance``, ``area``, ``perimeter``, ``centroid_lat``, ``centroid_lon``
+
+            keep_selection: Preserve current selection. Default ``True``.
+
+        Returns:
+            A new KnowledgeGraph with the properties added to selected nodes.
+
+        Examples::
+
+            # Copy structure name onto wells
+            graph.type_filter('Structure').traverse('Well', method='contains') \\
+                .add_properties({'Structure': ['name', 'status']})
+
+            # Rename properties
+            graph.type_filter('Structure').traverse('Well', method='contains') \\
+                .add_properties({'Structure': {'struct_name': 'name'}})
+
+            # Aggregate: count wells per structure
+            graph.type_filter('Well').traverse('Structure', method='contains') \\
+                .add_properties({'Well': {
+                    'well_count': 'count(*)',
+                    'avg_depth': 'mean(depth)',
+                }})
+
+            # Spatial compute
+            graph.type_filter('Structure').traverse('Well', method='contains') \\
+                .add_properties({'Structure': {
+                    'dist_to_center': 'distance',
+                    'parent_area': 'area',
+                }})
         """
         ...
 
