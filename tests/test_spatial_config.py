@@ -54,7 +54,7 @@ def well_graph():
     return graph
 
 
-# ── set_spatial / get_spatial ────────────────────────────────────────
+# ── set_spatial / spatial ────────────────────────────────────────
 
 
 class TestSetGetSpatial:
@@ -67,7 +67,7 @@ class TestSetGetSpatial:
         graph.add_nodes(df, 'Field', 'id', 'name')
         graph.set_spatial('Field', location=('lat', 'lon'))
 
-        config = graph.get_spatial('Field')
+        config = graph.spatial('Field')
         assert config is not None
         assert config['location'] == ('lat', 'lon')
 
@@ -83,24 +83,24 @@ class TestSetGetSpatial:
             shapes={'boundary': 'bnd_wkt'},
         )
 
-        config = graph.get_spatial('Field')
+        config = graph.spatial('Field')
         assert config['location'] == ('lat', 'lon')
         assert config['geometry'] == 'wkt_col'
         assert config['points'] == {'drill': ('d_lat', 'd_lon')}
         assert config['shapes'] == {'boundary': 'bnd_wkt'}
 
-    def test_get_spatial_none(self):
+    def test_spatial_none(self):
         graph = KnowledgeGraph()
-        assert graph.get_spatial('Nonexistent') is None
+        assert graph.spatial('Nonexistent') is None
 
-    def test_get_spatial_all(self, field_graph):
-        result = field_graph.get_spatial()
+    def test_spatial_all(self, field_graph):
+        result = field_graph.spatial()
         assert result is not None
         assert 'Field' in result
 
-    def test_get_spatial_empty_graph(self):
+    def test_spatial_empty_graph(self):
         graph = KnowledgeGraph()
-        assert graph.get_spatial() is None
+        assert graph.spatial() is None
 
 
 # ── column_types parsing ─────────────────────────────────────────────
@@ -109,24 +109,24 @@ class TestSetGetSpatial:
 class TestColumnTypesParsing:
     def test_location_via_column_types(self, field_graph):
         """Location config is set via column_types during add_nodes."""
-        config = field_graph.get_spatial('Field')
+        config = field_graph.spatial('Field')
         assert config is not None
         assert config['location'] == ('latitude', 'longitude')
 
     def test_geometry_via_column_types(self, field_graph):
         """Geometry config is set via column_types during add_nodes."""
-        config = field_graph.get_spatial('Field')
+        config = field_graph.spatial('Field')
         assert config['geometry'] == 'wkt_polygon'
 
     def test_named_point_via_column_types(self, well_graph):
         """Named points are set via column_types during add_nodes."""
-        config = well_graph.get_spatial('Well')
+        config = well_graph.spatial('Well')
         assert config is not None
         assert config['points'] == {'bottom_hole': ('bh_lat', 'bh_lon')}
 
     def test_named_shape_via_column_types(self, well_graph):
         """Named shapes are set via column_types during add_nodes."""
-        config = well_graph.get_spatial('Well')
+        config = well_graph.spatial('Well')
         assert config['shapes'] == {'boundary': 'boundary_wkt'}
 
     def test_incomplete_location_raises(self):
@@ -275,43 +275,43 @@ class TestVirtualProperties:
 class TestPymethodsAutoResolution:
     def test_near_point_m_auto_resolve(self, field_graph):
         """near_point_m() works without explicit lat_field/lon_field."""
-        result = field_graph.type_filter('Field').near_point_m(
+        result = field_graph.select('Field').near_point_m(
             center_lat=60.5, center_lon=3.5, max_distance_m=100_000.0,
         )
-        assert result.node_count() >= 1
+        assert result.len() >= 1
 
     def test_within_bounds_auto_resolve(self, field_graph):
         """within_bounds() works without explicit lat_field/lon_field."""
-        result = field_graph.type_filter('Field').within_bounds(
+        result = field_graph.select('Field').within_bounds(
             min_lat=59.0, max_lat=62.0, min_lon=2.0, max_lon=5.0,
         )
-        assert result.node_count() >= 1
+        assert result.len() >= 1
 
-    def test_get_bounds_auto_resolve(self, field_graph):
-        """get_bounds() works without explicit lat_field/lon_field."""
-        bounds = field_graph.type_filter('Field').get_bounds()
+    def test_bounds_auto_resolve(self, field_graph):
+        """bounds() works without explicit lat_field/lon_field."""
+        bounds = field_graph.select('Field').bounds()
         assert bounds is not None
         assert 'min_lat' in bounds
 
-    def test_get_centroid_auto_resolve(self, field_graph):
-        """get_centroid() works without explicit lat_field/lon_field."""
-        centroid = field_graph.type_filter('Field').get_centroid()
+    def test_centroid_auto_resolve(self, field_graph):
+        """centroid() works without explicit lat_field/lon_field."""
+        centroid = field_graph.select('Field').centroid()
         assert centroid is not None
         assert 'latitude' in centroid
 
     def test_intersects_geometry_auto_resolve(self, field_graph):
         """intersects_geometry() works without explicit geometry_field."""
-        result = field_graph.type_filter('Field').intersects_geometry(
+        result = field_graph.select('Field').intersects_geometry(
             'POLYGON((2 59, 5 59, 5 62, 2 62, 2 59))',
         )
-        assert result.node_count() >= 1
+        assert result.len() >= 1
 
     def test_contains_point_auto_resolve(self, field_graph):
         """contains_point() works without explicit geometry_field."""
-        result = field_graph.type_filter('Field').contains_point(
+        result = field_graph.select('Field').contains_point(
             lat=60.5, lon=3.5,
         )
-        assert result.node_count() >= 1
+        assert result.len() >= 1
 
 
 # ── Geometry centroid fallback (no lat/lon) ──────────────────────────
@@ -340,31 +340,31 @@ class TestGeometryCentroidFallback:
 
     def test_near_point_m_fallback(self, prospect_graph):
         """near_point_m() uses geometry centroid when no lat/lon."""
-        result = prospect_graph.type_filter('Prospect').near_point_m(
+        result = prospect_graph.select('Prospect').near_point_m(
             center_lat=60.5, center_lon=3.5, max_distance_m=50_000.0,
         )
-        assert result.node_count() == 1  # only Alpha
-        nodes = result.get_nodes()
+        assert result.len() == 1  # only Alpha
+        nodes = result.collect()
         assert nodes[0]['title'] == 'Alpha'
 
     def test_within_bounds_fallback(self, prospect_graph):
         """within_bounds() uses geometry centroid when no lat/lon."""
-        result = prospect_graph.type_filter('Prospect').within_bounds(
+        result = prospect_graph.select('Prospect').within_bounds(
             min_lat=60.0, max_lat=61.0, min_lon=3.0, max_lon=4.0,
         )
-        assert result.node_count() == 1  # only Alpha
+        assert result.len() == 1  # only Alpha
 
-    def test_get_bounds_fallback(self, prospect_graph):
-        """get_bounds() uses geometry centroids when no lat/lon."""
-        bounds = prospect_graph.type_filter('Prospect').get_bounds()
+    def test_bounds_fallback(self, prospect_graph):
+        """bounds() uses geometry centroids when no lat/lon."""
+        bounds = prospect_graph.select('Prospect').bounds()
         assert bounds is not None
         # All three centroids should be included
         assert bounds['min_lat'] < 61.0
         assert bounds['max_lat'] > 65.0
 
-    def test_get_centroid_fallback(self, prospect_graph):
-        """get_centroid() uses geometry centroids when no lat/lon."""
-        centroid = prospect_graph.type_filter('Prospect').get_centroid()
+    def test_centroid_fallback(self, prospect_graph):
+        """centroid() uses geometry centroids when no lat/lon."""
+        centroid = prospect_graph.select('Prospect').centroid()
         assert centroid is not None
         # Average of ~(60.5, 3.5), ~(64.5, 7.5), ~(65.5, 6.5)
         assert 63.0 < centroid['latitude'] < 64.0
@@ -382,7 +382,7 @@ class TestSaveLoadRoundtrip:
         from kglite import load
         loaded = load(path)
 
-        config = loaded.get_spatial('Field')
+        config = loaded.spatial('Field')
         assert config is not None
         assert config['location'] == ('latitude', 'longitude')
         assert config['geometry'] == 'wkt_polygon'

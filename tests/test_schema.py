@@ -28,7 +28,7 @@ class TestSchemaDefinition:
         graph.clear_schema()
         assert not graph.has_schema()
 
-    def test_get_schema_definition(self):
+    def test_schema_definition(self):
         graph = KnowledgeGraph()
         schema_def = {
             'nodes': {
@@ -39,7 +39,7 @@ class TestSchemaDefinition:
             }
         }
         graph.define_schema(schema_def)
-        retrieved = graph.get_schema_definition()
+        retrieved = graph.schema_definition()
         assert retrieved is not None
 
 

@@ -195,30 +195,30 @@ class TestTraversalAfterDelete:
 
     def test_traverse_from_surviving_node(self, chain_with_deletion):
         """Traverse from a node whose neighbor was deleted."""
-        bob = chain_with_deletion.type_filter('Person').filter({'title': 'Bob'})
+        bob = chain_with_deletion.select('Person').where({'title': 'Bob'})
         # Bob -> Charlie was deleted, so traversal should return nothing
         friends = bob.traverse(connection_type='KNOWS', direction='outgoing')
-        assert friends.node_count() == 0
+        assert friends.len() == 0
 
     def test_traverse_intact_edge(self, chain_with_deletion):
         """Traverse along an edge that still exists."""
-        dave = chain_with_deletion.type_filter('Person').filter({'title': 'Dave'})
+        dave = chain_with_deletion.select('Person').where({'title': 'Dave'})
         friends = dave.traverse(connection_type='KNOWS', direction='outgoing')
-        assert friends.node_count() == 1  # Dave -> Eve
+        assert friends.len() == 1  # Dave -> Eve
 
     def test_traverse_incoming_after_delete(self, chain_with_deletion):
         """Incoming traversal should skip deleted source nodes."""
-        eve = chain_with_deletion.type_filter('Person').filter({'title': 'Eve'})
+        eve = chain_with_deletion.select('Person').where({'title': 'Eve'})
         known_by = eve.traverse(connection_type='KNOWS', direction='incoming')
-        assert known_by.node_count() == 1  # Only Dave knows Eve now
+        assert known_by.len() == 1  # Only Dave knows Eve now
 
     def test_traverse_chain_after_delete(self, chain_with_deletion):
         """Multi-hop traversal should stop at deletion boundary."""
-        alice = chain_with_deletion.type_filter('Person').filter({'title': 'Alice'})
+        alice = chain_with_deletion.select('Person').where({'title': 'Alice'})
         hop1 = alice.traverse(connection_type='KNOWS', direction='outgoing')
-        assert hop1.node_count() == 1  # Only Bob
+        assert hop1.len() == 1  # Only Bob
         hop2 = hop1.traverse(connection_type='KNOWS', direction='outgoing')
-        assert hop2.node_count() == 0  # Bob -> Charlie deleted
+        assert hop2.len() == 0  # Bob -> Charlie deleted
 
 
 # ============================================================================
@@ -230,19 +230,19 @@ class TestFilterAfterDelete:
 
     def test_type_filter_with_tombstone(self, chain_with_deletion):
         """type_filter should exclude deleted nodes."""
-        filtered = chain_with_deletion.type_filter('Person')
-        assert filtered.node_count() == 4  # 5 - 1 deleted
+        filtered = chain_with_deletion.select('Person')
+        assert filtered.len() == 4  # 5 - 1 deleted
 
     def test_property_filter_with_tombstone(self, chain_with_deletion):
         """filter() should work correctly with tombstones."""
-        oslo_people = chain_with_deletion.type_filter('Person').filter({'city': 'Oslo'})
+        oslo_people = chain_with_deletion.select('Person').where({'city': 'Oslo'})
         # Alice and Eve are from Oslo, Charlie was deleted
-        assert oslo_people.node_count() == 2
+        assert oslo_people.len() == 2
 
     def test_filter_for_deleted_node(self, chain_with_deletion):
         """Filtering for a deleted node's properties should return empty."""
-        result = chain_with_deletion.type_filter('Person').filter({'title': 'Charlie'})
-        assert result.node_count() == 0
+        result = chain_with_deletion.select('Person').where({'title': 'Charlie'})
+        assert result.len() == 0
 
 
 # ============================================================================
@@ -283,8 +283,8 @@ class TestAddNodesAfterDelete:
             'age': [28, 33],
         })
         chain_with_deletion.add_nodes(new_people, 'Person', 'person_id', 'name')
-        filtered = chain_with_deletion.type_filter('Person')
-        assert filtered.node_count() == 6  # 4 surviving + 2 new
+        filtered = chain_with_deletion.select('Person')
+        assert filtered.len() == 6  # 4 surviving + 2 new
 
     def test_add_nodes_data_intact(self, chain_with_deletion):
         """New nodes added after deletion should have correct data."""
@@ -294,7 +294,7 @@ class TestAddNodesAfterDelete:
             'age': [28],
         })
         chain_with_deletion.add_nodes(new_people, 'Person', 'person_id', 'name')
-        frank = chain_with_deletion.get_node_by_id('Person', 10)
+        frank = chain_with_deletion.node('Person', 10)
         assert frank is not None
         assert frank['title'] == 'Frank'
         assert frank['age'] == 28
@@ -385,7 +385,7 @@ class TestExportAfterDelete:
             path = f.name
         try:
             # Export requires an active selection
-            filtered = chain_with_deletion.type_filter('Person')
+            filtered = chain_with_deletion.select('Person')
             filtered.export(path, format='graphml')
             assert os.path.exists(path)
             content = open(path).read()
@@ -399,7 +399,7 @@ class TestExportAfterDelete:
         with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
             path = f.name
         try:
-            filtered = chain_with_deletion.type_filter('Person')
+            filtered = chain_with_deletion.select('Person')
             filtered.export(path, format='d3')
             with open(path) as fh:
                 data = json.load(fh)
@@ -410,7 +410,7 @@ class TestExportAfterDelete:
 
     def test_export_string_with_tombstone(self, chain_with_deletion):
         """export_string should work with tombstones."""
-        filtered = chain_with_deletion.type_filter('Person')
+        filtered = chain_with_deletion.select('Person')
         result = filtered.export_string(format='json')
         assert result is not None
         assert len(result) > 0
@@ -426,7 +426,7 @@ class TestStatisticsAfterDelete:
 
     def test_statistics_with_tombstone(self, chain_with_deletion):
         """statistics() should compute on surviving nodes only."""
-        filtered = chain_with_deletion.type_filter('Person')
+        filtered = chain_with_deletion.select('Person')
         stats = filtered.statistics('age', 0)
         assert stats is not None
         # Charlie (35) deleted. Remaining: 25, 30, 40, 45
@@ -435,15 +435,15 @@ class TestStatisticsAfterDelete:
 
     def test_calculate_with_tombstone(self, chain_with_deletion):
         """calculate() should not crash with tombstones."""
-        filtered = chain_with_deletion.type_filter('Person')
+        filtered = chain_with_deletion.select('Person')
         # calculate returns a new graph; verify it doesn't panic
         result = filtered.calculate('age * 2', store_as='double_age')
         assert result is not None
 
     def test_count_with_tombstone(self, chain_with_deletion):
         """node_count should correctly skip tombstones."""
-        filtered = chain_with_deletion.type_filter('Person')
-        assert filtered.node_count() == 4
+        filtered = chain_with_deletion.select('Person')
+        assert filtered.len() == 4
 
 
 # ============================================================================
@@ -460,11 +460,11 @@ class TestSaveLoadAfterDelete:
         try:
             chain_with_deletion.save(path)
             loaded = kglite.load(path)
-            filtered = loaded.type_filter('Person')
-            assert filtered.node_count() == 4
+            filtered = loaded.select('Person')
+            assert filtered.len() == 4
 
             # Charlie should not exist
-            charlie = loaded.get_node_by_id('Person', 3)
+            charlie = loaded.node('Person', 3)
             assert charlie is None
         finally:
             os.unlink(path)
@@ -476,7 +476,7 @@ class TestSaveLoadAfterDelete:
         try:
             chain_with_deletion.save(path)
             loaded = kglite.load(path)
-            alice = loaded.get_node_by_id('Person', 1)
+            alice = loaded.node('Person', 1)
             assert alice is not None
             assert alice['title'] == 'Alice'
             assert alice['age'] == 25
@@ -533,45 +533,45 @@ class TestIndexAfterDelete:
         chain_graph.reindex()  # Rebuild after delete
 
         # Oslo people: was Alice, Charlie, Eve — now Alice, Eve
-        oslo = chain_graph.type_filter('Person').filter({'city': 'Oslo'})
-        assert oslo.node_count() == 2
+        oslo = chain_graph.select('Person').where({'city': 'Oslo'})
+        assert oslo.len() == 2
 
     def test_build_id_indices_after_delete(self, chain_with_deletion):
         """build_id_indices should work with tombstones."""
         chain_with_deletion.build_id_indices(['Person'])
         # Should be able to look up surviving nodes
-        alice = chain_with_deletion.get_node_by_id('Person', 1)
+        alice = chain_with_deletion.node('Person', 1)
         assert alice is not None
         assert alice['title'] == 'Alice'
 
 
 # ============================================================================
-# 11. get_node_by_id for Deleted Nodes
+# 11. node for Deleted Nodes
 # ============================================================================
 
 class TestGetNodeByIdAfterDelete:
-    """get_node_by_id for deleted nodes should return None, not crash."""
+    """node for deleted nodes should return None, not crash."""
 
     def test_get_deleted_node_returns_none(self, chain_with_deletion):
         """Looking up a deleted node by ID should return None."""
-        charlie = chain_with_deletion.get_node_by_id('Person', 3)
+        charlie = chain_with_deletion.node('Person', 3)
         assert charlie is None
 
     def test_get_surviving_node_works(self, chain_with_deletion):
         """Looking up a surviving node should still work."""
-        alice = chain_with_deletion.get_node_by_id('Person', 1)
+        alice = chain_with_deletion.node('Person', 1)
         assert alice is not None
         assert alice['title'] == 'Alice'
 
     def test_get_node_after_multiple_deletes(self, chain_graph):
-        """get_node_by_id should handle multiple deletions correctly."""
+        """node should handle multiple deletions correctly."""
         chain_graph.cypher("MATCH (p:Person {name: 'Bob'}) DETACH DELETE p")
         chain_graph.cypher("MATCH (p:Person {name: 'Dave'}) DETACH DELETE p")
 
-        assert chain_graph.get_node_by_id('Person', 2) is None  # Bob deleted
-        assert chain_graph.get_node_by_id('Person', 4) is None  # Dave deleted
-        assert chain_graph.get_node_by_id('Person', 1) is not None  # Alice alive
-        assert chain_graph.get_node_by_id('Person', 5) is not None  # Eve alive
+        assert chain_graph.node('Person', 2) is None  # Bob deleted
+        assert chain_graph.node('Person', 4) is None  # Dave deleted
+        assert chain_graph.node('Person', 1) is not None  # Alice alive
+        assert chain_graph.node('Person', 5) is not None  # Eve alive
 
 
 # ============================================================================
@@ -583,14 +583,14 @@ class TestToDfAfterDelete:
 
     def test_to_df_with_tombstone(self, chain_with_deletion):
         """to_df should exclude deleted nodes."""
-        filtered = chain_with_deletion.type_filter('Person')
+        filtered = chain_with_deletion.select('Person')
         df = filtered.to_df()
         assert len(df) == 4  # 5 - 1 deleted
         assert 'Charlie' not in df['title'].values
 
     def test_to_df_column_integrity(self, chain_with_deletion):
         """DataFrame columns should be intact after deletion."""
-        filtered = chain_with_deletion.type_filter('Person')
+        filtered = chain_with_deletion.select('Person')
         df = filtered.to_df()
         assert 'age' in df.columns
         assert 'city' in df.columns
@@ -637,24 +637,24 @@ class TestFullWorkflowAfterDelete:
         # --- With tombstones present ---
 
         # Type filter
-        filtered = graph.type_filter('Person')
-        assert filtered.node_count() == 7
+        filtered = graph.select('Person')
+        assert filtered.len() == 7
 
         # Property filter
-        oslo = filtered.filter({'city': 'Oslo'})
-        assert oslo.node_count() > 0
+        oslo = filtered.where({'city': 'Oslo'})
+        assert oslo.len() > 0
 
         # Cypher MATCH
         result = graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")
         assert result[0]['cnt'] == 7
 
         # Traversal
-        p1 = graph.type_filter('Person').filter({'title': 'P_1'})
+        p1 = graph.select('Person').where({'title': 'P_1'})
         friends = p1.traverse(connection_type='KNOWS', direction='outgoing')
-        assert friends.node_count() >= 1
+        assert friends.len() >= 1
 
         # to_df
-        df = graph.type_filter('Person').to_df()
+        df = graph.select('Person').to_df()
         assert len(df) == 7
 
         # Graph algorithms

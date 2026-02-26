@@ -345,8 +345,8 @@ impl KnowledgeGraph {
     /// Retrieve embeddings for nodes.
     ///
     /// Can be called in two ways:
-    ///   - ``get_embeddings(node_type, text_column)`` — returns all embeddings of that type
-    ///   - ``get_embeddings(text_column)`` — returns embeddings for the current selection
+    ///   - ``embeddings(node_type, text_column)`` — returns all embeddings of that type
+    ///   - ``embeddings(text_column)`` — returns embeddings for the current selection
     ///
     /// Args:
     ///     text_column: Source column name (e.g. 'summary'). Resolves to '{text_column}_emb'.
@@ -354,7 +354,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     Dict mapping node IDs to embedding vectors (list of floats).
     #[pyo3(signature = (node_type_or_text_column, text_column=None))]
-    fn get_embeddings(
+    fn embeddings(
         &self,
         py: Python<'_>,
         node_type_or_text_column: &str,
@@ -362,7 +362,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         let result = PyDict::new(py);
 
-        // Two-arg form: get_embeddings(node_type, text_column)
+        // Two-arg form: embeddings(node_type, text_column)
         if let Some(col) = text_column {
             let key = (node_type_or_text_column.to_string(), format!("{}_emb", col));
             let store = match self.inner.embeddings.get(&key) {
@@ -383,7 +383,7 @@ impl KnowledgeGraph {
             return result.into_py_any(py);
         }
 
-        // One-arg form: get_embeddings(text_column) — selection-based
+        // One-arg form: embeddings(text_column) — selection-based
         let col = node_type_or_text_column;
 
         let level_count = self.selection.get_level_count();
@@ -428,7 +428,7 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     The embedding vector as a list of floats, or None if not found.
-    fn get_embedding(
+    fn embedding(
         &self,
         py: Python<'_>,
         node_type: &str,

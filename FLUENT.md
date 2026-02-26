@@ -2,7 +2,7 @@
 
 Full fluent (method-chaining) API supported by KGLite. For Cypher queries, see [CYPHER.md](CYPHER.md). For a quick overview, see the [README](README.md).
 
-> **Selection model:** The fluent API is selection-based. Most methods return a new `KnowledgeGraph` with an updated selection — no data is materialised until you call a retrieval method (`get_nodes()`, `to_df()`, etc.). This makes query chains fast even on large graphs.
+> **Selection model:** The fluent API is selection-based. Most methods return a new `KnowledgeGraph` with an updated selection — no data is materialised until you call a retrieval method (`collect()`, `to_df()`, etc.). This makes query chains fast even on large graphs.
 
 ---
 
@@ -89,44 +89,44 @@ graph = kglite.load("graph.kgl")
 
 ```python
 # Select all nodes of a type
-people = graph.type_filter('Person')
+people = graph.select('Person')
 
 # With sort and limit
-top10 = graph.type_filter('Person', sort='age', max_nodes=10)
+top10 = graph.select('Person', sort='age', limit=10)
 
 # Multi-column sort
-graph.type_filter('Person', sort=[('city', True), ('age', False)])  # city ASC, age DESC
+graph.select('Person', sort=[('city', True), ('age', False)])  # city ASC, age DESC
 ```
 
 ### Property Filtering
 
 ```python
 # Exact match
-graph.type_filter('Person').filter({'city': 'Oslo'})
+graph.select('Person').where({'city': 'Oslo'})
 
 # Comparison operators
-graph.type_filter('Person').filter({'age': {'>': 25}})
-graph.type_filter('Product').filter({'price': {'>=': 100, '<=': 500}})
+graph.select('Person').where({'age': {'>': 25}})
+graph.select('Product').where({'price': {'>=': 100, '<=': 500}})
 
 # String predicates
-graph.type_filter('Person').filter({'name': {'contains': 'ali'}})
-graph.type_filter('Person').filter({'name': {'starts_with': 'A'}})
-graph.type_filter('Person').filter({'email': {'ends_with': '@example.com'}})
-graph.type_filter('Person').filter({'name': {'regex': '^A.*'}})
+graph.select('Person').where({'name': {'contains': 'ali'}})
+graph.select('Person').where({'name': {'starts_with': 'A'}})
+graph.select('Person').where({'email': {'ends_with': '@example.com'}})
+graph.select('Person').where({'name': {'regex': '^A.*'}})
 
 # Negated variants
-graph.type_filter('Person').filter({'status': {'not_in': ['inactive', 'banned']}})
-graph.type_filter('Person').filter({'name': {'not_contains': 'test'}})
+graph.select('Person').where({'status': {'not_in': ['inactive', 'banned']}})
+graph.select('Person').where({'name': {'not_contains': 'test'}})
 
 # IN list
-graph.type_filter('Person').filter({'city': {'in': ['Oslo', 'Bergen']}})
+graph.select('Person').where({'city': {'in': ['Oslo', 'Bergen']}})
 
 # Null checks
-graph.type_filter('Person').filter({'email': {'is_not_null': True}})
-graph.type_filter('Person').filter({'nickname': {'is_null': True}})
+graph.select('Person').where({'email': {'is_not_null': True}})
+graph.select('Person').where({'nickname': {'is_null': True}})
 
 # Combined conditions (AND logic within a single dict)
-graph.type_filter('Person').filter({
+graph.select('Person').where({
     'age': {'>': 25},
     'city': 'Oslo',
     'name': {'regex': '^A.*'},
@@ -137,7 +137,7 @@ graph.type_filter('Person').filter({
 
 ```python
 # OR logic across condition sets
-graph.type_filter('Person').filter_any([
+graph.select('Person').where_any([
     {'city': 'Oslo'},
     {'city': 'Bergen'},
     {'age': {'>': 60}},
@@ -148,30 +148,30 @@ graph.type_filter('Person').filter_any([
 
 ```python
 # Keep only nodes that have a KNOWS connection
-graph.type_filter('Person').has_connection('KNOWS')
+graph.select('Person').where_connected('KNOWS')
 
 # Direction-specific
-graph.type_filter('Person').has_connection('KNOWS', direction='outgoing')
-graph.type_filter('Person').has_connection('KNOWS', direction='incoming')
+graph.select('Person').where_connected('KNOWS', direction='outgoing')
+graph.select('Person').where_connected('KNOWS', direction='incoming')
 
 # Orphan filtering
-graph.type_filter('Person').filter_orphans(include_orphans=True)   # only disconnected nodes
-graph.type_filter('Person').filter_orphans(include_orphans=False)  # only connected nodes
+graph.select('Person').where_orphans(include_orphans=True)   # only disconnected nodes
+graph.select('Person').where_orphans(include_orphans=False)  # only connected nodes
 ```
 
 ### Sorting & Pagination
 
 ```python
 # Sort
-graph.type_filter('Person').sort('age')
-graph.type_filter('Person').sort('age', ascending=False)
-graph.type_filter('Person').sort([('city', True), ('age', False)])
+graph.select('Person').sort('age')
+graph.select('Person').sort('age', ascending=False)
+graph.select('Person').sort([('city', True), ('age', False)])
 
 # Limit
-graph.type_filter('Person').max_nodes(100)
+graph.select('Person').limit(100)
 
 # Pagination (skip + limit)
-graph.type_filter('Person').sort('name').offset(20).max_nodes(10)  # page 3 of 10
+graph.select('Person').sort('name').offset(20).limit(10)  # page 3 of 10
 ```
 
 ---
@@ -182,16 +182,16 @@ Date-range filtering on node properties. NULL semantics: NULL `from` = valid sin
 
 ```python
 # Nodes valid at a specific date
-graph.type_filter('Employee').valid_at('2024-01-15')
+graph.select('Employee').valid_at('2024-01-15')
 # Uses default fields: date_from, date_to
 
 # Custom field names
-graph.type_filter('Contract').valid_at('2024-06-01',
+graph.select('Contract').valid_at('2024-06-01',
     date_from_field='start_date',
     date_to_field='end_date')
 
 # Nodes valid during a range (overlap check)
-graph.type_filter('Regulation').valid_during('2020-01-01', '2022-12-31',
+graph.select('Regulation').valid_during('2020-01-01', '2022-12-31',
     date_from_field='effective_from',
     date_to_field='effective_to')
 ```
@@ -204,19 +204,19 @@ graph.type_filter('Regulation').valid_during('2020-01-01', '2022-12-31',
 
 ```python
 # Bounding box
-graph.type_filter('City').within_bounds(
+graph.select('City').within_bounds(
     min_lat=59.0, max_lat=61.0,
     min_lon=10.0, max_lon=12.0)
 
 # With custom field names
-graph.type_filter('City').within_bounds(59.0, 61.0, 10.0, 12.0,
+graph.select('City').within_bounds(59.0, 61.0, 10.0, 12.0,
     lat_field='lat', lon_field='lon')
 
 # Distance filter (degrees — fast, approximate)
-graph.type_filter('City').near_point(59.91, 10.75, max_distance=1.0)
+graph.select('City').near_point(59.91, 10.75, max_distance=1.0)
 
 # Distance filter (meters — geodesic, WGS84)
-graph.type_filter('City').near_point_m(59.91, 10.75, max_distance_m=100_000)
+graph.select('City').near_point_m(59.91, 10.75, max_distance_m=100_000)
 # Falls back to geometry centroid when lat/lon fields are missing
 ```
 
@@ -224,18 +224,18 @@ graph.type_filter('City').near_point_m(59.91, 10.75, max_distance_m=100_000)
 
 ```python
 # Point-in-polygon: which fields contain a point?
-graph.type_filter('Field').contains_point(60.5, 3.5)
+graph.select('Field').contains_point(60.5, 3.5)
 
 # Custom geometry field
-graph.type_filter('Field').contains_point(60.5, 3.5, geometry_field='wkt_geometry')
+graph.select('Field').contains_point(60.5, 3.5, geometry_field='wkt_geometry')
 
 # Geometry intersection: which fields overlap a query polygon?
-graph.type_filter('Field').intersects_geometry(
+graph.select('Field').intersects_geometry(
     'POLYGON((3.0 60.0, 4.0 60.0, 4.0 61.0, 3.0 61.0, 3.0 60.0))')
 
 # Also accepts shapely geometry objects
 from shapely.geometry import box
-graph.type_filter('Field').intersects_geometry(box(3.0, 60.0, 4.0, 61.0))
+graph.select('Field').intersects_geometry(box(3.0, 60.0, 4.0, 61.0))
 ```
 
 ### Spatial Configuration
@@ -254,22 +254,22 @@ graph.set_spatial('Pipeline',
     shapes={'route': 'route_wkt'})
 
 # Query spatial config
-graph.get_spatial('City')     # config for one type
-graph.get_spatial()           # all types
+graph.spatial('City')     # config for one type
+graph.spatial()           # all types
 ```
 
 ### Spatial Aggregations
 
 ```python
 # Geographic bounds of selection
-bounds = graph.type_filter('City').get_bounds()
+bounds = graph.select('City').bounds()
 # {'min_lat': 58.1, 'max_lat': 71.1, 'min_lon': 5.3, 'max_lon': 31.0}
 
 # As shapely polygon
-poly = graph.type_filter('City').get_bounds(as_shapely=True)
+poly = graph.select('City').bounds(as_shapely=True)
 
 # Centroid (average lat/lon)
-center = graph.type_filter('City').get_centroid()
+center = graph.select('City').centroid()
 # {'latitude': 63.4, 'longitude': 10.4}
 
 # WKT centroid (static method — does not require selection)
@@ -291,8 +291,8 @@ graph.set_timeseries('Sensor',
     units={'temperature': '°C', 'pressure': 'bar'},
     bin_type='sample')  # 'total' | 'mean' | 'sample'
 
-graph.get_timeseries_config('Sensor')
-graph.get_timeseries_config()  # all types
+graph.timeseries_config('Sensor')
+graph.timeseries_config()  # all types
 ```
 
 ### Bulk Loading from DataFrame
@@ -323,20 +323,20 @@ graph.add_ts_channel('sensor_1', 'pressure', [1.01, 1.02, 0.99])
 
 ```python
 # Get all channels for a node
-data = graph.get_timeseries('sensor_1')
+data = graph.timeseries('sensor_1')
 # {'keys': ['2024-01-01', '2024-01-02', ...],
 #  'channels': {'temperature': [20.1, 21.3, ...], 'pressure': [1.01, ...]}}
 
 # Single channel
-data = graph.get_timeseries('sensor_1', channel='temperature')
+data = graph.timeseries('sensor_1', channel='temperature')
 # {'keys': ['2024-01-01', ...], 'values': [20.1, ...]}
 
 # Date range
-data = graph.get_timeseries('sensor_1', channel='temperature',
+data = graph.timeseries('sensor_1', channel='temperature',
     start='2024-01-01', end='2024-01-02')
 
 # Just the time index
-keys = graph.get_time_index('sensor_1')
+keys = graph.time_index('sensor_1')
 # ['2024-01-01', '2024-01-02', '2024-01-03']
 ```
 
@@ -378,15 +378,15 @@ graph.set_embeddings('Article', 'summary', {
 
 ```python
 # Search using a text query — auto-embeds via set_embedder()
-results = graph.type_filter('Article').search_text(
+results = graph.select('Article').search_text(
     'summary', 'machine learning advances', top_k=10)
 
 # With explicit metric
-results = graph.type_filter('Article').search_text(
+results = graph.select('Article').search_text(
     'summary', 'climate change', top_k=5, metric='dot_product')
 
 # As DataFrame
-df = graph.type_filter('Article').search_text(
+df = graph.select('Article').search_text(
     'summary', 'AI safety', top_k=10, to_df=True)
 ```
 
@@ -394,13 +394,13 @@ df = graph.type_filter('Article').search_text(
 
 ```python
 # Search with an explicit vector
-results = graph.type_filter('Article').vector_search(
+results = graph.select('Article').vector_search(
     'summary', query_vector=[0.1, 0.2, ...], top_k=10)
 
 # Combine with property filters
 results = (graph
-    .type_filter('Article')
-    .filter({'category': 'politics'})
+    .select('Article')
+    .where({'category': 'politics'})
     .vector_search('summary', query_vec, top_k=10, metric='cosine'))
 ```
 
@@ -430,11 +430,11 @@ graph.list_embeddings()
 # [{'node_type': 'Article', 'text_column': 'summary', 'dimension': 384, 'count': 1000}]
 
 # Retrieve all embeddings
-vecs = graph.get_embeddings('Article', 'summary')       # by type
-vecs = graph.type_filter('Article').get_embeddings('summary')  # from selection
+vecs = graph.embeddings('Article', 'summary')       # by type
+vecs = graph.select('Article').embeddings('summary')  # from selection
 
 # Single embedding
-vec = graph.get_embedding('Article', 'summary', 'article_1')
+vec = graph.embedding('Article', 'summary', 'article_1')
 
 # Remove an embedding store
 graph.remove_embeddings('Article', 'summary')
@@ -446,28 +446,28 @@ graph.remove_embeddings('Article', 'summary')
 
 ```python
 # Follow outgoing connections
-graph.type_filter('Person').traverse('WORKS_AT')
+graph.select('Person').traverse('WORKS_AT')
 
 # Direction control
-graph.type_filter('Person').traverse('KNOWS', direction='incoming')
-graph.type_filter('Person').traverse('KNOWS', direction='both')
+graph.select('Person').traverse('KNOWS', direction='incoming')
+graph.select('Person').traverse('KNOWS', direction='both')
 
 # Filter target nodes
-graph.type_filter('Person').traverse('WORKS_AT',
+graph.select('Person').traverse('WORKS_AT',
     filter_target={'city': 'Oslo'})
 
 # Filter edge properties
-graph.type_filter('Person').traverse('RATED',
+graph.select('Person').traverse('RATED',
     filter_connection={'score': {'>': 4}})
 
 # Sort and limit targets
-graph.type_filter('Person').traverse('KNOWS',
-    sort_target='name', max_nodes=5)
+graph.select('Person').traverse('KNOWS',
+    sort_target='name', limit=5)
 
 # Multi-hop traversal
 companies = (graph
-    .type_filter('Person')
-    .filter({'city': 'Oslo'})
+    .select('Person')
+    .where({'city': 'Oslo'})
     .traverse('WORKS_AT')
     .traverse('LOCATED_IN'))
 ```
@@ -489,18 +489,18 @@ method={'type': 'contains', 'resolve': 'geometry'}       # dict with settings
 ```python
 # Find all wells within each structural element's geometry
 # Default: target resolved via location fields → geometry centroid fallback
-graph.type_filter('Structure').traverse('Well', method='contains')
+graph.select('Structure').traverse('Well', method='contains')
 
 # Force polygon-in-polygon containment (target as full geometry)
-graph.type_filter('Structure').traverse('Field',
+graph.select('Structure').traverse('Field',
     method={'type': 'contains', 'resolve': 'geometry'})
 
 # Force geometry centroid (even if target has location fields)
-graph.type_filter('Structure').traverse('Well',
+graph.select('Structure').traverse('Well',
     method={'type': 'contains', 'resolve': 'centroid'})
 
 # Override geometry field name
-graph.type_filter('Zone').traverse('Well',
+graph.select('Zone').traverse('Well',
     method={'type': 'contains', 'geometry': 'wkt_geometry'})
 ```
 
@@ -508,10 +508,10 @@ graph.type_filter('Zone').traverse('Well',
 
 ```python
 # Find licences whose geometry overlaps each field (always geometry-to-geometry)
-graph.type_filter('Field').traverse('Licence', method='intersects')
+graph.select('Field').traverse('Licence', method='intersects')
 
 # With custom geometry field
-graph.type_filter('Field').traverse('Licence',
+graph.select('Field').traverse('Licence',
     method={'type': 'intersects', 'geometry': 'wkt_field'})
 ```
 
@@ -519,33 +519,33 @@ graph.type_filter('Field').traverse('Licence',
 
 ```python
 # Find wells within 5 km of each platform (point-to-point, default resolution)
-graph.type_filter('Platform').traverse('Well',
+graph.select('Platform').traverse('Well',
     method={'type': 'distance', 'max_m': 5000})
 
 # Force geometry centroid (even if nodes have location fields)
-graph.type_filter('Structure').traverse('Well',
+graph.select('Structure').traverse('Well',
     method={'type': 'distance', 'max_m': 5000, 'resolve': 'centroid'})
 
 # Closest boundary point (min edge-to-edge distance)
-graph.type_filter('Structure').traverse('Well',
+graph.select('Structure').traverse('Well',
     method={'type': 'distance', 'max_m': 5000, 'resolve': 'closest'})
 
 # With filter and limit
-graph.type_filter('Platform').traverse('Well',
+graph.select('Platform').traverse('Well',
     method={'type': 'distance', 'max_m': 10000},
-    filter_target={'status': 'active'}, max_nodes=20)
+    filter_target={'status': 'active'}, limit=20)
 ```
 
 #### Semantic Similarity
 
 ```python
 # Find articles with similar abstracts (cosine > 0.85)
-graph.type_filter('Article').traverse('Article',
+graph.select('Article').traverse('Article',
     method={'type': 'text_score', 'property': 'abstract', 'threshold': 0.85},
-    max_nodes=5)
+    limit=5)
 
 # Different similarity metric
-graph.type_filter('Doc').traverse('Doc',
+graph.select('Doc').traverse('Doc',
     method={'type': 'text_score', 'property': 'summary',
             'threshold': 0.7, 'metric': 'dot_product'})
 ```
@@ -554,18 +554,18 @@ graph.type_filter('Doc').traverse('Doc',
 
 ```python
 # Group wells into clusters by location
-graph.type_filter('Well').traverse(
+graph.select('Well').traverse(
     method={'type': 'cluster', 'algorithm': 'kmeans', 'k': 5,
             'features': ['latitude', 'longitude']})
 
 # DBSCAN with distance threshold
-graph.type_filter('Well').traverse(
+graph.select('Well').traverse(
     method={'type': 'cluster', 'algorithm': 'dbscan',
             'eps': 5000, 'min_samples': 3,
             'features': ['latitude', 'longitude']})
 
 # Chain: per-cluster statistics
-graph.type_filter('Well').traverse(
+graph.select('Well').traverse(
     method={'type': 'cluster', 'algorithm': 'kmeans', 'k': 10,
             'features': ['latitude', 'longitude', 'depth']}) \
     .statistics('production')
@@ -590,19 +590,19 @@ the selected (leaf) nodes with properties from ancestor nodes in the hierarchy.
 
 ```python
 # Copy properties from parent type
-graph.type_filter('Structure').traverse('Well', method='contains') \
+graph.select('Structure').traverse('Well', method='contains') \
     .add_properties({'Structure': ['name', 'status']})
 
 # Copy all properties
-graph.type_filter('Structure').traverse('Well', method='contains') \
+graph.select('Structure').traverse('Well', method='contains') \
     .add_properties({'Structure': []})
 
 # Rename properties
-graph.type_filter('Structure').traverse('Well', method='contains') \
+graph.select('Structure').traverse('Well', method='contains') \
     .add_properties({'Structure': {'struct_name': 'name', 'struct_status': 'status'}})
 
 # Aggregate: count and stats from leaf nodes onto ancestors
-graph.type_filter('Well').traverse('Structure', method='contains') \
+graph.select('Well').traverse('Structure', method='contains') \
     .add_properties({'Well': {
         'well_count': 'count(*)',
         'avg_depth': 'mean(depth)',
@@ -611,7 +611,7 @@ graph.type_filter('Well').traverse('Structure', method='contains') \
     }})
 
 # Spatial computed properties
-graph.type_filter('Structure').traverse('Well', method='contains') \
+graph.select('Structure').traverse('Well', method='contains') \
     .add_properties({'Structure': {
         'dist_to_center': 'distance',     # geodesic distance to parent centroid
         'parent_area': 'area',            # parent geometry area in m²
@@ -619,7 +619,7 @@ graph.type_filter('Structure').traverse('Well', method='contains') \
     }})
 
 # Combined: rename + spatial in one call
-graph.type_filter('Structure').traverse('Well', method='contains') \
+graph.select('Structure').traverse('Well', method='contains') \
     .add_properties({
         'Structure': {
             'struct_name': 'name',
@@ -629,7 +629,7 @@ graph.type_filter('Structure').traverse('Well', method='contains') \
     })
 
 # Copy from intermediate node in A → B → C chain
-graph.type_filter('A').traverse('REL_AB').traverse('REL_BC') \
+graph.select('A').traverse('REL_AB').traverse('REL_BC') \
     .add_properties({'B': ['score']})
 ```
 
@@ -641,34 +641,34 @@ graph.type_filter('A').traverse('REL_AB').traverse('REL_BC') \
 
 ```python
 # Expand selection by N hops (undirected)
-expanded = graph.type_filter('Person').filter({'name': 'Alice'}).expand(hops=2)
+expanded = graph.select('Person').where({'name': 'Alice'}).expand(hops=2)
 ```
 
 ### Create Connections from Traversal
 
 ```python
 # After A → B → C traversal, create direct A → C edges
-graph.type_filter('A').traverse('REL_AB').traverse('REL_BC') \
+graph.select('A').traverse('REL_AB').traverse('REL_BC') \
     .create_connections('A_TO_C')
 
 # Copy properties from intermediate B nodes onto the new edges
-graph.type_filter('A').traverse('REL_AB').traverse('REL_BC') \
+graph.select('A').traverse('REL_AB').traverse('REL_BC') \
     .create_connections('A_TO_C', properties={'B': ['score', 'weight']})
 
 # Empty list = copy ALL properties from that type
-graph.type_filter('A').traverse('REL_AB').traverse('REL_BC') \
+graph.select('A').traverse('REL_AB').traverse('REL_BC') \
     .create_connections('A_TO_C', properties={'B': []})
 
 # Copy from multiple node types
-graph.type_filter('A').traverse('REL_AB').traverse('REL_BC') \
+graph.select('A').traverse('REL_AB').traverse('REL_BC') \
     .create_connections('A_TO_C', properties={'A': ['name'], 'B': ['score']})
 
 # Override source/target (connect B → C instead of A → C)
-graph.type_filter('A').traverse('REL_AB').traverse('REL_BC') \
+graph.select('A').traverse('REL_AB').traverse('REL_BC') \
     .create_connections('B_TO_C', source_type='B', target_type='C')
 
 # Conflict handling
-graph.type_filter('A').traverse('REL_AB').traverse('REL_BC') \
+graph.select('A').traverse('REL_AB').traverse('REL_BC') \
     .create_connections('A_TO_C', conflict_handling='skip')
 ```
 
@@ -680,7 +680,7 @@ graph.type_filter('A').traverse('REL_AB').traverse('REL_BC') \
 
 ```python
 # Full node data — returns ResultView (lazy)
-result = graph.type_filter('Person').filter({'age': {'>': 25}}).get_nodes()
+result = graph.select('Person').where({'age': {'>': 25}}).collect()
 for node in result:
     print(node['title'], node['age'])
 
@@ -692,19 +692,19 @@ print(result[0])
 nodes = result.to_list()
 
 # Lightweight: id + title + type only
-ids = graph.type_filter('Person').get_ids()
+ids = graph.select('Person').ids()
 
 # Flat ID list (lightest)
-id_list = graph.type_filter('Person').id_values()
+id_list = graph.select('Person').ids()
 
 # O(1) lookup by type + ID
-person = graph.get_node_by_id('Person', 'alice')
+person = graph.node('Person', 'alice')
 
 # Titles only
-titles = graph.type_filter('Person').get_titles()
+titles = graph.select('Person').titles()
 
 # Specific properties as tuples
-props = graph.type_filter('Person').get_properties(['name', 'age'])
+props = graph.select('Person').get_properties(['name', 'age'])
 # [('Alice', 30), ('Bob', 25)]
 ```
 
@@ -712,20 +712,20 @@ props = graph.type_filter('Person').get_properties(['name', 'age'])
 
 ```python
 # Count without materialising (O(1))
-n = graph.type_filter('Person').node_count()
+n = graph.select('Person').len()
 
 # Raw graph indices
-idx = graph.type_filter('Person').indices()
+idx = graph.select('Person').indices()
 ```
 
 ### DataFrame Export
 
 ```python
 # Current selection as DataFrame
-df = graph.type_filter('Person').to_df()
+df = graph.select('Person').to_df()
 
 # Without type/id columns
-df = graph.type_filter('Person').to_df(include_type=False, include_id=False)
+df = graph.select('Person').to_df(include_type=False, include_id=False)
 
 # GeoDataFrame (from ResultView)
 result = graph.cypher("MATCH (n:Field) RETURN n.name, n.wkt_geometry AS geometry")
@@ -734,7 +734,7 @@ gdf = result.to_gdf(geometry_column='geometry', crs='EPSG:4326')
 
 ### ResultView
 
-All `cypher()` calls, `get_nodes()` (flat), centrality methods, and `sample()` return a `ResultView`:
+All `cypher()` calls, `collect()` (flat), centrality methods, and `sample()` return a `ResultView`:
 
 ```python
 result = graph.cypher("MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age")
@@ -761,37 +761,37 @@ for row in result:
 
 ```python
 # Descriptive statistics for a numeric property
-stats = graph.type_filter('Person').statistics('age')
+stats = graph.select('Person').statistics('age')
 # {count, mean, std, min, max, sum}
 
 # Group by a property
-stats = graph.type_filter('Person').statistics('age', group_by='city')
+stats = graph.select('Person').statistics('age', group_by='city')
 # {'Oslo': {count, mean, ...}, 'Bergen': {count, mean, ...}}
 
 # Count nodes
-n = graph.type_filter('Person').count()
+n = graph.select('Person').count()
 
 # Count grouped by property
-counts = graph.type_filter('Person').count(group_by='city')
+counts = graph.select('Person').count(group_by='city')
 # {'Oslo': 150, 'Bergen': 80}
 
 # Math expressions
-graph.type_filter('Product').calculate('price * quantity')
+graph.select('Product').calculate('price * quantity')
 
 # Aggregate functions
-graph.type_filter('Person').calculate('mean(age)')
+graph.select('Person').calculate('mean(age)')
 
 # Store results as new properties
-graph.type_filter('Product').calculate('price * 1.25', store_as='price_with_tax')
+graph.select('Product').calculate('price * 1.25', store_as='price_with_tax')
 ```
 
 ### Unique Values
 
 ```python
-cities = graph.type_filter('Person').unique_values('city')
+cities = graph.select('Person').unique_values('city')
 
 # Store as comma-separated list on parent nodes
-graph.type_filter('Company').traverse('EMPLOYS').unique_values(
+graph.select('Company').traverse('EMPLOYS').unique_values(
     'skill', store_as='employee_skills')
 ```
 
@@ -799,7 +799,7 @@ graph.type_filter('Company').traverse('EMPLOYS').unique_values(
 
 ```python
 # Collect child titles into comma-separated strings on parents
-graph.type_filter('Company').traverse('EMPLOYS').children_properties_to_list(
+graph.select('Company').traverse('EMPLOYS').collect_children(
     property='name', sort='name', store_as='employees')
 ```
 
@@ -846,7 +846,7 @@ components = graph.connected_components(weak=False)  # strongly connected
 # Returns list of components (largest first)
 
 # Degree counts for selected nodes
-degrees = graph.type_filter('Person').get_degrees()
+degrees = graph.select('Person').degrees()
 # {'Alice': 5, 'Bob': 3, ...}
 ```
 
@@ -905,20 +905,20 @@ result = graph.label_propagation(max_iterations=100)
 Combine selections from different query chains on the same graph:
 
 ```python
-young = graph.type_filter('Person').filter({'age': {'<': 25}})
-oslo = graph.type_filter('Person').filter({'city': 'Oslo'})
+young = graph.select('Person').where({'age': {'<': 25}})
+oslo = graph.select('Person').where({'city': 'Oslo'})
 
 # Union — nodes in either selection
-young.union(oslo).get_nodes()
+young.union(oslo).collect()
 
 # Intersection — nodes in both selections
-young.intersection(oslo).get_nodes()
+young.intersection(oslo).collect()
 
 # Difference — in young but not in oslo
-young.difference(oslo).get_nodes()
+young.difference(oslo).collect()
 
 # Symmetric difference — in exactly one selection
-young.symmetric_difference(oslo).get_nodes()
+young.symmetric_difference(oslo).collect()
 ```
 
 ---
@@ -929,7 +929,7 @@ young.symmetric_difference(oslo).get_nodes()
 
 ```python
 # Batch-update all selected nodes
-result = graph.type_filter('Person').filter({'city': 'Oslo'}).update({
+result = graph.select('Person').where({'city': 'Oslo'}).update({
     'region': 'Eastern Norway',
     'updated': True,
 })
@@ -946,10 +946,10 @@ For CREATE, SET, DELETE, REMOVE, and MERGE — see [CYPHER.md](CYPHER.md#create-
 
 ```python
 # Extract selected nodes + their inter-edges into a new independent graph
-sub = graph.type_filter('Person').filter({'city': 'Oslo'}).to_subgraph()
+sub = graph.select('Person').where({'city': 'Oslo'}).to_subgraph()
 
 # Preview what would be extracted
-stats = graph.type_filter('Person').expand(2).subgraph_stats()
+stats = graph.select('Person').expand(2).subgraph_stats()
 # {'node_count': 42, 'edge_count': 78, 'node_types': ['Person', 'Company'], ...}
 ```
 
@@ -1049,7 +1049,7 @@ graph.export('graph.json')                 # D3 JSON
 graph.export('graph.csv')                  # CSV
 
 # Selection-only export
-graph.type_filter('Person').export('people.graphml', selection_only=True)
+graph.select('Person').export('people.graphml', selection_only=True)
 
 # String export (no file)
 xml = graph.export_string('graphml')
@@ -1080,7 +1080,7 @@ graph = kglite.load('graph.kgl')
 
 ```python
 # Text summary
-print(graph.get_schema())
+print(graph.schema_text())
 
 # Full schema dict
 schema = graph.schema()
@@ -1107,12 +1107,12 @@ graph.connection_types()
 graph.sample('Person', n=5)
 
 # Selection state
-print(graph.get_selection())
+print(graph.selection())
 graph.clear()  # reset selection
 
 # Execution plan for current chain
-print(graph.type_filter('Person').filter({'age': {'>': 25}}).explain())
-# TYPE_FILTER Person (500 nodes) -> FILTER (42 nodes)
+print(graph.select('Person').where({'age': {'>': 25}}).explain())
+# SELECT Person (500 nodes) -> WHERE (42 nodes)
 ```
 
 ### Schema Definition & Validation
@@ -1214,9 +1214,9 @@ toc = graph.toc('src/main.py')
 ## Operation Reports
 
 ```python
-graph.get_last_report()       # most recent operation report
-graph.get_operation_index()   # sequential operation counter
-graph.get_report_history()    # all reports
+graph.last_report()       # most recent operation report
+graph.operation_index()   # sequential operation counter
+graph.report_history()    # all reports
 ```
 
 ---
@@ -1226,12 +1226,12 @@ graph.get_report_history()    # all reports
 | Feature | Fluent API | Cypher |
 |---------|-----------|--------|
 | **Spatial — point filters** | `within_bounds`, `near_point`, `near_point_m`, `contains_point` | `distance()`, `contains()` in WHERE |
-| **Spatial — geometry** | `intersects_geometry`, `set_spatial`, `get_spatial` | `intersects()`, `centroid()`, `area()`, `perimeter()` |
-| **Spatial — bounds/centroid** | `get_bounds()`, `get_centroid()`, `wkt_centroid()` | Manual via `latitude()`, `longitude()` |
+| **Spatial — geometry** | `intersects_geometry`, `set_spatial`, `spatial` | `intersects()`, `centroid()`, `area()`, `perimeter()` |
+| **Spatial — bounds/centroid** | `bounds()`, `centroid()`, `wkt_centroid()` | Manual via `latitude()`, `longitude()` |
 | **Temporal — point-in-time** | `valid_at()` | `valid_at(e, date, 'from', 'to')` |
 | **Temporal — range overlap** | `valid_during()` | `valid_during(e, start, end, 'from', 'to')` |
 | **Timeseries — load** | `add_timeseries`, `add_ts_channel`, `set_time_index` | N/A (load via fluent) |
-| **Timeseries — extract** | `get_timeseries()`, `get_time_index()` | `ts_series()` |
+| **Timeseries — extract** | `timeseries()`, `time_index()` | `ts_series()` |
 | **Timeseries — aggregate** | N/A (use Cypher) | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_at`, `ts_delta` |
 | **Vector — load** | `set_embeddings`, `embed_texts`, `set_embedder` | N/A (load via fluent) |
 | **Vector — search** | `vector_search()`, `search_text()` | `text_score()` in RETURN/WHERE |
@@ -1239,7 +1239,7 @@ graph.get_report_history()    # all reports
 | **Centrality** | `betweenness_centrality`, `pagerank`, `degree_centrality`, `closeness_centrality` | `CALL pagerank() YIELD ...` etc. |
 | **Community** | `louvain_communities`, `label_propagation` | `CALL louvain() YIELD ...` etc. |
 | **Pattern matching** | `match_pattern()`, `traverse()`, `expand()` | Full MATCH with patterns |
-| **Filtering** | `filter`, `filter_any`, `has_connection`, etc. | WHERE clause |
+| **Filtering** | `where`, `where_any`, `where_connected`, etc. | WHERE clause |
 | **Aggregation** | `statistics()`, `count()`, `calculate()` | `count()`, `sum()`, `avg()` in RETURN |
 | **Mutations** | `update()` (batch property update) | CREATE, SET, DELETE, REMOVE, MERGE |
 | **Transactions** | `begin()`, `begin_read()` | Implicit (each `cypher()` is atomic) |

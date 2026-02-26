@@ -14,7 +14,7 @@ class TestBatchUpdate:
             'status': ['active', 'active', 'active'],
         })
         graph.add_nodes(df, 'Node', 'id', 'name')
-        result = graph.type_filter('Node').update({'status': 'inactive'})
+        result = graph.select('Node').update({'status': 'inactive'})
         assert result['nodes_updated'] == 3
 
     def test_update_with_filter(self):
@@ -25,7 +25,7 @@ class TestBatchUpdate:
             'value': [10, 20, 30],
         })
         graph.add_nodes(df, 'Node', 'id', 'name')
-        result = graph.type_filter('Node').filter({'value': {'>': 15}}).update(
+        result = graph.select('Node').where({'value': {'>': 15}}).update(
             {'processed': True}
         )
         assert result['nodes_updated'] == 2
@@ -34,7 +34,7 @@ class TestBatchUpdate:
         graph = KnowledgeGraph()
         df = pd.DataFrame({'id': [1, 2], 'name': ['A', 'B']})
         graph.add_nodes(df, 'Node', 'id', 'name')
-        result = graph.type_filter('Node').update({'flag': True}, keep_selection=True)
+        result = graph.select('Node').update({'flag': True}, keep_selection=True)
         updated_graph = result['graph']
         assert updated_graph is not None
 
@@ -42,7 +42,7 @@ class TestBatchUpdate:
         graph = KnowledgeGraph()
         df = pd.DataFrame({'id': [1], 'name': ['A']})
         graph.add_nodes(df, 'Node', 'id', 'name')
-        result = graph.type_filter('Node').update({
+        result = graph.select('Node').update({
             'count': 42,
             'ratio': 3.14,
             'active': True,
@@ -55,9 +55,9 @@ class TestBatchUpdate:
         graph = KnowledgeGraph()
         df = pd.DataFrame({'id': [1], 'name': ['A'], 'val': [0]})
         graph.add_nodes(df, 'Node', 'id', 'name')
-        result = graph.type_filter('Node').update({'val': 999})
+        result = graph.select('Node').update({'val': 999})
         updated = result['graph']
-        node = updated.type_filter('Node').get_nodes()[0]
+        node = updated.select('Node').collect()[0]
         assert node['val'] == 999
 
 
@@ -78,8 +78,8 @@ class TestBulkOperations:
             graph.add_nodes(item['data'], item['node_type'],
                             item['id_field'], 'name')
 
-        assert graph.type_filter('Person').node_count() == 2
-        assert graph.type_filter('Company').node_count() == 1
+        assert graph.select('Person').len() == 2
+        assert graph.select('Company').len() == 1
 
     def test_add_connections_bulk(self):
         graph = KnowledgeGraph()
@@ -107,7 +107,7 @@ class TestConnectorAPI:
             'unique_id_field': 'person_id',
             'node_title_field': 'name',
         }])
-        assert graph.type_filter('Person').node_count() == 5
+        assert graph.select('Person').len() == 5
 
     def test_add_connections_bulk_api(self):
         graph = KnowledgeGraph()
@@ -126,5 +126,5 @@ class TestConnectorAPI:
             'target_type': 'Company',
         }])
 
-        result = graph.type_filter('Person').traverse('WORKS_AT')
-        assert result.node_count() >= 1
+        result = graph.select('Person').traverse('WORKS_AT')
+        assert result.len() >= 1

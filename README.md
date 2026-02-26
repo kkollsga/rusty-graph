@@ -215,7 +215,7 @@ The model wrapper works with any provider — OpenAI, Cohere, local sentence-tra
 
 **Relationships** connect two nodes with a type (e.g., `:KNOWS`) and optional properties. The Cypher API calls them "relationships"; the fluent API calls them "connections" — same thing.
 
-**Selections** (fluent API) are lightweight views — a set of node indices that flow through chained operations like `type_filter().filter().traverse()`. They don't copy data.
+**Selections** (fluent API) are lightweight views — a set of node indices that flow through chained operations like `select().where().traverse()`. They don't copy data.
 
 **Atomicity.** Each `cypher()` call is atomic — if any clause fails, the graph remains unchanged. For multi-statement atomicity, use `graph.begin()` transactions. Durability only via explicit `save()`.
 
@@ -226,7 +226,7 @@ The model wrapper works with any provider — OpenAI, Cohere, local sentence-tra
 KGLite stores nodes and relationships in a Rust graph structure ([petgraph](https://github.com/petgraph/petgraph)). Python only sees lightweight handles — data converts to Python objects on access, not on query.
 
 - **Cypher queries** parse, optimize, and execute entirely in Rust, then return a `ResultView` (lazy — rows convert to Python dicts only when accessed)
-- **Fluent API** chains build a *selection* (a set of node indices) — no data is copied until you call `get_nodes()`, `to_df()`, etc.
+- **Fluent API** chains build a *selection* (a set of node indices) — no data is copied until you call `collect()`, `to_df()`, etc.
 - **Persistence** is via `save()`/`load()` binary snapshots — there is no WAL or auto-save
 
 ---
@@ -248,7 +248,7 @@ All node-related methods use a consistent key order: **`type`, `title`, `id`**, 
 
 ### ResultView
 
-`ResultView` is a lazy result container returned by `cypher()`, centrality methods, `get_nodes()`, and `sample()`. Data stays in Rust and is only converted to Python objects when you access it — making `cypher()` calls fast even for large result sets.
+`ResultView` is a lazy result container returned by `cypher()`, centrality methods, `collect()`, and `sample()`. Data stays in Rust and is only converted to Python objects when you access it — making `cypher()` calls fast even for large result sets.
 
 ```python
 result = graph.cypher("MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age")
@@ -286,31 +286,30 @@ Every method that returns node data uses the same dict shape:
 
 | Method | Returns | Notes |
 |--------|---------|-------|
-| `node_count()` | `int` | No materialization |
+| `len()` | `int` | No materialization |
 | `indices()` | `list[int]` | Raw graph indices |
-| `id_values()` | `list[Any]` | Flat list of IDs |
-| `get_ids()` | `list[{type, title, id}]` | Identification only |
-| `get_titles()` | `list[str]` | Flat list (see below) |
+| `ids()` | `list[Any]` | Flat list of IDs |
+| `titles()` | `list[str]` | Flat list (see below) |
 | `get_properties(['a','b'])` | `list[tuple]` | Flat list (see below) |
-| `get_nodes()` | `ResultView` or grouped dict | Full node dicts |
+| `collect()` | `ResultView` or grouped dict | Full node dicts |
 | `to_df()` | `DataFrame` | Columns: `type, title, id, ...props` |
-| `get_node_by_id(type, id)` | `dict \| None` | O(1) hash lookup |
+| `node(type, id)` | `dict \| None` | O(1) hash lookup |
 
 ### Flat vs. grouped results
 
-`get_titles()`, `get_properties()`, and `get_nodes()` automatically flatten when there is only one parent group (the common case). After a traversal with multiple parent groups, they return grouped dicts instead:
+`titles()`, `get_properties()`, and `collect()` automatically flatten when there is only one parent group (the common case). After a traversal with multiple parent groups, they return grouped dicts instead:
 
 ```python
 # No traversal (single group) → flat list
-graph.type_filter('Person').get_titles()
+graph.select('Person').titles()
 # ['Alice', 'Bob', 'Charlie']
 
 # After traversal (multiple groups) → grouped dict
-graph.type_filter('Person').traverse('KNOWS').get_titles()
+graph.select('Person').traverse('KNOWS').titles()
 # {'Alice': ['Bob'], 'Bob': ['Charlie']}
 
 # Override with flatten_single_parent=False to always get grouped
-graph.type_filter('Person').get_titles(flatten_single_parent=False)
+graph.select('Person').titles(flatten_single_parent=False)
 # {'Root': ['Alice', 'Bob', 'Charlie']}
 ```
 
@@ -581,8 +580,8 @@ When adding nodes, `unique_id_field` and `node_title_field` are **mapped** to `i
 ```python
 # After adding with unique_id_field='user_id', node_title_field='name':
 graph.cypher("MATCH (u:User) WHERE u.user_id = 1001 RETURN u")  # OK — alias resolves to id
-graph.type_filter('User').filter({'user_id': 1001})              # OK — alias works here too
-graph.type_filter('User').filter({'id': 1001})                   # Also OK — canonical name
+graph.select('User').where({'user_id': 1001})              # OK — alias works here too
+graph.select('User').where({'id': 1001})                   # Also OK — canonical name
 
 # Results always use canonical names:
 # {'id': 1001, 'title': 'Alice', 'type': 'User', ...}  — NOT 'user_id' or 'name'
@@ -622,15 +621,15 @@ graph.add_nodes(
     column_types={'valid_from': 'datetime', 'valid_to': 'datetime'}
 )
 
-graph.type_filter('Estimate').filter({'valid_from': {'>=': '2020-06-01'}})
-graph.type_filter('Estimate').valid_at('2020-06-15')
-graph.type_filter('Estimate').valid_during('2020-01-01', '2020-06-30')
+graph.select('Estimate').where({'valid_from': {'>=': '2020-06-01'}})
+graph.select('Estimate').valid_at('2020-06-15')
+graph.select('Estimate').valid_during('2020-01-01', '2020-06-30')
 ```
 
 ### Batch Property Updates
 
 ```python
-result = graph.type_filter('Prospect').filter({'status': 'Inactive'}).update({
+result = graph.select('Prospect').where({'status': 'Inactive'}).update({
     'is_active': False,
     'deactivation_reason': 'status_inactive'
 })
@@ -648,9 +647,9 @@ report = graph.add_nodes(data=df, node_type='Product', unique_id_field='product_
 # report keys: operation, timestamp, nodes_created, nodes_updated, nodes_skipped,
 #              processing_time_ms, has_errors, errors
 
-graph.get_last_report()       # most recent operation report
-graph.get_operation_index()   # sequential index of last operation
-graph.get_report_history()    # all reports
+graph.last_report()       # most recent operation report
+graph.operation_index()   # sequential index of last operation
+graph.report_history()    # all reports
 ```
 
 ---
@@ -662,49 +661,49 @@ graph.get_report_history()    # all reports
 ### Filtering
 
 ```python
-graph.type_filter('Product').filter({'price': 999.99})
-graph.type_filter('Product').filter({'price': {'<': 500.0}, 'stock': {'>': 50}})
-graph.type_filter('Product').filter({'id': {'in': [101, 103]}})
-graph.type_filter('Product').filter({'category': {'is_null': True}})
+graph.select('Product').where({'price': 999.99})
+graph.select('Product').where({'price': {'<': 500.0}, 'stock': {'>': 50}})
+graph.select('Product').where({'id': {'in': [101, 103]}})
+graph.select('Product').where({'category': {'is_null': True}})
 
 # Regex matching
-graph.type_filter('Person').filter({'name': {'regex': '^A.*'}})   # or {'=~': '^A.*'}
-graph.type_filter('Person').filter({'name': {'regex': '(?i)^alice'}})  # case-insensitive
+graph.select('Person').where({'name': {'regex': '^A.*'}})   # or {'=~': '^A.*'}
+graph.select('Person').where({'name': {'regex': '(?i)^alice'}})  # case-insensitive
 
 # Negated conditions
-graph.type_filter('Person').filter({'city': {'not_in': ['Oslo', 'Bergen']}})
-graph.type_filter('Person').filter({'name': {'not_contains': 'test'}})
-graph.type_filter('Person').filter({'name': {'not_regex': '^[A-C].*'}})
+graph.select('Person').where({'city': {'not_in': ['Oslo', 'Bergen']}})
+graph.select('Person').where({'name': {'not_contains': 'test'}})
+graph.select('Person').where({'name': {'not_regex': '^[A-C].*'}})
 
-# OR logic — filter_any keeps nodes matching ANY condition set
-graph.type_filter('Person').filter_any([
+# OR logic — where_any keeps nodes matching ANY condition set
+graph.select('Person').where_any([
     {'city': 'Oslo'},
     {'city': 'Bergen'},
 ])
 
 # Connection existence — filter without changing the selection target
-graph.type_filter('Person').has_connection('KNOWS')                        # any direction
-graph.type_filter('Person').has_connection('KNOWS', direction='outgoing')  # outgoing only
+graph.select('Person').where_connected('KNOWS')                        # any direction
+graph.select('Person').where_connected('KNOWS', direction='outgoing')  # outgoing only
 
 # Orphan nodes (no connections)
-graph.filter_orphans(include_orphans=True)
+graph.where_orphans(include_orphans=True)
 ```
 
 ### Sorting and Pagination
 
 ```python
-graph.type_filter('Product').sort('price')
-graph.type_filter('Product').sort('price', ascending=False)
-graph.type_filter('Product').sort([('stock', False), ('price', True)])
+graph.select('Product').sort('price')
+graph.select('Product').sort('price', ascending=False)
+graph.select('Product').sort([('stock', False), ('price', True)])
 
-# Pagination with offset + max_nodes
-graph.type_filter('Person').sort('name').offset(20).max_nodes(10)  # page 3 of 10
+# Pagination with offset + limit
+graph.select('Person').sort('name').offset(20).limit(10)  # page 3 of 10
 ```
 
 ### Traversing the Graph
 
 ```python
-alice = graph.type_filter('User').filter({'title': 'Alice'})
+alice = graph.select('User').where({'title': 'Alice'})
 alice_products = alice.traverse(connection_type='PURCHASED', direction='outgoing')
 
 # Filter and sort traversal targets
@@ -712,18 +711,18 @@ expensive = alice.traverse(
     connection_type='PURCHASED',
     filter_target={'price': {'>=': 500.0}},
     sort_target='price',
-    max_nodes=10
+    limit=10
 )
 
 # Get connection information
-alice.get_connections(include_node_properties=True)
+alice.connections(include_node_properties=True)
 ```
 
 ### Set Operations
 
 ```python
-n3 = graph.type_filter('Prospect').filter({'geoprovince': 'N3'})
-m3 = graph.type_filter('Prospect').filter({'geoprovince': 'M3'})
+n3 = graph.select('Prospect').where({'geoprovince': 'N3'})
+m3 = graph.select('Prospect').where({'geoprovince': 'M3'})
 
 n3.union(m3)                    # all nodes from both (OR)
 n3.intersection(m3)             # nodes in both (AND)
@@ -734,32 +733,32 @@ n3.symmetric_difference(m3)     # nodes in exactly one (XOR)
 ### Retrieving Results
 
 ```python
-people = graph.type_filter('Person')
+people = graph.select('Person')
 
 # Lightweight (no property materialization)
-people.node_count()                     # → 3
+people.len()                     # → 3
 people.indices()                        # → [0, 1, 2]
-people.id_values()                      # → [1, 2, 3]
+people.ids()                      # → [1, 2, 3]
 
 # Medium (partial materialization)
-people.get_ids()                        # → [{'type': 'Person', 'title': 'Alice', 'id': 1}, ...]
-people.get_titles()                     # → ['Alice', 'Bob', 'Charlie']
+people.ids()                        # → [{'type': 'Person', 'title': 'Alice', 'id': 1}, ...]
+people.titles()                     # → ['Alice', 'Bob', 'Charlie']
 people.get_properties(['age', 'city'])  # → [(28, 'Oslo'), (35, 'Bergen'), (42, 'Oslo')]
 
 # Full materialization
-people.get_nodes()                      # → [{'type': 'Person', 'title': 'Alice', 'id': 1, 'age': 28, ...}, ...]
+people.collect()                      # → [{'type': 'Person', 'title': 'Alice', 'id': 1, 'age': 28, ...}, ...]
 people.to_df()                          # → DataFrame with columns type, title, id, age, city, ...
 
 # Single node lookup (O(1))
-graph.get_node_by_id('Person', 1)       # → {'type': 'Person', 'title': 'Alice', ...} or None
+graph.node('Person', 1)       # → {'type': 'Person', 'title': 'Alice', ...} or None
 ```
 
 ### Debugging Selections
 
 ```python
-result = graph.type_filter('User').filter({'id': 1001})
+result = graph.select('User').where({'id': 1001})
 print(result.explain())
-# TYPE_FILTER User (1000 nodes) -> FILTER (1 nodes)
+# SELECT User (1000 nodes) -> WHERE (1 nodes)
 ```
 
 ### Pattern Matching
@@ -785,7 +784,7 @@ graph.match_pattern('(a:Person)-[:KNOWS]->(b:Person)', max_matches=100)
 
 ## Semantic Search
 
-Store embedding vectors alongside nodes and query them with fast similarity search. Embeddings are stored separately from node properties — they don't appear in `get_nodes()`, `to_df()`, or regular Cypher property access.
+Store embedding vectors alongside nodes and query them with fast similarity search. Embeddings are stored separately from node properties — they don't appear in `collect()`, `to_df()`, or regular Cypher property access.
 
 ### Text-Level API (Recommended)
 
@@ -832,7 +831,7 @@ graph.embed_texts("Article", "summary")
 # → {'embedded': 1000, 'skipped': 3, 'skipped_existing': 0, 'dimension': 384}
 
 # Search with text — resolves "summary" → "summary_emb" internally
-results = graph.type_filter("Article").search_text("summary", "machine learning", top_k=10)
+results = graph.select("Article").search_text("summary", "machine learning", top_k=10)
 # [{'id': 42, 'title': '...', 'type': 'Article', 'score': 0.95, ...}, ...]
 ```
 
@@ -854,8 +853,8 @@ graph.embed_texts("Article", "summary", replace=True)
 
 # Combine with filters
 results = (graph
-    .type_filter("Article")
-    .filter({"category": "politics"})
+    .select("Article")
+    .where({"category": "politics"})
     .search_text("summary", "foreign policy", top_k=10))
 ```
 
@@ -883,25 +882,25 @@ graph.add_nodes(df, 'Doc', 'id', 'title', column_types={'text_emb': 'embedding'}
 
 ### Vector Search (Low-Level)
 
-Search operates on the current selection — combine with `type_filter()` and `filter()` for scoped queries:
+Search operates on the current selection — combine with `select()` and `filter()` for scoped queries:
 
 ```python
 # Basic search — returns list of dicts sorted by similarity
-results = graph.type_filter('Article').vector_search('summary', query_vec, top_k=10)
+results = graph.select('Article').vector_search('summary', query_vec, top_k=10)
 # [{'id': 5, 'title': '...', 'type': 'Article', 'score': 0.95, ...}, ...]
 # 'score' is always included: cosine similarity [-1,1], dot_product, or negative euclidean distance
 
 # Filtered search — only search within a subset
 results = (graph
-    .type_filter('Article')
-    .filter({'category': 'politics'})
+    .select('Article')
+    .where({'category': 'politics'})
     .vector_search('summary', query_vec, top_k=10))
 
 # DataFrame output
-df = graph.type_filter('Article').vector_search('summary', query_vec, top_k=10, to_df=True)
+df = graph.select('Article').vector_search('summary', query_vec, top_k=10, to_df=True)
 
 # Distance metrics: 'cosine' (default), 'dot_product', 'euclidean'
-results = graph.type_filter('Article').vector_search(
+results = graph.select('Article').vector_search(
     'summary', query_vec, top_k=10, metric='dot_product')
 ```
 
@@ -943,14 +942,14 @@ graph.list_embeddings()
 graph.remove_embeddings('Article', 'summary')
 
 # Retrieve all embeddings for a type (no selection needed)
-embs = graph.get_embeddings('Article', 'summary')
+embs = graph.embeddings('Article', 'summary')
 # {1: [0.1, 0.2, ...], 2: [0.4, 0.5, ...], ...}
 
 # Retrieve embeddings for current selection only
-embs = graph.type_filter('Article').filter({'category': 'politics'}).get_embeddings('summary')
+embs = graph.select('Article').where({'category': 'politics'}).embeddings('summary')
 
 # Get a single node's embedding (O(1) lookup, returns None if not found)
-vec = graph.get_embedding('Article', 'summary', node_id)
+vec = graph.embedding('Article', 'summary', node_id)
 ```
 
 Embeddings persist across `save()`/`load()` cycles automatically.
@@ -1114,7 +1113,7 @@ Noise points (DBSCAN only) get `cluster = -1`. Filter with `WHERE cluster >= 0`.
 ### Node Degrees
 
 ```python
-degrees = graph.type_filter('Person').get_degrees()
+degrees = graph.select('Person').degrees()
 # Returns: {'Alice': 5, 'Bob': 3, ...}
 ```
 
@@ -1147,7 +1146,7 @@ With spatial types declared, queries become simpler:
 
 ```python
 # Auto-resolves location fields — no lat_field/lon_field needed
-graph.type_filter('Field').near_point_m(center_lat=60.5, center_lon=3.2, max_distance_m=50000.0)
+graph.select('Field').near_point_m(center_lat=60.5, center_lon=3.2, max_distance_m=50000.0)
 
 # Cypher distance between nodes — resolves via location, falls back to geometry centroid
 graph.cypher("""
@@ -1195,12 +1194,12 @@ graph.set_spatial('Field',
 
 ```python
 # With spatial config — field names auto-resolved
-graph.type_filter('Discovery').within_bounds(
+graph.select('Discovery').within_bounds(
     min_lat=58.0, max_lat=62.0, min_lon=1.0, max_lon=5.0
 )
 
 # Without spatial config — explicit field names
-graph.type_filter('Discovery').within_bounds(
+graph.select('Discovery').within_bounds(
     lat_field='latitude', lon_field='longitude',
     min_lat=58.0, max_lat=62.0, min_lon=1.0, max_lon=5.0
 )
@@ -1209,7 +1208,7 @@ graph.type_filter('Discovery').within_bounds(
 ### Distance Queries (Geodesic)
 
 ```python
-graph.type_filter('Wellbore').near_point_m(
+graph.select('Wellbore').near_point_m(
     center_lat=60.5, center_lon=3.2, max_distance_m=50000.0
 )
 ```
@@ -1217,7 +1216,7 @@ graph.type_filter('Wellbore').near_point_m(
 ### WKT Geometry Intersection
 
 ```python
-graph.type_filter('Field').intersects_geometry(
+graph.select('Field').intersects_geometry(
     'POLYGON((1 58, 5 58, 5 62, 1 62, 1 58))'
 )
 ```
@@ -1226,13 +1225,13 @@ Accepts WKT strings or shapely geometry objects:
 
 ```python
 from shapely.geometry import box
-graph.type_filter('Field').intersects_geometry(box(1, 58, 5, 62))
+graph.select('Field').intersects_geometry(box(1, 58, 5, 62))
 ```
 
 ### Point-in-Polygon
 
 ```python
-graph.type_filter('Block').contains_point(lat=60.5, lon=3.2)
+graph.select('Block').contains_point(lat=60.5, lon=3.2)
 ```
 
 ### GeoDataFrame Export
@@ -1251,14 +1250,14 @@ gdf = rv.to_gdf(geometry_column='n.geometry', crs='EPSG:4326')
 ### Statistics
 
 ```python
-price_stats = graph.type_filter('Product').statistics('price')
-unique_cats = graph.type_filter('Product').unique_values(property='category', max_length=10)
+price_stats = graph.select('Product').statistics('price')
+unique_cats = graph.select('Product').unique_values(property='category', max_length=10)
 
 # Group by a property — like SQL GROUP BY
-graph.type_filter('Person').count(group_by='city')
+graph.select('Person').count(group_by='city')
 # → {'Oslo': 42, 'Bergen': 15, 'Trondheim': 8}
 
-graph.type_filter('Person').statistics('age', group_by='city')
+graph.select('Person').statistics('age', group_by='city')
 # → {'Oslo': {'count': 42, 'mean': 35.2, 'std': 8.1, 'min': 22, 'max': 65, 'sum': 1478},
 #    'Bergen': {'count': 15, ...}, ...}
 ```
@@ -1266,19 +1265,19 @@ graph.type_filter('Person').statistics('age', group_by='city')
 ### Calculations
 
 ```python
-graph.type_filter('Product').calculate(expression='price * 1.1', store_as='price_with_tax')
+graph.select('Product').calculate(expression='price * 1.1', store_as='price_with_tax')
 
-graph.type_filter('User').traverse('PURCHASED').calculate(
+graph.select('User').traverse('PURCHASED').calculate(
     expression='sum(price * quantity)', store_as='total_spent'
 )
 
-graph.type_filter('User').traverse('PURCHASED').count(store_as='product_count', group_by_parent=True)
+graph.select('User').traverse('PURCHASED').count(store_as='product_count', group_by_parent=True)
 ```
 
 ### Connection Aggregation
 
 ```python
-graph.type_filter('Discovery').traverse('EXTENDS_INTO').calculate(
+graph.select('Discovery').traverse('EXTENDS_INTO').calculate(
     expression='sum(share_pct)',
     aggregate_connections=True
 )
@@ -1307,7 +1306,7 @@ graph.define_schema({
 })
 
 errors = graph.validate_schema()
-schema = graph.get_schema()
+schema = graph.schema_text()
 ```
 
 ### Indexes
@@ -1373,8 +1372,8 @@ graphml_string = graph.export_string(format='graphml')
 
 ```python
 subgraph = (
-    graph.type_filter('Company')
-    .filter({'title': 'Acme Corp'})
+    graph.select('Company')
+    .where({'title': 'Acme Corp'})
     .expand(hops=2)
     .to_subgraph()
 )
@@ -1515,9 +1514,9 @@ Missing CSV files and invalid rows are handled gracefully — the graph is still
 
 1. **Batch operations** — add nodes/connections in batches, not individually
 2. **Specify columns** — only include columns you need to reduce memory
-3. **Filter by type first** — `type_filter()` before `filter()` for narrower scans
+3. **Filter by type first** — `select()` before `filter()` for narrower scans
 4. **Create indexes** — on frequently filtered equality conditions (~3x on 100k+ nodes)
-5. **Use lightweight methods** — `node_count()`, `indices()`, `get_node_by_id()` skip property materialization
+5. **Use lightweight methods** — `len()`, `indices()`, `node()` skip property materialization
 6. **Cypher LIMIT** — use `LIMIT` to avoid scanning entire result sets
 
 ### Threading
@@ -1546,7 +1545,7 @@ For concurrent access from multiple threads, mutations (`add_nodes`, `CREATE`/`S
 - **`id` and `title` are canonical.** `add_nodes(unique_id_field='user_id')` stores the column as `id`. The original name works as an alias in Cypher (`n.user_id` resolves to `n.id`), but results always return canonical names (`id`, `title`).
 - **Save files use a pinned binary format.** `.kgl` and `.kgle` files use bincode with explicitly pinned encoding options (little-endian, fixed-int). Files are compatible across OS and CPU architecture within the same major version. For long-term archival or sharing with non-kglite tools, use `export()` (GraphML, CSV).
 - **Indexes:** `create_index()` accelerates equality only (`=`). For range queries (`>`, `<`, `>=`, `<=`), use `create_range_index()`.
-- **Flat vs. grouped results.** After traversal with multiple parents, `get_titles()`, `get_nodes()`, and `get_properties()` return grouped dicts instead of flat lists. Use `flatten_single_parent=False` to always get grouped output.
+- **Flat vs. grouped results.** After traversal with multiple parents, `titles()`, `collect()`, and `get_properties()` return grouped dicts instead of flat lists. Use `flatten_single_parent=False` to always get grouped output.
 - **No auto-persistence.** The graph lives in memory. `save()` is manual — crashes lose unsaved work.
 
 ---
@@ -1606,8 +1605,8 @@ graph.cypher("""
 
 ```python
 subgraph = (
-    graph.type_filter('Person')
-    .filter({'name': 'Alice'})
+    graph.select('Person')
+    .where({'name': 'Alice'})
     .expand(hops=2)
     .to_subgraph()
 )
@@ -1660,7 +1659,7 @@ graph.set_timeseries("Field",
     bin_type="total",                            # optional: "total", "mean", or "sample"
 )
 
-graph.get_timeseries_config("Field")
+graph.timeseries_config("Field")
 # {'resolution': 'month', 'channels': ['oil', 'gas'],
 #  'units': {'oil': 'MSm3', 'gas': 'BSm3'}, 'bin_type': 'total'}
 ```
@@ -1782,15 +1781,15 @@ graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_series(f.oil, '2015', '
 
 ```python
 # All channels
-graph.get_timeseries(node_id)
+graph.timeseries(node_id)
 # {'keys': [[2020,1], [2020,2], ...], 'channels': {'oil': [...], 'gas': [...]}}
 
 # Single channel
-graph.get_timeseries(node_id, channel="oil")
+graph.timeseries(node_id, channel="oil")
 # {'keys': [...], 'values': [...]}
 
 # Date-string range filter
-graph.get_timeseries(node_id, start='2020', end='2020')
+graph.timeseries(node_id, start='2020', end='2020')
 ```
 
 **Available functions:** `ts_at`, `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_first`, `ts_last`, `ts_series`, `ts_delta`. See [CYPHER.md](CYPHER.md#timeseries-functions) for the full reference.
@@ -1807,7 +1806,7 @@ graph.save("file.kgl")              # persist
 graph = kglite.load("file.kgl")     # reload
 graph = kglite.from_blueprint("blueprint.json")  # build from CSV blueprint
 graph.graph_info()                   # → dict with node_count, edge_count, fragmentation_ratio, ...
-graph.get_schema()                   # → str summary of types and connections
+graph.schema_text()                   # → str summary of types and connections
 graph.node_types                     # → ['Person', 'Product', ...]
 ```
 
@@ -1834,14 +1833,14 @@ graph.add_connections(data=df, connection_type='REL',
 ### Selection chain (fluent API)
 
 ```python
-graph.type_filter('Person')                        # select by type → KnowledgeGraph
-    .filter({'age': {'>': 25}})                    # AND filter → KnowledgeGraph
-    .filter_any([{'city': 'Oslo'}, {'city': 'Bergen'}])  # OR filter → KnowledgeGraph
-    .has_connection('KNOWS', direction='outgoing') # edge existence → KnowledgeGraph
+graph.select('Person')                        # select by type → KnowledgeGraph
+    .where({'age': {'>': 25}})                    # AND filter → KnowledgeGraph
+    .where_any([{'city': 'Oslo'}, {'city': 'Bergen'}])  # OR filter → KnowledgeGraph
+    .where_connected('KNOWS', direction='outgoing') # edge existence → KnowledgeGraph
     .sort('age', ascending=False)                  # sort → KnowledgeGraph
-    .offset(20).max_nodes(10)                      # pagination → KnowledgeGraph
+    .offset(20).limit(10)                      # pagination → KnowledgeGraph
     .traverse('KNOWS', direction='outgoing')       # traverse → KnowledgeGraph
-    .get_nodes()                                   # materialize → ResultView or grouped dict
+    .collect()                                   # materialize → ResultView or grouped dict
 ```
 
 ### Semantic search
@@ -1850,16 +1849,16 @@ graph.type_filter('Person')                        # select by type → Knowledg
 # Text-level API (recommended) — register model once, embed & search by column name
 graph.set_embedder(model)                                                    # register model (.dimension, .embed())
 graph.embed_texts('Article', 'summary')                                      # embed text column → stored as summary_emb
-graph.type_filter('Article').search_text('summary', 'find AI papers', top_k=10)  # text query search
+graph.select('Article').search_text('summary', 'find AI papers', top_k=10)  # text query search
 
 # Low-level vector API — bring your own vectors
 graph.set_embeddings('Article', 'summary', {id: vec, ...})             # store embeddings
-graph.type_filter('Article').vector_search('summary', qvec, top_k=10)  # similarity search
+graph.select('Article').vector_search('summary', qvec, top_k=10)  # similarity search
 graph.list_embeddings()                                                 # list all embedding stores
 graph.remove_embeddings('Article', 'summary')                           # remove an embedding store
-graph.get_embeddings('Article', 'summary')                              # retrieve all vectors for type
-graph.type_filter('Article').get_embeddings('summary')                  # retrieve vectors for selection
-graph.get_embedding('Article', 'summary', node_id)                      # single node vector (or None)
+graph.embeddings('Article', 'summary')                              # retrieve all vectors for type
+graph.select('Article').embeddings('summary')                  # retrieve vectors for selection
+graph.embedding('Article', 'summary', node_id)                      # single node vector (or None)
 graph.export_embeddings('emb.kgle')                                     # export all embeddings to file
 graph.export_embeddings('emb.kgle', ['Article'])                        # export by node type
 graph.export_embeddings('emb.kgle', {'Article': ['summary']})           # export by type + property

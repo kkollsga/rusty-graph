@@ -22,13 +22,13 @@ def graph_with_fields():
 # ── Config ────────────────────────────────────────────────────────────────
 
 
-def test_set_get_timeseries_config(graph_with_fields):
+def test_set_timeseries_config(graph_with_fields):
     g = graph_with_fields
     g.set_timeseries(
         "Field", resolution="month", channels=["oil", "gas"],
         units={"oil": "MSm3", "gas": "BSm3"}, bin_type="total",
     )
-    config = g.get_timeseries_config("Field")
+    config = g.timeseries_config("Field")
     assert config is not None
     assert config["resolution"] == "month"
     assert config["channels"] == ["oil", "gas"]
@@ -36,16 +36,16 @@ def test_set_get_timeseries_config(graph_with_fields):
     assert config["bin_type"] == "total"
 
 
-def test_get_timeseries_config_none(graph_with_fields):
+def test_timeseries_config_none(graph_with_fields):
     g = graph_with_fields
-    assert g.get_timeseries_config("Field") is None
-    assert g.get_timeseries_config() is None
+    assert g.timeseries_config("Field") is None
+    assert g.timeseries_config() is None
 
 
-def test_get_timeseries_config_all(graph_with_fields):
+def test_timeseries_config_all(graph_with_fields):
     g = graph_with_fields
     g.set_timeseries("Field", resolution="year")
-    result = g.get_timeseries_config()
+    result = g.timeseries_config()
     assert isinstance(result, dict)
     assert "Field" in result
 
@@ -53,7 +53,7 @@ def test_get_timeseries_config_all(graph_with_fields):
 def test_config_no_units_or_bin_type(graph_with_fields):
     g = graph_with_fields
     g.set_timeseries("Field", resolution="month", channels=["oil"])
-    config = g.get_timeseries_config("Field")
+    config = g.timeseries_config("Field")
     assert config["resolution"] == "month"
     assert config.get("units", {}) == {}
     assert config.get("bin_type") is None
@@ -66,7 +66,7 @@ def test_set_time_index_with_date_strings(graph_with_fields):
     g = graph_with_fields
     g.set_time_index(1, ["2020-01", "2020-02", "2020-03"])
     g.add_ts_channel(1, "oil", [1.0, 2.0, 3.0])
-    ts = g.get_timeseries(1)
+    ts = g.timeseries(1)
     assert ts is not None
     assert ts["keys"] == ["2020-01-01", "2020-02-01", "2020-03-01"]
     assert ts["channels"]["oil"] == [1.0, 2.0, 3.0]
@@ -77,7 +77,7 @@ def test_set_time_index_with_int_lists_compat(graph_with_fields):
     g = graph_with_fields
     g.set_time_index(1, [[2020, 1], [2020, 2], [2020, 3]])
     g.add_ts_channel(1, "oil", [1.0, 2.0, 3.0])
-    ts = g.get_timeseries(1)
+    ts = g.timeseries(1)
     assert ts is not None
     assert ts["keys"] == ["2020-01-01", "2020-02-01", "2020-03-01"]
     assert ts["channels"]["oil"] == [1.0, 2.0, 3.0]
@@ -102,42 +102,42 @@ def test_set_time_index_unsorted(graph_with_fields):
         g.set_time_index(1, ["2020-02", "2020-01"])
 
 
-def test_get_time_index(graph_with_fields):
+def test_time_index(graph_with_fields):
     g = graph_with_fields
     g.set_time_index(1, ["2020-01", "2020-02"])
-    idx = g.get_time_index(1)
+    idx = g.time_index(1)
     assert idx == ["2020-01-01", "2020-02-01"]
 
 
-def test_get_time_index_none(graph_with_fields):
+def test_time_index_none(graph_with_fields):
     g = graph_with_fields
-    assert g.get_time_index(1) is None
+    assert g.time_index(1) is None
 
 
-def test_get_timeseries_none(graph_with_fields):
+def test_timeseries_none(graph_with_fields):
     g = graph_with_fields
-    assert g.get_timeseries(1) is None
+    assert g.timeseries(1) is None
 
 
-def test_get_timeseries_single_channel(graph_with_fields):
+def test_timeseries_single_channel(graph_with_fields):
     g = graph_with_fields
     g.set_time_index(1, ["2020-01", "2020-02"])
     g.add_ts_channel(1, "oil", [1.0, 2.0])
     g.add_ts_channel(1, "gas", [0.5, 0.6])
-    ts = g.get_timeseries(1, channel="oil")
+    ts = g.timeseries(1, channel="oil")
     assert "values" in ts
     assert ts["values"] == [1.0, 2.0]
 
 
-def test_get_timeseries_missing_channel(graph_with_fields):
+def test_timeseries_missing_channel(graph_with_fields):
     g = graph_with_fields
     g.set_time_index(1, ["2020-01"])
     g.add_ts_channel(1, "oil", [1.0])
     with pytest.raises(KeyError, match="water"):
-        g.get_timeseries(1, channel="water")
+        g.timeseries(1, channel="water")
 
 
-def test_get_timeseries_with_date_string_range(graph_with_fields):
+def test_timeseries_with_date_string_range(graph_with_fields):
     g = graph_with_fields
     g.set_timeseries("Field", resolution="month")
     g.set_time_index(
@@ -145,12 +145,12 @@ def test_get_timeseries_with_date_string_range(graph_with_fields):
         ["2019-12", "2020-01", "2020-02", "2021-01"],
     )
     g.add_ts_channel(1, "oil", [0.9, 1.0, 2.0, 3.0])
-    ts = g.get_timeseries(1, start="2020", end="2020")
+    ts = g.timeseries(1, start="2020", end="2020")
     assert ts["keys"] == ["2020-01-01", "2020-02-01"]
     assert ts["channels"]["oil"] == [1.0, 2.0]
 
 
-def test_get_timeseries_with_month_range(graph_with_fields):
+def test_timeseries_with_month_range(graph_with_fields):
     g = graph_with_fields
     g.set_timeseries("Field", resolution="month")
     g.set_time_index(
@@ -158,7 +158,7 @@ def test_get_timeseries_with_month_range(graph_with_fields):
         ["2020-01", "2020-02", "2020-03", "2020-04"],
     )
     g.add_ts_channel(1, "oil", [1.0, 2.0, 3.0, 4.0])
-    ts = g.get_timeseries(1, start="2020-2", end="2020-3")
+    ts = g.timeseries(1, start="2020-2", end="2020-3")
     assert ts["keys"] == ["2020-02-01", "2020-03-01"]
     assert ts["channels"]["oil"] == [2.0, 3.0]
 
@@ -168,7 +168,7 @@ def test_multiple_channels(graph_with_fields):
     g.set_time_index(1, ["2020-01", "2020-02"])
     g.add_ts_channel(1, "oil", [1.0, 2.0])
     g.add_ts_channel(1, "gas", [0.5, 0.6])
-    ts = g.get_timeseries(1)
+    ts = g.timeseries(1)
     assert "oil" in ts["channels"]
     assert "gas" in ts["channels"]
 
@@ -179,7 +179,7 @@ def test_set_time_index_replaces(graph_with_fields):
     g.set_time_index(1, ["2020-01", "2020-02"])
     g.add_ts_channel(1, "oil", [1.0, 2.0])
     g.set_time_index(1, ["2021-01"])
-    ts = g.get_timeseries(1)
+    ts = g.timeseries(1)
     assert ts["keys"] == ["2021-01-01"]
     assert ts["channels"] == {}
 
@@ -209,12 +209,12 @@ def test_add_timeseries_from_dataframe(graph_with_fields):
     assert result["nodes_loaded"] == 2
     assert result["total_records"] == 6
 
-    ts1 = g.get_timeseries(1)
+    ts1 = g.timeseries(1)
     assert ts1["keys"] == ["2020-01-01", "2020-02-01", "2020-03-01"]
     assert ts1["channels"]["oil"] == [1.0, 1.5, 2.0]
     assert ts1["channels"]["gas"] == [0.1, 0.2, 0.3]
 
-    ts2 = g.get_timeseries(2)
+    ts2 = g.timeseries(2)
     assert ts2["keys"] == ["2020-01-01", "2020-02-01", "2020-03-01"]
     assert ts2["channels"]["oil"] == [0.5, 0.6, 0.7]
 
@@ -237,7 +237,7 @@ def test_add_timeseries_channels_as_list(graph_with_fields):
         resolution="year",
     )
     assert result["nodes_loaded"] == 1
-    ts = g.get_timeseries(1)
+    ts = g.timeseries(1)
     assert ts["channels"]["oil"] == [1.0, 2.0]
 
 
@@ -258,7 +258,7 @@ def test_add_timeseries_auto_config(graph_with_fields):
         channels=["oil"],
         resolution="year",
     )
-    config = g.get_timeseries_config("Field")
+    config = g.timeseries_config("Field")
     assert config is not None
     assert config["resolution"] == "year"
     assert "oil" in config["channels"]
@@ -283,7 +283,7 @@ def test_add_timeseries_with_units(graph_with_fields):
         resolution="month",
         units={"oil": "MSm3"},
     )
-    config = g.get_timeseries_config("Field")
+    config = g.timeseries_config("Field")
     assert config["units"] == {"oil": "MSm3"}
 
 
@@ -306,7 +306,7 @@ def test_add_timeseries_uses_existing_config(graph_with_fields):
         time_key=["year", "month"],
         channels=["oil"],
     )
-    ts = g.get_timeseries(1)
+    ts = g.timeseries(1)
     assert ts["channels"]["oil"] == [1.0]
 
 
@@ -329,7 +329,7 @@ def test_add_timeseries_unsorted_data(graph_with_fields):
         channels=["oil"],
         resolution="month",
     )
-    ts = g.get_timeseries(1)
+    ts = g.timeseries(1)
     assert ts["keys"] == ["2020-01-01", "2020-02-01", "2020-03-01"]
     assert ts["channels"]["oil"] == [1.0, 2.0, 3.0]
 
@@ -350,12 +350,12 @@ def test_save_load_roundtrip(graph_with_fields, tmp_path):
     g.save(path)
     g2 = kglite.load(path)
 
-    ts = g2.get_timeseries(1)
+    ts = g2.timeseries(1)
     assert ts is not None
     assert ts["keys"] == ["2020-01-01", "2020-02-01"]
     assert ts["channels"]["oil"] == [1.0, 2.0]
 
-    config = g2.get_timeseries_config("Field")
+    config = g2.timeseries_config("Field")
     assert config is not None
     assert config["resolution"] == "month"
     assert config["units"] == {"oil": "MSm3"}
@@ -370,4 +370,4 @@ def test_save_load_no_timeseries(tmp_path):
     path = str(tmp_path / "no_ts.kgl")
     g.save(path)
     g2 = kglite.load(path)
-    assert g2.get_timeseries(1) is None
+    assert g2.timeseries(1) is None

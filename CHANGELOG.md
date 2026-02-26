@@ -5,6 +5,46 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.67] - 2026-02-26
+
+### Changed
+
+- **BREAKING: Fluent API method renames** — modernized the fluent API surface to match common query DSL conventions:
+  - `type_filter()` → `select()`
+  - `filter()` → `where()`
+  - `filter_any()` → `where_any()`
+  - `filter_orphans()` → `where_orphans()`
+  - `has_connection()` → `where_connected()`
+  - `max_nodes()` → `limit()`
+  - `get_nodes()` → `collect()`
+  - `node_count()` → `len()` (also adds `__len__` for `len(graph)`)
+  - `id_values()` → `ids()`
+  - `max_nodes=` parameter → `limit=` everywhere (select, where, traverse, collect, etc.)
+- **BREAKING: Retrieval method renames** — dropped inconsistent `get_` prefix and shortened verbose methods:
+  - `get_titles()` → `titles()`
+  - `get_connections()` → `connections()`
+  - `get_degrees()` → `degrees()`
+  - `get_bounds()` → `bounds()`
+  - `get_centroid()` → `centroid()`
+  - `get_selection()` → `selection()`
+  - `get_schema()` → `schema_text()`
+  - `get_schema_definition()` → `schema_definition()`
+  - `get_last_report()` → `last_report()`
+  - `get_operation_index()` → `operation_index()`
+  - `get_report_history()` → `report_history()`
+  - `get_spatial()` → `spatial()`
+  - `get_timeseries()` → `timeseries()`
+  - `get_time_index()` → `time_index()`
+  - `get_timeseries_config()` → `timeseries_config()`
+  - `get_embeddings()` → `embeddings()`
+  - `get_embedding()` → `embedding()`
+  - `get_node_by_id()` → `node()`
+  - `children_properties_to_list()` → `collect_children()` (also `filter=` param → `where=`)
+
+### Removed
+
+- **`get_ids()`** — removed; use `ids()` for flat ID list or `collect()` for full node dicts
+
 ## [0.5.66] - 2026-02-26
 
 ### Changed

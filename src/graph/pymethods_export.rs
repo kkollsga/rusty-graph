@@ -31,7 +31,7 @@ impl KnowledgeGraph {
     ///     graph.export('output.graphml')
     ///
     ///     # Export selection to D3 format
-    ///     graph.type_filter('Field').expand(hops=2).export('fields.json', format='d3')
+    ///     graph.select('Field').expand(hops=2).export('fields.json', format='d3')
     ///
     ///     # Export to GEXF for Gephi
     ///     graph.export('network.gexf', format='gexf')
@@ -139,7 +139,7 @@ impl KnowledgeGraph {
     ///     result = graph.export_csv('output/')
     ///
     ///     # Export only selected nodes
-    ///     result = graph.type_filter('Person').export_csv('output/')
+    ///     result = graph.select('Person').export_csv('output/')
     ///
     ///     # With progress output
     ///     result = graph.export_csv('output/', verbose=True)

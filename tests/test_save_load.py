@@ -15,7 +15,7 @@ class TestBasicSaveLoad:
         try:
             small_graph.save(path)
             loaded = kglite.load(path)
-            assert loaded.type_filter('Person').node_count() == 3
+            assert loaded.select('Person').len() == 3
         finally:
             os.unlink(path)
 
@@ -25,7 +25,7 @@ class TestBasicSaveLoad:
         try:
             small_graph.save(path)
             loaded = kglite.load(path)
-            alice = loaded.get_node_by_id('Person', 1)
+            alice = loaded.node('Person', 1)
             assert alice['title'] == 'Alice'
             assert alice['age'] == 28
         finally:
@@ -37,9 +37,9 @@ class TestBasicSaveLoad:
         try:
             small_graph.save(path)
             loaded = kglite.load(path)
-            alice = loaded.type_filter('Person').filter({'title': 'Alice'})
+            alice = loaded.select('Person').where({'title': 'Alice'})
             friends = alice.traverse(connection_type='KNOWS', direction='outgoing')
-            assert friends.node_count() == 2
+            assert friends.len() == 2
         finally:
             os.unlink(path)
 
@@ -93,7 +93,7 @@ class TestSaveLoadWithFeatures:
         try:
             graph.save(path)
             loaded = kglite.load(path)
-            assert loaded.type_filter('LargeType').node_count() == 1000
+            assert loaded.select('LargeType').len() == 1000
         finally:
             os.unlink(path)
 
@@ -263,8 +263,8 @@ class TestV2Format:
             loaded = kglite.load(path)
 
             # Check nodes
-            assert loaded.node_count() == 3
-            alice = loaded.get_node_by_id('Person', 1)
+            assert loaded.len() == 3
+            alice = loaded.node('Person', 1)
             assert alice['title'] == 'Alice'
             assert alice['age'] == 30
 
@@ -299,7 +299,7 @@ class TestV2Format:
             # Save as v2 and verify it loads
             graph.save(path)
             loaded = kglite.load(path)
-            assert loaded.type_filter('Node').node_count() == 2
+            assert loaded.select('Node').len() == 2
         finally:
             os.unlink(path)
 
@@ -366,6 +366,6 @@ class TestV2Format:
         try:
             graph.save(path)
             loaded = kglite.load(path)
-            assert loaded.node_count() == 50
+            assert loaded.len() == 50
         finally:
             os.unlink(path)

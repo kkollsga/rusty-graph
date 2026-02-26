@@ -42,18 +42,18 @@ class TestCreateDrop:
 class TestIndexUsage:
     def test_filter_uses_index(self, indexed_graph):
         indexed_graph.create_index('Item', 'category')
-        result = indexed_graph.type_filter('Item').filter({'category': 'Cat_0'})
-        assert result.node_count() == 20
+        result = indexed_graph.select('Item').where({'category': 'Cat_0'})
+        assert result.len() == 20
 
     def test_filter_no_index_same_result(self, indexed_graph):
         # Without index
-        result_no_idx = indexed_graph.type_filter('Item').filter({'category': 'Cat_1'})
-        count_no_idx = result_no_idx.node_count()
+        result_no_idx = indexed_graph.select('Item').where({'category': 'Cat_1'})
+        count_no_idx = result_no_idx.len()
 
         # With index
         indexed_graph.create_index('Item', 'category')
-        result_idx = indexed_graph.type_filter('Item').filter({'category': 'Cat_1'})
-        count_idx = result_idx.node_count()
+        result_idx = indexed_graph.select('Item').where({'category': 'Cat_1'})
+        count_idx = result_idx.len()
 
         assert count_no_idx == count_idx
 

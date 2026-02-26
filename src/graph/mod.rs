@@ -1707,12 +1707,12 @@ impl KnowledgeGraph {
         Ok(result_dict.into())
     }
 
-    #[pyo3(signature = (node_type, sort=None, max_nodes=None))]
-    fn type_filter(
+    #[pyo3(signature = (node_type, sort=None, limit=None))]
+    fn select(
         &mut self,
         node_type: String,
         sort: Option<&Bound<'_, PyAny>>,
-        max_nodes: Option<usize>,
+        limit: Option<usize>,
     ) -> PyResult<Self> {
         let mut new_kg = self.clone();
 
@@ -1745,7 +1745,7 @@ impl KnowledgeGraph {
             &mut new_kg.selection,
             conditions,
             sort_fields,
-            max_nodes,
+            limit,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
@@ -1756,18 +1756,19 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
         new_kg.selection.add_plan_step(
-            PlanStep::new("TYPE_FILTER", Some(&node_type), estimated).with_actual_rows(actual),
+            PlanStep::new("SELECT", Some(&node_type), estimated).with_actual_rows(actual),
         );
 
         Ok(new_kg)
     }
 
-    #[pyo3(signature = (conditions, sort=None, max_nodes=None))]
-    fn filter(
+    #[pyo3(signature = (conditions, sort=None, limit=None))]
+    #[pyo3(name = "where")]
+    fn where_method(
         &mut self,
         conditions: &Bound<'_, PyDict>,
         sort: Option<&Bound<'_, PyAny>>,
-        max_nodes: Option<usize>,
+        limit: Option<usize>,
     ) -> PyResult<Self> {
         let mut new_kg = self.clone();
 
@@ -1789,7 +1790,7 @@ impl KnowledgeGraph {
             &mut new_kg.selection,
             filter_conditions,
             sort_fields,
-            max_nodes,
+            limit,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
@@ -1801,20 +1802,20 @@ impl KnowledgeGraph {
             .unwrap_or(0);
         new_kg
             .selection
-            .add_plan_step(PlanStep::new("FILTER", None, estimated).with_actual_rows(actual));
+            .add_plan_step(PlanStep::new("WHERE", None, estimated).with_actual_rows(actual));
 
         Ok(new_kg)
     }
 
     /// Filter nodes matching ANY of the given condition sets (OR logic).
-    /// Each item in the list is a condition dict (same format as filter()).
+    /// Each item in the list is a condition dict (same format as where()).
     /// A node is kept if it matches at least one condition set.
-    #[pyo3(signature = (conditions, sort=None, max_nodes=None))]
-    fn filter_any(
+    #[pyo3(signature = (conditions, sort=None, limit=None))]
+    fn where_any(
         &mut self,
         conditions: &Bound<'_, PyList>,
         sort: Option<&Bound<'_, PyAny>>,
-        max_nodes: Option<usize>,
+        limit: Option<usize>,
     ) -> PyResult<Self> {
         let mut new_kg = self.clone();
 
@@ -1823,7 +1824,7 @@ impl KnowledgeGraph {
             .map(|item| {
                 let dict = item.cast::<PyDict>().map_err(|_| {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "filter_any expects a list of condition dicts",
+                        "where_any expects a list of condition dicts",
                     )
                 })?;
                 py_in::pydict_to_filter_conditions(dict)
@@ -1832,7 +1833,7 @@ impl KnowledgeGraph {
 
         if condition_sets.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "filter_any requires at least one condition set",
+                "where_any requires at least one condition set",
             ));
         }
 
@@ -1846,19 +1847,19 @@ impl KnowledgeGraph {
             &mut new_kg.selection,
             &condition_sets,
             sort_fields,
-            max_nodes,
+            limit,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         Ok(new_kg)
     }
 
-    #[pyo3(signature = (include_orphans=None, sort=None, max_nodes=None))]
-    fn filter_orphans(
+    #[pyo3(signature = (include_orphans=None, sort=None, limit=None))]
+    fn where_orphans(
         &mut self,
         include_orphans: Option<bool>,
         sort: Option<&Bound<'_, PyAny>>,
-        max_nodes: Option<usize>,
+        limit: Option<usize>,
     ) -> PyResult<Self> {
         let mut new_kg = self.clone();
         let include = include_orphans.unwrap_or(true);
@@ -1874,7 +1875,7 @@ impl KnowledgeGraph {
             &mut new_kg.selection,
             include,
             sort_fields.as_ref(),
-            max_nodes,
+            limit,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
@@ -1891,7 +1892,7 @@ impl KnowledgeGraph {
         Ok(new_kg)
     }
 
-    fn max_nodes(&mut self, max_per_group: usize) -> PyResult<Self> {
+    fn limit(&mut self, max_per_group: usize) -> PyResult<Self> {
         let mut new_kg = self.clone();
         filtering_methods::limit_nodes_per_group(&self.inner, &mut new_kg.selection, max_per_group)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
@@ -1900,8 +1901,8 @@ impl KnowledgeGraph {
     }
 
     /// Skip the first N nodes per group (for pagination).
-    /// Use with sort() + max_nodes() for paged results:
-    ///   graph.sort('name').offset(20).max_nodes(10)
+    /// Use with sort() + limit() for paged results:
+    ///   graph.sort('name').offset(20).limit(10)
     fn offset(&mut self, n: usize) -> PyResult<Self> {
         let mut new_kg = self.clone();
         filtering_methods::offset_nodes(&self.inner, &mut new_kg.selection, n)
@@ -1912,7 +1913,11 @@ impl KnowledgeGraph {
     /// Filter current selection to nodes that have at least one connection
     /// of the given type. Equivalent to Cypher's WHERE EXISTS {(n)-[:TYPE]->()}.
     #[pyo3(signature = (connection_type, direction=None))]
-    fn has_connection(&mut self, connection_type: &str, direction: Option<&str>) -> PyResult<Self> {
+    fn where_connected(
+        &mut self,
+        connection_type: &str,
+        direction: Option<&str>,
+    ) -> PyResult<Self> {
         let mut new_kg = self.clone();
         let dir = match direction.unwrap_or("any") {
             "outgoing" | "out" => Some(petgraph::Direction::Outgoing),
@@ -2053,7 +2058,7 @@ impl KnowledgeGraph {
     ///
     /// Example:
     ///     ```python
-    ///     result = graph.type_filter('Discovery').filter({'year': {'>=': 2020}}).update({
+    ///     result = graph.select('Discovery').where({'year': {'>=': 2020}}).update({
     ///         'is_recent': True
     ///     })
     ///     graph = result['graph']  # Use the returned graph with updates
@@ -2157,11 +2162,11 @@ impl KnowledgeGraph {
         })
     }
 
-    #[pyo3(signature = (max_nodes=None, indices=None, parent_type=None, parent_info=None,
+    #[pyo3(signature = (limit=None, indices=None, parent_type=None, parent_info=None,
                          flatten_single_parent=true))]
-    fn get_nodes(
+    fn collect(
         &self,
-        max_nodes: Option<usize>,
+        limit: Option<usize>,
         indices: Option<Vec<usize>>,
         parent_type: Option<&str>,
         parent_info: Option<bool>,
@@ -2183,7 +2188,7 @@ impl KnowledgeGraph {
             && (selection_has_nodes || has_query_operations);
 
         if use_fast_path {
-            let max = max_nodes.unwrap_or(usize::MAX);
+            let max = limit.unwrap_or(usize::MAX);
             let nodes: Vec<&schema::NodeData> = self
                 .selection
                 .current_node_indices()
@@ -2200,7 +2205,7 @@ impl KnowledgeGraph {
             &self.selection,
             None,
             indices.as_deref(),
-            max_nodes,
+            limit,
         );
         Python::attach(|py| {
             py_out::level_nodes_to_pydict(
@@ -2303,15 +2308,18 @@ impl KnowledgeGraph {
     }
 
     /// Returns the count of nodes in the current selection without materialization.
-    /// If no selection/filter has been applied, returns the total graph node count.
-    /// Much faster than get_nodes() when you only need the count.
+    /// If no selection has been applied, returns the total graph node count.
+    /// Much faster than collect() when you only need the count.
+    /// Also available via Python's built-in len(): len(graph.select('User'))
     ///
     /// Example:
     ///     ```python
-    ///     count = graph.node_count()           # total nodes in graph
-    ///     count = graph.type_filter('User').node_count()  # filtered count
+    ///     count = graph.len()                      # total nodes in graph
+    ///     count = graph.select('User').len()        # filtered count
+    ///     count = len(graph.select('User'))         # same, via __len__
     ///     ```
-    fn node_count(&self) -> usize {
+    #[pyo3(name = "len")]
+    fn py_len(&self) -> usize {
         if self.selection.has_active_selection() {
             self.selection.current_node_count()
         } else {
@@ -2319,12 +2327,16 @@ impl KnowledgeGraph {
         }
     }
 
+    fn __len__(&self) -> usize {
+        self.py_len()
+    }
+
     /// Returns the raw node indices in the current selection.
-    /// Much faster than get_nodes() when you only need indices for further processing.
+    /// Much faster than collect() when you only need indices for further processing.
     ///
     /// Example:
     ///     ```python
-    ///     indices = graph.type_filter('User').indices()
+    ///     indices = graph.select('User').indices()
     ///     ```
     fn indices(&self) -> Vec<usize> {
         self.selection
@@ -2333,55 +2345,18 @@ impl KnowledgeGraph {
             .collect()
     }
 
-    /// Returns only id, title, and type for nodes - no other properties.
-    /// Much faster than get_nodes() when you only need basic identification.
-    ///
-    /// Returns:
-    ///     List of dicts with 'id', 'title', and 'type' keys only.
-    ///
-    /// Example:
-    ///     ```python
-    ///     ids = graph.type_filter('User').get_ids()
-    ///     ```
-    fn get_ids(&self) -> PyResult<Py<PyAny>> {
-        Python::attach(|py| {
-            let key_type = pyo3::intern!(py, "type");
-            let key_title = pyo3::intern!(py, "title");
-            let key_id = pyo3::intern!(py, "id");
-            let result = PyList::empty(py);
-
-            for node_idx in self.selection.current_node_indices() {
-                if let Some(node) = self.inner.get_node(node_idx) {
-                    let dict = PyDict::new(py);
-                    dict.set_item(key_type, &node.node_type)?;
-                    dict.set_item(key_title, py_out::value_to_py(py, &node.title)?)?;
-                    dict.set_item(key_id, py_out::value_to_py(py, &node.id)?)?;
-                    result.append(dict)?;
-                }
-            }
-
-            Ok(result.into())
-        })
-    }
-
     /// Returns just the raw ID values from the current selection as a flat list.
     /// This is the lightest possible output when you only need ID values.
-    ///
-    /// Much faster than get_nodes() or even get_ids() since it:
-    /// - Skips title and type extraction
-    /// - Returns raw values without dict wrapping
-    /// - Minimal Python object creation
     ///
     /// Returns:
     ///     List of ID values (int, str, or whatever type the IDs are)
     ///
     /// Example:
     ///     ```python
-    ///     # Get just the user IDs
-    ///     user_ids = graph.type_filter('User').id_values()
+    ///     user_ids = graph.select('User').ids()
     ///     # Returns: [1, 2, 3, 4, 5, ...]
     ///     ```
-    fn id_values(&self) -> PyResult<Py<PyAny>> {
+    fn ids(&self) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {
             let result = PyList::empty(py);
 
@@ -2397,7 +2372,7 @@ impl KnowledgeGraph {
 
     /// Look up a single node by its type and ID value. O(1) after first call.
     ///
-    /// This is much faster than type_filter().filter() for single-node lookups
+    /// This is much faster than select().where() for single-node lookups
     /// because it uses a hash index instead of scanning all nodes.
     ///
     /// Args:
@@ -2409,14 +2384,10 @@ impl KnowledgeGraph {
     ///
     /// Example:
     ///     ```python
-    ///     user = graph.get_node_by_id("User", 38870)
+    ///     user = graph.node("User", 38870)
     ///     ```
     #[pyo3(signature = (node_type, node_id))]
-    fn get_node_by_id(
-        &mut self,
-        node_type: &str,
-        node_id: &Bound<'_, PyAny>,
-    ) -> PyResult<Option<Py<PyAny>>> {
+    fn node(&mut self, node_type: &str, node_id: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
         // Convert Python value to Rust Value
         let id_value = py_in::py_value_to_value(node_id)?;
 
@@ -2914,7 +2885,7 @@ impl KnowledgeGraph {
         })
     }
 
-    /// Build ID indices for specified node types for faster get_node_by_id lookups.
+    /// Build ID indices for specified node types for faster node() lookups.
     ///
     /// Call this after loading a graph if you plan to do many ID lookups.
     /// Indices are built lazily anyway, but this pre-builds them.
@@ -3117,7 +3088,7 @@ impl KnowledgeGraph {
 
     #[pyo3(signature = (indices=None, parent_info=None, include_node_properties=None,
                         flatten_single_parent=true))]
-    fn get_connections(
+    fn connections(
         &self,
         indices: Option<Vec<usize>>,
         parent_info: Option<bool>,
@@ -3141,10 +3112,10 @@ impl KnowledgeGraph {
         })
     }
 
-    #[pyo3(signature = (max_nodes=None, indices=None, flatten_single_parent=None))]
-    fn get_titles(
+    #[pyo3(signature = (limit=None, indices=None, flatten_single_parent=None))]
+    fn titles(
         &self,
-        max_nodes: Option<usize>,
+        limit: Option<usize>,
         indices: Option<Vec<usize>>,
         flatten_single_parent: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
@@ -3154,7 +3125,7 @@ impl KnowledgeGraph {
             None,
             &["title"],
             indices.as_deref(),
-            max_nodes,
+            limit,
         );
         Python::attach(|py| {
             py_out::level_single_values_to_pydict(py, &values, flatten_single_parent)
@@ -3187,11 +3158,11 @@ impl KnowledgeGraph {
         Ok(steps.join(" -> "))
     }
 
-    #[pyo3(signature = (properties, max_nodes=None, indices=None, flatten_single_parent=None))]
+    #[pyo3(signature = (properties, limit=None, indices=None, flatten_single_parent=None))]
     fn get_properties(
         &self,
         properties: Vec<String>,
-        max_nodes: Option<usize>,
+        limit: Option<usize>,
         indices: Option<Vec<usize>>,
         flatten_single_parent: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
@@ -3202,7 +3173,7 @@ impl KnowledgeGraph {
             None,
             &property_refs,
             indices.as_deref(),
-            max_nodes,
+            limit,
         );
         Python::attach(|py| py_out::level_values_to_pydict(py, &values, flatten_single_parent))
     }
@@ -3245,7 +3216,7 @@ impl KnowledgeGraph {
         }
     }
 
-    #[pyo3(signature = (connection_type=None, level_index=None, direction=None, filter_target=None, filter_connection=None, sort_target=None, max_nodes=None, new_level=None, method=None))]
+    #[pyo3(signature = (connection_type=None, level_index=None, direction=None, filter_target=None, filter_connection=None, sort_target=None, limit=None, new_level=None, method=None))]
     #[allow(clippy::too_many_arguments)]
     fn traverse(
         &mut self,
@@ -3255,7 +3226,7 @@ impl KnowledgeGraph {
         filter_target: Option<&Bound<'_, PyDict>>,
         filter_connection: Option<&Bound<'_, PyDict>>,
         sort_target: Option<&Bound<'_, PyAny>>,
-        max_nodes: Option<usize>,
+        limit: Option<usize>,
         new_level: Option<bool>,
         method: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
@@ -3291,7 +3262,7 @@ impl KnowledgeGraph {
                 &config,
                 conditions.as_ref(),
                 sort_fields.as_ref(),
-                max_nodes,
+                limit,
             )
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
@@ -3333,7 +3304,7 @@ impl KnowledgeGraph {
                 conditions.as_ref(),
                 conn_conditions.as_ref(),
                 sort_fields.as_ref(),
-                max_nodes,
+                limit,
                 new_level,
             )
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
@@ -3478,14 +3449,14 @@ impl KnowledgeGraph {
         Ok(new_kg)
     }
 
-    #[pyo3(signature = (property=None, filter=None, sort=None, max_nodes=None, store_as=None, max_length=None, keep_selection=None))]
+    #[pyo3(signature = (property=None, r#where=None, sort=None, limit=None, store_as=None, max_length=None, keep_selection=None))]
     #[allow(clippy::too_many_arguments)]
-    fn children_properties_to_list(
+    fn collect_children(
         &mut self,
         property: Option<&str>,
-        filter: Option<&Bound<'_, PyDict>>,
+        r#where: Option<&Bound<'_, PyDict>>,
         sort: Option<&Bound<'_, PyAny>>,
-        max_nodes: Option<usize>,
+        limit: Option<usize>,
         store_as: Option<&str>,
         max_length: Option<usize>,
         keep_selection: Option<bool>,
@@ -3495,8 +3466,8 @@ impl KnowledgeGraph {
         // Apply filtering and sorting if needed
         let mut filtered_kg = self.clone();
 
-        if let Some(filter_dict) = filter {
-            let conditions = py_in::pydict_to_filter_conditions(filter_dict)?;
+        if let Some(where_dict) = r#where {
+            let conditions = py_in::pydict_to_filter_conditions(where_dict)?;
             let sort_fields = match sort {
                 Some(spec) => Some(py_in::parse_sort_fields(spec, None)?),
                 None => None,
@@ -3507,7 +3478,7 @@ impl KnowledgeGraph {
                 &mut filtered_kg.selection,
                 conditions,
                 sort_fields,
-                max_nodes,
+                limit,
             )
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         } else if let Some(spec) = sort {
@@ -3516,7 +3487,7 @@ impl KnowledgeGraph {
             filtering_methods::sort_nodes(&self.inner, &mut filtered_kg.selection, sort_fields)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
-            if let Some(max) = max_nodes {
+            if let Some(max) = limit {
                 filtering_methods::limit_nodes_per_group(
                     &self.inner,
                     &mut filtered_kg.selection,
@@ -3524,7 +3495,7 @@ impl KnowledgeGraph {
                 )
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
             }
-        } else if let Some(max) = max_nodes {
+        } else if let Some(max) = limit {
             filtering_methods::limit_nodes_per_group(&self.inner, &mut filtered_kg.selection, max)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         }
@@ -3833,7 +3804,7 @@ impl KnowledgeGraph {
         }
     }
 
-    fn get_schema(&self) -> PyResult<String> {
+    fn schema_text(&self) -> PyResult<String> {
         let schema_string = debugging::get_schema_string(&self.inner);
         Ok(schema_string)
     }
@@ -3920,7 +3891,7 @@ impl KnowledgeGraph {
         introspection::mcp_quickstart()
     }
 
-    fn get_selection(&self) -> PyResult<String> {
+    fn selection(&self) -> PyResult<String> {
         Ok(debugging::get_selection_string(
             &self.inner,
             &self.selection,
@@ -4094,7 +4065,7 @@ impl KnowledgeGraph {
     }
 
     /// Get the most recent operation report as a Python dictionary
-    fn get_last_report(&self) -> PyResult<Py<PyAny>> {
+    fn last_report(&self) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {
             if let Some(report) = self.reports.get_last_report() {
                 match report {
@@ -4174,12 +4145,12 @@ impl KnowledgeGraph {
     }
 
     /// Get the last operation index (a sequential ID of operations performed)
-    fn get_operation_index(&self) -> usize {
+    fn operation_index(&self) -> usize {
         self.reports.get_last_operation_index()
     }
 
     /// Get all report history as a list of dictionaries
-    fn get_report_history(&self) -> PyResult<Py<PyAny>> {
+    fn report_history(&self) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {
             // Create an empty list with PyList::empty
             let report_list = PyList::empty(py);
@@ -4556,7 +4527,7 @@ impl KnowledgeGraph {
     }
 
     /// Get the current schema definition as a dictionary
-    fn get_schema_definition(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn schema_definition(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let schema = match self.inner.get_schema() {
             Some(s) => s,
             None => return Ok(py.None()),

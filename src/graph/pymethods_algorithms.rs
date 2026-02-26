@@ -616,7 +616,7 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     A dictionary mapping node titles to their degree counts
-    fn get_degrees(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn degrees(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let result_dict = PyDict::new(py);
 
         let level_count = self.selection.get_level_count();
@@ -968,7 +968,7 @@ impl KnowledgeGraph {
     /// Example:
     ///     ```python
     ///     # Start with a single field and expand to include connected nodes
-    ///     expanded = graph.type_filter('Field').filter({'name': 'EKOFISK'}).expand(hops=2)
+    ///     expanded = graph.select('Field').where({'name': 'EKOFISK'}).expand(hops=2)
     ///     ```
     #[pyo3(signature = (hops=None))]
     fn expand(&mut self, hops: Option<usize>) -> PyResult<Self> {
@@ -1012,8 +1012,8 @@ impl KnowledgeGraph {
     ///     ```python
     ///     # Extract a subgraph of a specific region
     ///     subgraph = (
-    ///         graph.type_filter('Field')
-    ///         .filter({'region': 'North Sea'})
+    ///         graph.select('Field')
+    ///         .where({'region': 'North Sea'})
     ///         .expand(hops=2)
     ///         .to_subgraph()
     ///     )

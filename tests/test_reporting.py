@@ -6,31 +6,31 @@ from kglite import KnowledgeGraph
 
 
 class TestExplain:
-    def test_explain_type_filter(self, social_graph):
-        result = social_graph.type_filter('Person')
+    def test_explain_select(self, social_graph):
+        result = social_graph.select('Person')
         explanation = result.explain()
         assert isinstance(explanation, str)
         assert 'Person' in explanation
 
     def test_explain_chained(self, social_graph):
-        result = social_graph.type_filter('Person').filter({'city': 'Oslo'})
+        result = social_graph.select('Person').where({'city': 'Oslo'})
         explanation = result.explain()
-        assert 'TYPE_FILTER' in explanation.upper() or 'type_filter' in explanation.lower()
-        assert 'FILTER' in explanation.upper()
+        assert 'SELECT' in explanation.upper()
+        assert 'WHERE' in explanation.upper()
 
     def test_explain_shows_counts(self, social_graph):
-        result = social_graph.type_filter('Person').filter({'city': 'Oslo'})
+        result = social_graph.select('Person').where({'city': 'Oslo'})
         explanation = result.explain()
         # Should show node counts at each step
         assert any(c.isdigit() for c in explanation)
 
     def test_explain_traversal(self, petroleum_graph):
-        result = petroleum_graph.type_filter('Play').traverse('HAS_PROSPECT')
+        result = petroleum_graph.select('Play').traverse('HAS_PROSPECT')
         explanation = result.explain()
         assert 'TRAVERSE' in explanation.upper() or 'traverse' in explanation.lower()
 
     def test_explain_empty(self, social_graph):
-        result = social_graph.type_filter('NonExistent')
+        result = social_graph.select('NonExistent')
         explanation = result.explain()
         assert isinstance(explanation, str)
 
@@ -45,7 +45,7 @@ class TestOperationReports:
         assert 'processing_time_ms' in report
 
     def test_add_connections_report(self, small_graph):
-        report = small_graph.get_last_report()
+        report = small_graph.last_report()
         assert report is not None
 
     def test_report_has_errors_field(self):
@@ -58,7 +58,7 @@ class TestOperationReports:
         graph = KnowledgeGraph()
         df = pd.DataFrame({'id': [1], 'name': ['A']})
         graph.add_nodes(df, 'Node', 'id', 'name')
-        idx = graph.get_operation_index()
+        idx = graph.operation_index()
         assert idx >= 1
 
     def test_report_history(self):
@@ -67,5 +67,5 @@ class TestOperationReports:
         df2 = pd.DataFrame({'id': [10], 'name': ['B']})
         graph.add_nodes(df1, 'TypeA', 'id', 'name')
         graph.add_nodes(df2, 'TypeB', 'id', 'name')
-        history = graph.get_report_history()
+        history = graph.report_history()
         assert len(history) >= 2

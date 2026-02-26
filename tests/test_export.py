@@ -110,13 +110,13 @@ class TestExportStringFormats:
 
 class TestExportWithSelection:
     def test_export_selection_only(self, social_graph):
-        selection = social_graph.type_filter('Person').filter({'city': 'Oslo'})
+        selection = social_graph.select('Person').where({'city': 'Oslo'})
         result = selection.export_string(format='d3', selection_only=True)
         data = json.loads(result)
         assert len(data['nodes']) > 0
 
     def test_export_expanded_selection(self, small_graph):
-        expanded = small_graph.type_filter('Person').filter({'title': 'Alice'}).expand(hops=1)
+        expanded = small_graph.select('Person').where({'title': 'Alice'}).expand(hops=1)
         subgraph = expanded.to_subgraph()
         result = subgraph.export_string(format='d3')
         data = json.loads(result)

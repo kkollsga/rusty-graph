@@ -43,24 +43,24 @@ def graph_with_embeddings():
     return graph
 
 
-# ── set_embeddings / get_embeddings ────────────────────────────────────────
+# ── set_embeddings / embeddings ────────────────────────────────────────
 
 
 class TestSetGetEmbeddings:
-    def test_set_and_get_embeddings(self, graph_with_embeddings):
+    def test_set_and_embeddings(self, graph_with_embeddings):
         graph = graph_with_embeddings
-        embs = graph.type_filter("Article").get_embeddings("summary")
+        embs = graph.select("Article").embeddings("summary")
 
         assert len(embs) == 5
         assert embs[1] == [1.0, 0.0, 0.0]
         assert embs[2] == [0.0, 1.0, 0.0]
 
-    def test_get_embeddings_filtered_selection(self, graph_with_embeddings):
+    def test_embeddings_filtered_selection(self, graph_with_embeddings):
         graph = graph_with_embeddings
         embs = (
-            graph.type_filter("Article")
-            .filter({"category": "politics"})
-            .get_embeddings("summary")
+            graph.select("Article")
+            .where({"category": "politics"})
+            .embeddings("summary")
         )
 
         assert len(embs) == 2
@@ -97,39 +97,39 @@ class TestSetGetEmbeddings:
         result = graph.set_embeddings("Node", "title", {})
         assert result["embeddings_stored"] == 0
 
-    def test_get_embeddings_two_arg_form(self, graph_with_embeddings):
-        """get_embeddings(node_type, text_column) returns all embeddings."""
+    def test_embeddings_two_arg_form(self, graph_with_embeddings):
+        """embeddings(node_type, text_column) returns all embeddings."""
         graph = graph_with_embeddings
-        embs = graph.get_embeddings("Article", "summary")
+        embs = graph.embeddings("Article", "summary")
 
         assert len(embs) == 5
         assert embs[1] == [1.0, 0.0, 0.0]
         assert embs[2] == [0.0, 1.0, 0.0]
 
-    def test_get_embeddings_two_arg_nonexistent(self, graph_with_embeddings):
+    def test_embeddings_two_arg_nonexistent(self, graph_with_embeddings):
         """Two-arg form returns empty dict for nonexistent store."""
         graph = graph_with_embeddings
-        embs = graph.get_embeddings("Article", "nonexistent")
+        embs = graph.embeddings("Article", "nonexistent")
         assert embs == {}
 
-    def test_get_embedding_single_node(self, graph_with_embeddings):
-        """get_embedding(node_type, text_column, node_id) returns one vector."""
+    def test_embedding_single_node(self, graph_with_embeddings):
+        """embedding(node_type, text_column, node_id) returns one vector."""
         graph = graph_with_embeddings
-        vec = graph.get_embedding("Article", "summary", 1)
+        vec = graph.embedding("Article", "summary", 1)
         assert vec == [1.0, 0.0, 0.0]
 
-        vec2 = graph.get_embedding("Article", "summary", 4)
+        vec2 = graph.embedding("Article", "summary", 4)
         assert vec2 == [0.0, 0.0, 1.0]
 
-    def test_get_embedding_nonexistent_node(self, graph_with_embeddings):
-        """get_embedding returns None for a node ID that doesn't exist."""
+    def test_embedding_nonexistent_node(self, graph_with_embeddings):
+        """embedding returns None for a node ID that doesn't exist."""
         graph = graph_with_embeddings
-        assert graph.get_embedding("Article", "summary", 999) is None
+        assert graph.embedding("Article", "summary", 999) is None
 
-    def test_get_embedding_nonexistent_store(self, graph_with_embeddings):
-        """get_embedding returns None for a property name that doesn't exist."""
+    def test_embedding_nonexistent_store(self, graph_with_embeddings):
+        """embedding returns None for a property name that doesn't exist."""
         graph = graph_with_embeddings
-        assert graph.get_embedding("Article", "no_such", 1) is None
+        assert graph.embedding("Article", "no_such", 1) is None
 
 
 class TestSetEmbeddingsValidation:
@@ -198,7 +198,7 @@ class TestVectorSearch:
         graph = graph_with_embeddings
 
         # Search for vectors similar to [1, 0, 0] (Alpha direction)
-        results = graph.type_filter("Article").vector_search(
+        results = graph.select("Article").vector_search(
             "summary", [1.0, 0.0, 0.0], top_k=3
         )
 
@@ -216,8 +216,8 @@ class TestVectorSearch:
 
         # Search only within "sports" category
         results = (
-            graph.type_filter("Article")
-            .filter({"category": "sports"})
+            graph.select("Article")
+            .where({"category": "sports"})
             .vector_search("summary", [0.0, 1.0, 0.0], top_k=10)
         )
 
@@ -229,7 +229,7 @@ class TestVectorSearch:
 
     def test_search_result_contains_properties(self, graph_with_embeddings):
         graph = graph_with_embeddings
-        results = graph.type_filter("Article").vector_search(
+        results = graph.select("Article").vector_search(
             "summary", [1.0, 0.0, 0.0], top_k=1
         )
 
@@ -245,7 +245,7 @@ class TestVectorSearch:
 
     def test_search_top_k_limits_results(self, graph_with_embeddings):
         graph = graph_with_embeddings
-        results = graph.type_filter("Article").vector_search(
+        results = graph.select("Article").vector_search(
             "summary", [1.0, 0.0, 0.0], top_k=2
         )
 
@@ -253,7 +253,7 @@ class TestVectorSearch:
 
     def test_search_dot_product_metric(self, graph_with_embeddings):
         graph = graph_with_embeddings
-        results = graph.type_filter("Article").vector_search(
+        results = graph.select("Article").vector_search(
             "summary",
             [1.0, 0.0, 0.0],
             top_k=3,
@@ -267,7 +267,7 @@ class TestVectorSearch:
 
     def test_search_euclidean_metric(self, graph_with_embeddings):
         graph = graph_with_embeddings
-        results = graph.type_filter("Article").vector_search(
+        results = graph.select("Article").vector_search(
             "summary",
             [1.0, 0.0, 0.0],
             top_k=3,
@@ -283,7 +283,7 @@ class TestVectorSearch:
         graph = graph_with_embeddings
 
         with pytest.raises(ValueError, match="dimension"):
-            graph.type_filter("Article").vector_search(
+            graph.select("Article").vector_search(
                 "summary", [1.0, 0.0], top_k=3  # 2D instead of 3D
             )
 
@@ -291,13 +291,13 @@ class TestVectorSearch:
         graph = graph_with_embeddings
 
         with pytest.raises(ValueError, match="Unknown metric"):
-            graph.type_filter("Article").vector_search(
+            graph.select("Article").vector_search(
                 "summary", [1.0, 0.0, 0.0], metric="manhattan"
             )
 
     def test_search_to_df(self, graph_with_embeddings):
         graph = graph_with_embeddings
-        df = graph.type_filter("Article").vector_search(
+        df = graph.select("Article").vector_search(
             "summary", [1.0, 0.0, 0.0], top_k=3, to_df=True
         )
 
@@ -318,14 +318,14 @@ class TestVectorSearch:
 class TestEmbeddingsInvisible:
     def test_embeddings_not_in_get_nodes(self, graph_with_embeddings):
         graph = graph_with_embeddings
-        nodes = graph.type_filter("Article").get_nodes()
+        nodes = graph.select("Article").collect()
 
         for node in nodes:
             assert "summary_emb" not in node
 
     def test_embeddings_not_in_to_df(self, graph_with_embeddings):
         graph = graph_with_embeddings
-        df = graph.type_filter("Article").to_df()
+        df = graph.select("Article").to_df()
 
         assert "summary_emb" not in df.columns
 
@@ -354,7 +354,7 @@ class TestEmbeddingPersistence:
             assert listing[0]["count"] == 5
 
             # Verify vector search still works
-            results = loaded.type_filter("Article").vector_search(
+            results = loaded.select("Article").vector_search(
                 "summary", [1.0, 0.0, 0.0], top_k=3
             )
             assert len(results) == 3
@@ -362,7 +362,7 @@ class TestEmbeddingPersistence:
             assert results[0]["score"] == pytest.approx(1.0, abs=1e-5)
 
             # Verify actual embedding values
-            embs = loaded.type_filter("Article").get_embeddings("summary")
+            embs = loaded.select("Article").embeddings("summary")
             assert embs[1] == pytest.approx([1.0, 0.0, 0.0])
             assert embs[2] == pytest.approx([0.0, 1.0, 0.0])
         finally:
@@ -382,7 +382,7 @@ class TestEmbeddingPersistence:
             loaded = kglite.load(path)
 
             assert loaded.list_embeddings() == []
-            assert loaded.type_filter("Node").node_count() == 2
+            assert loaded.select("Node").len() == 2
         finally:
             os.unlink(path)
 
@@ -417,12 +417,12 @@ class TestAddNodesEmbeddings:
         assert listing[0]["count"] == 3
 
         # Embeddings should NOT be in node properties
-        nodes = graph.type_filter("Doc").get_nodes()
+        nodes = graph.select("Doc").collect()
         for node in nodes:
             assert "text_emb" not in node
 
         # Vector search should work
-        results = graph.type_filter("Doc").vector_search(
+        results = graph.select("Doc").vector_search(
             "text", [1.0, 0.0], top_k=2
         )
         assert len(results) == 2
@@ -631,7 +631,7 @@ class TestEmbedTexts:
         assert result1["embedded"] == 10
 
         # Verify embeddings stored
-        embs = graph.get_embeddings("Item", "text")
+        embs = graph.embeddings("Item", "text")
         assert len(embs) == 10
 
     def test_embed_texts_dimension_mismatch(self):
@@ -747,7 +747,7 @@ class TestEmbedTexts:
         assert r2["skipped_existing"] == 2
 
         # All 4 now have embeddings
-        embs = graph.get_embeddings("Item", "text")
+        embs = graph.embeddings("Item", "text")
         assert len(embs) == 4
 
     def test_embed_texts_replace(self):
@@ -792,7 +792,7 @@ class TestSearchText:
         graph.embed_texts("Article", "summary", show_progress=False)
 
         # Search with text — uses "summary" which resolves to "summary_emb"
-        results = graph.type_filter("Article").search_text(
+        results = graph.select("Article").search_text(
             "summary", "artificial intelligence", top_k=3
         )
 
@@ -819,8 +819,8 @@ class TestSearchText:
         graph.embed_texts("Doc", "text", show_progress=False)
 
         results = (
-            graph.type_filter("Doc")
-            .filter({"category": "tech"})
+            graph.select("Doc")
+            .where({"category": "tech"})
             .search_text("text", "AI paper", top_k=5)
         )
 
@@ -841,7 +841,7 @@ class TestSearchText:
         graph.set_embedder(MockEmbedder(dimension=3))
         graph.embed_texts("Node", "text", show_progress=False)
 
-        result = graph.type_filter("Node").search_text(
+        result = graph.select("Node").search_text(
             "text", "hello", top_k=2, to_df=True
         )
 
@@ -869,10 +869,10 @@ class TestSearchText:
         query_vec = model.embed(["alpha beta"])[0]
 
         # Both paths — search_text uses "text" → "text_emb"
-        text_results = graph.type_filter("Node").search_text(
+        text_results = graph.select("Node").search_text(
             "text", "alpha beta", top_k=3
         )
-        vec_results = graph.type_filter("Node").vector_search(
+        vec_results = graph.select("Node").vector_search(
             "text", query_vec, top_k=3
         )
 
@@ -888,7 +888,7 @@ class TestSearchText:
         graph.add_nodes(df, "Node", "id", "title")
 
         with pytest.raises(RuntimeError, match="set_embedder"):
-            graph.type_filter("Node").search_text("text", "hello")
+            graph.select("Node").search_text("text", "hello")
 
 
 # ── load/unload lifecycle ─────────────────────────────────────────────────
@@ -972,7 +972,7 @@ class TestEmbedderLifecycle:
         model.load_count = 0
         model.unload_count = 0
 
-        results = graph.type_filter("Node").search_text("text", "alpha", top_k=2)
+        results = graph.select("Node").search_text("text", "alpha", top_k=2)
 
         assert len(results) == 2
         assert model.load_count == 1
@@ -999,7 +999,7 @@ class TestEmbedderLifecycle:
         result = graph.embed_texts("Node", "text", show_progress=False)
         assert result["embedded"] == 3
 
-        results = graph.type_filter("Node").search_text("text", "alpha", top_k=2)
+        results = graph.select("Node").search_text("text", "alpha", top_k=2)
         assert len(results) == 2
 
     def test_unload_called_on_embed_error(self):

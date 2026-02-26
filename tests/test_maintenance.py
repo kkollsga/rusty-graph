@@ -104,8 +104,8 @@ class TestReindex:
         """After DELETE + reindex, type_filter should work correctly."""
         graph_with_data.cypher("MATCH (p:Person {name: 'Person_5'}) DETACH DELETE p")
         graph_with_data.reindex()
-        filtered = graph_with_data.type_filter('Person')
-        assert filtered.node_count() == 9
+        filtered = graph_with_data.select('Person')
+        assert filtered.len() == 9
 
     def test_reindex_preserves_property_indexes(self, graph_with_data):
         """reindex() should rebuild existing property indexes."""
@@ -189,8 +189,8 @@ class TestVacuum:
         graph_with_data.vacuum()
 
         # Type filter should work
-        filtered = graph_with_data.type_filter('Person')
-        assert filtered.node_count() == 9
+        filtered = graph_with_data.select('Person')
+        assert filtered.len() == 9
 
         # Cypher MATCH should work
         result = graph_with_data.cypher("MATCH (p:Person) RETURN count(p) as cnt")
@@ -199,17 +199,17 @@ class TestVacuum:
     def test_vacuum_resets_selection(self, graph_with_data):
         """vacuum() should reset the selection since indices change."""
         # Build a selection
-        filtered = graph_with_data.type_filter('Person')
-        assert filtered.node_count() == 10
+        filtered = graph_with_data.select('Person')
+        assert filtered.len() == 10
 
         # Delete and vacuum on the original graph
         graph_with_data.cypher("MATCH (p:Person {name: 'Person_5'}) DETACH DELETE p")
         graph_with_data.vacuum()
 
         # Selection is cleared; node_count() returns total graph count (9 remaining)
-        assert graph_with_data.node_count() == 9
+        assert graph_with_data.len() == 9
         # After re-filtering, we get the correct count
-        assert graph_with_data.type_filter('Person').node_count() == 9
+        assert graph_with_data.select('Person').len() == 9
 
     def test_vacuum_then_create(self, graph_with_data):
         """After vacuum, CREATE should still work correctly."""

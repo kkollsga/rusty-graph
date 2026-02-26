@@ -49,42 +49,42 @@ class TestRangeIndexQueries:
 
     def test_greater_than(self, graph):
         graph.create_range_index("Person", "age")
-        result = graph.filter({"type": "Person"}).filter({"age": {">": 110}}).get_nodes()
+        result = graph.where({"type": "Person"}).where({"age": {">": 110}}).collect()
         ages = sorted(n["age"] for n in result)
         assert all(a > 110 for a in ages)
         assert len(result) == 9  # ages 111-119
 
     def test_greater_than_equals(self, graph):
         graph.create_range_index("Person", "age")
-        result = graph.filter({"type": "Person"}).filter({"age": {">=": 115}}).get_nodes()
+        result = graph.where({"type": "Person"}).where({"age": {">=": 115}}).collect()
         ages = sorted(n["age"] for n in result)
         assert all(a >= 115 for a in ages)
         assert len(result) == 5  # ages 115-119
 
     def test_less_than(self, graph):
         graph.create_range_index("Person", "age")
-        result = graph.filter({"type": "Person"}).filter({"age": {"<": 25}}).get_nodes()
+        result = graph.where({"type": "Person"}).where({"age": {"<": 25}}).collect()
         ages = sorted(n["age"] for n in result)
         assert all(a < 25 for a in ages)
         assert len(result) == 5  # ages 20-24
 
     def test_less_than_equals(self, graph):
         graph.create_range_index("Person", "age")
-        result = graph.filter({"type": "Person"}).filter({"age": {"<=": 22}}).get_nodes()
+        result = graph.where({"type": "Person"}).where({"age": {"<=": 22}}).collect()
         ages = sorted(n["age"] for n in result)
         assert all(a <= 22 for a in ages)
         assert len(result) == 3  # ages 20-22
 
     def test_between(self, graph):
         graph.create_range_index("Person", "age")
-        result = graph.filter({"type": "Person"}).filter({"age": {"between": [50, 55]}}).get_nodes()
+        result = graph.where({"type": "Person"}).where({"age": {"between": [50, 55]}}).collect()
         ages = sorted(n["age"] for n in result)
         assert all(50 <= a <= 55 for a in ages)
         assert len(result) == 6  # ages 50-55
 
     def test_range_query_without_index_still_works(self, graph):
         """Range queries should work without an index (fallback to scan)."""
-        result = graph.filter({"type": "Person"}).filter({"age": {">": 110}}).get_nodes()
+        result = graph.where({"type": "Person"}).where({"age": {">": 110}}).collect()
         assert len(result) == 9
 
 
@@ -95,7 +95,7 @@ class TestRangeIndexMaintenance:
         graph.create_range_index("Person", "age")
         graph.cypher("CREATE (n:Person {id: 200, title: 'New', age: 200})")
 
-        result = graph.filter({"type": "Person"}).filter({"age": {">": 150}}).get_nodes()
+        result = graph.where({"type": "Person"}).where({"age": {">": 150}}).collect()
         assert len(result) == 1
         assert result[0]["age"] == 200
 
@@ -103,7 +103,7 @@ class TestRangeIndexMaintenance:
         graph.create_range_index("Person", "age")
         graph.cypher("MATCH (n:Person) WHERE n.title = 'Person_0' SET n.age = 999")
 
-        result = graph.filter({"type": "Person"}).filter({"age": {">": 500}}).get_nodes()
+        result = graph.where({"type": "Person"}).where({"age": {">": 500}}).collect()
         assert len(result) == 1
         assert result[0]["age"] == 999
 
@@ -111,9 +111,9 @@ class TestRangeIndexMaintenance:
         graph.create_range_index("Person", "age")
         graph.set_auto_vacuum(None)  # disable to avoid index rebuild
 
-        before = graph.filter({"type": "Person"}).filter({"age": {"<=": 25}}).get_nodes()
+        before = graph.where({"type": "Person"}).where({"age": {"<=": 25}}).collect()
         graph.cypher("MATCH (n:Person) WHERE n.age = 20 DETACH DELETE n")
-        after = graph.filter({"type": "Person"}).filter({"age": {"<=": 25}}).get_nodes()
+        after = graph.where({"type": "Person"}).where({"age": {"<=": 25}}).collect()
 
         assert len(after) == len(before) - 1
 
@@ -132,7 +132,7 @@ class TestRangeIndexPersistence:
             g2 = kglite.load(path)
 
             # Range index should work after reload
-            result = g2.filter({"type": "Person"}).filter({"age": {">": 110}}).get_nodes()
+            result = g2.where({"type": "Person"}).where({"age": {">": 110}}).collect()
             assert len(result) == 9
         finally:
             os.unlink(path)

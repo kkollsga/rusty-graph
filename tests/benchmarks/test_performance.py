@@ -21,7 +21,7 @@ class TestNodeLoadPerformance:
         start = time.time()
         graph.add_nodes(df, 'Item', 'id', 'name')
         elapsed = time.time() - start
-        assert graph.type_filter('Item').node_count() == count
+        assert graph.select('Item').len() == count
         # Just record timing, no hard threshold
         print(f"  {count} nodes: {elapsed*1000:.1f}ms")
 
@@ -29,28 +29,28 @@ class TestNodeLoadPerformance:
 class TestFilterPerformance:
     def test_filter_performance(self, large_graph):
         start = time.time()
-        result = large_graph.type_filter('Item').filter({'category': 'Cat_0'})
+        result = large_graph.select('Item').where({'category': 'Cat_0'})
         elapsed = time.time() - start
-        assert result.node_count() == 200
+        assert result.len() == 200
         print(f"  Filter 10k nodes: {elapsed*1000:.1f}ms")
 
     def test_indexed_filter_performance(self, large_graph):
         large_graph.create_index('Item', 'category')
         start = time.time()
-        result = large_graph.type_filter('Item').filter({'category': 'Cat_0'})
+        result = large_graph.select('Item').where({'category': 'Cat_0'})
         elapsed = time.time() - start
-        assert result.node_count() == 200
+        assert result.len() == 200
         print(f"  Indexed filter 10k nodes: {elapsed*1000:.1f}ms")
 
 
 class TestLightweightMethods:
     def test_node_count_vs_get_nodes(self, large_graph):
         start = time.time()
-        count = large_graph.type_filter('Item').node_count()
+        count = large_graph.select('Item').len()
         count_time = time.time() - start
 
         start = time.time()
-        nodes = large_graph.type_filter('Item').get_nodes()
+        nodes = large_graph.select('Item').collect()
         get_time = time.time() - start
 
         assert count == len(nodes) == 10000
@@ -215,7 +215,7 @@ class TestCypherPerformance:
 
         # Fluent API approach
         start = time.time()
-        fluent_result = graph.type_filter('Person').filter({'age': {'>': 40}}).get_nodes()
+        fluent_result = graph.select('Person').where({'age': {'>': 40}}).collect()
         fluent_time = time.time() - start
 
         assert len(cypher_result) == len(fluent_result)

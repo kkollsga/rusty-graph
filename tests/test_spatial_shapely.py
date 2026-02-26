@@ -48,20 +48,20 @@ def wkt_graph():
 class TestShapelyInput:
     def test_intersects_geometry_with_shapely_polygon(self, wkt_graph):
         poly = Polygon([(2, 59), (6, 59), (6, 63), (2, 63), (2, 59)])
-        result = wkt_graph.type_filter('Field').intersects_geometry(poly)
-        assert result.node_count() >= 1
+        result = wkt_graph.select('Field').intersects_geometry(poly)
+        assert result.len() >= 1
 
     def test_intersects_geometry_wkt_string_still_works(self, wkt_graph):
         """Backwards compatibility: plain WKT strings still work."""
-        result = wkt_graph.type_filter('Field').intersects_geometry(
+        result = wkt_graph.select('Field').intersects_geometry(
             'POLYGON((2 59, 6 59, 6 63, 2 63, 2 59))',
         )
-        assert result.node_count() >= 1
+        assert result.len() >= 1
 
     def test_intersects_geometry_with_shapely_box(self, wkt_graph):
         bbox = box(2, 59, 6, 63)
-        result = wkt_graph.type_filter('Field').intersects_geometry(bbox)
-        assert result.node_count() >= 1
+        result = wkt_graph.select('Field').intersects_geometry(bbox)
+        assert result.len() >= 1
 
     def test_wkt_centroid_with_shapely_polygon(self, wkt_graph):
         poly = Polygon([(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)])
@@ -77,7 +77,7 @@ class TestShapelyInput:
 
     def test_intersects_bad_type_raises(self, wkt_graph):
         with pytest.raises(TypeError, match="WKT string or a geometry object"):
-            wkt_graph.type_filter('Field').intersects_geometry(12345)
+            wkt_graph.select('Field').intersects_geometry(12345)
 
     def test_wkt_centroid_bad_type_raises(self, wkt_graph):
         with pytest.raises(TypeError, match="WKT string or a geometry object"):
@@ -104,32 +104,32 @@ class TestShapelyOutput:
         assert abs(result.x - 5.0) < 0.01
         assert abs(result.y - 5.0) < 0.01
 
-    def test_get_centroid_as_shapely(self, geo_graph):
-        result = geo_graph.type_filter('Location').get_centroid(
+    def test_centroid_as_shapely(self, geo_graph):
+        result = geo_graph.select('Location').centroid(
             lat_field='latitude', lon_field='longitude', as_shapely=True,
         )
         assert isinstance(result, Point)
 
-    def test_get_centroid_as_shapely_empty(self):
+    def test_centroid_as_shapely_empty(self):
         graph = KnowledgeGraph()
-        result = graph.get_centroid(as_shapely=True)
+        result = graph.centroid(as_shapely=True)
         assert result is None
 
-    def test_get_bounds_as_shapely(self, geo_graph):
-        result = geo_graph.type_filter('Location').get_bounds(
+    def test_bounds_as_shapely(self, geo_graph):
+        result = geo_graph.select('Location').bounds(
             lat_field='latitude', lon_field='longitude', as_shapely=True,
         )
         assert isinstance(result, Polygon)
         assert result.is_valid
 
-    def test_get_bounds_as_shapely_empty(self):
+    def test_bounds_as_shapely_empty(self):
         graph = KnowledgeGraph()
-        result = graph.get_bounds(as_shapely=True)
+        result = graph.bounds(as_shapely=True)
         assert result is None
 
-    def test_get_bounds_default_is_dict(self, geo_graph):
+    def test_bounds_default_is_dict(self, geo_graph):
         """Default behavior unchanged — returns dict."""
-        result = geo_graph.type_filter('Location').get_bounds(
+        result = geo_graph.select('Location').bounds(
             lat_field='latitude', lon_field='longitude',
         )
         assert isinstance(result, dict)
@@ -141,7 +141,7 @@ class TestShapelyOutput:
 
 class TestToGdf:
     def test_to_gdf_from_get_nodes(self, wkt_graph):
-        rv = wkt_graph.type_filter('Field').get_nodes()
+        rv = wkt_graph.select('Field').collect()
         gdf = rv.to_gdf(geometry_column='geometry')
         assert isinstance(gdf, gpd.GeoDataFrame)
         assert len(gdf) == 3
@@ -151,7 +151,7 @@ class TestToGdf:
             assert isinstance(geom, Polygon)
 
     def test_to_gdf_with_crs(self, wkt_graph):
-        rv = wkt_graph.type_filter('Field').get_nodes()
+        rv = wkt_graph.select('Field').collect()
         gdf = rv.to_gdf(geometry_column='geometry', crs='EPSG:4326')
         assert gdf.crs is not None
         assert gdf.crs.to_epsg() == 4326
@@ -165,6 +165,6 @@ class TestToGdf:
         assert len(gdf) == 3
 
     def test_to_gdf_missing_column_raises(self, wkt_graph):
-        rv = wkt_graph.type_filter('Field').get_nodes()
+        rv = wkt_graph.select('Field').collect()
         with pytest.raises(KeyError):
             rv.to_gdf(geometry_column='nonexistent')

@@ -107,9 +107,9 @@ class TestCentrality:
         result = social_graph.degree_centrality()
         assert result is not None
 
-    def test_get_degrees(self, social_graph):
-        # get_degrees needs a selection — use type_filter first
-        degrees = social_graph.type_filter('Person').get_degrees()
+    def test_degrees(self, social_graph):
+        # degrees needs a selection — use type_filter first
+        degrees = social_graph.select('Person').degrees()
         assert degrees is not None
         assert isinstance(degrees, dict)
         assert len(degrees) > 0

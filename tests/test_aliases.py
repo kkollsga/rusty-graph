@@ -2,7 +2,7 @@
 
 When users call add_nodes(df, 'Type', 'npdid', 'prospect_name'),
 the original column names should still work as property accessors in Cypher queries,
-filter() calls, and the fluent API.
+where() calls, and the fluent API.
 """
 import pytest
 import pandas as pd
@@ -86,26 +86,26 @@ class TestCypherAliasResolution:
 
 
 class TestFilterAliasResolution:
-    """Fluent API filter() should resolve original column names."""
+    """Fluent API where() should resolve original column names."""
 
     def test_filter_by_alias_id(self, graph_with_aliases):
-        """filter({'npdid': 2}) should find the node."""
+        """where({'npdid': 2}) should find the node."""
         g = graph_with_aliases
-        result = g.filter({"type": "Prospect"}).filter({"npdid": 2}).get_nodes()
+        result = g.where({"type": "Prospect"}).where({"npdid": 2}).collect()
         assert len(result) == 1
         assert result[0]["title"] == "Beta"
 
     def test_filter_by_alias_title(self, graph_with_aliases):
-        """filter({'prospect_name': 'Alpha'}) should find the node."""
+        """where({'prospect_name': 'Alpha'}) should find the node."""
         g = graph_with_aliases
-        result = g.filter({"type": "Prospect"}).filter({"prospect_name": "Alpha"}).get_nodes()
+        result = g.where({"type": "Prospect"}).where({"prospect_name": "Alpha"}).collect()
         assert len(result) == 1
         assert result[0]["id"] == 1
 
     def test_filter_by_canonical_still_works(self, graph_with_aliases):
-        """filter({'id': 1}) should still work."""
+        """where({'id': 1}) should still work."""
         g = graph_with_aliases
-        result = g.filter({"type": "Prospect"}).filter({"id": 1}).get_nodes()
+        result = g.where({"type": "Prospect"}).where({"id": 1}).collect()
         assert len(result) == 1
         assert result[0]["title"] == "Alpha"
 

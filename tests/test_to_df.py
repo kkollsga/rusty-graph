@@ -10,7 +10,7 @@ class TestToDF:
     """Tests for KnowledgeGraph.to_df()."""
 
     def test_basic_to_df(self, small_graph):
-        df = small_graph.type_filter('Person').to_df()
+        df = small_graph.select('Person').to_df()
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 3
         assert 'title' in df.columns
@@ -21,32 +21,32 @@ class TestToDF:
         assert set(df['title']) == {'Alice', 'Bob', 'Charlie'}
 
     def test_filtered_to_df(self, small_graph):
-        df = small_graph.type_filter('Person').filter({'city': 'Oslo'}).to_df()
+        df = small_graph.select('Person').where({'city': 'Oslo'}).to_df()
         assert len(df) == 2
         assert set(df['title']) == {'Alice', 'Charlie'}
         assert all(df['city'] == 'Oslo')
 
     def test_include_type_false(self, small_graph):
-        df = small_graph.type_filter('Person').to_df(include_type=False)
+        df = small_graph.select('Person').to_df(include_type=False)
         assert 'type' not in df.columns
         assert 'title' in df.columns
         assert 'id' in df.columns
 
     def test_include_id_false(self, small_graph):
-        df = small_graph.type_filter('Person').to_df(include_id=False)
+        df = small_graph.select('Person').to_df(include_id=False)
         assert 'id' not in df.columns
         assert 'title' in df.columns
         assert 'type' in df.columns
 
     def test_include_both_false(self, small_graph):
-        df = small_graph.type_filter('Person').to_df(include_type=False, include_id=False)
+        df = small_graph.select('Person').to_df(include_type=False, include_id=False)
         assert 'type' not in df.columns
         assert 'id' not in df.columns
         assert 'title' in df.columns
         assert 'age' in df.columns
 
     def test_empty_selection(self, small_graph):
-        df = small_graph.type_filter('Person').filter({'city': 'Nonexistent'}).to_df()
+        df = small_graph.select('Person').where({'city': 'Nonexistent'}).to_df()
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 0
 
@@ -56,13 +56,13 @@ class TestToDF:
         assert len(df) == 0
 
     def test_traversal_to_df(self, small_graph):
-        df = small_graph.type_filter('Person').filter({'title': 'Alice'}).traverse('KNOWS').to_df()
+        df = small_graph.select('Person').where({'title': 'Alice'}).traverse('KNOWS').to_df()
         assert isinstance(df, pd.DataFrame)
         assert len(df) >= 1  # Alice knows Bob and Charlie
 
     def test_null_handling(self, social_graph):
         """Nodes with missing properties should have None in the DataFrame."""
-        df = social_graph.type_filter('Person').to_df()
+        df = social_graph.select('Person').to_df()
         assert 'email' in df.columns
         # Odd-numbered persons have None email
         null_count = df['email'].isna().sum()
@@ -72,8 +72,8 @@ class TestToDF:
         """Nodes of different types should have None for missing properties."""
         # Select both Person and Company nodes
         g = social_graph
-        persons = g.type_filter('Person')
-        companies = g.type_filter('Company')
+        persons = g.select('Person')
+        companies = g.select('Company')
         combined = persons.union(companies)
         df = combined.to_df()
         assert len(df) == 25  # 20 persons + 5 companies
@@ -89,7 +89,7 @@ class TestToDF:
 
     def test_column_order(self, small_graph):
         """type, title, id should always come first."""
-        df = small_graph.type_filter('Person').to_df()
+        df = small_graph.select('Person').to_df()
         cols = list(df.columns)
         assert cols[0] == 'type'
         assert cols[1] == 'title'
@@ -97,7 +97,7 @@ class TestToDF:
 
     def test_values_correct(self, small_graph):
         """Verify actual data values are correct."""
-        df = small_graph.type_filter('Person').to_df()
+        df = small_graph.select('Person').to_df()
         alice = df[df['title'] == 'Alice'].iloc[0]
         assert alice['age'] == 28
         assert alice['city'] == 'Oslo'

@@ -137,7 +137,7 @@ impl KnowledgeGraph {
     /// Example:
     ///     ```python
     ///     # Filter discoveries in the North Sea area
-    ///     north_sea = graph.type_filter('Discovery').within_bounds(
+    ///     north_sea = graph.select('Discovery').within_bounds(
     ///         min_lat=56.0, max_lat=62.0,
     ///         min_lon=0.0, max_lon=8.0
     ///     )
@@ -213,7 +213,7 @@ impl KnowledgeGraph {
     /// Example:
     ///     ```python
     ///     # Find discoveries near a point (within ~50km)
-    ///     nearby = graph.type_filter('Discovery').near_point(
+    ///     nearby = graph.select('Discovery').near_point(
     ///         center_lat=60.0, center_lon=4.0,
     ///         max_distance=0.5  # ~50km
     ///     )
@@ -283,7 +283,7 @@ impl KnowledgeGraph {
     /// Example:
     ///     ```python
     ///     # Find discoveries within 50km of a point
-    ///     nearby = graph.type_filter('Discovery').near_point_m(
+    ///     nearby = graph.select('Discovery').near_point_m(
     ///         center_lat=60.0, center_lon=5.0,
     ///         max_distance_m=50000.0
     ///     )
@@ -350,7 +350,7 @@ impl KnowledgeGraph {
     /// Example:
     ///     ```python
     ///     # Find which blocks contain a specific location
-    ///     containing = graph.type_filter('Block').contains_point(
+    ///     containing = graph.select('Block').contains_point(
     ///         lat=61.4, lon=4.0,
     ///         geometry_field='boundary'
     ///     )
@@ -404,12 +404,12 @@ impl KnowledgeGraph {
     /// Example:
     ///     ```python
     ///     # Find blocks intersecting with a polygon (WKT string)
-    ///     intersecting = graph.type_filter('Block').intersects_geometry(
+    ///     intersecting = graph.select('Block').intersects_geometry(
     ///         'POLYGON((2 58, 4 58, 4 60, 2 60, 2 58))'
     ///     )
     ///     # Or with a shapely geometry
     ///     from shapely.geometry import Polygon
-    ///     intersecting = graph.type_filter('Block').intersects_geometry(
+    ///     intersecting = graph.select('Block').intersects_geometry(
     ///         Polygon([(2, 58), (4, 58), (4, 60), (2, 60)])
     ///     )
     ///     ```
@@ -462,11 +462,11 @@ impl KnowledgeGraph {
     ///
     /// Example:
     ///     ```python
-    ///     bounds = graph.type_filter('Discovery').get_bounds()
+    ///     bounds = graph.select('Discovery').bounds()
     ///     print(f"Latitude: {bounds['min_lat']} to {bounds['max_lat']}")
     ///     ```
     #[pyo3(signature = (lat_field=None, lon_field=None, as_shapely=false))]
-    fn get_bounds(
+    fn bounds(
         &self,
         py: Python<'_>,
         lat_field: Option<&str>,
@@ -509,11 +509,11 @@ impl KnowledgeGraph {
     ///
     /// Example:
     ///     ```python
-    ///     center = graph.type_filter('Discovery').get_centroid()
+    ///     center = graph.select('Discovery').centroid()
     ///     print(f"Center: {center['latitude']}, {center['longitude']}")
     ///     ```
     #[pyo3(signature = (lat_field=None, lon_field=None, as_shapely=false))]
-    fn get_centroid(
+    fn centroid(
         &self,
         py: Python<'_>,
         lat_field: Option<&str>,
@@ -650,7 +650,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     dict with spatial config for the requested type(s), or None if not configured.
     #[pyo3(signature = (node_type=None))]
-    fn get_spatial(&self, py: Python<'_>, node_type: Option<String>) -> PyResult<Py<PyAny>> {
+    fn spatial(&self, py: Python<'_>, node_type: Option<String>) -> PyResult<Py<PyAny>> {
         let graph = &self.inner;
 
         if let Some(nt) = node_type {

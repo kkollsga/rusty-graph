@@ -94,7 +94,7 @@ class ResultIter:
 class ResultView:
     """Lazy result container — data stays in Rust until accessed from Python.
 
-    Returned by ``cypher()``, centrality methods, ``get_nodes()`` (flat),
+    Returned by ``cypher()``, centrality methods, ``collect()`` (flat),
     and ``sample()``.
 
     Data is only converted to Python objects when you actually access rows
@@ -399,29 +399,29 @@ class KnowledgeGraph:
     # Selection & Filtering
     # ====================================================================
 
-    def type_filter(
+    def select(
         self,
         node_type: str,
         sort: Optional[Union[str, list[tuple[str, bool]]]] = None,
-        max_nodes: Optional[int] = None,
+        limit: Optional[int] = None,
     ) -> KnowledgeGraph:
         """Select all nodes of a given type.
 
         Args:
             node_type: The node type to select (e.g. ``'Person'``).
             sort: Optional sort spec — a property name or list of ``(field, ascending)`` tuples.
-            max_nodes: Limit the number of selected nodes.
+            limit: Limit the number of selected nodes.
 
         Returns:
             A new KnowledgeGraph with the filtered selection.
         """
         ...
 
-    def filter(
+    def where(
         self,
         conditions: dict[str, Any],
         sort: Optional[Union[str, list[tuple[str, bool]]]] = None,
-        max_nodes: Optional[int] = None,
+        limit: Optional[int] = None,
     ) -> KnowledgeGraph:
         """Filter the current selection by property conditions.
 
@@ -433,7 +433,7 @@ class KnowledgeGraph:
 
         Example::
 
-            graph.type_filter('Person').filter({
+            graph.select('Person').where({
                 'age': {'>': 25},
                 'city': 'Oslo',
                 'name': {'regex': '^A.*'},
@@ -445,28 +445,28 @@ class KnowledgeGraph:
         """
         ...
 
-    def filter_any(
+    def where_any(
         self,
         conditions: list[dict[str, Any]],
         sort: Optional[Union[str, list[tuple[str, bool]]]] = None,
-        max_nodes: Optional[int] = None,
+        limit: Optional[int] = None,
     ) -> KnowledgeGraph:
         """Filter the current selection with OR logic across multiple condition sets.
 
-        Each dict in *conditions* is a set of AND conditions (same as ``filter()``).
+        Each dict in *conditions* is a set of AND conditions (same as ``where()``).
         A node is kept if it matches **any** of the condition sets.
 
         Args:
             conditions: List of condition dicts. Must contain at least one.
             sort: Optional sort spec.
-            max_nodes: Limit the number of selected nodes.
+            limit: Limit the number of selected nodes.
 
         Returns:
             A new KnowledgeGraph with the filtered selection.
 
         Example::
 
-            graph.type_filter('Person').filter_any([
+            graph.select('Person').where_any([
                 {'city': 'Oslo'},
                 {'city': 'Bergen'},
             ])
@@ -476,11 +476,11 @@ class KnowledgeGraph:
         """
         ...
 
-    def filter_orphans(
+    def where_orphans(
         self,
         include_orphans: Optional[bool] = None,
         sort: Optional[Union[str, list[tuple[str, bool]]]] = None,
-        max_nodes: Optional[int] = None,
+        limit: Optional[int] = None,
     ) -> KnowledgeGraph:
         """Filter nodes based on whether they have connections.
 
@@ -488,7 +488,7 @@ class KnowledgeGraph:
             include_orphans: If ``True``, keep only orphan (disconnected) nodes.
                 If ``False``, keep only connected nodes. Default ``True``.
             sort: Optional sort spec.
-            max_nodes: Limit the number of selected nodes.
+            limit: Limit the number of selected nodes.
 
         Returns:
             A new KnowledgeGraph with the filtered selection.
@@ -511,7 +511,7 @@ class KnowledgeGraph:
         """
         ...
 
-    def max_nodes(self, max_per_group: int) -> KnowledgeGraph:
+    def limit(self, max_per_group: int) -> KnowledgeGraph:
         """Limit the number of nodes per parent group.
 
         Args:
@@ -525,8 +525,8 @@ class KnowledgeGraph:
     def offset(self, n: int) -> KnowledgeGraph:
         """Skip the first *n* nodes per parent group (pagination).
 
-        Combine with ``max_nodes()`` for pagination:
-        ``graph.sort('name').offset(20).max_nodes(10)``
+        Combine with ``limit()`` for pagination:
+        ``graph.sort('name').offset(20).limit(10)``
 
         Args:
             n: Number of nodes to skip.
@@ -536,7 +536,7 @@ class KnowledgeGraph:
         """
         ...
 
-    def has_connection(
+    def where_connected(
         self,
         connection_type: str,
         direction: Optional[str] = None,
@@ -623,9 +623,9 @@ class KnowledgeGraph:
     # Data Retrieval
     # ====================================================================
 
-    def get_nodes(
+    def collect(
         self,
-        max_nodes: Optional[int] = None,
+        limit: Optional[int] = None,
         indices: Optional[list[int]] = None,
         parent_type: Optional[str] = None,
         parent_info: Optional[bool] = None,
@@ -634,7 +634,7 @@ class KnowledgeGraph:
         """Materialise selected nodes as a ResultView (flat) or grouped dict.
 
         Args:
-            max_nodes: Maximum number of nodes to return.
+            limit: Maximum number of nodes to return.
             indices: Specific node indices to return.
             parent_type: Group results by parent of this type.
             parent_info: Include parent info in grouped output.
@@ -666,32 +666,27 @@ class KnowledgeGraph:
         """
         ...
 
-    def node_count(self) -> int:
+    def len(self) -> int:
         """Count selected nodes without materialising them.
 
-        Much faster than ``len(get_nodes())``.
+        Much faster than ``len(collect())``. Also available via ``len(graph)``.
         """
         ...
+
+    def __len__(self) -> int: ...
 
     def indices(self) -> list[int]:
         """Return raw graph indices for selected nodes."""
         ...
 
-    def get_ids(self) -> list[dict[str, Any]]:
-        """Return only ``id``, ``title``, and ``type`` for each selected node.
-
-        Faster than :meth:`get_nodes` when you only need identification info.
-        """
-        ...
-
-    def id_values(self) -> list[Any]:
+    def ids(self) -> list[Any]:
         """Return a flat list of ID values from the current selection.
 
         The lightest retrieval method — no dict wrapping.
         """
         ...
 
-    def get_node_by_id(self, node_type: str, node_id: Any) -> Optional[dict[str, Any]]:
+    def node(self, node_type: str, node_id: Any) -> Optional[dict[str, Any]]:
         """Look up a single node by type and ID. O(1) via hash index.
 
         Args:
@@ -807,7 +802,7 @@ class KnowledgeGraph:
         ...
 
     def build_id_indices(self, node_types: Optional[list[str]] = None) -> None:
-        """Pre-build ID lookup indices for fast :meth:`get_node_by_id` calls.
+        """Pre-build ID lookup indices for fast :meth:`node` calls.
 
         Args:
             node_types: Types to index. ``None`` indexes all types.
@@ -931,7 +926,7 @@ class KnowledgeGraph:
         """
         ...
 
-    def get_connections(
+    def connections(
         self,
         indices: Optional[list[int]] = None,
         parent_info: Optional[bool] = None,
@@ -951,9 +946,9 @@ class KnowledgeGraph:
         """
         ...
 
-    def get_titles(
+    def titles(
         self,
-        max_nodes: Optional[int] = None,
+        limit: Optional[int] = None,
         indices: Optional[list[int]] = None,
         flatten_single_parent: Optional[bool] = None,
     ) -> Union[list[str], dict[str, list[str]]]:
@@ -975,14 +970,14 @@ class KnowledgeGraph:
 
         Example output::
 
-            TYPE_FILTER Person (500 nodes) -> FILTER (42 nodes)
+            SELECT Person (500 nodes) -> WHERE (42 nodes)
         """
         ...
 
     def get_properties(
         self,
         properties: list[str],
-        max_nodes: Optional[int] = None,
+        limit: Optional[int] = None,
         indices: Optional[list[int]] = None,
         flatten_single_parent: Optional[bool] = None,
     ) -> Union[list[tuple[Any, ...]], dict[str, list[tuple[Any, ...]]]]:
@@ -993,7 +988,7 @@ class KnowledgeGraph:
 
         Args:
             properties: List of property names to retrieve.
-            max_nodes: Maximum number of nodes.
+            limit: Maximum number of nodes.
             indices: Specific node indices.
             flatten_single_parent: Flatten single-group results to a list. Default ``True``.
 
@@ -1040,7 +1035,7 @@ class KnowledgeGraph:
         filter_target: Optional[dict[str, Any]] = None,
         filter_connection: Optional[dict[str, Any]] = None,
         sort_target: Optional[Union[str, list[tuple[str, bool]]]] = None,
-        max_nodes: Optional[int] = None,
+        limit: Optional[int] = None,
         new_level: Optional[bool] = None,
         method: Optional[Union[str, dict[str, Any]]] = None,
     ) -> KnowledgeGraph:
@@ -1062,7 +1057,7 @@ class KnowledgeGraph:
             filter_target: Filter conditions for target nodes.
             filter_connection: Filter conditions for edge properties (edge mode only).
             sort_target: Sort target nodes per source.
-            max_nodes: Limit target nodes per source.
+            limit: Limit target nodes per source.
             new_level: Add targets as a new hierarchy level (edge mode). Default ``True``.
             method: Comparison method — a string for simple cases, or a dict with
                 method-specific settings.
@@ -1123,30 +1118,30 @@ class KnowledgeGraph:
         Examples::
 
             # Edge-based (existing)
-            graph.type_filter('Person').traverse('KNOWS')
+            graph.select('Person').traverse('KNOWS')
 
             # Spatial containment (string shorthand)
-            graph.type_filter('Structure').traverse('Well', method='contains')
+            graph.select('Structure').traverse('Well', method='contains')
 
             # Spatial containment with resolve
-            graph.type_filter('Structure').traverse('Field',
+            graph.select('Structure').traverse('Field',
                 method={'type': 'contains', 'resolve': 'geometry'})
 
             # Distance with threshold
-            graph.type_filter('Platform').traverse('Well',
+            graph.select('Platform').traverse('Well',
                 method={'type': 'distance', 'max_m': 5000})
 
             # Distance using closest boundary point
-            graph.type_filter('Structure').traverse('Well',
+            graph.select('Structure').traverse('Well',
                 method={'type': 'distance', 'max_m': 5000, 'resolve': 'closest'})
 
             # Semantic similarity
-            graph.type_filter('Article').traverse('Article',
+            graph.select('Article').traverse('Article',
                 method={'type': 'text_score', 'property': 'abstract', 'threshold': 0.85},
-                max_nodes=5)
+                limit=5)
 
             # Clustering
-            graph.type_filter('Well').traverse(
+            graph.select('Well').traverse(
                 method={'type': 'cluster', 'algorithm': 'kmeans', 'k': 5,
                         'features': ['latitude', 'longitude']})
         """
@@ -1186,7 +1181,7 @@ class KnowledgeGraph:
 
             # After traversal A → B → C, create direct A → C edges
             # with B's 'score' property copied onto each edge
-            graph.type_filter('A') \\
+            graph.select('A') \\
                 .traverse('REL_AB') \\
                 .traverse('REL_BC') \\
                 .create_connections('A_TO_C',
@@ -1224,22 +1219,22 @@ class KnowledgeGraph:
         Examples::
 
             # Copy structure name onto wells
-            graph.type_filter('Structure').traverse('Well', method='contains') \\
+            graph.select('Structure').traverse('Well', method='contains') \\
                 .add_properties({'Structure': ['name', 'status']})
 
             # Rename properties
-            graph.type_filter('Structure').traverse('Well', method='contains') \\
+            graph.select('Structure').traverse('Well', method='contains') \\
                 .add_properties({'Structure': {'struct_name': 'name'}})
 
             # Aggregate: count wells per structure
-            graph.type_filter('Well').traverse('Structure', method='contains') \\
+            graph.select('Well').traverse('Structure', method='contains') \\
                 .add_properties({'Well': {
                     'well_count': 'count(*)',
                     'avg_depth': 'mean(depth)',
                 }})
 
             # Spatial compute
-            graph.type_filter('Structure').traverse('Well', method='contains') \\
+            graph.select('Structure').traverse('Well', method='contains') \\
                 .add_properties({'Structure': {
                     'dist_to_center': 'distance',
                     'parent_area': 'area',
@@ -1247,12 +1242,12 @@ class KnowledgeGraph:
         """
         ...
 
-    def children_properties_to_list(
+    def collect_children(
         self,
         property: Optional[str] = None,
-        filter: Optional[dict[str, Any]] = None,
+        where: Optional[dict[str, Any]] = None,
         sort: Optional[Union[str, list[tuple[str, bool]]]] = None,
-        max_nodes: Optional[int] = None,
+        limit: Optional[int] = None,
         store_as: Optional[str] = None,
         max_length: Optional[int] = None,
         keep_selection: Optional[bool] = None,
@@ -1261,9 +1256,9 @@ class KnowledgeGraph:
 
         Args:
             property: Child property to collect. Default ``'title'``.
-            filter: Filter conditions for children.
+            where: Filter conditions for children.
             sort: Sort children.
-            max_nodes: Limit children per parent.
+            limit: Limit children per parent.
             store_as: If set, stores the list as this property on parent nodes.
             max_length: Max string length when storing.
             keep_selection: Preserve selection after store. Default ``False``.
@@ -1348,7 +1343,7 @@ class KnowledgeGraph:
     # Debugging & Introspection
     # ====================================================================
 
-    def get_schema(self) -> str:
+    def schema_text(self) -> str:
         """Return a text summary of the graph schema (node types, connections)."""
         ...
 
@@ -1461,7 +1456,7 @@ class KnowledgeGraph:
         """
         ...
 
-    def get_selection(self) -> str:
+    def selection(self) -> str:
         """Return a text summary of the current selection state."""
         ...
 
@@ -1543,7 +1538,7 @@ class KnowledgeGraph:
             n: Number of nodes to return. Default ``5``.
 
         Returns:
-            List of node dicts (same format as :meth:`get_nodes`).
+            List of node dicts (same format as :meth:`collect`).
 
         Raises:
             KeyError: If node_type does not exist.
@@ -1580,18 +1575,18 @@ class KnowledgeGraph:
     # Operation Reports
     # ====================================================================
 
-    def get_last_report(self) -> dict[str, Any]:
+    def last_report(self) -> dict[str, Any]:
         """Get the most recent operation report as a dict.
 
         Returns an empty dict if no operations have been performed.
         """
         ...
 
-    def get_operation_index(self) -> int:
+    def operation_index(self) -> int:
         """Get the sequential index of the last operation."""
         ...
 
-    def get_report_history(self) -> list[dict[str, Any]]:
+    def report_history(self) -> list[dict[str, Any]]:
         """Get all operation reports as a list of dicts."""
         ...
 
@@ -1666,7 +1661,7 @@ class KnowledgeGraph:
         """Remove the schema definition from the graph."""
         ...
 
-    def get_schema_definition(self) -> Optional[dict[str, Any]]:
+    def schema_definition(self) -> Optional[dict[str, Any]]:
         """Get the current schema definition as a dict, or ``None``."""
         ...
 
@@ -1818,7 +1813,7 @@ class KnowledgeGraph:
         """Check if two nodes are connected (directly or indirectly)."""
         ...
 
-    def get_degrees(self) -> dict[str, int]:
+    def degrees(self) -> dict[str, int]:
         """Get connection count for each selected node.
 
         Returns:
@@ -2068,7 +2063,7 @@ class KnowledgeGraph:
         Example::
 
             graph.export_csv('output/')
-            graph.type_filter('Person').export_csv('output/', verbose=True)
+            graph.select('Person').export_csv('output/', verbose=True)
         """
         ...
 
@@ -2146,7 +2141,7 @@ class KnowledgeGraph:
         Example::
 
             graph.create_range_index('Person', 'age')
-            old = graph.filter({'type': 'Person'}).filter({'age': {'>': 60}}).get_nodes()
+            old = graph.select('Person').where({'age': {'>': 60}}).collect()
         """
         ...
 
@@ -2329,7 +2324,7 @@ class KnowledgeGraph:
         """
         ...
 
-    def get_spatial(
+    def spatial(
         self,
         node_type: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
@@ -2449,7 +2444,7 @@ class KnowledgeGraph:
         """
         ...
 
-    def get_bounds(
+    def bounds(
         self,
         lat_field: Optional[str] = None,
         lon_field: Optional[str] = None,
@@ -2470,7 +2465,7 @@ class KnowledgeGraph:
         """
         ...
 
-    def get_centroid(
+    def centroid(
         self,
         lat_field: Optional[str] = None,
         lon_field: Optional[str] = None,
@@ -2533,7 +2528,7 @@ class KnowledgeGraph:
         """
         ...
 
-    def get_timeseries_config(
+    def timeseries_config(
         self,
         node_type: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
@@ -2618,7 +2613,7 @@ class KnowledgeGraph:
         """
         ...
 
-    def get_timeseries(
+    def timeseries(
         self,
         node_id: Any,
         channel: Optional[str] = None,
@@ -2641,7 +2636,7 @@ class KnowledgeGraph:
         """
         ...
 
-    def get_time_index(
+    def time_index(
         self,
         node_id: Any,
     ) -> Optional[list[str]]:
@@ -2659,7 +2654,7 @@ class KnowledgeGraph:
         """Store embeddings for nodes of the given type.
 
         Embeddings are stored separately from regular node properties and are
-        invisible to ``get_nodes()``, ``to_df()``, and other property-based APIs.
+        invisible to ``collect()``, ``to_df()``, and other property-based APIs.
         The embedding store key is auto-derived as ``{text_column}_emb``.
 
         Validates that ``text_column`` exists as a property on the node type
@@ -2702,8 +2697,8 @@ class KnowledgeGraph:
         Example::
 
             results = (graph
-                .type_filter('Article')
-                .filter({'category': 'politics'})
+                .select('Article')
+                .where({'category': 'politics'})
                 .vector_search('summary', query_vec, top_k=10))
         """
         ...
@@ -2726,7 +2721,7 @@ class KnowledgeGraph:
         ...
 
     @overload
-    def get_embeddings(self, node_type: str, text_column: str) -> dict[Any, list[float]]:
+    def embeddings(self, node_type: str, text_column: str) -> dict[Any, list[float]]:
         """Retrieve all embeddings for a node type.
 
         Args:
@@ -2739,7 +2734,7 @@ class KnowledgeGraph:
         ...
 
     @overload
-    def get_embeddings(self, text_column: str) -> dict[Any, list[float]]:
+    def embeddings(self, text_column: str) -> dict[Any, list[float]]:
         """Retrieve embeddings for nodes in the current selection.
 
         Args:
@@ -2750,9 +2745,9 @@ class KnowledgeGraph:
         """
         ...
 
-    def get_embeddings(self, *args, **kwargs) -> dict[Any, list[float]]: ...
+    def embeddings(self, *args, **kwargs) -> dict[Any, list[float]]: ...
 
-    def get_embedding(
+    def embedding(
         self, node_type: str, text_column: str, node_id: Any
     ) -> list[float] | None:
         """Retrieve a single node's embedding vector.
@@ -2857,7 +2852,7 @@ class KnowledgeGraph:
 
         Example::
 
-            results = g.type_filter("Article").search_text(
+            results = g.select("Article").search_text(
                 "summary", "find AI articles", top_k=10
             )
         """

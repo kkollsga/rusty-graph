@@ -152,7 +152,7 @@ class TestAutoVacuumDataIntegrity:
         g.cypher("MATCH (n:Person) WHERE n.age < 40 DETACH DELETE n")
 
         # Filter should still work (indices were rebuilt)
-        result = g.filter({"type": "Person"}).get_nodes()
+        result = g.where({"type": "Person"}).collect()
         assert len(result) > 0
         for node in result:
             assert node["age"] >= 40

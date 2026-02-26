@@ -11,7 +11,7 @@ import kglite
 class TestCrossFeatureWorkflows:
     def test_temporal_with_spatial(self, petroleum_graph):
         """Combine temporal and spatial queries."""
-        valid = petroleum_graph.type_filter('Prospect').valid_at(
+        valid = petroleum_graph.select('Prospect').valid_at(
             '2020-06-15',
             date_from_field='date_from',
             date_to_field='date_to',
@@ -20,7 +20,7 @@ class TestCrossFeatureWorkflows:
             lat_field='latitude', lon_field='longitude',
             min_lat=59.0, max_lat=65.0, min_lon=3.0, max_lon=8.0,
         )
-        assert nearby.node_count() > 0
+        assert nearby.len() > 0
 
     def test_pattern_match_with_filter(self, petroleum_graph):
         """Pattern match then apply additional filtering."""
@@ -35,14 +35,14 @@ class TestCrossFeatureWorkflows:
     def test_index_with_set_operations(self, social_graph):
         """Use index for fast filtering combined with set operations."""
         social_graph.create_index('Person', 'city')
-        oslo = social_graph.type_filter('Person').filter({'city': 'Oslo'})
-        bergen = social_graph.type_filter('Person').filter({'city': 'Bergen'})
+        oslo = social_graph.select('Person').where({'city': 'Oslo'})
+        bergen = social_graph.select('Person').where({'city': 'Bergen'})
         combined = oslo.union(bergen)
-        assert combined.node_count() == oslo.node_count() + bergen.node_count()
+        assert combined.len() == oslo.len() + bergen.len()
 
     def test_subgraph_with_export(self, small_graph):
         """Extract subgraph and export it."""
-        selection = small_graph.type_filter('Person').filter({'title': 'Alice'})
+        selection = small_graph.select('Person').where({'title': 'Alice'})
         expanded = selection.expand(hops=1)
         subgraph = expanded.to_subgraph()
         result = subgraph.export_string(format='d3')
@@ -60,7 +60,7 @@ class TestCrossFeatureWorkflows:
         errors = graph.validate_schema()
         assert len(errors) == 0
 
-        result = graph.type_filter('Item').update({'status': 'archived'})
+        result = graph.select('Item').update({'status': 'archived'})
         assert result['nodes_updated'] == 2
 
     def test_cypher_with_pattern_match_parity(self, social_graph):
@@ -75,9 +75,9 @@ class TestCrossFeatureWorkflows:
 
     def test_full_pipeline(self, petroleum_graph):
         """Full workflow: filter -> traverse -> aggregate -> export."""
-        plays = petroleum_graph.type_filter('Play')
+        plays = petroleum_graph.select('Play')
         prospects = plays.traverse('HAS_PROSPECT')
-        assert prospects.node_count() > 0
+        assert prospects.len() > 0
 
         explanation = prospects.explain()
         assert isinstance(explanation, str)
@@ -103,7 +103,7 @@ class TestCrossFeatureWorkflows:
         try:
             graph.save(path)
             loaded = kglite.load(path)
-            assert loaded.type_filter('Node').node_count() == 10
+            assert loaded.select('Node').len() == 10
             assert loaded.has_index('Node', 'cat')
             assert loaded.has_schema()
         finally:

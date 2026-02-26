@@ -1,4 +1,4 @@
-"""Tests for connection operations: add, retrieve, get_connections."""
+"""Tests for connection operations: add, retrieve, connections."""
 
 import pytest
 import pandas as pd
@@ -7,12 +7,12 @@ from kglite import KnowledgeGraph
 
 class TestAddConnections:
     def test_add_connections_basic(self, small_graph):
-        conns = small_graph.type_filter('Person').filter({'title': 'Alice'}).get_connections()
+        conns = small_graph.select('Person').where({'title': 'Alice'}).connections()
         assert len(conns) > 0
 
     def test_add_connections_with_properties(self, small_graph):
-        # get_connections returns a nested dict: {title: {node_id, node_type, incoming, outgoing}}
-        conns = small_graph.type_filter('Person').filter({'title': 'Alice'}).get_connections()
+        # connections returns a nested dict: {title: {node_id, node_type, incoming, outgoing}}
+        conns = small_graph.select('Person').where({'title': 'Alice'}).connections()
         assert 'Alice' in conns
         alice = conns['Alice']
         # Alice has outgoing KNOWS connections
@@ -49,18 +49,18 @@ class TestAddConnections:
 
 
 class TestGetConnections:
-    def test_get_connections_basic(self, small_graph):
-        # get_connections returns nested dict keyed by node title
-        conns = small_graph.type_filter('Person').filter({'title': 'Alice'}).get_connections()
+    def test_connections_basic(self, small_graph):
+        # connections returns nested dict keyed by node title
+        conns = small_graph.select('Person').where({'title': 'Alice'}).connections()
         assert 'Alice' in conns
         alice_conns = conns['Alice']
         assert 'outgoing' in alice_conns
         assert 'KNOWS' in alice_conns['outgoing']
         assert len(alice_conns['outgoing']['KNOWS']) >= 2
 
-    def test_get_connections_include_properties(self, small_graph):
+    def test_connections_include_properties(self, small_graph):
         # include_node_properties is a bool flag
-        conns = small_graph.type_filter('Person').filter({'title': 'Alice'}).get_connections(
+        conns = small_graph.select('Person').where({'title': 'Alice'}).connections(
             include_node_properties=True
         )
         assert 'Alice' in conns

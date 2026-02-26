@@ -42,7 +42,7 @@ class TestAddNodesConflict:
             'email': ['alice@example.com'],
         })
         people_graph.add_nodes(df, 'Person', 'id', 'name')
-        nodes = people_graph.type_filter('Person').filter({'id': 'alice'}).get_nodes()
+        nodes = people_graph.select('Person').where({'id': 'alice'}).collect()
         assert len(nodes) == 1
         assert nodes[0]['email'] == 'alice@example.com'
         # Age should be preserved from original
@@ -56,7 +56,7 @@ class TestAddNodesConflict:
             'email': ['alice@example.com'],
         })
         people_graph.add_nodes(df, 'Person', 'id', 'name', conflict_handling='replace')
-        nodes = people_graph.type_filter('Person').filter({'id': 'alice'}).get_nodes()
+        nodes = people_graph.select('Person').where({'id': 'alice'}).collect()
         assert len(nodes) == 1
         assert nodes[0]['email'] == 'alice@example.com'
         # Age should be gone (replaced)
@@ -70,7 +70,7 @@ class TestAddNodesConflict:
             'email': ['alice@example.com'],
         })
         people_graph.add_nodes(df, 'Person', 'id', 'name', conflict_handling='skip')
-        nodes = people_graph.type_filter('Person').filter({'id': 'alice'}).get_nodes()
+        nodes = people_graph.select('Person').where({'id': 'alice'}).collect()
         assert len(nodes) == 1
         # Original title preserved
         assert nodes[0]['title'] == 'Alice'
@@ -86,7 +86,7 @@ class TestAddNodesConflict:
             'email': ['alice@example.com'],
         })
         people_graph.add_nodes(df, 'Person', 'id', 'name', conflict_handling='preserve')
-        nodes = people_graph.type_filter('Person').filter({'id': 'alice'}).get_nodes()
+        nodes = people_graph.select('Person').where({'id': 'alice'}).collect()
         assert len(nodes) == 1
         # Age preserved (not overwritten by 99)
         assert nodes[0]['age'] == 30
@@ -101,7 +101,7 @@ class TestAddNodesConflict:
             'age': [28],
         })
         people_graph.add_nodes(df, 'Person', 'id', 'name', conflict_handling='skip')
-        assert people_graph.type_filter('Person').node_count() == 4
+        assert people_graph.select('Person').len() == 4
 
 
 # ---------------------------------------------------------------------------
@@ -114,15 +114,15 @@ class TestAddNodesMetadata:
     def test_type_index_created(self, graph):
         df = pd.DataFrame({'id': [1, 2], 'name': ['A', 'B']})
         graph.add_nodes(df, 'MyType', 'id', 'name')
-        assert graph.type_filter('MyType').node_count() == 2
+        assert graph.select('MyType').len() == 2
 
     def test_multiple_types_independent(self, graph):
         df1 = pd.DataFrame({'id': [1], 'name': ['A']})
         df2 = pd.DataFrame({'id': [1], 'name': ['X']})
         graph.add_nodes(df1, 'TypeA', 'id', 'name')
         graph.add_nodes(df2, 'TypeB', 'id', 'name')
-        assert graph.type_filter('TypeA').node_count() == 1
-        assert graph.type_filter('TypeB').node_count() == 1
+        assert graph.select('TypeA').len() == 1
+        assert graph.select('TypeB').len() == 1
 
     def test_node_types_listed(self, graph):
         df = pd.DataFrame({'id': [1], 'name': ['A']})
@@ -210,7 +210,7 @@ class TestMutationErrors:
         """Empty DataFrame should not crash."""
         df = pd.DataFrame({'id': [], 'name': []})
         graph.add_nodes(df, 'T', 'id', 'name')
-        assert graph.type_filter('T').node_count() == 0
+        assert graph.select('T').len() == 0
 
     def test_missing_id_column(self, graph):
         """Missing unique_id_field column should raise error."""
@@ -225,7 +225,7 @@ class TestMutationErrors:
             'name': ['First', 'Second'],
         })
         graph.add_nodes(df, 'T', 'id', 'name')
-        nodes = graph.type_filter('T').get_nodes()
+        nodes = graph.select('T').collect()
         # Within a single batch, duplicates are both created
         assert len(nodes) == 2
 
@@ -259,7 +259,7 @@ class TestBulkOperations:
             'val': list(range(500)),
         })
         graph.add_nodes(df, 'Bulk', 'id', 'name')
-        assert graph.type_filter('Bulk').node_count() == 500
+        assert graph.select('Bulk').len() == 500
 
     def test_bulk_connections(self, graph):
         df = pd.DataFrame({
@@ -283,6 +283,6 @@ class TestBulkOperations:
             'val': [i if i % 2 == 0 else None for i in range(10)],
         })
         graph.add_nodes(df, 'T', 'id', 'name')
-        assert graph.type_filter('T').node_count() == 10
-        nodes = graph.type_filter('T').filter({'val': {'is_null': True}})
-        assert nodes.node_count() == 5
+        assert graph.select('T').len() == 10
+        nodes = graph.select('T').where({'val': {'is_null': True}})
+        assert nodes.len() == 5

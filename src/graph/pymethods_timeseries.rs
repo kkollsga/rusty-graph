@@ -47,11 +47,7 @@ impl KnowledgeGraph {
 
     /// Get timeseries configuration for a node type, or all types.
     #[pyo3(signature = (node_type=None))]
-    fn get_timeseries_config(
-        &self,
-        py: Python<'_>,
-        node_type: Option<String>,
-    ) -> PyResult<Py<PyAny>> {
+    fn timeseries_config(&self, py: Python<'_>, node_type: Option<String>) -> PyResult<Py<PyAny>> {
         let graph = &self.inner;
         if let Some(nt) = node_type {
             match graph.timeseries_configs.get(&nt) {
@@ -370,7 +366,7 @@ impl KnowledgeGraph {
     /// Otherwise returns `{keys: [...], channels: {name: [...], ...}}`.
     /// Returns None if the node has no timeseries data.
     #[pyo3(signature = (node_id, channel=None, start=None, end=None))]
-    fn get_timeseries(
+    fn timeseries(
         &self,
         py: Python<'_>,
         node_id: &Bound<'_, PyAny>,
@@ -438,7 +434,7 @@ impl KnowledgeGraph {
 
     /// Get the time index for a node as ISO date strings, or None.
     #[pyo3(signature = (node_id,))]
-    fn get_time_index(&self, py: Python<'_>, node_id: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn time_index(&self, py: Python<'_>, node_id: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let graph = &self.inner;
         let id_val = py_in::py_value_to_value(node_id)?;
         let node_idx = find_node_by_id_readonly(graph, &id_val)?;

@@ -14,7 +14,7 @@ impl KnowledgeGraph {
     /// Create an index on a property for a specific node type.
     ///
     /// Indexes dramatically speed up equality filters on the indexed property.
-    /// Once created, the index is automatically used by filter() operations.
+    /// Once created, the index is automatically used by where() operations.
     ///
     /// Args:
     ///     node_type: The type of nodes to index
@@ -29,7 +29,7 @@ impl KnowledgeGraph {
     ///     graph.create_index('Prospect', 'geoprovince')
     ///
     ///     # Now this filter will use the index (O(1) instead of O(n))
-    ///     graph.type_filter('Prospect').filter({'geoprovince': 'North Sea'})
+    ///     graph.select('Prospect').where({'geoprovince': 'North Sea'})
     ///     ```
     fn create_index(
         &mut self,
@@ -132,7 +132,7 @@ impl KnowledgeGraph {
     /// Create a range index (B-Tree) on a property for a specific node type.
     ///
     /// Range indexes enable efficient range queries (>, >=, <, <=, BETWEEN)
-    /// using ``filter()`` with comparison conditions.
+    /// using ``where()`` with comparison conditions.
     ///
     /// Args:
     ///     node_type: The type of nodes to index.
@@ -145,7 +145,7 @@ impl KnowledgeGraph {
     ///     ```python
     ///     graph.create_range_index('Person', 'age')
     ///     # Now range queries on age use the B-Tree index:
-    ///     result = graph.filter({'type': 'Person'}).filter({'age': {'>': 25}}).get_nodes()
+    ///     result = graph.select('Person').where({'age': {'>': 25}}).collect()
     ///     ```
     fn create_range_index(
         &mut self,
@@ -218,7 +218,7 @@ impl KnowledgeGraph {
     ///     graph.create_composite_index('Prospect', ['geoprovince', 'status'])
     ///
     ///     # Now this filter is very fast:
-    ///     graph.type_filter('Prospect').filter({
+    ///     graph.select('Prospect').where({
     ///         'geoprovince': 'N3',
     ///         'status': 'Active'
     ///     })

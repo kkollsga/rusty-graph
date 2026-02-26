@@ -147,7 +147,7 @@ class TestExportCsvSubnodes:
 class TestExportCsvSelection:
     def test_export_with_type_filter(self, social_graph, export_dir):
         out = os.path.join(export_dir, "out")
-        result = social_graph.type_filter("Company").export_csv(out)
+        result = social_graph.select("Company").export_csv(out)
 
         assert "Company" in result["nodes"]
         assert "Person" not in result["nodes"]
@@ -157,7 +157,7 @@ class TestExportCsvSelection:
     def test_export_selection_connections_both_endpoints(self, social_graph, export_dir):
         """Only connections where both endpoints are selected should be exported."""
         out = os.path.join(export_dir, "out")
-        result = social_graph.type_filter("Person").export_csv(out)
+        result = social_graph.select("Person").export_csv(out)
 
         # KNOWS edges (Person -> Person) should be present
         assert "KNOWS" in result["connections"]
@@ -167,7 +167,7 @@ class TestExportCsvSelection:
     def test_export_full_graph_override(self, social_graph, export_dir):
         """selection_only=False exports the full graph even with active selection."""
         out = os.path.join(export_dir, "out")
-        social_graph.type_filter("Company")
+        social_graph.select("Company")
         result = social_graph.export_csv(out, selection_only=False)
 
         assert "Company" in result["nodes"]

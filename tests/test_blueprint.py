@@ -88,7 +88,7 @@ class TestBasicLoading:
         bp_path = _minimal_blueprint(tmp_path)
         graph = from_blueprint(bp_path, save=False)
 
-        alice = graph.get_node_by_id("Person", 1)
+        alice = graph.node("Person", 1)
         assert alice is not None
         assert alice["title"] == "Alice"
         assert alice["age"] == 28

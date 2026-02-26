@@ -30,11 +30,11 @@ def indexed_graph():
 
 def _names_from_filter(graph, conditions):
     """Helper: type_filter('Person') + filter(conditions), return set of names via Cypher."""
-    graph.type_filter('Person')
-    result = graph.filter(conditions)
-    count = result.node_count()
+    graph.select('Person')
+    result = graph.where(conditions)
+    count = result.len()
     # Also verify via get_nodes which gives property dicts
-    nodes = result.get_nodes()
+    nodes = result.collect()
     return count, {n.get('title', n.get('name', '')) for n in nodes}
 
 
@@ -158,7 +158,7 @@ class TestTypeMetadata:
         assert info['type_count'] == 1  # Just Animal
 
         # Schema string should mention Animal type
-        schema = graph.get_schema()
+        schema = graph.schema_text()
         assert 'Animal' in schema
 
     def test_mixed_python_cypher_metadata_consistent(self):
@@ -175,7 +175,7 @@ class TestTypeMetadata:
         graph.cypher("CREATE (p:Person {name: 'Bob', age: 35})")
 
         # Schema should mention Person type
-        schema = graph.get_schema()
+        schema = graph.schema_text()
         assert 'Person' in schema
 
         # No SchemaNode graph nodes should exist — MATCH returns nothing
