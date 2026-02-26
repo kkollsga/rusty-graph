@@ -536,7 +536,7 @@ fn format_result_view_multiline(
                     for c in &nc.connections {
                         if c.outgoing {
                             buf.push_str(&format!(
-                                "  {:width$}  <> --{}--> {}({}, {})\n",
+                                "  {:width$}  ◆ --{}--> {}({}, {})\n",
                                 "",
                                 c.connection_type,
                                 c.target_type,
@@ -546,7 +546,7 @@ fn format_result_view_multiline(
                             ));
                         } else {
                             buf.push_str(&format!(
-                                "  {:width$}  {}({}, {}) --{}--> <>\n",
+                                "  {:width$}  {}({}, {}) --{}--> ◆\n",
                                 "",
                                 c.target_type,
                                 c.target_id,
