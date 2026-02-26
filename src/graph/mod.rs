@@ -2189,13 +2189,9 @@ impl KnowledgeGraph {
 
         if use_fast_path {
             let max = limit.unwrap_or(usize::MAX);
-            let nodes: Vec<&schema::NodeData> = self
-                .selection
-                .current_node_indices()
-                .filter_map(|idx| self.inner.get_node(idx))
-                .take(max)
-                .collect();
-            let view = cypher::ResultView::from_nodes(nodes.into_iter());
+            let indices: Vec<petgraph::graph::NodeIndex> =
+                self.selection.current_node_indices().take(max).collect();
+            let view = cypher::ResultView::from_nodes_with_graph(&self.inner, &indices);
             return Python::attach(|py| Py::new(py, view).map(|v| v.into_any()));
         }
 
@@ -4094,9 +4090,11 @@ impl KnowledgeGraph {
         };
 
         if let Some(nt) = node_type {
-            let nodes = introspection::compute_sample(&self.inner, &nt, count)
-                .map_err(PyErr::new::<pyo3::exceptions::PyKeyError, _>)?;
-            let view = cypher::ResultView::from_nodes(nodes.into_iter());
+            let type_indices = self.inner.type_indices.get(&nt).ok_or_else(|| {
+                pyo3::exceptions::PyKeyError::new_err(format!("Node type '{}' not found", nt))
+            })?;
+            let indices: Vec<_> = type_indices.iter().copied().take(count).collect();
+            let view = cypher::ResultView::from_nodes_with_graph(&self.inner, &indices);
             return Python::attach(|py| Py::new(py, view).map(|v| v.into_any()));
         }
 
@@ -4112,14 +4110,9 @@ impl KnowledgeGraph {
             .selection
             .get_level(last)
             .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Empty selection"))?;
-        let indices = level.get_all_nodes();
-        let mut result = Vec::with_capacity(count.min(indices.len()));
-        for idx in indices.iter().take(count) {
-            if let Some(node) = self.inner.graph.node_weight(*idx) {
-                result.push(node);
-            }
-        }
-        let view = cypher::ResultView::from_nodes(result.into_iter());
+        let all_indices = level.get_all_nodes();
+        let indices: Vec<_> = all_indices.into_iter().take(count).collect();
+        let view = cypher::ResultView::from_nodes_with_graph(&self.inner, &indices);
         Python::attach(|py| Py::new(py, view).map(|v| v.into_any()))
     }
 

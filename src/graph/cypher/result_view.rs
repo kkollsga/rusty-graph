@@ -10,14 +10,32 @@ use super::result::{ClauseStats, CypherResult, MutationStats};
 use crate::datatypes::values::Value;
 use crate::graph::graph_algorithms::CentralityResult;
 use crate::graph::schema::{DirGraph, NodeData};
+use petgraph::visit::EdgeRef;
+use petgraph::Direction;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySlice};
 use pyo3::IntoPyObjectExt;
 use std::collections::HashSet;
 
+/// A single connection summary for display: connection type, target type, id, title.
+#[derive(Clone)]
+struct ConnectionSummary {
+    connection_type: String,
+    target_type: String,
+    target_id: String,
+    target_title: String,
+    outgoing: bool, // true = this node → target, false = target → this node
+}
+
+/// Connection summaries for a single node.
+#[derive(Clone, Default)]
+struct NodeConnections {
+    connections: Vec<ConnectionSummary>,
+}
+
 /// Lazy result view — data stays in Rust until accessed from Python.
 ///
-/// Returned by `cypher()`, centrality methods, `get_nodes()`, and `sample()`.
+/// Returned by `cypher()`, centrality methods, `collect()`, and `sample()`.
 /// Supports `len()`, indexing, iteration, `to_list()`, and `to_df()`.
 #[pyclass(name = "ResultView")]
 pub struct ResultView {
@@ -25,6 +43,8 @@ pub struct ResultView {
     rows: Vec<Vec<PreProcessedValue>>,
     stats: Option<MutationStats>,
     profile: Option<Vec<ClauseStats>>,
+    /// Per-row connection summaries (only populated for node-based results).
+    node_connections: Option<Vec<NodeConnections>>,
 }
 
 // ========================================================================
@@ -45,6 +65,7 @@ impl ResultView {
             rows,
             stats,
             profile,
+            node_connections: None,
         }
     }
 
@@ -56,6 +77,7 @@ impl ResultView {
             rows,
             stats: result.stats,
             profile: result.profile,
+            node_connections: None,
         }
     }
 
@@ -89,15 +111,23 @@ impl ResultView {
             rows,
             stats: None,
             profile: None,
+            node_connections: None,
         }
     }
 
-    /// get_nodes / sample: collects all nodes, computes property key union for columns.
-    /// Pure Rust, no GIL needed.
-    pub fn from_nodes<'a>(nodes: impl Iterator<Item = &'a NodeData>) -> Self {
-        let nodes_vec: Vec<&NodeData> = nodes.collect();
+    /// collect / sample with graph access: nodes + connection summaries.
+    pub fn from_nodes_with_graph(
+        graph: &DirGraph,
+        node_indices: &[petgraph::graph::NodeIndex],
+    ) -> Self {
+        use crate::datatypes::values::format_value;
 
-        // Compute union of property keys (preserving insertion order via seen set)
+        let nodes_vec: Vec<&NodeData> = node_indices
+            .iter()
+            .filter_map(|&idx| graph.get_node(idx))
+            .collect();
+
+        // Compute union of property keys
         let mut prop_keys: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         for node in &nodes_vec {
@@ -129,11 +159,50 @@ impl ResultView {
             })
             .collect();
 
+        // Gather connection summaries per node
+        let node_connections: Vec<NodeConnections> = node_indices
+            .iter()
+            .map(|&idx| {
+                let mut conns = Vec::new();
+
+                // Outgoing: this node → target
+                for edge in graph.graph.edges_directed(idx, Direction::Outgoing) {
+                    let target_idx = edge.target();
+                    if let Some(target) = graph.get_node(target_idx) {
+                        conns.push(ConnectionSummary {
+                            connection_type: edge.weight().connection_type.clone(),
+                            target_type: target.node_type.clone(),
+                            target_id: format_value(&target.id),
+                            target_title: format_value(&target.title),
+                            outgoing: true,
+                        });
+                    }
+                }
+
+                // Incoming: source → this node
+                for edge in graph.graph.edges_directed(idx, Direction::Incoming) {
+                    let source_idx = edge.source();
+                    if let Some(source) = graph.get_node(source_idx) {
+                        conns.push(ConnectionSummary {
+                            connection_type: edge.weight().connection_type.clone(),
+                            target_type: source.node_type.clone(),
+                            target_id: format_value(&source.id),
+                            target_title: format_value(&source.title),
+                            outgoing: false,
+                        });
+                    }
+                }
+
+                NodeConnections { connections: conns }
+            })
+            .collect();
+
         ResultView {
             columns,
             rows,
             stats: None,
             profile: None,
+            node_connections: Some(node_connections),
         }
     }
 
@@ -213,6 +282,7 @@ impl ResultView {
                     rows: sliced_rows,
                     stats: None,
                     profile: None,
+                    node_connections: None,
                 },
             )
             .map(|v| v.into_any())
@@ -236,7 +306,15 @@ impl ResultView {
     }
 
     fn __str__(&self) -> String {
-        format_result_view(&self.columns, &self.rows, 50)
+        if self.rows.len() <= 3 {
+            format_result_view_multiline(
+                &self.columns,
+                &self.rows,
+                self.node_connections.as_deref(),
+            )
+        } else {
+            self.__repr__()
+        }
     }
 
     /// Column names as a list of strings.
@@ -293,6 +371,7 @@ impl ResultView {
             rows: self.rows[..take].to_vec(),
             stats: None,
             profile: None,
+            node_connections: self.node_connections.as_ref().map(|nc| nc[..take].to_vec()),
         }
     }
 
@@ -306,6 +385,10 @@ impl ResultView {
             rows: self.rows[start..].to_vec(),
             stats: None,
             profile: None,
+            node_connections: self
+                .node_connections
+                .as_ref()
+                .map(|nc| nc[start..].to_vec()),
         }
     }
 
@@ -403,23 +486,26 @@ fn format_preprocessed_value(pv: &PreProcessedValue) -> String {
     }
 }
 
-fn format_result_view(columns: &[String], rows: &[Vec<PreProcessedValue>], limit: usize) -> String {
+fn format_result_view_multiline(
+    columns: &[String],
+    rows: &[Vec<PreProcessedValue>],
+    node_connections: Option<&[NodeConnections]>,
+) -> String {
     if rows.is_empty() {
         return "(empty result)".to_string();
     }
 
-    let total = rows.len();
-    let show = total.min(limit);
-
     // Find the widest column name for alignment
     let key_width = columns.iter().map(|c| c.len()).max().unwrap_or(0);
 
-    let mut buf = String::with_capacity(show * 200);
+    let mut buf = String::with_capacity(rows.len() * 300);
 
-    for (i, row) in rows.iter().take(show).enumerate() {
+    for (i, row) in rows.iter().enumerate() {
         if i > 0 {
             buf.push('\n');
         }
+
+        // Properties
         for (j, val) in row.iter().enumerate() {
             if j < columns.len() {
                 let s = format_preprocessed_value(val);
@@ -431,10 +517,38 @@ fn format_result_view(columns: &[String], rows: &[Vec<PreProcessedValue>], limit
                 ));
             }
         }
-    }
 
-    if total > show {
-        buf.push_str(&format!("\n... {} of {} rows shown\n", show, total));
+        // Connection summaries
+        if let Some(all_conns) = node_connections {
+            if let Some(nc) = all_conns.get(i) {
+                if !nc.connections.is_empty() {
+                    buf.push_str(&format!("  {:width$}\n", "───", width = key_width + 4));
+                    for c in &nc.connections {
+                        if c.outgoing {
+                            buf.push_str(&format!(
+                                "  {:width$}  <> --{}--> {}({}, {})\n",
+                                "",
+                                c.connection_type,
+                                c.target_type,
+                                c.target_id,
+                                c.target_title,
+                                width = key_width,
+                            ));
+                        } else {
+                            buf.push_str(&format!(
+                                "  {:width$}  {}({}, {}) --{}--> <>\n",
+                                "",
+                                c.target_type,
+                                c.target_id,
+                                c.target_title,
+                                c.connection_type,
+                                width = key_width,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     buf
