@@ -39,28 +39,7 @@ impl TypeLookup {
     }
 
     pub fn check_uid(&self, uid: &Value) -> Option<NodeIndex> {
-        // First try direct lookup
-        if let Some(idx) = self.uid_to_index.get(uid).copied() {
-            return Some(idx);
-        }
-
-        // Handle type mismatches between Int64 and UniqueId
-        // Python integers become Int64, but unique IDs are stored as UniqueId
-        match uid {
-            Value::Int64(i) => {
-                // Try as UniqueId if the value fits
-                if *i >= 0 && *i <= u32::MAX as i64 {
-                    self.uid_to_index.get(&Value::UniqueId(*i as u32)).copied()
-                } else {
-                    None
-                }
-            }
-            Value::UniqueId(u) => {
-                // Try as Int64
-                self.uid_to_index.get(&Value::Int64(*u as i64)).copied()
-            }
-            _ => None,
-        }
+        CombinedTypeLookup::lookup_with_type_fallback(&self.uid_to_index, uid)
     }
 
     pub fn check_title(&self, title: &Value) -> Option<NodeIndex> {
@@ -129,7 +108,11 @@ impl CombinedTypeLookup {
         Self::lookup_with_type_fallback(map, uid)
     }
 
-    /// Helper function to handle Int64/UniqueId type mismatches during lookup
+    /// Helper function to handle Int64/UniqueId/Float64 type mismatches during lookup.
+    ///
+    /// IDs in CSV sources sometimes arrive as floats (e.g. 260.0 instead of 260)
+    /// due to pandas nullable-int promotion.  This method tries all plausible
+    /// numeric representations so that a Float64(260.0) matches an Int64(260) node.
     fn lookup_with_type_fallback(
         map: &HashMap<Value, NodeIndex>,
         uid: &Value,
@@ -139,16 +122,36 @@ impl CombinedTypeLookup {
             return Some(idx);
         }
 
-        // Handle type mismatches between Int64 and UniqueId
         match uid {
-            Value::Int64(i) => {
-                if *i >= 0 && *i <= u32::MAX as i64 {
-                    map.get(&Value::UniqueId(*i as u32)).copied()
-                } else {
-                    None
+            Value::Float64(f) => {
+                // Float that is a whole number → try Int64 and UniqueId
+                if f.is_finite() && f.fract() == 0.0 {
+                    let i = *f as i64;
+                    if let Some(idx) = map.get(&Value::Int64(i)).copied() {
+                        return Some(idx);
+                    }
+                    if i >= 0 && i <= u32::MAX as i64 {
+                        return map.get(&Value::UniqueId(i as u32)).copied();
+                    }
                 }
+                None
             }
-            Value::UniqueId(u) => map.get(&Value::Int64(*u as i64)).copied(),
+            Value::Int64(i) => {
+                // Try UniqueId, then Float64
+                if *i >= 0 && *i <= u32::MAX as i64 {
+                    if let Some(idx) = map.get(&Value::UniqueId(*i as u32)).copied() {
+                        return Some(idx);
+                    }
+                }
+                map.get(&Value::Float64(*i as f64)).copied()
+            }
+            Value::UniqueId(u) => {
+                // Try Int64, then Float64
+                if let Some(idx) = map.get(&Value::Int64(*u as i64)).copied() {
+                    return Some(idx);
+                }
+                map.get(&Value::Float64(*u as f64)).copied()
+            }
             _ => None,
         }
     }

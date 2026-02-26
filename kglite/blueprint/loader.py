@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Union
 
+import numpy as np
 import pandas as pd
 import kglite
 
@@ -35,7 +37,8 @@ def from_blueprint(
 
     Args:
         blueprint_path: Path to the blueprint JSON file.
-        verbose: If True, print progress information.
+        verbose: If True, print detailed progress for every node/edge type.
+            When False (default), only warnings and a final summary are printed.
         save: If True and the blueprint specifies an output path, save the graph.
 
     Returns:
@@ -53,12 +56,22 @@ def from_blueprint(
         raw = json.load(f)
 
     loader = BlueprintLoader(raw, verbose=verbose)
-    graph = loader.build()
+
+    # Suppress UserWarning from add_connections — we track skips in the loader
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        graph = loader.build()
+
+    # Always print warnings (regardless of verbose)
+    if loader.warnings:
+        print(f"\n  {len(loader.warnings)} warning(s):")
+        for w in loader.warnings:
+            print(f"    [{w['context']}] {w['message']}")
 
     if loader.errors:
-        print(f"\nBlueprint loaded with {len(loader.errors)} warning(s):")
+        print(f"\n  {len(loader.errors)} error(s):")
         for err in loader.errors:
-            print(f"  [{err['context']}] {err['message']}")
+            print(f"    [{err['context']}] {err['message']}")
 
     if save and loader.output_path:
         loader.output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,12 +90,23 @@ class BlueprintLoader:
         self.verbose = verbose
         self.graph = kglite.KnowledgeGraph()
         self.errors: list[dict[str, str]] = []
+        self.warnings: list[dict[str, str]] = []
 
-        # Parse settings
+        # Parse settings — support both old ("root") and new ("input_root") keys
         settings = raw.get("settings", {})
-        self.root = Path(settings.get("root", "."))
-        output = settings.get("output")
-        self.output_path = self.root / output if output else None
+        self.root = Path(settings.get("input_root", settings.get("root", ".")))
+
+        # Output path: optional output_path + output_file, or legacy "output"
+        output_path = settings.get("output_path")
+        output_file = settings.get("output_file", settings.get("output"))
+        if output_file:
+            if output_path:
+                self.output_path = (Path(output_path) / output_file).resolve()
+            else:
+                # Relative to input_root (supports ../ notation)
+                self.output_path = (self.root / output_file).resolve()
+        else:
+            self.output_path = None
 
         # Node specs keyed by type name
         self.nodes: dict[str, dict[str, Any]] = raw.get("nodes", {})
@@ -132,10 +156,17 @@ class BlueprintLoader:
         self._load_junction_edges(core_specs + sub_specs)
 
         elapsed = time.time() - t0
-        if self.verbose:
-            total_nodes = sum(self.stats["nodes_by_type"].values())
-            total_edges = sum(self.stats["edges_by_type"].values())
-            print(f"\nDone in {elapsed:.1f}s: {total_nodes} nodes, {total_edges} edges")
+        total_nodes = sum(self.stats["nodes_by_type"].values())
+        total_edges = sum(self.stats["edges_by_type"].values())
+        n_types = len(self.stats["nodes_by_type"])
+        e_types = len(self.stats["edges_by_type"])
+
+        # Always print the summary line
+        print(
+            f"\nDone in {elapsed:.1f}s: "
+            f"{total_nodes:,} nodes ({n_types} types), "
+            f"{total_edges:,} edges ({e_types} types)"
+        )
 
         return self.graph
 
@@ -296,7 +327,9 @@ class BlueprintLoader:
             ts_param = None
             ts_config = spec.get("timeseries")
             if ts_config:
-                ts_param, df = self._prepare_timeseries(df, ts_config, skip)
+                ts_param, df = self._prepare_timeseries(
+                    df, ts_config, skip, node_type
+                )
 
             # Never skip the pk or title columns — add_nodes needs them
             skip = [
@@ -388,6 +421,13 @@ class BlueprintLoader:
             if filt:
                 df = self._apply_filter(df, filt)
 
+            # Apply same timeseries time-component filtering as node loading.
+            # Without this, aggregate rows (e.g. month=0) produce edge rows
+            # that reference source nodes that were never created.
+            ts_config = spec.get("timeseries")
+            if ts_config:
+                df = self._apply_timeseries_filter(df, ts_config)
+
             # Handle pk: "auto" — regenerate the same IDs
             pk = spec.get("pk", "id")
             if pk == "auto":
@@ -419,6 +459,9 @@ class BlueprintLoader:
                 if edge_df.empty:
                     continue
 
+                # Coerce float ID columns to int (pandas reads nullable-int as float)
+                _coerce_id_columns(edge_df, [pk, target_col])
+
                 try:
                     report = self.graph.add_connections(
                         data=edge_df,
@@ -435,6 +478,7 @@ class BlueprintLoader:
                     continue
 
                 count = report.get("connections_created", 0)
+                skipped = report.get("connections_skipped", 0)
                 self.stats["edges_by_type"][edge_type] = (
                     self.stats["edges_by_type"].get(edge_type, 0) + count
                 )
@@ -442,6 +486,14 @@ class BlueprintLoader:
                 if self.verbose:
                     print(
                         f"    {node_type} -[{edge_type}]-> {target_type}: {count} edges"
+                    )
+
+                if skipped:
+                    errors = report.get("errors", [])
+                    detail = "; ".join(errors) if errors else f"{skipped} skipped"
+                    self._report_warning(
+                        f"{node_type} -[{edge_type}]-> {target_type}",
+                        detail,
                     )
 
     # ── Phase 5: Junction edges ─────────────────────────────────────
@@ -493,11 +545,12 @@ class BlueprintLoader:
                     if col not in df.columns:
                         continue
                     if typ == "date":
-                        import pandas as pd
-
                         df[col] = pd.to_datetime(
                             df[col], unit="ms", errors="coerce"
                         )
+
+                # Coerce float ID columns to int
+                _coerce_id_columns(df, [source_fk, target_fk])
 
                 try:
                     report = self.graph.add_connections(
@@ -517,6 +570,7 @@ class BlueprintLoader:
                     continue
 
                 count = report.get("connections_created", 0)
+                skipped = report.get("connections_skipped", 0)
                 self.stats["edges_by_type"][edge_type] = (
                     self.stats["edges_by_type"].get(edge_type, 0) + count
                 )
@@ -524,6 +578,14 @@ class BlueprintLoader:
                 if self.verbose:
                     print(
                         f"    {node_type} -[{edge_type}]-> {target_type}: {count} edges"
+                    )
+
+                if skipped:
+                    errors = report.get("errors", [])
+                    detail = "; ".join(errors) if errors else f"{skipped} skipped"
+                    self._report_warning(
+                        f"{node_type} -[{edge_type}]-> {target_type}",
+                        detail,
                     )
 
     # ── Helpers ──────────────────────────────────────────────────────
@@ -573,6 +635,22 @@ class BlueprintLoader:
                 df = df[df[col] == val]
         return df
 
+    def _apply_timeseries_filter(
+        self, df: pd.DataFrame, ts_config: dict[str, Any]
+    ) -> pd.DataFrame:
+        """Drop aggregate rows (e.g. month=0) from timeseries data.
+
+        Mirrors the filtering in ``_prepare_timeseries`` so FK edge building
+        operates on the same row set as node creation.
+        """
+        time_key = ts_config.get("time_key")
+        if not isinstance(time_key, dict):
+            return df
+        for label, col in time_key.items():
+            if label != "year" and col in df.columns:
+                df = df[df[col] != 0]
+        return df
+
     def _build_column_types(
         self, properties: dict[str, str]
     ) -> dict[str, str]:
@@ -603,7 +681,7 @@ class BlueprintLoader:
             ) from None
 
         if "_geometry" not in df.columns:
-            self._report_error(
+            self._report_warning(
                 node_type,
                 "Blueprint uses geometry types but CSV has no '_geometry' column",
             )
@@ -672,6 +750,7 @@ class BlueprintLoader:
         df: pd.DataFrame,
         ts_config: dict[str, Any],
         skip: list[str],
+        node_type: str,
     ) -> tuple[dict[str, Any], pd.DataFrame]:
         """Prepare timeseries parameter for add_nodes() inline loading.
 
@@ -702,7 +781,8 @@ class BlueprintLoader:
                     dropped = before - len(df)
                     if dropped and self.verbose:
                         print(
-                            f"      Dropped {dropped} rows with {col}=0 (aggregate totals)"
+                            f"      Dropped {dropped} rows with {col}=0 "
+                            f"(aggregate totals)"
                         )
 
         # Rename channel columns: csv_col -> channel_name
@@ -737,7 +817,29 @@ class BlueprintLoader:
         return ts_param, df
 
     def _report_error(self, context: str, message: str) -> None:
-        """Accumulate a non-fatal error."""
+        """Accumulate a fatal error."""
         self.errors.append({"context": context, "message": message})
-        if self.verbose:
-            print(f"    WARNING [{context}]: {message}")
+
+    def _report_warning(self, context: str, message: str) -> None:
+        """Accumulate a non-fatal warning."""
+        self.warnings.append({"context": context, "message": message})
+
+
+# ── Module-level helpers ──────────────────────────────────────────────
+
+
+def _coerce_id_columns(df: pd.DataFrame, columns: list[str]) -> None:
+    """In-place coerce float ID columns to int.
+
+    Pandas reads integer columns with NaN as float64 (e.g. 260.0 instead
+    of 260).  This converts whole-number floats back to int so that ID
+    matching works correctly.
+    """
+    for col in columns:
+        if col not in df.columns:
+            continue
+        if df[col].dtype.kind == "f":
+            # Only convert if all non-null values are whole numbers
+            non_null = df[col].dropna()
+            if len(non_null) > 0 and (non_null == non_null.astype(np.int64)).all():
+                df[col] = df[col].astype("Int64")  # nullable int
