@@ -3,73 +3,54 @@
 ## Build & Test
 
 ```bash
-# Always activate the venv and unset CONDA_PREFIX before building
 source .venv/bin/activate && unset CONDA_PREFIX
-
-# Build the Rust extension into the venv
-maturin develop              # or: make dev
-
-# Run tests
-make test                    # Rust + Python
-make test-rust               # Rust unit tests only
-make test-py                 # Python tests only
-cargo check                  # fast compile check (no codegen)
-cargo fmt                    # format Rust code
-cargo clippy -- -D warnings  # lint
-make lint                    # fmt --check + clippy (run before pushing)
+maturin develop              # build Rust extension into venv
+make test                    # Rust + Python tests
+make lint                    # fmt --check + clippy (always run before pushing)
 ```
-
-**Before pushing:** Always run `make lint` to catch formatting and clippy issues that CI will reject.
 
 ## Architecture
 
-- **Rust core** (`src/`): `KnowledgeGraph` struct with `#[pymethods]` via PyO3. Graph storage uses `petgraph` with `DirGraph` wrapper in `schema.rs`.
-- **Python package** (`kglite/`): thin wrapper + `code_tree/` subpackage for tree-sitter based codebase parsing.
-- **Type stubs** (`kglite/__init__.pyi`): must be updated when adding or changing any `#[pymethods]` function.
-- **Cypher engine** (`src/graph/cypher/`): parser → AST → executor pipeline. Supports MATCH, WHERE, RETURN, CREATE, SET, DELETE, aggregations, path patterns.
-- **Code tree parser** (`kglite/code_tree/`): language-specific parsers in `parsers/`, graph builder in `builder.py`. Outputs a `KnowledgeGraph` with code entities.
-- **MCP server** (`examples/mcp_server.py`): FastMCP server exposing the graph to AI agents.
-- **Introspection** (`src/graph/introspection.rs`): `describe()` generates XML schema description for AI agent consumption.
+- **Rust core** (`src/`): `KnowledgeGraph` with `#[pymethods]` via PyO3, `petgraph` storage.
+- **Cypher engine** (`src/graph/cypher/`): parser → AST → executor.
+- **Python package** (`kglite/`): thin wrapper + `code_tree/` (tree-sitter codebase parsing).
+- **Type stubs** (`kglite/__init__.pyi`): source of truth for API docs — update when changing `#[pymethods]`.
+- **Introspection** (`src/graph/introspection.rs`): `describe()` XML schema for AI agents.
 
 ## Key Patterns
 
-- **PyO3 methods**: `&self` for read-only, return `PyResult<Py<PyAny>>`, use `Python::attach()` for GIL access.
-- **NodeData fields**: `id` (qualified_name for code entities), `title` (display name), `node_type`, `properties` HashMap.
-- **Type indices**: `HashMap<String, Vec<NodeIndex>>` for fast node lookup by type.
-- **Private helpers**: put shared logic in a non-`#[pymethods]` `impl KnowledgeGraph` block (around line 140-310 in mod.rs).
-- **Value conversion**: use `py_out::value_to_py()` and `py_out::nodeinfo_to_pydict()` for Rust→Python.
-- **pyo3 0.27+**: use `.cast::<T>()` not `.downcast::<T>()` (deprecated). Use `.into()` for `Bound<PyDict>` → `Py<PyAny>` in non-pymethods blocks.
+- PyO3: `&self` for read-only, return `PyResult<Py<PyAny>>`, use `Python::attach()`.
+- Use `.cast::<T>()` not `.downcast::<T>()` (deprecated in pyo3 0.27+).
+- Private helpers go in non-`#[pymethods]` `impl KnowledgeGraph` block.
+- Value conversion: `py_out::value_to_py()` and `py_out::nodeinfo_to_pydict()`.
 
-## Changelog Rule
+## When Changing a `#[pymethods]` Function
 
-**Always update `CHANGELOG.md`** when making user-visible changes. Add entries to the `[Unreleased]` section under the appropriate category (Added, Changed, Fixed, Removed).
-
-Skip changelog updates for: internal refactors, CI changes, test-only changes, formatting fixes.
-
-## Commit Messages
-
-Format: `type: short description`
-
-Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`
-
-## Files to Update Together
-
-When adding a new `#[pymethods]` function:
-1. `src/graph/mod.rs` — the implementation
-2. `src/graph/introspection.rs` — add to `describe()` output if relevant
-3. `kglite/__init__.pyi` — type stub
+1. `src/graph/mod.rs` — implementation
+2. `kglite/__init__.pyi` — type stub + docstring
+3. `src/graph/introspection.rs` — `describe()` output (if agent-facing)
 4. `examples/mcp_server.py` — MCP tool (if agent-facing)
-5. `CHANGELOG.md` — `[Unreleased]` → Added
-6. `README.md` — if it's a major feature
+5. `CHANGELOG.md` — `[Unreleased]` section
 
-## Git Push Protocol
+## Documentation
 
-**NEVER push to git without explicit user approval.** Before pushing:
+Docs auto-rebuild at [kglite.readthedocs.io](https://kglite.readthedocs.io) on every push to `main`.
 
-1. Ask the user to confirm the new version number (bump patch by +0.0.1 from current)
-2. Once confirmed, update `Cargo.toml` version and promote `[Unreleased]` in `CHANGELOG.md` to the confirmed version
-3. Commit, then push only after the user approves
+- **API reference**: auto-generated from docstrings in `kglite/__init__.pyi`
+- **Cypher reference**: edit `CYPHER.md`
+- **Fluent API reference**: edit `FLUENT.md`
+- **Guide content**: edit `docs/guides/*.md`
+- **README.md**: landing page only — do not duplicate guide content here
 
-## Version
+## Commits & Releases
 
-Single source of truth: `Cargo.toml` line 3. `pyproject.toml` reads it dynamically via maturin.
+Commit format: `type: short description` (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`)
+
+Update `CHANGELOG.md` `[Unreleased]` for user-visible changes. Skip for internal refactors, CI, test-only, formatting.
+
+**NEVER push without explicit user approval.** Before pushing:
+1. Confirm version number with user (bump patch +0.0.1)
+2. Update `Cargo.toml` version + promote changelog
+3. Commit, then push after user approves
+
+Version source of truth: `Cargo.toml` line 3.

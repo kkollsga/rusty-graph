@@ -24,7 +24,7 @@ pip install kglite
 
 ---
 
-## Quick Start
+## Quick Start — [Cypher guide](https://kglite.readthedocs.io/en/latest/guides/cypher.html)
 
 ```python
 import kglite
@@ -56,7 +56,7 @@ graph.save("my_graph.kgl")
 loaded = kglite.load("my_graph.kgl")
 ```
 
-### Bulk Loading from DataFrames
+### Bulk Loading from DataFrames — [docs](https://kglite.readthedocs.io/en/latest/guides/data-loading.html)
 
 ```python
 import pandas as pd
@@ -69,7 +69,52 @@ users_df = pd.DataFrame({
 graph.add_nodes(data=users_df, node_type='User', unique_id_field='user_id', node_title_field='name')
 ```
 
-### AI Agent Integration
+### Blueprint Loading (CSV → Graph) — [docs](https://kglite.readthedocs.io/en/latest/guides/data-loading.html)
+
+```python
+import kglite
+
+# Define a blueprint.json mapping CSVs to nodes and connections:
+# {
+#   "settings": {"root": "./data"},
+#   "nodes": {
+#     "Person": {
+#       "csv": "persons.csv", "pk": "person_id", "title": "name",
+#       "properties": {"age": "int", "city": "string"},
+#       "connections": {
+#         "junction_edges": {
+#           "KNOWS": {"csv": "knows.csv", "source_fk": "person_id",
+#                     "target": "Person", "target_fk": "friend_id"}
+#         }
+#       }
+#     }
+#   }
+# }
+
+graph = kglite.from_blueprint("blueprint.json")
+```
+
+### Code Review (Parse a Codebase) — [docs](https://kglite.readthedocs.io/en/latest/guides/code-tree.html)
+
+```python
+from kglite.code_tree import build
+
+graph = build(".")  # auto-detects pyproject.toml / Cargo.toml
+
+# Find the most-called functions
+graph.cypher("""
+    MATCH (caller:Function)-[:CALLS]->(f:Function)
+    RETURN f.name AS function, count(caller) AS callers
+    ORDER BY callers DESC LIMIT 10
+""")
+
+# Explore code
+graph.find("execute")              # search by name
+graph.source("execute_query")      # read source code
+graph.context("KnowledgeGraph")    # see struct with methods
+```
+
+### AI Agent Integration — [docs](https://kglite.readthedocs.io/en/latest/guides/ai-agents.html)
 
 ```python
 xml = graph.describe()  # progressive-disclosure schema for agents

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.73] - 2026-02-27
+
+### Changed
+
+- **README** — added blueprint loading and code review examples to Quick Start, doc links on each section
+- **CLAUDE.md** — simplified and consolidated conventions
+
 ## [0.5.72] - 2026-02-27
 
 ### Added
