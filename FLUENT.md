@@ -1,6 +1,6 @@
 # Fluent API Reference
 
-Full fluent (method-chaining) API supported by KGLite. For Cypher queries, see [CYPHER.md](CYPHER.md). For a quick overview, see the [README](README.md).
+Full fluent (method-chaining) API supported by KGLite. For Cypher queries, see the [Cypher Reference](https://kglite.readthedocs.io/en/latest/reference/cypher-reference.html). For a quick overview, see the [documentation](https://kglite.readthedocs.io).
 
 > **Selection model:** The fluent API is selection-based. Most methods return a new `KnowledgeGraph` with an updated selection — no data is materialised until you call a retrieval method (`collect()`, `to_df()`, etc.). This makes query chains fast even on large graphs.
 
@@ -342,7 +342,7 @@ keys = graph.time_index('sensor_1')
 
 ### Timeseries Aggregation via Cypher
 
-The fluent API provides data loading and extraction. For aggregation (`ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_at`, `ts_delta`, `ts_series`, etc.), use Cypher — see [CYPHER.md](CYPHER.md#timeseries-functions).
+The fluent API provides data loading and extraction. For aggregation (`ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_at`, `ts_delta`, `ts_series`, etc.), use Cypher — see the [Cypher Reference](https://kglite.readthedocs.io/en/latest/reference/cypher-reference.html#timeseries-functions).
 
 ```python
 # Example: top producers in 2020
@@ -952,7 +952,7 @@ print(result['nodes_updated'])
 
 ### Cypher Mutations
 
-For CREATE, SET, DELETE, REMOVE, and MERGE — see [CYPHER.md](CYPHER.md#create--set--delete--remove--merge).
+For CREATE, SET, DELETE, REMOVE, and MERGE — see the [Cypher Reference](https://kglite.readthedocs.io/en/latest/reference/cypher-reference.html#create--set--delete--remove--merge).
 
 ---
 

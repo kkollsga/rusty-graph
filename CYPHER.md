@@ -1,6 +1,6 @@
 # Cypher Reference
 
-Full Cypher subset supported by KGLite. For a quick overview, see the [README](README.md#cypher-queries).
+Full Cypher subset supported by KGLite. For a quick overview, see the [Cypher guide](https://kglite.readthedocs.io/en/latest/guides/cypher.html).
 
 > **Single-label note:** Each node has exactly one type. `labels(n)` returns a string, not a list. `SET n:OtherLabel` is not supported.
 
@@ -152,7 +152,7 @@ graph.cypher("""
 
 ## Spatial Functions
 
-Built-in spatial functions for geographic queries. All node-aware functions auto-resolve geometry and location via [spatial types](README.md#spatial-types).
+Built-in spatial functions for geographic queries. All node-aware functions auto-resolve geometry and location via [spatial types](https://kglite.readthedocs.io/en/latest/guides/spatial.html).
 
 | Function | Returns | Description |
 |----------|---------|-------------|

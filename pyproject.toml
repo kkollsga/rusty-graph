@@ -48,7 +48,7 @@ dynamic = ["version"]
 [project.urls]
 Homepage = "https://github.com/kkollsga/kglite"
 Repository = "https://github.com/kkollsga/kglite"
-Documentation = "https://github.com/kkollsga/kglite#readme"
+Documentation = "https://kglite.readthedocs.io"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

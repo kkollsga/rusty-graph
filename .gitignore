@@ -30,5 +30,9 @@ __pycache__/
 # Generated graph files
 *.kgl
 
+# Sphinx docs build output
+docs/_build/
+docs/autoapi/
+
 # macOS system files
 .DS_Store
