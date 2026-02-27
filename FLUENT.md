@@ -450,15 +450,22 @@ graph.select('Person').traverse('WORKS_AT')
 
 # Direction control
 graph.select('Person').traverse('KNOWS', direction='incoming')
-graph.select('Person').traverse('KNOWS', direction='both')
 
-# Filter target nodes
+# Filter to specific target node type (when a connection goes to multiple types)
+graph.select('Field').traverse('OF_FIELD', direction='incoming',
+    target_type='ProductionProfile')
+
+# Multiple target types
+graph.select('Field').traverse('OF_FIELD', direction='incoming',
+    target_type=['ProductionProfile', 'FieldReserves'])
+
+# Filter target nodes by properties
 graph.select('Person').traverse('WORKS_AT',
-    filter_target={'city': 'Oslo'})
+    where={'city': 'Oslo'})
 
 # Filter edge properties
 graph.select('Person').traverse('RATED',
-    filter_connection={'score': {'>': 4}})
+    where_connection={'score': {'>': 4}})
 
 # Sort and limit targets
 graph.select('Person').traverse('KNOWS',
@@ -470,7 +477,14 @@ companies = (graph
     .where({'city': 'Oslo'})
     .traverse('WORKS_AT')
     .traverse('LOCATED_IN'))
+
+# Combine target_type + where + temporal
+graph.select('Field').traverse('OF_FIELD', direction='incoming',
+    target_type='Wellbore', where={'wlbTotalDepth': {'>': 5000}})
 ```
+
+> **Note:** `filter_target` and `filter_connection` still work as aliases for
+> `where` and `where_connection` respectively.
 
 ### Comparison-Based Traversal (Traverse Plugins)
 

@@ -119,20 +119,22 @@ impl ResultView {
     pub fn from_nodes_with_graph(
         graph: &DirGraph,
         node_indices: &[petgraph::graph::NodeIndex],
+        temporal_context: &super::super::TemporalContext,
     ) -> Self {
         use crate::datatypes::values::format_value;
+        use crate::graph::temporal;
 
         let nodes_vec: Vec<&NodeData> = node_indices
             .iter()
             .filter_map(|&idx| graph.get_node(idx))
             .collect();
 
-        // Compute union of property keys
+        // Compute union of property keys (single clone per unique key)
+        let mut seen: HashSet<&str> = HashSet::new();
         let mut prop_keys: Vec<String> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
         for node in &nodes_vec {
             for key in node.properties.keys() {
-                if seen.insert(key.clone()) {
+                if seen.insert(key.as_str()) {
                     prop_keys.push(key.clone());
                 }
             }
@@ -159,14 +161,56 @@ impl ResultView {
             })
             .collect();
 
-        // Gather connection summaries per node
+        // Resolve temporal context to a concrete ref_date or range for edge filtering
+        use super::super::TemporalContext;
+        let is_all = matches!(temporal_context, TemporalContext::All);
+        let ref_date = match temporal_context {
+            TemporalContext::Today => Some(chrono::Local::now().date_naive()),
+            TemporalContext::At(d) => Some(*d),
+            _ => None,
+        };
+        let range_dates = match temporal_context {
+            TemporalContext::During(s, e) => Some((*s, *e)),
+            _ => None,
+        };
+
+        // Cap connections per node for display purposes
+        const MAX_CONNS_PER_NODE: usize = 50;
+
+        // Inline helper: check if edge passes temporal filter
+        let edge_temporal_ok =
+            |props: &std::collections::HashMap<String, crate::datatypes::values::Value>,
+             conn_type: &str|
+             -> bool {
+                if is_all {
+                    return true;
+                }
+                if let Some(configs) = graph.temporal_edge_configs.get(conn_type) {
+                    if let Some(d) = &ref_date {
+                        return temporal::is_temporally_valid_multi(props, configs, d);
+                    }
+                    if let Some((s, e)) = &range_dates {
+                        return temporal::overlaps_range_multi(props, configs, s, e);
+                    }
+                }
+                true
+            };
+
+        // Gather connection summaries per node, filtering temporal connections
         let node_connections: Vec<NodeConnections> = node_indices
             .iter()
             .map(|&idx| {
-                let mut conns = Vec::new();
+                let mut conns = Vec::with_capacity(16);
 
                 // Outgoing: this node → target
                 for edge in graph.graph.edges_directed(idx, Direction::Outgoing) {
+                    if conns.len() >= MAX_CONNS_PER_NODE {
+                        break;
+                    }
+                    if !edge_temporal_ok(&edge.weight().properties, &edge.weight().connection_type)
+                    {
+                        continue;
+                    }
                     let target_idx = edge.target();
                     if let Some(target) = graph.get_node(target_idx) {
                         conns.push(ConnectionSummary {
@@ -181,6 +225,13 @@ impl ResultView {
 
                 // Incoming: source → this node
                 for edge in graph.graph.edges_directed(idx, Direction::Incoming) {
+                    if conns.len() >= MAX_CONNS_PER_NODE {
+                        break;
+                    }
+                    if !edge_temporal_ok(&edge.weight().properties, &edge.weight().connection_type)
+                    {
+                        continue;
+                    }
                     let source_idx = edge.source();
                     if let Some(source) = graph.get_node(source_idx) {
                         conns.push(ConnectionSummary {

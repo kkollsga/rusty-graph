@@ -62,8 +62,8 @@
               "fldSdfiShare"
             ],
             "property_types": {
-              "fldLicenseeFrom": "date",
-              "fldLicenseeTo": "date"
+              "fldLicenseeFrom": "validFrom",
+              "fldLicenseeTo": "validTo"
             }
           },
           "HAS_OPERATOR": {
@@ -76,8 +76,8 @@
               "fldOperatorTo"
             ],
             "property_types": {
-              "fldOperatorFrom": "date",
-              "fldOperatorTo": "date"
+              "fldOperatorFrom": "validFrom",
+              "fldOperatorTo": "validTo"
             }
           },
           "INCLUDES_DISCOVERY": {
@@ -90,8 +90,8 @@
               "fldDiscoveryInclToDate"
             ],
             "property_types": {
-              "fldDiscoveryInclFromDate": "date",
-              "fldDiscoveryInclToDate": "date"
+              "fldDiscoveryInclFromDate": "validFrom",
+              "fldDiscoveryInclToDate": "validTo"
             }
           }
         }
@@ -189,8 +189,8 @@
           "title": "fldStatus",
           "parent_fk": "fldNpdidField",
           "properties": {
-            "fldStatusFromDate": "date",
-            "fldStatusToDate": "date",
+            "fldStatusFromDate": "validFrom",
+            "fldStatusToDate": "validTo",
             "fldStatusDateUpdated": "date"
           },
           "skipped": [
@@ -263,8 +263,8 @@
             "fldNpdidOwner": "int",
             "fldName": "string",
             "fldOwnerKind": "string",
-            "fldOwnershipFromDate": "date",
-            "fldOwnershipToDate": "date",
+            "fldOwnershipFromDate": "validFrom",
+            "fldOwnershipToDate": "validTo",
             "fldOwnerDateUpdated": "date"
           },
           "skipped": [
@@ -1070,8 +1070,8 @@
               "dscOperatorTo"
             ],
             "property_types": {
-              "dscOperatorFrom": "date",
-              "dscOperatorTo": "date"
+              "dscOperatorFrom": "validFrom",
+              "dscOperatorTo": "validTo"
             }
           },
           "HAS_DEPOSIT_PROSPECT": {
@@ -1155,8 +1155,8 @@
             "dscCurrentActivityStatus": "string",
             "dscDateFromInclInField": "date",
             "dscDateUpdated": "date",
-            "dscDateValidFrom": "date",
-            "dscDateValidTo": "date",
+            "dscDateValidFrom": "validFrom",
+            "dscDateValidTo": "validTo",
             "wlbName": "string",
             "dscDiscoveryYear": "int",
             "fldName": "string",
@@ -1363,8 +1363,8 @@
               "prlLicenseeDateValidTo"
             ],
             "property_types": {
-              "prlLicenseeDateValidFrom": "date",
-              "prlLicenseeDateValidTo": "date"
+              "prlLicenseeDateValidFrom": "validFrom",
+              "prlLicenseeDateValidTo": "validTo"
             }
           },
           "HAS_OPERATOR": {
@@ -1377,8 +1377,8 @@
               "prlOperDateValidTo"
             ],
             "property_types": {
-              "prlOperDateValidFrom": "date",
-              "prlOperDateValidTo": "date"
+              "prlOperDateValidFrom": "validFrom",
+              "prlOperDateValidTo": "validTo"
             }
           },
           "LICENCE_TRANSFER": {
@@ -1412,8 +1412,8 @@
             "prlDateGranted": "date",
             "prlDateValidTo": "date",
             "prlDateInitialPeriodExpires": "date",
-            "prlDatePhaseValidFrom": "date",
-            "prlDatePhaseValidTo": "date",
+            "prlDatePhaseValidFrom": "validFrom",
+            "prlDatePhaseValidTo": "validTo",
             "prlPhaseDateUpdated": "date"
           },
           "skipped": [
@@ -1486,8 +1486,8 @@
           "parent_fk": "prlNpdidLicence",
           "properties": {
             "prlAreaPolyStratigraphical": "string",
-            "prlAreaPolyDateValidFrom": "date",
-            "prlAreaPolyDateValidTo": "date",
+            "prlAreaPolyDateValidFrom": "validFrom",
+            "prlAreaPolyDateValidTo": "validTo",
             "prlAreaPolyNationCode": "string",
             "prlAreaPolyBlockName": "string",
             "prlAreaPolyPolyNo": "int",
@@ -1994,8 +1994,8 @@
       "properties": {
         "tufKind": "string",
         "tufStatus": "string",
-        "tufDateValidFrom": "date",
-        "tufDateValidTo": "date",
+        "tufDateValidFrom": "validFrom",
+        "tufDateValidTo": "validTo",
         "tufStartPoint": "string",
         "tufEndPoint": "string"
       },
@@ -2016,8 +2016,8 @@
               "tufOperDateValidTo"
             ],
             "property_types": {
-              "tufOperDateValidFrom": "date",
-              "tufOperDateValidTo": "date"
+              "tufOperDateValidFrom": "validFrom",
+              "tufOperDateValidTo": "validTo"
             }
           },
           "HAS_OWNER": {
@@ -2031,8 +2031,8 @@
               "tufOwnerDateValidTo"
             ],
             "property_types": {
-              "tufOwnerDateValidFrom": "date",
-              "tufOwnerDateValidTo": "date"
+              "tufOwnerDateValidFrom": "validFrom",
+              "tufOwnerDateValidTo": "validTo"
             }
           }
         }
@@ -2072,8 +2072,8 @@
         "seaSourceNumber": "float",
         "seaSourceSize": "float",
         "seaSourcePressure": "float",
-        "seaPlanFromDate": "date",
-        "seaPlanToDate": "date",
+        "seaPlanFromDate": "validFrom",
+        "seaPlanToDate": "validTo",
         "seaPlanBoatKm": "float",
         "seaDateStarting": "date",
         "seaDateFinalized": "date",
@@ -2265,8 +2265,8 @@
           "properties": {
             "seaFisheryExpertName": "string",
             "seaFisheryExpertPhoneNumber": "string",
-            "seaFisheryExpertFromDate": "date",
-            "seaFisheryExpertToDate": "date"
+            "seaFisheryExpertFromDate": "validFrom",
+            "seaFisheryExpertToDate": "validTo"
           },
           "skipped": [
             "OBJECTID",
@@ -2288,8 +2288,8 @@
           "title": "seaSurveyName",
           "parent_fk": "seaNpdidSurvey",
           "properties": {
-            "seaWeeklyDoneFromDate": "date",
-            "seaWeeklyDoneToDate": "date",
+            "seaWeeklyDoneFromDate": "validFrom",
+            "seaWeeklyDoneToDate": "validTo",
             "seaWeeklyDonePolygonNumber": "float",
             "seaWeeklyDoneComments": "string",
             "seaWeeklyDoneCdpKm": "float",
@@ -2316,8 +2316,8 @@
           "title": "seaSurveyName",
           "parent_fk": "seaNpdidSurvey",
           "properties": {
-            "seaWeeklyPlannedFromDate": "date",
-            "seaWeeklyPlannedToDate": "date",
+            "seaWeeklyPlannedFromDate": "validFrom",
+            "seaWeeklyPlannedToDate": "validTo",
             "seaWeeklyPlannedPolygonNumber": "float",
             "seaWeeklyPlannedComments": "string",
             "seaWeeklyPlannedCdpKm": "float",
@@ -2374,8 +2374,8 @@
       "properties": {
         "baaKind": "string",
         "baaDateApproved": "date",
-        "baaDateValidFrom": "date",
-        "baaDateValidTo": "date",
+        "baaDateValidFrom": "validFrom",
+        "baaDateValidTo": "validTo",
         "baaActive": "bool",
         "baaPublishOnInternet": "bool",
         "baaDateUpdated": "date",
@@ -2409,8 +2409,8 @@
               "baaLicenseeDateValidTo"
             ],
             "property_types": {
-              "baaLicenseeDateValidFrom": "date",
-              "baaLicenseeDateValidTo": "date"
+              "baaLicenseeDateValidFrom": "validFrom",
+              "baaLicenseeDateValidTo": "validTo"
             }
           },
           "HAS_OPERATOR": {
@@ -2446,8 +2446,8 @@
           "parent_fk": "baaNpdidBsnsArrArea",
           "properties": {
             "baaKind": "string",
-            "baaAreaPolyDateValidFrom": "date",
-            "baaAreaPolyDateValidTo": "date",
+            "baaAreaPolyDateValidFrom": "validFrom",
+            "baaAreaPolyDateValidTo": "validTo",
             "prlName": "string",
             "baaAreaPolyNationCode2": "string",
             "baaAreaPolyBlockName": "string",
@@ -2523,8 +2523,8 @@
       "properties": {
         "afxKind": "string",
         "afxDateApproved": "date",
-        "afxDateValidFrom": "date",
-        "afxDateValidTo": "date",
+        "afxDateValidFrom": "validFrom",
+        "afxDateValidTo": "validTo",
         "afxActive": "bool",
         "afxPublishOnInternet": "bool",
         "afxDateUpdated": "date",
@@ -2561,8 +2561,8 @@
           "parent_fk": "afxNpdidAfexArea",
           "properties": {
             "afxKind": "string",
-            "afxAreaPolyDateValidFrom": "date",
-            "afxAreaPolyDateValidTo": "date",
+            "afxAreaPolyDateValidFrom": "validFrom",
+            "afxAreaPolyDateValidTo": "validTo",
             "prlName": "string",
             "afxAreaPolyNationCode2": "string",
             "blcName": "string",
@@ -2606,8 +2606,8 @@
         "ptlKind": "string",
         "ptlStatus": "string",
         "tufNpdidTuf": "int",
-        "ptlDateValidFrom": "date",
-        "ptlDateValidTo": "date",
+        "ptlDateValidFrom": "validFrom",
+        "ptlDateValidTo": "validTo",
         "ptlDateAwarded": "date",
         "prlName": "string",
         "tufName": "string",
@@ -3125,8 +3125,8 @@
               "source"
             ],
             "property_types": {
-              "date_from": "date",
-              "date_to": "date"
+              "date_from": "validFrom",
+              "date_to": "validTo"
             }
           },
           "TESTED_BY_WELLBORE": {
@@ -3158,8 +3158,8 @@
           "properties": {
             "reported_by": "string",
             "date_registered": "date",
-            "date_officially_valid_from": "date",
-            "date_officially_valid_to": "date",
+            "date_officially_valid_from": "validFrom",
+            "date_officially_valid_to": "validTo",
             "total_risk": "float",
             "oil_recover_total": "float",
             "gas_recover_total": "float",
@@ -3437,8 +3437,8 @@
           "title": "prospect_name",
           "parent_fk": "npdid_prospect",
           "properties": {
-            "date_valid_from": "date",
-            "date_valid_to": "date",
+            "date_valid_from": "validFrom",
+            "date_valid_to": "validTo",
             "prospect_number": "int"
           },
           "skipped": [

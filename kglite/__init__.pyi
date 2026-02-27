@@ -407,13 +407,20 @@ class KnowledgeGraph:
         node_type: str,
         sort: Optional[Union[str, list[tuple[str, bool]]]] = None,
         limit: Optional[int] = None,
+        temporal: Optional[bool] = None,
     ) -> KnowledgeGraph:
         """Select all nodes of a given type.
+
+        When a temporal config exists for this node type (via ``set_temporal()``),
+        nodes are auto-filtered to those valid at the reference date (today or
+        ``date()`` context). Pass ``temporal=False`` to include all nodes.
 
         Args:
             node_type: The node type to select (e.g. ``'Person'``).
             sort: Optional sort spec — a property name or list of ``(field, ascending)`` tuples.
             limit: Limit the number of selected nodes.
+            temporal: Override temporal filtering. ``None`` = auto (filter if configured),
+                ``False`` = disable, ``True`` = require (error if not configured).
 
         Returns:
             A new KnowledgeGraph with the filtered selection.
@@ -563,7 +570,7 @@ class KnowledgeGraph:
 
     def valid_at(
         self,
-        date: str,
+        date: Optional[str] = None,
         date_from_field: Optional[str] = None,
         date_to_field: Optional[str] = None,
     ) -> KnowledgeGraph:
@@ -571,10 +578,13 @@ class KnowledgeGraph:
 
         Keeps nodes where ``date_from <= date <= date_to``.
 
+        If field names are not specified, auto-detects from ``set_temporal()`` config.
+        If *date* is not specified, uses the ``date()`` context or today.
+
         Args:
-            date: Date string (e.g. ``'2024-01-15'``).
-            date_from_field: Name of the start-date property. Default ``'date_from'``.
-            date_to_field: Name of the end-date property. Default ``'date_to'``.
+            date: Date string (e.g. ``'2024-01-15'``). Defaults to reference date or today.
+            date_from_field: Name of the start-date property. Auto-detected if temporal config exists.
+            date_to_field: Name of the end-date property. Auto-detected if temporal config exists.
 
         Returns:
             A new KnowledgeGraph with the filtered selection.
@@ -590,11 +600,13 @@ class KnowledgeGraph:
     ) -> KnowledgeGraph:
         """Filter nodes whose validity period overlaps a date range.
 
+        If field names are not specified, auto-detects from ``set_temporal()`` config.
+
         Args:
             start_date: Start of the query range.
             end_date: End of the query range.
-            date_from_field: Name of the start-date property. Default ``'date_from'``.
-            date_to_field: Name of the end-date property. Default ``'date_to'``.
+            date_from_field: Name of the start-date property. Auto-detected if temporal config exists.
+            date_to_field: Name of the end-date property. Auto-detected if temporal config exists.
 
         Returns:
             A new KnowledgeGraph with the filtered selection.
@@ -677,6 +689,34 @@ class KnowledgeGraph:
 
         Args:
             limit: Maximum number of nodes to show. Default ``50``.
+        """
+        ...
+
+    def show(
+        self,
+        columns: list[str] | None = None,
+        limit: int = 200,
+    ) -> str:
+        """Display selected nodes with specific properties in a compact format.
+
+        Single level (no traversals): one node per line as ``Type(val1, val2)``.
+        Multi-level (after traverse): walks the full chain as
+        ``Type1(vals) -> Type2(vals) -> Type3(vals)``.
+
+        Args:
+            columns: Property names to include. Default ``["id", "title"]``.
+            limit: Maximum output lines. Default ``200``.
+
+        Example::
+
+            print(graph.select("Discovery").show(["id", "title"]))
+            # Discovery(123, Johan Sverdrup)
+
+            print(graph.select("Discovery")
+                .traverse("HAS_DEPOSIT_PROSPECT")
+                .traverse("TESTED_BY_WELLBORE")
+                .show(["id"]))
+            # Discovery(123) -> Prospect(456) -> Wellbore(789)
         """
         ...
 
@@ -1052,112 +1092,73 @@ class KnowledgeGraph:
         limit: Optional[int] = None,
         new_level: Optional[bool] = None,
         method: Optional[Union[str, dict[str, Any]]] = None,
+        at: Optional[str] = None,
+        during: Optional[tuple[str, str]] = None,
+        temporal: Optional[bool] = None,
+        target_type: Optional[Union[str, list[str]]] = None,
+        where: Optional[dict[str, Any]] = None,
+        where_connection: Optional[dict[str, Any]] = None,
     ) -> KnowledgeGraph:
-        """Traverse connections or discover relationships via comparison methods.
+        """Traverse connections to discover related nodes.
 
-        **Edge-based mode** (default, no ``method``):
-            Follow explicit graph edges of a given type.
+        **Edge-based mode** (default): follow graph edges of a given type.
 
-        **Comparison-based mode** (``method=`` specified):
-            Discover source→target pairs via spatial, semantic, or clustering
-            comparisons. The first arg becomes **target node type** instead of
-            connection type.
+        **Comparison mode** (``method=``): spatial, semantic, or clustering.
 
         Args:
-            connection_type: Edge type to follow (edge mode) or target node type
-                (comparison mode). Required for edge mode and spatial/semantic methods.
-            level_index: Source level in the hierarchy (edge mode only).
-            direction: ``'outgoing'``, ``'incoming'``, or both (edge mode only).
-            filter_target: Filter conditions for target nodes.
-            filter_connection: Filter conditions for edge properties (edge mode only).
-            sort_target: Sort target nodes per source.
-            limit: Limit target nodes per source.
-            new_level: Add targets as a new hierarchy level (edge mode). Default ``True``.
-            method: Comparison method — a string for simple cases, or a dict with
-                method-specific settings.
-
-                **String shorthand** (no extra settings needed)::
-
-                    method='contains'
-                    method='intersects'
-
-                **Dict form** with settings:
-
-                Spatial containment::
-
-                    method={'type': 'contains'}
-                    method={'type': 'contains', 'resolve': 'geometry'}
-                    method={'type': 'contains', 'resolve': 'centroid', 'geometry': 'wkt_field'}
-
-                Spatial intersection::
-
-                    method={'type': 'intersects'}
-                    method={'type': 'intersects', 'geometry': 'wkt_field'}
-
-                Distance::
-
-                    method={'type': 'distance', 'max_m': 5000}
-                    method={'type': 'distance', 'max_m': 5000, 'resolve': 'centroid'}
-                    method={'type': 'distance', 'max_m': 5000, 'resolve': 'closest'}
-
-                Semantic similarity::
-
-                    method={'type': 'text_score', 'property': 'abstract', 'threshold': 0.85}
-                    method={'type': 'text_score', 'property': 'abstract', 'threshold': 0.85, 'metric': 'cosine'}
-
-                Clustering::
-
-                    method={'type': 'cluster', 'algorithm': 'kmeans', 'k': 10, 'features': ['lat', 'lon']}
-                    method={'type': 'cluster', 'algorithm': 'dbscan', 'eps': 5000, 'min_samples': 3, 'features': ['lat', 'lon']}
-
-                **Dict keys:**
-
-                - ``type`` (required): ``'contains'``, ``'intersects'``, ``'distance'``, ``'text_score'``, ``'cluster'``
-                - ``resolve``: How polygon geometries are interpreted (overrides default location → centroid fallback):
-                  ``'centroid'`` (geometry centroid), ``'closest'`` (nearest boundary point), ``'geometry'`` (full polygon)
-                - ``max_m``: Max distance in meters (distance method)
-                - ``geometry``: Override geometry field name (spatial methods)
-                - ``property``: Embedding property name (text_score)
-                - ``threshold``: Min similarity score (text_score). Default 0.0
-                - ``metric``: ``'cosine'`` (default), ``'dot_product'``, ``'euclidean'`` (text_score)
-                - ``algorithm``: ``'kmeans'`` or ``'dbscan'`` (cluster)
-                - ``features``: Feature property names (cluster)
-                - ``k``: Number of clusters (kmeans)
-                - ``eps``: Neighborhood radius (dbscan)
-                - ``min_samples``: Min cluster size (dbscan). Default 5
+            connection_type: Edge type to follow (e.g. ``'HAS_LICENSEE'``).
+                In comparison mode, this becomes the target node type.
+            direction: ``'outgoing'``, ``'incoming'``, or ``None`` (both).
+            target_type: Filter targets to specific node type(s). Accepts a
+                string or list of strings. Useful when a connection type
+                connects to multiple node types.
+            where: Property conditions for **target nodes** — same operators
+                as ``.where()`` (``'>'``, ``'contains'``, ``'in'``, etc.).
+            where_connection: Property conditions for **edge properties**.
+            sort_target: Sort targets per source. Field name or
+                ``[(field, ascending)]`` list.
+            limit: Max target nodes per source.
+            at: Temporal point-in-time filter (e.g. ``'2005'``).
+            during: Temporal range filter (e.g. ``('2000', '2010')``).
+            temporal: Override temporal filtering. ``False`` = disable.
+            method: Comparison method — string or dict with settings.
+                See ``FLUENT.md`` for spatial, semantic, and clustering options.
+            level_index: Source level in the hierarchy (advanced).
+            new_level: Add targets as new hierarchy level. Default ``True``.
+            filter_target: Deprecated alias for ``where``.
+            filter_connection: Deprecated alias for ``where_connection``.
 
         Returns:
-            A new KnowledgeGraph with matched/grouped nodes selected.
+            A new KnowledgeGraph with traversal results selected.
 
         Examples::
 
-            # Edge-based (existing)
-            graph.select('Person').traverse('KNOWS')
+            # Follow edges
+            graph.select('Field').traverse('HAS_LICENSEE')
 
-            # Spatial containment (string shorthand)
+            # Filter to specific target type
+            graph.select('Field').traverse('OF_FIELD', direction='incoming',
+                target_type='ProductionProfile')
+
+            # Multiple target types
+            graph.select('Field').traverse('OF_FIELD', direction='incoming',
+                target_type=['ProductionProfile', 'FieldReserves'])
+
+            # Filter target node properties
+            graph.select('Field').traverse('HAS_LICENSEE',
+                where={'title': 'Equinor Energy AS'})
+
+            # Filter edge properties
+            graph.select('Person').traverse('RATED',
+                where_connection={'score': {'>': 4}})
+
+            # Temporal filtering
+            graph.select('Field').traverse('HAS_LICENSEE', at='2005')
+            graph.select('Field').traverse('HAS_LICENSEE',
+                during=('2000', '2010'))
+
+            # Comparison-based (spatial containment)
             graph.select('Structure').traverse('Well', method='contains')
-
-            # Spatial containment with resolve
-            graph.select('Structure').traverse('Field',
-                method={'type': 'contains', 'resolve': 'geometry'})
-
-            # Distance with threshold
-            graph.select('Platform').traverse('Well',
-                method={'type': 'distance', 'max_m': 5000})
-
-            # Distance using closest boundary point
-            graph.select('Structure').traverse('Well',
-                method={'type': 'distance', 'max_m': 5000, 'resolve': 'closest'})
-
-            # Semantic similarity
-            graph.select('Article').traverse('Article',
-                method={'type': 'text_score', 'property': 'abstract', 'threshold': 0.85},
-                limit=5)
-
-            # Clustering
-            graph.select('Well').traverse(
-                method={'type': 'cluster', 'algorithm': 'kmeans', 'k': 5,
-                        'features': ['latitude', 'longitude']})
         """
         ...
 
@@ -2323,6 +2324,63 @@ class KnowledgeGraph:
                 RETURN community, count(*) AS size
                 ORDER BY size DESC
             ''')
+        """
+        ...
+
+    # ====================================================================
+    # Temporal
+    # ====================================================================
+
+    def set_temporal(
+        self,
+        type_name: str,
+        valid_from: str,
+        valid_to: str,
+    ) -> None:
+        """Configure temporal validity for a node type or connection type.
+
+        After configuration, ``select()`` auto-filters temporal nodes and
+        ``traverse()`` auto-filters temporal connections to "current" (today
+        or the ``date()`` context).
+
+        Auto-detects whether *type_name* is a node type or connection type.
+
+        Args:
+            type_name: Node type (e.g. ``'FieldStatus'``) or connection type
+                (e.g. ``'HAS_LICENSEE'``).
+            valid_from: Property name holding the start date.
+            valid_to: Property name holding the end date.
+
+        Raises:
+            ValueError: If *type_name* is not a known node or connection type.
+        """
+        ...
+
+    def date(
+        self,
+        date_str: Optional[str] = None,
+        end_str: Optional[str] = None,
+    ) -> KnowledgeGraph:
+        """Set the temporal context for auto-filtering.
+
+        Returns a new KnowledgeGraph. All subsequent ``select()`` and
+        ``traverse()`` calls on the returned graph use this context for
+        temporal filtering.
+
+        Modes:
+            - ``date('2013')`` — point-in-time (valid at 2013-01-01).
+            - ``date('2010', '2015')`` — range: include everything valid at
+              any point during 2010-01-01 to 2015-12-31 (overlap check).
+            - ``date('all')`` — disable temporal filtering entirely.
+            - ``date()`` — reset to today (default).
+
+        Args:
+            date_str: Date string, ``'all'``, or ``None`` to reset.
+            end_str: Optional end date for range mode. End dates expand to
+                period end (``'2015'`` → 2015-12-31, ``'2015-06'`` → 2015-06-30).
+
+        Returns:
+            A new KnowledgeGraph with the given temporal context.
         """
         ...
 

@@ -5,6 +5,32 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.5.71] - 2026-02-27
+
+### Added
+
+- **`traverse()` API improvements:**
+  - `target_type` parameter — filter targets to specific node type(s): `traverse('OF_FIELD', direction='incoming', target_type='ProductionProfile')` or `target_type=['ProductionProfile', 'FieldReserves']`
+  - `where` parameter — alias for `filter_target`, consistent with the fluent API: `traverse('HAS_LICENSEE', where={'title': 'Equinor'})`
+  - `where_connection` parameter — alias for `filter_connection`: `traverse('RATED', where_connection={'score': {'>': 4}})`
+  - `help(g.traverse)` now shows a comprehensive docstring with args, examples, and usage patterns
+- **Temporal awareness** — first-class support for time-dependent nodes and connections:
+  - Declare temporal columns via `column_types={"fldLicenseeFrom": "validFrom", "fldLicenseeTo": "validTo"}` on `add_nodes()` or `add_connections()` — auto-configures temporal filtering behind the scenes (same pattern as spatial `"geometry"` / `"location.lat"`)
+  - `date("2013")` sets a temporal context for the entire chain — all subsequent `select()` and `traverse()` calls filter to that date instead of today
+  - `date("2010", "2015")` — range mode: include everything valid at any point during the period (overlap check)
+  - `date("all")` — disable temporal filtering entirely (show all records regardless of validity dates)
+  - `select()` auto-filters temporal nodes to "currently valid" (or the `date()` context). Pass `temporal=False` to include all historic records
+  - `traverse()` auto-filters temporal connections to "currently valid". Override with `at="2015"`, `during=("2010", "2020")`, or `temporal=False`
+  - `valid_at()` / `valid_during()` auto-detect field names from temporal config; NULL `date_to` treated as "still active"
+  - Display (`sample()`, `collect()`) filters connection summaries to temporally valid edges
+  - `describe()` includes `temporal_from`/`temporal_to` attributes on configured types and connections
+  - Blueprint loader: use `"validFrom"` / `"validTo"` property types to auto-configure temporal filtering
+  - `set_temporal(type_name, valid_from, valid_to)` available as low-level API for manual configuration
+  - Temporal configs persist through `save()`/`load()` round-trips
+- **`show(columns, limit=200)`** — compact display of selected nodes with chosen properties. Single-level shows `Type(val1, val2)` per line; after `traverse()` walks the full chain as `Type1(vals) -> Type2(vals) -> Type3(vals)`. Resolves field aliases and truncates long values
+
 ## [0.5.70] - 2026-02-26
 
 ### Added

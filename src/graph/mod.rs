@@ -34,6 +34,7 @@ pub mod set_operations;
 pub mod spatial;
 pub mod statistics_methods;
 pub mod subgraph;
+pub mod temporal;
 pub mod timeseries;
 pub mod traversal_methods;
 pub mod value_operations;
@@ -142,6 +143,30 @@ pub struct KnowledgeGraph {
     last_mutation_stats: Option<cypher::result::MutationStats>,
     /// Registered Python embedding model (not serialized — re-set after load).
     embedder: Option<Py<PyAny>>,
+    /// Temporal context for auto-filtering temporal nodes/connections.
+    /// Set via `date()` method. Default = Today (resolve at query time).
+    temporal_context: TemporalContext,
+}
+
+/// Temporal context for automatic date filtering on select/traverse/collect.
+/// Set via the `date()` method. Carried through clone (fluent API chaining).
+#[derive(Clone, Debug, Default)]
+pub(crate) enum TemporalContext {
+    /// Use today's date (default). Resolved at query time.
+    #[default]
+    Today,
+    /// Point-in-time: valid_from <= date AND (valid_to IS NULL OR valid_to >= date).
+    At(chrono::NaiveDate),
+    /// Range overlap: valid_from <= end AND (valid_to IS NULL OR valid_to >= start).
+    During(chrono::NaiveDate, chrono::NaiveDate),
+    /// No temporal filtering — show everything regardless of validity dates.
+    All,
+}
+
+impl TemporalContext {
+    fn is_all(&self) -> bool {
+        matches!(self, TemporalContext::All)
+    }
 }
 
 /// Mutable working copy during a transaction.
@@ -195,6 +220,7 @@ impl Clone for KnowledgeGraph {
             reports: self.reports.clone(),
             last_mutation_stats: self.last_mutation_stats.clone(),
             embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
+            temporal_context: self.temporal_context.clone(),
         }
     }
 }
@@ -229,6 +255,18 @@ Example with sentence-transformers:
 impl KnowledgeGraph {
     fn add_report(&mut self, report: OperationReport) -> usize {
         self.reports.add_report(report)
+    }
+
+    /// Infer the node type of the current (latest level) selection by sampling
+    /// the first node. Returns None if the selection is empty.
+    fn infer_selection_node_type(&self) -> Option<String> {
+        let level_idx = self.selection.get_level_count().saturating_sub(1);
+        let level = self.selection.get_level(level_idx)?;
+        let first_idx = level.iter_node_indices().next()?;
+        self.inner
+            .graph
+            .node_weight(first_idx)
+            .map(|n| n.node_type.clone())
     }
 
     /// Get the registered embedder or return a helpful error with a skeleton.
@@ -560,6 +598,56 @@ fn parse_spatial_column_types(
     }
 
     Ok((Some(config), cleaned.unbind()))
+}
+
+/// Parse temporal column_types entries and produce a TemporalConfig + cleaned column_types dict.
+///
+/// Recognizes: `validFrom`, `validTo`. These are replaced with `datetime` in the
+/// returned dict so `pandas_to_dataframe` can handle them as date columns.
+///
+/// Returns `(Some(config), cleaned_dict)` if both validFrom and validTo were found,
+/// or `(None, original_dict)` if neither or only one was found.
+fn parse_temporal_column_types(
+    py: Python<'_>,
+    column_types: &Bound<'_, PyDict>,
+) -> PyResult<(Option<schema::TemporalConfig>, Py<PyDict>)> {
+    let cleaned = PyDict::new(py);
+    let mut valid_from_col: Option<String> = None;
+    let mut valid_to_col: Option<String> = None;
+
+    for (key, value) in column_types.iter() {
+        let col_name: String = key.extract()?;
+        let type_str: String = value.extract()?;
+        let type_lower = type_str.to_lowercase();
+
+        match type_lower.as_str() {
+            "validfrom" => {
+                valid_from_col = Some(col_name.clone());
+                cleaned.set_item(&col_name, "datetime")?;
+            }
+            "validto" => {
+                valid_to_col = Some(col_name.clone());
+                cleaned.set_item(&col_name, "datetime")?;
+            }
+            _ => {
+                cleaned.set_item(&col_name, &type_str)?;
+            }
+        }
+    }
+
+    match (valid_from_col, valid_to_col) {
+        (Some(from), Some(to)) => Ok((
+            Some(schema::TemporalConfig {
+                valid_from: from,
+                valid_to: to,
+            }),
+            cleaned.unbind(),
+        )),
+        (Some(_), None) | (None, Some(_)) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Incomplete temporal config: both 'validFrom' and 'validTo' column types must be specified.",
+        )),
+        (None, None) => Ok((None, column_types.clone().unbind())),
+    }
 }
 
 // ─── Inline timeseries parsing ──────────────────────────────────────────────
@@ -904,6 +992,7 @@ impl KnowledgeGraph {
             reports: OperationReports::new(),
             last_mutation_stats: None,
             embedder: None,
+            temporal_context: TemporalContext::default(),
         }
     }
 
@@ -1017,7 +1106,15 @@ impl KnowledgeGraph {
             (None, None)
         };
 
-        // Use cleaned column_types for DataFrame conversion (spatial types replaced with natural types)
+        // Parse temporal column_types (validFrom/validTo → datetime)
+        let (temporal_cfg, cleaned_types) = if let Some(ref cleaned) = cleaned_types {
+            let (tcfg, final_cleaned) = parse_temporal_column_types(py, cleaned.bind(py))?;
+            (tcfg, Some(final_cleaned))
+        } else {
+            (None, cleaned_types)
+        };
+
+        // Use cleaned column_types for DataFrame conversion (spatial+temporal types replaced with natural types)
         let effective_types = cleaned_types.as_ref().map(|d| d.bind(py).clone());
 
         // When timeseries is present, deduplicate rows (keep first per unique_id) for static props
@@ -1054,6 +1151,11 @@ impl KnowledgeGraph {
         // Merge spatial config into graph
         if let Some(cfg) = spatial_cfg {
             graph.spatial_configs.insert(node_type.clone(), cfg);
+        }
+
+        // Merge temporal config into graph
+        if let Some(cfg) = temporal_cfg {
+            graph.temporal_node_configs.insert(node_type.clone(), cfg);
         }
 
         // Store embeddings for the created nodes
@@ -1345,6 +1447,18 @@ impl KnowledgeGraph {
             default_cols.push(tgt_title);
         }
 
+        // Auto-include columns mentioned in column_types (e.g. temporal date columns)
+        let mut column_type_cols: Vec<String> = Vec::new();
+        if let Some(type_dict) = column_types {
+            for key in type_dict.keys() {
+                let col_name: String = key.extract()?;
+                column_type_cols.push(col_name);
+            }
+        }
+        for col in &column_type_cols {
+            default_cols.push(col.as_str());
+        }
+
         // Use enforce_columns=true for add_connections
         let enforce_columns = Some(true);
 
@@ -1357,11 +1471,21 @@ impl KnowledgeGraph {
             enforce_columns,
         )?;
 
+        // Parse temporal column_types (validFrom/validTo → datetime)
+        let py = data.py();
+        let (temporal_cfg, cleaned_types) = if let Some(type_dict) = column_types {
+            let (tcfg, cleaned) = parse_temporal_column_types(py, type_dict)?;
+            (tcfg, Some(cleaned))
+        } else {
+            (None, None)
+        };
+        let effective_types = cleaned_types.as_ref().map(|d| d.bind(py).clone());
+
         let df_result = py_in::pandas_to_dataframe(
             data,
             &[source_id_field.clone(), target_id_field.clone()],
             &column_list,
-            column_types,
+            effective_types.as_ref(),
         )?;
 
         let graph = get_graph_mut(&mut self.inner);
@@ -1369,7 +1493,7 @@ impl KnowledgeGraph {
         let result = maintain_graph::add_connections(
             graph,
             df_result,
-            connection_type,
+            connection_type.clone(),
             source_type,
             source_id_field,
             target_type,
@@ -1379,6 +1503,15 @@ impl KnowledgeGraph {
             conflict_handling,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+        // Merge temporal config into graph (auto-detected from validFrom/validTo column types)
+        if let Some(cfg) = temporal_cfg {
+            graph
+                .temporal_edge_configs
+                .entry(connection_type)
+                .or_default()
+                .push(cfg);
+        }
 
         self.selection.clear();
 
@@ -1707,12 +1840,91 @@ impl KnowledgeGraph {
         Ok(result_dict.into())
     }
 
-    #[pyo3(signature = (node_type, sort=None, limit=None))]
+    /// Configure temporal validity for a node type or connection type.
+    ///
+    /// After configuration, `select()` auto-filters temporal nodes to "current" and
+    /// `traverse()` auto-filters temporal connections to "current". Use `date()` to
+    /// shift the temporal context.
+    ///
+    /// Args:
+    ///     type_name: Node type (e.g. "FieldStatus") or connection type (e.g. "HAS_LICENSEE").
+    ///     valid_from: Property name holding the start date (e.g. "fldLicenseeFrom").
+    ///     valid_to: Property name holding the end date (e.g. "fldLicenseeTo").
+    #[pyo3(signature = (type_name, valid_from, valid_to))]
+    fn set_temporal(
+        &mut self,
+        type_name: String,
+        valid_from: String,
+        valid_to: String,
+    ) -> PyResult<()> {
+        use crate::graph::schema::TemporalConfig;
+        let config = TemporalConfig {
+            valid_from,
+            valid_to,
+        };
+        let graph = get_graph_mut(&mut self.inner);
+        // Auto-detect: check node types first, then connection types
+        if graph.type_indices.contains_key(&type_name) {
+            graph.temporal_node_configs.insert(type_name, config);
+        } else if graph.connection_type_metadata.contains_key(&type_name) {
+            graph
+                .temporal_edge_configs
+                .entry(type_name)
+                .or_default()
+                .push(config);
+        } else {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "'{}' is not a known node type or connection type",
+                type_name
+            )));
+        }
+        Ok(())
+    }
+
+    /// Set the temporal context for auto-filtering.
+    ///
+    /// Returns a new KnowledgeGraph. All subsequent `select()` and `traverse()`
+    /// calls on the returned graph use this context for temporal filtering.
+    ///
+    /// - `date("2013")` — point-in-time (Jan 1 2013)
+    /// - `date("2010", "2015")` — range: include anything valid during 2010-2015
+    /// - `date("all")` — disable temporal filtering entirely
+    /// - `date()` — reset to today
+    #[pyo3(signature = (date_str=None, end_str=None))]
+    fn date(&self, date_str: Option<&str>, end_str: Option<&str>) -> PyResult<Self> {
+        let mut new_kg = self.clone();
+        new_kg.temporal_context = match (date_str, end_str) {
+            (Some("all"), _) => TemporalContext::All,
+            (Some(start), Some(end)) => {
+                let (start_date, _) = timeseries::parse_date_query(start)
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                let (end_date, end_precision) = timeseries::parse_date_query(end)
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                let expanded_end = timeseries::expand_end(end_date, end_precision);
+                TemporalContext::During(start_date, expanded_end)
+            }
+            (Some(s), None) => {
+                let (date, _) = timeseries::parse_date_query(s)
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                TemporalContext::At(date)
+            }
+            (None, None) => TemporalContext::Today,
+            (None, Some(_)) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "date() end_str requires a start date_str",
+                ));
+            }
+        };
+        Ok(new_kg)
+    }
+
+    #[pyo3(signature = (node_type, sort=None, limit=None, temporal=None))]
     fn select(
         &mut self,
         node_type: String,
         sort: Option<&Bound<'_, PyAny>>,
         limit: Option<usize>,
+        temporal: Option<bool>,
     ) -> PyResult<Self> {
         let mut new_kg = self.clone();
 
@@ -1748,6 +1960,24 @@ impl KnowledgeGraph {
             limit,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+        // Apply temporal filtering if configured and not disabled
+        if temporal != Some(false) && !self.temporal_context.is_all() {
+            if let Some(config) = self.inner.temporal_node_configs.get(&node_type) {
+                let level_idx = new_kg.selection.get_level_count().saturating_sub(1);
+                if let Some(level) = new_kg.selection.get_level_mut(level_idx) {
+                    for nodes in level.selections.values_mut() {
+                        nodes.retain(|&idx| {
+                            if let Some(node) = self.inner.graph.node_weight(idx) {
+                                temporal::node_passes_context(node, config, &self.temporal_context)
+                            } else {
+                                false
+                            }
+                        });
+                    }
+                }
+            }
+        }
 
         // Record actual result
         let actual = new_kg
@@ -1947,16 +2177,48 @@ impl KnowledgeGraph {
     /// This is a convenience method for temporal queries. It filters nodes where:
     /// - date_from_field <= date <= date_to_field
     ///
-    /// Default field names are 'date_from' and 'date_to' if not specified.
-    #[pyo3(signature = (date, date_from_field=None, date_to_field=None))]
+    /// If field names are not specified, auto-detects from set_temporal() config.
+    /// If date is not specified, uses the reference date from date() or today.
+    #[pyo3(signature = (date=None, date_from_field=None, date_to_field=None))]
     fn valid_at(
         &mut self,
-        date: &str,
+        date: Option<&str>,
         date_from_field: Option<&str>,
         date_to_field: Option<&str>,
     ) -> PyResult<Self> {
-        let from_field = date_from_field.unwrap_or("date_from");
-        let to_field = date_to_field.unwrap_or("date_to");
+        // Auto-detect field names from temporal config if not provided
+        let temporal_config = if date_from_field.is_none() || date_to_field.is_none() {
+            self.infer_selection_node_type()
+                .and_then(|nt| self.inner.temporal_node_configs.get(&nt).cloned())
+        } else {
+            None
+        };
+        let from_field = date_from_field
+            .map(|s| s.to_string())
+            .or_else(|| temporal_config.as_ref().map(|c| c.valid_from.clone()))
+            .unwrap_or_else(|| "date_from".to_string());
+        let to_field = date_to_field
+            .map(|s| s.to_string())
+            .or_else(|| temporal_config.as_ref().map(|c| c.valid_to.clone()))
+            .unwrap_or_else(|| "date_to".to_string());
+        // Resolve the reference date
+        let ref_date = match date {
+            Some(d) => {
+                let (parsed, _) = timeseries::parse_date_query(d)
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                parsed
+            }
+            None => match &self.temporal_context {
+                TemporalContext::At(d) => *d,
+                _ => chrono::Local::now().date_naive(),
+            },
+        };
+
+        // Use temporal helper for NULL-aware filtering (NULL date_to = still active)
+        let config = schema::TemporalConfig {
+            valid_from: from_field,
+            valid_to: to_field,
+        };
 
         let mut new_kg = self.clone();
 
@@ -1967,19 +2229,19 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
 
-        // Build compound filter: date_from <= date AND date_to >= date
-        let mut conditions = HashMap::new();
-        conditions.insert(
-            from_field.to_string(),
-            FilterCondition::LessThanEquals(Value::String(date.to_string())),
-        );
-        conditions.insert(
-            to_field.to_string(),
-            FilterCondition::GreaterThanEquals(Value::String(date.to_string())),
-        );
-
-        filtering_methods::filter_nodes(&self.inner, &mut new_kg.selection, conditions, None, None)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        // Filter in-place using temporal validity (handles NULL as unbounded)
+        let current_level = new_kg.selection.get_level_count().saturating_sub(1);
+        if let Some(level) = new_kg.selection.get_level_mut(current_level) {
+            for (_parent, children) in level.selections.iter_mut() {
+                children.retain(|&idx| {
+                    if let Some(node) = self.inner.graph.node_weight(idx) {
+                        temporal::node_is_temporally_valid(node, &config, &ref_date)
+                    } else {
+                        false
+                    }
+                });
+            }
+        }
 
         // Record actual result
         let actual = new_kg
@@ -1999,7 +2261,7 @@ impl KnowledgeGraph {
     /// This filters nodes where their validity period overlaps with the given range:
     /// - date_from_field <= end_date AND date_to_field >= start_date
     ///
-    /// Default field names are 'date_from' and 'date_to' if not specified.
+    /// If field names are not specified, auto-detects from set_temporal() config.
     #[pyo3(signature = (start_date, end_date, date_from_field=None, date_to_field=None))]
     fn valid_during(
         &mut self,
@@ -2008,8 +2270,33 @@ impl KnowledgeGraph {
         date_from_field: Option<&str>,
         date_to_field: Option<&str>,
     ) -> PyResult<Self> {
-        let from_field = date_from_field.unwrap_or("date_from");
-        let to_field = date_to_field.unwrap_or("date_to");
+        // Auto-detect field names from temporal config if not provided
+        let temporal_config = if date_from_field.is_none() || date_to_field.is_none() {
+            self.infer_selection_node_type()
+                .and_then(|nt| self.inner.temporal_node_configs.get(&nt).cloned())
+        } else {
+            None
+        };
+        let from_field = date_from_field
+            .map(|s| s.to_string())
+            .or_else(|| temporal_config.as_ref().map(|c| c.valid_from.clone()))
+            .unwrap_or_else(|| "date_from".to_string());
+        let to_field = date_to_field
+            .map(|s| s.to_string())
+            .or_else(|| temporal_config.as_ref().map(|c| c.valid_to.clone()))
+            .unwrap_or_else(|| "date_to".to_string());
+
+        // Parse dates
+        let (start_parsed, _) = timeseries::parse_date_query(start_date)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let (end_parsed, _) = timeseries::parse_date_query(end_date)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
+        // Use temporal helper for NULL-aware overlap check
+        let config = schema::TemporalConfig {
+            valid_from: from_field,
+            valid_to: to_field,
+        };
 
         let mut new_kg = self.clone();
 
@@ -2020,20 +2307,19 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
 
-        // Build compound filter for overlapping ranges:
-        // node.date_from <= end_date AND node.date_to >= start_date
-        let mut conditions = HashMap::new();
-        conditions.insert(
-            from_field.to_string(),
-            FilterCondition::LessThanEquals(Value::String(end_date.to_string())),
-        );
-        conditions.insert(
-            to_field.to_string(),
-            FilterCondition::GreaterThanEquals(Value::String(start_date.to_string())),
-        );
-
-        filtering_methods::filter_nodes(&self.inner, &mut new_kg.selection, conditions, None, None)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        // Filter in-place using temporal overlap (handles NULL as unbounded)
+        let current_level = new_kg.selection.get_level_count().saturating_sub(1);
+        if let Some(level) = new_kg.selection.get_level_mut(current_level) {
+            for (_parent, children) in level.selections.iter_mut() {
+                children.retain(|&idx| {
+                    if let Some(node) = self.inner.graph.node_weight(idx) {
+                        temporal::node_overlaps_range(node, &config, &start_parsed, &end_parsed)
+                    } else {
+                        false
+                    }
+                });
+            }
+        }
 
         // Record actual result
         let actual = new_kg
@@ -2137,6 +2423,7 @@ impl KnowledgeGraph {
             reports: self.reports.clone(),
             last_mutation_stats: None,
             embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
+            temporal_context: self.temporal_context.clone(),
         };
 
         // Create and add a report
@@ -2191,7 +2478,11 @@ impl KnowledgeGraph {
             let max = limit.unwrap_or(usize::MAX);
             let indices: Vec<petgraph::graph::NodeIndex> =
                 self.selection.current_node_indices().take(max).collect();
-            let view = cypher::ResultView::from_nodes_with_graph(&self.inner, &indices);
+            let view = cypher::ResultView::from_nodes_with_graph(
+                &self.inner,
+                &indices,
+                &self.temporal_context,
+            );
             return Python::attach(|py| Py::new(py, view).map(|v| v.into_any()));
         }
 
@@ -2355,6 +2646,159 @@ impl KnowledgeGraph {
         }
 
         Ok(buf)
+    }
+
+    /// Display selected nodes with specific properties in a compact format.
+    ///
+    /// Single level (no traversals): one node per line as `Type(val1, val2)`
+    /// Multi-level (after traverse): walks the full chain as
+    /// `Type1(vals) -> Type2(vals) -> Type3(vals)`
+    ///
+    /// Args:
+    ///     columns: property names to include (default: ["id", "title"])
+    ///     limit: max output lines (default: 200)
+    ///
+    /// Example:
+    ///     ```python
+    ///     print(graph.select("Discovery").show(["id", "title"]))
+    ///     # Discovery(123, Johan Sverdrup)
+    ///     # Discovery(456, Troll)
+    ///
+    ///     print(graph.select("Discovery")
+    ///         .traverse("HAS_DEPOSIT_PROSPECT")
+    ///         .traverse("TESTED_BY_WELLBORE")
+    ///         .show(["id", "title"]))
+    ///     # Discovery(123, Johan Sverdrup) -> Prospect(456, Alpha) -> Wellbore(789, W1)
+    ///     ```
+    #[pyo3(signature = (columns=None, limit=200))]
+    fn show(&self, columns: Option<Vec<String>>, limit: usize) -> PyResult<String> {
+        use crate::graph::value_operations::format_value_compact;
+
+        let columns = columns.unwrap_or_else(|| vec!["id".to_string(), "title".to_string()]);
+        let level_count = self.selection.get_level_count();
+
+        // Helper: format a single node as Type(val1, val2, ...)
+        let fmt_node = |idx: NodeIndex| -> String {
+            let node = match self.inner.get_node(idx) {
+                Some(n) => n,
+                None => return "?".to_string(),
+            };
+            let mut s = String::with_capacity(64);
+            s.push_str(&node.node_type);
+            s.push('(');
+            let mut first = true;
+            for col in &columns {
+                let resolved = self.inner.resolve_alias(&node.node_type, col);
+                if let Some(val) = node.get_field_ref(resolved) {
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
+                    if !first {
+                        s.push_str(", ");
+                    }
+                    let v = format_value_compact(val);
+                    if v.len() > 80 {
+                        let keep = (80 - 5) / 2;
+                        s.push_str(&v[..keep]);
+                        s.push_str(" ... ");
+                        s.push_str(&v[v.len() - keep..]);
+                    } else {
+                        s.push_str(&v);
+                    }
+                    first = false;
+                }
+            }
+            s.push(')');
+            s
+        };
+
+        if level_count <= 1 {
+            // Single level: format each node on its own line
+            let nodes: Vec<_> = self.selection.current_node_indices().collect();
+            if nodes.is_empty() {
+                return Ok("(empty selection)".to_string());
+            }
+            let show_count = nodes.len().min(limit);
+            let mut buf = String::with_capacity(show_count * 80);
+            for &idx in nodes.iter().take(show_count) {
+                buf.push_str(&fmt_node(idx));
+                buf.push('\n');
+            }
+            if nodes.len() > show_count {
+                buf.push_str(&format!("... and {} more\n", nodes.len() - show_count));
+            }
+            Ok(buf)
+        } else {
+            // Multi-level: walk traversal chains via DFS
+            let level0 = self
+                .selection
+                .get_level(0)
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("no selection levels"))?;
+
+            let mut chains: Vec<Vec<NodeIndex>> = Vec::new();
+            let roots = level0.get_all_nodes();
+
+            'outer: for root in &roots {
+                let mut stack: Vec<(usize, Vec<NodeIndex>)> = vec![(1, vec![*root])];
+
+                while let Some((level_idx, chain)) = stack.pop() {
+                    if chains.len() >= limit {
+                        break 'outer;
+                    }
+
+                    if level_idx >= level_count {
+                        // Reached the end — complete chain
+                        chains.push(chain);
+                        continue;
+                    }
+
+                    let level = match self.selection.get_level(level_idx) {
+                        Some(l) => l,
+                        None => {
+                            chains.push(chain);
+                            continue;
+                        }
+                    };
+
+                    let last_node = *chain.last().unwrap();
+                    match level.selections.get(&Some(last_node)) {
+                        Some(children) if !children.is_empty() => {
+                            for &child in children {
+                                let mut new_chain = chain.clone();
+                                new_chain.push(child);
+                                stack.push((level_idx + 1, new_chain));
+                            }
+                        }
+                        _ => {
+                            // Dead end — omit incomplete chains
+                        }
+                    }
+                }
+            }
+
+            if chains.is_empty() {
+                return Ok("(no traversal results)".to_string());
+            }
+
+            let show_count = chains.len().min(limit);
+            let mut buf = String::with_capacity(show_count * 120);
+            for chain in chains.iter().take(show_count) {
+                for (i, &idx) in chain.iter().enumerate() {
+                    if i > 0 {
+                        buf.push_str(" -> ");
+                    }
+                    buf.push_str(&fmt_node(idx));
+                }
+                buf.push('\n');
+            }
+            if chains.len() > show_count {
+                buf.push_str(&format!(
+                    "... and {} more chains\n",
+                    chains.len() - show_count
+                ));
+            }
+            Ok(buf)
+        }
     }
 
     /// Returns the count of nodes in the current selection without materialization.
@@ -3266,7 +3710,43 @@ impl KnowledgeGraph {
         }
     }
 
-    #[pyo3(signature = (connection_type=None, level_index=None, direction=None, filter_target=None, filter_connection=None, sort_target=None, limit=None, new_level=None, method=None))]
+    /// Traverse connections to discover related nodes.
+    ///
+    /// Two modes:
+    ///
+    /// - **Edge mode** (default): follow graph edges of a given type.
+    /// - **Comparison mode** (``method=``): spatial, semantic, or clustering.
+    ///
+    /// Args:
+    ///     connection_type (str): Edge type to follow (e.g. ``'HAS_LICENSEE'``).
+    ///         In comparison mode, this is the target node type instead.
+    ///     direction (str): ``'outgoing'``, ``'incoming'``, or ``None`` (both).
+    ///     target_type (str | list[str]): Filter targets to specific node type(s).
+    ///         Useful when a connection type connects to multiple node types.
+    ///     where (dict): Property conditions for target nodes — same operators
+    ///         as ``.where()`` (``'>'``, ``'contains'``, ``'in'``, etc.).
+    ///     where_connection (dict): Property conditions for edge properties.
+    ///     sort_target: Sort targets per source. Field name or ``[(field, asc)]``.
+    ///     limit (int): Max target nodes per source.
+    ///     at (str): Temporal point-in-time filter (``'2005'``).
+    ///     during (tuple[str,str]): Temporal range filter (``('2000','2010')``).
+    ///     temporal (bool): Override temporal filtering (``False`` = off).
+    ///     method: Comparison method — string or dict with settings.
+    ///     filter_target (dict): Deprecated alias for ``where``.
+    ///     filter_connection (dict): Deprecated alias for ``where_connection``.
+    ///
+    /// Returns:
+    ///     New KnowledgeGraph with traversal results selected.
+    ///
+    /// Examples::
+    ///
+    ///     g.select('Field').traverse('HAS_LICENSEE')
+    ///     g.select('Field').traverse('OF_FIELD', direction='incoming',
+    ///         target_type='ProductionProfile')
+    ///     g.select('Field').traverse('HAS_LICENSEE',
+    ///         where={'title': 'Equinor Energy AS'})
+    ///     g.select('Field').traverse('HAS_LICENSEE', at='2005')
+    #[pyo3(signature = (connection_type=None, level_index=None, direction=None, filter_target=None, filter_connection=None, sort_target=None, limit=None, new_level=None, method=None, at=None, during=None, temporal=None, target_type=None, r#where=None, where_connection=None))]
     #[allow(clippy::too_many_arguments)]
     fn traverse(
         &mut self,
@@ -3279,6 +3759,12 @@ impl KnowledgeGraph {
         limit: Option<usize>,
         new_level: Option<bool>,
         method: Option<&Bound<'_, PyAny>>,
+        at: Option<&str>,
+        during: Option<(String, String)>,
+        temporal: Option<bool>,
+        target_type: Option<&Bound<'_, PyAny>>,
+        r#where: Option<&Bound<'_, PyDict>>,
+        where_connection: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         let mut new_kg = self.clone();
 
@@ -3289,7 +3775,49 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
 
-        let conditions = if let Some(cond) = filter_target {
+        // Resolve where → filter_target alias (error if both provided)
+        let effective_filter_target =
+            match (filter_target, r#where) {
+                (Some(_), Some(_)) => return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Cannot use both 'filter_target' and 'where' — they are aliases. Use 'where'.",
+                )),
+                (Some(ft), None) => Some(ft),
+                (None, Some(w)) => Some(w),
+                (None, None) => None,
+            };
+
+        // Resolve where_connection → filter_connection alias
+        let effective_filter_connection = match (filter_connection, where_connection) {
+            (Some(_), Some(_)) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Cannot use both 'filter_connection' and 'where_connection' — they are aliases. Use 'where_connection'.",
+                ))
+            }
+            (Some(fc), None) => Some(fc),
+            (None, Some(wc)) => Some(wc),
+            (None, None) => None,
+        };
+
+        // Parse target_type: str → vec![str], list[str] → vec[str]
+        let target_types: Option<Vec<String>> = if let Some(tt) = target_type {
+            if let Ok(s) = tt.extract::<String>() {
+                Some(vec![s])
+            } else if let Ok(list) = tt.extract::<Vec<String>>() {
+                if list.is_empty() {
+                    None
+                } else {
+                    Some(list)
+                }
+            } else {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    "target_type must be a string or list of strings",
+                ));
+            }
+        } else {
+            None
+        };
+
+        let conditions = if let Some(cond) = effective_filter_target {
             Some(py_in::pydict_to_filter_conditions(cond)?)
         } else {
             None
@@ -3333,7 +3861,7 @@ impl KnowledgeGraph {
                 )
             })?;
 
-            let conn_conditions = if let Some(cond) = filter_connection {
+            let conn_conditions = if let Some(cond) = effective_filter_connection {
                 Some(py_in::pydict_to_filter_conditions(cond)?)
             } else {
                 None
@@ -3343,6 +3871,52 @@ impl KnowledgeGraph {
                 Some(py_in::parse_sort_fields(spec, None)?)
             } else {
                 None
+            };
+
+            // Build temporal filter for edge-based traversal
+            // Priority: temporal=False > at > during > config+temporal_context
+            let temporal_filter = if temporal == Some(false) {
+                None
+            } else if let Some(at_str) = at {
+                let (date, _) = timeseries::parse_date_query(at_str)
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                self.inner
+                    .temporal_edge_configs
+                    .get(&ct)
+                    .map(|configs| traversal_methods::TemporalEdgeFilter::At(configs.clone(), date))
+            } else if let Some((start_str, end_str)) = &during {
+                let (start, _) = timeseries::parse_date_query(start_str)
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                let (end, _) = timeseries::parse_date_query(end_str)
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                self.inner.temporal_edge_configs.get(&ct).map(|configs| {
+                    traversal_methods::TemporalEdgeFilter::During(configs.clone(), start, end)
+                })
+            } else {
+                // Auto: use config + temporal_context
+                match &self.temporal_context {
+                    TemporalContext::All => None,
+                    TemporalContext::Today => {
+                        self.inner.temporal_edge_configs.get(&ct).map(|configs| {
+                            let today = chrono::Local::now().date_naive();
+                            traversal_methods::TemporalEdgeFilter::At(configs.clone(), today)
+                        })
+                    }
+                    TemporalContext::At(d) => {
+                        self.inner.temporal_edge_configs.get(&ct).map(|configs| {
+                            traversal_methods::TemporalEdgeFilter::At(configs.clone(), *d)
+                        })
+                    }
+                    TemporalContext::During(start, end) => {
+                        self.inner.temporal_edge_configs.get(&ct).map(|configs| {
+                            traversal_methods::TemporalEdgeFilter::During(
+                                configs.clone(),
+                                *start,
+                                *end,
+                            )
+                        })
+                    }
+                }
             };
 
             traversal_methods::make_traversal(
@@ -3356,6 +3930,8 @@ impl KnowledgeGraph {
                 sort_fields.as_ref(),
                 limit,
                 new_level,
+                temporal_filter.as_ref(),
+                target_types.as_deref(),
             )
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
@@ -3418,6 +3994,7 @@ impl KnowledgeGraph {
             reports: self.reports.clone(), // Copy over existing reports
             last_mutation_stats: None,
             embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
+            temporal_context: self.temporal_context.clone(),
         };
 
         // Store the report in the new graph
@@ -3488,6 +4065,7 @@ impl KnowledgeGraph {
             reports: self.reports.clone(),
             last_mutation_stats: None,
             embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
+            temporal_context: self.temporal_context.clone(),
         };
 
         // Record plan step
@@ -3583,6 +4161,7 @@ impl KnowledgeGraph {
             reports: self.reports.clone(),
             last_mutation_stats: None,
             embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
+            temporal_context: self.temporal_context.clone(),
         };
 
         // Store the report
@@ -3698,6 +4277,7 @@ impl KnowledgeGraph {
                         embedder: Python::attach(|py| {
                             self.embedder.as_ref().map(|m| m.clone_ref(py))
                         }),
+                        temporal_context: self.temporal_context.clone(),
                     };
 
                     // Store the calculation report
@@ -3836,6 +4416,7 @@ impl KnowledgeGraph {
                 reports: self.reports.clone(), // Copy existing reports
                 last_mutation_stats: None,
                 embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
+                temporal_context: self.temporal_context.clone(),
             };
 
             // Add the report
@@ -4101,7 +4682,11 @@ impl KnowledgeGraph {
                 pyo3::exceptions::PyKeyError::new_err(format!("Node type '{}' not found", nt))
             })?;
             let indices: Vec<_> = type_indices.iter().copied().take(count).collect();
-            let view = cypher::ResultView::from_nodes_with_graph(&self.inner, &indices);
+            let view = cypher::ResultView::from_nodes_with_graph(
+                &self.inner,
+                &indices,
+                &self.temporal_context,
+            );
             return Python::attach(|py| Py::new(py, view).map(|v| v.into_any()));
         }
 
@@ -4119,7 +4704,11 @@ impl KnowledgeGraph {
             .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Empty selection"))?;
         let all_indices = level.get_all_nodes();
         let indices: Vec<_> = all_indices.into_iter().take(count).collect();
-        let view = cypher::ResultView::from_nodes_with_graph(&self.inner, &indices);
+        let view = cypher::ResultView::from_nodes_with_graph(
+            &self.inner,
+            &indices,
+            &self.temporal_context,
+        );
         Python::attach(|py| Py::new(py, view).map(|v| v.into_any()))
     }
 

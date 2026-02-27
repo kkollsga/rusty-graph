@@ -10,7 +10,7 @@ use super::reporting::OperationReports;
 use super::schema::{CowSelection, PlanStep};
 use super::{
     centrality_results_to_dataframe, centrality_results_to_py_dict, community_results_to_py,
-    cypher, graph_algorithms, lookups, subgraph, KnowledgeGraph,
+    cypher, graph_algorithms, lookups, subgraph, KnowledgeGraph, TemporalContext,
 };
 
 #[pymethods]
@@ -1030,6 +1030,7 @@ impl KnowledgeGraph {
             reports: OperationReports::new(), // Fresh reports for new graph
             last_mutation_stats: None,
             embedder: None,
+            temporal_context: TemporalContext::default(),
         })
     }
 

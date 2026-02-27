@@ -3,15 +3,27 @@ use crate::datatypes::values::FilterCondition;
 use crate::datatypes::values::Value;
 use crate::graph::filtering_methods;
 use crate::graph::schema::{
-    CurrentSelection, DirGraph, NodeData, SelectionOperation, SpatialConfig,
+    CurrentSelection, DirGraph, NodeData, SelectionOperation, SpatialConfig, TemporalConfig,
 };
 use crate::graph::spatial;
+use crate::graph::temporal;
 use crate::graph::vector_search;
+use chrono::NaiveDate;
 use geo::geometry::Geometry;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 use std::collections::{HashMap, HashSet};
+
+/// Temporal filter for edge traversal.
+/// Carries multiple TemporalConfig entries to support shared connection type names
+/// across source types (e.g., HAS_LICENSEE used by Field, Licence, BusinessArrangement).
+pub enum TemporalEdgeFilter {
+    /// Point-in-time: valid_from <= date AND (valid_to IS NULL OR valid_to >= date)
+    At(Vec<TemporalConfig>, NaiveDate),
+    /// Range overlap: valid_from <= end AND (valid_to IS NULL OR valid_to >= start)
+    During(Vec<TemporalConfig>, NaiveDate, NaiveDate),
+}
 
 // ── Comparison-based traversal types ─────────────────────────────────────────
 
@@ -92,6 +104,19 @@ fn edge_matches_conditions(
     })
 }
 
+/// Check if edge properties pass a temporal filter.
+/// Tries multiple configs to find one matching the edge's field names.
+fn edge_passes_temporal(properties: &HashMap<String, Value>, filter: &TemporalEdgeFilter) -> bool {
+    match filter {
+        TemporalEdgeFilter::At(configs, date) => {
+            temporal::is_temporally_valid_multi(properties, configs, date)
+        }
+        TemporalEdgeFilter::During(configs, start, end) => {
+            temporal::overlaps_range_multi(properties, configs, start, end)
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn make_traversal(
     graph: &DirGraph,
@@ -104,6 +129,8 @@ pub fn make_traversal(
     sort_target: Option<&Vec<(String, bool)>>,
     max_nodes: Option<usize>,
     new_level: Option<bool>,
+    temporal_filter: Option<&TemporalEdgeFilter>,
+    target_type: Option<&[String]>,
 ) -> Result<(), String> {
     // Validate connection type exists
     if !graph.has_connection_type(&connection_type) {
@@ -143,14 +170,23 @@ pub fn make_traversal(
     };
 
     // FAST PATH: No filtering, sorting, or limits - optimized for common case
+    // target_type is kept in fast path since it's a cheap string comparison
     let use_fast_path = filter_target.is_none()
         && filter_connection.is_none()
         && sort_target.is_none()
         && max_nodes.is_none()
-        && create_new_level;
+        && create_new_level
+        && temporal_filter.is_none();
 
     if use_fast_path {
-        return make_traversal_fast(graph, selection, &connection_type, source_level_index, dir);
+        return make_traversal_fast(
+            graph,
+            selection,
+            &connection_type,
+            source_level_index,
+            dir,
+            target_type,
+        );
     }
 
     // SLOW PATH: Full processing with filtering/sorting/limits
@@ -165,6 +201,8 @@ pub fn make_traversal(
         sort_target,
         max_nodes,
         create_new_level,
+        temporal_filter,
+        target_type,
     )
 }
 
@@ -176,6 +214,7 @@ fn make_traversal_fast(
     connection_type: &str,
     source_level_index: usize,
     direction: Option<Direction>,
+    target_type: Option<&[String]>,
 ) -> Result<(), String> {
     // Get source nodes using iterator to avoid allocation
     let source_level = selection
@@ -197,19 +236,36 @@ fn make_traversal_fast(
     for &source_node in &source_nodes {
         let mut targets: HashSet<NodeIndex> = HashSet::new();
 
+        // Helper: check if a target node passes the type filter
+        let type_ok = |idx: petgraph::graph::NodeIndex| -> bool {
+            match target_type {
+                None => true,
+                Some(types) => {
+                    let nt = &graph.graph[idx].node_type;
+                    types.iter().any(|t| t == nt)
+                }
+            }
+        };
+
         // Process edges based on direction
         match direction {
             Some(Direction::Outgoing) => {
                 for edge in graph.graph.edges_directed(source_node, Direction::Outgoing) {
                     if edge.weight().connection_type == connection_type {
-                        targets.insert(edge.target());
+                        let t = edge.target();
+                        if type_ok(t) {
+                            targets.insert(t);
+                        }
                     }
                 }
             }
             Some(Direction::Incoming) => {
                 for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
                     if edge.weight().connection_type == connection_type {
-                        targets.insert(edge.source());
+                        let t = edge.source();
+                        if type_ok(t) {
+                            targets.insert(t);
+                        }
                     }
                 }
             }
@@ -217,12 +273,18 @@ fn make_traversal_fast(
                 // Both directions
                 for edge in graph.graph.edges_directed(source_node, Direction::Outgoing) {
                     if edge.weight().connection_type == connection_type {
-                        targets.insert(edge.target());
+                        let t = edge.target();
+                        if type_ok(t) {
+                            targets.insert(t);
+                        }
                     }
                 }
                 for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
                     if edge.weight().connection_type == connection_type {
-                        targets.insert(edge.source());
+                        let t = edge.source();
+                        if type_ok(t) {
+                            targets.insert(t);
+                        }
                     }
                 }
             }
@@ -274,6 +336,8 @@ fn make_traversal_full(
     sort_target: Option<&Vec<(String, bool)>>,
     max_nodes: Option<usize>,
     create_new_level: bool,
+    temporal_filter: Option<&TemporalEdgeFilter>,
+    target_type: Option<&[String]>,
 ) -> Result<(), String> {
     // Get source level
     let source_level = selection
@@ -348,6 +412,17 @@ fn make_traversal_full(
         // Collect all targets for this parent in one pass
         let mut targets = HashSet::new();
 
+        // Helper: check if a target node passes the type filter
+        let type_ok = |idx: NodeIndex| -> bool {
+            match target_type {
+                None => true,
+                Some(types) => {
+                    let nt = &graph.graph[idx].node_type;
+                    types.iter().any(|t| t == nt)
+                }
+            }
+        };
+
         // Process edges based on direction
         for &source_node in source_nodes {
             match direction {
@@ -360,7 +435,15 @@ fn make_traversal_full(
                                     continue;
                                 }
                             }
-                            targets.insert(edge.target());
+                            if let Some(tf) = &temporal_filter {
+                                if !edge_passes_temporal(&edge.weight().properties, tf) {
+                                    continue;
+                                }
+                            }
+                            let t = edge.target();
+                            if type_ok(t) {
+                                targets.insert(t);
+                            }
                         }
                     }
                 }
@@ -373,7 +456,15 @@ fn make_traversal_full(
                                     continue;
                                 }
                             }
-                            targets.insert(edge.source());
+                            if let Some(tf) = &temporal_filter {
+                                if !edge_passes_temporal(&edge.weight().properties, tf) {
+                                    continue;
+                                }
+                            }
+                            let t = edge.source();
+                            if type_ok(t) {
+                                targets.insert(t);
+                            }
                         }
                     }
                 }
@@ -387,7 +478,15 @@ fn make_traversal_full(
                                     continue;
                                 }
                             }
-                            targets.insert(edge.target());
+                            if let Some(tf) = &temporal_filter {
+                                if !edge_passes_temporal(&edge.weight().properties, tf) {
+                                    continue;
+                                }
+                            }
+                            let t = edge.target();
+                            if type_ok(t) {
+                                targets.insert(t);
+                            }
                         }
                     }
                     for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
@@ -398,7 +497,15 @@ fn make_traversal_full(
                                     continue;
                                 }
                             }
-                            targets.insert(edge.source());
+                            if let Some(tf) = &temporal_filter {
+                                if !edge_passes_temporal(&edge.weight().properties, tf) {
+                                    continue;
+                                }
+                            }
+                            let t = edge.source();
+                            if type_ok(t) {
+                                targets.insert(t);
+                            }
                         }
                     }
                 }

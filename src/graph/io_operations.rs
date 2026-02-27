@@ -19,10 +19,10 @@
 use crate::graph::reporting::OperationReports;
 use crate::graph::schema::{
     CompositeIndexKey, ConnectionTypeInfo, CowSelection, DirGraph, EmbeddingStore, IndexKey,
-    SaveMetadata, SchemaDefinition, SpatialConfig,
+    SaveMetadata, SchemaDefinition, SpatialConfig, TemporalConfig,
 };
 use crate::graph::timeseries::{NodeTimeseries, TimeseriesConfig};
-use crate::graph::KnowledgeGraph;
+use crate::graph::{KnowledgeGraph, TemporalContext};
 use bincode::Options;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -104,6 +104,12 @@ struct FileMetadata {
     /// Timeseries configuration per node type.
     #[serde(default)]
     timeseries_configs: HashMap<String, TimeseriesConfig>,
+    /// Temporal configuration per node type (valid_from/valid_to on nodes).
+    #[serde(default)]
+    temporal_node_configs: HashMap<String, TemporalConfig>,
+    /// Temporal configuration per connection type (valid_from/valid_to on edges).
+    #[serde(default)]
+    temporal_edge_configs: HashMap<String, Vec<TemporalConfig>>,
     /// Compressed size of the graph section in bytes.
     /// When present, bytes after graph_compressed_size contain the embedding section.
     #[serde(default)]
@@ -190,6 +196,8 @@ pub fn write_graph_to_file(graph: &DirGraph, path: &str) -> io::Result<()> {
         auto_vacuum_threshold: graph.auto_vacuum_threshold,
         spatial_configs: graph.spatial_configs.clone(),
         timeseries_configs: graph.timeseries_configs.clone(),
+        temporal_node_configs: graph.temporal_node_configs.clone(),
+        temporal_edge_configs: graph.temporal_edge_configs.clone(),
         timeseries_data_version: 2, // NaiveDate keys
         graph_compressed_size: if has_extra_sections {
             Some(graph_compressed.len() as u64)
@@ -345,6 +353,8 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
     dir_graph.auto_vacuum_threshold = metadata.auto_vacuum_threshold;
     dir_graph.spatial_configs = metadata.spatial_configs;
     dir_graph.timeseries_configs = metadata.timeseries_configs;
+    dir_graph.temporal_node_configs = metadata.temporal_node_configs;
+    dir_graph.temporal_edge_configs = metadata.temporal_edge_configs;
     dir_graph.save_metadata = SaveMetadata {
         format_version: 2,
         library_version: metadata.library_version,
@@ -671,5 +681,6 @@ fn finalize_load(mut dir_graph: DirGraph) -> KnowledgeGraph {
         reports: OperationReports::new(),
         last_mutation_stats: None,
         embedder: None,
+        temporal_context: TemporalContext::default(),
     }
 }

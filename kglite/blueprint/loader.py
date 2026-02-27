@@ -19,9 +19,14 @@ _TYPE_MAP = {
     "int": "integer",
     "float": "float",
     "date": "datetime",
+    "validFrom": "validFrom",
+    "validTo": "validTo",
     # "bool" is auto-detected by pandas, no explicit mapping needed
     # spatial types handled separately
 }
+
+# Temporal virtual types that need date conversion before passing to Rust
+_TEMPORAL_TYPES = {"validFrom", "validTo"}
 
 # Spatial virtual types that need geometry conversion
 _SPATIAL_TYPES = {"geometry", "location.lat", "location.lon"}
@@ -311,6 +316,15 @@ class BlueprintLoader:
             if has_geo:
                 df = self._convert_geometry(df, properties, node_type)
 
+            # Convert date/temporal columns from epoch ms to datetime
+            for col, typ in properties.items():
+                if col not in df.columns:
+                    continue
+                if typ in {"date"} | _TEMPORAL_TYPES:
+                    df[col] = pd.to_datetime(
+                        df[col], unit="ms", errors="coerce"
+                    )
+
             # Build column_types for non-spatial, non-bool types
             column_types = self._build_column_types(properties)
 
@@ -544,10 +558,13 @@ class BlueprintLoader:
                 for col, typ in prop_types.items():
                     if col not in df.columns:
                         continue
-                    if typ == "date":
+                    if typ in {"date"} | _TEMPORAL_TYPES:
                         df[col] = pd.to_datetime(
                             df[col], unit="ms", errors="coerce"
                         )
+
+                # Build column_types for Rust (includes validFrom/validTo pass-through)
+                column_types = self._build_column_types(prop_types)
 
                 # Coerce float ID columns to int
                 _coerce_id_columns(df, [source_fk, target_fk])
@@ -561,6 +578,7 @@ class BlueprintLoader:
                         target_type=target_type,
                         target_id_field=target_fk,
                         columns=prop_cols if prop_cols else None,
+                        column_types=column_types if column_types else None,
                     )
                 except Exception as e:
                     self._report_error(
@@ -587,6 +605,7 @@ class BlueprintLoader:
                         f"{node_type} -[{edge_type}]-> {target_type}",
                         detail,
                     )
+
 
     # ── Helpers ──────────────────────────────────────────────────────
 

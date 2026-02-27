@@ -26,6 +26,18 @@ pub struct SpatialConfig {
     pub shapes: HashMap<String, String>,
 }
 
+/// Temporal configuration for a node type or connection type.
+/// Declares which properties hold validity-period dates (valid_from, valid_to).
+/// When configured, temporal filtering is applied automatically in
+/// `select()` (for nodes) and `traverse()` (for connections).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct TemporalConfig {
+    /// Property name holding the start date, e.g. "fldLicenseeFrom" or "date_from"
+    pub valid_from: String,
+    /// Property name holding the end date, e.g. "fldLicenseeTo" or "date_to"
+    pub valid_to: String,
+}
+
 /// Lightweight snapshot of a node's data: id, title, type, and properties.
 /// Used as the return type for node queries and traversals.
 #[derive(Clone, Debug)]
@@ -499,6 +511,16 @@ pub struct DirGraph {
     /// Persisted as a separate section in v2 .kgl files.
     #[serde(skip)]
     pub(crate) timeseries_store: HashMap<usize, super::timeseries::NodeTimeseries>,
+    /// Temporal configuration per node type: type_name → TemporalConfig.
+    /// Nodes of this type are auto-filtered by validity period in select().
+    #[serde(default)]
+    pub(crate) temporal_node_configs: HashMap<String, TemporalConfig>,
+    /// Temporal configurations per connection type: connection_type → Vec<TemporalConfig>.
+    /// Multiple configs per type support shared connection type names across source types
+    /// (e.g., HAS_LICENSEE used by Field, Licence, BusinessArrangement with different field names).
+    /// Edges of this type are auto-filtered by validity period in traverse().
+    #[serde(default)]
+    pub(crate) temporal_edge_configs: HashMap<String, Vec<TemporalConfig>>,
     /// If true, Cypher mutations (CREATE, SET, DELETE, REMOVE, MERGE) are rejected
     /// and describe() omits mutation documentation.
     #[serde(skip)]
@@ -540,6 +562,8 @@ impl DirGraph {
             embeddings: HashMap::new(),
             timeseries_configs: HashMap::new(),
             timeseries_store: HashMap::new(),
+            temporal_node_configs: HashMap::new(),
+            temporal_edge_configs: HashMap::new(),
             read_only: false,
             version: 0,
         }
@@ -573,6 +597,8 @@ impl DirGraph {
             embeddings: HashMap::new(),
             timeseries_configs: HashMap::new(),
             timeseries_store: HashMap::new(),
+            temporal_node_configs: HashMap::new(),
+            temporal_edge_configs: HashMap::new(),
             read_only: false,
             version: 0,
         }

@@ -229,8 +229,35 @@ fn compute_type_capabilities(graph: &DirGraph) -> HashMap<String, TypeCapabiliti
 
 // ── Core functions ──────────────────────────────────────────────────────────
 
-/// Scan all edges once to compute per-connection-type stats.
+/// Compute per-connection-type stats.
+///
+/// Fast path: uses connection_type_metadata + cached edge counts (O(types)).
+/// Fallback: scans all edges (O(edges)) for pre-metadata graphs.
 pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStats> {
+    // Fast path: use metadata (already has source/target types) + cached counts
+    if !graph.connection_type_metadata.is_empty() {
+        let counts = graph.get_edge_type_counts();
+        let mut result: Vec<ConnectionTypeStats> = graph
+            .connection_type_metadata
+            .iter()
+            .map(|(conn_type, info)| {
+                let mut source_types: Vec<String> = info.source_types.iter().cloned().collect();
+                source_types.sort();
+                let mut target_types: Vec<String> = info.target_types.iter().cloned().collect();
+                target_types.sort();
+                ConnectionTypeStats {
+                    connection_type: conn_type.clone(),
+                    count: counts.get(conn_type).copied().unwrap_or(0),
+                    source_types,
+                    target_types,
+                }
+            })
+            .collect();
+        result.sort_by(|a, b| a.connection_type.cmp(&b.connection_type));
+        return result;
+    }
+
+    // Fallback: scan all edges (pre-metadata graphs)
     let mut stats: HashMap<String, (usize, HashSet<String>, HashSet<String>)> = HashMap::new();
 
     for edge_ref in graph.graph.edge_references() {
@@ -809,12 +836,29 @@ fn write_connection_map(xml: &mut String, graph: &DirGraph, conn_stats: &[Connec
             if sources.is_empty() || targets.is_empty() {
                 continue;
             }
+            let temporal_attr =
+                if let Some(configs) = graph.temporal_edge_configs.get(&ct.connection_type) {
+                    configs
+                        .iter()
+                        .map(|tc| {
+                            format!(
+                                " temporal_from=\"{}\" temporal_to=\"{}\"",
+                                xml_escape(&tc.valid_from),
+                                xml_escape(&tc.valid_to)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("")
+                } else {
+                    String::new()
+                };
             xml.push_str(&format!(
-                "    <conn type=\"{}\" count=\"{}\" from=\"{}\" to=\"{}\"/>\n",
+                "    <conn type=\"{}\" count=\"{}\" from=\"{}\" to=\"{}\"{}/>\n",
                 xml_escape(&ct.connection_type),
                 ct.count,
                 sources.join(","),
                 targets.join(","),
+                temporal_attr,
             ));
         }
         xml.push_str("  </connections>\n");
@@ -1764,6 +1808,13 @@ fn write_type_detail(
     }
     if let Some(title_alias) = graph.title_field_aliases.get(node_type) {
         alias_attrs.push_str(&format!(" title_alias=\"{}\"", xml_escape(title_alias)));
+    }
+    if let Some(tc) = graph.temporal_node_configs.get(node_type) {
+        alias_attrs.push_str(&format!(
+            " temporal_from=\"{}\" temporal_to=\"{}\"",
+            xml_escape(&tc.valid_from),
+            xml_escape(&tc.valid_to)
+        ));
     }
 
     xml.push_str(&format!(
