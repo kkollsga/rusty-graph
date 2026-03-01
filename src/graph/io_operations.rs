@@ -19,7 +19,8 @@
 use crate::graph::reporting::OperationReports;
 use crate::graph::schema::{
     CompositeIndexKey, ConnectionTypeInfo, CowSelection, DirGraph, EmbeddingStore, IndexKey,
-    SaveMetadata, SchemaDefinition, SpatialConfig, TemporalConfig,
+    SaveMetadata, SchemaDefinition, SerdeDeserializeGuard, SerdeSerializeGuard, SpatialConfig,
+    StringInterner, TemporalConfig,
 };
 use crate::graph::timeseries::{NodeTimeseries, TimeseriesConfig};
 use crate::graph::{KnowledgeGraph, TemporalContext};
@@ -147,6 +148,8 @@ pub fn write_graph_to_file(graph: &DirGraph, path: &str) -> io::Result<()> {
     // Compress graph to buffer first so we know its size (needed for embedding section)
     let mut graph_compressed = Vec::new();
     {
+        // Set thread-local interner so InternedKey serializes as string keys
+        let _guard = SerdeSerializeGuard::new(&graph.interner);
         let gz = GzEncoder::new(&mut graph_compressed, Compression::new(3));
         bincode_options()
             .serialize_into(gz, &graph.graph)
@@ -337,11 +340,12 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
         None => (&buf[graph_start..], None, None),
     };
 
-    // Decompress and deserialize graph
-    let graph = load_core_data(graph_bytes, core_version)?;
+    // Decompress and deserialize graph (interner is populated as a side effect)
+    let (graph, interner) = load_core_data(graph_bytes, core_version)?;
 
     // Reassemble DirGraph
     let mut dir_graph = DirGraph::from_graph(graph);
+    dir_graph.interner = interner;
     dir_graph.schema_definition = metadata.schema_definition;
     dir_graph.property_index_keys = metadata.property_index_keys;
     dir_graph.composite_index_keys = metadata.composite_index_keys;
@@ -400,14 +404,21 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
 
 /// Load v1 format: gzip-compressed bincode of full DirGraph.
 fn load_v1(buf: &[u8]) -> io::Result<DirGraph> {
-    let gz = GzDecoder::new(buf);
-    let dir_graph: DirGraph = bincode_options().deserialize_from(gz).map_err(|e| {
-        io::Error::other(format!(
-            "Failed to load v1 (gzip+bincode) file. This file may have been saved with an \
-                     incompatible version of kglite. Error: {}",
-            e
-        ))
-    })?;
+    // v1 serializes full DirGraph — interner field is serde(skip) so it
+    // starts empty, but InternedKey::deserialize populates the thread-local.
+    let mut interner = StringInterner::new();
+    let mut dir_graph: DirGraph = {
+        let _guard = SerdeDeserializeGuard::new(&mut interner);
+        let gz = GzDecoder::new(buf);
+        bincode_options().deserialize_from(gz).map_err(|e| {
+            io::Error::other(format!(
+                "Failed to load v1 (gzip+bincode) file. This file may have been saved with an \
+                         incompatible version of kglite. Error: {}",
+                e
+            ))
+        })?
+    };
+    dir_graph.interner = interner;
 
     // v1 files stored format_version in save_metadata
     let saved_version = dir_graph.save_metadata.format_version;
@@ -426,7 +437,7 @@ fn load_v1(buf: &[u8]) -> io::Result<DirGraph> {
 fn load_core_data(
     graph_bytes: &[u8],
     file_core_version: u32,
-) -> io::Result<crate::graph::schema::Graph> {
+) -> io::Result<(crate::graph::schema::Graph, StringInterner)> {
     if file_core_version > CURRENT_CORE_DATA_VERSION {
         return Err(io::Error::other(format!(
             "File uses core data version {} but this library only supports up to version {}. \
@@ -435,21 +446,25 @@ fn load_core_data(
         )));
     }
 
-    // Decompress
-    let gz = GzDecoder::new(graph_bytes);
-    let graph: crate::graph::schema::Graph =
+    // Set up interner for deserialization — InternedKey::deserialize registers
+    // each string key as a side effect, so the interner is fully populated after load.
+    let mut interner = StringInterner::new();
+    let graph: crate::graph::schema::Graph = {
+        let _guard = SerdeDeserializeGuard::new(&mut interner);
+        let gz = GzDecoder::new(graph_bytes);
         bincode_options().deserialize_from(gz).map_err(|e| {
             io::Error::other(format!(
                 "Failed to deserialize graph data (core version {}). Error: {}",
                 file_core_version, e
             ))
-        })?;
+        })?
+    };
 
     // Run migration chain: version N → N+1 → ... → CURRENT_CORE_DATA_VERSION
     if file_core_version < CURRENT_CORE_DATA_VERSION {
-        migrate_core_data(graph, file_core_version)
+        migrate_core_data(graph, file_core_version).map(|g| (g, interner))
     } else {
-        Ok(graph)
+        Ok((graph, interner))
     }
 }
 
@@ -672,6 +687,7 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
 /// Rebuild caches and wrap in KnowledgeGraph.
 fn finalize_load(mut dir_graph: DirGraph) -> KnowledgeGraph {
     dir_graph.rebuild_type_indices();
+    dir_graph.compact_properties();
     dir_graph.build_connection_types_cache();
     dir_graph.rebuild_indices_from_keys();
 

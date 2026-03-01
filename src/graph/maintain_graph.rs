@@ -5,10 +5,11 @@ use crate::graph::batch_operations::{
 };
 use crate::graph::lookups::{CombinedTypeLookup, TypeLookup};
 use crate::graph::reporting::{ConnectionOperationReport, NodeOperationReport};
-use crate::graph::schema::{CurrentSelection, DirGraph};
+use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, TypeSchema};
 use crate::graph::spatial;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 fn check_data_validity(df_data: &DataFrame, unique_id_field: &str) -> Result<(), String> {
     // Remove strict UniqueId type verification to allow nulls
@@ -113,6 +114,27 @@ pub fn add_nodes(
             }
         })
         .collect();
+
+    // Build TypeSchema from DataFrame columns for compact storage
+    let schema_keys: Vec<InternedKey> = property_columns
+        .iter()
+        .map(|(col_name, _)| graph.interner.get_or_intern(col_name))
+        .collect();
+    let type_schema = Arc::new(TypeSchema::from_keys(schema_keys));
+
+    // Store or extend the schema for this node type
+    let existing = graph.type_schemas.get(&node_type).cloned();
+    if let Some(existing_schema) = existing {
+        // Extend the existing schema with any new keys
+        let mut merged = (*existing_schema).clone();
+        for (_, key) in type_schema.iter() {
+            merged.add_key(key);
+        }
+        let merged_arc = Arc::new(merged);
+        graph.type_schemas.insert(node_type.clone(), merged_arc);
+    } else {
+        graph.type_schemas.insert(node_type.clone(), type_schema);
+    }
 
     let property_count = property_columns.len();
     let mut batch = BatchProcessor::new(df_data.row_count());
@@ -674,16 +696,16 @@ pub fn create_connections(
                 let mut props = HashMap::new();
                 // Walk the chain (which goes target → source), process each node
                 for &(_, node_idx) in &chain {
-                    if let Some(node) = graph.get_node(node_idx) {
+                    if let Some(node) = graph.graph.node_weight(node_idx) {
                         if let Some(requested_props) = prop_spec.get(&node.node_type) {
                             if requested_props.is_empty() {
                                 // Empty list = copy all properties
-                                for (k, v) in &node.properties {
-                                    props.insert(k.clone(), v.clone());
+                                for (k, v) in node.property_iter(&graph.interner) {
+                                    props.insert(k.to_string(), v.clone());
                                 }
                             } else {
                                 for prop_name in requested_props {
-                                    if let Some(val) = node.properties.get(prop_name) {
+                                    if let Some(val) = node.get_property(prop_name) {
                                         props.insert(prop_name.clone(), val.clone());
                                     }
                                 }
@@ -995,20 +1017,20 @@ pub fn add_properties(
                     None => continue,
                 };
 
-                let ancestor_node = match graph.get_node(ancestor_idx) {
+                let ancestor_node = match graph.graph.node_weight(ancestor_idx) {
                     Some(n) => n,
                     None => continue,
                 };
 
                 match spec {
                     PropertySpec::CopyAll => {
-                        for (k, v) in &ancestor_node.properties {
-                            props_to_set.insert(k.clone(), v.clone());
+                        for (k, v) in ancestor_node.property_iter(&graph.interner) {
+                            props_to_set.insert(k.to_string(), v.clone());
                         }
                     }
                     PropertySpec::CopyList(prop_names) => {
                         for prop_name in prop_names {
-                            if let Some(val) = ancestor_node.properties.get(prop_name) {
+                            if let Some(val) = ancestor_node.get_property(prop_name) {
                                 props_to_set.insert(prop_name.clone(), val.clone());
                             }
                         }
@@ -1024,7 +1046,7 @@ pub fn add_properties(
                                 ) {
                                     props_to_set.insert(target_name.clone(), val);
                                 }
-                            } else if let Some(val) = ancestor_node.properties.get(source_expr) {
+                            } else if let Some(val) = ancestor_node.get_property(source_expr) {
                                 props_to_set.insert(target_name.clone(), val.clone());
                             }
                         }
@@ -1042,10 +1064,15 @@ pub fn add_properties(
     let mut nodes_updated = 0;
     let mut properties_set = 0;
     for (node_idx, props) in updates {
-        if let Some(node) = graph.get_node_mut(node_idx) {
-            let count = props.len();
-            for (k, v) in props {
-                node.properties.insert(k, v);
+        // Pre-intern keys before getting mutable node reference (split borrow)
+        let interned_props: Vec<(InternedKey, Value)> = props
+            .into_iter()
+            .map(|(k, v)| (graph.interner.get_or_intern(&k), v))
+            .collect();
+        if let Some(node) = graph.graph.node_weight_mut(node_idx) {
+            let count = interned_props.len();
+            for (ik, v) in interned_props {
+                node.properties.insert(ik, v);
             }
             nodes_updated += 1;
             properties_set += count;
@@ -1161,12 +1188,12 @@ fn resolve_location(
 ) -> Option<(f64, f64)> {
     let sc = spatial_config?;
     if let Some((ref lat_f, ref lon_f)) = sc.location {
-        let lat = mg_value_to_f64(node.properties.get(lat_f)?)?;
-        let lon = mg_value_to_f64(node.properties.get(lon_f)?)?;
+        let lat = mg_value_to_f64(node.get_property(lat_f)?)?;
+        let lon = mg_value_to_f64(node.get_property(lon_f)?)?;
         return Some((lat, lon));
     }
     if let Some(ref geom_f) = sc.geometry {
-        if let Some(Value::String(wkt)) = node.properties.get(geom_f) {
+        if let Some(Value::String(wkt)) = node.get_property(geom_f) {
             if let Ok(geom) = spatial::parse_wkt(wkt) {
                 return spatial::geometry_centroid(&geom).ok();
             }
@@ -1181,7 +1208,7 @@ fn resolve_geometry(
 ) -> Option<geo::geometry::Geometry<f64>> {
     let sc = spatial_config?;
     let geom_field = sc.geometry.as_deref()?;
-    match node.properties.get(geom_field) {
+    match node.get_property(geom_field) {
         Some(Value::String(wkt)) => spatial::parse_wkt(wkt).ok(),
         _ => None,
     }
@@ -1233,7 +1260,7 @@ fn add_properties_aggregate(
                         {
                             if let Some(ancestor_node) = graph.get_node(ancestor_idx) {
                                 for prop_name in props {
-                                    if let Some(val) = ancestor_node.properties.get(prop_name) {
+                                    if let Some(val) = ancestor_node.get_property(prop_name) {
                                         updates
                                             .entry(target_idx)
                                             .or_default()
@@ -1251,12 +1278,12 @@ fn add_properties_aggregate(
                         if let Some(ancestor_idx) =
                             walk_to_ancestor(target_idx, target_level, source_level, parent_maps)
                         {
-                            if let Some(ancestor_node) = graph.get_node(ancestor_idx) {
-                                for (k, v) in &ancestor_node.properties {
+                            if let Some(ancestor_node) = graph.graph.node_weight(ancestor_idx) {
+                                for (k, v) in ancestor_node.property_iter(&graph.interner) {
                                     updates
                                         .entry(target_idx)
                                         .or_default()
-                                        .insert(k.clone(), v.clone());
+                                        .insert(k.to_string(), v.clone());
                                 }
                             }
                         }
@@ -1289,7 +1316,7 @@ fn add_properties_aggregate(
                                     .iter()
                                     .filter_map(|&idx| {
                                         graph.get_node(idx).and_then(|n| {
-                                            n.properties.get(prop).and_then(mg_value_to_f64)
+                                            n.get_property(prop).and_then(mg_value_to_f64)
                                         })
                                     })
                                     .collect()
@@ -1338,8 +1365,7 @@ fn add_properties_aggregate(
                                     parent_maps,
                                 ) {
                                     if let Some(ancestor_node) = graph.get_node(ancestor_idx) {
-                                        if let Some(val) = ancestor_node.properties.get(source_expr)
-                                        {
+                                        if let Some(val) = ancestor_node.get_property(source_expr) {
                                             updates
                                                 .entry(target_idx)
                                                 .or_default()
@@ -1359,10 +1385,15 @@ fn add_properties_aggregate(
     let mut properties_set = 0;
 
     for (node_idx, props) in updates {
-        if let Some(node) = graph.get_node_mut(node_idx) {
-            let count = props.len();
-            for (k, v) in props {
-                node.properties.insert(k, v);
+        // Pre-intern keys before getting mutable node reference (split borrow)
+        let interned_props: Vec<(InternedKey, Value)> = props
+            .into_iter()
+            .map(|(k, v)| (graph.interner.get_or_intern(&k), v))
+            .collect();
+        if let Some(node) = graph.graph.node_weight_mut(node_idx) {
+            let count = interned_props.len();
+            for (ik, v) in interned_props {
+                node.properties.insert(ik, v);
             }
             nodes_updated += 1;
             properties_set += count;

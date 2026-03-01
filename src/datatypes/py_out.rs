@@ -592,6 +592,7 @@ pub fn string_pairs_to_pydict(py: Python, pairs: &[(String, String)]) -> PyResul
 pub fn pattern_matches_to_pylist(
     py: Python,
     matches: &[crate::graph::pattern_matching::PatternMatch],
+    interner: &crate::graph::schema::StringInterner,
 ) -> PyResult<Py<PyAny>> {
     use crate::graph::pattern_matching::MatchBinding;
 
@@ -635,7 +636,7 @@ pub fn pattern_matches_to_pylist(
                     binding_dict.set_item("source_idx", source.index())?;
                     binding_dict.set_item("target_idx", target.index())?;
                     binding_dict.set_item("edge_index", edge_index.index())?;
-                    binding_dict.set_item("connection_type", connection_type)?;
+                    binding_dict.set_item("connection_type", interner.resolve(*connection_type))?;
                     let props_dict = PyDict::new(py);
                     for (key, value) in properties {
                         props_dict.set_item(key, value_to_py(py, value)?)?;
@@ -657,7 +658,7 @@ pub fn pattern_matches_to_pylist(
                     for (node_idx, conn_type) in path {
                         let step_dict = PyDict::new(py);
                         step_dict.set_item("node_idx", node_idx.index())?;
-                        step_dict.set_item("connection_type", conn_type)?;
+                        step_dict.set_item("connection_type", interner.resolve(*conn_type))?;
                         path_list.append(step_dict)?;
                     }
                     binding_dict.set_item("path", path_list)?;

@@ -11,7 +11,7 @@ use crate::graph::pattern_matching::{
     EdgeDirection, MatchBinding, Pattern, PatternElement, PatternExecutor, PatternMatch,
     PropertyMatcher,
 };
-use crate::graph::schema::{DirGraph, EdgeData, NodeData};
+use crate::graph::schema::{DirGraph, EdgeData, InternedKey, NodeData, TypeSchema};
 use crate::graph::spatial;
 use crate::graph::timeseries;
 use crate::graph::value_operations;
@@ -432,11 +432,12 @@ impl<'a> CypherExecutor<'a> {
                 })
             }
             Clause::FusedCountTypedEdge { edge_type, alias } => {
+                let interned_et = InternedKey::from_str(edge_type);
                 let count = self
                     .graph
                     .graph
                     .edge_weights()
-                    .filter(|e| e.connection_type == *edge_type)
+                    .filter(|e| e.connection_type == interned_et)
                     .count() as i64;
                 let mut projected = Bindings::with_capacity(1);
                 projected.insert(alias.clone(), Value::Int64(count));
@@ -674,7 +675,10 @@ impl<'a> CypherExecutor<'a> {
                                             .graph
                                             .graph
                                             .edge_weight(eb.edge_index)
-                                            .map(|ed| ed.connection_type.clone())
+                                            .map(|ed| {
+                                                ed.connection_type_str(&self.graph.interner)
+                                                    .to_string()
+                                            })
                                             .unwrap_or_default();
                                         row.path_bindings.insert(
                                             pa.variable.clone(),
@@ -893,13 +897,17 @@ impl<'a> CypherExecutor<'a> {
                     hops,
                     path,
                 } => {
+                    let string_path: Vec<(petgraph::graph::NodeIndex, String)> = path
+                        .iter()
+                        .map(|(idx, ik)| (*idx, self.graph.interner.resolve(*ik).to_string()))
+                        .collect();
                     row.path_bindings.insert(
                         var,
                         PathBinding {
                             source,
                             target,
                             hops,
-                            path,
+                            path: string_path,
                         },
                     );
                 }
@@ -937,13 +945,17 @@ impl<'a> CypherExecutor<'a> {
                     hops,
                     path,
                 } => {
+                    let string_path: Vec<(petgraph::graph::NodeIndex, String)> = path
+                        .iter()
+                        .map(|(idx, ik)| (*idx, self.graph.interner.resolve(*ik).to_string()))
+                        .collect();
                     row.path_bindings.insert(
                         var.clone(),
                         PathBinding {
                             source: *source,
                             target: *target,
                             hops: *hops,
-                            path: path.clone(),
+                            path: string_path,
                         },
                     );
                 }
@@ -1147,12 +1159,13 @@ impl<'a> CypherExecutor<'a> {
         };
 
         let conn_type = edge.connection_type.as_deref();
+        let interned_conn = conn_type.map(InternedKey::from_str);
         let mut count: i64 = 0;
 
         for edge_ref in self.graph.graph.edges_directed(bound_idx, traverse_dir) {
             // Check connection type
-            if let Some(ct) = conn_type {
-                if edge_ref.weight().connection_type != ct {
+            if let Some(ik) = interned_conn {
+                if edge_ref.weight().connection_type != ik {
                     continue;
                 }
             }
@@ -1214,21 +1227,21 @@ impl<'a> CypherExecutor<'a> {
             EdgeDirection::Incoming => Direction::Incoming,
             EdgeDirection::Both => return 0, // unsupported in fused path
         };
-        let conn_type1 = edge1.connection_type.as_deref();
+        let interned_conn1 = edge1.connection_type.as_deref().map(InternedKey::from_str);
 
         let dir2 = match edge2.direction {
             EdgeDirection::Outgoing => Direction::Outgoing,
             EdgeDirection::Incoming => Direction::Incoming,
             EdgeDirection::Both => return 0,
         };
-        let conn_type2 = edge2.connection_type.as_deref();
+        let interned_conn2 = edge2.connection_type.as_deref().map(InternedKey::from_str);
 
         let mut total: i64 = 0;
 
         // First hop: first_idx --e1--> middle nodes
         for e1_ref in self.graph.graph.edges_directed(first_idx, dir1) {
-            if let Some(ct) = conn_type1 {
-                if e1_ref.weight().connection_type != ct {
+            if let Some(ik) = interned_conn1 {
+                if e1_ref.weight().connection_type != ik {
                     continue;
                 }
             }
@@ -1250,8 +1263,8 @@ impl<'a> CypherExecutor<'a> {
 
             // Second hop: mid_idx --e2--> last nodes (just count)
             for e2_ref in self.graph.graph.edges_directed(mid_idx, dir2) {
-                if let Some(ct) = conn_type2 {
-                    if e2_ref.weight().connection_type != ct {
+                if let Some(ik) = interned_conn2 {
+                    if e2_ref.weight().connection_type != ik {
                         continue;
                     }
                 }
@@ -1631,16 +1644,14 @@ impl<'a> CypherExecutor<'a> {
                     None => return false,
                 };
                 let lat = match node
-                    .properties
-                    .get(&spec.lat_prop)
+                    .get_property(&spec.lat_prop)
                     .and_then(value_operations::value_to_f64)
                 {
                     Some(v) => v,
                     None => return false,
                 };
                 let lon = match node
-                    .properties
-                    .get(&spec.lon_prop)
+                    .get_property(&spec.lon_prop)
                     .and_then(value_operations::value_to_f64)
                 {
                     Some(v) => v,
@@ -2460,7 +2471,11 @@ impl<'a> CypherExecutor<'a> {
                 // Edge variable — return connection_type as representative value
                 if let Some(edge) = row.edge_bindings.get(name) {
                     if let Some(edge_data) = self.graph.graph.edge_weight(edge.edge_index) {
-                        return Ok(Value::String(edge_data.connection_type.clone()));
+                        return Ok(Value::String(
+                            edge_data
+                                .connection_type_str(&self.graph.interner)
+                                .to_string(),
+                        ));
                     }
                 }
                 // Path variable — return hops count
@@ -2997,7 +3012,7 @@ impl<'a> CypherExecutor<'a> {
 
         // Primary geometry + bounding box
         let geometry = config.geometry.as_ref().and_then(|geom_f| {
-            if let Some(Value::String(wkt)) = node.properties.get(geom_f) {
+            if let Some(Value::String(wkt)) = node.get_property(geom_f) {
                 if let Ok(geom) = self.parse_wkt_cached(wkt) {
                     let bbox = geom.bounding_rect();
                     return Some((geom, bbox));
@@ -3008,15 +3023,15 @@ impl<'a> CypherExecutor<'a> {
 
         // Primary location
         let location = config.location.as_ref().and_then(|(lat_f, lon_f)| {
-            let lat = value_operations::value_to_f64(node.properties.get(lat_f)?)?;
-            let lon = value_operations::value_to_f64(node.properties.get(lon_f)?)?;
+            let lat = value_operations::value_to_f64(node.get_property(lat_f)?)?;
+            let lon = value_operations::value_to_f64(node.get_property(lon_f)?)?;
             Some((lat, lon))
         });
 
         // Named shapes
         let mut shapes = HashMap::new();
         for (name, field) in &config.shapes {
-            if let Some(Value::String(wkt)) = node.properties.get(field) {
+            if let Some(Value::String(wkt)) = node.get_property(field) {
                 if let Ok(geom) = self.parse_wkt_cached(wkt) {
                     let bbox = geom.bounding_rect();
                     shapes.insert(name.clone(), (geom, bbox));
@@ -3028,11 +3043,9 @@ impl<'a> CypherExecutor<'a> {
         let mut points = HashMap::new();
         for (name, (lat_f, lon_f)) in &config.points {
             if let (Some(lat), Some(lon)) = (
-                node.properties
-                    .get(lat_f)
+                node.get_property(lat_f)
                     .and_then(value_operations::value_to_f64),
-                node.properties
-                    .get(lon_f)
+                node.get_property(lon_f)
                     .and_then(value_operations::value_to_f64),
             ) {
                 points.insert(name.clone(), (lat, lon));
@@ -3328,7 +3341,11 @@ impl<'a> CypherExecutor<'a> {
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(edge) = row.edge_bindings.get(var) {
                         if let Some(edge_data) = self.graph.graph.edge_weight(edge.edge_index) {
-                            return Ok(Value::String(edge_data.connection_type.clone()));
+                            return Ok(Value::String(
+                                edge_data
+                                    .connection_type_str(&self.graph.interner)
+                                    .to_string(),
+                            ));
                         }
                     }
                 }
@@ -3366,7 +3383,7 @@ impl<'a> CypherExecutor<'a> {
                     if let Some(&idx) = row.node_bindings.get(var) {
                         if let Some(node) = self.graph.graph.node_weight(idx) {
                             let mut keys: Vec<&str> = vec!["id", "title", "type"];
-                            keys.extend(node.properties.keys().map(|k| k.as_str()));
+                            keys.extend(node.property_keys(&self.graph.interner));
                             keys.sort();
                             return Ok(Value::String(format!(
                                 "[{}]",
@@ -3380,7 +3397,7 @@ impl<'a> CypherExecutor<'a> {
                     if let Some(edge) = row.edge_bindings.get(var) {
                         if let Some(edge_data) = self.graph.graph.edge_weight(edge.edge_index) {
                             let mut keys: Vec<&str> = vec!["type"];
-                            keys.extend(edge_data.properties.keys().map(|k| k.as_str()));
+                            keys.extend(edge_data.property_keys(&self.graph.interner));
                             keys.sort();
                             return Ok(Value::String(format!(
                                 "[{}]",
@@ -5712,7 +5729,7 @@ impl<'a> CypherExecutor<'a> {
                     let mut vals = Vec::with_capacity(prop_names.len());
                     let mut all_present = true;
                     for prop in prop_names {
-                        if let Some(val) = node.properties.get(prop) {
+                        if let Some(val) = node.get_property(prop) {
                             if let Some(f) = value_to_f64(val) {
                                 vals.push(f);
                             } else {
@@ -6216,7 +6233,11 @@ fn execute_create(
                     graph.register_connection_type(edge_pat.connection_type.clone());
                     stats.relationships_created += 1;
 
-                    let edge_data = EdgeData::new(edge_pat.connection_type.clone(), edge_props);
+                    let edge_data = EdgeData::new(
+                        edge_pat.connection_type.clone(),
+                        edge_props,
+                        &mut graph.interner,
+                    );
                     let edge_index = graph
                         .graph
                         .add_edge(actual_source, actual_target, edge_data);
@@ -6284,7 +6305,32 @@ fn create_node(
 
     let label = node_pat.label.clone().unwrap_or_else(|| "Node".to_string());
 
-    let node_data = NodeData::new(id, title, label.clone(), properties);
+    // Pre-intern all property keys (borrows only graph.interner)
+    let interned_keys: Vec<InternedKey> = properties
+        .keys()
+        .map(|k| graph.interner.get_or_intern(k))
+        .collect();
+
+    // Build or extend the TypeSchema for this label (borrows only graph.type_schemas)
+    let schema_entry = graph
+        .type_schemas
+        .entry(label.clone())
+        .or_insert_with(|| Arc::new(TypeSchema::new()));
+    let schema_mut = Arc::make_mut(schema_entry);
+    for &ik in &interned_keys {
+        schema_mut.add_key(ik);
+    }
+    let schema = Arc::clone(graph.type_schemas.get(&label).unwrap());
+
+    // Create compact node using the shared TypeSchema
+    let node_data = NodeData::new_compact(
+        id,
+        title,
+        label.clone(),
+        properties,
+        &mut graph.interner,
+        &schema,
+    );
 
     let node_idx = graph.graph.add_node(node_data);
 
@@ -6320,9 +6366,8 @@ fn ensure_type_metadata(
     // Read sample node properties for type inference
     let sample_props: HashMap<String, String> = match graph.graph.node_weight(sample_node_idx) {
         Some(node) => node
-            .properties
-            .iter()
-            .map(|(k, v)| (k.clone(), value_type_name(v)))
+            .property_iter(&graph.interner)
+            .map(|(k, v)| (k.to_string(), value_type_name(v)))
             .collect(),
         None => return,
     };
@@ -6419,8 +6464,8 @@ fn execute_set(
                     // Clone value before it may be consumed by the mutation
                     let value_for_index = value.clone();
 
-                    // Apply the mutation (borrows graph mutably)
-                    if let Some(node) = graph.get_node_mut(*node_idx) {
+                    // Apply the mutation (split borrows: graph.graph + graph.interner)
+                    if let Some(node) = graph.graph.node_weight_mut(*node_idx) {
                         match property.as_str() {
                             "title" => {
                                 node.title = value;
@@ -6429,13 +6474,23 @@ fn execute_set(
                                 // "name" maps to title in Cypher reads;
                                 // update both title and properties for consistency
                                 node.title = value.clone();
-                                node.properties.insert("name".to_string(), value);
+                                node.set_property("name", value, &mut graph.interner);
                             }
                             _ => {
-                                node.properties.insert(property.clone(), value);
+                                node.set_property(property, value, &mut graph.interner);
                             }
                         }
                         stats.properties_set += 1;
+                    }
+
+                    // Ensure the DirGraph-level TypeSchema includes this property key
+                    if property != "title" {
+                        let ik = InternedKey::from_str(property);
+                        if let Some(schema_arc) = graph.type_schemas.get_mut(&node_type_str) {
+                            if schema_arc.slot(ik).is_none() {
+                                Arc::make_mut(schema_arc).add_key(ik);
+                            }
+                        }
                     }
 
                     // Update property/composite indices (no active borrows)
@@ -6660,7 +6715,7 @@ fn execute_remove(
 
                     // Remove property (mutable borrow, returns old value)
                     let removed_value = if let Some(node) = graph.get_node_mut(*node_idx) {
-                        node.properties.remove(property)
+                        node.remove_property(property)
                     } else {
                         None
                     };
@@ -6929,12 +6984,12 @@ fn try_match_merge_pattern(
                 };
 
                 // Search for existing edge matching type
+                let interned_ct = InternedKey::from_str(&edge_pat.connection_type);
                 let matching_edge = graph
                     .graph
                     .edges_directed(actual_src, petgraph::Direction::Outgoing)
                     .find(|e| {
-                        e.target() == actual_tgt
-                            && e.weight().connection_type == edge_pat.connection_type
+                        e.target() == actual_tgt && e.weight().connection_type == interned_ct
                     });
 
                 if let Some(edge_ref) = matching_edge {
@@ -7220,7 +7275,7 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
         "type" | "node_type" | "label" => Value::String(node.node_type.clone()),
         _ => {
             // Check real property first (most common case)
-            if let Some(val) = node.properties.get(resolved) {
+            if let Some(val) = node.get_property(resolved) {
                 return val.clone();
             }
             // Fall through to spatial virtual properties only if not found
@@ -7229,10 +7284,10 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
                 if resolved == "location" {
                     if let Some((lat_f, lon_f)) = &config.location {
                         let lat = value_operations::value_to_f64(
-                            node.properties.get(lat_f).unwrap_or(&Value::Null),
+                            node.get_property(lat_f).unwrap_or(&Value::Null),
                         );
                         let lon = value_operations::value_to_f64(
-                            node.properties.get(lon_f).unwrap_or(&Value::Null),
+                            node.get_property(lon_f).unwrap_or(&Value::Null),
                         );
                         if let (Some(lat), Some(lon)) = (lat, lon) {
                             return Value::Point { lat, lon };
@@ -7242,7 +7297,7 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
                 // "geometry" → return WKT string from geometry config
                 if resolved == "geometry" {
                     if let Some(geom_f) = &config.geometry {
-                        if let Some(val) = node.properties.get(geom_f) {
+                        if let Some(val) = node.get_property(geom_f) {
                             return val.clone();
                         }
                     }
@@ -7250,10 +7305,10 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
                 // Named points → synthesize Point
                 if let Some((lat_f, lon_f)) = config.points.get(resolved) {
                     let lat = value_operations::value_to_f64(
-                        node.properties.get(lat_f).unwrap_or(&Value::Null),
+                        node.get_property(lat_f).unwrap_or(&Value::Null),
                     );
                     let lon = value_operations::value_to_f64(
-                        node.properties.get(lon_f).unwrap_or(&Value::Null),
+                        node.get_property(lon_f).unwrap_or(&Value::Null),
                     );
                     if let (Some(lat), Some(lon)) = (lat, lon) {
                         return Value::Point { lat, lon };
@@ -7261,7 +7316,7 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
                 }
                 // Named shapes → return WKT string
                 if let Some(shape_f) = config.shapes.get(resolved) {
-                    if let Some(val) = node.properties.get(shape_f) {
+                    if let Some(val) = node.get_property(shape_f) {
                         return val.clone();
                     }
                 }
@@ -7275,10 +7330,11 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
 fn resolve_edge_property(graph: &DirGraph, edge: &EdgeBinding, property: &str) -> Value {
     if let Some(edge_data) = graph.graph.edge_weight(edge.edge_index) {
         match property {
-            "type" | "connection_type" => Value::String(edge_data.connection_type.clone()),
+            "type" | "connection_type" => {
+                Value::String(edge_data.connection_type_str(&graph.interner).to_string())
+            }
             _ => edge_data
-                .properties
-                .get(property)
+                .get_property(property)
                 .cloned()
                 .unwrap_or(Value::Null),
         }
@@ -8097,6 +8153,7 @@ mod tests {
                 ("name".to_string(), Value::String("Alice".to_string())),
                 ("age".to_string(), Value::Int64(30)),
             ]),
+            &mut graph.interner,
         );
         let bob = NodeData::new(
             Value::UniqueId(2),
@@ -8106,6 +8163,7 @@ mod tests {
                 ("name".to_string(), Value::String("Bob".to_string())),
                 ("age".to_string(), Value::Int64(25)),
             ]),
+            &mut graph.interner,
         );
         let alice_idx = graph.graph.add_node(alice);
         let bob_idx = graph.graph.add_node(bob);
@@ -8120,7 +8178,7 @@ mod tests {
             .or_default()
             .push(bob_idx);
 
-        let edge = EdgeData::new("KNOWS".to_string(), HashMap::new());
+        let edge = EdgeData::new("KNOWS".to_string(), HashMap::new(), &mut graph.interner);
         graph.graph.add_edge(alice_idx, bob_idx, edge);
         graph.register_connection_type("KNOWS".to_string());
 
@@ -8389,6 +8447,7 @@ mod tests {
             Value::String("Solo".to_string()),
             "Person".to_string(),
             HashMap::from([("name".to_string(), Value::String("Solo".to_string()))]),
+            &mut graph.interner,
         );
         let idx = graph.graph.add_node(node);
         graph
@@ -8662,7 +8721,7 @@ mod tests {
         let mut graph = build_test_graph(); // Alice -> Bob via KNOWS
                                             // Add self-loop: Alice -> Alice
         let alice_idx = graph.type_indices["Person"][0];
-        let self_edge = EdgeData::new("KNOWS".to_string(), HashMap::new());
+        let self_edge = EdgeData::new("KNOWS".to_string(), HashMap::new(), &mut graph.interner);
         graph.graph.add_edge(alice_idx, alice_idx, self_edge);
 
         // MATCH (p)-[:KNOWS]->(p) should only return the self-loop (Alice->Alice)

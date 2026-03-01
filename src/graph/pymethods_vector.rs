@@ -55,7 +55,7 @@ impl KnowledgeGraph {
                         indices.iter().any(|&idx| {
                             g.graph
                                 .node_weight(idx)
-                                .map(|n| n.properties.contains_key(text_column))
+                                .map(|n| n.has_property(text_column))
                                 .unwrap_or(false)
                         })
                     })
@@ -200,7 +200,7 @@ impl KnowledgeGraph {
                         let _ = dict.set_item("title", py_out::value_to_py(py, &node.title).ok());
                         let _ = dict.set_item("type", &node.node_type);
                         let _ = dict.set_item("score", r.score);
-                        for (k, v) in &node.properties {
+                        for (k, v) in node.property_iter(&self.inner.interner) {
                             let _ = dict.set_item(k, py_out::value_to_py(py, v).ok());
                         }
                         dict.into()
@@ -221,7 +221,7 @@ impl KnowledgeGraph {
                 dict.set_item("title", py_out::value_to_py(py, &node.title)?)?;
                 dict.set_item("type", &node.node_type)?;
                 dict.set_item("score", r.score)?;
-                for (k, v) in &node.properties {
+                for (k, v) in node.property_iter(&self.inner.interner) {
                     dict.set_item(k, py_out::value_to_py(py, v)?)?;
                 }
                 py_list.append(dict)?;
@@ -554,7 +554,7 @@ impl KnowledgeGraph {
 
         for &node_idx in &node_indices {
             if let Some(node) = self.inner.graph.node_weight(node_idx) {
-                match node.properties.get(text_column) {
+                match node.get_property(text_column) {
                     Some(crate::datatypes::values::Value::String(s)) if !s.is_empty() => {
                         // Skip nodes that already have an embedding
                         if existing_store

@@ -72,8 +72,8 @@ pub fn to_graphml(
             ));
 
             // Serialize properties as JSON
-            if !node.properties.is_empty() {
-                let props_json = properties_to_json(&node.properties);
+            if node.property_count() > 0 {
+                let props_json = properties_to_json(node.property_iter(&graph.interner));
                 xml.push_str(&format!(
                     "      <data key=\"node_properties\">{}</data>\n",
                     escape_xml(&props_json)
@@ -100,11 +100,12 @@ pub fn to_graphml(
                 ));
                 xml.push_str(&format!(
                     "      <data key=\"edge_type\">{}</data>\n",
-                    escape_xml(&edge.weight().connection_type)
+                    escape_xml(edge.weight().connection_type_str(&graph.interner))
                 ));
 
-                if !edge.weight().properties.is_empty() {
-                    let props_json = properties_to_json(&edge.weight().properties);
+                if edge.weight().property_count() > 0 {
+                    let props_json =
+                        properties_to_json(edge.weight().property_iter(&graph.interner));
                     xml.push_str(&format!(
                         "      <data key=\"edge_properties\">{}</data>\n",
                         escape_xml(&props_json)
@@ -161,7 +162,7 @@ pub fn to_d3_json(
             obj.push_str(&format!("\"title\":{}", json_value(&node.title)));
 
             // Add select properties (not all to keep output clean)
-            for (key, value) in &node.properties {
+            for (key, value) in node.property_iter(&graph.interner) {
                 if key != "id" && key != "title" && key != "type" {
                     obj.push_str(&format!(",{}:{}", json_string(key), json_value(value)));
                 }
@@ -188,11 +189,11 @@ pub fn to_d3_json(
                     link.push_str(&format!("\"target\":{},", target_pos));
                     link.push_str(&format!(
                         "\"type\":{}",
-                        json_string(&edge.weight().connection_type)
+                        json_string(edge.weight().connection_type_str(&graph.interner))
                     ));
 
                     // Add edge properties
-                    for (key, value) in &edge.weight().properties {
+                    for (key, value) in edge.weight().property_iter(&graph.interner) {
                         link.push_str(&format!(",{}:{}", json_string(key), json_value(value)));
                     }
 
@@ -300,7 +301,7 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
                 xml.push_str("        <attvalues>\n");
                 xml.push_str(&format!(
                     "          <attvalue for=\"0\" value=\"{}\"/>\n",
-                    escape_xml(&edge.weight().connection_type)
+                    escape_xml(edge.weight().connection_type_str(&graph.interner))
                 ));
                 xml.push_str("        </attvalues>\n");
                 xml.push_str("      </edge>\n");
@@ -361,7 +362,7 @@ pub fn to_csv(
                     "{},{},{}\n",
                     source_idx.index(),
                     target_idx.index(),
-                    escape_csv(&edge.weight().connection_type)
+                    escape_csv(edge.weight().connection_type_str(&graph.interner))
                 ));
             }
         }
@@ -434,12 +435,12 @@ pub fn to_csv_dir(
             if node_set.contains(&target_idx) {
                 let w = edge.weight();
                 edges_by_type
-                    .entry(w.connection_type.clone())
+                    .entry(w.connection_type_str(&graph.interner).to_string())
                     .or_default()
                     .push(EdgeInfo {
                         source_idx,
                         target_idx,
-                        properties: w.properties.clone(),
+                        properties: w.properties_cloned(&graph.interner),
                     });
             }
         }
@@ -482,8 +483,8 @@ pub fn to_csv_dir(
         let mut prop_names: BTreeSet<String> = BTreeSet::new();
         for &idx in indices {
             if let Some(node) = graph.graph.node_weight(idx) {
-                for key in node.properties.keys() {
-                    prop_names.insert(key.clone());
+                for key in node.property_keys(&graph.interner) {
+                    prop_names.insert(key.to_string());
                 }
             }
         }
@@ -494,7 +495,7 @@ pub fn to_csv_dir(
         for col in &prop_cols {
             for &idx in indices {
                 if let Some(node) = graph.graph.node_weight(idx) {
-                    if let Some(val) = node.properties.get(col) {
+                    if let Some(val) = node.get_property(col) {
                         if !matches!(val, Value::Null) {
                             prop_types.insert(col.clone(), value_type_name(val));
                             break;
@@ -522,7 +523,7 @@ pub fn to_csv_dir(
                 csv.push_str(&escape_csv(&value_to_string(&node.title)));
                 for col in &prop_cols {
                     csv.push(',');
-                    if let Some(val) = node.properties.get(col) {
+                    if let Some(val) = node.get_property(col) {
                         csv.push_str(&escape_csv(&value_to_string(val)));
                     }
                 }
@@ -894,9 +895,8 @@ fn json_value(value: &Value) -> String {
     }
 }
 
-fn properties_to_json(properties: &HashMap<String, Value>) -> String {
+fn properties_to_json<'a>(properties: impl Iterator<Item = (&'a str, &'a Value)>) -> String {
     let pairs: Vec<String> = properties
-        .iter()
         .map(|(k, v)| format!("{}:{}", json_string(k), json_value(v)))
         .collect();
     format!("{{{}}}", pairs.join(","))

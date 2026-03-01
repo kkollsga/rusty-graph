@@ -273,7 +273,7 @@ pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStat
     for edge_ref in graph.graph.edge_references() {
         let edge_data = edge_ref.weight();
         let entry = stats
-            .entry(edge_data.connection_type.clone())
+            .entry(edge_data.connection_type_str(&graph.interner).to_string())
             .or_insert_with(|| (0, HashSet::new(), HashSet::new()));
         entry.0 += 1;
 
@@ -375,7 +375,7 @@ fn sample_unique_values(
                 break;
             }
             if let Some(node) = graph.get_node(idx) {
-                if let Some(val) = node.properties.get(property) {
+                if let Some(val) = node.get_property(property) {
                     if !is_null_value(val) {
                         let s = match val {
                             Value::String(s) => s.clone(),
@@ -587,8 +587,8 @@ pub fn compute_property_stats(
     let mut all_props: HashSet<String> = HashSet::new();
     for &idx in node_indices {
         if let Some(node) = graph.get_node(idx) {
-            for key in node.properties.keys() {
-                all_props.insert(key.clone());
+            for key in node.property_keys(&graph.interner) {
+                all_props.insert(key.to_string());
             }
         }
     }
@@ -626,7 +626,7 @@ pub fn compute_property_stats(
                 let val = match prop_name.as_str() {
                     "id" => Some(&node.id),
                     "title" => Some(&node.title),
-                    _ => node.properties.get(prop_name),
+                    _ => node.get_property(prop_name),
                 };
 
                 if let Some(v) = val {
@@ -687,7 +687,10 @@ pub fn compute_neighbors_schema(
         for edge_ref in graph.graph.edges_directed(node_idx, Direction::Outgoing) {
             if let Some(target_node) = graph.get_node(edge_ref.target()) {
                 let key = (
-                    edge_ref.weight().connection_type.clone(),
+                    edge_ref
+                        .weight()
+                        .connection_type_str(&graph.interner)
+                        .to_string(),
                     target_node.node_type.clone(),
                 );
                 *outgoing.entry(key).or_insert(0) += 1;
@@ -696,7 +699,10 @@ pub fn compute_neighbors_schema(
         for edge_ref in graph.graph.edges_directed(node_idx, Direction::Incoming) {
             if let Some(source_node) = graph.get_node(edge_ref.source()) {
                 let key = (
-                    edge_ref.weight().connection_type.clone(),
+                    edge_ref
+                        .weight()
+                        .connection_type_str(&graph.interner)
+                        .to_string(),
                     source_node.node_type.clone(),
                 );
                 *incoming.entry(key).or_insert(0) += 1;
@@ -887,10 +893,10 @@ fn compute_edge_property_stats(
     // First pass: discover property names
     for edge_ref in graph.graph.edge_references() {
         let ed = edge_ref.weight();
-        if ed.connection_type == connection_type {
+        if ed.connection_type_str(&graph.interner) == connection_type {
             total_edges += 1;
-            for key in ed.properties.keys() {
-                all_props.insert(key.clone());
+            for key in ed.property_keys(&graph.interner) {
+                all_props.insert(key.to_string());
             }
         }
     }
@@ -910,10 +916,10 @@ fn compute_edge_property_stats(
 
         for edge_ref in graph.graph.edge_references() {
             let ed = edge_ref.weight();
-            if ed.connection_type != connection_type {
+            if ed.connection_type_str(&graph.interner) != connection_type {
                 continue;
             }
-            if let Some(v) = ed.properties.get(prop_name) {
+            if let Some(v) = ed.get_property(prop_name) {
                 if !is_null_value(v) {
                     non_null += 1;
                     value_set.insert(v.clone());
@@ -959,9 +965,9 @@ fn write_connections_overview(xml: &mut String, graph: &DirGraph) {
             let mut props: HashSet<String> = HashSet::new();
             for edge_ref in graph.graph.edge_references() {
                 let ed = edge_ref.weight();
-                if ed.connection_type == ct.connection_type {
-                    for key in ed.properties.keys() {
-                        props.insert(key.clone());
+                if ed.connection_type_str(&graph.interner) == ct.connection_type {
+                    for key in ed.property_keys(&graph.interner) {
+                        props.insert(key.to_string());
                     }
                 }
             }
@@ -1029,7 +1035,7 @@ fn write_connections_detail(
         let mut pair_counts: HashMap<(String, String), usize> = HashMap::new();
         for edge_ref in graph.graph.edge_references() {
             let ed = edge_ref.weight();
-            if ed.connection_type != *topic {
+            if ed.connection_type_str(&graph.interner) != *topic {
                 continue;
             }
             let src_type = graph
@@ -1089,7 +1095,7 @@ fn write_connections_detail(
         let mut sample_count = 0;
         for edge_ref in graph.graph.edge_references() {
             let ed = edge_ref.weight();
-            if ed.connection_type != *topic {
+            if ed.connection_type_str(&graph.interner) != *topic {
                 continue;
             }
             if sample_count >= 2 {
@@ -1111,13 +1117,13 @@ fn write_connections_detail(
             );
             // Add up to 4 edge properties
             let mut prop_count = 0;
-            let mut keys: Vec<&String> = ed.properties.keys().collect();
+            let mut keys: Vec<&str> = ed.property_keys(&graph.interner).collect();
             keys.sort();
             for key in keys {
                 if prop_count >= 4 {
                     break;
                 }
-                if let Some(v) = ed.properties.get(key) {
+                if let Some(v) = ed.get_property(key) {
                     if !is_null_value(v) {
                         attrs.push_str(&format!(
                             " {}=\"{}\"",
@@ -2010,8 +2016,9 @@ fn write_type_detail(
                 );
                 // Include up to 4 non-null custom properties
                 let mut prop_count = 0;
-                let mut sorted_props: Vec<(&String, &Value)> = node.properties.iter().collect();
-                sorted_props.sort_by_key(|(k, _)| k.as_str());
+                let mut sorted_props: Vec<(&str, &Value)> =
+                    node.property_iter(&graph.interner).collect();
+                sorted_props.sort_by_key(|(k, _)| *k);
                 for (k, v) in sorted_props {
                     if !is_null_value(v) && prop_count < 4 {
                         attrs.push_str(&format!(

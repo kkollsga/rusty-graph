@@ -1,6 +1,6 @@
 // src/graph/filtering_methods.rs
 use crate::datatypes::values::{FilterCondition, Value};
-use crate::graph::schema::{CurrentSelection, DirGraph, SelectionOperation};
+use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, SelectionOperation};
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 
@@ -696,21 +696,22 @@ pub fn filter_by_connection(
         .get_level_mut(current_index)
         .ok_or_else(|| "No active selection level".to_string())?;
 
+    let conn_key = InternedKey::from_str(connection_type);
     let has_conn = |idx: NodeIndex| -> bool {
         match direction {
             Some(dir) => graph
                 .graph
                 .edges_directed(idx, dir)
-                .any(|e| e.weight().connection_type == connection_type),
+                .any(|e| e.weight().connection_type == conn_key),
             None => {
                 graph
                     .graph
                     .edges_directed(idx, petgraph::Direction::Outgoing)
-                    .any(|e| e.weight().connection_type == connection_type)
+                    .any(|e| e.weight().connection_type == conn_key)
                     || graph
                         .graph
                         .edges_directed(idx, petgraph::Direction::Incoming)
-                        .any(|e| e.weight().connection_type == connection_type)
+                        .any(|e| e.weight().connection_type == conn_key)
             }
         }
     };

@@ -76,6 +76,12 @@ pub fn extract_subgraph(
 
     let mut new_graph = DirGraph::new();
 
+    // Copy interner so the subgraph can resolve InternedKeys from compact storage
+    new_graph.interner = source.interner.clone();
+
+    // Copy type schemas so compact property storage works correctly
+    new_graph.type_schemas = source.type_schemas.clone();
+
     // Map from old node indices to new node indices
     let mut index_map: HashMap<NodeIndex, NodeIndex> = HashMap::with_capacity(nodes.len());
 
@@ -106,9 +112,9 @@ pub fn extract_subgraph(
                     index_map.get(&old_source_idx),
                     index_map.get(&old_target_idx),
                 ) {
-                    // Clone edge data
-                    let edge_data = EdgeData::new(
-                        edge.weight().connection_type.clone(),
+                    // Clone edge data (properties are already interned)
+                    let edge_data = EdgeData::new_interned(
+                        edge.weight().connection_type,
                         edge.weight().properties.clone(),
                     );
                     new_graph.graph.add_edge(new_source, new_target, edge_data);
@@ -157,8 +163,8 @@ pub fn get_subgraph_stats(
         for edge in source.graph.edges(source_idx) {
             if node_set.contains(&edge.target()) {
                 edge_count += 1;
-                let conn_type = &edge.weight().connection_type;
-                *connection_types.entry(conn_type.clone()).or_insert(0) += 1;
+                let conn_type = edge.weight().connection_type_str(&source.interner);
+                *connection_types.entry(conn_type.to_string()).or_insert(0) += 1;
             }
         }
     }

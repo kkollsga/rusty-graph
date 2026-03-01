@@ -69,8 +69,6 @@ fn validate_single_node(
         Value::String(s) => s.clone(),
         _ => format!("{:?}", node.title),
     };
-    let properties = &node.properties;
-
     // Check required fields
     for required_field in &schema.required_fields {
         // Skip built-in fields that are always present
@@ -78,8 +76,8 @@ fn validate_single_node(
             continue;
         }
 
-        let has_field = properties
-            .get(required_field)
+        let has_field = node
+            .get_property(required_field)
             .map(|v| !matches!(v, Value::Null))
             .unwrap_or(false);
 
@@ -94,7 +92,7 @@ fn validate_single_node(
 
     // Check field types
     for (field, expected_type) in &schema.field_types {
-        if let Some(value) = properties.get(field) {
+        if let Some(value) = node.get_property(field) {
             if !value_matches_type(value, expected_type) {
                 errors.push(ValidationError::TypeMismatch {
                     node_type: node_type.to_string(),
@@ -122,11 +120,11 @@ fn validate_connections(
     // Iterate through all edges
     for edge_ref in graph.graph.edge_references() {
         let edge_data = edge_ref.weight();
-        let connection_type = &edge_data.connection_type;
+        let connection_type = edge_data.connection_type_str(&graph.interner);
 
         // Count connection types for strict mode check
         *connection_type_counts
-            .entry(connection_type.clone())
+            .entry(connection_type.to_string())
             .or_insert(0) += 1;
 
         // If there's a schema for this connection type, validate it
@@ -141,7 +139,7 @@ fn validate_connections(
             // Validate endpoint types
             if source_type != conn_schema.source_type || target_type != conn_schema.target_type {
                 errors.push(ValidationError::InvalidConnectionEndpoint {
-                    connection_type: connection_type.clone(),
+                    connection_type: connection_type.to_string(),
                     expected_source: conn_schema.source_type.clone(),
                     expected_target: conn_schema.target_type.clone(),
                     actual_source: source_type,
@@ -152,14 +150,13 @@ fn validate_connections(
             // Validate required properties
             for required_prop in &conn_schema.required_properties {
                 let has_prop = edge_data
-                    .properties
-                    .get(required_prop)
+                    .get_property(required_prop)
                     .map(|v| !matches!(v, Value::Null))
                     .unwrap_or(false);
 
                 if !has_prop {
                     errors.push(ValidationError::MissingConnectionProperty {
-                        connection_type: connection_type.clone(),
+                        connection_type: connection_type.to_string(),
                         source_title: source_title.clone(),
                         target_title: target_title.clone(),
                         property: required_prop.clone(),

@@ -3,7 +3,8 @@ use crate::datatypes::values::FilterCondition;
 use crate::datatypes::values::Value;
 use crate::graph::filtering_methods;
 use crate::graph::schema::{
-    CurrentSelection, DirGraph, NodeData, SelectionOperation, SpatialConfig, TemporalConfig,
+    CurrentSelection, DirGraph, InternedKey, NodeData, SelectionOperation, SpatialConfig,
+    TemporalConfig,
 };
 use crate::graph::spatial;
 use crate::graph::temporal;
@@ -90,11 +91,12 @@ impl MethodConfig {
 
 /// Check if edge properties match all given filter conditions
 fn edge_matches_conditions(
-    properties: &HashMap<String, Value>,
+    properties: &[(InternedKey, Value)],
     conditions: &HashMap<String, FilterCondition>,
 ) -> bool {
     conditions.iter().all(|(field, condition)| {
-        match properties.get(field) {
+        let ik = InternedKey::from_str(field);
+        match properties.iter().find(|(k, _)| *k == ik).map(|(_, v)| v) {
             Some(value) => filtering_methods::matches_condition(value, condition),
             None => {
                 // Missing field is treated as null
@@ -106,7 +108,7 @@ fn edge_matches_conditions(
 
 /// Check if edge properties pass a temporal filter.
 /// Tries multiple configs to find one matching the edge's field names.
-fn edge_passes_temporal(properties: &HashMap<String, Value>, filter: &TemporalEdgeFilter) -> bool {
+fn edge_passes_temporal(properties: &[(InternedKey, Value)], filter: &TemporalEdgeFilter) -> bool {
     match filter {
         TemporalEdgeFilter::At(configs, date) => {
             temporal::is_temporally_valid_multi(properties, configs, date)
@@ -228,6 +230,9 @@ fn make_traversal_fast(
     selection.add_level();
     let target_level_index = selection.get_level_count() - 1;
 
+    // Pre-intern connection type for fast u64 == u64 comparison in inner loop
+    let conn_key = InternedKey::from_str(connection_type);
+
     // Pre-allocate targets HashSet with estimated capacity
     let mut all_targets_per_parent: HashMap<NodeIndex, Vec<NodeIndex>> =
         HashMap::with_capacity(source_nodes.len());
@@ -251,7 +256,7 @@ fn make_traversal_fast(
         match direction {
             Some(Direction::Outgoing) => {
                 for edge in graph.graph.edges_directed(source_node, Direction::Outgoing) {
-                    if edge.weight().connection_type == connection_type {
+                    if edge.weight().connection_type == conn_key {
                         let t = edge.target();
                         if type_ok(t) {
                             targets.insert(t);
@@ -261,7 +266,7 @@ fn make_traversal_fast(
             }
             Some(Direction::Incoming) => {
                 for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
-                    if edge.weight().connection_type == connection_type {
+                    if edge.weight().connection_type == conn_key {
                         let t = edge.source();
                         if type_ok(t) {
                             targets.insert(t);
@@ -272,7 +277,7 @@ fn make_traversal_fast(
             None => {
                 // Both directions
                 for edge in graph.graph.edges_directed(source_node, Direction::Outgoing) {
-                    if edge.weight().connection_type == connection_type {
+                    if edge.weight().connection_type == conn_key {
                         let t = edge.target();
                         if type_ok(t) {
                             targets.insert(t);
@@ -280,7 +285,7 @@ fn make_traversal_fast(
                     }
                 }
                 for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
-                    if edge.weight().connection_type == connection_type {
+                    if edge.weight().connection_type == conn_key {
                         let t = edge.source();
                         if type_ok(t) {
                             targets.insert(t);
@@ -412,6 +417,9 @@ fn make_traversal_full(
         // Collect all targets for this parent in one pass
         let mut targets = HashSet::new();
 
+        // Pre-intern connection type for fast u64 == u64 comparison
+        let conn_key = InternedKey::from_str(&connection_type);
+
         // Helper: check if a target node passes the type filter
         let type_ok = |idx: NodeIndex| -> bool {
             match target_type {
@@ -428,7 +436,7 @@ fn make_traversal_full(
             match direction {
                 Some(Direction::Outgoing) => {
                     for edge in graph.graph.edges_directed(source_node, Direction::Outgoing) {
-                        if edge.weight().connection_type == connection_type {
+                        if edge.weight().connection_type == conn_key {
                             if let Some(conn_filter) = filter_connection {
                                 if !edge_matches_conditions(&edge.weight().properties, conn_filter)
                                 {
@@ -449,7 +457,7 @@ fn make_traversal_full(
                 }
                 Some(Direction::Incoming) => {
                     for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
-                        if edge.weight().connection_type == connection_type {
+                        if edge.weight().connection_type == conn_key {
                             if let Some(conn_filter) = filter_connection {
                                 if !edge_matches_conditions(&edge.weight().properties, conn_filter)
                                 {
@@ -471,7 +479,7 @@ fn make_traversal_full(
                 None => {
                     // Both directions
                     for edge in graph.graph.edges_directed(source_node, Direction::Outgoing) {
-                        if edge.weight().connection_type == connection_type {
+                        if edge.weight().connection_type == conn_key {
                             if let Some(conn_filter) = filter_connection {
                                 if !edge_matches_conditions(&edge.weight().properties, conn_filter)
                                 {
@@ -490,7 +498,7 @@ fn make_traversal_full(
                         }
                     }
                     for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
-                        if edge.weight().connection_type == connection_type {
+                        if edge.weight().connection_type == conn_key {
                             if let Some(conn_filter) = filter_connection {
                                 if !edge_matches_conditions(&edge.weight().properties, conn_filter)
                                 {
@@ -650,7 +658,7 @@ fn resolve_geometry_field<'a>(
 
 /// Extract a parsed WKT geometry from a node's properties.
 fn node_geometry(node: &NodeData, geom_field: &str) -> Option<Geometry<f64>> {
-    match node.properties.get(geom_field) {
+    match node.get_property(geom_field) {
         Some(Value::String(wkt)) => spatial::parse_wkt(wkt).ok(),
         _ => None,
     }
@@ -713,8 +721,8 @@ fn resolve_node_geom(
 }
 
 fn extract_lat_lon(node: &NodeData, lat_field: &str, lon_field: &str) -> Option<(f64, f64)> {
-    let lat = value_to_f64(node.properties.get(lat_field)?)?;
-    let lon = value_to_f64(node.properties.get(lon_field)?)?;
+    let lat = value_to_f64(node.get_property(lat_field)?)?;
+    let lon = value_to_f64(node.get_property(lon_field)?)?;
     Some((lat, lon))
 }
 
@@ -1379,8 +1387,7 @@ fn cluster_traversal(
         let mut row = Vec::with_capacity(features.len());
         for feat in features {
             let val = node
-                .properties
-                .get(feat)
+                .get_property(feat)
                 .and_then(value_to_f64)
                 .unwrap_or(0.0);
             row.push(val);

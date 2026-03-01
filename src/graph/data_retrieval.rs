@@ -33,7 +33,7 @@ pub fn get_nodes(
         for &index in idx {
             if let Some(node_idx) = NodeIndex::new(index).into() {
                 if let Some(node) = graph.get_node(node_idx) {
-                    let node_info = node.to_node_info();
+                    let node_info = node.to_node_info(&graph.interner);
                     direct_nodes.push(node_info);
                     if let Some(max) = max_nodes {
                         if direct_nodes.len() >= max {
@@ -78,7 +78,7 @@ pub fn get_nodes(
         let mut all_nodes = Vec::new();
         for node_idx in graph.graph.node_indices() {
             if let Some(node) = graph.get_node(node_idx) {
-                let node_info = node.to_node_info();
+                let node_info = node.to_node_info(&graph.interner);
                 all_nodes.push(node_info);
                 if let Some(max) = max_nodes {
                     if all_nodes.len() >= max {
@@ -109,7 +109,7 @@ pub fn get_nodes(
 
             for &child_idx in children {
                 if let Some(node) = graph.get_node(child_idx) {
-                    let node_info = node.to_node_info();
+                    let node_info = node.to_node_info(&graph.interner);
                     nodes.push(node_info);
                     if let Some(max) = max_nodes {
                         if nodes.len() >= max {
@@ -449,12 +449,12 @@ pub fn get_connections(
                         if let Some(source_node) = graph.get_node(edge_ref.source()) {
                             let edge_data = edge_ref.weight();
                             let node_props = if include_node_properties {
-                                Some(source_node.properties.clone())
+                                Some(source_node.properties_cloned(&graph.interner))
                             } else {
                                 None
                             };
                             incoming.push((
-                                edge_data.connection_type.clone(),
+                                edge_data.connection_type_str(&graph.interner).to_string(),
                                 source_node
                                     .get_field_ref("id")
                                     .cloned()
@@ -463,7 +463,7 @@ pub fn get_connections(
                                     .get_field_ref("title")
                                     .cloned()
                                     .unwrap_or(Value::Null),
-                                edge_data.properties.clone(),
+                                edge_data.properties_cloned(&graph.interner),
                                 node_props,
                             ));
                         }
@@ -477,12 +477,12 @@ pub fn get_connections(
                         if let Some(target_node) = graph.get_node(edge_ref.target()) {
                             let edge_data = edge_ref.weight();
                             let node_props = if include_node_properties {
-                                Some(target_node.properties.clone())
+                                Some(target_node.properties_cloned(&graph.interner))
                             } else {
                                 None
                             };
                             outgoing.push((
-                                edge_data.connection_type.clone(),
+                                edge_data.connection_type_str(&graph.interner).to_string(),
                                 target_node
                                     .get_field_ref("id")
                                     .cloned()
@@ -491,7 +491,7 @@ pub fn get_connections(
                                     .get_field_ref("title")
                                     .cloned()
                                     .unwrap_or(Value::Null),
-                                edge_data.properties.clone(),
+                                edge_data.properties_cloned(&graph.interner),
                                 node_props,
                             ));
                         }

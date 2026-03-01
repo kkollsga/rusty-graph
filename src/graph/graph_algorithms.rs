@@ -2,7 +2,7 @@
 //! Graph algorithms module providing path finding and connectivity analysis.
 
 use crate::datatypes::values::Value;
-use crate::graph::schema::DirGraph;
+use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::value_operations;
 use petgraph::algo::kosaraju_scc;
 use petgraph::graph::NodeIndex;
@@ -27,12 +27,18 @@ fn filtered_neighbors_undirected(
         Some(types) => {
             let mut neighbors = Vec::new();
             for edge in graph.graph.edges_directed(node, Direction::Outgoing) {
-                if types.iter().any(|t| t == &edge.weight().connection_type) {
+                if types
+                    .iter()
+                    .any(|t| InternedKey::from_str(t) == edge.weight().connection_type)
+                {
                     neighbors.push(edge.target());
                 }
             }
             for edge in graph.graph.edges_directed(node, Direction::Incoming) {
-                if types.iter().any(|t| t == &edge.weight().connection_type) {
+                if types
+                    .iter()
+                    .any(|t| InternedKey::from_str(t) == edge.weight().connection_type)
+                {
                     neighbors.push(edge.source());
                 }
             }
@@ -56,7 +62,11 @@ fn filtered_neighbors_outgoing(
         Some(types) => graph
             .graph
             .edges_directed(node, Direction::Outgoing)
-            .filter(|e| types.iter().any(|t| t == &e.weight().connection_type))
+            .filter(|e| {
+                types
+                    .iter()
+                    .any(|t| InternedKey::from_str(t) == e.weight().connection_type)
+            })
             .map(|e| e.target())
             .collect(),
     }
@@ -649,13 +659,13 @@ pub fn get_path_connections(graph: &DirGraph, path: &[NodeIndex]) -> Vec<Option<
             .graph
             .edges(from)
             .find(|e| e.target() == to)
-            .map(|e| e.weight().connection_type.clone())
+            .map(|e| e.weight().connection_type_str(&graph.interner).to_string())
             .or_else(|| {
                 graph
                     .graph
                     .edges(to)
                     .find(|e| e.target() == from)
-                    .map(|e| e.weight().connection_type.clone())
+                    .map(|e| e.weight().connection_type_str(&graph.interner).to_string())
             });
 
         connections.push(conn_type);
@@ -737,7 +747,10 @@ pub fn betweenness_centrality(
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for edge in graph.graph.edge_references() {
         if let Some(types) = &connection_types {
-            if !types.iter().any(|t| t == &edge.weight().connection_type) {
+            if !types
+                .iter()
+                .any(|t| InternedKey::from_str(t) == edge.weight().connection_type)
+            {
                 continue;
             }
         }
@@ -914,7 +927,10 @@ pub fn pagerank(
     let mut out_degrees: Vec<usize> = vec![0; n];
     for edge in graph.graph.edge_references() {
         if let Some(types) = &connection_types {
-            if !types.iter().any(|t| t == &edge.weight().connection_type) {
+            if !types
+                .iter()
+                .any(|t| InternedKey::from_str(t) == edge.weight().connection_type)
+            {
                 continue;
             }
         }
@@ -1058,7 +1074,10 @@ pub fn degree_centrality(
     let mut degrees = vec![0usize; bound];
     for edge in graph.graph.edge_references() {
         if let Some(types) = &connection_types {
-            if !types.iter().any(|t| t == &edge.weight().connection_type) {
+            if !types
+                .iter()
+                .any(|t| InternedKey::from_str(t) == edge.weight().connection_type)
+            {
                 continue;
             }
         }
@@ -1117,7 +1136,10 @@ pub fn closeness_centrality(
     let mut adj_incoming: Vec<Vec<usize>> = vec![Vec::new(); n];
     for edge in graph.graph.edge_references() {
         if let Some(types) = &connection_types {
-            if !types.iter().any(|t| t == &edge.weight().connection_type) {
+            if !types
+                .iter()
+                .any(|t| InternedKey::from_str(t) == edge.weight().connection_type)
+            {
                 continue;
             }
         }
@@ -1261,7 +1283,10 @@ pub fn louvain_communities(
     let mut total_weight = 0.0f64;
     for edge in graph.graph.edge_references() {
         if let Some(types) = &connection_types {
-            if !types.iter().any(|t| t == &edge.weight().connection_type) {
+            if !types
+                .iter()
+                .any(|t| InternedKey::from_str(t) == edge.weight().connection_type)
+            {
                 continue;
             }
         }
@@ -1459,7 +1484,10 @@ pub fn label_propagation(
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for edge in graph.graph.edge_references() {
         if let Some(types) = &connection_types {
-            if !types.iter().any(|t| t == &edge.weight().connection_type) {
+            if !types
+                .iter()
+                .any(|t| InternedKey::from_str(t) == edge.weight().connection_type)
+            {
                 continue;
             }
         }
@@ -1573,7 +1601,7 @@ fn edge_weight(
 ) -> f64 {
     if let Some(prop) = weight_property {
         if let Some(edge_data) = graph.graph.edge_weight(edge_id) {
-            if let Some(val) = edge_data.properties.get(prop) {
+            if let Some(val) = edge_data.get_property(prop) {
                 return value_operations::value_to_f64(val).unwrap_or(1.0);
             }
         }
@@ -1647,6 +1675,7 @@ mod tests {
                 Value::String(format!("Node_{}", i)),
                 "Chain".to_string(),
                 HashMap::new(),
+                &mut graph.interner,
             );
             let idx = graph.graph.add_node(node);
             graph
@@ -1657,7 +1686,7 @@ mod tests {
             indices.push(idx);
         }
         for i in 0..4 {
-            let edge = EdgeData::new("NEXT".to_string(), HashMap::new());
+            let edge = EdgeData::new("NEXT".to_string(), HashMap::new(), &mut graph.interner);
             graph.graph.add_edge(indices[i], indices[i + 1], edge);
         }
         (graph, indices)
@@ -1673,6 +1702,7 @@ mod tests {
                 Value::String(format!("N_{}", i)),
                 "Node".to_string(),
                 HashMap::new(),
+                &mut graph.interner,
             );
             let idx = graph.graph.add_node(node);
             graph
@@ -1685,7 +1715,7 @@ mod tests {
         // A->B, B->C, C->A
         let pairs = [(0, 1), (1, 2), (2, 0)];
         for (from, to) in pairs {
-            let edge = EdgeData::new("LINK".to_string(), HashMap::new());
+            let edge = EdgeData::new("LINK".to_string(), HashMap::new(), &mut graph.interner);
             graph.graph.add_edge(indices[from], indices[to], edge);
         }
         (graph, indices)
@@ -1701,6 +1731,7 @@ mod tests {
                 Value::String(format!("N_{}", i)),
                 "Node".to_string(),
                 HashMap::new(),
+                &mut graph.interner,
             );
             let idx = graph.graph.add_node(node);
             graph
@@ -1711,17 +1742,11 @@ mod tests {
             indices.push(idx);
         }
         // Component 1: A-B
-        graph.graph.add_edge(
-            indices[0],
-            indices[1],
-            EdgeData::new("LINK".to_string(), HashMap::new()),
-        );
+        let edge_ab = EdgeData::new("LINK".to_string(), HashMap::new(), &mut graph.interner);
+        graph.graph.add_edge(indices[0], indices[1], edge_ab);
         // Component 2: C-D
-        graph.graph.add_edge(
-            indices[2],
-            indices[3],
-            EdgeData::new("LINK".to_string(), HashMap::new()),
-        );
+        let edge_cd = EdgeData::new("LINK".to_string(), HashMap::new(), &mut graph.interner);
+        graph.graph.add_edge(indices[2], indices[3], edge_cd);
         (graph, indices)
     }
 
@@ -1831,6 +1856,7 @@ mod tests {
                 Value::String(format!("Node_{}", i)),
                 "Test".to_string(),
                 HashMap::new(),
+                &mut graph.interner,
             );
             let idx = graph.graph.add_node(node);
             graph
@@ -1840,21 +1866,12 @@ mod tests {
                 .push(idx);
             indices.push(idx);
         }
-        graph.graph.add_edge(
-            indices[0],
-            indices[1],
-            EdgeData::new("NEXT".to_string(), HashMap::new()),
-        );
-        graph.graph.add_edge(
-            indices[1],
-            indices[2],
-            EdgeData::new("NEXT".to_string(), HashMap::new()),
-        );
-        graph.graph.add_edge(
-            indices[0],
-            indices[2],
-            EdgeData::new("SKIP".to_string(), HashMap::new()),
-        );
+        let edge1 = EdgeData::new("NEXT".to_string(), HashMap::new(), &mut graph.interner);
+        graph.graph.add_edge(indices[0], indices[1], edge1);
+        let edge2 = EdgeData::new("NEXT".to_string(), HashMap::new(), &mut graph.interner);
+        graph.graph.add_edge(indices[1], indices[2], edge2);
+        let edge3 = EdgeData::new("SKIP".to_string(), HashMap::new(), &mut graph.interner);
+        graph.graph.add_edge(indices[0], indices[2], edge3);
 
         // Without filter: shortest path is A->C via SKIP (1 hop)
         let result = shortest_path(&graph, indices[0], indices[2], None, None, None);

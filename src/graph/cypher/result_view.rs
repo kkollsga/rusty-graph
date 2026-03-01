@@ -133,9 +133,9 @@ impl ResultView {
         let mut seen: HashSet<&str> = HashSet::new();
         let mut prop_keys: Vec<String> = Vec::new();
         for node in &nodes_vec {
-            for key in node.properties.keys() {
-                if seen.insert(key.as_str()) {
-                    prop_keys.push(key.clone());
+            for key in node.property_keys(&graph.interner) {
+                if seen.insert(key) {
+                    prop_keys.push(key.to_string());
                 }
             }
         }
@@ -154,7 +154,7 @@ impl ResultView {
                 ];
                 for key in &prop_keys {
                     row.push(PreProcessedValue::Plain(
-                        node.properties.get(key).cloned().unwrap_or(Value::Null),
+                        node.get_property(key).cloned().unwrap_or(Value::Null),
                     ));
                 }
                 row
@@ -177,24 +177,22 @@ impl ResultView {
         // Cap connections per node for display purposes
         const MAX_CONNS_PER_NODE: usize = 50;
 
-        // Inline helper: check if edge passes temporal filter
-        let edge_temporal_ok =
-            |props: &std::collections::HashMap<String, crate::datatypes::values::Value>,
-             conn_type: &str|
-             -> bool {
-                if is_all {
-                    return true;
+        // Inline helper: check if edge passes temporal filter.
+        let edge_temporal_ok = |edge_data: &crate::graph::schema::EdgeData| -> bool {
+            if is_all {
+                return true;
+            }
+            let ct_str = edge_data.connection_type_str(&graph.interner);
+            if let Some(configs) = graph.temporal_edge_configs.get(ct_str) {
+                if let Some(d) = &ref_date {
+                    return temporal::is_temporally_valid_multi(&edge_data.properties, configs, d);
                 }
-                if let Some(configs) = graph.temporal_edge_configs.get(conn_type) {
-                    if let Some(d) = &ref_date {
-                        return temporal::is_temporally_valid_multi(props, configs, d);
-                    }
-                    if let Some((s, e)) = &range_dates {
-                        return temporal::overlaps_range_multi(props, configs, s, e);
-                    }
+                if let Some((s, e)) = &range_dates {
+                    return temporal::overlaps_range_multi(&edge_data.properties, configs, s, e);
                 }
-                true
-            };
+            }
+            true
+        };
 
         // Gather connection summaries per node, filtering temporal connections
         let node_connections: Vec<NodeConnections> = node_indices
@@ -207,14 +205,16 @@ impl ResultView {
                     if conns.len() >= MAX_CONNS_PER_NODE {
                         break;
                     }
-                    if !edge_temporal_ok(&edge.weight().properties, &edge.weight().connection_type)
-                    {
+                    if !edge_temporal_ok(edge.weight()) {
                         continue;
                     }
                     let target_idx = edge.target();
                     if let Some(target) = graph.get_node(target_idx) {
                         conns.push(ConnectionSummary {
-                            connection_type: edge.weight().connection_type.clone(),
+                            connection_type: edge
+                                .weight()
+                                .connection_type_str(&graph.interner)
+                                .to_string(),
                             target_type: target.node_type.clone(),
                             target_id: format_value(&target.id),
                             target_title: format_value(&target.title),
@@ -228,14 +228,16 @@ impl ResultView {
                     if conns.len() >= MAX_CONNS_PER_NODE {
                         break;
                     }
-                    if !edge_temporal_ok(&edge.weight().properties, &edge.weight().connection_type)
-                    {
+                    if !edge_temporal_ok(edge.weight()) {
                         continue;
                     }
                     let source_idx = edge.source();
                     if let Some(source) = graph.get_node(source_idx) {
                         conns.push(ConnectionSummary {
-                            connection_type: edge.weight().connection_type.clone(),
+                            connection_type: edge
+                                .weight()
+                                .connection_type_str(&graph.interner)
+                                .to_string(),
                             target_type: source.node_type.clone(),
                             target_id: format_value(&source.id),
                             target_title: format_value(&source.title),

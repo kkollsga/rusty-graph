@@ -5,7 +5,7 @@ use super::maintain_graph;
 use super::statistics_methods::{get_parent_child_pairs, ParentChildPair};
 use crate::datatypes::values::Value;
 use crate::graph::reporting::CalculationOperationReport; // Remove unused OperationReport import
-use crate::graph::schema::{CurrentSelection, DirGraph, NodeData};
+use crate::graph::schema::{CurrentSelection, DirGraph, NodeData, StringInterner};
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
 use std::time::Instant; // For timing operations
@@ -144,18 +144,17 @@ pub fn process_equation(
 
                         if let Some(schema_idx) = schema_lookup.check_title(&schema_title) {
                             if let Some(schema_node) = graph.get_node(schema_idx) {
-                                let properties = &schema_node.properties;
                                 // Validate each variable against schema properties
                                 // Don't check reserved field names like 'id', 'title', 'type'
                                 for var in &variables {
                                     if var != "id"
                                         && var != "title"
                                         && var != "type"
-                                        && !properties.contains_key(var)
+                                        && !schema_node.has_property(var)
                                     {
-                                        let available = properties
-                                            .keys()
-                                            .cloned()
+                                        let available = schema_node
+                                            .property_keys(&graph.interner)
+                                            .map(|k| k.to_string())
                                             .collect::<Vec<String>>()
                                             .join(", ");
                                         return Err(format!(
@@ -347,7 +346,11 @@ pub fn evaluate_equation(
                 let objects: Vec<HashMap<String, Value>> = pair
                     .children
                     .iter()
-                    .filter_map(|&node_idx| graph.get_node(node_idx).map(convert_node_to_object))
+                    .filter_map(|&node_idx| {
+                        graph
+                            .get_node(node_idx)
+                            .map(|n| convert_node_to_object(n, &graph.interner))
+                    })
                     .collect();
 
                 if objects.is_empty() {
@@ -402,7 +405,7 @@ pub fn evaluate_equation(
             .map(|&node_idx| match graph.get_node(node_idx) {
                 Some(node) => {
                     let title = node.get_field_ref("title").and_then(|v| v.as_string());
-                    let obj = convert_node_to_object(node);
+                    let obj = convert_node_to_object(node, &graph.interner);
 
                     match Evaluator::evaluate(parsed_expr, &[obj]) {
                         Ok(value) => StatResult {
@@ -489,11 +492,13 @@ pub fn evaluate_connection_equation(
                     edge_idx
                         .and_then(|idx| graph.graph.edge_weight(idx))
                         .map(|edge_data| {
-                            let mut props = edge_data.properties.clone();
+                            let mut props = edge_data.properties_cloned(&graph.interner);
                             // Also include the connection_type as a property
                             props.insert(
                                 "connection_type".to_string(),
-                                Value::String(edge_data.connection_type.clone()),
+                                Value::String(
+                                    edge_data.connection_type_str(&graph.interner).to_string(),
+                                ),
                             );
                             props
                         })
@@ -541,14 +546,12 @@ fn has_aggregation(expr: &Expr) -> bool {
     }
 }
 
-fn convert_node_to_object(node: &NodeData) -> HashMap<String, Value> {
-    let properties = &node.properties;
-
+fn convert_node_to_object(node: &NodeData, interner: &StringInterner) -> HashMap<String, Value> {
     // Pre-allocate HashMap with exact capacity to avoid reallocations
-    let mut object = HashMap::with_capacity(properties.len());
+    let mut object = HashMap::with_capacity(node.property_count());
 
     // Process all properties - avoid clone for simple Copy-like types
-    for (key, value) in properties {
+    for (key, value) in node.property_iter(interner) {
         let new_value = match value {
             // Directly construct new values for simple numeric types (avoids Clone overhead)
             Value::Int64(n) => Value::Int64(*n),
@@ -567,7 +570,7 @@ fn convert_node_to_object(node: &NodeData) -> HashMap<String, Value> {
             // DateTime and any future types need clone
             _ => value.clone(),
         };
-        object.insert(key.clone(), new_value);
+        object.insert(key.to_string(), new_value);
     }
 
     object

@@ -4,7 +4,7 @@
 use crate::datatypes::values::Value;
 use crate::graph::cypher::result::Bindings;
 use crate::graph::filtering_methods::values_equal;
-use crate::graph::schema::DirGraph;
+use crate::graph::schema::{DirGraph, InternedKey};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::{EdgeRef, NodeIndexable};
 use petgraph::Direction;
@@ -123,7 +123,7 @@ pub enum MatchBinding {
         source: NodeIndex,
         target: NodeIndex,
         edge_index: EdgeIndex,
-        connection_type: String,
+        connection_type: InternedKey,
         properties: HashMap<String, Value>,
     },
     /// Variable-length path binding for patterns like -[:TYPE*1..3]->
@@ -132,7 +132,7 @@ pub enum MatchBinding {
         target: NodeIndex,
         hops: usize,
         /// Path as list of (node_index, connection_type) pairs
-        path: Vec<(NodeIndex, String)>,
+        path: Vec<(NodeIndex, InternedKey)>,
     },
 }
 
@@ -1245,7 +1245,7 @@ impl<'a> PatternExecutor<'a> {
                 } else if resolved == "id" {
                     Some(&node.id)
                 } else {
-                    node.properties.get(resolved)
+                    node.get_property(resolved)
                 };
 
                 match value {
@@ -1300,22 +1300,28 @@ impl<'a> PatternExecutor<'a> {
 
         let mut results = Vec::new();
 
-        // Determine which directions to check
-        let directions = match edge_pattern.direction {
-            EdgeDirection::Outgoing => vec![Direction::Outgoing],
-            EdgeDirection::Incoming => vec![Direction::Incoming],
-            EdgeDirection::Both => vec![Direction::Outgoing, Direction::Incoming],
+        // Determine which directions to check (static slice, no heap alloc)
+        let directions: &[Direction] = match edge_pattern.direction {
+            EdgeDirection::Outgoing => &[Direction::Outgoing],
+            EdgeDirection::Incoming => &[Direction::Incoming],
+            EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
         };
 
-        for direction in directions {
+        // Pre-intern connection type for fast u64 == u64 comparison in inner loop
+        let conn_key = edge_pattern
+            .connection_type
+            .as_ref()
+            .map(|ct| InternedKey::from_str(ct));
+
+        for &direction in directions {
             let edges = self.graph.graph.edges_directed(source, direction);
 
             for edge in edges {
                 let edge_data = edge.weight();
 
-                // Check connection type if specified
-                if let Some(ref conn_type) = edge_pattern.connection_type {
-                    if &edge_data.connection_type != conn_type {
+                // Check connection type if specified (u64 == u64)
+                if let Some(key) = conn_key {
+                    if edge_data.connection_type != key {
                         continue;
                     }
                 }
@@ -1324,8 +1330,7 @@ impl<'a> PatternExecutor<'a> {
                 if let Some(ref props) = edge_pattern.properties {
                     let matches = props.iter().all(|(key, matcher)| {
                         edge_data
-                            .properties
-                            .get(key)
+                            .get_property(key)
                             .map(|v| self.value_matches(v, matcher))
                             .unwrap_or(false)
                     });
@@ -1368,15 +1373,15 @@ impl<'a> PatternExecutor<'a> {
                         source,
                         target,
                         edge_index: edge.id(),
-                        connection_type: edge_data.connection_type.clone(),
-                        properties: edge_data.properties.clone(),
+                        connection_type: edge_data.connection_type,
+                        properties: edge_data.properties_cloned(&self.graph.interner),
                     }
                 } else {
                     MatchBinding::Edge {
                         source,
                         target,
                         edge_index: edge.id(),
-                        connection_type: String::new(),
+                        connection_type: InternedKey::default(),
                         properties: HashMap::new(),
                     }
                 };
@@ -1407,6 +1412,12 @@ impl<'a> PatternExecutor<'a> {
             EdgeDirection::Incoming => &[Direction::Incoming],
             EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
         };
+
+        // Pre-intern connection type for fast u64 == u64 comparison in inner loop
+        let conn_key = edge_pattern
+            .connection_type
+            .as_ref()
+            .map(|ct| InternedKey::from_str(ct));
 
         // Global visited set — each node is explored at most once.
         // Vec<bool> is faster than HashSet for dense NodeIndex (no hashing, cache-friendly).
@@ -1439,9 +1450,9 @@ impl<'a> PatternExecutor<'a> {
                 for edge in edges {
                     let edge_data = edge.weight();
 
-                    // Check connection type
-                    if let Some(ref conn_type) = edge_pattern.connection_type {
-                        if &edge_data.connection_type != conn_type {
+                    // Check connection type (u64 == u64)
+                    if let Some(key) = conn_key {
+                        if edge_data.connection_type != key {
                             continue;
                         }
                     }
@@ -1450,8 +1461,7 @@ impl<'a> PatternExecutor<'a> {
                     if let Some(ref props) = edge_pattern.properties {
                         let matches = props.iter().all(|(key, matcher)| {
                             edge_data
-                                .properties
-                                .get(key)
+                                .get_property(key)
                                 .map(|v| self.value_matches(v, matcher))
                                 .unwrap_or(false)
                         });
@@ -1548,9 +1558,15 @@ impl<'a> PatternExecutor<'a> {
             EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
         };
 
+        // Pre-intern connection type for fast u64 == u64 comparison in inner loop
+        let conn_key = edge_pattern
+            .connection_type
+            .as_ref()
+            .map(|ct| InternedKey::from_str(ct));
+
         // BFS state: (current_node, depth, path_info)
         // path_info stores the path taken for creating variable-length edge binding
-        type PathInfo = Vec<(NodeIndex, String)>;
+        type PathInfo = Vec<(NodeIndex, InternedKey)>;
         let mut queue: VecDeque<(NodeIndex, usize, PathInfo)> = VecDeque::new();
         let mut visited_at_depth: HashMap<(NodeIndex, usize), bool> = HashMap::new();
 
@@ -1572,7 +1588,7 @@ impl<'a> PatternExecutor<'a> {
 
             // First pass: collect all valid targets to know how many branches we'll have
             // This avoids cloning paths unnecessarily when only one target exists
-            let mut valid_targets: Vec<(NodeIndex, String)> = Vec::new();
+            let mut valid_targets: Vec<(NodeIndex, InternedKey)> = Vec::new();
 
             for &direction in directions {
                 let edges = self.graph.graph.edges_directed(current, direction);
@@ -1580,9 +1596,9 @@ impl<'a> PatternExecutor<'a> {
                 for edge in edges {
                     let edge_data = edge.weight();
 
-                    // Check connection type if specified
-                    if let Some(ref conn_type) = edge_pattern.connection_type {
-                        if &edge_data.connection_type != conn_type {
+                    // Check connection type if specified (u64 == u64)
+                    if let Some(key) = conn_key {
+                        if edge_data.connection_type != key {
                             continue;
                         }
                     }
@@ -1591,8 +1607,7 @@ impl<'a> PatternExecutor<'a> {
                     if let Some(ref props) = edge_pattern.properties {
                         let matches = props.iter().all(|(key, matcher)| {
                             edge_data
-                                .properties
-                                .get(key)
+                                .get_property(key)
                                 .map(|v| self.value_matches(v, matcher))
                                 .unwrap_or(false)
                         });
@@ -1614,7 +1629,7 @@ impl<'a> PatternExecutor<'a> {
                     }
                     visited_at_depth.insert(visit_key, true);
 
-                    valid_targets.push((target, edge_data.connection_type.clone()));
+                    valid_targets.push((target, edge_data.connection_type));
                 }
             }
 
@@ -1694,7 +1709,7 @@ impl<'a> PatternExecutor<'a> {
                 node_type: node.node_type.clone(),
                 title: title_str,
                 id: node.id.clone(),
-                properties: node.properties.clone(),
+                properties: node.properties_cloned(&self.graph.interner),
             }
         } else {
             MatchBinding::Node {

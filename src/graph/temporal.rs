@@ -3,9 +3,8 @@
 // Shared temporal validity helpers for filtering nodes and edges by date.
 
 use crate::datatypes::values::Value;
-use crate::graph::schema::{NodeData, TemporalConfig};
+use crate::graph::schema::{InternedKey, NodeData, TemporalConfig};
 use chrono::NaiveDate;
-use std::collections::HashMap;
 
 /// Check if a set of properties is temporally valid at a reference date.
 ///
@@ -14,12 +13,15 @@ use std::collections::HashMap;
 /// Handles Value::DateTime(NaiveDate) and Value::Null (open-ended).
 /// Missing properties are treated as unbounded (always valid on that side).
 pub fn is_temporally_valid(
-    properties: &HashMap<String, Value>,
+    properties: &[(InternedKey, Value)],
     config: &TemporalConfig,
     reference: &NaiveDate,
 ) -> bool {
+    let from_key = InternedKey::from_str(&config.valid_from);
+    let to_key = InternedKey::from_str(&config.valid_to);
+
     // Check valid_from: must be <= reference (or missing/null = unbounded start)
-    if let Some(from_val) = properties.get(&config.valid_from) {
+    if let Some((_, from_val)) = properties.iter().find(|(k, _)| *k == from_key) {
         match from_val {
             Value::DateTime(d) => {
                 if d > reference {
@@ -32,7 +34,7 @@ pub fn is_temporally_valid(
     }
 
     // Check valid_to: must be >= reference (or missing/null = still active)
-    if let Some(to_val) = properties.get(&config.valid_to) {
+    if let Some((_, to_val)) = properties.iter().find(|(k, _)| *k == to_key) {
         match to_val {
             Value::DateTime(d) => {
                 if d < reference {
@@ -88,13 +90,16 @@ pub fn node_is_temporally_valid(
 ///
 /// Overlap when: valid_from <= end AND (valid_to IS NULL OR valid_to >= start)
 pub fn overlaps_range(
-    properties: &HashMap<String, Value>,
+    properties: &[(InternedKey, Value)],
     config: &TemporalConfig,
     start: &NaiveDate,
     end: &NaiveDate,
 ) -> bool {
+    let from_key = InternedKey::from_str(&config.valid_from);
+    let to_key = InternedKey::from_str(&config.valid_to);
+
     // Check valid_from <= end
-    if let Some(from_val) = properties.get(&config.valid_from) {
+    if let Some((_, from_val)) = properties.iter().find(|(k, _)| *k == from_key) {
         match from_val {
             Value::DateTime(d) => {
                 if d > end {
@@ -107,7 +112,7 @@ pub fn overlaps_range(
     }
 
     // Check valid_to >= start
-    if let Some(to_val) = properties.get(&config.valid_to) {
+    if let Some((_, to_val)) = properties.iter().find(|(k, _)| *k == to_key) {
         match to_val {
             Value::DateTime(d) => {
                 if d < start {
@@ -166,12 +171,16 @@ pub fn node_overlaps_range(
 /// If found, uses that config for the temporal validity check.
 /// If no config's fields exist on the edge, returns true (non-temporal edge).
 pub fn is_temporally_valid_multi(
-    properties: &HashMap<String, Value>,
+    properties: &[(InternedKey, Value)],
     configs: &[TemporalConfig],
     reference: &NaiveDate,
 ) -> bool {
     for config in configs {
-        if properties.contains_key(&config.valid_from) || properties.contains_key(&config.valid_to)
+        let from_key = InternedKey::from_str(&config.valid_from);
+        let to_key = InternedKey::from_str(&config.valid_to);
+        if properties
+            .iter()
+            .any(|(k, _)| *k == from_key || *k == to_key)
         {
             return is_temporally_valid(properties, config, reference);
         }
@@ -183,13 +192,17 @@ pub fn is_temporally_valid_multi(
 ///
 /// Same multi-config matching as `is_temporally_valid_multi`.
 pub fn overlaps_range_multi(
-    properties: &HashMap<String, Value>,
+    properties: &[(InternedKey, Value)],
     configs: &[TemporalConfig],
     start: &NaiveDate,
     end: &NaiveDate,
 ) -> bool {
     for config in configs {
-        if properties.contains_key(&config.valid_from) || properties.contains_key(&config.valid_to)
+        let from_key = InternedKey::from_str(&config.valid_from);
+        let to_key = InternedKey::from_str(&config.valid_to);
+        if properties
+            .iter()
+            .any(|(k, _)| *k == from_key || *k == to_key)
         {
             return overlaps_range(properties, config, start, end);
         }

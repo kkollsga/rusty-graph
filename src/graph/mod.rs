@@ -373,7 +373,7 @@ impl KnowledgeGraph {
                         if let Some(node) = self.inner.get_node(idx) {
                             if let Value::String(qn) = &node.id {
                                 if qn.ends_with(&suffix) {
-                                    matches.push((idx, node.to_node_info()));
+                                    matches.push((idx, node.to_node_info(&self.inner.interner)));
                                 }
                             }
                         }
@@ -402,7 +402,7 @@ impl KnowledgeGraph {
                                 .map(|v| v == &name_val)
                                 .unwrap_or(false);
                         if name_match {
-                            matches.push((idx, node.to_node_info()));
+                            matches.push((idx, node.to_node_info(&self.inner.interner)));
                         }
                     }
                 }
@@ -2536,19 +2536,19 @@ impl KnowledgeGraph {
     #[pyo3(signature = (*, include_type=true, include_id=true))]
     fn to_df(&self, py: Python<'_>, include_type: bool, include_id: bool) -> PyResult<Py<PyAny>> {
         // Collect nodes from the current selection
-        let mut nodes_data: Vec<(&str, &Value, &Value, &HashMap<String, Value>)> = Vec::new();
+        let mut nodes_data: Vec<(&str, &Value, &Value, &schema::NodeData)> = Vec::new();
         let mut prop_keys: Vec<String> = Vec::new();
         let mut prop_keys_seen: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
         for node_idx in self.selection.current_node_indices() {
             if let Some(node) = self.inner.get_node(node_idx) {
-                for key in node.properties.keys() {
-                    if prop_keys_seen.insert(key.clone()) {
-                        prop_keys.push(key.clone());
+                for key in node.property_keys(&self.inner.interner) {
+                    if prop_keys_seen.insert(key.to_string()) {
+                        prop_keys.push(key.to_string());
                     }
                 }
-                nodes_data.push((&node.node_type, &node.id, &node.title, &node.properties));
+                nodes_data.push((&node.node_type, &node.id, &node.title, node));
             }
         }
 
@@ -2572,7 +2572,7 @@ impl KnowledgeGraph {
         let prop_cols: Vec<pyo3::Bound<'_, PyList>> =
             prop_keys.iter().map(|_| PyList::empty(py)).collect();
 
-        for (node_type, id, title, properties) in &nodes_data {
+        for (node_type, id, title, node) in &nodes_data {
             title_col.append(py_out::value_to_py(py, title)?)?;
             if let Some(ref tc) = type_col {
                 tc.append(*node_type)?;
@@ -2581,7 +2581,7 @@ impl KnowledgeGraph {
                 ic.append(py_out::value_to_py(py, id)?)?;
             }
             for (j, key) in prop_keys.iter().enumerate() {
-                let val = properties.get(key).unwrap_or(&Value::Null);
+                let val = node.get_property(key).unwrap_or(&Value::Null);
                 prop_cols[j].append(py_out::value_to_py(py, val)?)?;
             }
         }
@@ -2648,10 +2648,10 @@ impl KnowledgeGraph {
                     format_value(&node.id),
                 ));
                 // Sort property keys for deterministic output
-                let mut keys: Vec<&String> = node.properties.keys().collect();
+                let mut keys: Vec<&str> = node.property_keys(&self.inner.interner).collect();
                 keys.sort();
                 for key in keys {
-                    if let Some(val) = node.properties.get(key) {
+                    if let Some(val) = node.get_property(key) {
                         let s = format_value(val);
                         let display = if s.len() > 80 {
                             let keep = (80 - 5) / 2;
@@ -2925,7 +2925,7 @@ impl KnowledgeGraph {
         };
 
         // Convert to Python dict
-        let node_info = node.to_node_info();
+        let node_info = node.to_node_info(&graph.interner);
         Python::attach(|py| {
             let dict = py_out::nodeinfo_to_pydict(py, &node_info)?;
             Ok(Some(dict))
@@ -2997,7 +2997,7 @@ impl KnowledgeGraph {
                             }
                         };
                         if matches {
-                            results.push(node.to_node_info());
+                            results.push(node.to_node_info(&self.inner.interner));
                         }
                     }
                 }
@@ -3118,7 +3118,7 @@ impl KnowledgeGraph {
             let result = PyDict::new(py);
 
             // Node properties
-            let node_info = target_node.to_node_info();
+            let node_info = target_node.to_node_info(&self.inner.interner);
             let node_dict = py_out::nodeinfo_to_pydict(py, &node_info)?;
             result.set_item("node", &node_dict)?;
 
@@ -3181,13 +3181,13 @@ impl KnowledgeGraph {
                 .graph
                 .edges_directed(target_idx, petgraph::Direction::Outgoing)
             {
-                let edge_type = &edge.weight().connection_type;
+                let edge_type = edge
+                    .weight()
+                    .connection_type_str(&self.inner.interner)
+                    .to_string();
                 let target = edge.target();
                 if hops <= 1 || neighbor_indices.contains(&target) {
-                    outgoing_groups
-                        .entry(edge_type.clone())
-                        .or_default()
-                        .push(target);
+                    outgoing_groups.entry(edge_type).or_default().push(target);
                 }
             }
 
@@ -3196,13 +3196,13 @@ impl KnowledgeGraph {
                 .graph
                 .edges_directed(target_idx, petgraph::Direction::Incoming)
             {
-                let edge_type = &edge.weight().connection_type;
+                let edge_type = edge
+                    .weight()
+                    .connection_type_str(&self.inner.interner)
+                    .to_string();
                 let source = edge.source();
                 if hops <= 1 || neighbor_indices.contains(&source) {
-                    incoming_groups
-                        .entry(edge_type.clone())
-                        .or_default()
-                        .push(source);
+                    incoming_groups.entry(edge_type).or_default().push(source);
                 }
             }
 
@@ -3216,11 +3216,11 @@ impl KnowledgeGraph {
                     {
                         let t = edge.target();
                         if t != target_idx && neighbor_indices.contains(&t) {
-                            let edge_type = &edge.weight().connection_type;
-                            outgoing_groups
-                                .entry(edge_type.clone())
-                                .or_default()
-                                .push(t);
+                            let edge_type = edge
+                                .weight()
+                                .connection_type_str(&self.inner.interner)
+                                .to_string();
+                            outgoing_groups.entry(edge_type).or_default().push(t);
                         }
                     }
                 }
@@ -3235,7 +3235,7 @@ impl KnowledgeGraph {
                         continue; // deduplicate
                     }
                     if let Some(node) = self.inner.get_node(idx) {
-                        let info = node.to_node_info();
+                        let info = node.to_node_info(&self.inner.interner);
                         let d = py_out::nodeinfo_to_pydict(py, &info)?;
                         list.append(d)?;
                     }
@@ -3266,7 +3266,7 @@ impl KnowledgeGraph {
                         continue;
                     }
                     if let Some(node) = self.inner.get_node(idx) {
-                        let info = node.to_node_info();
+                        let info = node.to_node_info(&self.inner.interner);
                         let d = py_out::nodeinfo_to_pydict(py, &info)?;
                         list.append(d)?;
                     }
@@ -3334,7 +3334,7 @@ impl KnowledgeGraph {
             .graph
             .edges_directed(file_idx, petgraph::Direction::Outgoing)
         {
-            if edge.weight().connection_type != "DEFINES" {
+            if edge.weight().connection_type != schema::InternedKey::from_str("DEFINES") {
                 continue;
             }
             if let Some(node) = self.inner.get_node(edge.target()) {
@@ -5365,7 +5365,7 @@ impl KnowledgeGraph {
         })?;
 
         // Convert matches to Python
-        py_out::pattern_matches_to_pylist(py, &matches)
+        py_out::pattern_matches_to_pylist(py, &matches, &self.inner.interner)
     }
 
     /// Execute a Cypher query against the graph.

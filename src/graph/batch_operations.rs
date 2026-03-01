@@ -1,8 +1,9 @@
 // src/graph/batch_operations.rs
 use crate::datatypes::Value;
-use crate::graph::schema::{DirGraph, EdgeData, NodeData};
+use crate::graph::schema::{DirGraph, EdgeData, InternedKey, NodeData};
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 // Constants for batch size optimization
@@ -157,12 +158,26 @@ impl BatchProcessor {
             let id_for_index = creation.id.clone();
             let node_type_for_index = creation.node_type.clone();
 
-            let node_data = NodeData::new(
-                creation.id,
-                creation.title,
-                creation.node_type.clone(),
-                creation.properties,
-            );
+            // Use compact storage if a TypeSchema exists for this node type
+            let schema: Option<Arc<_>> = graph.type_schemas.get(&creation.node_type).cloned();
+            let node_data = if let Some(ref ts) = schema {
+                NodeData::new_compact(
+                    creation.id,
+                    creation.title,
+                    creation.node_type.clone(),
+                    creation.properties,
+                    &mut graph.interner,
+                    ts,
+                )
+            } else {
+                NodeData::new(
+                    creation.id,
+                    creation.title,
+                    creation.node_type.clone(),
+                    creation.properties,
+                    &mut graph.interner,
+                )
+            };
             let node_idx = graph.graph.add_node(node_data);
             // Add to type index
             graph
@@ -181,18 +196,30 @@ impl BatchProcessor {
 
         // Process updates in current chunk
         for update in self.updates.drain(..) {
-            if let Some(node) = graph.get_node_mut(update.node_idx) {
+            if update.conflict_mode == ConflictHandling::Skip {
+                // Skip this node entirely
+                continue;
+            }
+
+            // Pre-intern property keys before borrowing graph.graph mutably
+            let interned_props: Vec<(InternedKey, Value)> = update
+                .properties
+                .into_iter()
+                .map(|(k, v)| {
+                    let key = graph.interner.get_or_intern(&k);
+                    (key, v)
+                })
+                .collect();
+
+            if let Some(node) = graph.graph.node_weight_mut(update.node_idx) {
                 match update.conflict_mode {
-                    ConflictHandling::Skip => {
-                        // Skip this node entirely
-                        continue;
-                    }
+                    ConflictHandling::Skip => unreachable!(), // handled above
                     ConflictHandling::Replace => {
                         // Current behavior - complete replacement
                         if let Some(new_title) = update.title {
                             node.title = new_title;
                         }
-                        node.properties = update.properties;
+                        node.properties.replace_all(interned_props);
                     }
                     ConflictHandling::Update => {
                         // Update only if provided
@@ -200,7 +227,7 @@ impl BatchProcessor {
                             node.title = new_title;
                         }
                         // Merge properties with preference to new values
-                        for (k, v) in update.properties {
+                        for (k, v) in interned_props {
                             node.properties.insert(k, v);
                         }
                     }
@@ -212,8 +239,8 @@ impl BatchProcessor {
                             }
                         }
                         // Merge properties with preference to existing values
-                        for (k, v) in update.properties {
-                            node.properties.entry(k).or_insert(v);
+                        for (k, v) in interned_props {
+                            node.properties.insert_if_absent(k, v);
                         }
                     }
                 }
@@ -366,7 +393,11 @@ impl ConnectionBatchProcessor {
                     ConflictHandling::Replace => {
                         // Remove the existing edge and create a new one
                         graph.graph.remove_edge(edge_idx);
-                        let edge_data = EdgeData::new(connection_type.to_string(), conn.properties);
+                        let edge_data = EdgeData::new(
+                            connection_type.to_string(),
+                            conn.properties,
+                            &mut graph.interner,
+                        );
                         graph
                             .graph
                             .add_edge(conn.source_idx, conn.target_idx, edge_data);
@@ -374,28 +405,54 @@ impl ConnectionBatchProcessor {
                     }
                     ConflictHandling::Update => {
                         // Update existing edge properties
+                        // Pre-intern keys before getting mutable edge reference
+                        let interned_props: Vec<(InternedKey, Value)> = conn
+                            .properties
+                            .into_iter()
+                            .map(|(k, v)| {
+                                let key = graph.interner.get_or_intern(&k);
+                                (key, v)
+                            })
+                            .collect();
                         if let Some(EdgeData {
                             properties: edge_props,
                             ..
                         }) = graph.graph.edge_weight_mut(edge_idx)
                         {
                             // Merge properties, preferring new values
-                            for (k, v) in conn.properties {
-                                edge_props.insert(k, v);
+                            for (k, v) in interned_props {
+                                if let Some((_, existing)) =
+                                    edge_props.iter_mut().find(|(ek, _)| *ek == k)
+                                {
+                                    *existing = v;
+                                } else {
+                                    edge_props.push((k, v));
+                                }
                             }
                             stats.connections_created += 1;
                         }
                     }
                     ConflictHandling::Preserve => {
                         // Update but preserve existing values
+                        // Pre-intern keys before getting mutable edge reference
+                        let interned_props: Vec<(InternedKey, Value)> = conn
+                            .properties
+                            .into_iter()
+                            .map(|(k, v)| {
+                                let key = graph.interner.get_or_intern(&k);
+                                (key, v)
+                            })
+                            .collect();
                         if let Some(EdgeData {
                             properties: edge_props,
                             ..
                         }) = graph.graph.edge_weight_mut(edge_idx)
                         {
-                            // Merge properties, preferring existing values
-                            for (k, v) in conn.properties {
-                                edge_props.entry(k).or_insert(v);
+                            // Merge properties, preserving existing values
+                            for (k, v) in interned_props {
+                                if !edge_props.iter().any(|(ek, _)| *ek == k) {
+                                    edge_props.push((k, v));
+                                }
                             }
                             stats.connections_created += 1;
                         }
@@ -403,7 +460,11 @@ impl ConnectionBatchProcessor {
                 }
             } else {
                 // Create new edge
-                let edge_data = EdgeData::new(connection_type.to_string(), conn.properties);
+                let edge_data = EdgeData::new(
+                    connection_type.to_string(),
+                    conn.properties,
+                    &mut graph.interner,
+                );
                 graph
                     .graph
                     .add_edge(conn.source_idx, conn.target_idx, edge_data);

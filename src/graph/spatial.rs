@@ -317,7 +317,7 @@ pub fn contains_point(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            let wkt_value = node.properties.get(geometry_field);
+            let wkt_value = node.get_property(geometry_field);
 
             if let Some(Value::String(wkt_str)) = wkt_value {
                 if let Ok(geometry) = parse_wkt(wkt_str) {
@@ -368,7 +368,7 @@ pub fn intersects_geometry(
 
     for node_idx in nodes {
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            let wkt_value = node.properties.get(geometry_field);
+            let wkt_value = node.get_property(geometry_field);
 
             if let Some(Value::String(wkt_str)) = wkt_value {
                 if let Ok(node_geometry) = parse_wkt(wkt_str) {
@@ -441,14 +441,14 @@ pub(crate) fn node_location(
     lon_field: &str,
     geom_fallback: Option<&str>,
 ) -> Option<(f64, f64)> {
-    let lat = node.properties.get(lat_field).and_then(value_to_f64);
-    let lon = node.properties.get(lon_field).and_then(value_to_f64);
+    let lat = node.get_property(lat_field).and_then(value_to_f64);
+    let lon = node.get_property(lon_field).and_then(value_to_f64);
     if let (Some(lat), Some(lon)) = (lat, lon) {
         return Some((lat, lon));
     }
     // Fallback: geometry centroid
     if let Some(geom_field) = geom_fallback {
-        if let Some(Value::String(wkt)) = node.properties.get(geom_field) {
+        if let Some(Value::String(wkt)) = node.get_property(geom_field) {
             if let Ok(geom) = parse_wkt(wkt) {
                 if let Ok((lat, lon)) = geometry_centroid(&geom) {
                     return Some((lat, lon));

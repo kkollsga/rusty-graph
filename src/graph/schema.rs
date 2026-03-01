@@ -3,9 +3,559 @@ use crate::datatypes::values::{FilterCondition, Value};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
 use petgraph::visit::NodeIndexable;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
+
+// ─── String Interning ─────────────────────────────────────────────────────────
+
+/// A compact property key backed by a hash of the original string.
+/// Lookups via `get_property(key)` compute the hash inline — no interner needed.
+/// Only methods that output string keys (e.g. `property_iter`) require the interner.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+pub struct InternedKey(u64);
+
+impl InternedKey {
+    /// Compute the interned key from a string. Deterministic across runs
+    /// (uses Rust's default SipHash which is seeded per-process, but that's
+    /// fine since InternedKeys are never persisted as u64 — they serialize
+    /// as their original string).
+    #[inline]
+    pub fn from_str(s: &str) -> Self {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        s.hash(&mut hasher);
+        InternedKey(hasher.finish())
+    }
+}
+
+impl Hash for InternedKey {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.0);
+    }
+}
+
+/// Serializes InternedKey as its original string (backward-compatible with
+/// HashMap<String, Value> on disk). Requires the thread-local SERIALIZE_INTERNER
+/// to be set before the top-level serialize call.
+impl Serialize for InternedKey {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        SERIALIZE_INTERNER.with(|cell| {
+            let ptr = cell
+                .get()
+                .expect("BUG: SERIALIZE_INTERNER not set during InternedKey serialization");
+            // SAFETY: ptr is set by SerdeInternerGuard which ensures the reference
+            // outlives the serialize call (the guard lives on the caller's stack).
+            let interner = unsafe { &*ptr };
+            interner.resolve(*self).serialize(serializer)
+        })
+    }
+}
+
+/// Deserializes InternedKey from a string (backward-compatible with
+/// HashMap<String, Value> on disk). Registers the string in the thread-local
+/// DESERIALIZE_INTERNER if set.
+impl<'de> Deserialize<'de> for InternedKey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        let key = InternedKey::from_str(&s);
+        DESERIALIZE_INTERNER.with(|cell| {
+            if let Some(ptr) = cell.get() {
+                // SAFETY: ptr is set by SerdeInternerGuard which ensures the
+                // mutable reference outlives the deserialize call.
+                let interner = unsafe { &mut *ptr };
+                interner.register(key, &s);
+            }
+        });
+        Ok(key)
+    }
+}
+
+/// Reverse mapping from InternedKey → original string.
+/// Used for serialization and for methods that output string keys.
+#[derive(Debug, Clone, Default)]
+pub struct StringInterner {
+    strings: HashMap<InternedKey, String>,
+}
+
+impl StringInterner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a key-string mapping. If the key already exists, this is a no-op.
+    /// Panics in debug mode if the same hash maps to a different string (collision).
+    #[inline]
+    pub fn register(&mut self, key: InternedKey, s: &str) {
+        self.strings.entry(key).or_insert_with(|| s.to_string());
+        #[cfg(debug_assertions)]
+        {
+            let existing = &self.strings[&key];
+            debug_assert_eq!(
+                existing, s,
+                "InternedKey hash collision: '{}' and '{}' have the same hash",
+                existing, s
+            );
+        }
+    }
+
+    /// Intern a string: compute its key and register the reverse mapping.
+    #[inline]
+    pub fn get_or_intern(&mut self, s: &str) -> InternedKey {
+        let key = InternedKey::from_str(s);
+        self.register(key, s);
+        key
+    }
+
+    /// Resolve an InternedKey back to its string. Panics if the key is unknown.
+    #[inline]
+    pub fn resolve(&self, key: InternedKey) -> &str {
+        self.strings
+            .get(&key)
+            .map(|s| s.as_str())
+            .expect("BUG: InternedKey not found in StringInterner")
+    }
+
+    /// Number of interned strings.
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.strings.len()
+    }
+}
+
+// ─── Thread-local serde support ───────────────────────────────────────────────
+
+thread_local! {
+    static SERIALIZE_INTERNER: Cell<Option<*const StringInterner>> = const { Cell::new(None) };
+    static DESERIALIZE_INTERNER: Cell<Option<*mut StringInterner>> = const { Cell::new(None) };
+}
+
+/// RAII guard that sets the thread-local interner for serialization.
+/// The interner reference must outlive the guard (enforced by the lifetime).
+pub(crate) struct SerdeSerializeGuard<'a> {
+    _phantom: std::marker::PhantomData<&'a StringInterner>,
+}
+
+impl<'a> SerdeSerializeGuard<'a> {
+    pub fn new(interner: &'a StringInterner) -> Self {
+        SERIALIZE_INTERNER.with(|cell| cell.set(Some(interner as *const StringInterner)));
+        SerdeSerializeGuard {
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for SerdeSerializeGuard<'_> {
+    fn drop(&mut self) {
+        SERIALIZE_INTERNER.with(|cell| cell.set(None));
+    }
+}
+
+/// RAII guard that sets the thread-local interner for deserialization.
+pub(crate) struct SerdeDeserializeGuard<'a> {
+    _phantom: std::marker::PhantomData<&'a mut StringInterner>,
+}
+
+impl<'a> SerdeDeserializeGuard<'a> {
+    pub fn new(interner: &'a mut StringInterner) -> Self {
+        DESERIALIZE_INTERNER.with(|cell| cell.set(Some(interner as *mut StringInterner)));
+        SerdeDeserializeGuard {
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for SerdeDeserializeGuard<'_> {
+    fn drop(&mut self) {
+        DESERIALIZE_INTERNER.with(|cell| cell.set(None));
+    }
+}
+
+// ─── Type Schema & Compact Property Storage ──────────────────────────────────
+
+/// Shared schema for all nodes of one type — maps property keys to dense slot indices.
+/// All nodes of the same type share an `Arc<TypeSchema>`, keeping per-node overhead to 8 bytes.
+#[derive(Debug, Clone)]
+pub struct TypeSchema {
+    /// slot_index → interned key (for iteration / serialization)
+    slots: Vec<InternedKey>,
+    /// interned key → slot_index (for O(1) lookup)
+    key_to_slot: HashMap<InternedKey, u16>,
+}
+
+impl TypeSchema {
+    /// Create an empty schema.
+    pub fn new() -> Self {
+        TypeSchema {
+            slots: Vec::new(),
+            key_to_slot: HashMap::new(),
+        }
+    }
+
+    /// Build a schema from an iterator of interned keys.
+    pub fn from_keys(keys: impl IntoIterator<Item = InternedKey>) -> Self {
+        let mut schema = TypeSchema::new();
+        for key in keys {
+            if !schema.key_to_slot.contains_key(&key) {
+                let slot = schema.slots.len() as u16;
+                schema.slots.push(key);
+                schema.key_to_slot.insert(key, slot);
+            }
+        }
+        schema
+    }
+
+    /// Get the slot index for a key, or None if not in schema.
+    #[inline]
+    pub fn slot(&self, key: InternedKey) -> Option<u16> {
+        self.key_to_slot.get(&key).copied()
+    }
+
+    /// Number of slots in the schema.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Add a new key to the schema. Returns the new slot index.
+    /// If the key already exists, returns the existing slot index.
+    pub fn add_key(&mut self, key: InternedKey) -> u16 {
+        if let Some(&slot) = self.key_to_slot.get(&key) {
+            slot
+        } else {
+            let slot = self.slots.len() as u16;
+            self.slots.push(key);
+            self.key_to_slot.insert(key, slot);
+            slot
+        }
+    }
+
+    /// Iterate over all (slot_index, interned_key) pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (u16, InternedKey)> + '_ {
+        self.slots.iter().enumerate().map(|(i, &k)| (i as u16, k))
+    }
+}
+
+/// Helper enum for returning one of two iterator types without boxing.
+pub(crate) enum Either<L, R> {
+    Left(L),
+    Right(R),
+}
+
+impl<L, R, T> Iterator for Either<L, R>
+where
+    L: Iterator<Item = T>,
+    R: Iterator<Item = T>,
+{
+    type Item = T;
+
+    #[inline]
+    fn next(&mut self) -> Option<T> {
+        match self {
+            Either::Left(l) => l.next(),
+            Either::Right(r) => r.next(),
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Either::Left(l) => l.size_hint(),
+            Either::Right(r) => r.size_hint(),
+        }
+    }
+}
+
+/// Compact property storage for nodes.
+/// - `Map`: transient during deserialization (before compaction).
+/// - `Compact`: steady state with a shared `TypeSchema` and dense `Vec<Value>`.
+pub(crate) enum PropertyStorage {
+    /// HashMap storage (used during deserialization, before `compact_properties()`).
+    Map(HashMap<InternedKey, Value>),
+    /// Slot-vec storage indexed by shared TypeSchema.
+    /// `Value::Null` in a slot means "property absent".
+    Compact {
+        schema: Arc<TypeSchema>,
+        values: Vec<Value>,
+    },
+}
+
+impl PropertyStorage {
+    /// Look up a property value by interned key. Returns None if absent or Value::Null.
+    #[inline]
+    pub fn get(&self, key: InternedKey) -> Option<&Value> {
+        match self {
+            PropertyStorage::Map(map) => map.get(&key),
+            PropertyStorage::Compact { schema, values } => schema
+                .slot(key)
+                .and_then(|slot| values.get(slot as usize))
+                .filter(|v| !matches!(v, Value::Null)),
+        }
+    }
+
+    /// Check if a property exists (non-Null).
+    #[inline]
+    pub fn contains(&self, key: InternedKey) -> bool {
+        self.get(key).is_some()
+    }
+
+    /// Insert or update a property. For Compact, extends schema via Arc::make_mut if key is new.
+    pub fn insert(&mut self, key: InternedKey, value: Value) {
+        match self {
+            PropertyStorage::Map(map) => {
+                map.insert(key, value);
+            }
+            PropertyStorage::Compact { schema, values } => {
+                let slot = if let Some(s) = schema.slot(key) {
+                    s as usize
+                } else {
+                    // New key: extend schema
+                    let s = Arc::make_mut(schema).add_key(key) as usize;
+                    s
+                };
+                if slot >= values.len() {
+                    values.resize(slot + 1, Value::Null);
+                }
+                values[slot] = value;
+            }
+        }
+    }
+
+    /// Insert only if the key is absent or Value::Null (for Preserve conflict mode).
+    pub fn insert_if_absent(&mut self, key: InternedKey, value: Value) {
+        match self {
+            PropertyStorage::Map(map) => {
+                map.entry(key).or_insert(value);
+            }
+            PropertyStorage::Compact { schema, values } => {
+                if let Some(slot) = schema.slot(key) {
+                    let slot = slot as usize;
+                    if slot < values.len() {
+                        if matches!(values[slot], Value::Null) {
+                            values[slot] = value;
+                        }
+                        // else: existing non-Null value, preserve it
+                    } else {
+                        // Slot beyond current Vec: insert
+                        values.resize(slot + 1, Value::Null);
+                        values[slot] = value;
+                    }
+                } else {
+                    // Key not in schema: extend and insert
+                    let slot = Arc::make_mut(schema).add_key(key) as usize;
+                    if slot >= values.len() {
+                        values.resize(slot + 1, Value::Null);
+                    }
+                    values[slot] = value;
+                }
+            }
+        }
+    }
+
+    /// Remove a property. Returns the old value if it existed.
+    pub fn remove(&mut self, key: InternedKey) -> Option<Value> {
+        match self {
+            PropertyStorage::Map(map) => map.remove(&key),
+            PropertyStorage::Compact { schema, values } => schema.slot(key).and_then(|slot| {
+                let slot = slot as usize;
+                if slot < values.len() {
+                    let old = std::mem::replace(&mut values[slot], Value::Null);
+                    if matches!(old, Value::Null) {
+                        None
+                    } else {
+                        Some(old)
+                    }
+                } else {
+                    None
+                }
+            }),
+        }
+    }
+
+    /// Replace all properties (for Replace conflict mode).
+    /// Clears existing properties and inserts the new ones.
+    pub fn replace_all(&mut self, pairs: impl IntoIterator<Item = (InternedKey, Value)>) {
+        match self {
+            PropertyStorage::Map(map) => {
+                map.clear();
+                map.extend(pairs);
+            }
+            PropertyStorage::Compact { schema, values } => {
+                // Reset all slots to Null
+                for v in values.iter_mut() {
+                    *v = Value::Null;
+                }
+                for (key, value) in pairs {
+                    let slot = if let Some(s) = schema.slot(key) {
+                        s as usize
+                    } else {
+                        Arc::make_mut(schema).add_key(key) as usize
+                    };
+                    if slot >= values.len() {
+                        values.resize(slot + 1, Value::Null);
+                    }
+                    values[slot] = value;
+                }
+            }
+        }
+    }
+
+    /// Count of non-Null properties.
+    pub fn len(&self) -> usize {
+        match self {
+            PropertyStorage::Map(map) => map.len(),
+            PropertyStorage::Compact { values, .. } => {
+                values.iter().filter(|v| !matches!(v, Value::Null)).count()
+            }
+        }
+    }
+
+    /// Iterate over property keys as strings. Requires interner for resolution.
+    pub fn keys<'a>(&'a self, interner: &'a StringInterner) -> impl Iterator<Item = &'a str> + 'a {
+        match self {
+            PropertyStorage::Map(map) => {
+                Either::Left(map.keys().map(move |k| interner.resolve(*k)))
+            }
+            PropertyStorage::Compact { schema, values } => Either::Right(
+                schema
+                    .slots
+                    .iter()
+                    .enumerate()
+                    .filter(move |(i, _)| values.get(*i).is_some_and(|v| !matches!(v, Value::Null)))
+                    .map(move |(_, ik)| interner.resolve(*ik)),
+            ),
+        }
+    }
+
+    /// Iterate over (key_string, &Value) pairs. Requires interner for resolution.
+    pub fn iter<'a>(
+        &'a self,
+        interner: &'a StringInterner,
+    ) -> impl Iterator<Item = (&'a str, &'a Value)> + 'a {
+        match self {
+            PropertyStorage::Map(map) => {
+                Either::Left(map.iter().map(move |(k, v)| (interner.resolve(*k), v)))
+            }
+            PropertyStorage::Compact { schema, values } => {
+                Either::Right(schema.slots.iter().enumerate().filter_map(move |(i, ik)| {
+                    values.get(i).and_then(|v| {
+                        if matches!(v, Value::Null) {
+                            None
+                        } else {
+                            Some((interner.resolve(*ik), v))
+                        }
+                    })
+                }))
+            }
+        }
+    }
+
+    /// Build Compact storage from pre-interned key-value pairs and a shared schema.
+    pub fn from_compact(
+        pairs: impl IntoIterator<Item = (InternedKey, Value)>,
+        schema: &Arc<TypeSchema>,
+    ) -> Self {
+        let mut values = vec![Value::Null; schema.len()];
+        for (key, value) in pairs {
+            if let Some(slot) = schema.slot(key) {
+                values[slot as usize] = value;
+            }
+        }
+        PropertyStorage::Compact {
+            schema: Arc::clone(schema),
+            values,
+        }
+    }
+}
+
+impl Clone for PropertyStorage {
+    fn clone(&self) -> Self {
+        match self {
+            PropertyStorage::Map(map) => PropertyStorage::Map(map.clone()),
+            PropertyStorage::Compact { schema, values } => PropertyStorage::Compact {
+                schema: Arc::clone(schema),
+                values: values.clone(),
+            },
+        }
+    }
+}
+
+impl std::fmt::Debug for PropertyStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PropertyStorage::Map(map) => f.debug_tuple("Map").field(map).finish(),
+            PropertyStorage::Compact { values, .. } => {
+                f.debug_tuple("Compact").field(values).finish()
+            }
+        }
+    }
+}
+
+impl PartialEq for PropertyStorage {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare logical content: same set of (InternedKey, non-Null Value) pairs.
+        // This is only used in tests (NodeData derives PartialEq).
+        fn collect_entries(ps: &PropertyStorage) -> Vec<(InternedKey, &Value)> {
+            match ps {
+                PropertyStorage::Map(map) => {
+                    let mut entries: Vec<_> = map.iter().map(|(&k, v)| (k, v)).collect();
+                    entries.sort_by_key(|(k, _)| k.0);
+                    entries
+                }
+                PropertyStorage::Compact { schema, values } => {
+                    let mut entries: Vec<_> = schema
+                        .slots
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, &ik)| {
+                            values.get(i).and_then(|v| {
+                                if matches!(v, Value::Null) {
+                                    None
+                                } else {
+                                    Some((ik, v))
+                                }
+                            })
+                        })
+                        .collect();
+                    entries.sort_by_key(|(k, _)| k.0);
+                    entries
+                }
+            }
+        }
+        collect_entries(self) == collect_entries(other)
+    }
+}
+
+impl Serialize for PropertyStorage {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            PropertyStorage::Map(map) => map.serialize(serializer),
+            PropertyStorage::Compact { schema, values } => {
+                // Count non-Null entries for accurate map length
+                let count = values.iter().filter(|v| !matches!(v, Value::Null)).count();
+                let mut map_ser = serializer.serialize_map(Some(count))?;
+                for (i, ik) in schema.slots.iter().enumerate() {
+                    if let Some(v) = values.get(i) {
+                        if !matches!(v, Value::Null) {
+                            map_ser.serialize_entry(ik, v)?;
+                        }
+                    }
+                }
+                map_ser.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PropertyStorage {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let map = HashMap::<InternedKey, Value>::deserialize(deserializer)?;
+        Ok(PropertyStorage::Map(map))
+    }
+}
 
 /// Spatial configuration for a node type. Declares which properties hold
 /// spatial data (lat/lon pairs, WKT geometries) and enables auto-resolution
@@ -449,9 +999,9 @@ pub struct DirGraph {
     /// Lazily built on first use for each node type, skipped during serialization
     #[serde(skip)]
     pub(crate) id_indices: HashMap<String, HashMap<Value, NodeIndex>>,
-    /// Fast O(1) lookup for connection types. Populated on first edge access.
+    /// Fast O(1) lookup for connection types (interned). Populated on first edge access.
     #[serde(skip)]
-    pub(crate) connection_types: std::collections::HashSet<String>,
+    pub(crate) connection_types: std::collections::HashSet<InternedKey>,
     /// Node type metadata: node_type → { property_name → type_string }
     /// Replaces SchemaNode graph nodes — persisted via serde/bincode.
     #[serde(default)]
@@ -529,6 +1079,15 @@ pub struct DirGraph {
     /// Used for optimistic concurrency control in transactions.
     #[serde(skip, default)]
     pub(crate) version: u64,
+    /// Property key interner: maps InternedKey(u64) → original string.
+    /// Populated during ingestion (add_nodes, CREATE, SET) and deserialization.
+    /// Skipped during serde — rebuilt on load by the InternedKey Deserialize impl.
+    #[serde(skip)]
+    pub(crate) interner: StringInterner,
+    /// Shared property schemas per node type: type_name → Arc<TypeSchema>.
+    /// Populated during ingestion (add_nodes, CREATE) and compaction (load).
+    #[serde(skip)]
+    pub(crate) type_schemas: HashMap<String, Arc<TypeSchema>>,
 }
 
 fn default_auto_vacuum_threshold() -> Option<f64> {
@@ -566,6 +1125,8 @@ impl DirGraph {
             temporal_edge_configs: HashMap::new(),
             read_only: false,
             version: 0,
+            interner: StringInterner::new(),
+            type_schemas: HashMap::new(),
         }
     }
 
@@ -601,6 +1162,8 @@ impl DirGraph {
             temporal_edge_configs: HashMap::new(),
             read_only: false,
             version: 0,
+            interner: StringInterner::new(),
+            type_schemas: HashMap::new(),
         }
     }
 
@@ -767,18 +1330,21 @@ impl DirGraph {
     }
 
     pub fn has_connection_type(&self, connection_type: &str) -> bool {
-        // Fast path: check the connection_types cache (O(1))
+        // Fast path: check the interned connection_types cache (O(1))
         if !self.connection_types.is_empty() {
-            return self.connection_types.contains(connection_type);
+            return self
+                .connection_types
+                .contains(&InternedKey::from_str(connection_type));
         }
         // Fallback: check metadata
         self.connection_type_metadata.contains_key(connection_type)
     }
 
-    /// Register a connection type for O(1) lookups.
+    /// Register a connection type (interned) for O(1) lookups.
     /// Called when edges are added to the graph.
     pub fn register_connection_type(&mut self, connection_type: String) {
-        self.connection_types.insert(connection_type);
+        let key = self.interner.get_or_intern(&connection_type);
+        self.connection_types.insert(key);
     }
 
     /// Build the connection types cache.
@@ -793,14 +1359,15 @@ impl DirGraph {
         // Fast path: metadata is serialized — use it instead of scanning edges
         if !self.connection_type_metadata.is_empty() {
             for key in self.connection_type_metadata.keys() {
-                self.connection_types.insert(key.clone());
+                self.connection_types
+                    .insert(self.interner.get_or_intern(key));
             }
             return;
         }
 
         // Fallback: scan all edges (pre-metadata graphs)
         for edge in self.graph.edge_weights() {
-            self.connection_types.insert(edge.connection_type.clone());
+            self.connection_types.insert(edge.connection_type);
         }
     }
 
@@ -816,7 +1383,8 @@ impl DirGraph {
         // Slow path: compute O(E) and cache
         let mut counts: HashMap<String, usize> = HashMap::new();
         for edge in self.graph.edge_weights() {
-            *counts.entry(edge.connection_type.clone()).or_insert(0) += 1;
+            let ct_str = self.interner.resolve(edge.connection_type).to_string();
+            *counts.entry(ct_str).or_insert(0) += 1;
         }
         let mut write = self.edge_type_counts_cache.write().unwrap();
         *write = Some(counts.clone());
@@ -949,7 +1517,7 @@ impl DirGraph {
         if let Some(node_indices) = self.type_indices.get(node_type) {
             for &idx in node_indices {
                 if let Some(node) = self.graph.node_weight(idx) {
-                    if let Some(value) = node.properties.get(property) {
+                    if let Some(value) = node.get_property(property) {
                         index.entry(value.clone()).or_default().push(idx);
                     }
                 }
@@ -1026,7 +1594,7 @@ impl DirGraph {
         if let Some(node_indices) = self.type_indices.get(node_type) {
             for &idx in node_indices {
                 if let Some(node) = self.graph.node_weight(idx) {
-                    if let Some(value) = node.properties.get(property) {
+                    if let Some(value) = node.get_property(property) {
                         index.entry(value.clone()).or_default().push(idx);
                     }
                 }
@@ -1094,7 +1662,7 @@ impl DirGraph {
                     // Extract values for all properties in order
                     let values: Vec<Value> = properties
                         .iter()
-                        .map(|p| node.properties.get(*p).cloned().unwrap_or(Value::Null))
+                        .map(|p| node.get_property(p).cloned().unwrap_or(Value::Null))
                         .collect();
 
                     // Only index if at least one value is non-null
@@ -1216,11 +1784,7 @@ impl DirGraph {
                 .keys()
                 .chain(self.range_indices.keys())
                 .filter(|(nt, _)| nt == node_type)
-                .filter_map(|key| {
-                    node.properties
-                        .get(&key.1)
-                        .map(|v| (key.clone(), v.clone()))
-                })
+                .filter_map(|key| node.get_property(&key.1).map(|v| (key.clone(), v.clone())))
                 .collect()
         };
         for (key, value) in &prop_updates {
@@ -1245,7 +1809,7 @@ impl DirGraph {
                     let vals: Vec<Value> = key
                         .1
                         .iter()
-                        .map(|p| node.properties.get(p).cloned().unwrap_or(Value::Null))
+                        .map(|p| node.get_property(p).cloned().unwrap_or(Value::Null))
                         .collect();
                     if vals.iter().any(|v| !matches!(v, Value::Null)) {
                         Some((key.clone(), CompositeValue(vals)))
@@ -1356,7 +1920,7 @@ impl DirGraph {
 
         // Read current node properties once
         let current_props: HashMap<String, Value> = match self.graph.node_weight(node_idx) {
-            Some(node) => node.properties.clone(),
+            Some(node) => node.properties_cloned(&self.interner),
             None => return,
         };
 
@@ -1448,6 +2012,53 @@ impl DirGraph {
             }
         }
         self.type_indices = new_type_indices;
+    }
+
+    /// Convert all node properties from PropertyStorage::Map to PropertyStorage::Compact.
+    /// Called after deserialization to convert the transient Map storage to dense slot-vec.
+    /// Builds TypeSchemas per node type and stores them in `self.type_schemas`.
+    pub fn compact_properties(&mut self) {
+        // Phase 1: Build TypeSchema per type by collecting all property keys
+        let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
+        for node_idx in self.graph.node_indices() {
+            if let Some(node) = self.graph.node_weight(node_idx) {
+                let schema = schemas
+                    .entry(node.node_type.clone())
+                    .or_insert_with(TypeSchema::new);
+                if let PropertyStorage::Map(map) = &node.properties {
+                    for &key in map.keys() {
+                        schema.add_key(key);
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Wrap in Arc and store
+        let arc_schemas: HashMap<String, Arc<TypeSchema>> =
+            schemas.into_iter().map(|(t, s)| (t, Arc::new(s))).collect();
+
+        // Phase 3: Convert each node's Map → Compact
+        // Collect indices first to avoid borrowing conflict.
+        let node_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
+        for node_idx in node_indices {
+            let node = self.graph.node_weight_mut(node_idx).unwrap();
+            if let PropertyStorage::Map(_) = &node.properties {
+                if let Some(schema) = arc_schemas.get(&node.node_type) {
+                    let old = std::mem::replace(
+                        &mut node.properties,
+                        PropertyStorage::Compact {
+                            schema: Arc::clone(schema),
+                            values: Vec::new(),
+                        },
+                    );
+                    if let PropertyStorage::Map(map) = old {
+                        node.properties = PropertyStorage::from_compact(map.into_iter(), schema);
+                    }
+                }
+            }
+        }
+
+        self.type_schemas = arc_schemas;
     }
 
     pub fn reindex(&mut self) {
@@ -1646,35 +2257,115 @@ pub struct NodeData {
     pub id: Value,
     pub title: Value,
     pub node_type: String,
-    pub properties: HashMap<String, Value>,
+    pub(crate) properties: PropertyStorage,
 }
 
 impl NodeData {
+    /// Create a new NodeData, interning all property keys.
+    /// Builds PropertyStorage::Map — call compact_properties() later to convert to Compact.
     pub fn new(
         id: Value,
         title: Value,
         node_type: String,
         properties: HashMap<String, Value>,
+        interner: &mut StringInterner,
     ) -> Self {
+        let interned_props = properties
+            .into_iter()
+            .map(|(k, v)| {
+                let key = interner.get_or_intern(&k);
+                (key, v)
+            })
+            .collect();
         NodeData {
             id,
             title,
             node_type,
-            properties,
+            properties: PropertyStorage::Map(interned_props),
+        }
+    }
+
+    /// Create a new NodeData with Compact storage using a pre-built schema.
+    pub fn new_compact(
+        id: Value,
+        title: Value,
+        node_type: String,
+        properties: HashMap<String, Value>,
+        interner: &mut StringInterner,
+        schema: &Arc<TypeSchema>,
+    ) -> Self {
+        let pairs = properties.into_iter().map(|(k, v)| {
+            let key = interner.get_or_intern(&k);
+            (key, v)
+        });
+        NodeData {
+            id,
+            title,
+            node_type,
+            properties: PropertyStorage::from_compact(pairs, schema),
         }
     }
 
     /// Returns a reference to the field value without cloning.
-    /// Use this for read-only access to avoid allocation overhead.
-    /// Note: "type" field is not supported here as it requires Value::String allocation.
-    /// Use get_node_type_ref() for the node type.
+    /// Uses hash-based lookup — no interner needed.
     #[inline]
     pub fn get_field_ref(&self, field: &str) -> Option<&Value> {
         match field {
             "id" => Some(&self.id),
             "title" => Some(&self.title),
-            _ => self.properties.get(field),
+            _ => self.properties.get(InternedKey::from_str(field)),
         }
+    }
+
+    /// Returns a reference to a property value (excludes id/title/type).
+    /// Uses hash-based lookup — no interner needed.
+    #[inline]
+    pub fn get_property(&self, key: &str) -> Option<&Value> {
+        self.properties.get(InternedKey::from_str(key))
+    }
+
+    /// Returns an iterator over property keys (excludes id/title/type).
+    /// Requires interner to resolve InternedKey → &str.
+    #[inline]
+    pub fn property_keys<'a>(
+        &'a self,
+        interner: &'a StringInterner,
+    ) -> impl Iterator<Item = &'a str> + 'a {
+        self.properties.keys(interner)
+    }
+
+    /// Returns an iterator over (key, value) pairs (excludes id/title/type).
+    /// Requires interner to resolve InternedKey → &str.
+    #[inline]
+    pub fn property_iter<'a>(
+        &'a self,
+        interner: &'a StringInterner,
+    ) -> impl Iterator<Item = (&'a str, &'a Value)> + 'a {
+        self.properties.iter(interner)
+    }
+
+    /// Returns the number of properties (excludes id/title/type).
+    #[inline]
+    pub fn property_count(&self) -> usize {
+        self.properties.len()
+    }
+
+    /// Returns true if the node has the given property key.
+    /// Uses hash-based lookup — no interner needed.
+    #[inline]
+    #[allow(dead_code)]
+    pub fn has_property(&self, key: &str) -> bool {
+        self.properties.contains(InternedKey::from_str(key))
+    }
+
+    /// Clone all properties into a new HashMap<String, Value> (for export/interop).
+    /// Requires interner to resolve InternedKey → String.
+    #[inline]
+    pub fn properties_cloned(&self, interner: &StringInterner) -> HashMap<String, Value> {
+        self.properties
+            .iter(interner)
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
     }
 
     /// Returns the node type as a string reference without allocation.
@@ -1683,27 +2374,186 @@ impl NodeData {
         self.node_type.as_str()
     }
 
-    pub fn to_node_info(&self) -> NodeInfo {
+    /// Convert to a NodeInfo snapshot (for Python API / export).
+    /// Requires interner to resolve property keys to strings.
+    pub fn to_node_info(&self, interner: &StringInterner) -> NodeInfo {
         NodeInfo {
             id: self.id.clone(),
             title: self.title.clone(),
             node_type: self.node_type.clone(),
+            properties: self.properties_cloned(interner),
+        }
+    }
+
+    /// Insert or update a property, interning the key.
+    #[inline]
+    pub fn set_property(&mut self, key: &str, value: Value, interner: &mut StringInterner) {
+        let interned = interner.get_or_intern(key);
+        self.properties.insert(interned, value);
+    }
+
+    /// Remove a property by key. Returns the removed value if it existed.
+    #[inline]
+    pub fn remove_property(&mut self, key: &str) -> Option<Value> {
+        self.properties.remove(InternedKey::from_str(key))
+    }
+}
+
+pub struct EdgeData {
+    pub connection_type: InternedKey,
+    pub properties: Vec<(InternedKey, Value)>,
+}
+
+// Serialize EdgeData in bincode-compatible struct format:
+// connection_type as InternedKey (auto-resolves to string),
+// properties as HashMap<InternedKey, Value> (backward-compatible with old format).
+impl Serialize for EdgeData {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("EdgeData", 2)?;
+        s.serialize_field("connection_type", &self.connection_type)?;
+        // Rebuild HashMap for serialization (backward-compatible wire format)
+        let props_map: HashMap<&InternedKey, &Value> =
+            self.properties.iter().map(|(k, v)| (k, v)).collect();
+        s.serialize_field("properties", &props_map)?;
+        s.end()
+    }
+}
+
+// Deserialize EdgeData: read connection_type as InternedKey (from string on disk),
+// read properties as HashMap<InternedKey, Value>, convert to Vec.
+impl<'de> Deserialize<'de> for EdgeData {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct EdgeDataHelper {
+            connection_type: InternedKey,
+            #[serde(default)]
+            properties: HashMap<InternedKey, Value>,
+        }
+        let helper = EdgeDataHelper::deserialize(deserializer)?;
+        Ok(EdgeData {
+            connection_type: helper.connection_type,
+            properties: helper.properties.into_iter().collect(),
+        })
+    }
+}
+
+impl std::fmt::Debug for EdgeData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EdgeData")
+            .field("connection_type", &self.connection_type)
+            .field("properties", &self.properties)
+            .finish()
+    }
+}
+
+impl Clone for EdgeData {
+    fn clone(&self) -> Self {
+        EdgeData {
+            connection_type: self.connection_type,
             properties: self.properties.clone(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EdgeData {
-    pub connection_type: String,
-    pub properties: HashMap<String, Value>,
-}
-
 impl EdgeData {
-    pub fn new(connection_type: String, properties: HashMap<String, Value>) -> Self {
+    /// Create a new EdgeData, interning connection_type and all property keys.
+    pub fn new(
+        connection_type: String,
+        properties: HashMap<String, Value>,
+        interner: &mut StringInterner,
+    ) -> Self {
+        let ct_key = interner.get_or_intern(&connection_type);
+        let interned_props: Vec<(InternedKey, Value)> = properties
+            .into_iter()
+            .map(|(k, v)| {
+                let key = interner.get_or_intern(&k);
+                (key, v)
+            })
+            .collect();
+        EdgeData {
+            connection_type: ct_key,
+            properties: interned_props,
+        }
+    }
+
+    /// Create EdgeData with pre-interned connection_type and properties.
+    pub fn new_interned(
+        connection_type: InternedKey,
+        properties: Vec<(InternedKey, Value)>,
+    ) -> Self {
         EdgeData {
             connection_type,
             properties,
+        }
+    }
+
+    /// Resolve connection_type to a string via the interner.
+    #[inline]
+    pub fn connection_type_str<'a>(&self, interner: &'a StringInterner) -> &'a str {
+        interner.resolve(self.connection_type)
+    }
+
+    /// Returns a reference to an edge property value.
+    /// Uses hash-based lookup — no interner needed.
+    #[inline]
+    pub fn get_property(&self, key: &str) -> Option<&Value> {
+        let ik = InternedKey::from_str(key);
+        self.properties
+            .iter()
+            .find(|(k, _)| *k == ik)
+            .map(|(_, v)| v)
+    }
+
+    /// Returns an iterator over edge property keys.
+    /// Requires interner to resolve InternedKey → &str.
+    #[inline]
+    pub fn property_keys<'a>(
+        &'a self,
+        interner: &'a StringInterner,
+    ) -> impl Iterator<Item = &'a str> {
+        self.properties
+            .iter()
+            .map(move |(k, _)| interner.resolve(*k))
+    }
+
+    /// Returns an iterator over (key, value) pairs.
+    /// Requires interner to resolve InternedKey → &str.
+    #[inline]
+    pub fn property_iter<'a>(
+        &'a self,
+        interner: &'a StringInterner,
+    ) -> impl Iterator<Item = (&'a str, &'a Value)> {
+        self.properties
+            .iter()
+            .map(move |(k, v)| (interner.resolve(*k), v))
+    }
+
+    /// Returns the number of edge properties.
+    #[inline]
+    pub fn property_count(&self) -> usize {
+        self.properties.len()
+    }
+
+    /// Clone all properties into a new HashMap<String, Value> (for export/interop).
+    /// Requires interner to resolve InternedKey → String.
+    #[inline]
+    pub fn properties_cloned(&self, interner: &StringInterner) -> HashMap<String, Value> {
+        self.properties
+            .iter()
+            .map(|(k, v)| (interner.resolve(*k).to_string(), v.clone()))
+            .collect()
+    }
+
+    /// Insert or update an edge property, interning the key.
+    #[inline]
+    #[allow(dead_code)]
+    pub fn set_property(&mut self, key: &str, value: Value, interner: &mut StringInterner) {
+        let interned = interner.get_or_intern(key);
+        if let Some((_, v)) = self.properties.iter_mut().find(|(k, _)| *k == interned) {
+            *v = value;
+        } else {
+            self.properties.push((interned, value));
         }
     }
 }
@@ -1897,6 +2747,7 @@ mod maintenance_tests {
                 Value::String(format!("Person_{}", i)),
                 "Person".to_string(),
                 props,
+                &mut g.interner,
             );
             let idx = g.graph.add_node(node);
             g.type_indices
@@ -1908,8 +2759,11 @@ mod maintenance_tests {
             for i in 0..(num_nodes.saturating_sub(1)) {
                 let src = NodeIndex::new(i);
                 let tgt = NodeIndex::new(i + 1);
-                g.graph
-                    .add_edge(src, tgt, EdgeData::new("KNOWS".to_string(), HashMap::new()));
+                g.graph.add_edge(
+                    src,
+                    tgt,
+                    EdgeData::new("KNOWS".to_string(), HashMap::new(), &mut g.interner),
+                );
             }
         }
         g
@@ -2155,6 +3009,7 @@ mod maintenance_tests {
             Value::String("Alice".to_string()),
             "Person".to_string(),
             props,
+            &mut g.interner,
         ));
         g.type_indices
             .entry("Person".to_string())
@@ -2170,6 +3025,7 @@ mod maintenance_tests {
             Value::String("Bob".to_string()),
             "Person".to_string(),
             props2,
+            &mut g.interner,
         ));
         g.type_indices
             .entry("Person".to_string())
@@ -2196,6 +3052,7 @@ mod maintenance_tests {
             Value::String("Alice".to_string()),
             "Person".to_string(),
             props,
+            &mut g.interner,
         ));
         g.type_indices
             .entry("Person".to_string())
@@ -2208,7 +3065,7 @@ mod maintenance_tests {
         let new_val = Value::String("Bergen".to_string());
         // Actually change the property on the node
         if let Some(node) = g.graph.node_weight_mut(n0) {
-            node.properties.insert("city".to_string(), new_val.clone());
+            node.set_property("city", new_val.clone(), &mut g.interner);
         }
         g.update_property_indices_for_set("Person", n0, "city", Some(&old_val), &new_val);
 
@@ -2229,6 +3086,7 @@ mod maintenance_tests {
             Value::String("Alice".to_string()),
             "Person".to_string(),
             props,
+            &mut g.interner,
         ));
         g.type_indices
             .entry("Person".to_string())
@@ -2239,7 +3097,7 @@ mod maintenance_tests {
         // Simulate REMOVE n.city
         let old_val = Value::String("Oslo".to_string());
         if let Some(node) = g.graph.node_weight_mut(n0) {
-            node.properties.remove("city");
+            node.remove_property("city");
         }
         g.update_property_indices_for_remove("Person", n0, "city", &old_val);
 
@@ -2259,6 +3117,7 @@ mod maintenance_tests {
             Value::String("Alice".to_string()),
             "Person".to_string(),
             props,
+            &mut g.interner,
         ));
         g.type_indices
             .entry("Person".to_string())
@@ -2277,7 +3136,7 @@ mod maintenance_tests {
         let old_val = Value::String("Oslo".to_string());
         let new_val = Value::String("Bergen".to_string());
         if let Some(node) = g.graph.node_weight_mut(n0) {
-            node.properties.insert("city".to_string(), new_val.clone());
+            node.set_property("city", new_val.clone(), &mut g.interner);
         }
         g.update_property_indices_for_set("Person", n0, "city", Some(&old_val), &new_val);
 
@@ -2299,6 +3158,7 @@ mod maintenance_tests {
             Value::String("Alice".to_string()),
             "Person".to_string(),
             props,
+            &mut g.interner,
         ));
         g.type_indices
             .entry("Person".to_string())

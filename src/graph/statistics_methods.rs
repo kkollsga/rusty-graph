@@ -220,5 +220,5 @@ fn try_convert_to_float(value: &Value) -> Option<f64> {
 }
 
 fn get_node_property<'a>(node: &'a NodeData, property: &str) -> Option<&'a Value> {
-    node.properties.get(property)
+    node.get_property(property)
 }
