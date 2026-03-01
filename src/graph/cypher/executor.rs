@@ -4493,9 +4493,9 @@ impl<'a> CypherExecutor<'a> {
         if clause.distinct {
             let mut seen = HashSet::new();
             result_set.rows.retain(|row| {
-                let key: Vec<String> = columns
+                let key: Vec<Value> = columns
                     .iter()
-                    .map(|col| format_value_compact(row.projected.get(col).unwrap_or(&Value::Null)))
+                    .map(|col| row.projected.get(col).cloned().unwrap_or(Value::Null))
                     .collect();
                 seen.insert(key)
             });
@@ -4623,9 +4623,9 @@ impl<'a> CypherExecutor<'a> {
         if clause.distinct {
             let mut seen = HashSet::new();
             result_rows.retain(|row| {
-                let key: Vec<String> = columns
+                let key: Vec<Value> = columns
                     .iter()
-                    .map(|col| format_value_compact(row.projected.get(col).unwrap_or(&Value::Null)))
+                    .map(|col| row.projected.get(col).cloned().unwrap_or(Value::Null))
                     .collect();
                 seen.insert(key)
             });
@@ -5925,9 +5925,9 @@ impl<'a> CypherExecutor<'a> {
         if !clause.all {
             let mut seen = HashSet::new();
             combined_rows.retain(|row| {
-                let key: Vec<String> = columns
+                let key: Vec<Value> = columns
                     .iter()
-                    .map(|col| format_value_compact(row.projected.get(col).unwrap_or(&Value::Null)))
+                    .map(|col| row.projected.get(col).cloned().unwrap_or(Value::Null))
                     .collect();
                 seen.insert(key)
             });

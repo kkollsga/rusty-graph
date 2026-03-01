@@ -6,10 +6,10 @@ use crate::graph::cypher::result::Bindings;
 use crate::graph::filtering_methods::values_equal;
 use crate::graph::schema::DirGraph;
 use petgraph::graph::{EdgeIndex, NodeIndex};
-use petgraph::visit::EdgeRef;
+use petgraph::visit::{EdgeRef, NodeIndexable};
 use petgraph::Direction;
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Instant;
 
 /// Minimum match count to use parallel expansion via rayon.
@@ -63,6 +63,11 @@ pub struct EdgePattern {
     /// global BFS dedup.  Set by the query planner when the query doesn't
     /// reference path info (no `p = ...` assignment, no named edge variable).
     pub needs_path_info: bool,
+    /// When true, the connection type metadata guarantees the target node
+    /// matches the pattern's type, so the node_weight() lookup can be skipped.
+    /// Set by the query planner when connection_type_metadata confirms a single
+    /// target type (outgoing) or source type (incoming).
+    pub skip_target_type_check: bool,
 }
 
 /// Direction of edge traversal
@@ -590,6 +595,7 @@ impl Parser {
             properties,
             var_length,
             needs_path_info: true,
+            skip_target_type_check: false,
         })
     }
 
@@ -1334,14 +1340,16 @@ impl<'a> PatternExecutor<'a> {
                     Direction::Incoming => edge.source(),
                 };
 
-                // Check if target matches node pattern
-                if let Some(ref node_type) = node_pattern.node_type {
-                    if let Some(node) = self.graph.graph.node_weight(target) {
-                        if &node.node_type != node_type {
+                // Check if target matches node pattern (skip when edge type guarantees it)
+                if !edge_pattern.skip_target_type_check {
+                    if let Some(ref node_type) = node_pattern.node_type {
+                        if let Some(node) = self.graph.graph.node_weight(target) {
+                            if &node.node_type != node_type {
+                                continue;
+                            }
+                        } else {
                             continue;
                         }
-                    } else {
-                        continue;
                     }
                 }
 
@@ -1352,14 +1360,25 @@ impl<'a> PatternExecutor<'a> {
                     }
                 }
 
-                // Create edge binding with connection data
-                let edge_data = edge.weight();
-                let edge_binding = MatchBinding::Edge {
-                    source,
-                    target,
-                    edge_index: edge.id(),
-                    connection_type: edge_data.connection_type.clone(),
-                    properties: edge_data.properties.clone(),
+                // Create edge binding — skip expensive clones when the edge has
+                // no named variable (the caller will drop the binding unused).
+                let edge_binding = if edge_pattern.variable.is_some() {
+                    let edge_data = edge.weight();
+                    MatchBinding::Edge {
+                        source,
+                        target,
+                        edge_index: edge.id(),
+                        connection_type: edge_data.connection_type.clone(),
+                        properties: edge_data.properties.clone(),
+                    }
+                } else {
+                    MatchBinding::Edge {
+                        source,
+                        target,
+                        edge_index: edge.id(),
+                        connection_type: String::new(),
+                        properties: HashMap::new(),
+                    }
                 };
 
                 results.push((target, edge_binding));
@@ -1389,9 +1408,10 @@ impl<'a> PatternExecutor<'a> {
             EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
         };
 
-        // Global visited set — each node is explored at most once
-        let mut visited = HashSet::new();
-        visited.insert(source);
+        // Global visited set — each node is explored at most once.
+        // Vec<bool> is faster than HashSet for dense NodeIndex (no hashing, cache-friendly).
+        let mut visited = vec![false; self.graph.graph.node_bound()];
+        visited[source.index()] = true;
 
         // Queue: (node, depth) — no path vector needed
         let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
@@ -1446,15 +1466,19 @@ impl<'a> PatternExecutor<'a> {
                     };
 
                     // Global dedup — skip if already visited at any depth
-                    if !visited.insert(target) {
+                    let target_idx = target.index();
+                    if visited[target_idx] {
                         continue;
                     }
+                    visited[target_idx] = true;
 
                     let new_depth = depth + 1;
 
                     // Check if target is a valid result (within hop range + matches node pattern)
                     if new_depth >= min_hops {
-                        let node_matches = if let Some(ref node_type) = node_pattern.node_type {
+                        let node_matches = if edge_pattern.skip_target_type_check {
+                            true
+                        } else if let Some(ref node_type) = node_pattern.node_type {
                             self.graph
                                 .graph
                                 .node_weight(target)
@@ -1605,7 +1629,9 @@ impl<'a> PatternExecutor<'a> {
 
                 // If we're within the valid hop range and target matches node pattern, add to results
                 if new_depth >= min_hops {
-                    let node_matches = if let Some(ref node_type) = node_pattern.node_type {
+                    let node_matches = if edge_pattern.skip_target_type_check {
+                        true
+                    } else if let Some(ref node_type) = node_pattern.node_type {
                         if let Some(node) = self.graph.graph.node_weight(target) {
                             &node.node_type == node_type
                         } else {

@@ -20,6 +20,7 @@ pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<Stri
     fuse_order_by_top_k(query);
     reorder_predicates_by_cost(query);
     mark_fast_var_length_paths(query);
+    mark_skip_target_type_check(query, graph);
 }
 
 /// Mark variable-length edges that don't need path tracking.
@@ -45,6 +46,69 @@ fn mark_fast_var_length_paths(query: &mut CypherQuery) {
                 if let PatternElement::Edge(ep) = element {
                     if ep.var_length.is_some() && ep.variable.is_none() {
                         ep.needs_path_info = false;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Skip node type checks when the connection type metadata guarantees the target type.
+///
+/// For a pattern like `(a:Person)-[:AUTHORED]->(b:Paper)`, if `AUTHORED` edges
+/// only ever connect Person→Paper, then checking `node_weight(target).node_type`
+/// in the BFS inner loop is redundant. This saves one `StableDiGraph` slab
+/// dereference per visited node.
+fn mark_skip_target_type_check(query: &mut CypherQuery, graph: &DirGraph) {
+    use crate::graph::pattern_matching::EdgeDirection;
+
+    for clause in &mut query.clauses {
+        let mc = match clause {
+            Clause::Match(mc) | Clause::OptionalMatch(mc) => mc,
+            _ => continue,
+        };
+
+        for pattern in &mut mc.patterns {
+            let elements = &mut pattern.elements;
+            // Walk elements in triples: Node, Edge, Node
+            let len = elements.len();
+            for i in 0..len {
+                if i + 2 >= len {
+                    break;
+                }
+                // Extract edge and target node info without overlapping borrows
+                let (conn_type, direction, target_node_type) = {
+                    let edge = match &elements[i + 1] {
+                        PatternElement::Edge(ep) => ep,
+                        _ => continue,
+                    };
+                    let target = match &elements[i + 2] {
+                        PatternElement::Node(np) => np,
+                        _ => continue,
+                    };
+                    match (&edge.connection_type, edge.direction, &target.node_type) {
+                        (Some(ct), dir, Some(nt)) => (ct.clone(), dir, nt.clone()),
+                        _ => continue,
+                    }
+                };
+
+                // Look up connection type metadata
+                if let Some(info) = graph.connection_type_metadata.get(&conn_type) {
+                    let guaranteed = match direction {
+                        EdgeDirection::Outgoing => {
+                            info.target_types.len() == 1
+                                && info.target_types.contains(&target_node_type)
+                        }
+                        EdgeDirection::Incoming => {
+                            info.source_types.len() == 1
+                                && info.source_types.contains(&target_node_type)
+                        }
+                        EdgeDirection::Both => false, // can't guarantee for bidirectional
+                    };
+                    if guaranteed {
+                        if let PatternElement::Edge(ep) = &mut elements[i + 1] {
+                            ep.skip_target_type_check = true;
+                        }
                     }
                 }
             }
