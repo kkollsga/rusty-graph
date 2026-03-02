@@ -835,6 +835,8 @@ impl KnowledgeGraph {
     ///
     /// Args:
     ///     normalized: If True, adjust for disconnected components (default: True)
+    ///     sample_size: Optional number of source nodes to sample for faster computation
+    ///                  on large graphs. If None, uses all nodes.
     ///     top_k: Return only the top K nodes by centrality (default: all)
     ///
     /// Returns:
@@ -845,13 +847,16 @@ impl KnowledgeGraph {
     ///     ```python
     ///     # Find nodes that are "closest" to all others
     ///     close_nodes = graph.closeness_centrality(top_k=10)
+    ///     # Approximate with sampling for large graphs
+    ///     close_nodes = graph.closeness_centrality(sample_size=100, top_k=10)
     ///     ```
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (normalized=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
+    #[pyo3(signature = (normalized=None, sample_size=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None))]
     fn closeness_centrality(
         &self,
         py: Python<'_>,
         normalized: Option<bool>,
+        sample_size: Option<usize>,
         connection_types: Option<Vec<String>>,
         top_k: Option<usize>,
         as_dict: Option<bool>,
@@ -867,6 +872,7 @@ impl KnowledgeGraph {
             graph_algorithms::closeness_centrality(
                 &inner,
                 normalized,
+                sample_size,
                 connection_types.as_deref(),
                 deadline,
             )

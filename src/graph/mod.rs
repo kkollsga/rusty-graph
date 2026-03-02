@@ -3697,6 +3697,7 @@ impl KnowledgeGraph {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (property, group_by_parent=None, level_index=None, indices=None, store_as=None, max_length=None, keep_selection=None))]
     fn unique_values(
         &mut self,
         property: String,
@@ -4555,6 +4556,34 @@ impl KnowledgeGraph {
             &self.inner,
             &self.selection,
         ))
+    }
+
+    // ================================================================
+    // Copy / Clone
+    // ================================================================
+
+    /// Create an independent deep copy of this graph.
+    ///
+    /// Returns a new ``KnowledgeGraph`` that shares no mutable state with
+    /// the original. Useful for running mutations without affecting the
+    /// source graph.
+    fn copy(&self) -> Self {
+        KnowledgeGraph {
+            inner: Arc::new((*self.inner).clone()),
+            selection: CowSelection::new(),
+            reports: OperationReports::new(),
+            last_mutation_stats: None,
+            embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
+            temporal_context: self.temporal_context.clone(),
+        }
+    }
+
+    fn __copy__(&self) -> Self {
+        self.copy()
+    }
+
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.copy()
     }
 
     // ================================================================

@@ -8,6 +8,14 @@ use std::collections::{HashMap, HashSet};
 const TYPE_FIELD: &str = "type";
 
 pub fn matches_condition(value: &Value, condition: &FilterCondition) -> bool {
+    matches_condition_cached(value, condition, &HashMap::new())
+}
+
+pub fn matches_condition_cached(
+    value: &Value,
+    condition: &FilterCondition,
+    regex_cache: &HashMap<String, regex::Regex>,
+) -> bool {
     match condition {
         FilterCondition::Equals(target) => values_equal(value, target),
         FilterCondition::NotEquals(target) => !values_equal(value, target),
@@ -55,12 +63,43 @@ pub fn matches_condition(value: &Value, condition: &FilterCondition) -> bool {
             _ => false,
         },
         FilterCondition::Regex(pattern) => match value {
-            Value::String(s) => regex::Regex::new(pattern)
-                .map(|re| re.is_match(s))
-                .unwrap_or(false),
+            Value::String(s) => {
+                if let Some(re) = regex_cache.get(pattern) {
+                    re.is_match(s)
+                } else {
+                    regex::Regex::new(pattern)
+                        .map(|re| re.is_match(s))
+                        .unwrap_or(false)
+                }
+            }
             _ => false,
         },
-        FilterCondition::Not(inner) => !matches_condition(value, inner),
+        FilterCondition::Not(inner) => !matches_condition_cached(value, inner, regex_cache),
+    }
+}
+
+/// Pre-compile all regex patterns from a conditions map.
+fn precompile_regex_patterns(
+    conditions: &HashMap<String, FilterCondition>,
+) -> HashMap<String, regex::Regex> {
+    let mut cache = HashMap::new();
+    for condition in conditions.values() {
+        collect_regex_patterns(condition, &mut cache);
+    }
+    cache
+}
+
+fn collect_regex_patterns(condition: &FilterCondition, cache: &mut HashMap<String, regex::Regex>) {
+    match condition {
+        FilterCondition::Regex(pattern) => {
+            if !cache.contains_key(pattern) {
+                if let Ok(re) = regex::Regex::new(pattern) {
+                    cache.insert(pattern.clone(), re);
+                }
+            }
+        }
+        FilterCondition::Not(inner) => collect_regex_patterns(inner, cache),
+        _ => {}
     }
 }
 
@@ -321,6 +360,9 @@ fn filter_nodes_by_conditions(
         }
     }
 
+    // Pre-compile regex patterns once for the entire filter pass
+    let regex_cache = precompile_regex_patterns(conditions);
+
     // Cache field lookups for frequently accessed fields
     let estimated_cache_size = nodes.len() * conditions.len();
     let mut field_cache: HashMap<(NodeIndex, &str), Option<Value>> =
@@ -338,7 +380,7 @@ fn filter_nodes_by_conditions(
                     });
 
                     match value {
-                        Some(v) => matches_condition(v, condition),
+                        Some(v) => matches_condition_cached(v, condition, &regex_cache),
                         None => {
                             // Missing field is treated as null
                             matches!(condition, FilterCondition::IsNull)
@@ -602,13 +644,21 @@ pub fn filter_nodes_any(
         .get_level_mut(current_index)
         .ok_or_else(|| "No active selection level".to_string())?;
 
+    // Pre-compile regex patterns from all condition sets
+    let mut regex_cache = HashMap::new();
+    for conditions in condition_sets {
+        for condition in conditions.values() {
+            collect_regex_patterns(condition, &mut regex_cache);
+        }
+    }
+
     let matches_any = |idx: NodeIndex| -> bool {
         if let Some(node) = graph.get_node(idx) {
             condition_sets.iter().any(|conditions| {
                 conditions.iter().all(|(key, condition)| {
                     let resolved = graph.resolve_alias(&node.node_type, key);
                     match node.get_field_ref(resolved) {
-                        Some(v) => matches_condition(v, condition),
+                        Some(v) => matches_condition_cached(v, condition, &regex_cache),
                         None => matches!(condition, FilterCondition::IsNull),
                     }
                 })

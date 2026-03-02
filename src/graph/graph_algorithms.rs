@@ -1202,9 +1202,13 @@ pub fn degree_centrality(
 ///
 /// Note: For disconnected graphs, only reachable nodes are considered.
 /// Optimized to use Vec instead of HashMap for O(1) direct indexing.
+///
+/// * `sample_size` - Optional number of source nodes to sample (for large graphs).
+///   Uses stride-based selection for even coverage.
 pub fn closeness_centrality(
     graph: &DirGraph,
     normalized: bool,
+    sample_size: Option<usize>,
     connection_types: Option<&[String]>,
     deadline: Option<Instant>,
 ) -> Vec<CentralityResult> {
@@ -1244,8 +1248,22 @@ pub fn closeness_centrality(
         neighbors.dedup();
     }
 
+    // Determine which nodes to use as sources.
+    // Stride-based sampling ensures even coverage across the graph.
+    let source_indices: Vec<usize> = if let Some(k) = sample_size {
+        let k = k.min(n);
+        if k == n {
+            (0..n).collect()
+        } else {
+            let step = n as f64 / k as f64;
+            (0..k).map(|i| (i as f64 * step) as usize).collect()
+        }
+    } else {
+        (0..n).collect()
+    };
+
     // Parallel path: each source BFS is independent, no shared accumulator
-    let use_parallel = n >= 4096;
+    let use_parallel = source_indices.len() >= 4096;
 
     if use_parallel {
         use rayon::prelude::*;
@@ -1254,12 +1272,14 @@ pub fn closeness_centrality(
         let deadline_ref = &deadline;
         let nodes_ref = &nodes;
 
-        let mut results: Vec<CentralityResult> = nodes_ref
+        let mut results: Vec<CentralityResult> = source_indices
             .par_iter()
             .enumerate()
-            .map(|(s_idx, &source)| {
+            .map(|(i, &s_idx)| {
+                let source = nodes_ref[s_idx];
+
                 // Periodic timeout check (every 100 sources)
-                if s_idx % 100 == 0 {
+                if i % 100 == 0 {
                     if let Some(dl) = deadline_ref {
                         if Instant::now() > *dl {
                             return CentralityResult {
@@ -1333,16 +1353,18 @@ pub fn closeness_centrality(
         return results;
     }
 
-    // Sequential path (n < 4096): reuses pre-allocated buffers across iterations
-    let mut results = Vec::with_capacity(n);
+    // Sequential path: reuses pre-allocated buffers across iterations
+    let mut results = Vec::with_capacity(source_indices.len());
     let mut dist: Vec<i64> = vec![-1; n];
     let mut current_level: Vec<usize> = Vec::with_capacity(n);
     let mut next_level: Vec<usize> = Vec::with_capacity(n);
     let mut touched: Vec<usize> = Vec::with_capacity(n);
 
-    for (s_idx, &source) in nodes.iter().enumerate() {
+    for (i, &s_idx) in source_indices.iter().enumerate() {
+        let source = nodes[s_idx];
+
         // Periodic timeout check (every 10 source nodes)
-        if s_idx.is_multiple_of(10) {
+        if i.is_multiple_of(10) {
             if let Some(dl) = deadline {
                 if Instant::now() > dl {
                     break;
@@ -2218,7 +2240,7 @@ mod tests {
     #[test]
     fn test_closeness_centrality_chain() {
         let (graph, indices) = build_chain_graph();
-        let results = closeness_centrality(&graph, false, None, None);
+        let results = closeness_centrality(&graph, false, None, None, None);
         assert_eq!(results.len(), 5);
         // Middle node should have highest closeness
         let middle = results

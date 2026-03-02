@@ -1489,6 +1489,22 @@ class KnowledgeGraph:
         ...
 
     # ====================================================================
+    # Copy / Clone
+    # ====================================================================
+
+    def copy(self) -> "KnowledgeGraph":
+        """Create an independent deep copy of this graph.
+
+        Returns a new ``KnowledgeGraph`` that shares no mutable state with
+        the original.  Useful for running mutations without affecting the
+        source graph.
+        """
+        ...
+
+    def __copy__(self) -> "KnowledgeGraph": ...
+    def __deepcopy__(self, memo: Any) -> "KnowledgeGraph": ...
+
+    # ====================================================================
     # Schema Introspection
     # ====================================================================
 
@@ -1939,6 +1955,8 @@ class KnowledgeGraph:
     def closeness_centrality(
         self,
         normalized: Optional[bool] = None,
+        sample_size: Optional[int] = None,
+        connection_types: Optional[Union[str, list[str]]] = None,
         top_k: Optional[int] = None,
         as_dict: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
@@ -1948,6 +1966,9 @@ class KnowledgeGraph:
 
         Args:
             normalized: Adjust for disconnected components. Default ``True``.
+            sample_size: Approximate by sampling *N* source nodes (faster for large graphs).
+                If ``None``, uses all nodes.
+            connection_types: Filter to specific relationship types.
             top_k: Return only the top *K* nodes.
             as_dict: Return ``{id: score}`` dict instead of list of dicts.
             timeout_ms: Abort after this many milliseconds, returning partial results.

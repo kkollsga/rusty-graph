@@ -583,88 +583,123 @@ pub fn compute_property_stats(
 
     let total_nodes = node_indices.len();
 
-    // First pass: discover all property names from actual nodes
-    let mut all_props: HashSet<String> = HashSet::new();
-    for &idx in node_indices {
-        if let Some(node) = graph.get_node(idx) {
-            for key in node.property_keys(&graph.interner) {
-                all_props.insert(key.to_string());
+    // Per-property accumulator
+    // Cap value_set at max_values+1 to avoid cloning every value when there are
+    // thousands of unique values. We only need the set for small-cardinality props.
+    // Cap at max_values+1: we need one extra to detect "too many unique values".
+    // When capped, unique count is a lower bound (max_values+1) and values = None.
+    let value_cap = if max_values > 0 {
+        max_values + 1
+    } else {
+        usize::MAX // still need unique counts even when not reporting values
+    };
+
+    struct PropAccum {
+        non_null: usize,
+        value_set: HashSet<Value>,
+        value_cap: usize,
+        first_type: Option<&'static str>,
+    }
+    impl PropAccum {
+        fn new(cap: usize) -> Self {
+            Self {
+                non_null: 0,
+                value_set: HashSet::new(),
+                value_cap: cap,
+                first_type: None,
+            }
+        }
+        fn add(&mut self, v: &Value) {
+            if !is_null_value(v) {
+                self.non_null += 1;
+                if self.value_set.len() < self.value_cap {
+                    self.value_set.insert(v.clone());
+                }
+                if self.first_type.is_none() {
+                    self.first_type = Some(value_type_name(v));
+                }
             }
         }
     }
 
-    // Build ordered property list: built-ins first, then discovered from actual nodes
-    // (metadata-only properties with no actual values are excluded)
-    let mut property_names: Vec<String> =
-        vec!["type".to_string(), "title".to_string(), "id".to_string()];
-    // Add discovered properties (sorted for determinism)
-    let mut discovered: Vec<String> = all_props.into_iter().collect();
-    discovered.sort();
-    property_names.extend(discovered);
+    // Single pass: accumulate stats for all properties simultaneously
+    let mut accum: HashMap<String, PropAccum> = HashMap::new();
+    // Pre-insert built-in fields so they appear even when all null
+    accum.insert("title".to_string(), PropAccum::new(value_cap));
+    accum.insert("id".to_string(), PropAccum::new(value_cap));
 
-    let mut results = Vec::new();
-
-    for prop_name in &property_names {
-        // Handle "type" specially — always same value, always non-null
-        if prop_name == "type" {
-            results.push(PropertyStatInfo {
-                property_name: "type".to_string(),
-                type_string: "str".to_string(),
-                non_null: total_nodes,
-                unique: 1,
-                values: Some(vec![Value::String(node_type.to_string())]),
-            });
-            continue;
-        }
-
-        let mut non_null: usize = 0;
-        let mut value_set: HashSet<Value> = HashSet::new();
-        let mut first_type: Option<&'static str> = None;
-
-        for &idx in node_indices {
-            if let Some(node) = graph.get_node(idx) {
-                let val = match prop_name.as_str() {
-                    "id" => Some(&node.id),
-                    "title" => Some(&node.title),
-                    _ => node.get_property(prop_name),
-                };
-
-                if let Some(v) = val {
-                    if !is_null_value(v) {
-                        non_null += 1;
-                        value_set.insert(v.clone());
-                        if first_type.is_none() {
-                            first_type = Some(value_type_name(v));
-                        }
-                    }
-                }
+    for &idx in node_indices {
+        if let Some(node) = graph.get_node(idx) {
+            accum
+                .entry("id".to_string())
+                .or_insert_with(|| PropAccum::new(value_cap))
+                .add(&node.id);
+            accum
+                .entry("title".to_string())
+                .or_insert_with(|| PropAccum::new(value_cap))
+                .add(&node.title);
+            for (key, value) in node.property_iter(&graph.interner) {
+                accum
+                    .entry(key.to_string())
+                    .or_insert_with(|| PropAccum::new(value_cap))
+                    .add(value);
             }
         }
+    }
 
-        // Determine type string: prefer metadata, fallback to inferred
-        let type_string = graph
-            .node_type_metadata
-            .get(node_type)
-            .and_then(|meta| meta.get(prop_name))
-            .cloned()
-            .unwrap_or_else(|| first_type.unwrap_or("unknown").to_string());
+    // Build ordered property list: type, title, id, then remaining sorted
+    let mut results = Vec::new();
 
-        let unique = value_set.len();
-        let values = if max_values > 0 && unique <= max_values && unique > 0 {
-            let mut vals: Vec<Value> = value_set.into_iter().collect();
-            vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            Some(vals)
-        } else {
-            None
-        };
+    // "type" is always synthetic
+    results.push(PropertyStatInfo {
+        property_name: "type".to_string(),
+        type_string: "str".to_string(),
+        non_null: total_nodes,
+        unique: 1,
+        values: Some(vec![Value::String(node_type.to_string())]),
+    });
 
-        results.push(PropertyStatInfo {
-            property_name: prop_name.clone(),
-            type_string,
-            non_null,
-            unique,
-            values,
-        });
+    // Canonical order for remaining: title, id first, then sorted discovered
+    let builtins = ["title", "id"];
+    let mut discovered: Vec<String> = accum
+        .keys()
+        .filter(|k| !builtins.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    discovered.sort();
+
+    let ordered: Vec<String> = builtins
+        .iter()
+        .map(|s| s.to_string())
+        .chain(discovered)
+        .collect();
+
+    let metadata = graph.node_type_metadata.get(node_type);
+
+    for prop_name in &ordered {
+        if let Some(pa) = accum.remove(prop_name) {
+            let type_string = metadata
+                .and_then(|meta| meta.get(prop_name))
+                .cloned()
+                .unwrap_or_else(|| pa.first_type.unwrap_or("unknown").to_string());
+
+            let unique = pa.value_set.len();
+            let values = if max_values > 0 && unique <= max_values && unique > 0 {
+                let mut vals: Vec<Value> = pa.value_set.into_iter().collect();
+                vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                Some(vals)
+            } else {
+                None
+            };
+
+            results.push(PropertyStatInfo {
+                property_name: prop_name.clone(),
+                type_string,
+                non_null: pa.non_null,
+                unique,
+                values,
+            });
+        }
     }
 
     Ok(results)
@@ -738,6 +773,72 @@ pub fn compute_neighbors_schema(
         outgoing: outgoing_list,
         incoming: incoming_list,
     })
+}
+
+/// Pre-compute neighbor schemas for ALL types in a single pass over edges.
+/// Much faster than calling `compute_neighbors_schema` per type in `describe()`.
+pub fn compute_all_neighbors_schemas(graph: &DirGraph) -> HashMap<String, NeighborsSchema> {
+    // Key: (source_type, conn_type, target_type) → count
+    let mut edge_counts: HashMap<(String, String, String), usize> = HashMap::new();
+
+    for edge_ref in graph.graph.edge_references() {
+        if let (Some(source), Some(target)) = (
+            graph.get_node(edge_ref.source()),
+            graph.get_node(edge_ref.target()),
+        ) {
+            let conn_type = edge_ref
+                .weight()
+                .connection_type_str(&graph.interner)
+                .to_string();
+            let key = (
+                source.node_type.clone(),
+                conn_type,
+                target.node_type.clone(),
+            );
+            *edge_counts.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    let mut result: HashMap<String, NeighborsSchema> = HashMap::new();
+    for ((src_type, conn_type, tgt_type), count) in &edge_counts {
+        // Outgoing for src_type
+        let schema = result
+            .entry(src_type.clone())
+            .or_insert_with(|| NeighborsSchema {
+                outgoing: Vec::new(),
+                incoming: Vec::new(),
+            });
+        schema.outgoing.push(NeighborConnection {
+            connection_type: conn_type.clone(),
+            other_type: tgt_type.clone(),
+            count: *count,
+        });
+
+        // Incoming for tgt_type
+        let schema = result
+            .entry(tgt_type.clone())
+            .or_insert_with(|| NeighborsSchema {
+                outgoing: Vec::new(),
+                incoming: Vec::new(),
+            });
+        schema.incoming.push(NeighborConnection {
+            connection_type: conn_type.clone(),
+            other_type: src_type.clone(),
+            count: *count,
+        });
+    }
+
+    // Sort each type's lists for deterministic output
+    for schema in result.values_mut() {
+        schema.outgoing.sort_by(|a, b| {
+            (&a.connection_type, &a.other_type).cmp(&(&b.connection_type, &b.other_type))
+        });
+        schema.incoming.sort_by(|a, b| {
+            (&a.connection_type, &a.other_type).cmp(&(&b.connection_type, &b.other_type))
+        });
+    }
+
+    result
 }
 
 /// Return first N nodes of a type for quick inspection.
@@ -1676,10 +1777,12 @@ fn write_topic_closeness(xml: &mut String) {
     xml.push_str("    <syntax>CALL closeness({params}) YIELD node, score</syntax>\n");
     xml.push_str("    <params>\n");
     xml.push_str("      <param name=\"normalized\" type=\"bool\" default=\"true\">Normalize scores.</param>\n");
+    xml.push_str("      <param name=\"sample_size\" type=\"int\" optional=\"true\">Approximate by sampling N source nodes (faster for large graphs).</param>\n");
     xml.push_str("      <param name=\"connection_types\" type=\"string|list\">Filter to specific relationship types.</param>\n");
     xml.push_str("    </params>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"basic\">CALL closeness() YIELD node, score RETURN node.name, score ORDER BY score DESC LIMIT 10</ex>\n");
+    xml.push_str("      <ex desc=\"sampled\">CALL closeness({sample_size: 100}) YIELD node, score RETURN node.name, round(score, 4) ORDER BY score DESC</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </closeness>\n");
 }
@@ -1837,6 +1940,7 @@ fn write_type_detail(
     node_type: &str,
     caps: &TypeCapabilities,
     indent: &str,
+    neighbors_cache: Option<&HashMap<String, NeighborsSchema>>,
 ) {
     let count = graph
         .type_indices
@@ -1896,8 +2000,15 @@ fn write_type_detail(
         }
     }
 
-    // Connections (neighbors)
-    if let Ok(neighbors) = compute_neighbors_schema(graph, node_type) {
+    // Connections (neighbors) — use pre-computed cache if available
+    let computed;
+    let neighbors_opt = if let Some(cache) = neighbors_cache {
+        cache.get(node_type)
+    } else {
+        computed = compute_neighbors_schema(graph, node_type).ok();
+        computed.as_ref()
+    };
+    if let Some(neighbors) = neighbors_opt {
         if !neighbors.outgoing.is_empty() || !neighbors.incoming.is_empty() {
             xml.push_str(&format!("{}  <connections>\n", indent));
             for nc in &neighbors.outgoing {
@@ -2176,9 +2287,11 @@ fn build_inventory_with_detail(graph: &DirGraph) -> String {
         has_geometry: false,
         has_embeddings: false,
     };
+    // Pre-compute all neighbor schemas in a single edge pass
+    let all_neighbors = compute_all_neighbors_schemas(graph);
     for nt in type_names {
         let tc = caps.get(nt).unwrap_or(&empty_caps);
-        write_type_detail(&mut xml, graph, nt, tc, "    ");
+        write_type_detail(&mut xml, graph, nt, tc, "    ", Some(&all_neighbors));
     }
     xml.push_str("  </types>\n");
 
@@ -2221,7 +2334,7 @@ fn build_focused_detail(graph: &DirGraph, types: &[String]) -> Result<String, St
 
     for t in types {
         let tc = caps.get(t).unwrap_or(&empty_caps);
-        write_type_detail(&mut xml, graph, t, tc, "  ");
+        write_type_detail(&mut xml, graph, t, tc, "  ", None);
     }
 
     xml.push_str("</graph>");

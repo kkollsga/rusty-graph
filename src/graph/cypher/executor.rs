@@ -5781,10 +5781,12 @@ impl<'a> CypherExecutor<'a> {
             }
             "closeness" | "closeness_centrality" => {
                 let normalized = call_param_bool(&params, "normalized", true);
+                let sample_size = call_param_opt_usize(&params, "sample_size");
                 let conn = call_param_string_list(&params, "connection_types");
                 let results = graph_algorithms::closeness_centrality(
                     self.graph,
                     normalized,
+                    sample_size,
                     conn.as_deref(),
                     self.deadline,
                 );
