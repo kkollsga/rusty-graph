@@ -94,7 +94,8 @@ impl CypherParser {
             | Some(CypherToken::Remove)
             | Some(CypherToken::On)
             | Some(CypherToken::Call)
-            | Some(CypherToken::Yield) => true,
+            | Some(CypherToken::Yield)
+            | Some(CypherToken::Having) => true,
             Some(CypherToken::Match) => true,
             Some(CypherToken::Optional) => {
                 // OPTIONAL MATCH
@@ -1072,6 +1073,53 @@ impl CypherParser {
 
         self.expect(&CypherToken::RParen)?;
 
+        // Check for window function: func() OVER (PARTITION BY ... ORDER BY ...)
+        if self.check(&CypherToken::Over) {
+            let lower = name.to_lowercase();
+            if !matches!(lower.as_str(), "row_number" | "rank" | "dense_rank") {
+                return Err(format!(
+                    "OVER clause is only supported for window functions (row_number, rank, dense_rank), not '{}'",
+                    name
+                ));
+            }
+            self.advance(); // consume OVER
+            self.expect(&CypherToken::LParen)?;
+
+            // Optional PARTITION BY
+            let partition_by = if self.check(&CypherToken::Partition) {
+                self.advance(); // consume PARTITION
+                self.expect(&CypherToken::By)?;
+                let mut exprs = vec![self.parse_expression()?];
+                while self.check(&CypherToken::Comma) {
+                    self.advance();
+                    exprs.push(self.parse_expression()?);
+                }
+                exprs
+            } else {
+                vec![]
+            };
+
+            // ORDER BY (required for window functions)
+            if !self.check(&CypherToken::Order) {
+                return Err("Window function requires ORDER BY in OVER clause".into());
+            }
+            self.advance(); // consume ORDER
+            self.expect(&CypherToken::By)?;
+            let mut order_by = vec![self.parse_order_item()?];
+            while self.check(&CypherToken::Comma) {
+                self.advance();
+                order_by.push(self.parse_order_item()?);
+            }
+
+            self.expect(&CypherToken::RParen)?;
+
+            return Ok(Expression::WindowFunction {
+                name: lower,
+                partition_by,
+                order_by,
+            });
+        }
+
         Ok(Expression::FunctionCall {
             name,
             args,
@@ -1300,7 +1348,19 @@ impl CypherParser {
 
         let items = self.parse_return_items()?;
 
-        Ok(Clause::Return(ReturnClause { items, distinct }))
+        // Optional HAVING clause for post-aggregation filtering
+        let having = if self.check(&CypherToken::Having) {
+            self.advance();
+            Some(self.parse_predicate()?)
+        } else {
+            None
+        };
+
+        Ok(Clause::Return(ReturnClause {
+            items,
+            distinct,
+            having,
+        }))
     }
 
     /// Parse comma-separated return items: expr AS alias, expr AS alias, ...
@@ -1345,8 +1405,8 @@ impl CypherParser {
 
         let items = self.parse_return_items()?;
 
-        // Check for optional WHERE in WITH
-        let where_clause = if self.check(&CypherToken::Where) {
+        // Check for optional HAVING or WHERE in WITH
+        let where_clause = if self.check(&CypherToken::Having) || self.check(&CypherToken::Where) {
             self.advance();
             Some(WhereClause {
                 predicate: self.parse_predicate()?,

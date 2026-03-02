@@ -2323,7 +2323,8 @@ impl<'a> CypherExecutor<'a> {
             | Expression::MapLiteral(_)
             | Expression::IsNull(_)
             | Expression::IsNotNull(_)
-            | Expression::QuantifiedList { .. } => false,
+            | Expression::QuantifiedList { .. }
+            | Expression::WindowFunction { .. } => false,
         }
     }
 
@@ -2807,6 +2808,11 @@ impl<'a> CypherExecutor<'a> {
                 };
                 Ok(Value::Boolean(result))
             }
+            Expression::WindowFunction { .. } => {
+                // Window functions are evaluated in a separate pass (apply_window_functions),
+                // not per-row. If we reach here, the value should already be in projected bindings.
+                Err("Window function must appear in RETURN/WITH clause".into())
+            }
         }
     }
 
@@ -3257,6 +3263,20 @@ impl<'a> CypherExecutor<'a> {
                     Value::DateTime(_) => Ok(val),
                     Value::Null => Ok(Value::Null),
                     _ => Err(format!("date() argument must be a string, got {:?}", val)),
+                }
+            }
+            "date_diff" | "datediff" => {
+                if args.len() != 2 {
+                    return Err("date_diff() requires 2 date arguments".into());
+                }
+                let a = self.evaluate_expression(&args[0], row)?;
+                let b = self.evaluate_expression(&args[1], row)?;
+                match (&a, &b) {
+                    (Value::DateTime(d1), Value::DateTime(d2)) => {
+                        Ok(Value::Int64((*d1 - *d2).num_days()))
+                    }
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    _ => Err("date_diff() arguments must be dates".into()),
                 }
             }
             "size" => {
@@ -4462,12 +4482,269 @@ impl<'a> CypherExecutor<'a> {
             .items
             .iter()
             .any(|item| is_aggregate_expression(&item.expression));
+        let has_windows = clause
+            .items
+            .iter()
+            .any(|item| is_window_expression(&item.expression));
 
-        if has_aggregation {
-            self.execute_return_with_aggregation(clause, result_set)
+        let mut result = if has_windows {
+            // Window functions: project non-window items first, then apply window pass
+            self.execute_return_with_windows(clause, result_set)?
+        } else if has_aggregation {
+            self.execute_return_with_aggregation(clause, result_set)?
         } else {
-            self.execute_return_projection(clause, result_set)
+            self.execute_return_projection(clause, result_set)?
+        };
+
+        // Apply HAVING filter (post-aggregation)
+        if let Some(ref having) = clause.having {
+            let where_clause = WhereClause {
+                predicate: having.clone(),
+            };
+            result = self.execute_where(&where_clause, result)?;
         }
+
+        Ok(result)
+    }
+
+    /// RETURN with window functions: project non-window items, then compute window values
+    fn execute_return_with_windows(
+        &self,
+        clause: &ReturnClause,
+        mut result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
+        let columns: Vec<String> = clause.items.iter().map(return_item_column_name).collect();
+
+        // Pre-compute: column names + folded expressions for non-window items (once, not per-row)
+        let non_window: Vec<(String, Expression)> = clause
+            .items
+            .iter()
+            .filter(|item| !is_window_expression(&item.expression))
+            .map(|item| {
+                (
+                    return_item_column_name(item),
+                    self.fold_constants_expr(&item.expression),
+                )
+            })
+            .collect();
+
+        // Step 1: Project non-window items per row (with rayon for large sets)
+        let project_row = |row: &mut ResultRow| -> Result<(), String> {
+            let mut projected = Bindings::with_capacity(clause.items.len());
+            for (key, expr) in &non_window {
+                let val = self.evaluate_expression(expr, row)?;
+                projected.insert(key.clone(), val);
+            }
+            row.projected = projected;
+            Ok(())
+        };
+
+        if result_set.rows.len() >= RAYON_THRESHOLD {
+            result_set.rows.par_iter_mut().try_for_each(project_row)?;
+        } else {
+            for row in &mut result_set.rows {
+                project_row(row)?;
+            }
+        }
+
+        // Step 2: Group window functions by their OVER spec to avoid redundant work.
+        // Window functions with identical partition_by + order_by share partition/sort computation.
+        struct WindowSpec<'a> {
+            partition_by: &'a [Expression],
+            order_by: &'a [OrderItem],
+            functions: Vec<(&'a str, String)>, // (func_name, col_name)
+        }
+
+        let mut specs: Vec<WindowSpec<'_>> = Vec::new();
+        for item in &clause.items {
+            if let Expression::WindowFunction {
+                name,
+                partition_by,
+                order_by,
+            } = &item.expression
+            {
+                let col_name = return_item_column_name(item);
+                // Check if an existing spec has the same OVER clause (by pointer equality
+                // on slices — works because they come from the same AST)
+                let found = specs.iter_mut().position(|s| {
+                    std::ptr::eq(
+                        s.partition_by as *const _,
+                        partition_by as &[Expression] as *const _,
+                    ) && std::ptr::eq(s.order_by as *const _, order_by as &[OrderItem] as *const _)
+                });
+                if let Some(idx) = found {
+                    specs[idx].functions.push((name, col_name));
+                } else {
+                    specs.push(WindowSpec {
+                        partition_by,
+                        order_by,
+                        functions: vec![(name, col_name)],
+                    });
+                }
+            }
+        }
+
+        for spec in &specs {
+            self.apply_window_functions(
+                spec.partition_by,
+                spec.order_by,
+                &spec.functions,
+                &mut result_set.rows,
+            )?;
+        }
+
+        // Handle DISTINCT
+        if clause.distinct {
+            let mut seen = HashSet::new();
+            result_set.rows.retain(|row| {
+                let key: Vec<Value> = columns
+                    .iter()
+                    .map(|col| row.projected.get(col).cloned().unwrap_or(Value::Null))
+                    .collect();
+                seen.insert(key)
+            });
+        }
+
+        result_set.columns = columns;
+        Ok(result_set)
+    }
+
+    /// Apply window functions sharing the same OVER spec to all rows.
+    /// Computes partition/sort once for the shared spec, then assigns all function results.
+    fn apply_window_functions(
+        &self,
+        partition_by: &[Expression],
+        order_by: &[OrderItem],
+        functions: &[(&str, String)],
+        rows: &mut [ResultRow],
+    ) -> Result<(), String> {
+        let n = rows.len();
+        if n == 0 {
+            return Ok(());
+        }
+
+        // Compute sort keys once (shared across all partitions and functions)
+        let sort_keys: Vec<Vec<Value>> = rows
+            .iter()
+            .map(|row| {
+                order_by
+                    .iter()
+                    .map(|item| {
+                        self.evaluate_expression(&item.expression, row)
+                            .unwrap_or(Value::Null)
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let sort_cmp = |a: usize, b: usize| -> std::cmp::Ordering {
+            for (i, item) in order_by.iter().enumerate() {
+                if let Some(ord) =
+                    filtering_methods::compare_values(&sort_keys[a][i], &sort_keys[b][i])
+                {
+                    let ord = if item.ascending { ord } else { ord.reverse() };
+                    if ord != std::cmp::Ordering::Equal {
+                        return ord;
+                    }
+                }
+            }
+            std::cmp::Ordering::Equal
+        };
+
+        // Build sorted partitions
+        let partitions: Vec<Vec<usize>> = if partition_by.is_empty() {
+            // Fast path: no partitioning — single partition with all rows
+            let mut indices: Vec<usize> = (0..n).collect();
+            indices.sort_by(|&a, &b| sort_cmp(a, b));
+            vec![indices]
+        } else {
+            // Group by partition key using reusable buffer
+            let mut parts: Vec<Vec<usize>> = Vec::new();
+            let mut part_map: HashMap<String, usize> = HashMap::new();
+            let mut key_buf = String::with_capacity(64);
+
+            for (i, row) in rows.iter().enumerate() {
+                key_buf.clear();
+                for (j, expr) in partition_by.iter().enumerate() {
+                    if j > 0 {
+                        key_buf.push('\x1F');
+                    }
+                    let val = self.evaluate_expression(expr, row).unwrap_or(Value::Null);
+                    value_operations::format_value_compact_into(&mut key_buf, &val);
+                }
+                if let Some(&pidx) = part_map.get(&key_buf) {
+                    parts[pidx].push(i);
+                } else {
+                    let pidx = parts.len();
+                    part_map.insert(key_buf.clone(), pidx);
+                    parts.push(vec![i]);
+                }
+            }
+
+            // Sort each partition
+            for partition in &mut parts {
+                partition.sort_by(|&a, &b| sort_cmp(a, b));
+            }
+            parts
+        };
+
+        // Apply each window function using the shared sorted partitions
+        for &(func_name, ref col_name) in functions {
+            for partition in &partitions {
+                match func_name {
+                    "row_number" => {
+                        for (rank, &row_idx) in partition.iter().enumerate() {
+                            rows[row_idx]
+                                .projected
+                                .insert(col_name.clone(), Value::Int64((rank + 1) as i64));
+                        }
+                    }
+                    "rank" => {
+                        let mut current_rank = 1i64;
+                        for i in 0..partition.len() {
+                            if i > 0 {
+                                let prev = partition[i - 1];
+                                let curr = partition[i];
+                                let same = order_by
+                                    .iter()
+                                    .enumerate()
+                                    .all(|(ki, _)| sort_keys[prev][ki] == sort_keys[curr][ki]);
+                                if !same {
+                                    current_rank = (i + 1) as i64;
+                                }
+                            }
+                            rows[partition[i]]
+                                .projected
+                                .insert(col_name.clone(), Value::Int64(current_rank));
+                        }
+                    }
+                    "dense_rank" => {
+                        let mut current_rank = 1i64;
+                        for i in 0..partition.len() {
+                            if i > 0 {
+                                let prev = partition[i - 1];
+                                let curr = partition[i];
+                                let same = order_by
+                                    .iter()
+                                    .enumerate()
+                                    .all(|(ki, _)| sort_keys[prev][ki] == sort_keys[curr][ki]);
+                                if !same {
+                                    current_rank += 1;
+                                }
+                            }
+                            rows[partition[i]]
+                                .projected
+                                .insert(col_name.clone(), Value::Int64(current_rank));
+                        }
+                    }
+                    _ => {
+                        return Err(format!("Unknown window function: {}", func_name));
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Simple projection without aggregation
@@ -4976,6 +5253,7 @@ impl<'a> CypherExecutor<'a> {
         let return_clause = ReturnClause {
             items: clause.items.clone(),
             distinct: clause.distinct,
+            having: None,
         };
         let mut projected = self.execute_return(&return_clause, result_set)?;
 
@@ -7084,6 +7362,11 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
     }
 }
 
+/// Check if an expression is a window function
+fn is_window_expression(expr: &Expression) -> bool {
+    matches!(expr, Expression::WindowFunction { .. })
+}
+
 /// Get the column name for a return item
 fn return_item_column_name(item: &ReturnItem) -> String {
     if let Some(ref alias) = item.alias {
@@ -7205,6 +7488,34 @@ fn expression_to_string(expr: &Expression) -> String {
                 variable,
                 expression_to_string(list_expr)
             )
+        }
+        Expression::WindowFunction {
+            name,
+            partition_by,
+            order_by,
+        } => {
+            let mut s = format!("{}() OVER (", name);
+            if !partition_by.is_empty() {
+                s.push_str("PARTITION BY ");
+                let parts: Vec<String> = partition_by.iter().map(expression_to_string).collect();
+                s.push_str(&parts.join(", "));
+                if !order_by.is_empty() {
+                    s.push(' ');
+                }
+            }
+            if !order_by.is_empty() {
+                s.push_str("ORDER BY ");
+                let parts: Vec<String> = order_by
+                    .iter()
+                    .map(|item| {
+                        let dir = if item.ascending { "" } else { " DESC" };
+                        format!("{}{}", expression_to_string(&item.expression), dir)
+                    })
+                    .collect();
+                s.push_str(&parts.join(", "));
+            }
+            s.push(')');
+            s
         }
     }
 }

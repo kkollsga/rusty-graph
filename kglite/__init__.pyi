@@ -2259,11 +2259,14 @@ class KnowledgeGraph:
 
         Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, WITH,
         OPTIONAL MATCH, UNWIND, UNION, CREATE, SET, DELETE, DETACH DELETE,
-        REMOVE, MERGE (with ON CREATE SET / ON MATCH SET), CASE expressions,
-        WHERE EXISTS, shortestPath(), list comprehensions,
+        REMOVE, MERGE (with ON CREATE SET / ON MATCH SET), HAVING,
+        CASE expressions, WHERE EXISTS, shortestPath(), list comprehensions,
         CALL...YIELD (graph algorithms: pagerank, betweenness, degree,
         closeness, louvain, label_propagation, connected_components),
-        parameters ($param), ``!=`` operator, and aggregation functions.
+        parameters ($param), ``!=`` operator, aggregation functions,
+        window functions (``row_number()``, ``rank()``, ``dense_rank()``
+        with ``OVER (PARTITION BY ... ORDER BY ...)``), and date arithmetic
+        (``date + N``, ``date - date``, ``date_diff(d1, d2)``).
 
         Mutation queries (CREATE, SET, DELETE, REMOVE, MERGE) store
         statistics on ``graph.last_mutation_stats`` with keys

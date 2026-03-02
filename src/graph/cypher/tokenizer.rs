@@ -52,6 +52,9 @@ pub enum CypherToken {
     Profile,
     Call,
     Yield,
+    Over,
+    Partition,
+    Having,
 
     // Parameters
     Parameter(String), // $param_name
@@ -423,6 +426,9 @@ fn identifier_to_token(ident: String) -> CypherToken {
         "PROFILE" => CypherToken::Profile,
         "CALL" => CypherToken::Call,
         "YIELD" => CypherToken::Yield,
+        "OVER" => CypherToken::Over,
+        "PARTITION" => CypherToken::Partition,
+        "HAVING" => CypherToken::Having,
         _ => CypherToken::Identifier(ident),
     }
 }
@@ -475,6 +481,9 @@ pub fn token_to_keyword_name(token: &CypherToken) -> Option<String> {
         CypherToken::Profile => "profile",
         CypherToken::Call => "call",
         CypherToken::Yield => "yield",
+        CypherToken::Over => "over",
+        CypherToken::Partition => "partition",
+        CypherToken::Having => "having",
         _ => return None,
     };
     Some(name.to_string())

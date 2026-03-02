@@ -49,6 +49,9 @@ pub fn to_float(val: &Value) -> Value {
 pub fn arithmetic_add(a: &Value, b: &Value) -> Value {
     match (a, b) {
         (Value::Int64(x), Value::Int64(y)) => Value::Int64(x + y),
+        // DateTime + Int → DateTime (add days)
+        (Value::DateTime(d), Value::Int64(n)) => Value::DateTime(*d + chrono::Duration::days(*n)),
+        (Value::Int64(n), Value::DateTime(d)) => Value::DateTime(*d + chrono::Duration::days(*n)),
         (Value::String(x), Value::String(y)) => Value::String(format!("{}{}", x, y)),
         // Null propagation for string ops
         (Value::String(_), Value::Null) | (Value::Null, Value::String(_)) => Value::Null,
@@ -66,6 +69,10 @@ pub fn arithmetic_add(a: &Value, b: &Value) -> Value {
 pub fn arithmetic_sub(a: &Value, b: &Value) -> Value {
     match (a, b) {
         (Value::Int64(x), Value::Int64(y)) => Value::Int64(x - y),
+        // DateTime - Int → DateTime (subtract days)
+        (Value::DateTime(d), Value::Int64(n)) => Value::DateTime(*d - chrono::Duration::days(*n)),
+        // DateTime - DateTime → Int (days between)
+        (Value::DateTime(a), Value::DateTime(b)) => Value::Int64((*a - *b).num_days()),
         _ => match (value_to_f64(a), value_to_f64(b)) {
             (Some(x), Some(y)) => Value::Float64(x - y),
             _ => Value::Null,

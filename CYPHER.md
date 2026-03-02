@@ -77,6 +77,50 @@ graph.cypher("MATCH (n:Person) RETURN DISTINCT n.city")
 graph.cypher("MATCH (n:Person) RETURN count(DISTINCT n.city) AS unique_cities")
 ```
 
+## HAVING
+
+Post-aggregation filter — use after RETURN or WITH with aggregates:
+
+```python
+graph.cypher("MATCH (n:Person) RETURN n.city, count(*) AS pop HAVING pop > 1000")
+```
+
+Also supported on WITH:
+
+```python
+graph.cypher("""
+    MATCH (n:Person)
+    WITH n.city AS city, count(*) AS pop HAVING pop > 100
+    RETURN city, pop
+""")
+```
+
+## Window Functions
+
+Window functions compute values across partitions of the result set without collapsing rows.
+
+| Function | Description |
+|---|---|
+| `row_number() OVER (...)` | Sequential number within partition |
+| `rank() OVER (...)` | Rank with gaps for ties |
+| `dense_rank() OVER (...)` | Rank without gaps for ties |
+
+OVER clause: `OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])`
+
+PARTITION BY is optional (whole result set = one partition). ORDER BY is required.
+
+```python
+# Global ranking
+graph.cypher("MATCH (n:Person) RETURN n.name, row_number() OVER (ORDER BY n.score DESC) AS rn")
+
+# Rank within department
+graph.cypher("""
+    MATCH (n:Person)
+    RETURN n.name, n.dept,
+           rank() OVER (PARTITION BY n.dept ORDER BY n.score DESC) AS dept_rank
+""")
+```
+
 ## WITH Clause
 
 ```python
@@ -116,6 +160,7 @@ graph.cypher("""
 | `labels(n)` | Node type (string, not list — single-label) |
 | `keys(n)` / `keys(r)` | Property names of a node or relationship (as JSON list) |
 | `date(str)` / `datetime(str)` | Parse date string to DateTime (`date('2020-01-15')`) |
+| `date_diff(d1, d2)` | Days between two dates (`d1 - d2`); also supports `date - date` arithmetic |
 | `coalesce(a, b, ...)` | First non-null argument |
 | `range(start, end [, step])` | Generate integer list (inclusive); default step = 1 |
 | `length(p)` | Path hop count |
@@ -226,6 +271,9 @@ Date-range filtering on nodes and relationships with explicit field names.
 |----------|-------------|
 | `date(str)` / `datetime(str)` | Parse date string to DateTime value |
 | `d.year`, `d.month`, `d.day` | Extract component from a DateTime value (use `WITH` to alias first) |
+| `date_diff(d1, d2)` | Days between two dates (same as `d1 - d2`) |
+| `date + N` / `date - N` | Add/subtract N days |
+| `date - date` | Days between two dates (integer) |
 | `valid_at(entity, date, 'from_field', 'to_field')` | True if entity is active at a point in time |
 | `valid_during(entity, start, end, 'from_field', 'to_field')` | True if entity's range overlaps the given interval |
 
@@ -793,7 +841,7 @@ graph.cypher("MATCH (f:Field) RETURN ts_at(f.oil, '2020')")
 | **String** | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse` |
 | **Math** | `abs`, `ceil`/`ceiling`, `floor`, `round`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand` |
 | **Spatial** | `point(lat, lon)`, `distance(a, b)`, `contains(a, b)`, `intersects(a, b)`, `centroid(n)`, `area(n)`, `perimeter(n)`, `latitude(point)`, `longitude(point)` |
-| **Temporal** | `date(str)`/`datetime(str)`, `d.year`/`d.month`/`d.day`, `valid_at(entity, date, 'from', 'to')`, `valid_during(entity, start, end, 'from', 'to')` — NULL = open-ended |
+| **Temporal** | `date(str)`/`datetime(str)`, `date_diff(d1, d2)`, `date ± N` (days), `date - date` → int, `d.year`/`d.month`/`d.day`, `valid_at(...)`, `valid_during(...)` |
 | **Semantic** | `text_score(n, prop, query [, metric])` — auto-embeds query via `set_embedder()`, cosine/dot_product/euclidean |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
@@ -811,7 +859,7 @@ Clause-by-clause comparison with the openCypher specification.
 | `MATCH` | Full | Node patterns, relationship patterns, variable-length paths, `shortestPath` |
 | `OPTIONAL MATCH` | Full | Automatic fusion optimization with aggregation |
 | `WHERE` | Full | All comparison, logical, string, and pattern operators |
-| `RETURN` | Full | Aliases, `DISTINCT`, expressions, map projections |
+| `RETURN` | Full | Aliases, `DISTINCT`, expressions, map projections, `HAVING` |
 | `WITH` | Full | Aggregation passthrough, grouping, chained subqueries |
 | `ORDER BY` | Full | Multi-column, `ASC`/`DESC`, fused top-k optimization |
 | `SKIP` / `LIMIT` | Full | |
@@ -824,6 +872,7 @@ Clause-by-clause comparison with the openCypher specification.
 | `MERGE` | Full | `ON CREATE SET`, `ON MATCH SET` |
 | `EXPLAIN` | Full | Structured `ResultView` with cardinality estimates |
 | `PROFILE` | Full | Execute + per-clause stats (rows_in, rows_out, elapsed_us) |
+| `HAVING` | Full | Post-aggregation filter on `RETURN`/`WITH` |
 | `CALL ... YIELD` | Full | Built-in graph algorithm procedures |
 | `FOREACH` | Not supported | Use `UNWIND` + `CREATE`/`SET` instead |
 | `CALL {}` subqueries | Not supported | Use `WITH` chaining or multiple `cypher()` calls |
@@ -850,6 +899,7 @@ Clause-by-clause comparison with the openCypher specification.
 | Map projections (`n {.prop1, .prop2}`) | Full | |
 | Map literals (`{key: expr}`) | Full | |
 | Variable binding in pattern properties | Full | `WITH val AS x MATCH ({prop: x})` |
+| Window functions (`OVER`) | Full | `row_number()`, `rank()`, `dense_rank()` with `PARTITION BY`/`ORDER BY` |
 
 ### Scalar & Aggregation Functions
 
@@ -866,7 +916,7 @@ Clause-by-clause comparison with the openCypher specification.
 | `id(n)` | Full | Returns node id |
 | `labels(n)` | Full | Returns single label (string, not list — single-label model) |
 | `keys(n)` / `keys(r)` | Full | Returns property names as JSON list |
-| `date(str)` / `datetime(str)` | Full | Parse date string to DateTime; `d.year`, `d.month`, `d.day` accessors |
+| `date(str)` / `datetime(str)` | Full | Parse date string to DateTime; `d.year`, `d.month`, `d.day` accessors; `date ± N`, `date - date`, `date_diff()` |
 | `coalesce` | Full | |
 | `range(start, end [, step])` | Full | Inclusive integer range |
 | `round(x [, precision])` | Full | |

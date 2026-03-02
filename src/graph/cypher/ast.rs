@@ -261,6 +261,12 @@ pub enum Expression {
         list_expr: Box<Expression>,
         filter: Box<Predicate>,
     },
+    /// Window function: func() OVER (PARTITION BY ... ORDER BY ...)
+    WindowFunction {
+        name: String,
+        partition_by: Vec<Expression>,
+        order_by: Vec<OrderItem>,
+    },
 }
 
 /// Quantifier type for list predicate functions
@@ -299,6 +305,7 @@ pub enum CaseCondition {
 pub struct ReturnClause {
     pub items: Vec<ReturnItem>,
     pub distinct: bool,
+    pub having: Option<Predicate>,
 }
 
 /// A single item in RETURN: expression AS alias

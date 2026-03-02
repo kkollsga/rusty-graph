@@ -1270,6 +1270,7 @@ fn write_cypher_overview(xml: &mut String) {
     xml.push_str(
         "    <clause name=\"MERGE\">Match existing or create new (upsert pattern).</clause>\n",
     );
+    xml.push_str("    <clause name=\"HAVING\">Post-aggregation filter on RETURN/WITH. Example: RETURN n.type, count(*) AS cnt HAVING cnt > 5</clause>\n");
     xml.push_str("    <clause name=\"EXPLAIN\">Prefix to show query plan as ResultView [step, operation, estimated_rows] without executing.</clause>\n");
     xml.push_str("    <clause name=\"PROFILE\">Prefix to execute and collect per-clause stats. Result has .profile with [clause, rows_in, rows_out, elapsed_us].</clause>\n");
     xml.push_str("  </clauses>\n");
@@ -1296,7 +1297,8 @@ fn write_cypher_overview(xml: &mut String) {
         "    <group name=\"graph\">size, length, id, labels, type, coalesce, range, keys</group>\n",
     );
     xml.push_str("    <group name=\"spatial\">distance(a,b)→m, contains(a,b), intersects(a,b), centroid(n), area(n)→m², perimeter(n)→m</group>\n");
-    xml.push_str("    <group name=\"temporal\">date(str)/datetime(str), d.year/d.month/d.day, valid_at(entity, date, 'from', 'to'), valid_during(entity, start, end, 'from', 'to')</group>\n");
+    xml.push_str("    <group name=\"temporal\">date(str)/datetime(str), date_diff(d1,d2), date ± N (days), date - date → int, d.year/d.month/d.day, valid_at(...), valid_during(...)</group>\n");
+    xml.push_str("    <group name=\"window\">row_number() OVER (...), rank() OVER (...), dense_rank() OVER (...). OVER (PARTITION BY expr ORDER BY expr [DESC])</group>\n");
     xml.push_str("  </functions>\n");
 
     // Procedures
@@ -1329,7 +1331,7 @@ fn write_cypher_overview(xml: &mut String) {
 
 // ── Cypher tier 3: topic detail functions ──────────────────────────────────
 
-const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, RETURN, WITH, ORDER BY, UNWIND, UNION, \
+const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, RETURN, WITH, HAVING, ORDER BY, UNWIND, UNION, \
     CASE, CREATE, SET, DELETE, MERGE, EXPLAIN, PROFILE, operators, functions, patterns, spatial, \
     temporal, pagerank, betweenness, degree, closeness, louvain, \
     label_propagation, connected_components, cluster";
@@ -1350,6 +1352,7 @@ fn write_cypher_topics(xml: &mut String, topics: &[String]) -> Result<(), String
             "WHERE" => write_topic_where(xml),
             "RETURN" => write_topic_return(xml),
             "WITH" => write_topic_with(xml),
+            "HAVING" => write_topic_having(xml),
             "ORDER BY" | "ORDERBY" | "ORDER_BY" => write_topic_order_by(xml),
             "UNWIND" => write_topic_unwind(xml),
             "UNION" => write_topic_union(xml),
@@ -1438,6 +1441,9 @@ fn write_topic_return(xml: &mut String) {
         "      <ex desc=\"expression\">RETURN n.name || ' (' || n.status || ')' AS label</ex>\n",
     );
     xml.push_str("      <ex desc=\"aggregation\">RETURN n.status, count(*) AS n, collect(n.name) AS names</ex>\n");
+    xml.push_str("      <ex desc=\"having\">RETURN n.type, count(*) AS cnt HAVING cnt > 5</ex>\n");
+    xml.push_str("      <ex desc=\"window\">RETURN n.name, row_number() OVER (ORDER BY n.score DESC) AS rn</ex>\n");
+    xml.push_str("      <ex desc=\"window-partition\">RETURN n.name, rank() OVER (PARTITION BY n.dept ORDER BY n.score DESC) AS r</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </RETURN>\n");
 }
@@ -1451,6 +1457,17 @@ fn write_topic_with(xml: &mut String) {
     xml.push_str("      <ex desc=\"limit intermediate\">MATCH (n:Field) WITH n ORDER BY n.name LIMIT 10 RETURN n.name</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </WITH>\n");
+}
+
+fn write_topic_having(xml: &mut String) {
+    xml.push_str("  <HAVING>\n");
+    xml.push_str("    <desc>Post-aggregation filter. Applies after grouping/aggregation in RETURN or WITH. Equivalent to WHERE but for aggregated results.</desc>\n");
+    xml.push_str("    <syntax>RETURN group_expr, agg_func() AS alias HAVING predicate</syntax>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"filter by count\">MATCH (n:Person) RETURN n.city, count(*) AS pop HAVING pop > 1000</ex>\n");
+    xml.push_str("      <ex desc=\"with WITH\">MATCH (n) WITH n.type AS t, count(*) AS c HAVING c >= 5 RETURN t, c</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </HAVING>\n");
 }
 
 fn write_topic_order_by(xml: &mut String) {
@@ -1582,6 +1599,8 @@ fn write_topic_functions(xml: &mut String) {
     xml.push_str("      <ex desc=\"string\">RETURN toLower(n.name) AS lower_name</ex>\n");
     xml.push_str("      <ex desc=\"aggregate\">RETURN n.status, count(*) AS n, avg(n.depth) AS avg_depth</ex>\n");
     xml.push_str("    </examples>\n");
+    xml.push_str("    <group name=\"temporal\">date(str)/datetime(str), date_diff(d1,d2), date ± N (add/sub days), date - date → days (int), d.year/d.month/d.day</group>\n");
+    xml.push_str("    <group name=\"window\">row_number() OVER (...), rank() OVER (...), dense_rank() OVER (...). Syntax: func() OVER (PARTITION BY expr ORDER BY expr [DESC]). PARTITION BY optional.</group>\n");
     xml.push_str("  </functions>\n");
 }
 
@@ -1787,6 +1806,11 @@ fn write_topic_temporal(xml: &mut String) {
     xml.push_str("  <temporal>\n");
     xml.push_str("    <desc>Temporal filtering functions for date-range validity checks on nodes and relationships. Works with any date/datetime string or DateTime properties. NULL fields are treated as open-ended boundaries.</desc>\n");
     xml.push_str("    <functions>\n");
+    xml.push_str("      <fn name=\"date(str) / datetime(str)\">Parse date string to DateTime value. Supports 'YYYY-MM-DD' format.</fn>\n");
+    xml.push_str("      <fn name=\"date_diff(d1, d2)\">Days between two dates (d1 - d2). Same as date subtraction.</fn>\n");
+    xml.push_str("      <fn name=\"date + N / date - N\">Add/subtract N days from a date.</fn>\n");
+    xml.push_str("      <fn name=\"date - date\">Days between two dates (returns integer).</fn>\n");
+    xml.push_str("      <fn name=\"d.year / d.month / d.day\">Extract year, month, or day from a DateTime value.</fn>\n");
     xml.push_str("      <fn name=\"valid_at(entity, date, 'from_field', 'to_field')\">True if entity.from_field &lt;= date &lt;= entity.to_field. NULL from_field = valid since beginning. NULL to_field = still valid.</fn>\n");
     xml.push_str("      <fn name=\"valid_during(entity, start, end, 'from_field', 'to_field')\">True if entity's validity period overlaps [start, end]. Overlap: entity.from_field &lt;= end AND entity.to_field &gt;= start. NULL = open-ended.</fn>\n");
     xml.push_str("    </functions>\n");

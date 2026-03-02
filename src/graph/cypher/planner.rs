@@ -1779,6 +1779,19 @@ impl TextScoreCollector {
                 self.rewrite_pred(filter, params)?;
                 Ok(())
             }
+            Expression::WindowFunction {
+                partition_by,
+                order_by,
+                ..
+            } => {
+                for expr in partition_by.iter_mut() {
+                    self.rewrite_expr(expr, params)?;
+                }
+                for item in order_by.iter_mut() {
+                    self.rewrite_expr(&mut item.expression, params)?;
+                }
+                Ok(())
+            }
         }
     }
 
