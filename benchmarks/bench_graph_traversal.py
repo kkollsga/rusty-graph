@@ -1,8 +1,8 @@
 """
-Benchmark: SQLite recursive CTEs vs KGLite (graph DB) — traversal performance.
+Benchmark: SQLite vs DuckDB vs KGLite — graph traversal performance.
 
-Tests BosonCollider's claim that B-tree joins outperform index-free adjacency
-for graph traversals. Both engines are embedded/in-process (no network overhead).
+Three embedded/in-process engines (no network overhead), all using in-memory storage.
+SQLite and DuckDB use recursive CTEs; KGLite uses native graph traversal.
 
 Dataset: ~30k nodes, ~220k edges — heterogeneous academic knowledge graph
   Nodes: Person (10k), Paper (20k), Topic (500), Institution (200)
@@ -11,7 +11,7 @@ Dataset: ~30k nodes, ~220k edges — heterogeneous academic knowledge graph
 Queries: hop depths 1–8, variable-depth, shortest path.
 
 Usage:
-    pip install kglite
+    pip install kglite duckdb
     python bench_graph_traversal.py
 """
 
@@ -20,6 +20,7 @@ import sqlite3
 import statistics
 import time
 
+import duckdb
 import kglite
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -150,6 +151,42 @@ def setup_sqlite(data):
         CREATE INDEX idx_col_2 ON collaborates(pid2);
     """)
     db.commit()
+    return db
+
+
+# ── DuckDB setup ───────────────────────────────────────────────────────────
+
+def setup_duckdb(data):
+    import pandas as pd
+
+    db = duckdb.connect(":memory:")
+
+    # Bulk load via DataFrames — DuckDB's optimal ingestion path
+    db.execute("CREATE TABLE person AS SELECT * FROM range(?) t(id)", [N_PERSONS])
+    db.execute("CREATE TABLE paper AS SELECT * FROM range(?) t(id)", [N_PAPERS])
+    db.execute("CREATE TABLE topic AS SELECT * FROM range(?) t(id)", [N_TOPICS])
+    db.execute("CREATE TABLE institution AS SELECT * FROM range(?) t(id)", [N_INSTITUTIONS])
+
+    for name, cols in [
+        ("authored", ["person_id", "paper_id"]),
+        ("cites", ["paper_id", "cited_id"]),
+        ("covers", ["paper_id", "topic_id"]),
+        ("affiliated", ["person_id", "inst_id"]),
+        ("collaborates", ["pid1", "pid2"]),
+    ]:
+        df = pd.DataFrame(data[name], columns=cols)
+        db.execute(f"CREATE TABLE {name} AS SELECT * FROM df")
+
+    db.execute("CREATE INDEX idx_dk_auth_p ON authored(person_id)")
+    db.execute("CREATE INDEX idx_dk_auth_pp ON authored(paper_id)")
+    db.execute("CREATE INDEX idx_dk_cite_p ON cites(paper_id)")
+    db.execute("CREATE INDEX idx_dk_cite_c ON cites(cited_id)")
+    db.execute("CREATE INDEX idx_dk_cov_p ON covers(paper_id)")
+    db.execute("CREATE INDEX idx_dk_cov_t ON covers(topic_id)")
+    db.execute("CREATE INDEX idx_dk_aff_p ON affiliated(person_id)")
+    db.execute("CREATE INDEX idx_dk_aff_i ON affiliated(inst_id)")
+    db.execute("CREATE INDEX idx_dk_col_1 ON collaborates(pid1)")
+    db.execute("CREATE INDEX idx_dk_col_2 ON collaborates(pid2)")
     return db
 
 
@@ -494,6 +531,180 @@ def kglite_multi_start_deep_raw(g, starts, depth):
     return sum(row["reach"] for row in result)
 
 
+# ── DuckDB queries ─────────────────────────────────────────────────────────
+# Same recursive CTE SQL as SQLite — DuckDB uses standard SQL syntax.
+# DuckDB returns results via .fetchall() like SQLite.
+
+def duckdb_citation_hops(db, depth):
+    return db.execute(f"""
+        WITH RECURSIVE chain(paper_id, d) AS (
+            SELECT cited_id, 1 FROM cites WHERE paper_id = {START_PAPER}
+            UNION
+            SELECT c.cited_id, chain.d + 1
+            FROM cites c JOIN chain ON c.paper_id = chain.paper_id
+            WHERE chain.d < {depth}
+        )
+        SELECT DISTINCT paper_id FROM chain
+    """).fetchall()
+
+
+def duckdb_collab_hops(db, depth):
+    return db.execute(f"""
+        WITH RECURSIVE chain(person_id, d) AS (
+            SELECT pid2, 1 FROM collaborates WHERE pid1 = {START_PERSON}
+            UNION
+            SELECT c.pid2, chain.d + 1
+            FROM collaborates c JOIN chain ON c.pid1 = chain.person_id
+            WHERE chain.d < {depth}
+        )
+        SELECT DISTINCT person_id FROM chain
+    """).fetchall()
+
+
+def duckdb_hetero_traversal(db):
+    return db.execute(f"""
+        SELECT DISTINCT p2.person_id
+        FROM authored a1
+        JOIN covers c1 ON a1.paper_id = c1.paper_id
+        JOIN covers c2 ON c1.topic_id = c2.topic_id AND c2.paper_id != c1.paper_id
+        JOIN authored p2 ON c2.paper_id = p2.paper_id
+        WHERE a1.person_id = {START_PERSON}
+    """).fetchall()
+
+
+def duckdb_shortest_path(db, source, target):
+    return db.execute(f"""
+        WITH RECURSIVE bfs(person_id, depth) AS (
+            SELECT {source}, 0
+            UNION
+            SELECT c.pid2, bfs.depth + 1
+            FROM collaborates c JOIN bfs ON c.pid1 = bfs.person_id
+            WHERE bfs.depth < 8
+        )
+        SELECT MIN(depth) FROM bfs WHERE person_id = {target}
+    """).fetchone()
+
+
+def duckdb_triangles(db):
+    placeholders = ",".join(str(p) for p in TRIANGLE_PAPERS)
+    return db.execute(f"""
+        SELECT count(*) FROM (
+            SELECT DISTINCT c1.paper_id AS a, c2.paper_id AS b, c3.paper_id AS c
+            FROM cites c1
+            JOIN cites c2 ON c1.cited_id = c2.paper_id
+            JOIN cites c3 ON c2.cited_id = c3.paper_id AND c3.cited_id = c1.paper_id
+            WHERE c1.paper_id IN ({placeholders})
+        )
+    """).fetchone()
+
+
+def duckdb_reachable(db, source, target, max_hops):
+    return db.execute(f"""
+        WITH RECURSIVE bfs(person_id, d) AS (
+            SELECT {source}, 0
+            UNION
+            SELECT c.pid2, bfs.d + 1
+            FROM collaborates c JOIN bfs ON c.pid1 = bfs.person_id
+            WHERE bfs.d < {max_hops}
+        )
+        SELECT 1 FROM bfs WHERE person_id = {target} LIMIT 1
+    """).fetchone()
+
+
+def duckdb_neighbor_topics(db, max_hops):
+    return db.execute(f"""
+        WITH RECURSIVE collab_net(person_id, d) AS (
+            SELECT pid2, 1 FROM collaborates WHERE pid1 = {START_PERSON}
+            UNION
+            SELECT c.pid2, collab_net.d + 1
+            FROM collaborates c JOIN collab_net ON c.pid1 = collab_net.person_id
+            WHERE collab_net.d < {max_hops}
+        )
+        SELECT count(DISTINCT cv.topic_id)
+        FROM collab_net cn
+        JOIN authored a ON cn.person_id = a.person_id
+        JOIN covers cv ON a.paper_id = cv.paper_id
+    """).fetchone()
+
+
+def duckdb_fan_out(db, persons, max_hops):
+    total = 0
+    for pid in persons:
+        row = db.execute(f"""
+            WITH RECURSIVE chain(person_id, d) AS (
+                SELECT pid2, 1 FROM collaborates WHERE pid1 = {pid}
+                UNION
+                SELECT c.pid2, chain.d + 1
+                FROM collaborates c JOIN chain ON c.pid1 = chain.person_id
+                WHERE chain.d < {max_hops}
+            )
+            SELECT count(DISTINCT person_id) FROM chain
+        """).fetchone()
+        total += row[0]
+    return total
+
+
+def duckdb_multi_start_deep(db, starts, depth):
+    total = 0
+    for sid in starts:
+        rows = db.execute(f"""
+            WITH RECURSIVE chain(paper_id, d) AS (
+                SELECT cited_id, 1 FROM cites WHERE paper_id = {sid}
+                UNION
+                SELECT c.cited_id, chain.d + 1
+                FROM cites c JOIN chain ON c.paper_id = chain.paper_id
+                WHERE chain.d < {depth}
+            )
+            SELECT count(DISTINCT paper_id) FROM chain
+        """).fetchone()
+        total += rows[0]
+    return total
+
+
+# ── DuckDB optimized queries ──────────────────────────────────────────────
+# DuckDB is vectorized and optimized for fewer, larger queries.
+# These batch multiple BFS traversals into a single CTE.
+
+def duckdb_fan_out_batch(db, persons, max_hops):
+    """Single multi-source BFS instead of 50 separate queries."""
+    plist = ",".join(str(p) for p in persons)
+    rows = db.execute(f"""
+        WITH RECURSIVE chain(start_pid, person_id, d) AS (
+            SELECT c.pid1, c.pid2, 1
+            FROM collaborates c
+            WHERE c.pid1 IN ({plist})
+            UNION
+            SELECT chain.start_pid, c.pid2, chain.d + 1
+            FROM collaborates c JOIN chain ON c.pid1 = chain.person_id
+            WHERE chain.d < {max_hops}
+        )
+        SELECT sum(cnt) FROM (
+            SELECT count(DISTINCT person_id) AS cnt FROM chain GROUP BY start_pid
+        )
+    """).fetchone()
+    return rows[0]
+
+
+def duckdb_multi_start_deep_batch(db, starts, depth):
+    """Single multi-source deep citation traversal."""
+    slist = ",".join(str(s) for s in starts)
+    rows = db.execute(f"""
+        WITH RECURSIVE chain(start_id, paper_id, d) AS (
+            SELECT c.paper_id, c.cited_id, 1
+            FROM cites c
+            WHERE c.paper_id IN ({slist})
+            UNION
+            SELECT chain.start_id, c.cited_id, chain.d + 1
+            FROM cites c JOIN chain ON c.paper_id = chain.paper_id
+            WHERE chain.d < {depth}
+        )
+        SELECT sum(cnt) FROM (
+            SELECT count(DISTINCT paper_id) AS cnt FROM chain GROUP BY start_id
+        )
+    """).fetchone()
+    return rows[0]
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -510,6 +721,11 @@ def main():
     db = setup_sqlite(data)
     print(f"{(time.perf_counter() - t0)*1000:.0f} ms")
 
+    print("Loading into DuckDB...", end=" ", flush=True)
+    t0 = time.perf_counter()
+    ddb = setup_duckdb(data)
+    print(f"{(time.perf_counter() - t0)*1000:.0f} ms")
+
     print("Loading into KGLite...", end=" ", flush=True)
     t0 = time.perf_counter()
     g = setup_kglite(data)
@@ -517,30 +733,44 @@ def main():
 
     rows = []
 
-    def run_pair(label, sqlite_fn, kglite_fn, kglite_raw_fn=None, category=""):
+    def run_triple(label, sqlite_fn, duckdb_fn, kglite_fn,
+                   kglite_raw_fn=None, duckdb_opt_fn=None, category=""):
         sql_ms, sql_n = bench(sqlite_fn)
+        duck_ms, duck_n = bench(duckdb_fn)
+        if duckdb_opt_fn:
+            duck_opt_ms, _ = bench(duckdb_opt_fn)
+            duck_ms = min(duck_ms, duck_opt_ms)
         kg_ms, kg_n = bench(kglite_fn)
         if kglite_raw_fn:
             kg_raw_ms, _ = bench(kglite_raw_fn)
         else:
             kg_raw_ms = kg_ms
-        ratio = sql_ms / kg_raw_ms if kg_raw_ms > 0 else float("inf")
-        winner = "KGLite" if ratio > 1 else "SQLite"
+        best_sql = min(sql_ms, duck_ms)
+        if kg_raw_ms <= best_sql:
+            winner = "KGLite"
+        elif duck_ms <= sql_ms:
+            winner = "DuckDB"
+        else:
+            winner = "SQLite"
+        # Ratio: best SQL engine vs KGLite
+        ratio = best_sql / kg_raw_ms if kg_raw_ms > 0 else float("inf")
         rows.append({
             "Category": category,
             "Query": label,
             "SQLite (ms)": round(sql_ms, 4),
+            "DuckDB (ms)": round(duck_ms, 4),
             "KGLite (ms)": round(kg_raw_ms, 4),
             "Winner": winner,
             "Ratio": f"{ratio:.1f}x",
-            "Rows": max(sql_n, kg_n),
+            "Rows": max(sql_n, duck_n, kg_n),
         })
 
     # ── Citation chain (shallow → crossover → deep) ──
     for depth in [5, 8, 15, 20]:
-        run_pair(
+        run_triple(
             f"{depth}-hop citations",
             lambda d=depth: sqlite_citation_hops(db, d),
+            lambda d=depth: duckdb_citation_hops(ddb, d),
             lambda d=depth: kglite_citation_hops(g, d),
             lambda d=depth: kglite_citation_hops_raw(g, d),
             category="Citation chain",
@@ -548,18 +778,20 @@ def main():
 
     # ── Collaboration chain ──
     for depth in [6, 10]:
-        run_pair(
+        run_triple(
             f"{depth}-hop collaborators",
             lambda d=depth: sqlite_collab_hops(db, d),
+            lambda d=depth: duckdb_collab_hops(ddb, d),
             lambda d=depth: kglite_collab_hops(g, d),
             lambda d=depth: kglite_collab_hops_raw(g, d),
             category="Collab chain",
         )
 
     # ── Heterogeneous traversal ──
-    run_pair(
+    run_triple(
         "Person->Paper->Topic->Paper->Person",
         lambda: sqlite_hetero_traversal(db),
+        lambda: duckdb_hetero_traversal(ddb),
         lambda: kglite_hetero_traversal(g),
         lambda: kglite_hetero_traversal_raw(g),
         category="Heterogeneous",
@@ -570,17 +802,19 @@ def main():
     for _ in range(2):
         src = rng.randint(0, N_PERSONS - 1)
         tgt = rng.randint(0, N_PERSONS - 1)
-        run_pair(
+        run_triple(
             f"Person {src} -> {tgt}",
             lambda s=src, t=tgt: sqlite_shortest_path(db, s, t),
+            lambda s=src, t=tgt: duckdb_shortest_path(ddb, s, t),
             lambda s=src, t=tgt: kglite_shortest_path(g, s, t),
             category="Shortest path",
         )
 
     # ── Triangle detection ──
-    run_pair(
+    run_triple(
         f"A->B->C->A in {len(TRIANGLE_PAPERS)} papers",
         lambda: sqlite_triangles(db),
+        lambda: duckdb_triangles(ddb),
         lambda: kglite_triangles_raw(g),
         category="Triangles",
     )
@@ -590,36 +824,42 @@ def main():
     for max_hops in [8, 12]:
         src = rng2.randint(0, N_PERSONS - 1)
         tgt = rng2.randint(0, N_PERSONS - 1)
-        run_pair(
+        run_triple(
             f"Person {src} <-> {tgt} ({max_hops} hops)",
             lambda s=src, t=tgt, h=max_hops: sqlite_reachable(db, s, t, h),
+            lambda s=src, t=tgt, h=max_hops: duckdb_reachable(ddb, s, t, h),
             lambda s=src, t=tgt, h=max_hops: kglite_reachable_raw(g, s, t, h),
             category="Reachability",
         )
 
     # ── Neighborhood aggregation (mixed types) ──
-    run_pair(
+    run_triple(
         "Topics via 2-hop collabs",
         lambda: sqlite_neighbor_topics(db, 2),
+        lambda: duckdb_neighbor_topics(ddb, 2),
         lambda: kglite_neighbor_topics_raw(g, 2),
         category="Neighborhood agg.",
     )
 
     # ── Fan-out (batch BFS) ──
     fan_out_50 = list(range(50))
-    run_pair(
+    run_triple(
         "50 x 3-hop reach",
         lambda: sqlite_fan_out(db, fan_out_50, 3),
+        lambda: duckdb_fan_out(ddb, fan_out_50, 3),
         lambda: kglite_fan_out_raw(g, fan_out_50, 3),
+        duckdb_opt_fn=lambda: duckdb_fan_out_batch(ddb, fan_out_50, 3),
         category="Fan-out",
     )
 
     # ── Multi-start deep traversal ──
     deep_starts = list(range(0, 100, 10))  # 10 start nodes
-    run_pair(
+    run_triple(
         "10 x 12-hop citations",
         lambda: sqlite_multi_start_deep(db, deep_starts, 12),
+        lambda: duckdb_multi_start_deep(ddb, deep_starts, 12),
         lambda: kglite_multi_start_deep_raw(g, deep_starts, 12),
+        duckdb_opt_fn=lambda: duckdb_multi_start_deep_batch(ddb, deep_starts, 12),
         category="Multi-start deep",
     )
 
@@ -630,8 +870,10 @@ def main():
 
     # Summary
     kg_wins = (df["Winner"] == "KGLite").sum()
+    duck_wins = (df["Winner"] == "DuckDB").sum()
     sql_wins = (df["Winner"] == "SQLite").sum()
-    print(f"\nKGLite wins: {kg_wins}/{len(df)}  |  SQLite wins: {sql_wins}/{len(df)}")
+    total = len(df)
+    print(f"\nKGLite wins: {kg_wins}/{total}  |  DuckDB wins: {duck_wins}/{total}  |  SQLite wins: {sql_wins}/{total}")
     print(f"Each query: median of {RUNS} runs. Dataset: {node_count:,} nodes, {edge_count:,} edges.")
 
 

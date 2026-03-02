@@ -14,12 +14,17 @@ use std::time::Instant;
 // Path Filtering Helpers
 // ============================================================================
 
+/// Pre-intern connection type strings into InternedKeys for fast comparison.
+fn intern_connection_types(connection_types: Option<&[String]>) -> Option<Vec<InternedKey>> {
+    connection_types.map(|types| types.iter().map(|t| InternedKey::from_str(t)).collect())
+}
+
 /// Get undirected neighbors filtered by edge connection type.
 /// When connection_types is None, returns all neighbors (equivalent to neighbors_undirected).
 fn filtered_neighbors_undirected(
     graph: &DirGraph,
     node: NodeIndex,
-    connection_types: Option<&[String]>,
+    connection_types: Option<&[InternedKey]>,
 ) -> Vec<NodeIndex> {
     use petgraph::Direction;
     match connection_types {
@@ -27,18 +32,12 @@ fn filtered_neighbors_undirected(
         Some(types) => {
             let mut neighbors = Vec::new();
             for edge in graph.graph.edges_directed(node, Direction::Outgoing) {
-                if types
-                    .iter()
-                    .any(|t| InternedKey::from_str(t) == edge.weight().connection_type)
-                {
+                if types.iter().any(|t| *t == edge.weight().connection_type) {
                     neighbors.push(edge.target());
                 }
             }
             for edge in graph.graph.edges_directed(node, Direction::Incoming) {
-                if types
-                    .iter()
-                    .any(|t| InternedKey::from_str(t) == edge.weight().connection_type)
-                {
+                if types.iter().any(|t| *t == edge.weight().connection_type) {
                     neighbors.push(edge.source());
                 }
             }
@@ -51,7 +50,7 @@ fn filtered_neighbors_undirected(
 fn filtered_neighbors_outgoing(
     graph: &DirGraph,
     node: NodeIndex,
-    connection_types: Option<&[String]>,
+    connection_types: Option<&[InternedKey]>,
 ) -> Vec<NodeIndex> {
     use petgraph::Direction;
     match connection_types {
@@ -62,11 +61,7 @@ fn filtered_neighbors_outgoing(
         Some(types) => graph
             .graph
             .edges_directed(node, Direction::Outgoing)
-            .filter(|e| {
-                types
-                    .iter()
-                    .any(|t| InternedKey::from_str(t) == e.weight().connection_type)
-            })
+            .filter(|e| types.iter().any(|t| *t == e.weight().connection_type))
             .map(|e| e.target())
             .collect(),
     }
@@ -125,7 +120,15 @@ pub fn shortest_path(
 ) -> Option<PathResult> {
     let via_set: Option<HashSet<&str>> =
         via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
-    let path = reconstruct_path_bfs(graph, source, target, connection_types, &via_set, deadline)?;
+    let interned = intern_connection_types(connection_types);
+    let path = reconstruct_path_bfs(
+        graph,
+        source,
+        target,
+        interned.as_deref(),
+        &via_set,
+        deadline,
+    )?;
     let cost = path.len().saturating_sub(1);
 
     Some(PathResult { path, cost })
@@ -200,6 +203,11 @@ pub fn shortest_path_cost_batch(
             adj[tgt_i].push(src_i);
         }
     }
+    // Dedup undirected adjacency (handles bidirectional edges A→B + B→A)
+    for neighbors in &mut adj {
+        neighbors.sort_unstable();
+        neighbors.dedup();
+    }
 
     // Reusable visited array — cleared between queries
     let mut visited: Vec<bool> = vec![false; n];
@@ -271,7 +279,7 @@ fn reconstruct_path_bfs(
     graph: &DirGraph,
     source: NodeIndex,
     target: NodeIndex,
-    connection_types: Option<&[String]>,
+    connection_types: Option<&[InternedKey]>,
     via_types: &Option<HashSet<&str>>,
     deadline: Option<Instant>,
 ) -> Option<Vec<NodeIndex>> {
@@ -369,6 +377,7 @@ pub fn shortest_path_directed(
 
     let via_set: Option<HashSet<&str>> =
         via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
+    let interned = intern_connection_types(connection_types);
 
     let node_bound = graph.graph.node_bound();
     let mut visited: Vec<bool> = vec![false; node_bound];
@@ -397,7 +406,7 @@ pub fn shortest_path_directed(
         let current = NodeIndex::new(current_idx);
 
         // Only follow outgoing edges
-        let neighbors = filtered_neighbors_outgoing(graph, current, connection_types);
+        let neighbors = filtered_neighbors_outgoing(graph, current, interned.as_deref());
         for neighbor in neighbors {
             let neighbor_idx = neighbor.index();
 
@@ -453,6 +462,7 @@ pub fn all_paths(
 ) -> Vec<Vec<NodeIndex>> {
     let via_set: Option<HashSet<&str>> =
         via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
+    let interned = intern_connection_types(connection_types);
     let mut results = Vec::new();
     let mut current_path = vec![source];
     let mut visited = HashSet::new();
@@ -467,7 +477,7 @@ pub fn all_paths(
         &mut visited,
         &mut results,
         max_results,
-        connection_types,
+        interned.as_deref(),
         &via_set,
         deadline,
     );
@@ -485,7 +495,7 @@ fn find_all_paths_recursive(
     visited: &mut HashSet<NodeIndex>,
     results: &mut Vec<Vec<NodeIndex>>,
     max_results: Option<usize>,
-    connection_types: Option<&[String]>,
+    connection_types: Option<&[InternedKey]>,
     via_types: &Option<HashSet<&str>>,
     deadline: Option<Instant>,
 ) {
@@ -744,13 +754,11 @@ pub fn betweenness_centrality(
     // Pre-build undirected adjacency list for BFS.
     // Betweenness treats edges as undirected so that nodes bridging
     // communities are detected regardless of edge direction.
+    let interned_ct = intern_connection_types(connection_types);
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for edge in graph.graph.edge_references() {
-        if let Some(types) = &connection_types {
-            if !types
-                .iter()
-                .any(|t| InternedKey::from_str(t) == edge.weight().connection_type)
-            {
+        if let Some(ref types) = interned_ct {
+            if !types.iter().any(|t| *t == edge.weight().connection_type) {
                 continue;
             }
         }
@@ -759,9 +767,11 @@ pub fn betweenness_centrality(
         adj[src_i].push(tgt_i);
         adj[tgt_i].push(src_i);
     }
-
-    // Initialize betweenness scores using Vec for O(1) access
-    let mut betweenness: Vec<f64> = vec![0.0; n];
+    // Dedup undirected adjacency (handles bidirectional edges A→B + B→A)
+    for neighbors in &mut adj {
+        neighbors.sort_unstable();
+        neighbors.dedup();
+    }
 
     // Determine which nodes to use as sources
     // Use stride-based sampling to ensure even coverage across the graph,
@@ -779,70 +789,157 @@ pub fn betweenness_centrality(
         (0..n).collect()
     };
 
-    // Pre-allocate data structures ONCE outside the loop
-    let mut stack: Vec<usize> = Vec::with_capacity(n);
-    let mut pred: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut sigma: Vec<f64> = vec![0.0; n];
-    let mut dist: Vec<i64> = vec![-1; n];
-    let mut delta: Vec<f64> = vec![0.0; n];
-    let mut queue: VecDeque<usize> = VecDeque::with_capacity(n);
+    // Parallel vs sequential Brandes' algorithm
+    let use_parallel = n >= 4096;
 
-    // Brandes' algorithm - process each source
-    for (source_counter, &s_idx) in source_indices.iter().enumerate() {
-        // Periodic timeout check (every 10 source nodes)
-        if source_counter.is_multiple_of(10) {
-            if let Some(dl) = deadline {
-                if Instant::now() > dl {
-                    break;
+    let mut betweenness: Vec<f64> = if use_parallel {
+        use rayon::prelude::*;
+
+        let adj_ref = &adj;
+        let deadline_ref = &deadline;
+        let num_threads = rayon::current_num_threads();
+        let chunk_size = (source_indices.len() / num_threads).max(1);
+
+        // Thread-local accumulation + reduction (avoids write conflicts on shared array)
+        source_indices
+            .par_chunks(chunk_size)
+            .map(|chunk| {
+                // Thread-local data structures (allocated once per thread)
+                let mut local_betweenness: Vec<f64> = vec![0.0; n];
+                let mut stack: Vec<usize> = Vec::with_capacity(n);
+                let mut pred: Vec<Vec<usize>> = vec![Vec::new(); n];
+                let mut sigma: Vec<f64> = vec![0.0; n];
+                let mut dist: Vec<i64> = vec![-1; n];
+                let mut delta: Vec<f64> = vec![0.0; n];
+                let mut queue: VecDeque<usize> = VecDeque::with_capacity(n);
+
+                for (local_counter, &s_idx) in chunk.iter().enumerate() {
+                    // Periodic timeout check (every 10 sources within this chunk)
+                    if local_counter % 10 == 0 {
+                        if let Some(dl) = deadline_ref {
+                            if Instant::now() > *dl {
+                                break;
+                            }
+                        }
+                    }
+
+                    // Reset only stack/queue
+                    stack.clear();
+                    queue.clear();
+
+                    // Initialize source
+                    sigma[s_idx] = 1.0;
+                    dist[s_idx] = 0;
+                    queue.push_back(s_idx);
+
+                    // BFS phase
+                    while let Some(v_idx) = queue.pop_front() {
+                        stack.push(v_idx);
+                        let v_dist = dist[v_idx];
+
+                        for &w_idx in &adj_ref[v_idx] {
+                            let d = dist[w_idx];
+                            if d < 0 {
+                                dist[w_idx] = v_dist + 1;
+                                queue.push_back(w_idx);
+                                sigma[w_idx] += sigma[v_idx];
+                                pred[w_idx].push(v_idx);
+                            } else if d == v_dist + 1 {
+                                sigma[w_idx] += sigma[v_idx];
+                                pred[w_idx].push(v_idx);
+                            }
+                        }
+                    }
+
+                    // Accumulation phase + sparse reset
+                    while let Some(w_idx) = stack.pop() {
+                        for &v_idx in &pred[w_idx] {
+                            let contribution = (sigma[v_idx] / sigma[w_idx]) * (1.0 + delta[w_idx]);
+                            delta[v_idx] += contribution;
+                        }
+                        if w_idx != s_idx {
+                            local_betweenness[w_idx] += delta[w_idx];
+                        }
+                        pred[w_idx].clear();
+                        sigma[w_idx] = 0.0;
+                        dist[w_idx] = -1;
+                        delta[w_idx] = 0.0;
+                    }
+                }
+
+                local_betweenness
+            })
+            .reduce(
+                || vec![0.0; n],
+                |mut a, b| {
+                    for i in 0..n {
+                        a[i] += b[i];
+                    }
+                    a
+                },
+            )
+    } else {
+        // Sequential path (n < 4096): reuses pre-allocated buffers across iterations
+        let mut betweenness: Vec<f64> = vec![0.0; n];
+        let mut stack: Vec<usize> = Vec::with_capacity(n);
+        let mut pred: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut sigma: Vec<f64> = vec![0.0; n];
+        let mut dist: Vec<i64> = vec![-1; n];
+        let mut delta: Vec<f64> = vec![0.0; n];
+        let mut queue: VecDeque<usize> = VecDeque::with_capacity(n);
+
+        for (source_counter, &s_idx) in source_indices.iter().enumerate() {
+            // Periodic timeout check (every 10 source nodes)
+            if source_counter.is_multiple_of(10) {
+                if let Some(dl) = deadline {
+                    if Instant::now() > dl {
+                        break;
+                    }
                 }
             }
-        }
 
-        // Reset data structures (much faster than re-allocating)
-        stack.clear();
-        queue.clear();
-        for i in 0..n {
-            pred[i].clear();
-            sigma[i] = 0.0;
-            dist[i] = -1;
-            delta[i] = 0.0;
-        }
+            stack.clear();
+            queue.clear();
 
-        // Initialize source
-        sigma[s_idx] = 1.0;
-        dist[s_idx] = 0;
-        queue.push_back(s_idx);
+            sigma[s_idx] = 1.0;
+            dist[s_idx] = 0;
+            queue.push_back(s_idx);
 
-        // BFS phase using pre-built adjacency list (no graph traversal)
-        while let Some(v_idx) = queue.pop_front() {
-            stack.push(v_idx);
-            let v_dist = dist[v_idx];
+            while let Some(v_idx) = queue.pop_front() {
+                stack.push(v_idx);
+                let v_dist = dist[v_idx];
 
-            for &w_idx in &adj[v_idx] {
-                // First visit?
-                if dist[w_idx] < 0 {
-                    dist[w_idx] = v_dist + 1;
-                    queue.push_back(w_idx);
-                }
-                // Shortest path to w via v?
-                if dist[w_idx] == v_dist + 1 {
-                    sigma[w_idx] += sigma[v_idx];
-                    pred[w_idx].push(v_idx);
+                for &w_idx in &adj[v_idx] {
+                    let d = dist[w_idx];
+                    if d < 0 {
+                        dist[w_idx] = v_dist + 1;
+                        queue.push_back(w_idx);
+                        sigma[w_idx] += sigma[v_idx];
+                        pred[w_idx].push(v_idx);
+                    } else if d == v_dist + 1 {
+                        sigma[w_idx] += sigma[v_idx];
+                        pred[w_idx].push(v_idx);
+                    }
                 }
             }
+
+            while let Some(w_idx) = stack.pop() {
+                for &v_idx in &pred[w_idx] {
+                    let contribution = (sigma[v_idx] / sigma[w_idx]) * (1.0 + delta[w_idx]);
+                    delta[v_idx] += contribution;
+                }
+                if w_idx != s_idx {
+                    betweenness[w_idx] += delta[w_idx];
+                }
+                pred[w_idx].clear();
+                sigma[w_idx] = 0.0;
+                dist[w_idx] = -1;
+                delta[w_idx] = 0.0;
+            }
         }
 
-        // Accumulation phase - back propagation
-        while let Some(w_idx) = stack.pop() {
-            for &v_idx in &pred[w_idx] {
-                let contribution = (sigma[v_idx] / sigma[w_idx]) * (1.0 + delta[w_idx]);
-                delta[v_idx] += contribution;
-            }
-            if w_idx != s_idx {
-                betweenness[w_idx] += delta[w_idx];
-            }
-        }
-    }
+        betweenness
+    };
 
     // Undirected BFS counts each (s,t) pair twice, so halve raw scores.
     for score in betweenness.iter_mut() {
@@ -923,14 +1020,12 @@ pub fn pagerank(
     // Pre-build reverse adjacency list: for each target j, store list of source indices.
     // Pull-based formulation: each target reads from its in-neighbors independently,
     // enabling rayon parallelization (no write conflicts on new_pr[j]).
+    let interned_ct = intern_connection_types(connection_types);
     let mut in_adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut out_degrees: Vec<usize> = vec![0; n];
     for edge in graph.graph.edge_references() {
-        if let Some(types) = &connection_types {
-            if !types
-                .iter()
-                .any(|t| InternedKey::from_str(t) == edge.weight().connection_type)
-            {
+        if let Some(ref types) = interned_ct {
+            if !types.iter().any(|t| *t == edge.weight().connection_type) {
                 continue;
             }
         }
@@ -1070,14 +1165,12 @@ pub fn degree_centrality(
     };
 
     // Compute all degrees in a single pass over edges instead of per-node traversal
+    let interned_ct = intern_connection_types(connection_types);
     let bound = graph.graph.node_bound();
     let mut degrees = vec![0usize; bound];
     for edge in graph.graph.edge_references() {
-        if let Some(types) = &connection_types {
-            if !types
-                .iter()
-                .any(|t| InternedKey::from_str(t) == edge.weight().connection_type)
-            {
+        if let Some(ref types) = interned_ct {
+            if !types.iter().any(|t| *t == edge.weight().connection_type) {
                 continue;
             }
         }
@@ -1115,8 +1208,6 @@ pub fn closeness_centrality(
     connection_types: Option<&[String]>,
     deadline: Option<Instant>,
 ) -> Vec<CentralityResult> {
-    use std::collections::VecDeque;
-
     let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
     let n = nodes.len();
 
@@ -1133,13 +1224,11 @@ pub fn closeness_centrality(
 
     // Pre-build incoming adjacency list: for closeness centrality on directed graphs,
     // we BFS via incoming edges (convention: d(v, u) = how easy for v to reach u)
+    let interned_ct = intern_connection_types(connection_types);
     let mut adj_incoming: Vec<Vec<usize>> = vec![Vec::new(); n];
     for edge in graph.graph.edge_references() {
-        if let Some(types) = &connection_types {
-            if !types
-                .iter()
-                .any(|t| InternedKey::from_str(t) == edge.weight().connection_type)
-            {
+        if let Some(ref types) = interned_ct {
+            if !types.iter().any(|t| *t == edge.weight().connection_type) {
                 continue;
             }
         }
@@ -1149,13 +1238,107 @@ pub fn closeness_centrality(
         // edge: src -> tgt, so tgt has incoming edge from src
         adj_incoming[tgt_i].push(src_i);
     }
+    // Dedup incoming adjacency (handles duplicate edges)
+    for neighbors in &mut adj_incoming {
+        neighbors.sort_unstable();
+        neighbors.dedup();
+    }
 
+    // Parallel path: each source BFS is independent, no shared accumulator
+    let use_parallel = n >= 4096;
+
+    if use_parallel {
+        use rayon::prelude::*;
+
+        let adj_ref = &adj_incoming;
+        let deadline_ref = &deadline;
+        let nodes_ref = &nodes;
+
+        let mut results: Vec<CentralityResult> = nodes_ref
+            .par_iter()
+            .enumerate()
+            .map(|(s_idx, &source)| {
+                // Periodic timeout check (every 100 sources)
+                if s_idx % 100 == 0 {
+                    if let Some(dl) = deadline_ref {
+                        if Instant::now() > *dl {
+                            return CentralityResult {
+                                node_idx: source,
+                                score: 0.0,
+                            };
+                        }
+                    }
+                }
+
+                // Thread-local BFS data structures
+                let mut dist: Vec<i64> = vec![-1; n];
+                let mut current_level: Vec<usize> = Vec::with_capacity(n / 4);
+                let mut next_level: Vec<usize> = Vec::with_capacity(n / 4);
+                let mut touched: Vec<usize> = Vec::with_capacity(n / 4);
+
+                // Initialize source
+                current_level.push(s_idx);
+                dist[s_idx] = 0;
+                touched.push(s_idx);
+                let mut depth: i64 = 0;
+
+                // Level-based BFS via incoming edges
+                while !current_level.is_empty() {
+                    depth += 1;
+                    next_level.clear();
+
+                    for &current_idx in &current_level {
+                        for &neighbor_idx in &adj_ref[current_idx] {
+                            if dist[neighbor_idx] < 0 {
+                                dist[neighbor_idx] = depth;
+                                next_level.push(neighbor_idx);
+                                touched.push(neighbor_idx);
+                            }
+                        }
+                    }
+
+                    std::mem::swap(&mut current_level, &mut next_level);
+                }
+
+                // Calculate closeness from touched nodes only
+                let reachable = touched.len();
+                let total_distance: i64 = touched.iter().map(|&idx| dist[idx]).sum();
+
+                if reachable > 1 && total_distance > 0 {
+                    let closeness = (reachable - 1) as f64 / total_distance as f64;
+                    let score = if normalized {
+                        closeness * (reachable - 1) as f64 / (n - 1) as f64
+                    } else {
+                        closeness
+                    };
+                    CentralityResult {
+                        node_idx: source,
+                        score,
+                    }
+                } else {
+                    CentralityResult {
+                        node_idx: source,
+                        score: 0.0,
+                    }
+                }
+            })
+            .collect();
+
+        results.sort_unstable_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        return results;
+    }
+
+    // Sequential path (n < 4096): reuses pre-allocated buffers across iterations
     let mut results = Vec::with_capacity(n);
-
-    // Pre-allocate data structures ONCE outside the loop
-    // -1 means not visited, >= 0 is the distance
     let mut dist: Vec<i64> = vec![-1; n];
-    let mut queue: VecDeque<usize> = VecDeque::with_capacity(n);
+    let mut current_level: Vec<usize> = Vec::with_capacity(n);
+    let mut next_level: Vec<usize> = Vec::with_capacity(n);
+    let mut touched: Vec<usize> = Vec::with_capacity(n);
 
     for (s_idx, &source) in nodes.iter().enumerate() {
         // Periodic timeout check (every 10 source nodes)
@@ -1167,41 +1350,44 @@ pub fn closeness_centrality(
             }
         }
 
-        // Reset data structures (much faster than re-allocating)
-        queue.clear();
-        for d in dist.iter_mut() {
-            *d = -1;
+        // Sparse reset from previous iteration (only visited nodes)
+        for &idx in &touched {
+            dist[idx] = -1;
         }
+        touched.clear();
+        current_level.clear();
 
-        // BFS via incoming edges to find distances
-        queue.push_back(s_idx);
+        // Initialize source
+        current_level.push(s_idx);
         dist[s_idx] = 0;
+        touched.push(s_idx);
+        let mut depth: i64 = 0;
 
-        while let Some(current_idx) = queue.pop_front() {
-            let current_dist = dist[current_idx];
+        // Level-based BFS via incoming edges
+        while !current_level.is_empty() {
+            depth += 1;
+            next_level.clear();
 
-            for &neighbor_idx in &adj_incoming[current_idx] {
-                if dist[neighbor_idx] < 0 {
-                    dist[neighbor_idx] = current_dist + 1;
-                    queue.push_back(neighbor_idx);
+            for &current_idx in &current_level {
+                for &neighbor_idx in &adj_incoming[current_idx] {
+                    if dist[neighbor_idx] < 0 {
+                        dist[neighbor_idx] = depth;
+                        next_level.push(neighbor_idx);
+                        touched.push(neighbor_idx);
+                    }
                 }
             }
+
+            std::mem::swap(&mut current_level, &mut next_level);
         }
 
-        // Calculate closeness from distances
-        let mut total_distance: i64 = 0;
-        let mut reachable: usize = 0;
-        for &d in &dist {
-            if d >= 0 {
-                total_distance += d;
-                reachable += 1;
-            }
-        }
+        // Calculate closeness from touched nodes only (not all N)
+        let reachable = touched.len();
+        let total_distance: i64 = touched.iter().map(|&idx| dist[idx]).sum();
 
         if reachable > 1 && total_distance > 0 {
             let closeness = (reachable - 1) as f64 / total_distance as f64;
 
-            // Normalize by the fraction of reachable nodes
             let score = if normalized {
                 closeness * (reachable - 1) as f64 / (n - 1) as f64
             } else {
@@ -1279,14 +1465,12 @@ pub fn louvain_communities(
 
     // Pre-build undirected weighted adjacency list
     // adj[i] = Vec<(neighbor_compact_idx, weight)>
+    let interned_ct = intern_connection_types(connection_types);
     let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
     let mut total_weight = 0.0f64;
     for edge in graph.graph.edge_references() {
-        if let Some(types) = &connection_types {
-            if !types
-                .iter()
-                .any(|t| InternedKey::from_str(t) == edge.weight().connection_type)
-            {
+        if let Some(ref types) = interned_ct {
+            if !types.iter().any(|t| *t == edge.weight().connection_type) {
                 continue;
             }
         }
@@ -1296,6 +1480,18 @@ pub fn louvain_communities(
         adj[src_i].push((tgt_i, w));
         adj[tgt_i].push((src_i, w));
         total_weight += w;
+    }
+    // Dedup weighted adjacency: merge duplicate neighbors by summing weights
+    for neighbors in &mut adj {
+        neighbors.sort_unstable_by_key(|&(idx, _)| idx);
+        neighbors.dedup_by(|a, b| {
+            if a.0 == b.0 {
+                b.1 += a.1;
+                true
+            } else {
+                false
+            }
+        });
     }
 
     if total_weight == 0.0 {
@@ -1481,13 +1677,11 @@ pub fn label_propagation(
     }
 
     // Pre-build undirected adjacency list (both directions)
+    let interned_ct = intern_connection_types(connection_types);
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for edge in graph.graph.edge_references() {
-        if let Some(types) = &connection_types {
-            if !types
-                .iter()
-                .any(|t| InternedKey::from_str(t) == edge.weight().connection_type)
-            {
+        if let Some(ref types) = interned_ct {
+            if !types.iter().any(|t| *t == edge.weight().connection_type) {
                 continue;
             }
         }
@@ -1495,6 +1689,11 @@ pub fn label_propagation(
         let tgt_i = node_to_idx[edge.target().index()];
         adj[src_i].push(tgt_i);
         adj[tgt_i].push(src_i);
+    }
+    // Dedup undirected adjacency (handles bidirectional edges A→B + B→A)
+    for neighbors in &mut adj {
+        neighbors.sort_unstable();
+        neighbors.dedup();
     }
 
     // Initialize: each node gets a unique label (0..n)
