@@ -156,6 +156,10 @@ pub fn generate_explain_plan(query: &CypherQuery, graph: &DirGraph) -> String {
                 "FusedMatchReturnAggregate (optimized MATCH + count)".to_string(),
                 Some(1),
             ),
+            Clause::FusedMatchWithAggregate { .. } => (
+                "FusedMatchWithAggregate (optimized MATCH + WITH count)".to_string(),
+                Some(1),
+            ),
             Clause::FusedOptionalMatchAggregate { .. } => (
                 "FusedOptionalMatchAggregate (optimized OPTIONAL MATCH + count)".to_string(),
                 Some(1),
@@ -209,6 +213,10 @@ pub fn generate_explain_plan(query: &CypherQuery, graph: &DirGraph) -> String {
                     edge_type
                 ),
                 Some(1),
+            ),
+            Clause::FusedNodeScanAggregate { .. } => (
+                "FusedNodeScanAggregate (optimized MATCH + RETURN agg)".to_string(),
+                None,
             ),
         };
         if let Some(est) = est {

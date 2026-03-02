@@ -7,8 +7,11 @@ SQLite and DuckDB use recursive CTEs; KGLite uses native graph traversal.
 Dataset: ~30k nodes, ~220k edges — heterogeneous academic knowledge graph
   Nodes: Person (10k), Paper (20k), Topic (500), Institution (200)
   Edges: AUTHORED, CITES, COVERS, AFFILIATED, COLLABORATES
+  Properties: h_index, pub_count, field, year, citation_count, venue, country, ranking
 
-Queries: hop depths 1–8, variable-depth, shortest path.
+Queries: 15 traversal benchmarks + 10 analytical + 10 advanced analytical (OPTIONAL MATCH,
+  EXISTS/NOT EXISTS, CASE aggregation, UNION, count(DISTINCT), multi-step WITH,
+  correlated top-N, out-degree distribution, multi-aggregate).
 
 Usage:
     pip install kglite duckdb
@@ -31,6 +34,10 @@ N_PAPERS = 20_000
 N_TOPICS = 500
 N_INSTITUTIONS = 200
 RUNS = 10  # median of N runs per query
+
+FIELDS = ["ML", "NLP", "CV", "Theory", "Systems", "DB", "Security", "HCI"]
+VENUES = ["NeurIPS", "ICML", "ACL", "CVPR", "AAAI", "SIGMOD", "VLDB", "KDD", "WWW", "ICLR"]
+COUNTRIES = ["US", "UK", "DE", "CN", "JP", "CA", "FR", "KR", "AU", "IN"]
 
 # ── Data generation ─────────────────────────────────────────────────────────
 
@@ -98,12 +105,41 @@ def generate_data():
         cites.append((pid, 5000))
         cites.append((pid, 5001))
 
+    # ── Node properties (separate RNG to keep edge data stable) ─────────────
+    prop_rng = random.Random(SEED + 100)
+
+    person_props = [
+        {"id": pid, "name": f"Person_{pid}",
+         "h_index": prop_rng.randint(1, 100), "pub_count": prop_rng.randint(1, 200),
+         "field": prop_rng.choice(FIELDS), "career_start": prop_rng.randint(1980, 2023)}
+        for pid in range(N_PERSONS)
+    ]
+    paper_props = [
+        {"id": pid, "title": f"Paper_{pid}",
+         "year": prop_rng.randint(1995, 2024), "citation_count": prop_rng.randint(0, 2000),
+         "venue": prop_rng.choice(VENUES), "field": prop_rng.choice(FIELDS)}
+        for pid in range(N_PAPERS)
+    ]
+    topic_props = [
+        {"id": tid, "name": f"Topic_{tid}", "parent_field": prop_rng.choice(FIELDS)}
+        for tid in range(N_TOPICS)
+    ]
+    inst_props = [
+        {"id": iid, "name": f"Inst_{iid}",
+         "country": prop_rng.choice(COUNTRIES), "ranking": prop_rng.randint(1, 200)}
+        for iid in range(N_INSTITUTIONS)
+    ]
+
     return {
         "authored": authored,
         "cites": cites,
         "covers": covers,
         "affiliated": affiliated,
         "collaborates": collaborates,
+        "person_props": person_props,
+        "paper_props": paper_props,
+        "topic_props": topic_props,
+        "inst_props": inst_props,
     }
 
 
@@ -116,10 +152,13 @@ def setup_sqlite(data):
     db.execute("PRAGMA cache_size=-64000")  # 64MB cache
 
     db.executescript("""
-        CREATE TABLE person (id INTEGER PRIMARY KEY);
-        CREATE TABLE paper (id INTEGER PRIMARY KEY);
-        CREATE TABLE topic (id INTEGER PRIMARY KEY);
-        CREATE TABLE institution (id INTEGER PRIMARY KEY);
+        CREATE TABLE person (id INTEGER PRIMARY KEY, name TEXT, h_index INT,
+                             pub_count INT, field TEXT, career_start INT);
+        CREATE TABLE paper (id INTEGER PRIMARY KEY, title TEXT, year INT,
+                            citation_count INT, venue TEXT, field TEXT);
+        CREATE TABLE topic (id INTEGER PRIMARY KEY, name TEXT, parent_field TEXT);
+        CREATE TABLE institution (id INTEGER PRIMARY KEY, name TEXT, country TEXT,
+                                  ranking INT);
 
         CREATE TABLE authored (person_id INT, paper_id INT);
         CREATE TABLE cites (paper_id INT, cited_id INT);
@@ -128,10 +167,16 @@ def setup_sqlite(data):
         CREATE TABLE collaborates (pid1 INT, pid2 INT);
     """)
 
-    db.executemany("INSERT INTO person VALUES (?)", [(i,) for i in range(N_PERSONS)])
-    db.executemany("INSERT INTO paper VALUES (?)", [(i,) for i in range(N_PAPERS)])
-    db.executemany("INSERT INTO topic VALUES (?)", [(i,) for i in range(N_TOPICS)])
-    db.executemany("INSERT INTO institution VALUES (?)", [(i,) for i in range(N_INSTITUTIONS)])
+    db.executemany("INSERT INTO person VALUES (?,?,?,?,?,?)",
+        [(p["id"], p["name"], p["h_index"], p["pub_count"], p["field"], p["career_start"])
+         for p in data["person_props"]])
+    db.executemany("INSERT INTO paper VALUES (?,?,?,?,?,?)",
+        [(p["id"], p["title"], p["year"], p["citation_count"], p["venue"], p["field"])
+         for p in data["paper_props"]])
+    db.executemany("INSERT INTO topic VALUES (?,?,?)",
+        [(t["id"], t["name"], t["parent_field"]) for t in data["topic_props"]])
+    db.executemany("INSERT INTO institution VALUES (?,?,?,?)",
+        [(i["id"], i["name"], i["country"], i["ranking"]) for i in data["inst_props"]])
     db.executemany("INSERT INTO authored VALUES (?,?)", data["authored"])
     db.executemany("INSERT INTO cites VALUES (?,?)", data["cites"])
     db.executemany("INSERT INTO covers VALUES (?,?)", data["covers"])
@@ -149,6 +194,12 @@ def setup_sqlite(data):
         CREATE INDEX idx_aff_i ON affiliated(inst_id);
         CREATE INDEX idx_col_1 ON collaborates(pid1);
         CREATE INDEX idx_col_2 ON collaborates(pid2);
+        CREATE INDEX idx_person_field ON person(field);
+        CREATE INDEX idx_person_hindex ON person(h_index);
+        CREATE INDEX idx_paper_year ON paper(year);
+        CREATE INDEX idx_paper_venue ON paper(venue);
+        CREATE INDEX idx_paper_field ON paper(field);
+        CREATE INDEX idx_paper_citation ON paper(citation_count);
     """)
     db.commit()
     return db
@@ -161,11 +212,13 @@ def setup_duckdb(data):
 
     db = duckdb.connect(":memory:")
 
-    # Bulk load via DataFrames — DuckDB's optimal ingestion path
-    db.execute("CREATE TABLE person AS SELECT * FROM range(?) t(id)", [N_PERSONS])
-    db.execute("CREATE TABLE paper AS SELECT * FROM range(?) t(id)", [N_PAPERS])
-    db.execute("CREATE TABLE topic AS SELECT * FROM range(?) t(id)", [N_TOPICS])
-    db.execute("CREATE TABLE institution AS SELECT * FROM range(?) t(id)", [N_INSTITUTIONS])
+    # Node tables with properties — bulk load via DataFrames
+    for name, props_key in [
+        ("person", "person_props"), ("paper", "paper_props"),
+        ("topic", "topic_props"), ("institution", "inst_props"),
+    ]:
+        df = pd.DataFrame(data[props_key])
+        db.execute(f"CREATE TABLE {name} AS SELECT * FROM df")
 
     for name, cols in [
         ("authored", ["person_id", "paper_id"]),
@@ -187,6 +240,13 @@ def setup_duckdb(data):
     db.execute("CREATE INDEX idx_dk_aff_i ON affiliated(inst_id)")
     db.execute("CREATE INDEX idx_dk_col_1 ON collaborates(pid1)")
     db.execute("CREATE INDEX idx_dk_col_2 ON collaborates(pid2)")
+    # Property indexes
+    db.execute("CREATE INDEX idx_dk_person_field ON person(field)")
+    db.execute("CREATE INDEX idx_dk_person_hindex ON person(h_index)")
+    db.execute("CREATE INDEX idx_dk_paper_year ON paper(year)")
+    db.execute("CREATE INDEX idx_dk_paper_venue ON paper(venue)")
+    db.execute("CREATE INDEX idx_dk_paper_field ON paper(field)")
+    db.execute("CREATE INDEX idx_dk_paper_citation ON paper(citation_count)")
     return db
 
 
@@ -197,10 +257,10 @@ def setup_kglite(data):
 
     g = kglite.KnowledgeGraph()
 
-    g.add_nodes(pd.DataFrame({"id": range(N_PERSONS)}), "Person", "id", "id")
-    g.add_nodes(pd.DataFrame({"id": range(N_PAPERS)}), "Paper", "id", "id")
-    g.add_nodes(pd.DataFrame({"id": range(N_TOPICS)}), "Topic", "id", "id")
-    g.add_nodes(pd.DataFrame({"id": range(N_INSTITUTIONS)}), "Institution", "id", "id")
+    g.add_nodes(pd.DataFrame(data["person_props"]), "Person", "id", "id")
+    g.add_nodes(pd.DataFrame(data["paper_props"]), "Paper", "id", "id")
+    g.add_nodes(pd.DataFrame(data["topic_props"]), "Topic", "id", "id")
+    g.add_nodes(pd.DataFrame(data["inst_props"]), "Institution", "id", "id")
 
     g.add_connections(
         pd.DataFrame(data["authored"], columns=["person_id", "paper_id"]),
@@ -222,6 +282,15 @@ def setup_kglite(data):
         pd.DataFrame(data["collaborates"], columns=["pid1", "pid2"]),
         "COLLABORATES", "Person", "pid1", "Person", "pid2",
     )
+
+    # Property indexes — match the SQLite/DuckDB index coverage for fair comparison
+    g.create_index("Person", "field")
+    g.create_index("Paper", "venue")
+    g.create_index("Paper", "field")
+    g.create_range_index("Paper", "year")
+    g.create_range_index("Paper", "citation_count")
+    g.create_range_index("Person", "h_index")
+
     return g
 
 
@@ -705,6 +774,651 @@ def duckdb_multi_start_deep_batch(db, starts, depth):
     return rows[0]
 
 
+# ── Analytical queries ──────────────────────────────────────────────────────
+# Property filters, aggregations, window functions, HAVING, WITH chains,
+# in-degree centrality, cross-institution joins, string/math ops.
+
+
+# 1. Property-filtered traversal: ML authors with high h-index → papers
+
+def sqlite_filtered_traversal(db):
+    return db.execute("""
+        SELECT DISTINCT a.paper_id
+        FROM person p JOIN authored a ON p.id = a.person_id
+        WHERE p.field = 'ML' AND p.h_index > 80
+    """).fetchall()
+
+
+def duckdb_filtered_traversal(db):
+    return db.execute("""
+        SELECT DISTINCT a.paper_id
+        FROM person p JOIN authored a ON p.id = a.person_id
+        WHERE p.field = 'ML' AND p.h_index > 80
+    """).fetchall()
+
+
+def kglite_filtered_traversal(g):
+    return len(g.cypher("""
+        MATCH (p:Person)-[:AUTHORED]->(paper:Paper)
+        WHERE p.field = 'ML' AND p.h_index > 80
+        RETURN DISTINCT paper.id
+    """))
+
+
+# 2. Multi-hop with intermediate filter: recent papers' 2-hop citations
+
+def sqlite_filtered_multihop(db):
+    return db.execute("""
+        SELECT DISTINCT c2.cited_id
+        FROM paper p
+        JOIN cites c1 ON p.id = c1.paper_id
+        JOIN cites c2 ON c1.cited_id = c2.paper_id
+        WHERE p.year > 2020
+    """).fetchall()
+
+
+def duckdb_filtered_multihop(db):
+    return db.execute("""
+        SELECT DISTINCT c2.cited_id
+        FROM paper p
+        JOIN cites c1 ON p.id = c1.paper_id
+        JOIN cites c2 ON c1.cited_id = c2.paper_id
+        WHERE p.year > 2020
+    """).fetchall()
+
+
+def kglite_filtered_multihop(g):
+    return len(g.cypher("""
+        MATCH (p:Paper)-[:CITES]->(:Paper)-[:CITES]->(c2:Paper)
+        WHERE p.year > 2020
+        RETURN DISTINCT c2.id
+    """))
+
+
+# 3. Aggregation pipeline: top 20 venue×year by paper count
+
+def sqlite_agg_pipeline(db):
+    return db.execute("""
+        SELECT venue, year, COUNT(*) AS cnt
+        FROM paper GROUP BY venue, year ORDER BY cnt DESC LIMIT 20
+    """).fetchall()
+
+
+def duckdb_agg_pipeline(db):
+    return db.execute("""
+        SELECT venue, year, COUNT(*) AS cnt
+        FROM paper GROUP BY venue, year ORDER BY cnt DESC LIMIT 20
+    """).fetchall()
+
+
+def kglite_agg_pipeline(g):
+    return len(g.cypher("""
+        MATCH (p:Paper)
+        RETURN p.venue AS venue, p.year AS year, count(*) AS cnt
+        ORDER BY cnt DESC LIMIT 20
+    """))
+
+
+# 4. HAVING clause: prolific venues
+
+def sqlite_having(db):
+    return db.execute("""
+        SELECT venue, COUNT(*) AS cnt, AVG(citation_count) AS ac
+        FROM paper GROUP BY venue
+        HAVING COUNT(*) > 200 AND AVG(citation_count) > 100
+    """).fetchall()
+
+
+def duckdb_having(db):
+    return db.execute("""
+        SELECT venue, COUNT(*) AS cnt, AVG(citation_count) AS ac
+        FROM paper GROUP BY venue
+        HAVING COUNT(*) > 200 AND AVG(citation_count) > 100
+    """).fetchall()
+
+
+def kglite_having(g):
+    return len(g.cypher("""
+        MATCH (p:Paper)
+        RETURN p.venue AS venue, count(*) AS cnt, avg(p.citation_count) AS ac
+        HAVING cnt > 200 AND ac > 100
+    """))
+
+
+# 5. Window function: rank authors by h_index within field
+
+def sqlite_window(db):
+    return db.execute("""
+        SELECT id, field, h_index,
+               ROW_NUMBER() OVER (PARTITION BY field ORDER BY h_index DESC) AS rk
+        FROM person
+    """).fetchall()
+
+
+def duckdb_window(db):
+    return db.execute("""
+        SELECT id, field, h_index,
+               ROW_NUMBER() OVER (PARTITION BY field ORDER BY h_index DESC) AS rk
+        FROM person
+    """).fetchall()
+
+
+def kglite_window(g):
+    return len(g.cypher("""
+        MATCH (p:Person)
+        RETURN p.id, p.field, p.h_index,
+               row_number() OVER (PARTITION BY p.field ORDER BY p.h_index DESC) AS rk
+    """))
+
+
+# 6. WITH chain: top authors' most-cited papers
+
+def sqlite_with_chain(db):
+    return db.execute("""
+        WITH top AS (SELECT id FROM person ORDER BY h_index DESC LIMIT 50)
+        SELECT p.id, p.citation_count
+        FROM top t JOIN authored a ON t.id = a.person_id
+        JOIN paper p ON a.paper_id = p.id
+        ORDER BY p.citation_count DESC LIMIT 20
+    """).fetchall()
+
+
+def duckdb_with_chain(db):
+    return db.execute("""
+        WITH top AS (SELECT id FROM person ORDER BY h_index DESC LIMIT 50)
+        SELECT p.id, p.citation_count
+        FROM top t JOIN authored a ON t.id = a.person_id
+        JOIN paper p ON a.paper_id = p.id
+        ORDER BY p.citation_count DESC LIMIT 20
+    """).fetchall()
+
+
+def kglite_with_chain(g):
+    return len(g.cypher("""
+        MATCH (a:Person)
+        WITH a ORDER BY a.h_index DESC LIMIT 50
+        MATCH (a)-[:AUTHORED]->(p:Paper)
+        RETURN p.id, p.citation_count
+        ORDER BY p.citation_count DESC LIMIT 20
+    """))
+
+
+# 7. In-degree centrality: most-cited papers
+
+def sqlite_indegree(db):
+    return db.execute("""
+        SELECT cited_id, COUNT(*) AS indegree
+        FROM cites GROUP BY cited_id ORDER BY indegree DESC LIMIT 20
+    """).fetchall()
+
+
+def duckdb_indegree(db):
+    return db.execute("""
+        SELECT cited_id, COUNT(*) AS indegree
+        FROM cites GROUP BY cited_id ORDER BY indegree DESC LIMIT 20
+    """).fetchall()
+
+
+def kglite_indegree(g):
+    return len(g.cypher("""
+        MATCH (:Paper)-[:CITES]->(p:Paper)
+        RETURN p.id, count(*) AS indegree
+        ORDER BY indegree DESC LIMIT 20
+    """))
+
+
+# 8. Cross-institution collaboration
+
+def sqlite_cross_inst(db):
+    return db.execute("""
+        SELECT a1.inst_id AS i1, a2.inst_id AS i2,
+               COUNT(DISTINCT au1.paper_id) AS collabs
+        FROM affiliated a1
+        JOIN authored au1 ON a1.person_id = au1.person_id
+        JOIN authored au2 ON au1.paper_id = au2.paper_id
+        JOIN affiliated a2 ON au2.person_id = a2.person_id
+        WHERE a1.inst_id < a2.inst_id
+        GROUP BY a1.inst_id, a2.inst_id
+        ORDER BY collabs DESC LIMIT 20
+    """).fetchall()
+
+
+def duckdb_cross_inst(db):
+    return db.execute("""
+        SELECT a1.inst_id AS i1, a2.inst_id AS i2,
+               COUNT(DISTINCT au1.paper_id) AS collabs
+        FROM affiliated a1
+        JOIN authored au1 ON a1.person_id = au1.person_id
+        JOIN authored au2 ON au1.paper_id = au2.paper_id
+        JOIN affiliated a2 ON au2.person_id = a2.person_id
+        WHERE a1.inst_id < a2.inst_id
+        GROUP BY a1.inst_id, a2.inst_id
+        ORDER BY collabs DESC LIMIT 20
+    """).fetchall()
+
+
+def kglite_cross_inst(g):
+    return len(g.cypher("""
+        MATCH (p1:Person)-[:AUTHORED]->(paper:Paper)<-[:AUTHORED]-(p2:Person),
+              (p1)-[:AFFILIATED]->(i1:Institution),
+              (p2)-[:AFFILIATED]->(i2:Institution)
+        WHERE i1.id < i2.id
+        RETURN i1.id AS inst1, i2.id AS inst2, count(DISTINCT paper.id) AS collabs
+        ORDER BY collabs DESC LIMIT 20
+    """))
+
+
+# 9. Complex filtered scan: multiple predicates
+
+def sqlite_complex_filter(db):
+    return db.execute("""
+        SELECT COUNT(*) FROM paper
+        WHERE year BETWEEN 2015 AND 2022
+          AND venue IN ('NeurIPS', 'ICML', 'ICLR')
+          AND citation_count > 500
+          AND field = 'ML'
+    """).fetchone()
+
+
+def duckdb_complex_filter(db):
+    return db.execute("""
+        SELECT COUNT(*) FROM paper
+        WHERE year BETWEEN 2015 AND 2022
+          AND venue IN ('NeurIPS', 'ICML', 'ICLR')
+          AND citation_count > 500
+          AND field = 'ML'
+    """).fetchone()
+
+
+def kglite_complex_filter(g):
+    rows = g.cypher("""
+        MATCH (p:Paper)
+        WHERE p.year >= 2015 AND p.year <= 2022
+          AND p.venue IN ['NeurIPS', 'ICML', 'ICLR']
+          AND p.citation_count > 500 AND p.field = 'ML'
+        RETURN count(*) AS cnt
+    """).to_list()
+    return rows[0]["cnt"] if rows else 0
+
+
+# 10. String + math operations
+
+def sqlite_string_math(db):
+    return db.execute("""
+        SELECT UPPER(venue) AS v, ROUND(citation_count / 100.0) AS bucket,
+               COUNT(*) AS cnt
+        FROM paper WHERE citation_count > 200
+        GROUP BY UPPER(venue), ROUND(citation_count / 100.0)
+        ORDER BY cnt DESC LIMIT 20
+    """).fetchall()
+
+
+def duckdb_string_math(db):
+    return db.execute("""
+        SELECT UPPER(venue) AS v, ROUND(citation_count / 100.0) AS bucket,
+               COUNT(*) AS cnt
+        FROM paper WHERE citation_count > 200
+        GROUP BY UPPER(venue), ROUND(citation_count / 100.0)
+        ORDER BY cnt DESC LIMIT 20
+    """).fetchall()
+
+
+def kglite_string_math(g):
+    return len(g.cypher("""
+        MATCH (p:Paper)
+        WHERE p.citation_count > 200
+        RETURN toUpper(p.venue) AS v, round(p.citation_count / 100.0) AS bucket,
+               count(*) AS cnt
+        ORDER BY cnt DESC LIMIT 20
+    """))
+
+
+# ── Advanced analytical queries ───────────────────────────────────────────
+# OPTIONAL MATCH, EXISTS/NOT EXISTS, CASE aggregation, UNION, count(DISTINCT),
+# multi-step WITH, correlated top-N, out-degree distribution, multi-aggregate.
+
+
+# 11. OPTIONAL MATCH — papers per person (left outer join)
+
+def sqlite_optional_match(db):
+    return db.execute("""
+        SELECT p.id, COALESCE(cnt, 0) AS papers
+        FROM person p LEFT JOIN (
+            SELECT person_id, COUNT(*) AS cnt FROM authored GROUP BY person_id
+        ) a ON p.id = a.person_id
+        WHERE p.field = 'ML'
+        ORDER BY papers DESC LIMIT 20
+    """).fetchall()
+
+
+def duckdb_optional_match(db):
+    return db.execute("""
+        SELECT p.id, COALESCE(cnt, 0) AS papers
+        FROM person p LEFT JOIN (
+            SELECT person_id, COUNT(*) AS cnt FROM authored GROUP BY person_id
+        ) a ON p.id = a.person_id
+        WHERE p.field = 'ML'
+        ORDER BY papers DESC LIMIT 20
+    """).fetchall()
+
+
+def kglite_optional_match(g):
+    return len(g.cypher("""
+        MATCH (p:Person)
+        WHERE p.field = 'ML'
+        OPTIONAL MATCH (p)-[:AUTHORED]->(paper:Paper)
+        RETURN p.id, count(paper) AS papers
+        ORDER BY papers DESC LIMIT 20
+    """))
+
+
+# 12. EXISTS — NLP persons who collaborate with ML authors
+
+def sqlite_exists(db):
+    return db.execute("""
+        SELECT DISTINCT p.id FROM person p
+        JOIN collaborates c ON p.id = c.pid1
+        JOIN person p2 ON c.pid2 = p2.id
+        WHERE p.field = 'NLP' AND p2.field = 'ML'
+    """).fetchall()
+
+
+def duckdb_exists(db):
+    return db.execute("""
+        SELECT DISTINCT p.id FROM person p
+        JOIN collaborates c ON p.id = c.pid1
+        JOIN person p2 ON c.pid2 = p2.id
+        WHERE p.field = 'NLP' AND p2.field = 'ML'
+    """).fetchall()
+
+
+def kglite_exists(g):
+    return len(g.cypher("""
+        MATCH (p:Person)
+        WHERE p.field = 'NLP' AND EXISTS {
+            MATCH (p)-[:COLLABORATES]->(other:Person)
+            WHERE other.field = 'ML'
+        }
+        RETURN DISTINCT p.id
+    """))
+
+
+# 13. NOT EXISTS — old papers never cited
+
+def sqlite_not_exists(db):
+    return db.execute("""
+        SELECT p.id FROM paper p
+        WHERE p.year < 2000
+        AND NOT EXISTS (SELECT 1 FROM cites c WHERE c.cited_id = p.id)
+    """).fetchall()
+
+
+def duckdb_not_exists(db):
+    return db.execute("""
+        SELECT p.id FROM paper p
+        WHERE p.year < 2000
+        AND NOT EXISTS (SELECT 1 FROM cites c WHERE c.cited_id = p.id)
+    """).fetchall()
+
+
+def kglite_not_exists(g):
+    return len(g.cypher("""
+        MATCH (p:Paper)
+        WHERE p.year < 2000 AND NOT EXISTS {
+            MATCH (:Paper)-[:CITES]->(p)
+        }
+        RETURN p.id
+    """))
+
+
+# 14. Conditional aggregation — ML vs non-ML per venue (CASE in aggregate)
+
+def sqlite_case_agg(db):
+    return db.execute("""
+        SELECT venue,
+               SUM(CASE WHEN field = 'ML' THEN 1 ELSE 0 END) AS ml_count,
+               SUM(CASE WHEN field <> 'ML' THEN 1 ELSE 0 END) AS other_count,
+               COUNT(*) AS total
+        FROM paper GROUP BY venue ORDER BY total DESC LIMIT 10
+    """).fetchall()
+
+
+def duckdb_case_agg(db):
+    return db.execute("""
+        SELECT venue,
+               SUM(CASE WHEN field = 'ML' THEN 1 ELSE 0 END) AS ml_count,
+               SUM(CASE WHEN field <> 'ML' THEN 1 ELSE 0 END) AS other_count,
+               COUNT(*) AS total
+        FROM paper GROUP BY venue ORDER BY total DESC LIMIT 10
+    """).fetchall()
+
+
+def kglite_case_agg(g):
+    return len(g.cypher("""
+        MATCH (p:Paper)
+        RETURN p.venue AS venue,
+               sum(CASE WHEN p.field = 'ML' THEN 1 ELSE 0 END) AS ml_count,
+               sum(CASE WHEN p.field <> 'ML' THEN 1 ELSE 0 END) AS other_count,
+               count(*) AS total
+        ORDER BY total DESC LIMIT 10
+    """))
+
+
+# 15. count(DISTINCT) — distinct fields per institution
+
+def sqlite_count_distinct(db):
+    return db.execute("""
+        SELECT i.id, i.name, COUNT(DISTINCT p.field) AS n_fields
+        FROM institution i
+        JOIN affiliated a ON i.id = a.inst_id
+        JOIN person p ON a.person_id = p.id
+        GROUP BY i.id, i.name
+        ORDER BY n_fields DESC LIMIT 20
+    """).fetchall()
+
+
+def duckdb_count_distinct(db):
+    return db.execute("""
+        SELECT i.id, i.name, COUNT(DISTINCT p.field) AS n_fields
+        FROM institution i
+        JOIN affiliated a ON i.id = a.inst_id
+        JOIN person p ON a.person_id = p.id
+        GROUP BY i.id, i.name
+        ORDER BY n_fields DESC LIMIT 20
+    """).fetchall()
+
+
+def kglite_count_distinct(g):
+    return len(g.cypher("""
+        MATCH (i:Institution)<-[:AFFILIATED]-(p:Person)
+        RETURN i.id, i.name, count(DISTINCT p.field) AS n_fields
+        ORDER BY n_fields DESC LIMIT 20
+    """))
+
+
+# 16. Multi-step WITH — top authors' venue distribution
+
+def sqlite_multistep_with(db):
+    return db.execute("""
+        WITH top_authors AS (
+            SELECT id FROM person ORDER BY h_index DESC LIMIT 100
+        ),
+        their_papers AS (
+            SELECT p.venue, p.citation_count
+            FROM top_authors ta
+            JOIN authored a ON ta.id = a.person_id
+            JOIN paper p ON a.paper_id = p.id
+        )
+        SELECT venue, COUNT(*) AS cnt, AVG(citation_count) AS avg_cite
+        FROM their_papers
+        GROUP BY venue ORDER BY cnt DESC LIMIT 10
+    """).fetchall()
+
+
+def duckdb_multistep_with(db):
+    return db.execute("""
+        WITH top_authors AS (
+            SELECT id FROM person ORDER BY h_index DESC LIMIT 100
+        ),
+        their_papers AS (
+            SELECT p.venue, p.citation_count
+            FROM top_authors ta
+            JOIN authored a ON ta.id = a.person_id
+            JOIN paper p ON a.paper_id = p.id
+        )
+        SELECT venue, COUNT(*) AS cnt, AVG(citation_count) AS avg_cite
+        FROM their_papers
+        GROUP BY venue ORDER BY cnt DESC LIMIT 10
+    """).fetchall()
+
+
+def kglite_multistep_with(g):
+    return len(g.cypher("""
+        MATCH (a:Person)
+        WITH a ORDER BY a.h_index DESC LIMIT 100
+        MATCH (a)-[:AUTHORED]->(p:Paper)
+        WITH p.venue AS venue, p.citation_count AS cites
+        RETURN venue, count(*) AS cnt, avg(cites) AS avg_cite
+        ORDER BY cnt DESC LIMIT 10
+    """))
+
+
+# 17. UNION — top by citations UNION top by recency
+
+def sqlite_union(db):
+    return db.execute("""
+        SELECT * FROM (
+            SELECT id, 'most_cited' AS reason FROM paper
+            ORDER BY citation_count DESC LIMIT 10
+        )
+        UNION
+        SELECT * FROM (
+            SELECT id, 'most_recent' AS reason FROM paper
+            ORDER BY year DESC, id DESC LIMIT 10
+        )
+    """).fetchall()
+
+
+def duckdb_union(db):
+    return db.execute("""
+        (SELECT id, 'most_cited' AS reason FROM paper
+         ORDER BY citation_count DESC LIMIT 10)
+        UNION
+        (SELECT id, 'most_recent' AS reason FROM paper
+         ORDER BY year DESC, id DESC LIMIT 10)
+    """).fetchall()
+
+
+def kglite_union(g):
+    return len(g.cypher("""
+        MATCH (p:Paper)
+        RETURN p.id AS id, 'most_cited' AS reason
+        ORDER BY p.citation_count DESC LIMIT 10
+        UNION
+        MATCH (p:Paper)
+        RETURN p.id AS id, 'most_recent' AS reason
+        ORDER BY p.year DESC, p.id DESC LIMIT 10
+    """))
+
+
+# 18. Correlated top-N — best author per field (window + filter)
+
+def sqlite_top_per_group(db):
+    return db.execute("""
+        SELECT field, id, h_index FROM (
+            SELECT field, id, h_index,
+                   ROW_NUMBER() OVER (PARTITION BY field ORDER BY h_index DESC) AS rn
+            FROM person
+        ) WHERE rn = 1
+    """).fetchall()
+
+
+def duckdb_top_per_group(db):
+    return db.execute("""
+        SELECT field, id, h_index FROM (
+            SELECT field, id, h_index,
+                   ROW_NUMBER() OVER (PARTITION BY field ORDER BY h_index DESC) AS rn
+            FROM person
+        ) WHERE rn = 1
+    """).fetchall()
+
+
+def kglite_top_per_group(g):
+    return len(g.cypher("""
+        MATCH (p:Person)
+        WITH p.field AS field, p.id AS id, p.h_index AS h,
+             row_number() OVER (PARTITION BY p.field ORDER BY p.h_index DESC) AS rn
+        WHERE rn = 1
+        RETURN field, id, h
+    """))
+
+
+# 19. Out-degree distribution — citation fan-out histogram
+
+def sqlite_outdegree_dist(db):
+    return db.execute("""
+        SELECT out_deg, COUNT(*) AS n_papers FROM (
+            SELECT paper_id, COUNT(*) AS out_deg FROM cites GROUP BY paper_id
+        ) GROUP BY out_deg ORDER BY out_deg
+    """).fetchall()
+
+
+def duckdb_outdegree_dist(db):
+    return db.execute("""
+        SELECT out_deg, COUNT(*) AS n_papers FROM (
+            SELECT paper_id, COUNT(*) AS out_deg FROM cites GROUP BY paper_id
+        ) GROUP BY out_deg ORDER BY out_deg
+    """).fetchall()
+
+
+def kglite_outdegree_dist(g):
+    return len(g.cypher("""
+        MATCH (p:Paper)-[:CITES]->(cited:Paper)
+        WITH p, count(cited) AS out_deg
+        RETURN out_deg, count(*) AS n_papers
+        ORDER BY out_deg
+    """))
+
+
+# 20. Multiple aggregates — comprehensive venue stats
+
+def sqlite_multi_agg(db):
+    return db.execute("""
+        SELECT venue,
+               COUNT(*) AS cnt,
+               AVG(citation_count) AS avg_cite,
+               SUM(citation_count) AS total_cite,
+               MIN(citation_count) AS min_cite,
+               MAX(citation_count) AS max_cite
+        FROM paper GROUP BY venue ORDER BY avg_cite DESC
+    """).fetchall()
+
+
+def duckdb_multi_agg(db):
+    return db.execute("""
+        SELECT venue,
+               COUNT(*) AS cnt,
+               AVG(citation_count) AS avg_cite,
+               SUM(citation_count) AS total_cite,
+               MIN(citation_count) AS min_cite,
+               MAX(citation_count) AS max_cite
+        FROM paper GROUP BY venue ORDER BY avg_cite DESC
+    """).fetchall()
+
+
+def kglite_multi_agg(g):
+    return len(g.cypher("""
+        MATCH (p:Paper)
+        RETURN p.venue AS venue,
+               count(*) AS cnt,
+               avg(p.citation_count) AS avg_cite,
+               sum(p.citation_count) AS total_cite,
+               min(p.citation_count) AS min_cite,
+               max(p.citation_count) AS max_cite
+        ORDER BY avg_cite DESC
+    """))
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -712,7 +1426,8 @@ def main():
 
     print("Generating dataset...")
     data = generate_data()
-    edge_count = sum(len(v) for v in data.values())
+    edge_keys = ["authored", "cites", "covers", "affiliated", "collaborates"]
+    edge_count = sum(len(data[k]) for k in edge_keys)
     node_count = N_PERSONS + N_PAPERS + N_TOPICS + N_INSTITUTIONS
     print(f"  {node_count:,} nodes, {edge_count:,} edges\n")
 
@@ -861,6 +1576,170 @@ def main():
         lambda: kglite_multi_start_deep_raw(g, deep_starts, 12),
         duckdb_opt_fn=lambda: duckdb_multi_start_deep_batch(ddb, deep_starts, 12),
         category="Multi-start deep",
+    )
+
+    # ── Analytical benchmarks ──
+
+    run_triple(
+        "ML authors (h>80) → papers",
+        lambda: sqlite_filtered_traversal(db),
+        lambda: duckdb_filtered_traversal(ddb),
+        lambda: kglite_filtered_traversal(g),
+        category="Prop. filter",
+    )
+
+    run_triple(
+        "Recent papers 2-hop cites",
+        lambda: sqlite_filtered_multihop(db),
+        lambda: duckdb_filtered_multihop(ddb),
+        lambda: kglite_filtered_multihop(g),
+        category="Filtered hops",
+    )
+
+    run_triple(
+        "Top 20 venue×year counts",
+        lambda: sqlite_agg_pipeline(db),
+        lambda: duckdb_agg_pipeline(ddb),
+        lambda: kglite_agg_pipeline(g),
+        category="Aggregation",
+    )
+
+    run_triple(
+        "Prolific venues (HAVING)",
+        lambda: sqlite_having(db),
+        lambda: duckdb_having(ddb),
+        lambda: kglite_having(g),
+        category="HAVING",
+    )
+
+    run_triple(
+        "Rank authors in field",
+        lambda: sqlite_window(db),
+        lambda: duckdb_window(ddb),
+        lambda: kglite_window(g),
+        category="Window fn",
+    )
+
+    run_triple(
+        "Top-50 authors' best papers",
+        lambda: sqlite_with_chain(db),
+        lambda: duckdb_with_chain(ddb),
+        lambda: kglite_with_chain(g),
+        category="WITH chain",
+    )
+
+    run_triple(
+        "Most-cited (in-degree)",
+        lambda: sqlite_indegree(db),
+        lambda: duckdb_indegree(ddb),
+        lambda: kglite_indegree(g),
+        category="In-degree",
+    )
+
+    run_triple(
+        "Cross-inst co-authorships",
+        lambda: sqlite_cross_inst(db),
+        lambda: duckdb_cross_inst(ddb),
+        lambda: kglite_cross_inst(g),
+        category="Cross-inst",
+    )
+
+    run_triple(
+        "Multi-predicate paper scan",
+        lambda: sqlite_complex_filter(db),
+        lambda: duckdb_complex_filter(ddb),
+        lambda: kglite_complex_filter(g),
+        category="Complex filter",
+    )
+
+    run_triple(
+        "UPPER + ROUND + GROUP BY",
+        lambda: sqlite_string_math(db),
+        lambda: duckdb_string_math(ddb),
+        lambda: kglite_string_math(g),
+        category="String+math",
+    )
+
+    # ── Advanced analytical benchmarks ──
+
+    run_triple(
+        "OPTIONAL MATCH papers/person",
+        lambda: sqlite_optional_match(db),
+        lambda: duckdb_optional_match(ddb),
+        lambda: kglite_optional_match(g),
+        category="OPTIONAL MATCH",
+    )
+
+    run_triple(
+        "EXISTS semi-join",
+        lambda: sqlite_exists(db),
+        lambda: duckdb_exists(ddb),
+        lambda: kglite_exists(g),
+        category="EXISTS",
+    )
+
+    run_triple(
+        "NOT EXISTS anti-join",
+        lambda: sqlite_not_exists(db),
+        lambda: duckdb_not_exists(ddb),
+        lambda: kglite_not_exists(g),
+        category="NOT EXISTS",
+    )
+
+    run_triple(
+        "CASE conditional agg",
+        lambda: sqlite_case_agg(db),
+        lambda: duckdb_case_agg(ddb),
+        lambda: kglite_case_agg(g),
+        category="CASE agg",
+    )
+
+    run_triple(
+        "count(DISTINCT) per group",
+        lambda: sqlite_count_distinct(db),
+        lambda: duckdb_count_distinct(ddb),
+        lambda: kglite_count_distinct(g),
+        category="DISTINCT agg",
+    )
+
+    run_triple(
+        "3-stage WITH pipeline",
+        lambda: sqlite_multistep_with(db),
+        lambda: duckdb_multistep_with(ddb),
+        lambda: kglite_multistep_with(g),
+        category="Multi-WITH",
+    )
+
+    run_triple(
+        "UNION top-cited + top-recent",
+        lambda: sqlite_union(db),
+        lambda: duckdb_union(ddb),
+        lambda: kglite_union(g),
+        category="UNION",
+    )
+
+    run_triple(
+        "Best author per field",
+        lambda: sqlite_top_per_group(db),
+        lambda: duckdb_top_per_group(ddb),
+        lambda: kglite_top_per_group(g),
+        category="Top-per-group",
+    )
+
+    run_triple(
+        "Citation out-degree histogram",
+        lambda: sqlite_outdegree_dist(db),
+        lambda: duckdb_outdegree_dist(ddb),
+        lambda: kglite_outdegree_dist(g),
+        category="Degree dist.",
+    )
+
+    run_triple(
+        "Venue stats (5 aggregates)",
+        lambda: sqlite_multi_agg(db),
+        lambda: duckdb_multi_agg(ddb),
+        lambda: kglite_multi_agg(g),
+        category="Multi-agg",
     )
 
     # Build DataFrame, sort by SQLite time, print as markdown

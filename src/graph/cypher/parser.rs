@@ -246,6 +246,7 @@ impl CypherParser {
                 patterns,
                 path_assignments,
                 limit_hint: None,
+                distinct_node_hint: None,
             };
             return if optional {
                 Ok(Clause::OptionalMatch(clause))
@@ -261,6 +262,7 @@ impl CypherParser {
             patterns,
             path_assignments,
             limit_hint: None,
+            distinct_node_hint: None,
         };
         if optional {
             Ok(Clause::OptionalMatch(clause))

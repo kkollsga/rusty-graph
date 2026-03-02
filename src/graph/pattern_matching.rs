@@ -3,13 +3,13 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::cypher::result::Bindings;
-use crate::graph::filtering_methods::values_equal;
+use crate::graph::filtering_methods::{compare_values, values_equal};
 use crate::graph::schema::{DirGraph, InternedKey};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::{EdgeRef, NodeIndexable};
 use petgraph::Direction;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 /// Minimum match count to use parallel expansion via rayon.
@@ -91,6 +91,21 @@ pub enum PropertyMatcher {
     /// IN-list matching: value must be one of these values.
     /// Pushed from `WHERE n.prop IN [v1, v2, ...]` by the planner.
     In(Vec<Value>),
+    /// Comparison matchers: pushed from `WHERE n.prop > val` etc. by the planner.
+    /// Enables filter pushdown into MATCH and range index acceleration.
+    GreaterThan(Value),
+    GreaterOrEqual(Value),
+    LessThan(Value),
+    LessOrEqual(Value),
+    /// Combined range: both a lower and upper bound on the same property.
+    /// Used when WHERE has e.g. `n.year >= 2015 AND n.year <= 2022`.
+    /// Booleans indicate inclusive (true) vs exclusive (false).
+    Range {
+        lower: Value,
+        lower_inclusive: bool,
+        upper: Value,
+        upper_inclusive: bool,
+    },
 }
 
 // ============================================================================
@@ -745,6 +760,10 @@ pub struct PatternExecutor<'a> {
     params: &'a HashMap<String, Value>,
     /// Optional deadline for aborting long-running pattern execution.
     deadline: Option<Instant>,
+    /// When set, deduplicate results by NodeIndex of the named variable.
+    /// At the last hop expansion, paths leading to already-seen target nodes
+    /// are skipped, avoiding PatternMatch cloning and allocation overhead.
+    distinct_target_var: Option<String>,
 }
 
 /// Static empty params for constructors that don't take parameters.
@@ -764,6 +783,7 @@ impl<'a> PatternExecutor<'a> {
             lightweight: false,
             params: &EMPTY_PARAMS,
             deadline: None,
+            distinct_target_var: None,
         }
     }
 
@@ -778,6 +798,7 @@ impl<'a> PatternExecutor<'a> {
             lightweight: true,
             params: &EMPTY_PARAMS,
             deadline: None,
+            distinct_target_var: None,
         }
     }
 
@@ -794,6 +815,7 @@ impl<'a> PatternExecutor<'a> {
             lightweight: true,
             params,
             deadline: None,
+            distinct_target_var: None,
         }
     }
 
@@ -810,6 +832,7 @@ impl<'a> PatternExecutor<'a> {
             lightweight: true,
             params: &EMPTY_PARAMS,
             deadline: None,
+            distinct_target_var: None,
         }
     }
 
@@ -826,12 +849,21 @@ impl<'a> PatternExecutor<'a> {
             lightweight: true,
             params,
             deadline: None,
+            distinct_target_var: None,
         }
     }
 
     /// Set a deadline for pattern execution. Returns self for chaining.
     pub fn set_deadline(mut self, deadline: Option<Instant>) -> Self {
         self.deadline = deadline;
+        self
+    }
+
+    /// Set a distinct target variable for deduplication during pattern matching.
+    /// At the last hop, paths leading to already-seen target NodeIndex values
+    /// are skipped, avoiding PatternMatch cloning overhead.
+    pub fn set_distinct_target(mut self, var: Option<String>) -> Self {
+        self.distinct_target_var = var;
         self
     }
 
@@ -878,6 +910,13 @@ impl<'a> PatternExecutor<'a> {
 
         // Track current node indices for each match
         let mut current_indices: Vec<NodeIndex> = initial_nodes;
+
+        // Pre-allocate dedup set for distinct_target_var optimization
+        let mut distinct_seen: HashSet<NodeIndex> = if self.distinct_target_var.is_some() {
+            HashSet::with_capacity(matches.len())
+        } else {
+            HashSet::new()
+        };
 
         // Process edge-node pairs
         let mut i = 1;
@@ -1029,6 +1068,16 @@ impl<'a> PatternExecutor<'a> {
                                 }
                             }
                         }
+                        // Distinct-target dedup: at the last hop, skip targets already seen
+                        if i + 1 >= pattern.elements.len() {
+                            if let Some(ref dtv) = self.distinct_target_var {
+                                if node_pattern.variable.as_deref() == Some(dtv.as_str())
+                                    && !distinct_seen.insert(target_idx)
+                                {
+                                    continue;
+                                }
+                            }
+                        }
                         let mut new_match = current_match.clone();
                         if let Some(ref var) = edge_pattern.variable {
                             new_match.bindings.push((var.clone(), edge_binding));
@@ -1064,8 +1113,28 @@ impl<'a> PatternExecutor<'a> {
                 new_indices.truncate(max);
             }
 
-            matches = new_matches;
-            current_indices = new_indices;
+            // Intermediate dedup: when distinct_target_var is set and this is
+            // NOT the final hop and the current node is anonymous (no variable),
+            // deduplicate by NodeIndex to reduce work at subsequent hops.
+            if self.distinct_target_var.is_some()
+                && i + 1 < pattern.elements.len()
+                && node_pattern.variable.is_none()
+            {
+                let mut seen_idx = HashSet::with_capacity(new_indices.len());
+                let mut deduped_matches = Vec::with_capacity(new_indices.len());
+                let mut deduped_indices = Vec::with_capacity(new_indices.len());
+                for (m, idx) in new_matches.into_iter().zip(new_indices) {
+                    if seen_idx.insert(idx) {
+                        deduped_matches.push(m);
+                        deduped_indices.push(idx);
+                    }
+                }
+                matches = deduped_matches;
+                current_indices = deduped_indices;
+            } else {
+                matches = new_matches;
+                current_indices = new_indices;
+            }
             i += 1;
         }
 
@@ -1164,12 +1233,24 @@ impl<'a> PatternExecutor<'a> {
                 PropertyMatcher::EqualsParam(name) => {
                     self.params.get(name.as_str()).map(|val| (k, val))
                 }
-                // EqualsVar / In are handled separately; skip for equality index lookup
-                PropertyMatcher::EqualsVar(_) | PropertyMatcher::In(_) => None,
+                // EqualsVar / In / comparisons are handled separately
+                _ => None,
             })
             .collect();
 
-        if equality_props.is_empty() {
+        // Check if any comparison/range matchers exist (for range index path below)
+        let has_comparison = props.values().any(|m| {
+            matches!(
+                m,
+                PropertyMatcher::GreaterThan(_)
+                    | PropertyMatcher::GreaterOrEqual(_)
+                    | PropertyMatcher::LessThan(_)
+                    | PropertyMatcher::LessOrEqual(_)
+                    | PropertyMatcher::Range { .. }
+            )
+        });
+
+        if equality_props.is_empty() && !has_comparison {
             return None;
         }
 
@@ -1224,7 +1305,59 @@ impl<'a> PatternExecutor<'a> {
             }
         }
 
+        // Try range index for comparison/range matchers
+        for (prop, matcher) in props {
+            use std::ops::Bound;
+            let bounds: Option<(Bound<&Value>, Bound<&Value>)> = match matcher {
+                PropertyMatcher::GreaterThan(v) => Some((Bound::Excluded(v), Bound::Unbounded)),
+                PropertyMatcher::GreaterOrEqual(v) => Some((Bound::Included(v), Bound::Unbounded)),
+                PropertyMatcher::LessThan(v) => Some((Bound::Unbounded, Bound::Excluded(v))),
+                PropertyMatcher::LessOrEqual(v) => Some((Bound::Unbounded, Bound::Included(v))),
+                PropertyMatcher::Range {
+                    lower,
+                    lower_inclusive,
+                    upper,
+                    upper_inclusive,
+                } => {
+                    let lo = if *lower_inclusive {
+                        Bound::Included(lower)
+                    } else {
+                        Bound::Excluded(lower)
+                    };
+                    let hi = if *upper_inclusive {
+                        Bound::Included(upper)
+                    } else {
+                        Bound::Excluded(upper)
+                    };
+                    Some((lo, hi))
+                }
+                _ => None,
+            };
+            if let Some((lo, hi)) = bounds {
+                if let Some(results) = self.graph.lookup_range(node_type, prop, lo, hi) {
+                    if props.len() == 1 {
+                        return Some(results);
+                    }
+                    // Filter remaining non-indexed properties
+                    let filtered = results
+                        .into_iter()
+                        .filter(|&idx| self.node_matches_properties(idx, props))
+                        .collect();
+                    return Some(filtered);
+                }
+            }
+        }
+
         None
+    }
+
+    /// Public wrapper for node property matching, used by FusedNodeScanAggregate.
+    pub fn node_matches_properties_pub(
+        &self,
+        idx: NodeIndex,
+        props: &HashMap<String, PropertyMatcher>,
+    ) -> bool {
+        self.node_matches_properties(idx, props)
     }
 
     /// Check if a node matches property filters
@@ -1276,6 +1409,48 @@ impl<'a> PatternExecutor<'a> {
             // If it reaches here unresolved, no match is possible.
             PropertyMatcher::EqualsVar(_) => false,
             PropertyMatcher::In(values) => values.iter().any(|v| values_equal(value, v)),
+            PropertyMatcher::GreaterThan(threshold) => {
+                compare_values(value, threshold) == Some(std::cmp::Ordering::Greater)
+            }
+            PropertyMatcher::GreaterOrEqual(threshold) => {
+                matches!(
+                    compare_values(value, threshold),
+                    Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                )
+            }
+            PropertyMatcher::LessThan(threshold) => {
+                compare_values(value, threshold) == Some(std::cmp::Ordering::Less)
+            }
+            PropertyMatcher::LessOrEqual(threshold) => {
+                matches!(
+                    compare_values(value, threshold),
+                    Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                )
+            }
+            PropertyMatcher::Range {
+                lower,
+                lower_inclusive,
+                upper,
+                upper_inclusive,
+            } => {
+                let above_lower = if *lower_inclusive {
+                    matches!(
+                        compare_values(value, lower),
+                        Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                    )
+                } else {
+                    compare_values(value, lower) == Some(std::cmp::Ordering::Greater)
+                };
+                let below_upper = if *upper_inclusive {
+                    matches!(
+                        compare_values(value, upper),
+                        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                    )
+                } else {
+                    compare_values(value, upper) == Some(std::cmp::Ordering::Less)
+                };
+                above_lower && below_upper
+            }
         }
     }
 

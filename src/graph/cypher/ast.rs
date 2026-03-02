@@ -61,6 +61,16 @@ pub enum Clause {
         match_clause: MatchClause,
         /// RETURN clause (group-by items + count aggregates)
         return_clause: ReturnClause,
+        /// Optional ORDER BY + LIMIT fusion: (count_item_index, descending, limit)
+        /// When set, uses a BinaryHeap to find top-k instead of materializing all rows.
+        top_k: Option<(usize, bool, usize)>,
+    },
+    /// Optimizer-generated: fuse MATCH traversal + WITH count() into a single
+    /// pass. Same as FusedMatchReturnAggregate but for WITH clauses (pipeline
+    /// continues after). Avoids materializing all edge rows before grouping.
+    FusedMatchWithAggregate {
+        match_clause: MatchClause,
+        with_clause: WithClause,
     },
     /// Optimizer-generated: fuse RETURN + ORDER BY + LIMIT into a single
     /// pass using a min-heap for O(n log k) instead of O(n log n).
@@ -73,6 +83,10 @@ pub enum Clause {
         descending: bool,
         /// LIMIT k value
         limit: usize,
+        /// Optional external sort expression (not in RETURN items).
+        /// When set, this expression is used for scoring instead of
+        /// `return_clause.items[score_item_index]`.
+        sort_expression: Option<Expression>,
     },
     /// Optimizer-generated: MATCH (n) RETURN count(n) → graph.node_count() in O(1).
     FusedCountAll {
@@ -98,6 +112,14 @@ pub enum Clause {
         edge_type: String,
         alias: String,
     },
+    /// Optimizer-generated: MATCH (n:Type) [WHERE ...] RETURN group_keys, agg_funcs(...)
+    /// → single-pass node scan with inline aggregation. Avoids materializing intermediate
+    /// ResultRows — evaluates group keys and aggregates directly from node properties.
+    FusedNodeScanAggregate {
+        match_clause: MatchClause,
+        where_predicate: Option<Predicate>,
+        return_clause: ReturnClause,
+    },
 }
 
 // ============================================================================
@@ -111,6 +133,10 @@ pub struct MatchClause {
     pub path_assignments: Vec<PathAssignment>,
     /// Planner-set limit for early termination (pushed down from LIMIT clause)
     pub limit_hint: Option<usize>,
+    /// Planner-set hint: when RETURN DISTINCT only references a single node variable,
+    /// pre-deduplicate pattern matches by that variable's NodeIndex to avoid creating
+    /// duplicate ResultRows that would be removed later.
+    pub distinct_node_hint: Option<String>,
 }
 
 /// Path variable assignment: `p = shortestPath(pattern)`
@@ -167,7 +193,7 @@ pub enum Predicate {
 }
 
 /// Comparison operators
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ComparisonOp {
     Equals,        // =
     NotEquals,     // <>

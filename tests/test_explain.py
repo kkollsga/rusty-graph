@@ -41,8 +41,8 @@ class TestExplainBasic:
         assert any("Match :Person" in op for op in ops)
 
     def test_explain_shows_filter(self, graph):
-        """WHERE shows as a step."""
-        result = graph.cypher("EXPLAIN MATCH (n:Person) WHERE n.age > 25 RETURN n.name")
+        """WHERE shows as a step (using <> which is not pushed into MATCH)."""
+        result = graph.cypher("EXPLAIN MATCH (n:Person) WHERE n.age <> 25 RETURN n.name")
         ops = [r["operation"] for r in result.to_list()]
         assert "Where" in ops
 
@@ -119,14 +119,25 @@ class TestProfile:
         assert "elapsed_us" in step
 
     def test_profile_row_counts(self, graph):
-        """MATCH produces rows, WHERE filters them."""
+        """Comparison pushdown: n.age > 28 pushed into MATCH, producing 1 row directly."""
         result = graph.cypher("PROFILE MATCH (n:Person) WHERE n.age > 28 RETURN n.name")
         profile = result.profile
-        # Match should produce 2 rows
+        # With comparison pushdown, MATCH directly filters and returns 1 row
+        match_step = profile[0]
+        assert match_step["clause"].startswith("Match")
+        assert match_step["rows_out"] == 1
+        # No WHERE step — predicate was pushed into MATCH
+        assert len(profile) == 2  # Match + Return
+
+    def test_profile_row_counts_not_equals(self, graph):
+        """NotEquals stays in WHERE (not pushed), showing MATCH 2 → WHERE 1."""
+        result = graph.cypher("PROFILE MATCH (n:Person) WHERE n.age <> 25 RETURN n.name")
+        profile = result.profile
+        # Match produces 2 rows
         match_step = profile[0]
         assert match_step["clause"].startswith("Match")
         assert match_step["rows_out"] == 2
-        # Where should filter to 1 (Alice, age 30)
+        # Where filters to 1 (Alice, age 30)
         where_step = profile[1]
         assert where_step["clause"] == "Where"
         assert where_step["rows_in"] == 2

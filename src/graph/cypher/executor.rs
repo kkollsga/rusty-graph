@@ -219,6 +219,7 @@ pub fn clause_display_name(clause: &Clause) -> String {
         Clause::FusedOptionalMatchAggregate { .. } => "FusedOptionalMatchAggregate".into(),
         Clause::FusedVectorScoreTopK { .. } => "FusedVectorScoreTopK".into(),
         Clause::FusedMatchReturnAggregate { .. } => "FusedMatchReturnAggregate".into(),
+        Clause::FusedMatchWithAggregate { .. } => "FusedMatchWithAggregate".into(),
         Clause::FusedOrderByTopK { .. } => "FusedOrderByTopK".into(),
         Clause::FusedCountAll { .. } => "FusedCountAll".into(),
         Clause::FusedCountByType { .. } => "FusedCountByType".into(),
@@ -229,6 +230,7 @@ pub fn clause_display_name(clause: &Clause) -> String {
         Clause::FusedCountTypedEdge { edge_type, .. } => {
             format!("FusedCountTypedEdge :{edge_type}")
         }
+        Clause::FusedNodeScanAggregate { .. } => "FusedNodeScanAggregate".into(),
     }
 }
 
@@ -364,17 +366,29 @@ impl<'a> CypherExecutor<'a> {
                 score_item_index,
                 descending,
                 limit,
+                sort_expression,
             } => self.execute_fused_order_by_top_k(
                 return_clause,
                 *score_item_index,
                 *descending,
                 *limit,
+                sort_expression.as_ref(),
                 result_set,
             ),
             Clause::FusedMatchReturnAggregate {
                 match_clause,
                 return_clause,
-            } => self.execute_fused_match_return_aggregate(match_clause, return_clause, result_set),
+                top_k,
+            } => self.execute_fused_match_return_aggregate(
+                match_clause,
+                return_clause,
+                top_k,
+                result_set,
+            ),
+            Clause::FusedMatchWithAggregate {
+                match_clause,
+                with_clause,
+            } => self.execute_fused_match_with_aggregate(match_clause, with_clause, result_set),
             Clause::FusedCountAll { alias } => {
                 let count = self.graph.graph.node_count() as i64;
                 let mut projected = Bindings::with_capacity(1);
@@ -446,6 +460,15 @@ impl<'a> CypherExecutor<'a> {
                     columns: vec![alias.clone()],
                 })
             }
+            Clause::FusedNodeScanAggregate {
+                match_clause,
+                where_predicate,
+                return_clause,
+            } => self.execute_fused_node_scan_aggregate(
+                match_clause,
+                where_predicate.as_ref(),
+                return_clause,
+            ),
             Clause::Call(c) => self.execute_call(c, result_set),
             Clause::Create(_)
             | Clause::Set(_)
@@ -536,10 +559,38 @@ impl<'a> CypherExecutor<'a> {
                         limit_hint,
                         self.params,
                     )
-                    .set_deadline(self.deadline);
+                    .set_deadline(self.deadline)
+                    .set_distinct_target(clause.distinct_node_hint.clone());
                     let matches = executor.execute(pattern)?;
-                    for m in matches {
-                        all_rows.push(self.pattern_match_to_row(m));
+
+                    // When distinct_node_hint is set, pre-dedup by NodeIndex to avoid
+                    // creating ResultRows for matches that would be DISTINCT-removed later.
+                    if let Some(ref dedup_var) = clause.distinct_node_hint {
+                        let mut seen = HashSet::with_capacity(matches.len().min(10000));
+                        for m in matches {
+                            // Check if this match's dedup variable is a node we've seen
+                            let dominated = m
+                                .bindings
+                                .iter()
+                                .find(|(name, _)| name == dedup_var)
+                                .is_some_and(|(_, b)| match b {
+                                    crate::graph::pattern_matching::MatchBinding::Node {
+                                        index,
+                                        ..
+                                    } => !seen.insert(*index),
+                                    crate::graph::pattern_matching::MatchBinding::NodeRef(
+                                        index,
+                                    ) => !seen.insert(*index),
+                                    _ => false,
+                                });
+                            if !dominated {
+                                all_rows.push(self.pattern_match_to_row(m));
+                            }
+                        }
+                    } else {
+                        for m in matches {
+                            all_rows.push(self.pattern_match_to_row(m));
+                        }
                     }
                 } else {
                     // Subsequent patterns: use shared-variable join
@@ -1091,6 +1142,159 @@ impl<'a> CypherExecutor<'a> {
     /// For pattern `(a:Type)-[:REL]->(b)` where `b` is already bound in the row:
     /// Instead of scanning all Type nodes and checking edges (O(|Type|)),
     /// traverse edges directly from the bound node (O(degree)).
+    /// Fast path for EXISTS / NOT EXISTS: when the subquery is a single
+    /// 3-element pattern (node-edge-node) with exactly one node already bound
+    /// from the outer row, we can check edge existence directly via
+    /// `edges_directed()` instead of creating a full PatternExecutor.
+    /// Returns `Some(true/false)` if the fast path applies, `None` otherwise.
+    fn try_fast_exists_check(
+        &self,
+        patterns: &[Pattern],
+        where_clause: &Option<Box<Predicate>>,
+        row: &ResultRow,
+    ) -> Option<Result<bool, String>> {
+        if patterns.len() != 1 {
+            return None;
+        }
+        let pattern = &patterns[0];
+        if pattern.elements.len() != 3 {
+            return None;
+        }
+
+        let node_a = match &pattern.elements[0] {
+            PatternElement::Node(np) => np,
+            _ => return None,
+        };
+        let edge = match &pattern.elements[1] {
+            PatternElement::Edge(ep) => ep,
+            _ => return None,
+        };
+        let node_b = match &pattern.elements[2] {
+            PatternElement::Node(np) => np,
+            _ => return None,
+        };
+
+        // Skip variable-length edges and edge property filters
+        if edge.var_length.is_some() || edge.properties.is_some() {
+            return None;
+        }
+
+        // Determine which node is bound from the outer row
+        let a_bound = node_a
+            .variable
+            .as_ref()
+            .and_then(|v| row.node_bindings.get(v).copied());
+        let b_bound = node_b
+            .variable
+            .as_ref()
+            .and_then(|v| row.node_bindings.get(v).copied());
+
+        let (bound_idx, other_node, other_var, direction) = match (a_bound, b_bound) {
+            (Some(idx), None) => {
+                let dir = match edge.direction {
+                    EdgeDirection::Outgoing => Direction::Outgoing,
+                    EdgeDirection::Incoming => Direction::Incoming,
+                    EdgeDirection::Both => return None,
+                };
+                (idx, node_b, &node_b.variable, dir)
+            }
+            (None, Some(idx)) => {
+                let dir = match edge.direction {
+                    EdgeDirection::Outgoing => Direction::Incoming,
+                    EdgeDirection::Incoming => Direction::Outgoing,
+                    EdgeDirection::Both => return None,
+                };
+                (idx, node_a, &node_a.variable, dir)
+            }
+            _ => return None, // both bound or neither — fall back
+        };
+
+        let interned_conn = edge.connection_type.as_deref().map(InternedKey::from_str);
+
+        // Pre-allocate a mutable row for WHERE evaluation (avoids clone per edge)
+        let (has_where, mut eval_row) = if where_clause.is_some() {
+            let mut r = row.clone(); // single clone
+            if let Some(ref var) = other_var {
+                r.node_bindings.insert(var.clone(), NodeIndex::new(0)); // placeholder
+            }
+            (true, r)
+        } else {
+            (false, ResultRow::new()) // unused placeholder
+        };
+
+        for edge_ref in self.graph.graph.edges_directed(bound_idx, direction) {
+            if let Some(ik) = interned_conn {
+                if edge_ref.weight().connection_type != ik {
+                    continue;
+                }
+            }
+
+            let other_idx = if direction == Direction::Outgoing {
+                edge_ref.target()
+            } else {
+                edge_ref.source()
+            };
+
+            // Check target node type
+            if let Some(ref req_type) = other_node.node_type {
+                if let Some(nd) = self.graph.graph.node_weight(other_idx) {
+                    if nd.get_node_type_ref() != req_type {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+
+            // Check target node inline properties — bail to slow path
+            // for non-trivial matchers (EqualsParam, EqualsVar, etc.)
+            if let Some(ref props) = other_node.properties {
+                if let Some(nd) = self.graph.graph.node_weight(other_idx) {
+                    let mut all_match = true;
+                    for (key, matcher) in props {
+                        let val = nd.get_property(key);
+                        let ok = match matcher {
+                            PropertyMatcher::Equals(expected) => val
+                                .as_ref()
+                                .is_some_and(|v| filtering_methods::values_equal(v, expected)),
+                            PropertyMatcher::In(values) => val.as_ref().is_some_and(|v| {
+                                values
+                                    .iter()
+                                    .any(|exp| filtering_methods::values_equal(v, exp))
+                            }),
+                            // Complex matchers — fall back to slow path
+                            _ => return None,
+                        };
+                        if !ok {
+                            all_match = false;
+                            break;
+                        }
+                    }
+                    if !all_match {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+
+            // Check WHERE clause — reuse pre-allocated row, just update binding
+            if has_where {
+                if let Some(ref var) = other_var {
+                    eval_row.node_bindings.insert(var.clone(), other_idx);
+                }
+                match self.evaluate_predicate(where_clause.as_ref().unwrap(), &eval_row) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+
+            return Some(Ok(true)); // Found a match
+        }
+        Some(Ok(false)) // No match found
+    }
+
     fn try_count_simple_pattern(
         &self,
         pattern: &crate::graph::pattern_matching::Pattern,
@@ -1407,30 +1611,58 @@ impl<'a> CypherExecutor<'a> {
         &self,
         match_clause: &MatchClause,
         return_clause: &ReturnClause,
+        top_k: &Option<(usize, bool, usize)>,
         existing: ResultSet,
     ) -> Result<ResultSet, String> {
-        // The MATCH must have exactly 1 pattern with 3 elements (validated by planner)
+        // The MATCH must have exactly 1 pattern with 3 or 5 elements (validated by planner)
         let pattern = &match_clause.patterns[0];
 
-        // Extract first-node pattern for group-key matching
-        let first_node_pattern = match &pattern.elements[0] {
-            PatternElement::Node(np) => np,
+        // Extract node variables from pattern
+        let first_var = match &pattern.elements[0] {
+            PatternElement::Node(np) => np.variable.as_ref(),
             _ => return Err("FusedMatchReturnAggregate: expected node pattern".into()),
         };
-        let first_var = first_node_pattern
-            .variable
-            .as_ref()
-            .ok_or("FusedMatchReturnAggregate: first node must have variable")?;
-
-        // Build a single-node pattern for matching group keys
-        let first_only_pattern = crate::graph::pattern_matching::Pattern {
-            elements: vec![pattern.elements[0].clone()],
+        let last_elem_idx = pattern.elements.len() - 1;
+        let second_var = match &pattern.elements[last_elem_idx] {
+            PatternElement::Node(np) => np.variable.as_ref(),
+            _ => return Err("FusedMatchReturnAggregate: expected node pattern".into()),
         };
 
-        // Match first-pattern nodes (group keys)
+        // Determine which variable is the group key by checking RETURN items.
+        // The planner guarantees all non-aggregate items reference the same variable.
+        let group_var: &str = {
+            let mut gv = None;
+            for item in &return_clause.items {
+                if !is_aggregate_expression(&item.expression) {
+                    gv = match &item.expression {
+                        Expression::PropertyAccess { variable, .. } => Some(variable.as_str()),
+                        Expression::Variable(v) => Some(v.as_str()),
+                        _ => None,
+                    };
+                    break;
+                }
+            }
+            gv.ok_or("FusedMatchReturnAggregate: no group-by variable found")?
+        };
+
+        // Determine which pattern element index is the group key
+        let group_elem_idx = if first_var.is_some_and(|v| v == group_var) {
+            0
+        } else if second_var.is_some_and(|v| v == group_var) {
+            last_elem_idx
+        } else {
+            return Err("FusedMatchReturnAggregate: group variable not in pattern".into());
+        };
+
+        // Build a single-node pattern for matching group keys
+        let group_only_pattern = crate::graph::pattern_matching::Pattern {
+            elements: vec![pattern.elements[group_elem_idx].clone()],
+        };
+
+        // Match group-key nodes
         let executor = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
             .set_deadline(self.deadline);
-        let first_matches = executor.execute(&first_only_pattern)?;
+        let group_matches = executor.execute(&group_only_pattern)?;
 
         // Identify which RETURN items are group keys vs aggregates
         let mut group_key_indices = Vec::new();
@@ -1443,12 +1675,520 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
-        let mut result_rows = Vec::with_capacity(first_matches.len());
+        // Helper: extract node index from a match binding
+        let extract_node_idx = |m: &crate::graph::pattern_matching::PatternMatch| -> Option<petgraph::graph::NodeIndex> {
+            m.bindings.iter().find_map(|(name, binding)| {
+                if name == group_var {
+                    match binding {
+                        MatchBinding::Node { index, .. } => Some(*index),
+                        MatchBinding::NodeRef(index) => Some(*index),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            })
+        };
 
-        for m in &first_matches {
-            // Extract the bound node index for the first variable
+        // Helper: count edges for a node
+        let count_for_node = |node_idx: petgraph::graph::NodeIndex| -> i64 {
+            if pattern.elements.len() == 5 && group_elem_idx == 0 {
+                self.count_two_hop_pattern(pattern, node_idx)
+            } else {
+                let mut bindings_for_count = Bindings::with_capacity(1);
+                bindings_for_count.insert(group_var.to_string(), node_idx);
+                self.try_count_simple_pattern(pattern, &bindings_for_count)
+                    .unwrap_or(0)
+            }
+        };
+
+        // Helper: build a result row for a (node_idx, count) pair
+        let build_row =
+            |node_idx: petgraph::graph::NodeIndex, match_count: i64| -> Result<ResultRow, String> {
+                let mut tmp_row = ResultRow::new();
+                tmp_row
+                    .node_bindings
+                    .insert(group_var.to_string(), node_idx);
+
+                let mut projected = Bindings::with_capacity(return_clause.items.len());
+                for &idx in &group_key_indices {
+                    let item = &return_clause.items[idx];
+                    let key = return_item_column_name(item);
+                    let val = self.evaluate_expression(&item.expression, &tmp_row)?;
+                    projected.insert(key, val);
+                }
+                for &idx in &count_indices {
+                    let item = &return_clause.items[idx];
+                    let key = return_item_column_name(item);
+                    projected.insert(key, Value::Int64(match_count));
+                }
+                let mut new_row = ResultRow::from_projected(projected);
+                new_row
+                    .node_bindings
+                    .insert(group_var.to_string(), node_idx);
+                Ok(new_row)
+            };
+
+        let result_rows = if let Some(&(_, descending, limit)) = top_k.as_ref() {
+            // Top-K path: use BinaryHeap to find only the top-k nodes by count
+            use std::cmp::Reverse;
+            use std::collections::BinaryHeap;
+
+            if descending {
+                // DESC: keep k largest → min-heap (Reverse) of size k
+                let mut heap: BinaryHeap<Reverse<(i64, petgraph::graph::NodeIndex)>> =
+                    BinaryHeap::with_capacity(limit + 1);
+                for m in &group_matches {
+                    let Some(node_idx) = extract_node_idx(m) else {
+                        continue;
+                    };
+                    let count = count_for_node(node_idx);
+                    heap.push(Reverse((count, node_idx)));
+                    if heap.len() > limit {
+                        heap.pop();
+                    }
+                }
+                // Drain into sorted order (DESC)
+                let mut top: Vec<_> = heap
+                    .into_sorted_vec()
+                    .into_iter()
+                    .map(|Reverse(x)| x)
+                    .collect();
+                top.reverse();
+                let mut rows = Vec::with_capacity(top.len());
+                for (count, node_idx) in top {
+                    rows.push(build_row(node_idx, count)?);
+                }
+                rows
+            } else {
+                // ASC: keep k smallest → max-heap of size k
+                let mut heap: BinaryHeap<(i64, petgraph::graph::NodeIndex)> =
+                    BinaryHeap::with_capacity(limit + 1);
+                for m in &group_matches {
+                    let Some(node_idx) = extract_node_idx(m) else {
+                        continue;
+                    };
+                    let count = count_for_node(node_idx);
+                    heap.push((count, node_idx));
+                    if heap.len() > limit {
+                        heap.pop();
+                    }
+                }
+                // Drain into sorted order (ASC)
+                let mut top: Vec<_> = heap.into_sorted_vec();
+                top.reverse();
+                let mut rows = Vec::with_capacity(top.len());
+                for (count, node_idx) in top {
+                    rows.push(build_row(node_idx, count)?);
+                }
+                rows
+            }
+        } else {
+            // Non-top-k: build all rows
+            let mut rows = Vec::with_capacity(group_matches.len());
+            for m in &group_matches {
+                let Some(node_idx) = extract_node_idx(m) else {
+                    continue;
+                };
+                let match_count = count_for_node(node_idx);
+                rows.push(build_row(node_idx, match_count)?);
+            }
+            rows
+        };
+
+        Ok(ResultSet {
+            rows: result_rows,
+            columns: existing.columns,
+        })
+    }
+
+    /// Fused MATCH (n:Type) [WHERE ...] RETURN group_keys, agg_funcs(...)
+    /// Single-pass node scan: iterates nodes directly, evaluates group keys
+    /// and aggregates without creating intermediate ResultRows.
+    fn execute_fused_node_scan_aggregate(
+        &self,
+        match_clause: &MatchClause,
+        where_predicate: Option<&Predicate>,
+        return_clause: &ReturnClause,
+    ) -> Result<ResultSet, String> {
+        use crate::graph::pattern_matching::PatternElement;
+
+        // Extract node variable and type from the single-element pattern
+        let pattern = &match_clause.patterns[0];
+        let node_pattern = match &pattern.elements[0] {
+            PatternElement::Node(np) => np,
+            _ => return Err("FusedNodeScanAggregate: expected node pattern".into()),
+        };
+        let node_var = node_pattern.variable.as_deref().unwrap_or("_n");
+        let node_type = node_pattern.node_type.as_deref();
+
+        // Get candidate node indices
+        let node_indices: Vec<petgraph::graph::NodeIndex> = if let Some(nt) = node_type {
+            if let Some(indices) = self.graph.type_indices.get(nt) {
+                indices.to_vec()
+            } else {
+                Vec::new()
+            }
+        } else {
+            self.graph.graph.node_indices().collect()
+        };
+
+        // Classify RETURN items into group keys and aggregates
+        let mut group_key_indices = Vec::new();
+        let mut agg_indices = Vec::new();
+        for (i, item) in return_clause.items.iter().enumerate() {
+            if is_aggregate_expression(&item.expression) {
+                agg_indices.push(i);
+            } else {
+                group_key_indices.push(i);
+            }
+        }
+
+        // Pre-fold group key and aggregate expressions
+        let folded_group_exprs: Vec<Expression> = group_key_indices
+            .iter()
+            .map(|&i| self.fold_constants_expr(&return_clause.items[i].expression))
+            .collect();
+
+        // Single-pass: iterate nodes, evaluate group keys, update accumulators
+        // Use a single reusable ResultRow to avoid per-node allocation
+        let mut eval_row = ResultRow::new();
+        eval_row
+            .node_bindings
+            .insert(node_var.to_string(), petgraph::graph::NodeIndex::new(0));
+
+        // Create PatternExecutor once for property matching (if needed)
+        let pattern_executor = if node_pattern.properties.is_some() {
+            Some(PatternExecutor::new_lightweight_with_params(
+                self.graph,
+                None,
+                self.params,
+            ))
+        } else {
+            None
+        };
+
+        // Inline accumulators for aggregation during scan
+        struct InlineAccumulators {
+            counts: Vec<i64>,
+            sums: Vec<f64>,
+            mins: Vec<Option<Value>>,
+            maxs: Vec<Option<Value>>,
+        }
+
+        // Groups: (group_key_values, first_node_idx_for_binding)
+        let mut groups: Vec<(Vec<Value>, petgraph::graph::NodeIndex)> = Vec::new();
+        let mut group_accumulators: Vec<InlineAccumulators> = Vec::new();
+        let mut group_index_map: HashMap<Vec<Value>, usize> = HashMap::new();
+
+        for &node_idx in node_indices.iter() {
+            // Check pattern properties using PatternExecutor's matching logic
+            if let Some(ref props) = node_pattern.properties {
+                if !pattern_executor
+                    .as_ref()
+                    .unwrap()
+                    .node_matches_properties_pub(node_idx, props)
+                {
+                    continue;
+                }
+            }
+
+            // Set the node binding for expression evaluation
+            *eval_row.node_bindings.get_mut(node_var).unwrap() = node_idx;
+
+            // Check WHERE predicate
+            if let Some(pred) = where_predicate {
+                if !self.evaluate_predicate(pred, &eval_row).unwrap_or(false) {
+                    continue;
+                }
+            }
+
+            // Evaluate group key
+            let key_values: Vec<Value> = folded_group_exprs
+                .iter()
+                .map(|expr| {
+                    self.evaluate_expression(expr, &eval_row)
+                        .unwrap_or(Value::Null)
+                })
+                .collect();
+
+            // Evaluate all aggregate expressions for this node
+            let agg_vals: Vec<Value> = agg_indices
+                .iter()
+                .map(|&ai| {
+                    let item = &return_clause.items[ai];
+                    match &item.expression {
+                        Expression::FunctionCall { args, .. } => {
+                            if args.is_empty() || matches!(args[0], Expression::Star) {
+                                Value::Boolean(true) // count(*) marker — always counted
+                            } else {
+                                self.evaluate_expression(&args[0], &eval_row)
+                                    .unwrap_or(Value::Null)
+                            }
+                        }
+                        _ => self
+                            .evaluate_expression(&item.expression, &eval_row)
+                            .unwrap_or(Value::Null),
+                    }
+                })
+                .collect();
+
+            if let Some(&group_idx) = group_index_map.get(&key_values) {
+                // Update accumulators
+                let acc = &mut group_accumulators[group_idx];
+                for (ai, _) in agg_indices.iter().enumerate() {
+                    let val = &agg_vals[ai];
+                    // Only count non-null values (count(*) uses Boolean marker)
+                    if !matches!(val, Value::Null) {
+                        acc.counts[ai] += 1;
+                    }
+                    if let Some(f) = value_to_f64(val) {
+                        acc.sums[ai] += f;
+                    }
+                    if !matches!(val, Value::Null) {
+                        if acc.mins[ai].is_none()
+                            || filtering_methods::compare_values(
+                                val,
+                                acc.mins[ai].as_ref().unwrap(),
+                            ) == Some(std::cmp::Ordering::Less)
+                        {
+                            acc.mins[ai] = Some(val.clone());
+                        }
+                        if acc.maxs[ai].is_none()
+                            || filtering_methods::compare_values(
+                                val,
+                                acc.maxs[ai].as_ref().unwrap(),
+                            ) == Some(std::cmp::Ordering::Greater)
+                        {
+                            acc.maxs[ai] = Some(val.clone());
+                        }
+                    }
+                }
+            } else {
+                let group_idx = groups.len();
+                group_index_map.insert(key_values.clone(), group_idx);
+                groups.push((key_values, node_idx));
+
+                // Initialize accumulators
+                let na = agg_indices.len();
+                let mut acc = InlineAccumulators {
+                    counts: vec![0i64; na],
+                    sums: vec![0.0f64; na],
+                    mins: vec![None; na],
+                    maxs: vec![None; na],
+                };
+                for (ai, _) in agg_indices.iter().enumerate() {
+                    let val = &agg_vals[ai];
+                    if !matches!(val, Value::Null) {
+                        acc.counts[ai] = 1;
+                        if let Some(f) = value_to_f64(val) {
+                            acc.sums[ai] = f;
+                        }
+                        acc.mins[ai] = Some(val.clone());
+                        acc.maxs[ai] = Some(val.clone());
+                    }
+                }
+                group_accumulators.push(acc);
+            }
+        }
+
+        // Build result rows from groups
+        let columns: Vec<String> = return_clause
+            .items
+            .iter()
+            .map(return_item_column_name)
+            .collect();
+
+        // Handle empty-set aggregation: pure aggregation with no group keys
+        // and no matching nodes should return one row with defaults (count=0, sum=0, etc.)
+        if groups.is_empty() && group_key_indices.is_empty() {
+            let empty_rows: Vec<&ResultRow> = Vec::new();
+            let mut projected = Bindings::with_capacity(return_clause.items.len());
+            for &item_idx in &agg_indices {
+                let item = &return_clause.items[item_idx];
+                let key = return_item_column_name(item);
+                let val = self.evaluate_aggregate_with_rows(&item.expression, &empty_rows)?;
+                projected.insert(key, val);
+            }
+            return Ok(ResultSet {
+                rows: vec![ResultRow::from_projected(projected)],
+                columns,
+            });
+        }
+
+        let mut result_rows = Vec::with_capacity(groups.len());
+
+        for (gi, (group_key_values, first_node_idx)) in groups.iter().enumerate() {
+            let mut projected = Bindings::with_capacity(return_clause.items.len());
+
+            // Add group key values
+            for (ki, &item_idx) in group_key_indices.iter().enumerate() {
+                let key = return_item_column_name(&return_clause.items[item_idx]);
+                projected.insert(key, group_key_values[ki].clone());
+            }
+
+            // Emit aggregate values from accumulators
+            let acc = &group_accumulators[gi];
+            for (ai, &item_idx) in agg_indices.iter().enumerate() {
+                let item = &return_clause.items[item_idx];
+                let key = return_item_column_name(item);
+                let val = match &item.expression {
+                    Expression::FunctionCall {
+                        name,
+                        args,
+                        distinct,
+                    } => {
+                        if *distinct {
+                            // DISTINCT aggregation not supported by inline — shouldn't reach here
+                            Value::Null
+                        } else {
+                            match name.to_lowercase().as_str() {
+                                "count" => Value::Int64(acc.counts[ai]),
+                                "sum" => {
+                                    if acc.counts[ai] == 0 {
+                                        Value::Int64(0)
+                                    } else {
+                                        // Check if input is integer-typed
+                                        let is_int = acc.mins[ai].as_ref().is_some_and(|v| {
+                                            matches!(v, Value::Int64(_) | Value::UniqueId(_))
+                                        });
+                                        if is_int {
+                                            Value::Int64(acc.sums[ai] as i64)
+                                        } else {
+                                            Value::Float64(acc.sums[ai])
+                                        }
+                                    }
+                                }
+                                "avg" | "mean" | "average" => {
+                                    if acc.counts[ai] == 0 {
+                                        Value::Null
+                                    } else {
+                                        Value::Float64(acc.sums[ai] / acc.counts[ai] as f64)
+                                    }
+                                }
+                                "min" => acc.mins[ai].clone().unwrap_or(Value::Null),
+                                "max" => acc.maxs[ai].clone().unwrap_or(Value::Null),
+                                _ => {
+                                    // Unsupported aggregate — fall back to evaluate
+                                    let mut tmp_row = ResultRow::new();
+                                    tmp_row
+                                        .node_bindings
+                                        .insert(node_var.to_string(), *first_node_idx);
+                                    self.evaluate_expression(&args[0], &tmp_row)?
+                                }
+                            }
+                        }
+                    }
+                    _ => Value::Null,
+                };
+                projected.insert(key, val);
+            }
+
+            let mut row = ResultRow::from_projected(projected);
+            row.node_bindings
+                .insert(node_var.to_string(), *first_node_idx);
+            result_rows.push(row);
+        }
+
+        // Handle HAVING
+        if let Some(ref having) = return_clause.having {
+            result_rows.retain(|row| self.evaluate_predicate(having, row).unwrap_or(false));
+        }
+
+        // Handle DISTINCT
+        if return_clause.distinct {
+            let mut seen = HashSet::new();
+            result_rows.retain(|row| {
+                let key: Vec<Value> = columns
+                    .iter()
+                    .map(|c| row.projected.get(c).cloned().unwrap_or(Value::Null))
+                    .collect();
+                seen.insert(key)
+            });
+        }
+
+        Ok(ResultSet {
+            rows: result_rows,
+            columns,
+        })
+    }
+
+    /// Fused MATCH + WITH count() — same as `execute_fused_match_return_aggregate`
+    /// but produces ResultSet for pipeline continuation (WITH semantics).
+    fn execute_fused_match_with_aggregate(
+        &self,
+        match_clause: &MatchClause,
+        with_clause: &WithClause,
+        _existing: ResultSet,
+    ) -> Result<ResultSet, String> {
+        let pattern = &match_clause.patterns[0];
+
+        let first_var = match &pattern.elements[0] {
+            PatternElement::Node(np) => np.variable.as_ref(),
+            _ => return Err("FusedMatchWithAggregate: expected node pattern".into()),
+        };
+        let second_var = match &pattern.elements[2] {
+            PatternElement::Node(np) => np.variable.as_ref(),
+            _ => return Err("FusedMatchWithAggregate: expected node pattern".into()),
+        };
+
+        // Determine which variable is the group key
+        let group_var: &str = {
+            let mut gv = None;
+            for item in &with_clause.items {
+                if !is_aggregate_expression(&item.expression) {
+                    if let Expression::Variable(v) = &item.expression {
+                        gv = Some(v.as_str());
+                        break;
+                    }
+                }
+            }
+            gv.ok_or("FusedMatchWithAggregate: no group-by variable found")?
+        };
+
+        let group_elem_idx = if first_var.is_some_and(|v| v == group_var) {
+            0
+        } else if second_var.is_some_and(|v| v == group_var) {
+            2
+        } else {
+            return Err("FusedMatchWithAggregate: group variable not in pattern".into());
+        };
+
+        // Build single-node pattern for matching group keys
+        let group_only_pattern = crate::graph::pattern_matching::Pattern {
+            elements: vec![pattern.elements[group_elem_idx].clone()],
+        };
+
+        let executor = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
+            .set_deadline(self.deadline);
+        let group_matches = executor.execute(&group_only_pattern)?;
+
+        // Identify group key and count items
+        let mut group_key_indices = Vec::new();
+        let mut count_indices = Vec::new();
+        for (i, item) in with_clause.items.iter().enumerate() {
+            if is_aggregate_expression(&item.expression) {
+                count_indices.push(i);
+            } else {
+                group_key_indices.push(i);
+            }
+        }
+
+        let columns: Vec<String> = with_clause
+            .items
+            .iter()
+            .map(|item| {
+                item.alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}", item.expression))
+            })
+            .collect();
+
+        let mut result_rows = Vec::with_capacity(group_matches.len());
+
+        for m in &group_matches {
             let node_idx = m.bindings.iter().find_map(|(name, binding)| {
-                if name == first_var {
+                if name == group_var {
                     match binding {
                         MatchBinding::Node { index, .. } | MatchBinding::NodeRef(index) => {
                             Some(*index)
@@ -1463,44 +2203,60 @@ impl<'a> CypherExecutor<'a> {
                 continue;
             };
 
-            // Count matches: O(degree) for 3-elem, O(degree * degree) for 5-elem
-            let match_count = if pattern.elements.len() == 5 {
-                self.count_two_hop_pattern(pattern, node_idx)
-            } else {
-                let mut bindings_for_count = Bindings::with_capacity(1);
-                bindings_for_count.insert(first_var.clone(), node_idx);
-                self.try_count_simple_pattern(pattern, &bindings_for_count)
-                    .unwrap_or(0)
-            };
+            let mut bindings_for_count = Bindings::with_capacity(1);
+            bindings_for_count.insert(group_var.to_string(), node_idx);
+            let match_count = self
+                .try_count_simple_pattern(pattern, &bindings_for_count)
+                .unwrap_or(0);
+
+            // Skip nodes with 0 matches (MATCH semantics — no outer join)
+            if match_count == 0 {
+                continue;
+            }
 
             // Build a temporary row for evaluating group-key expressions
             let mut tmp_row = ResultRow::new();
-            tmp_row.node_bindings.insert(first_var.clone(), node_idx);
+            tmp_row
+                .node_bindings
+                .insert(group_var.to_string(), node_idx);
 
-            // Build projected values
-            let mut projected = Bindings::with_capacity(return_clause.items.len());
+            let mut projected = Bindings::with_capacity(with_clause.items.len());
 
             for &idx in &group_key_indices {
-                let item = &return_clause.items[idx];
-                let key = return_item_column_name(item);
+                let item = &with_clause.items[idx];
+                let key = item
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}", item.expression));
                 let val = self.evaluate_expression(&item.expression, &tmp_row)?;
                 projected.insert(key, val);
             }
 
             for &idx in &count_indices {
-                let item = &return_clause.items[idx];
-                let key = return_item_column_name(item);
+                let item = &with_clause.items[idx];
+                let key = item
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}", item.expression));
                 projected.insert(key, Value::Int64(match_count));
             }
 
             let mut new_row = ResultRow::from_projected(projected);
-            new_row.node_bindings.insert(first_var.clone(), node_idx);
+            new_row
+                .node_bindings
+                .insert(group_var.to_string(), node_idx);
             result_rows.push(new_row);
+        }
+
+        // Apply WITH WHERE filter if present
+        if let Some(ref where_clause) = with_clause.where_clause {
+            let folded = self.fold_constants_pred(&where_clause.predicate);
+            result_rows.retain(|row| self.evaluate_predicate(&folded, row).unwrap_or(false));
         }
 
         Ok(ResultSet {
             rows: result_rows,
-            columns: existing.columns,
+            columns,
         })
     }
 
@@ -1869,8 +2625,13 @@ impl<'a> CypherExecutor<'a> {
                 patterns,
                 where_clause,
             } => {
-                // Execute each pattern and check if any match is compatible
-                // with the current row's bindings (outer variables must match)
+                // Fast path: single 3-element pattern with one bound node
+                // — check edge existence directly without PatternExecutor
+                if let Some(result) = self.try_fast_exists_check(patterns, where_clause, row) {
+                    return result;
+                }
+
+                // Slow path: full pattern execution for complex EXISTS
                 for pattern in patterns {
                     // Resolve EqualsVar references against current row
                     let resolved;
@@ -2411,7 +3172,7 @@ impl<'a> CypherExecutor<'a> {
                 right,
             } => Predicate::Comparison {
                 left: self.fold_constants_expr(left),
-                operator: operator.clone(),
+                operator: *operator,
                 right: self.fold_constants_expr(right),
             },
             Predicate::And(l, r) => Predicate::And(
@@ -4836,11 +5597,10 @@ impl<'a> CypherExecutor<'a> {
             .map(|&i| self.fold_constants_expr(&clause.items[i].expression))
             .collect();
 
-        // Group rows by grouping key values (single composite string key to reduce allocations)
+        // Group rows by grouping key values using Value hash directly (no string formatting)
         self.check_deadline()?;
         let mut groups: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
-        let mut group_index_map: HashMap<String, usize> = HashMap::new();
-        let mut key_buf = String::with_capacity(64);
+        let mut group_index_map: HashMap<Vec<Value>, usize> = HashMap::new();
 
         for (row_idx, row) in result_set.rows.iter().enumerate() {
             let key_values: Vec<Value> = folded_group_exprs
@@ -4848,19 +5608,11 @@ impl<'a> CypherExecutor<'a> {
                 .map(|expr| self.evaluate_expression(expr, row).unwrap_or(Value::Null))
                 .collect();
 
-            key_buf.clear();
-            for (i, val) in key_values.iter().enumerate() {
-                if i > 0 {
-                    key_buf.push('\x1F');
-                }
-                value_operations::format_value_compact_into(&mut key_buf, val);
-            }
-
-            if let Some(&group_idx) = group_index_map.get(&key_buf) {
+            if let Some(&group_idx) = group_index_map.get(&key_values) {
                 groups[group_idx].1.push(row_idx);
             } else {
                 let group_idx = groups.len();
-                group_index_map.insert(key_buf.clone(), group_idx);
+                group_index_map.insert(key_values.clone(), group_idx);
                 groups.push((key_values, vec![row_idx]));
             }
         }
@@ -4880,14 +5632,22 @@ impl<'a> CypherExecutor<'a> {
                 projected.insert(key, group_key_values[ki].clone());
             }
 
-            // Compute aggregations
-            for (item_idx, item) in clause.items.iter().enumerate() {
-                if group_key_indices.contains(&item_idx) {
-                    continue; // Already added
+            // Compute aggregations — try single-pass fusion first
+            if let Some(agg_results) =
+                self.try_fused_numeric_aggregation(clause, &group_key_indices, &group_rows)?
+            {
+                for (key, val) in agg_results {
+                    projected.insert(key, val);
                 }
-                let key = return_item_column_name(item);
-                let val = self.evaluate_aggregate_with_rows(&item.expression, &group_rows)?;
-                projected.insert(key, val);
+            } else {
+                for (item_idx, item) in clause.items.iter().enumerate() {
+                    if group_key_indices.contains(&item_idx) {
+                        continue; // Already added
+                    }
+                    let key = return_item_column_name(item);
+                    let val = self.evaluate_aggregate_with_rows(&item.expression, &group_rows)?;
+                    projected.insert(key, val);
+                }
             }
 
             // Preserve node/edge bindings from the first row in the group
@@ -5240,6 +6000,198 @@ impl<'a> CypherExecutor<'a> {
         Ok(values)
     }
 
+    /// Single-pass multi-aggregate: when all aggregates in a group are simple
+    /// numeric functions (count/sum/avg/min/max) without DISTINCT, compute all
+    /// of them in one pass over the group rows instead of one pass per aggregate.
+    fn try_fused_numeric_aggregation(
+        &self,
+        clause: &ReturnClause,
+        group_key_indices: &[usize],
+        group_rows: &[&ResultRow],
+    ) -> Result<Option<Vec<(String, Value)>>, String> {
+        // Classify each aggregate item
+        #[derive(Clone, Copy)]
+        enum AggKind {
+            CountStar,
+            Count,
+            Sum,
+            Avg,
+            Min,
+            Max,
+        }
+
+        struct AggSpec<'a> {
+            col_name: String,
+            kind: AggKind,
+            expr: &'a Expression,
+        }
+
+        let mut specs: Vec<AggSpec> = Vec::new();
+
+        for (item_idx, item) in clause.items.iter().enumerate() {
+            if group_key_indices.contains(&item_idx) {
+                continue;
+            }
+            match &item.expression {
+                Expression::FunctionCall {
+                    name,
+                    args,
+                    distinct,
+                } => {
+                    if *distinct {
+                        return Ok(None); // DISTINCT needs dedup — bail
+                    }
+                    let kind = match name.to_lowercase().as_str() {
+                        "count" => {
+                            if args.len() == 1 && matches!(args[0], Expression::Star) {
+                                AggKind::CountStar
+                            } else {
+                                AggKind::Count
+                            }
+                        }
+                        "sum" => AggKind::Sum,
+                        "avg" | "mean" | "average" => AggKind::Avg,
+                        "min" => AggKind::Min,
+                        "max" => AggKind::Max,
+                        _ => return Ok(None), // collect/std/etc — bail
+                    };
+                    specs.push(AggSpec {
+                        col_name: return_item_column_name(item),
+                        kind,
+                        expr: &args[0],
+                    });
+                }
+                _ => return Ok(None), // Non-function aggregate expression — bail
+            }
+        }
+
+        if specs.is_empty() {
+            return Ok(None);
+        }
+
+        // Accumulators
+        let n = specs.len();
+        let mut counts = vec![0i64; n];
+        let mut sums = vec![0.0f64; n];
+        let mut mins: Vec<Option<Value>> = vec![None; n];
+        let mut maxs: Vec<Option<Value>> = vec![None; n];
+
+        // Deduplicate expressions to avoid evaluating the same one multiple times
+        // Map each spec to an expression index
+        let mut unique_exprs: Vec<&Expression> = Vec::new();
+        let mut spec_expr_idx: Vec<usize> = Vec::with_capacity(n);
+
+        for spec in &specs {
+            if matches!(spec.kind, AggKind::CountStar) {
+                spec_expr_idx.push(usize::MAX); // sentinel — no expression needed
+                continue;
+            }
+            // Check if this expression already exists (by pointer equality for speed)
+            let idx = unique_exprs
+                .iter()
+                .position(|&e| std::ptr::eq(e, spec.expr));
+            if let Some(idx) = idx {
+                spec_expr_idx.push(idx);
+            } else {
+                spec_expr_idx.push(unique_exprs.len());
+                unique_exprs.push(spec.expr);
+            }
+        }
+
+        let mut eval_buf: Vec<Value> = vec![Value::Null; unique_exprs.len()];
+
+        // Single pass over rows
+        for row in group_rows {
+            // Evaluate each unique expression once
+            for (i, expr) in unique_exprs.iter().enumerate() {
+                eval_buf[i] = self.evaluate_expression(expr, row)?;
+            }
+
+            // Update all accumulators
+            for (si, spec) in specs.iter().enumerate() {
+                match spec.kind {
+                    AggKind::CountStar => {
+                        counts[si] += 1;
+                    }
+                    AggKind::Count => {
+                        let val = &eval_buf[spec_expr_idx[si]];
+                        if !matches!(val, Value::Null) {
+                            counts[si] += 1;
+                        }
+                    }
+                    AggKind::Sum | AggKind::Avg => {
+                        let val = &eval_buf[spec_expr_idx[si]];
+                        if let Some(f) = value_to_f64(val) {
+                            sums[si] += f;
+                            counts[si] += 1;
+                        }
+                    }
+                    AggKind::Min => {
+                        let val = &eval_buf[spec_expr_idx[si]];
+                        if !matches!(val, Value::Null) {
+                            mins[si] = Some(match mins[si].take() {
+                                None => val.clone(),
+                                Some(current) => {
+                                    if filtering_methods::compare_values(val, &current)
+                                        == Some(std::cmp::Ordering::Less)
+                                    {
+                                        val.clone()
+                                    } else {
+                                        current
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    AggKind::Max => {
+                        let val = &eval_buf[spec_expr_idx[si]];
+                        if !matches!(val, Value::Null) {
+                            maxs[si] = Some(match maxs[si].take() {
+                                None => val.clone(),
+                                Some(current) => {
+                                    if filtering_methods::compare_values(val, &current)
+                                        == Some(std::cmp::Ordering::Greater)
+                                    {
+                                        val.clone()
+                                    } else {
+                                        current
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Produce results
+        let mut results = Vec::with_capacity(n);
+        for (si, spec) in specs.iter().enumerate() {
+            let val = match spec.kind {
+                AggKind::CountStar | AggKind::Count => Value::Int64(counts[si]),
+                AggKind::Sum => {
+                    if counts[si] == 0 {
+                        Value::Int64(0)
+                    } else {
+                        Value::Float64(sums[si])
+                    }
+                }
+                AggKind::Avg => {
+                    if counts[si] == 0 {
+                        Value::Null
+                    } else {
+                        Value::Float64(sums[si] / counts[si] as f64)
+                    }
+                }
+                AggKind::Min => mins[si].take().unwrap_or(Value::Null),
+                AggKind::Max => maxs[si].take().unwrap_or(Value::Null),
+            };
+            results.push((spec.col_name.clone(), val));
+        }
+
+        Ok(Some(results))
+    }
+
     // ========================================================================
     // WITH
     // ========================================================================
@@ -5489,6 +6441,7 @@ impl<'a> CypherExecutor<'a> {
         score_item_index: usize,
         descending: bool,
         limit: usize,
+        sort_expression: Option<&Expression>,
         result_set: ResultSet,
     ) -> Result<ResultSet, String> {
         if result_set.rows.is_empty() || limit == 0 {
@@ -5503,8 +6456,11 @@ impl<'a> CypherExecutor<'a> {
             });
         }
 
-        let score_expr =
-            self.fold_constants_expr(&return_clause.items[score_item_index].expression);
+        let score_expr = if let Some(expr) = sort_expression {
+            self.fold_constants_expr(expr)
+        } else {
+            self.fold_constants_expr(&return_clause.items[score_item_index].expression)
+        };
 
         // Early type check: if the sort key isn't convertible to f64, fall back
         // to unfused RETURN → ORDER BY → LIMIT execution.
@@ -5593,12 +6549,15 @@ impl<'a> CypherExecutor<'a> {
             .map(return_item_column_name)
             .collect();
 
+        // When sort_expression is set, the sort key is external to RETURN items —
+        // don't replace any RETURN item expression with the score expression.
+        let has_external_sort = sort_expression.is_some();
         let folded_exprs: Vec<Expression> = return_clause
             .items
             .iter()
             .enumerate()
             .map(|(idx, item)| {
-                if idx == score_item_index {
+                if idx == score_item_index && !has_external_sort {
                     score_expr.clone()
                 } else {
                     self.fold_constants_expr(&item.expression)
@@ -5622,7 +6581,7 @@ impl<'a> CypherExecutor<'a> {
             let mut projected = Bindings::with_capacity(return_clause.items.len());
             for (j, item) in return_clause.items.iter().enumerate() {
                 let key = return_item_column_name(item);
-                let val = if j == score_item_index && score_is_native_float {
+                let val = if j == score_item_index && score_is_native_float && !has_external_sort {
                     // Recover actual score (undo negation for ASC)
                     let actual = if descending {
                         winner.score
@@ -6219,14 +7178,19 @@ impl<'a> CypherExecutor<'a> {
         }
 
         // Remove duplicates for UNION (not UNION ALL)
+        // Use hash-based dedup to avoid cloning Vec<Value> per row
         if !clause.all {
+            use std::hash::{Hash, Hasher};
             let mut seen = HashSet::new();
             combined_rows.retain(|row| {
-                let key: Vec<Value> = columns
-                    .iter()
-                    .map(|col| row.projected.get(col).cloned().unwrap_or(Value::Null))
-                    .collect();
-                seen.insert(key)
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                for col in &columns {
+                    match row.projected.get(col) {
+                        Some(val) => val.hash(&mut hasher),
+                        None => Value::Null.hash(&mut hasher),
+                    }
+                }
+                seen.insert(hasher.finish())
             });
         }
 

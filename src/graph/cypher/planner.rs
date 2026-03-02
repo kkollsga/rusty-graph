@@ -11,16 +11,34 @@ use std::collections::HashMap;
 /// Accepts query parameters so that `WHERE n.prop = $param` can be pushed
 /// into MATCH patterns the same way literal equalities are.
 pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<String, Value>) {
+    // Recursively optimize nested queries (e.g., UNION right-arm)
+    optimize_nested_queries(query, graph, params);
     push_where_into_match(query, params);
     push_limit_into_match(query, graph);
+    push_distinct_into_match(query);
     fuse_count_short_circuits(query);
     fuse_optional_match_aggregate(query);
     fuse_match_return_aggregate(query);
+    fuse_match_with_aggregate(query);
+    fuse_node_scan_aggregate(query);
     fuse_vector_score_order_limit(query);
     fuse_order_by_top_k(query);
     reorder_predicates_by_cost(query);
     mark_fast_var_length_paths(query);
     mark_skip_target_type_check(query, graph);
+}
+
+/// Recursively optimize queries nested inside UNION clauses.
+fn optimize_nested_queries(
+    query: &mut CypherQuery,
+    graph: &DirGraph,
+    params: &HashMap<String, Value>,
+) {
+    for clause in &mut query.clauses {
+        if let Clause::Union(ref mut u) = clause {
+            optimize(&mut u.query, graph, params);
+        }
+    }
 }
 
 /// Mark variable-length edges that don't need path tracking.
@@ -430,17 +448,20 @@ fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<String, Value
         };
 
         // Split predicate into pushable conditions and remainder
-        let (pushable, pushable_in, remaining) =
+        let (pushable, pushable_in, pushable_cmp, remaining) =
             extract_pushable_equalities(&where_pred, &match_vars, params);
 
         // Apply pushable conditions to MATCH patterns
-        if !pushable.is_empty() || !pushable_in.is_empty() {
+        if !pushable.is_empty() || !pushable_in.is_empty() || !pushable_cmp.is_empty() {
             if let Clause::Match(ref mut m) = query.clauses[i] {
                 for (var_name, property, value) in &pushable {
                     apply_property_to_patterns(&mut m.patterns, var_name, property, value.clone());
                 }
                 for (var_name, property, values) in pushable_in {
                     apply_in_property_to_patterns(&mut m.patterns, &var_name, &property, values);
+                }
+                for (var_name, property, op, value) in pushable_cmp {
+                    apply_comparison_to_patterns(&mut m.patterns, &var_name, &property, op, value);
                 }
             }
 
@@ -521,6 +542,104 @@ fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) {
         }
         query.clauses.remove(i + 2); // Remove LIMIT
                                      // Don't increment — check the new i+2
+    }
+}
+
+/// Push DISTINCT hint into MATCH when RETURN DISTINCT references a single node variable.
+///
+/// When all RETURN DISTINCT expressions depend on a single node variable
+/// (e.g., `RETURN DISTINCT c2.id` or `RETURN DISTINCT c2.id, c2.name`),
+/// the executor can pre-deduplicate pattern matches by that variable's NodeIndex
+/// during the MATCH phase, avoiding creation of duplicate ResultRows.
+///
+/// Detects patterns: MATCH → [WHERE] → RETURN DISTINCT
+fn push_distinct_into_match(query: &mut CypherQuery) {
+    // Find MATCH + RETURN DISTINCT (with optional WHERE in between)
+    for i in 0..query.clauses.len() {
+        let match_idx = match &query.clauses[i] {
+            Clause::Match(_) => i,
+            _ => continue,
+        };
+
+        // Find the RETURN clause (skip optional WHERE)
+        let return_idx = if match_idx + 1 < query.clauses.len() {
+            match &query.clauses[match_idx + 1] {
+                Clause::Return(_) => match_idx + 1,
+                Clause::Where(_) if match_idx + 2 < query.clauses.len() => {
+                    if matches!(&query.clauses[match_idx + 2], Clause::Return(_)) {
+                        match_idx + 2
+                    } else {
+                        continue;
+                    }
+                }
+                _ => continue,
+            }
+        } else {
+            continue;
+        };
+
+        // Check: RETURN must be DISTINCT, no aggregation
+        let distinct_var = if let Clause::Return(r) = &query.clauses[return_idx] {
+            if !r.distinct {
+                continue;
+            }
+            if r.items
+                .iter()
+                .any(|item| super::executor::is_aggregate_expression(&item.expression))
+            {
+                continue;
+            }
+            // All return items must reference a single node variable
+            let mut var: Option<&str> = None;
+            let mut all_same = true;
+            for item in &r.items {
+                let v = match &item.expression {
+                    Expression::PropertyAccess { variable, .. } => variable.as_str(),
+                    Expression::Variable(v) => v.as_str(),
+                    _ => {
+                        all_same = false;
+                        break;
+                    }
+                };
+                match var {
+                    None => var = Some(v),
+                    Some(prev) if prev == v => {}
+                    _ => {
+                        all_same = false;
+                        break;
+                    }
+                }
+            }
+            if all_same {
+                var.map(String::from)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(dv) = distinct_var {
+            // Verify the variable is a node variable in the MATCH pattern
+            if let Clause::Match(ref mc) = &query.clauses[match_idx] {
+                let is_node_var = mc.patterns.iter().any(|p| {
+                    p.elements.iter().any(|e| {
+                        if let crate::graph::pattern_matching::PatternElement::Node(np) = e {
+                            np.variable.as_deref() == Some(dv.as_str())
+                        } else {
+                            false
+                        }
+                    })
+                });
+                if !is_node_var {
+                    continue;
+                }
+            }
+            // Set the hint
+            if let Clause::Match(ref mut mc) = query.clauses[match_idx] {
+                mc.distinct_node_hint = Some(dv);
+            }
+        }
     }
 }
 
@@ -763,79 +882,106 @@ fn fuse_match_return_aggregate(query: &mut CypherQuery) {
             continue;
         }
 
-        let first_var = match first_var {
-            Some(v) => v,
-            None => {
-                i += 1;
-                continue;
-            }
-        };
+        // At least one of first_var / second_var must be named
+        if first_var.is_none() && second_var.is_none() {
+            i += 1;
+            continue;
+        }
 
-        // Check RETURN: must have count() aggregate + group-by on first node only
+        // Check RETURN: must have count() aggregate + group-by on one node variable.
+        // Determine which variable is the group key (first or second).
         let fusable = if let Clause::Return(r) = &query.clauses[i + 1] {
             if r.distinct {
                 false
             } else {
                 let mut has_count = false;
                 let mut all_valid = true;
+                let mut group_var: Option<&str> = None;
+                let mut count_var_ok = true;
+
+                // First pass: identify which variable group-by items reference
                 for item in &r.items {
-                    if is_aggregate_expression(&item.expression) {
-                        match &item.expression {
-                            Expression::FunctionCall {
-                                name,
-                                args,
-                                distinct,
-                            } if name.eq_ignore_ascii_case("count") => {
-                                if *distinct {
+                    if !is_aggregate_expression(&item.expression) {
+                        let refs_var = match &item.expression {
+                            Expression::PropertyAccess { variable, .. } => Some(variable.as_str()),
+                            Expression::Variable(v) => Some(v.as_str()),
+                            _ => None,
+                        };
+                        match refs_var {
+                            Some(v) => {
+                                if group_var.is_none() {
+                                    group_var = Some(v);
+                                } else if group_var != Some(v) {
+                                    // Group-by references multiple variables — can't fuse
                                     all_valid = false;
                                     break;
                                 }
-                                // count(*) is fine
-                                if args.len() == 1 && matches!(args[0], Expression::Star) {
-                                    has_count = true;
-                                    continue;
-                                }
-                                // count(var) — var must be second node
-                                if let Some(Expression::Variable(var)) = args.first() {
-                                    if second_var.as_deref() == Some(var.as_str()) {
-                                        has_count = true;
-                                        continue;
-                                    }
-                                }
-                                all_valid = false;
-                                break;
                             }
-                            _ => {
-                                all_valid = false;
-                                break;
-                            }
-                        }
-                    } else {
-                        // Group-by item must reference first node variable
-                        match &item.expression {
-                            Expression::PropertyAccess { variable, .. }
-                                if variable == &first_var =>
-                            {
-                                // OK
-                            }
-                            Expression::Variable(v) if v == &first_var => {
-                                // OK
-                            }
-                            _ => {
+                            None => {
                                 all_valid = false;
                                 break;
                             }
                         }
                     }
                 }
-                // Don't fuse when ALL items are aggregates (no group keys).
-                // The standard execute_return_with_aggregation handles this
-                // correctly as a single-group aggregate over all rows.
-                let has_group_keys = r
-                    .items
-                    .iter()
-                    .any(|item| !is_aggregate_expression(&item.expression));
-                has_count && all_valid && has_group_keys
+
+                // group_var must be either first_var or second_var
+                if all_valid {
+                    if let Some(gv) = group_var {
+                        let is_first = first_var.as_deref() == Some(gv);
+                        let is_second = second_var.as_deref() == Some(gv);
+                        if !is_first && !is_second {
+                            all_valid = false;
+                        }
+                    } else {
+                        all_valid = false; // no group keys found
+                    }
+                }
+
+                // Second pass: check count() aggregates
+                if all_valid {
+                    let other_var = if group_var == first_var.as_deref() {
+                        &second_var
+                    } else {
+                        &first_var
+                    };
+                    for item in &r.items {
+                        if is_aggregate_expression(&item.expression) {
+                            match &item.expression {
+                                Expression::FunctionCall {
+                                    name,
+                                    args,
+                                    distinct,
+                                } if name.eq_ignore_ascii_case("count") => {
+                                    if *distinct {
+                                        count_var_ok = false;
+                                        break;
+                                    }
+                                    // count(*) is fine
+                                    if args.len() == 1 && matches!(args[0], Expression::Star) {
+                                        has_count = true;
+                                        continue;
+                                    }
+                                    // count(var) — var must be the OTHER node
+                                    if let Some(Expression::Variable(var)) = args.first() {
+                                        if other_var.as_deref() == Some(var.as_str()) {
+                                            has_count = true;
+                                            continue;
+                                        }
+                                    }
+                                    count_var_ok = false;
+                                    break;
+                                }
+                                _ => {
+                                    count_var_ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                has_count && all_valid && count_var_ok
             }
         } else {
             false
@@ -863,6 +1009,409 @@ fn fuse_match_return_aggregate(query: &mut CypherQuery) {
             Clause::FusedMatchReturnAggregate {
                 match_clause,
                 return_clause,
+                top_k: None,
+            },
+        );
+
+        i += 1;
+    }
+
+    // Second pass: absorb ORDER BY + LIMIT into FusedMatchReturnAggregate
+    fuse_aggregate_order_limit(query);
+}
+
+/// Absorb ORDER BY + LIMIT into a preceding FusedMatchReturnAggregate.
+/// When the sort key is the count aggregate, uses a BinaryHeap to find
+/// top-k instead of materializing all rows then sorting.
+fn fuse_aggregate_order_limit(query: &mut CypherQuery) {
+    use super::executor::is_aggregate_expression;
+
+    let mut i = 0;
+    while i + 2 < query.clauses.len() {
+        let is_pattern = matches!(
+            (
+                &query.clauses[i],
+                &query.clauses[i + 1],
+                &query.clauses[i + 2]
+            ),
+            (
+                Clause::FusedMatchReturnAggregate { .. },
+                Clause::OrderBy(_),
+                Clause::Limit(_)
+            )
+        );
+        if !is_pattern {
+            i += 1;
+            continue;
+        }
+
+        // Extract ORDER BY sort key and LIMIT value
+        let (sort_expr_idx, descending) = if let Clause::OrderBy(ob) = &query.clauses[i + 1] {
+            if ob.items.len() != 1 {
+                i += 1;
+                continue; // multi-key sort — bail
+            }
+            let sort_item = &ob.items[0];
+            // Find which RETURN item the sort key references
+            if let Clause::FusedMatchReturnAggregate { return_clause, .. } = &query.clauses[i] {
+                let mut found_idx = None;
+                for (ri, item) in return_clause.items.iter().enumerate() {
+                    // Match by alias or by expression
+                    let matches_alias =
+                        item.alias
+                            .as_ref()
+                            .is_some_and(|a| match &sort_item.expression {
+                                Expression::Variable(v) => v == a,
+                                _ => false,
+                            });
+                    if matches_alias && is_aggregate_expression(&item.expression) {
+                        found_idx = Some(ri);
+                        break;
+                    }
+                }
+                match found_idx {
+                    Some(idx) => (idx, !sort_item.ascending),
+                    None => {
+                        i += 1;
+                        continue;
+                    }
+                }
+            } else {
+                i += 1;
+                continue;
+            }
+        } else {
+            i += 1;
+            continue;
+        };
+
+        let limit = if let Clause::Limit(l) = &query.clauses[i + 2] {
+            match &l.count {
+                Expression::Literal(Value::Int64(n)) if *n > 0 => *n as usize,
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            }
+        } else {
+            i += 1;
+            continue;
+        };
+
+        // Absorb ORDER BY + LIMIT into the fused aggregate
+        query.clauses.remove(i + 2); // remove LIMIT
+        query.clauses.remove(i + 1); // remove ORDER BY
+        if let Clause::FusedMatchReturnAggregate { top_k, .. } = &mut query.clauses[i] {
+            *top_k = Some((sort_expr_idx, descending, limit));
+        }
+
+        i += 1;
+    }
+}
+
+/// Fuse MATCH (n:Type) [WHERE pred] RETURN group_keys, agg_funcs(...)
+/// into a single-pass node scan with inline aggregation.
+///
+/// Instead of: MATCH creates 20k ResultRows → RETURN groups and aggregates them
+/// Fused: iterate nodes directly, evaluate group keys and aggregates from node properties.
+fn fuse_node_scan_aggregate(query: &mut CypherQuery) {
+    use super::executor::is_aggregate_expression;
+
+    let mut i = 0;
+    while i + 1 < query.clauses.len() {
+        // Find MATCH + [WHERE] + RETURN pattern
+        let match_idx = i;
+        if !matches!(&query.clauses[match_idx], Clause::Match(_)) {
+            i += 1;
+            continue;
+        }
+
+        // Check for optional WHERE clause between MATCH and RETURN
+        let (where_idx, return_idx) = if i + 2 < query.clauses.len()
+            && matches!(&query.clauses[i + 1], Clause::Where(_))
+            && matches!(&query.clauses[i + 2], Clause::Return(_))
+        {
+            (Some(i + 1), i + 2)
+        } else if matches!(&query.clauses[i + 1], Clause::Return(_)) {
+            (None, i + 1)
+        } else {
+            i += 1;
+            continue;
+        };
+
+        // Validate MATCH: single pattern, single node element (no edges),
+        // no pushed-down property matchers (those benefit from index lookups).
+        let is_single_node = if let Clause::Match(mc) = &query.clauses[match_idx] {
+            let no_props = if let PatternElement::Node(np) = &mc.patterns[0].elements[0] {
+                np.properties.is_none()
+            } else {
+                false
+            };
+            mc.patterns.len() == 1
+                && mc.patterns[0].elements.len() == 1
+                && matches!(mc.patterns[0].elements[0], PatternElement::Node(_))
+                && mc.path_assignments.is_empty()
+                && no_props
+        } else {
+            false
+        };
+        if !is_single_node {
+            i += 1;
+            continue;
+        }
+
+        // Validate RETURN: must have supported aggregation (count/sum/avg/min/max only)
+        let has_supported_agg = if let Clause::Return(r) = &query.clauses[return_idx] {
+            let has_any_agg = r
+                .items
+                .iter()
+                .any(|item| is_aggregate_expression(&item.expression));
+            let all_supported = r.items.iter().all(|item| {
+                if !is_aggregate_expression(&item.expression) {
+                    return true; // group key — OK
+                }
+                match &item.expression {
+                    Expression::FunctionCall { name, distinct, .. } => {
+                        if *distinct {
+                            return false; // DISTINCT not supported inline
+                        }
+                        matches!(
+                            name.to_lowercase().as_str(),
+                            "count" | "sum" | "avg" | "mean" | "average" | "min" | "max"
+                        )
+                    }
+                    _ => false,
+                }
+            });
+            has_any_agg && all_supported
+        } else {
+            false
+        };
+        if !has_supported_agg {
+            i += 1;
+            continue;
+        }
+
+        // All checks passed — fuse
+        let where_predicate = if let Some(wi) = where_idx {
+            if let Clause::Where(w) = query.clauses.remove(wi) {
+                // return_idx shifted by 1 after remove
+                Some(w.predicate)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Recalculate return_idx after potential WHERE removal
+        let ret_idx = if where_idx.is_some() {
+            return_idx - 1
+        } else {
+            return_idx
+        };
+
+        let return_clause = if let Clause::Return(r) = query.clauses.remove(ret_idx) {
+            r
+        } else {
+            unreachable!()
+        };
+        let match_clause = if let Clause::Match(mc) = query.clauses.remove(match_idx) {
+            mc
+        } else {
+            unreachable!()
+        };
+
+        query.clauses.insert(
+            match_idx,
+            Clause::FusedNodeScanAggregate {
+                match_clause,
+                where_predicate,
+                return_clause,
+            },
+        );
+
+        i += 1;
+    }
+}
+
+/// Fuse MATCH (node-edge-node) + WITH (group-by + count) into a single
+/// pass that counts edges directly per node. Same criteria as
+/// `fuse_match_return_aggregate` but targets WITH clauses so the pipeline
+/// can continue (e.g., out-degree histogram: WITH p, count(cited) → RETURN).
+fn fuse_match_with_aggregate(query: &mut CypherQuery) {
+    use super::executor::is_aggregate_expression;
+
+    let mut i = 0;
+    while i + 1 < query.clauses.len() {
+        let can_fuse = matches!(
+            (&query.clauses[i], &query.clauses[i + 1]),
+            (Clause::Match(_), Clause::With(_))
+        );
+        if !can_fuse {
+            i += 1;
+            continue;
+        }
+
+        // Check MATCH: exactly 1 pattern with 3 elements (node-edge-node)
+        let (first_var, second_var, edge_has_props, second_has_props) =
+            if let Clause::Match(m) = &query.clauses[i] {
+                if m.patterns.len() != 1 || m.patterns[0].elements.len() != 3 {
+                    i += 1;
+                    continue;
+                }
+                let pat = &m.patterns[0];
+                let first_var = match &pat.elements[0] {
+                    PatternElement::Node(np) => np.variable.clone(),
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                let edge_has_props = match &pat.elements[1] {
+                    PatternElement::Edge(ep) => ep.properties.is_some() || ep.var_length.is_some(),
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                let (second_var, second_has_props) = match &pat.elements[2] {
+                    PatternElement::Node(np) => (np.variable.clone(), np.properties.is_some()),
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                (first_var, second_var, edge_has_props, second_has_props)
+            } else {
+                i += 1;
+                continue;
+            };
+
+        if edge_has_props || second_has_props {
+            i += 1;
+            continue;
+        }
+        if first_var.is_none() && second_var.is_none() {
+            i += 1;
+            continue;
+        }
+
+        // Check WITH: must have count() aggregate + group-by on one node variable
+        let fusable = if let Clause::With(w) = &query.clauses[i + 1] {
+            if w.distinct {
+                false
+            } else {
+                let mut has_count = false;
+                let mut all_valid = true;
+                let mut group_var: Option<&str> = None;
+                let mut count_var_ok = true;
+
+                for item in &w.items {
+                    if !is_aggregate_expression(&item.expression) {
+                        let refs_var = match &item.expression {
+                            Expression::Variable(v) => Some(v.as_str()),
+                            _ => None,
+                        };
+                        match refs_var {
+                            Some(v) => {
+                                if group_var.is_none() {
+                                    group_var = Some(v);
+                                } else if group_var != Some(v) {
+                                    all_valid = false;
+                                    break;
+                                }
+                            }
+                            None => {
+                                all_valid = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // group_var must be either first_var or second_var
+                if all_valid {
+                    if let Some(gv) = group_var {
+                        let is_first = first_var.as_deref() == Some(gv);
+                        let is_second = second_var.as_deref() == Some(gv);
+                        if !is_first && !is_second {
+                            all_valid = false;
+                        }
+                    } else {
+                        all_valid = false;
+                    }
+                }
+
+                // Check count() aggregates reference the OTHER node variable
+                if all_valid {
+                    let other_var = if group_var == first_var.as_deref() {
+                        &second_var
+                    } else {
+                        &first_var
+                    };
+                    for item in &w.items {
+                        if is_aggregate_expression(&item.expression) {
+                            match &item.expression {
+                                Expression::FunctionCall {
+                                    name,
+                                    args,
+                                    distinct,
+                                } if name.eq_ignore_ascii_case("count") => {
+                                    if *distinct {
+                                        count_var_ok = false;
+                                        break;
+                                    }
+                                    if args.len() == 1 && matches!(args[0], Expression::Star) {
+                                        has_count = true;
+                                        continue;
+                                    }
+                                    if let Some(Expression::Variable(var)) = args.first() {
+                                        if other_var.as_deref() == Some(var.as_str()) {
+                                            has_count = true;
+                                            continue;
+                                        }
+                                    }
+                                    count_var_ok = false;
+                                    break;
+                                }
+                                _ => {
+                                    count_var_ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                has_count && all_valid && count_var_ok
+            }
+        } else {
+            false
+        };
+
+        if !fusable {
+            i += 1;
+            continue;
+        }
+
+        // All checks passed — fuse MATCH + WITH
+        let with_clause = if let Clause::With(w) = query.clauses.remove(i + 1) {
+            w
+        } else {
+            unreachable!()
+        };
+        let match_clause = if let Clause::Match(m) = query.clauses.remove(i) {
+            m
+        } else {
+            unreachable!()
+        };
+
+        query.clauses.insert(
+            i,
+            Clause::FusedMatchWithAggregate {
+                match_clause,
+                with_clause,
             },
         );
 
@@ -887,20 +1436,22 @@ fn collect_pattern_variables(
     vars
 }
 
-/// (equality_conditions, in_conditions, remaining_predicate)
+/// (equality_conditions, in_conditions, comparison_conditions, remaining_predicate)
 type PushableResult = (
     Vec<(String, String, Value)>,
     Vec<(String, String, Vec<Value>)>,
+    Vec<(String, String, ComparisonOp, Value)>,
     Option<Predicate>,
 );
 
 /// Extract pushable predicates from a WHERE clause into MATCH patterns.
-/// Returns (equality_conditions, in_conditions, remaining_predicate).
+/// Returns (equality_conditions, in_conditions, comparison_conditions, remaining_predicate).
 ///
 /// Pushes conditions of the form:
 /// - `variable.property = literal_value` (equality)
 /// - `variable.property = $param` (equality with param)
 /// - `variable.property IN [literal, ...]` (IN list)
+/// - `variable.property > literal_value` (and >=, <, <=)
 ///
 /// The variable must be defined in MATCH.
 fn extract_pushable_equalities(
@@ -910,9 +1461,16 @@ fn extract_pushable_equalities(
 ) -> PushableResult {
     let mut pushable = Vec::new();
     let mut pushable_in = Vec::new();
-    let remaining =
-        extract_from_predicate(pred, match_vars, params, &mut pushable, &mut pushable_in);
-    (pushable, pushable_in, remaining)
+    let mut pushable_cmp = Vec::new();
+    let remaining = extract_from_predicate(
+        pred,
+        match_vars,
+        params,
+        &mut pushable,
+        &mut pushable_in,
+        &mut pushable_cmp,
+    );
+    (pushable, pushable_in, pushable_cmp, remaining)
 }
 
 /// Recursively extract pushable predicates from a predicate tree.
@@ -923,6 +1481,7 @@ fn extract_from_predicate(
     params: &HashMap<String, Value>,
     pushable: &mut Vec<(String, String, Value)>,
     pushable_in: &mut Vec<(String, String, Vec<Value>)>,
+    pushable_cmp: &mut Vec<(String, String, ComparisonOp, Value)>,
 ) -> Option<Predicate> {
     match pred {
         Predicate::Comparison {
@@ -936,6 +1495,24 @@ fn extract_from_predicate(
                 None // Fully consumed
             } else {
                 Some(pred.clone()) // Keep as-is
+            }
+        }
+        Predicate::Comparison {
+            left,
+            operator:
+                op @ (ComparisonOp::GreaterThan
+                | ComparisonOp::GreaterThanEq
+                | ComparisonOp::LessThan
+                | ComparisonOp::LessThanEq),
+            right,
+        } => {
+            if let Some((var, prop, op, val)) =
+                try_extract_comparison(left, right, *op, match_vars, params)
+            {
+                pushable_cmp.push((var, prop, op, val));
+                None
+            } else {
+                Some(pred.clone())
             }
         }
         Predicate::In { expr, list } => {
@@ -961,10 +1538,22 @@ fn extract_from_predicate(
             Some(pred.clone())
         }
         Predicate::And(left, right) => {
-            let left_remaining =
-                extract_from_predicate(left, match_vars, params, pushable, pushable_in);
-            let right_remaining =
-                extract_from_predicate(right, match_vars, params, pushable, pushable_in);
+            let left_remaining = extract_from_predicate(
+                left,
+                match_vars,
+                params,
+                pushable,
+                pushable_in,
+                pushable_cmp,
+            );
+            let right_remaining = extract_from_predicate(
+                right,
+                match_vars,
+                params,
+                pushable,
+                pushable_in,
+                pushable_cmp,
+            );
 
             match (left_remaining, right_remaining) {
                 (None, None) => None,
@@ -1026,6 +1615,159 @@ fn try_extract_equality(
     }
 
     None
+}
+
+/// Try to extract a comparison: variable.property OP literal_or_param
+/// When the literal is on the left (e.g. `30 < n.age`), reverse the operator
+/// so it becomes `n.age > 30`.
+fn try_extract_comparison(
+    left: &Expression,
+    right: &Expression,
+    op: ComparisonOp,
+    match_vars: &[(String, Option<String>)],
+    params: &HashMap<String, Value>,
+) -> Option<(String, String, ComparisonOp, Value)> {
+    // Left is property access, right is literal: variable.property OP literal
+    if let (Expression::PropertyAccess { variable, property }, Expression::Literal(val)) =
+        (left, right)
+    {
+        if match_vars.iter().any(|(v, _)| v == variable) {
+            return Some((variable.clone(), property.clone(), op, val.clone()));
+        }
+    }
+
+    // Right is property access, left is literal: literal OP variable.property → reverse
+    if let (Expression::Literal(val), Expression::PropertyAccess { variable, property }) =
+        (left, right)
+    {
+        if match_vars.iter().any(|(v, _)| v == variable) {
+            let reversed = match op {
+                ComparisonOp::GreaterThan => ComparisonOp::LessThan,
+                ComparisonOp::GreaterThanEq => ComparisonOp::LessThanEq,
+                ComparisonOp::LessThan => ComparisonOp::GreaterThan,
+                ComparisonOp::LessThanEq => ComparisonOp::GreaterThanEq,
+                other => other,
+            };
+            return Some((variable.clone(), property.clone(), reversed, val.clone()));
+        }
+    }
+
+    // Left is property access, right is parameter
+    if let (Expression::PropertyAccess { variable, property }, Expression::Parameter(name)) =
+        (left, right)
+    {
+        if let Some(val) = params.get(name.as_str()) {
+            if match_vars.iter().any(|(v, _)| v == variable) {
+                return Some((variable.clone(), property.clone(), op, val.clone()));
+            }
+        }
+    }
+
+    // Right is property access, left is parameter → reverse
+    if let (Expression::Parameter(name), Expression::PropertyAccess { variable, property }) =
+        (left, right)
+    {
+        if let Some(val) = params.get(name.as_str()) {
+            if match_vars.iter().any(|(v, _)| v == variable) {
+                let reversed = match op {
+                    ComparisonOp::GreaterThan => ComparisonOp::LessThan,
+                    ComparisonOp::GreaterThanEq => ComparisonOp::LessThanEq,
+                    ComparisonOp::LessThan => ComparisonOp::GreaterThan,
+                    ComparisonOp::LessThanEq => ComparisonOp::GreaterThanEq,
+                    other => other,
+                };
+                return Some((variable.clone(), property.clone(), reversed, val.clone()));
+            }
+        }
+    }
+
+    None
+}
+
+/// Apply a comparison condition to the matching node pattern in MATCH.
+/// If the same property already has a comparison matcher (e.g. `year >= 2015`
+/// followed by `year <= 2022`), merge them into a `Range` matcher.
+fn apply_comparison_to_patterns(
+    patterns: &mut [crate::graph::pattern_matching::Pattern],
+    var_name: &str,
+    property: &str,
+    op: ComparisonOp,
+    value: Value,
+) {
+    for pattern in patterns.iter_mut() {
+        for element in &mut pattern.elements {
+            if let PatternElement::Node(ref mut np) = element {
+                if np.variable.as_deref() == Some(var_name) {
+                    let props = np.properties.get_or_insert_with(Default::default);
+                    // Check if there's already a comparison on this property to merge
+                    if let Some(existing) = props.get(property) {
+                        if let Some(merged) = merge_comparison(existing, op, &value) {
+                            props.insert(property.to_string(), merged);
+                            return;
+                        }
+                    }
+                    let matcher = match op {
+                        ComparisonOp::GreaterThan => PropertyMatcher::GreaterThan(value),
+                        ComparisonOp::GreaterThanEq => PropertyMatcher::GreaterOrEqual(value),
+                        ComparisonOp::LessThan => PropertyMatcher::LessThan(value),
+                        ComparisonOp::LessThanEq => PropertyMatcher::LessOrEqual(value),
+                        _ => return,
+                    };
+                    props.insert(property.to_string(), matcher);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Merge two comparison matchers on the same property into a Range.
+/// E.g. existing `>= 2015` + new `<= 2022` → `Range { 2015..=2022 }`.
+fn merge_comparison(
+    existing: &PropertyMatcher,
+    new_op: ComparisonOp,
+    new_val: &Value,
+) -> Option<PropertyMatcher> {
+    // Extract the existing bound direction
+    let (existing_lower, existing_val, existing_inclusive) = match existing {
+        PropertyMatcher::GreaterThan(v) => (true, v, false),
+        PropertyMatcher::GreaterOrEqual(v) => (true, v, true),
+        PropertyMatcher::LessThan(v) => (false, v, false),
+        PropertyMatcher::LessOrEqual(v) => (false, v, true),
+        _ => return None,
+    };
+
+    // Determine the new bound direction
+    let (new_lower, new_inclusive) = match new_op {
+        ComparisonOp::GreaterThan => (true, false),
+        ComparisonOp::GreaterThanEq => (true, true),
+        ComparisonOp::LessThan => (false, false),
+        ComparisonOp::LessThanEq => (false, true),
+        _ => return None,
+    };
+
+    // Can only merge opposite directions (lower + upper)
+    if existing_lower == new_lower {
+        return None; // Both are lower or both are upper — can't merge cleanly
+    }
+
+    if existing_lower {
+        // existing is lower bound, new is upper bound
+        Some(PropertyMatcher::Range {
+            lower: existing_val.clone(),
+            lower_inclusive: existing_inclusive,
+            upper: new_val.clone(),
+            upper_inclusive: new_inclusive,
+        })
+    } else {
+        // existing is upper bound, new is lower bound
+        Some(PropertyMatcher::Range {
+            lower: new_val.clone(),
+            lower_inclusive: new_inclusive,
+            upper: existing_val.clone(),
+            upper_inclusive: existing_inclusive,
+        })
+    }
 }
 
 /// Apply a property equality condition to the matching node pattern in MATCH
@@ -1239,7 +1981,7 @@ fn fuse_order_by_top_k(query: &mut CypherQuery) {
             continue;
         }
 
-        let (score_idx, alias) = if let Clause::Return(r) = &query.clauses[i] {
+        let (score_idx, sort_expression) = if let Clause::Return(r) = &query.clauses[i] {
             // Don't fuse if RETURN has DISTINCT
             if r.distinct {
                 i += 1;
@@ -1253,40 +1995,38 @@ fn fuse_order_by_top_k(query: &mut CypherQuery) {
                 i += 1;
                 continue;
             }
-            // We need ORDER BY to reference a RETURN alias — find which one
-            let order_alias = if let Clause::OrderBy(o) = &query.clauses[i + 1] {
+            // Find which RETURN item the ORDER BY references
+            let order_info = if let Clause::OrderBy(o) = &query.clauses[i + 1] {
                 if o.items.len() != 1 {
                     i += 1;
                     continue;
                 }
-                match &o.items[0].expression {
+                let order_alias = match &o.items[0].expression {
                     Expression::Variable(v) => v.clone(),
                     other => expression_to_column_name(other),
+                };
+                // Try matching a RETURN item
+                let found = r
+                    .items
+                    .iter()
+                    .enumerate()
+                    .find(|(_, item)| return_item_column_name(item) == order_alias);
+                match found {
+                    Some((idx, _)) => (idx, None), // sort key is RETURN item
+                    None => {
+                        // Sort key not in RETURN — store expression directly
+                        (0, Some(o.items[0].expression.clone()))
+                    }
                 }
             } else {
                 i += 1;
                 continue;
             };
-            // Find matching RETURN item
-            let found = r
-                .items
-                .iter()
-                .enumerate()
-                .find(|(_, item)| return_item_column_name(item) == order_alias);
-            match found {
-                Some((idx, _)) => (idx, order_alias),
-                None => {
-                    i += 1;
-                    continue;
-                }
-            }
+            order_info
         } else {
             i += 1;
             continue;
         };
-        // Verify alias matches ORDER BY (already extracted above)
-        let _ = &alias;
-
         // Extract ORDER BY direction
         let descending = if let Clause::OrderBy(o) = &query.clauses[i + 1] {
             !o.items[0].ascending
@@ -1325,6 +2065,7 @@ fn fuse_order_by_top_k(query: &mut CypherQuery) {
                 score_item_index: score_idx,
                 descending,
                 limit,
+                sort_expression,
             },
         );
 
@@ -1876,31 +2617,55 @@ mod tests {
         let params = HashMap::new();
         optimize(&mut query, &graph, &params);
 
-        // n.age = 30 should be pushed, n.score > 100 should remain
-        assert_eq!(query.clauses.len(), 3); // MATCH + WHERE + RETURN
-        assert!(matches!(&query.clauses[1], Clause::Where(_)));
+        // Both n.age = 30 and n.score > 100 should be pushed into MATCH
+        assert_eq!(query.clauses.len(), 2); // MATCH + RETURN (WHERE fully consumed)
 
-        if let Clause::Where(w) = &query.clauses[1] {
-            // Remaining should be n.score > 100
-            assert!(matches!(
-                &w.predicate,
-                Predicate::Comparison {
-                    operator: ComparisonOp::GreaterThan,
-                    ..
-                }
-            ));
+        if let Clause::Match(m) = &query.clauses[0] {
+            if let PatternElement::Node(np) = &m.patterns[0].elements[0] {
+                let props = np.properties.as_ref().unwrap();
+                assert!(matches!(
+                    props.get("age"),
+                    Some(PropertyMatcher::Equals(Value::Int64(30)))
+                ));
+                assert!(matches!(
+                    props.get("score"),
+                    Some(PropertyMatcher::GreaterThan(Value::Int64(100)))
+                ));
+            }
         }
     }
 
     #[test]
-    fn test_no_pushdown_for_non_equality() {
+    fn test_comparison_pushdown() {
         let mut query = parse_cypher("MATCH (n:Person) WHERE n.age > 30 RETURN n").unwrap();
 
         let graph = DirGraph::new();
         let params = HashMap::new();
         optimize(&mut query, &graph, &params);
 
-        // No pushdown - WHERE should remain
+        // Comparison should be pushed into MATCH, WHERE removed
+        assert_eq!(query.clauses.len(), 2); // MATCH + RETURN
+
+        if let Clause::Match(m) = &query.clauses[0] {
+            if let PatternElement::Node(np) = &m.patterns[0].elements[0] {
+                let props = np.properties.as_ref().unwrap();
+                assert!(matches!(
+                    props.get("age"),
+                    Some(PropertyMatcher::GreaterThan(Value::Int64(30)))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn test_no_pushdown_for_not_equals() {
+        let mut query = parse_cypher("MATCH (n:Person) WHERE n.age <> 30 RETURN n").unwrap();
+
+        let graph = DirGraph::new();
+        let params = HashMap::new();
+        optimize(&mut query, &graph, &params);
+
+        // NotEquals should NOT be pushed - WHERE should remain
         assert_eq!(query.clauses.len(), 3); // MATCH + WHERE + RETURN
     }
 
@@ -1944,7 +2709,50 @@ mod tests {
         params.insert("min_age".to_string(), Value::Int64(25));
         optimize(&mut query, &graph, &params);
 
-        // n.name = $name should be pushed, n.age > $min_age should remain (not equality)
-        assert_eq!(query.clauses.len(), 3); // MATCH + WHERE + RETURN
+        // Both should be pushed: n.name = $name (equality) and n.age > $min_age (comparison)
+        assert_eq!(query.clauses.len(), 2); // MATCH + RETURN (WHERE fully consumed)
+
+        if let Clause::Match(m) = &query.clauses[0] {
+            if let PatternElement::Node(np) = &m.patterns[0].elements[0] {
+                let props = np.properties.as_ref().unwrap();
+                assert!(matches!(
+                    props.get("name"),
+                    Some(PropertyMatcher::Equals(Value::String(s))) if s == "Alice"
+                ));
+                assert!(matches!(
+                    props.get("age"),
+                    Some(PropertyMatcher::GreaterThan(Value::Int64(25)))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn test_comparison_range_merge() {
+        let mut query =
+            parse_cypher("MATCH (n:Paper) WHERE n.year >= 2015 AND n.year <= 2022 RETURN n")
+                .unwrap();
+
+        let graph = DirGraph::new();
+        let params = HashMap::new();
+        optimize(&mut query, &graph, &params);
+
+        // Both comparisons should be merged into a Range matcher
+        assert_eq!(query.clauses.len(), 2); // MATCH + RETURN
+
+        if let Clause::Match(m) = &query.clauses[0] {
+            if let PatternElement::Node(np) = &m.patterns[0].elements[0] {
+                let props = np.properties.as_ref().unwrap();
+                assert!(matches!(
+                    props.get("year"),
+                    Some(PropertyMatcher::Range {
+                        lower: Value::Int64(2015),
+                        lower_inclusive: true,
+                        upper: Value::Int64(2022),
+                        upper_inclusive: true,
+                    })
+                ));
+            }
+        }
     }
 }
