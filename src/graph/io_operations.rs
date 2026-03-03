@@ -124,6 +124,13 @@ struct FileMetadata {
     /// follows after graph + embedding sections.
     #[serde(default)]
     embedding_compressed_size: Option<u64>,
+    /// Compression algorithm: "zstd" (default for new files) or "gzip" (legacy).
+    #[serde(default = "default_compression")]
+    compression: String,
+}
+
+fn default_compression() -> String {
+    "gzip".to_string() // Legacy files without this field used gzip
 }
 
 fn default_auto_vacuum_threshold() -> Option<f64> {
@@ -143,28 +150,43 @@ pub fn prepare_save(graph: &mut Arc<DirGraph>) {
     g.populate_index_keys();
 }
 
+/// Compress data using zstd (level 1 — fastest with good ratio).
+fn zstd_compress(data: &[u8]) -> io::Result<Vec<u8>> {
+    zstd::encode_all(std::io::Cursor::new(data), 1)
+}
+
+/// Decompress data using the algorithm specified in metadata.
+fn decompress_section(data: &[u8], compression: &str) -> io::Result<Vec<u8>> {
+    match compression {
+        "zstd" => zstd::decode_all(std::io::Cursor::new(data)),
+        _ => {
+            // Legacy gzip
+            let mut decoder = GzDecoder::new(data);
+            let mut buf = Vec::new();
+            decoder.read_to_end(&mut buf)?;
+            Ok(buf)
+        }
+    }
+}
+
 /// Serialize, compress, and write graph data to file. Heavy I/O, safe to run without GIL.
 pub fn write_graph_to_file(graph: &DirGraph, path: &str) -> io::Result<()> {
-    // Compress graph to buffer first so we know its size (needed for embedding section)
-    let mut graph_compressed = Vec::new();
-    {
-        // Set thread-local interner so InternedKey serializes as string keys
+    // Serialize graph to raw bincode first, then compress
+    let graph_raw = {
         let _guard = SerdeSerializeGuard::new(&graph.interner);
-        let gz = GzEncoder::new(&mut graph_compressed, Compression::new(3));
         bincode_options()
-            .serialize_into(gz, &graph.graph)
-            .map_err(io::Error::other)?;
-    }
+            .serialize(&graph.graph)
+            .map_err(io::Error::other)?
+    };
+    let graph_compressed = zstd_compress(&graph_raw)?;
 
     // Compress embeddings if any exist
     let has_embeddings = !graph.embeddings.is_empty();
     let embedding_compressed = if has_embeddings {
-        let mut buf = Vec::new();
-        let gz = GzEncoder::new(&mut buf, Compression::new(3));
-        bincode_options()
-            .serialize_into(gz, &graph.embeddings)
+        let raw = bincode_options()
+            .serialize(&graph.embeddings)
             .map_err(io::Error::other)?;
-        Some(buf)
+        Some(zstd_compress(&raw)?)
     } else {
         None
     };
@@ -172,12 +194,10 @@ pub fn write_graph_to_file(graph: &DirGraph, path: &str) -> io::Result<()> {
     // Compress timeseries if any exist
     let has_timeseries = !graph.timeseries_store.is_empty();
     let timeseries_compressed = if has_timeseries {
-        let mut buf = Vec::new();
-        let gz = GzEncoder::new(&mut buf, Compression::new(3));
-        bincode_options()
-            .serialize_into(gz, &graph.timeseries_store)
+        let raw = bincode_options()
+            .serialize(&graph.timeseries_store)
             .map_err(io::Error::other)?;
-        Some(buf)
+        Some(zstd_compress(&raw)?)
     } else {
         None
     };
@@ -218,6 +238,7 @@ pub fn write_graph_to_file(graph: &DirGraph, path: &str) -> io::Result<()> {
         } else {
             None
         },
+        compression: "zstd".to_string(),
     };
 
     let metadata_json = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
@@ -341,7 +362,7 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
     };
 
     // Decompress and deserialize graph (interner is populated as a side effect)
-    let (graph, interner) = load_core_data(graph_bytes, core_version)?;
+    let (graph, interner) = load_core_data(graph_bytes, core_version, &metadata.compression)?;
 
     // Reassemble DirGraph
     let mut dir_graph = DirGraph::from_graph(graph);
@@ -367,9 +388,9 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
     // Load embeddings if present
     if let Some(emb_bytes) = embedding_bytes {
         if !emb_bytes.is_empty() {
-            let gz = GzDecoder::new(emb_bytes);
+            let decompressed = decompress_section(emb_bytes, &metadata.compression)?;
             let embeddings: HashMap<(String, String), EmbeddingStore> =
-                bincode_options().deserialize_from(gz).map_err(|e| {
+                bincode_options().deserialize(&decompressed).map_err(|e| {
                     io::Error::other(format!("Failed to deserialize embedding data: {}", e))
                 })?;
             dir_graph.embeddings = embeddings;
@@ -380,18 +401,15 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
     if let Some(ts_bytes) = timeseries_bytes {
         if !ts_bytes.is_empty() {
             if metadata.timeseries_data_version < 2 {
-                // Legacy format (Vec<Vec<i64>> keys) — skip loading timeseries data.
-                // The graph structure and configs are still loaded; timeseries data
-                // must be re-imported from source.
                 eprintln!(
                     "Warning: Timeseries data in this file uses legacy format (v{}). \
                      Timeseries data was not loaded — please re-import from source data.",
                     metadata.timeseries_data_version
                 );
             } else {
-                let gz = GzDecoder::new(ts_bytes);
+                let decompressed = decompress_section(ts_bytes, &metadata.compression)?;
                 let ts_store: HashMap<usize, NodeTimeseries> =
-                    bincode_options().deserialize_from(gz).map_err(|e| {
+                    bincode_options().deserialize(&decompressed).map_err(|e| {
                         io::Error::other(format!("Failed to deserialize timeseries data: {}", e))
                     })?;
                 dir_graph.timeseries_store = ts_store;
@@ -437,6 +455,7 @@ fn load_v1(buf: &[u8]) -> io::Result<DirGraph> {
 fn load_core_data(
     graph_bytes: &[u8],
     file_core_version: u32,
+    compression: &str,
 ) -> io::Result<(crate::graph::schema::Graph, StringInterner)> {
     if file_core_version > CURRENT_CORE_DATA_VERSION {
         return Err(io::Error::other(format!(
@@ -446,13 +465,15 @@ fn load_core_data(
         )));
     }
 
+    // Decompress graph bytes
+    let decompressed = decompress_section(graph_bytes, compression)?;
+
     // Set up interner for deserialization — InternedKey::deserialize registers
     // each string key as a side effect, so the interner is fully populated after load.
     let mut interner = StringInterner::new();
     let graph: crate::graph::schema::Graph = {
         let _guard = SerdeDeserializeGuard::new(&mut interner);
-        let gz = GzDecoder::new(graph_bytes);
-        bincode_options().deserialize_from(gz).map_err(|e| {
+        bincode_options().deserialize(&decompressed).map_err(|e| {
             io::Error::other(format!(
                 "Failed to deserialize graph data (core version {}). Error: {}",
                 file_core_version, e
@@ -686,8 +707,7 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
 
 /// Rebuild caches and wrap in KnowledgeGraph.
 fn finalize_load(mut dir_graph: DirGraph) -> KnowledgeGraph {
-    dir_graph.rebuild_type_indices();
-    dir_graph.compact_properties();
+    dir_graph.rebuild_type_indices_and_compact();
     dir_graph.build_connection_types_cache();
     dir_graph.rebuild_indices_from_keys();
 

@@ -619,8 +619,8 @@ class BlueprintLoader:
             raise FileNotFoundError(f"CSV file not found: {full_path}")
 
         df = pd.read_csv(full_path, low_memory=False)
-        self._csv_cache[relative_path] = df
-        return df.copy()
+        self._csv_cache[relative_path] = df.copy()  # cache gets a copy
+        return df  # return original without extra copy
 
     def _apply_filter(
         self, df: pd.DataFrame, filt: dict[str, Any]

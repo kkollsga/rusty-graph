@@ -57,19 +57,36 @@ impl Serialize for InternedKey {
 /// Deserializes InternedKey from a string (backward-compatible with
 /// HashMap<String, Value> on disk). Registers the string in the thread-local
 /// DESERIALIZE_INTERNER if set.
+///
+/// Uses a custom Visitor to avoid String allocation: bincode's SliceReader
+/// provides borrowed &str directly from the decompressed buffer. Only the
+/// first occurrence of each key allocates (in the interner). For ~5.6M
+/// property keys with ~200 unique ones, this eliminates ~5.6M allocations.
 impl<'de> Deserialize<'de> for InternedKey {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        let key = InternedKey::from_str(&s);
-        DESERIALIZE_INTERNER.with(|cell| {
-            if let Some(ptr) = cell.get() {
-                // SAFETY: ptr is set by SerdeInternerGuard which ensures the
-                // mutable reference outlives the deserialize call.
-                let interner = unsafe { &mut *ptr };
-                interner.register(key, &s);
+        struct KeyVisitor;
+        impl<'de> serde::de::Visitor<'de> for KeyVisitor {
+            type Value = InternedKey;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a string key")
             }
-        });
-        Ok(key)
+            /// Fast path: hash borrowed &str directly, no String allocation.
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                let key = InternedKey::from_str(v);
+                DESERIALIZE_INTERNER.with(|cell| {
+                    if let Some(ptr) = cell.get() {
+                        let interner = unsafe { &mut *ptr };
+                        interner.register(key, v);
+                    }
+                });
+                Ok(key)
+            }
+            /// Fallback for formats that provide owned Strings (e.g. JSON).
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+                self.visit_str(&v)
+            }
+        }
+        deserializer.deserialize_str(KeyVisitor)
     }
 }
 
@@ -2017,17 +2034,26 @@ impl DirGraph {
     /// Convert all node properties from PropertyStorage::Map to PropertyStorage::Compact.
     /// Called after deserialization to convert the transient Map storage to dense slot-vec.
     /// Builds TypeSchemas per node type and stores them in `self.type_schemas`.
+    #[allow(dead_code)]
     pub fn compact_properties(&mut self) {
-        // Phase 1: Build TypeSchema per type by collecting all property keys
+        // Phase 1: Build TypeSchemas from node_type_metadata (O(types), not O(N×P))
         let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
-        for node_idx in self.graph.node_indices() {
-            if let Some(node) = self.graph.node_weight(node_idx) {
-                let schema = schemas
-                    .entry(node.node_type.clone())
-                    .or_insert_with(TypeSchema::new);
-                if let PropertyStorage::Map(map) = &node.properties {
-                    for &key in map.keys() {
-                        schema.add_key(key);
+        for (node_type, props) in &self.node_type_metadata {
+            let keys = props.keys().map(|name| InternedKey::from_str(name));
+            schemas.insert(node_type.clone(), TypeSchema::from_keys(keys));
+        }
+
+        // Fallback: if metadata is empty (pre-metadata graph), scan nodes
+        if schemas.is_empty() {
+            for node_idx in self.graph.node_indices() {
+                if let Some(node) = self.graph.node_weight(node_idx) {
+                    let schema = schemas
+                        .entry(node.node_type.clone())
+                        .or_insert_with(TypeSchema::new);
+                    if let PropertyStorage::Map(map) = &node.properties {
+                        for &key in map.keys() {
+                            schema.add_key(key);
+                        }
                     }
                 }
             }
@@ -2058,6 +2084,56 @@ impl DirGraph {
             }
         }
 
+        self.type_schemas = arc_schemas;
+    }
+
+    /// Combined rebuild_type_indices + compact_properties in a single pass.
+    /// Used after deserialization when both need to run.
+    pub fn rebuild_type_indices_and_compact(&mut self) {
+        // Build TypeSchemas from metadata (O(types))
+        let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
+        for (node_type, props) in &self.node_type_metadata {
+            let keys = props.keys().map(|name| InternedKey::from_str(name));
+            schemas.insert(node_type.clone(), TypeSchema::from_keys(keys));
+        }
+
+        let arc_schemas: HashMap<String, Arc<TypeSchema>> =
+            schemas.into_iter().map(|(t, s)| (t, Arc::new(s))).collect();
+
+        // Single pass: build type_indices AND convert Map → Compact
+        let type_count = self.node_type_metadata.len().max(4);
+        let avg_per_type = self.graph.node_count() / type_count.max(1);
+        let mut new_type_indices: HashMap<String, Vec<NodeIndex>> =
+            HashMap::with_capacity(type_count);
+
+        let node_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
+        for node_idx in node_indices {
+            let node = self.graph.node_weight_mut(node_idx).unwrap();
+
+            // Rebuild type_indices
+            new_type_indices
+                .entry(node.node_type.clone())
+                .or_insert_with(|| Vec::with_capacity(avg_per_type))
+                .push(node_idx);
+
+            // Convert Map → Compact
+            if let PropertyStorage::Map(_) = &node.properties {
+                if let Some(schema) = arc_schemas.get(&node.node_type) {
+                    let old = std::mem::replace(
+                        &mut node.properties,
+                        PropertyStorage::Compact {
+                            schema: Arc::clone(schema),
+                            values: Vec::new(),
+                        },
+                    );
+                    if let PropertyStorage::Map(map) = old {
+                        node.properties = PropertyStorage::from_compact(map.into_iter(), schema);
+                    }
+                }
+            }
+        }
+
+        self.type_indices = new_type_indices;
         self.type_schemas = arc_schemas;
     }
 
@@ -2303,6 +2379,38 @@ impl NodeData {
             title,
             node_type,
             properties: PropertyStorage::from_compact(pairs, schema),
+        }
+    }
+
+    /// Create a new NodeData with Compact storage from pre-interned keys (avoids re-interning).
+    pub fn new_compact_preinterned(
+        id: Value,
+        title: Value,
+        node_type: String,
+        properties: Vec<(InternedKey, Value)>,
+        schema: &Arc<TypeSchema>,
+    ) -> Self {
+        NodeData {
+            id,
+            title,
+            node_type,
+            properties: PropertyStorage::from_compact(properties, schema),
+        }
+    }
+
+    /// Create a new NodeData with Map storage from pre-interned keys (avoids re-interning).
+    pub fn new_preinterned(
+        id: Value,
+        title: Value,
+        node_type: String,
+        properties: Vec<(InternedKey, Value)>,
+    ) -> Self {
+        let map: HashMap<InternedKey, Value> = properties.into_iter().collect();
+        NodeData {
+            id,
+            title,
+            node_type,
+            properties: PropertyStorage::Map(map),
         }
     }
 

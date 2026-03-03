@@ -145,75 +145,132 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
         .call_method0("tolist")?
         .extract()?;
 
+    // Convert series to Python list once — PyList.get_item() is O(1) C-level array access,
+    // whereas Series.get_item() goes through pandas' label-aware indexing with dtype dispatch.
+    // For 15M cells this saves ~10-20s of Python↔Rust FFI overhead.
+    let py_list = series.call_method0("tolist")?;
+
     match col_type {
-        ColumnType::UniqueId => {
-            let mut vec = Vec::with_capacity(length);
-            for (i, &is_null) in null_mask.iter().enumerate() {
-                if is_null {
-                    vec.push(None);
-                } else {
-                    let value = series.get_item(i)?;
-                    vec.push(to_u32(&value));
+        ColumnType::Float64 => {
+            // Fast path: try batch extraction (works when column has no mixed types)
+            match py_list.extract::<Vec<Option<f64>>>() {
+                Ok(mut values) => {
+                    // Apply null mask — pandas NaN extracts as Some(NaN), not None
+                    for (i, &is_null) in null_mask.iter().enumerate() {
+                        if is_null {
+                            values[i] = None;
+                        }
+                    }
+                    Ok(ColumnData::Float64(values))
+                }
+                Err(_) => {
+                    // Fallback: per-element with null mask (mixed types or special values)
+                    let py_list = py_list.cast::<PyList>()?;
+                    let mut vec = Vec::with_capacity(length);
+                    for (i, &is_null) in null_mask.iter().enumerate() {
+                        if is_null {
+                            vec.push(None);
+                        } else {
+                            let item = py_list.get_item(i)?;
+                            vec.push(to_f64(&item));
+                        }
+                    }
+                    Ok(ColumnData::Float64(vec))
                 }
             }
-            Ok(ColumnData::UniqueId(vec))
+        }
+        ColumnType::Boolean => {
+            // Fast path: try batch extraction
+            match py_list.extract::<Vec<Option<bool>>>() {
+                Ok(mut values) => {
+                    // Apply null mask — pd.NA may not extract as None
+                    for (i, &is_null) in null_mask.iter().enumerate() {
+                        if is_null {
+                            values[i] = None;
+                        }
+                    }
+                    Ok(ColumnData::Boolean(values))
+                }
+                Err(_) => {
+                    let py_list = py_list.cast::<PyList>()?;
+                    let mut vec = Vec::with_capacity(length);
+                    for (i, &is_null) in null_mask.iter().enumerate() {
+                        if is_null {
+                            vec.push(None);
+                        } else {
+                            let item = py_list.get_item(i)?;
+                            vec.push(to_bool(&item));
+                        }
+                    }
+                    Ok(ColumnData::Boolean(vec))
+                }
+            }
+        }
+        ColumnType::String => {
+            // Fast path: try batch extraction
+            match py_list.extract::<Vec<Option<String>>>() {
+                Ok(mut values) => {
+                    // Apply null mask for safety
+                    for (i, &is_null) in null_mask.iter().enumerate() {
+                        if is_null {
+                            values[i] = None;
+                        }
+                    }
+                    Ok(ColumnData::String(values))
+                }
+                Err(_) => {
+                    let py_list = py_list.cast::<PyList>()?;
+                    let mut vec = Vec::with_capacity(length);
+                    for (i, &is_null) in null_mask.iter().enumerate() {
+                        if is_null {
+                            vec.push(None);
+                        } else {
+                            let item = py_list.get_item(i)?;
+                            vec.push(item.str().ok().map(|s| s.to_string()));
+                        }
+                    }
+                    Ok(ColumnData::String(vec))
+                }
+            }
         }
         ColumnType::Int64 => {
+            // Int64 columns may contain numpy int64 which doesn't batch-extract to i64,
+            // so use per-element with PyList (still much faster than Series indexing)
+            let py_list = py_list.cast::<PyList>()?;
             let mut vec = Vec::with_capacity(length);
             for (i, &is_null) in null_mask.iter().enumerate() {
                 if is_null {
                     vec.push(None);
                 } else {
-                    let value = series.get_item(i)?;
-                    vec.push(to_i64(&value));
+                    let item = py_list.get_item(i)?;
+                    vec.push(to_i64(&item));
                 }
             }
             Ok(ColumnData::Int64(vec))
         }
-        ColumnType::Float64 => {
+        ColumnType::UniqueId => {
+            let py_list = py_list.cast::<PyList>()?;
             let mut vec = Vec::with_capacity(length);
             for (i, &is_null) in null_mask.iter().enumerate() {
                 if is_null {
                     vec.push(None);
                 } else {
-                    let value = series.get_item(i)?;
-                    vec.push(to_f64(&value));
+                    let item = py_list.get_item(i)?;
+                    vec.push(to_u32(&item));
                 }
             }
-            Ok(ColumnData::Float64(vec))
-        }
-        ColumnType::String => {
-            let mut vec = Vec::with_capacity(length);
-            for (i, &is_null) in null_mask.iter().enumerate() {
-                if is_null {
-                    vec.push(None);
-                } else {
-                    let value = series.get_item(i)?;
-                    vec.push(value.str().ok().map(|s| s.to_string()));
-                }
-            }
-            Ok(ColumnData::String(vec))
-        }
-        ColumnType::Boolean => {
-            let mut vec = Vec::with_capacity(length);
-            for (i, &is_null) in null_mask.iter().enumerate() {
-                if is_null {
-                    vec.push(None);
-                } else {
-                    let value = series.get_item(i)?;
-                    vec.push(to_bool(&value));
-                }
-            }
-            Ok(ColumnData::Boolean(vec))
+            Ok(ColumnData::UniqueId(vec))
         }
         ColumnType::DateTime => {
+            // DateTime needs custom parsing — use PyList for O(1) access
+            let py_list = py_list.cast::<PyList>()?;
             let mut vec = Vec::with_capacity(length);
             for (i, &is_null) in null_mask.iter().enumerate() {
                 if is_null {
                     vec.push(None);
                 } else {
-                    let value = series.get_item(i)?;
-                    vec.push(to_datetime(&value));
+                    let item = py_list.get_item(i)?;
+                    vec.push(to_datetime(&item));
                 }
             }
             Ok(ColumnData::DateTime(vec))

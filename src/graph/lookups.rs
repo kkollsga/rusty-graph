@@ -38,6 +38,29 @@ impl TypeLookup {
         })
     }
 
+    /// Fast constructor using pre-built id_indices from DirGraph (avoids full-graph scan).
+    /// Falls back to graph scan if id_indices has been invalidated (e.g., after node deletion).
+    /// Does not build title_to_index since it's unused in the add_nodes hot path.
+    pub fn from_id_indices(
+        id_indices: &HashMap<String, HashMap<Value, NodeIndex>>,
+        graph: &Graph,
+        node_type: String,
+    ) -> Result<Self, String> {
+        if node_type.is_empty() {
+            return Err("Node type cannot be empty".to_string());
+        }
+        if let Some(uid_map) = id_indices.get(&node_type) {
+            Ok(TypeLookup {
+                uid_to_index: uid_map.clone(),
+                title_to_index: HashMap::new(),
+                node_type,
+            })
+        } else {
+            // id_indices invalidated — fall back to graph scan
+            Self::new(graph, node_type)
+        }
+    }
+
     pub fn check_uid(&self, uid: &Value) -> Option<NodeIndex> {
         CombinedTypeLookup::lookup_with_type_fallback(&self.uid_to_index, uid)
     }
@@ -93,6 +116,41 @@ impl CombinedTypeLookup {
             target_type,
             same_type,
         })
+    }
+
+    /// Fast constructor using pre-built id_indices from DirGraph (avoids full-graph scan).
+    /// Falls back to graph scan if id_indices has been invalidated for either type.
+    pub fn from_id_indices(
+        id_indices: &HashMap<String, HashMap<Value, NodeIndex>>,
+        graph: &Graph,
+        source_type: String,
+        target_type: String,
+    ) -> Result<Self, String> {
+        if source_type.is_empty() || target_type.is_empty() {
+            return Err("Node types cannot be empty".to_string());
+        }
+        let same_type = source_type == target_type;
+        let has_source = id_indices.contains_key(&source_type);
+        let has_target = same_type || id_indices.contains_key(&target_type);
+
+        if has_source && has_target {
+            let source_uid = id_indices.get(&source_type).cloned().unwrap_or_default();
+            let target_uid = if same_type {
+                None
+            } else {
+                Some(id_indices.get(&target_type).cloned().unwrap_or_default())
+            };
+            Ok(CombinedTypeLookup {
+                source_uid_to_index: source_uid,
+                target_uid_to_index: target_uid,
+                source_type,
+                target_type,
+                same_type,
+            })
+        } else {
+            // id_indices invalidated — fall back to graph scan
+            Self::new(graph, source_type, target_type)
+        }
     }
 
     pub fn check_source(&self, uid: &Value) -> Option<NodeIndex> {

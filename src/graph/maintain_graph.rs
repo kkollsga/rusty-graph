@@ -91,7 +91,8 @@ pub fn add_nodes(
             .insert(node_type.clone(), title_field.clone());
     }
 
-    let type_lookup = TypeLookup::new(&graph.graph, node_type.clone())?;
+    let type_lookup =
+        TypeLookup::from_id_indices(&graph.id_indices, &graph.graph, node_type.clone())?;
     let id_idx = df_data
         .get_column_index(&unique_id_field)
         .ok_or_else(|| format!("Column '{}' not found", unique_id_field))?;
@@ -136,6 +137,11 @@ pub fn add_nodes(
         graph.type_schemas.insert(node_type.clone(), type_schema);
     }
 
+    // Pre-intern property column keys once (avoids re-interning per row)
+    let interned_columns: Vec<(InternedKey, usize)> = property_columns
+        .iter()
+        .map(|(col_name, col_idx)| (graph.interner.get_or_intern(col_name), *col_idx))
+        .collect();
     let property_count = property_columns.len();
     let mut batch = BatchProcessor::new(df_data.row_count());
     let mut skipped_count = 0;
@@ -161,15 +167,14 @@ pub fn add_nodes(
             .get_value_by_index(row_idx, title_idx)
             .unwrap_or(Value::Null);
 
-        // OPTIMIZATION: Use pre-computed indices for direct column access.
-        // Skip null values — property access returns Null for missing keys anyway.
-        let mut properties = HashMap::with_capacity(property_count);
-        for (col_name, col_idx) in &property_columns {
+        // Use pre-interned keys — avoids HashMap allocation and string cloning per row
+        let mut properties_interned = Vec::with_capacity(property_count);
+        for (interned_key, col_idx) in &interned_columns {
             let value = df_data
                 .get_value_by_index(row_idx, *col_idx)
                 .unwrap_or(Value::Null);
             if !matches!(value, Value::Null) {
-                properties.insert(col_name.clone(), value);
+                properties_interned.push((*interned_key, value));
             }
         }
 
@@ -182,6 +187,13 @@ pub fn add_nodes(
                     None
                 };
 
+                // Update path still uses HashMap (less frequent, interning handled in batch)
+                let mut properties = HashMap::with_capacity(properties_interned.len());
+                for (ik, v) in properties_interned {
+                    let name = graph.interner.resolve(ik);
+                    properties.insert(name.to_string(), v);
+                }
+
                 NodeAction::Update {
                     node_idx,
                     title: title_update,
@@ -189,11 +201,11 @@ pub fn add_nodes(
                     conflict_mode,
                 }
             }
-            None => NodeAction::Create {
+            None => NodeAction::CreateInterned {
                 node_type: node_type.clone(),
                 id,
                 title,
-                properties,
+                properties: properties_interned,
             },
         };
         batch.add_action(action, graph)?;
@@ -311,10 +323,20 @@ pub fn add_connections(
         .as_ref()
         .and_then(|field| df_data.get_column_index(field));
 
-    let lookup = CombinedTypeLookup::new(&graph.graph, source_type.clone(), target_type.clone())?;
+    let lookup = CombinedTypeLookup::from_id_indices(
+        &graph.id_indices,
+        &graph.graph,
+        source_type.clone(),
+        target_type.clone(),
+    )?;
     let mut batch = ConnectionBatchProcessor::new(df_data.row_count());
     // Set the conflict handling mode
     batch.set_conflict_mode(conflict_mode);
+    // Skip edge existence checks on initial load (no existing edges of this type)
+    let is_initial_load = !graph
+        .connection_type_metadata
+        .contains_key(&connection_type);
+    batch.set_skip_existence_check(is_initial_load);
 
     let mut skipped_count = 0;
     let mut skipped_null_source = 0;

@@ -27,6 +27,7 @@ pub struct BatchMetrics {
 
 // Node Processing
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum NodeAction {
     Update {
         node_idx: NodeIndex,
@@ -39,6 +40,13 @@ pub enum NodeAction {
         id: Value,
         title: Value,
         properties: HashMap<String, Value>,
+    },
+    /// Create with pre-interned property keys (avoids re-interning per row)
+    CreateInterned {
+        node_type: String,
+        id: Value,
+        title: Value,
+        properties: Vec<(InternedKey, Value)>,
     },
 }
 
@@ -57,6 +65,14 @@ struct NodeCreation {
     id: Value,
     title: Value,
     properties: HashMap<String, Value>,
+}
+
+#[derive(Debug)]
+struct NodeCreationInterned {
+    node_type: String,
+    id: Value,
+    title: Value,
+    properties: Vec<(InternedKey, Value)>,
 }
 
 #[derive(Debug)]
@@ -83,6 +99,7 @@ impl BatchStats {
 #[derive(Debug)]
 pub struct BatchProcessor {
     creates: Vec<NodeCreation>,
+    creates_interned: Vec<NodeCreationInterned>,
     updates: Vec<NodeUpdate>,
     capacity: usize,
     batch_type: BatchType,
@@ -100,6 +117,7 @@ impl BatchProcessor {
 
         BatchProcessor {
             creates: Vec::with_capacity(capacity),
+            creates_interned: Vec::with_capacity(capacity),
             updates: Vec::with_capacity(capacity),
             capacity,
             batch_type,
@@ -123,6 +141,19 @@ impl BatchProcessor {
                     properties,
                 });
             }
+            NodeAction::CreateInterned {
+                node_type,
+                id,
+                title,
+                properties,
+            } => {
+                self.creates_interned.push(NodeCreationInterned {
+                    node_type,
+                    id,
+                    title,
+                    properties,
+                });
+            }
             NodeAction::Update {
                 node_idx,
                 title,
@@ -140,7 +171,7 @@ impl BatchProcessor {
 
         // For large batches, flush if we hit capacity
         if let BatchType::Large = self.batch_type {
-            if self.creates.len() >= self.capacity {
+            if self.creates.len() + self.creates_interned.len() >= self.capacity {
                 let stats = self.flush_chunk(graph)?;
                 self.accumulated_stats.combine(&stats); // Accumulate stats from intermediate flushes
             }
@@ -186,6 +217,42 @@ impl BatchProcessor {
                 .or_default()
                 .push(node_idx);
             // Add to ID index for O(1) lookups
+            graph
+                .id_indices
+                .entry(node_type_for_index)
+                .or_default()
+                .insert(id_for_index, node_idx);
+            stats.creates += 1;
+        }
+
+        // Process pre-interned creates (fast path — no string interning needed)
+        for creation in self.creates_interned.drain(..) {
+            let id_for_index = creation.id.clone();
+            let node_type_for_index = creation.node_type.clone();
+
+            let schema: Option<Arc<_>> = graph.type_schemas.get(&creation.node_type).cloned();
+            let node_data = if let Some(ref ts) = schema {
+                NodeData::new_compact_preinterned(
+                    creation.id,
+                    creation.title,
+                    creation.node_type.clone(),
+                    creation.properties,
+                    ts,
+                )
+            } else {
+                NodeData::new_preinterned(
+                    creation.id,
+                    creation.title,
+                    creation.node_type.clone(),
+                    creation.properties,
+                )
+            };
+            let node_idx = graph.graph.add_node(node_data);
+            graph
+                .type_indices
+                .entry(creation.node_type)
+                .or_default()
+                .push(node_idx);
             graph
                 .id_indices
                 .entry(node_type_for_index)
@@ -268,7 +335,10 @@ impl BatchProcessor {
             }
             BatchType::Large => {
                 // Process any remaining items
-                if !self.creates.is_empty() || !self.updates.is_empty() {
+                if !self.creates.is_empty()
+                    || !self.creates_interned.is_empty()
+                    || !self.updates.is_empty()
+                {
                     let stats = self.flush_chunk(graph)?;
                     total_stats.combine(&stats);
                 }
@@ -309,6 +379,7 @@ pub struct ConnectionBatchProcessor {
     metrics: BatchMetrics,
     conflict_mode: ConflictHandling,
     accumulated_stats: ConnectionBatchStats, // Track stats across intermediate flushes
+    skip_existence_check: bool,              // Skip find_edge() on initial load
 }
 
 impl ConnectionBatchProcessor {
@@ -327,12 +398,18 @@ impl ConnectionBatchProcessor {
             metrics: BatchMetrics::default(),
             conflict_mode: ConflictHandling::Update,
             accumulated_stats: ConnectionBatchStats::default(),
+            skip_existence_check: false,
         }
     }
 
     // Add setter for conflict mode
     pub fn set_conflict_mode(&mut self, mode: ConflictHandling) {
         self.conflict_mode = mode;
+    }
+
+    /// Skip edge existence checks (safe when this connection type has no existing edges)
+    pub fn set_skip_existence_check(&mut self, skip: bool) {
+        self.skip_existence_check = skip;
     }
 
     pub fn add_connection(
@@ -343,12 +420,15 @@ impl ConnectionBatchProcessor {
         graph: &mut DirGraph,
         connection_type: &str,
     ) -> Result<(), String> {
-        // Check if the edge already exists
-        let existing_edge = graph.graph.find_edge(source_idx, target_idx);
+        // Skip existence check on initial load (no existing edges of this type)
+        if !self.skip_existence_check {
+            // Check if the edge already exists
+            let existing_edge = graph.graph.find_edge(source_idx, target_idx);
 
-        // If edge exists and conflict mode is Skip, don't add it
-        if existing_edge.is_some() && self.conflict_mode == ConflictHandling::Skip {
-            return Ok(());
+            // If edge exists and conflict mode is Skip, don't add it
+            if existing_edge.is_some() && self.conflict_mode == ConflictHandling::Skip {
+                return Ok(());
+            }
         }
 
         // Track property names for schema
@@ -383,8 +463,14 @@ impl ConnectionBatchProcessor {
 
         // Create or update edges in current chunk
         for conn in self.connections.drain(..) {
-            // Check if the edge already exists
-            if let Some(edge_idx) = graph.graph.find_edge(conn.source_idx, conn.target_idx) {
+            // On initial load, skip existence check for performance (no existing edges)
+            let existing_edge = if self.skip_existence_check {
+                None
+            } else {
+                graph.graph.find_edge(conn.source_idx, conn.target_idx)
+            };
+
+            if let Some(edge_idx) = existing_edge {
                 match self.conflict_mode {
                     ConflictHandling::Skip => {
                         // Skip this edge (should already be filtered in add_connection)
