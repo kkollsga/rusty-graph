@@ -2,6 +2,7 @@
 use crate::datatypes::Value;
 use crate::graph::schema::{DirGraph, EdgeData, InternedKey, NodeData};
 use petgraph::graph::NodeIndex;
+use petgraph::visit::EdgeRef;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
@@ -422,8 +423,13 @@ impl ConnectionBatchProcessor {
     ) -> Result<(), String> {
         // Skip existence check on initial load (no existing edges of this type)
         if !self.skip_existence_check {
-            // Check if the edge already exists
-            let existing_edge = graph.graph.find_edge(source_idx, target_idx);
+            // Check if an edge of the same type already exists between these nodes
+            let conn_type_key = graph.interner.get_or_intern(connection_type);
+            let existing_edge = graph
+                .graph
+                .edges_connecting(source_idx, target_idx)
+                .find(|e| e.weight().connection_type == conn_type_key)
+                .map(|e| e.id());
 
             // If edge exists and conflict mode is Skip, don't add it
             if existing_edge.is_some() && self.conflict_mode == ConflictHandling::Skip {
@@ -461,13 +467,21 @@ impl ConnectionBatchProcessor {
         let start = Instant::now();
         let mut stats = ConnectionBatchStats::default();
 
+        // Pre-intern the connection type for edge type comparison
+        let conn_type_key = graph.interner.get_or_intern(connection_type);
+
         // Create or update edges in current chunk
         for conn in self.connections.drain(..) {
-            // On initial load, skip existence check for performance (no existing edges)
+            // On initial load, skip existence check for performance (no existing edges).
+            // When checking, find an edge of the SAME connection type (not just any edge).
             let existing_edge = if self.skip_existence_check {
                 None
             } else {
-                graph.graph.find_edge(conn.source_idx, conn.target_idx)
+                graph
+                    .graph
+                    .edges_connecting(conn.source_idx, conn.target_idx)
+                    .find(|e| e.weight().connection_type == conn_type_key)
+                    .map(|e| e.id())
             };
 
             if let Some(edge_idx) = existing_edge {

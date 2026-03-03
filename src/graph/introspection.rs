@@ -2813,7 +2813,7 @@ fn write_fluent_topic_loading(xml: &mut String) {
     );
     xml.push_str("    <methods>\n");
     xml.push_str("      <m sig=\"add_nodes(df, type, id_field, title_field, columns=None, column_types=None, conflict_handling='skip', timeseries=None)\">Load nodes. column_types maps columns to spatial/temporal types.</m>\n");
-    xml.push_str("      <m sig=\"add_connections(df, conn_type, source_type, source_id_field, target_type, target_id_field, properties=None)\">Load edges.</m>\n");
+    xml.push_str("      <m sig=\"add_connections(df, conn_type, source_type, source_id_field, target_type, target_id_field, columns=None)\">Load edges.</m>\n");
     xml.push_str("      <m sig=\"add_nodes_bulk(specs)\">Bulk load multiple node types: [{'node_type': ..., 'data': df, ...}].</m>\n");
     xml.push_str(
         "      <m sig=\"add_connections_bulk(specs)\">Bulk load multiple connection types.</m>\n",

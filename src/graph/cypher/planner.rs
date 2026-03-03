@@ -773,6 +773,24 @@ fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) {
             continue;
         }
 
+        // Safety check: patterns must be node-only (no edges).
+        // When a pattern has edges, N source nodes ≠ N result rows,
+        // so pushing LIMIT into the pattern executor would truncate
+        // source nodes before edge expansion, producing wrong results.
+        let has_edges = if let Clause::Match(ref m) = query.clauses[i] {
+            m.patterns.iter().any(|p| {
+                p.elements
+                    .iter()
+                    .any(|e| matches!(e, PatternElement::Edge(_)))
+            })
+        } else {
+            false
+        };
+        if has_edges {
+            i += 1;
+            continue;
+        }
+
         // Extract LIMIT value — must be a literal positive integer
         let limit_val = if let Clause::Limit(l) = &query.clauses[i + 2] {
             match &l.count {

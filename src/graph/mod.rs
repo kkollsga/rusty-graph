@@ -3889,10 +3889,16 @@ impl KnowledgeGraph {
                 None
             };
 
+            // Resolve target type: prefer explicit target_type=, fall back to first arg.
+            let resolved_target = target_types
+                .as_ref()
+                .and_then(|v| v.first().map(|s| s.as_str()))
+                .or(connection_type.as_deref());
+
             traversal_methods::make_comparison_traversal(
                 &self.inner,
                 &mut new_kg.selection,
-                connection_type.as_deref(), // reused as target_type
+                resolved_target,
                 &config,
                 conditions.as_ref(),
                 sort_fields.as_ref(),

@@ -239,6 +239,8 @@ pub(crate) fn geometry_contains_geometry(a: &Geometry<f64>, b: &Geometry<f64>) -
         (Geometry::Polygon(pa), Geometry::LineString(lb)) => pa.contains(lb),
         (Geometry::MultiPolygon(mpa), Geometry::Point(pb)) => mpa.contains(pb),
         (Geometry::MultiPolygon(mpa), Geometry::Polygon(pb)) => mpa.contains(pb),
+        (Geometry::MultiPolygon(mpa), Geometry::LineString(lb)) => mpa.contains(lb),
+        (Geometry::MultiPolygon(mpa), Geometry::MultiPolygon(mpb)) => mpa.contains(mpb),
         (Geometry::Rect(r), Geometry::Point(p)) => r.contains(p),
         (Geometry::Rect(r), Geometry::Polygon(p)) => rect_to_polygon(r).contains(p),
         _ => false,

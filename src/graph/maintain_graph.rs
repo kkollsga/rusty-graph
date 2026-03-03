@@ -637,22 +637,11 @@ pub fn create_connections(
         ));
     }
 
-    // --- Build reverse parent maps for levels between source and target ---
-    // child_idx → parent_idx for each level
-    let mut parent_maps: Vec<HashMap<NodeIndex, NodeIndex>> = vec![HashMap::new(); level_count];
-    for (lvl_idx, pmap) in parent_maps.iter_mut().enumerate().skip(1) {
-        if let Some(level) = selection.get_level(lvl_idx) {
-            for (parent_opt, children) in level.iter_groups() {
-                if let Some(parent) = parent_opt {
-                    for &child in children {
-                        pmap.insert(child, *parent);
-                    }
-                }
-            }
-        }
-    }
-
-    // --- Iterate target level, walk up to source, collect properties, create edges ---
+    // --- Iterate target level groups to create edges ---
+    // Each group at the target level has (parent, children). For each target node,
+    // walk up through group parents to find the source node at source_level.
+    // A child can appear in multiple groups (different parents), producing one edge
+    // per distinct (source, target) pair.
     let target_level_data = match selection.get_level(target_level) {
         Some(level) if !level.is_empty() => level,
         _ => {
@@ -674,7 +663,70 @@ pub fn create_connections(
     let mut detected_source_type = None;
     let mut detected_target_type = None;
 
-    for (_parent_opt, targets) in target_level_data.iter_groups() {
+    // For the common 2-level case (source_level=0, target_level=1), each group's
+    // parent IS the source node, so we don't need parent maps at all.
+    // For multi-level cases, build reverse parent maps: child → parents (plural).
+    let parent_maps: Vec<HashMap<NodeIndex, Vec<NodeIndex>>> = if target_level - source_level > 1 {
+        let mut maps: Vec<HashMap<NodeIndex, Vec<NodeIndex>>> = vec![HashMap::new(); level_count];
+        for (lvl_idx, pmap) in maps.iter_mut().enumerate().skip(1) {
+            if let Some(level) = selection.get_level(lvl_idx) {
+                for (parent_opt, children) in level.iter_groups() {
+                    if let Some(parent) = parent_opt {
+                        for &child in children {
+                            pmap.entry(child).or_default().push(*parent);
+                        }
+                    }
+                }
+            }
+        }
+        maps
+    } else {
+        Vec::new()
+    };
+
+    // Helper: walk from a node at `start_level` up to `source_level`, returning
+    // all possible source nodes. For a 1-step walk, this is just the immediate parent.
+    let walk_to_sources = |start_node: NodeIndex, start_level: usize| -> Vec<NodeIndex> {
+        if start_level == source_level {
+            return vec![start_node];
+        }
+        // BFS walk up through parent maps
+        let mut current_nodes = vec![start_node];
+        for lvl in (source_level + 1..=start_level).rev() {
+            let mut next_nodes = Vec::new();
+            for node in &current_nodes {
+                if let Some(parents) = parent_maps[lvl].get(node) {
+                    next_nodes.extend(parents);
+                }
+            }
+            if next_nodes.is_empty() {
+                return Vec::new(); // Orphan — no path to source
+            }
+            current_nodes = next_nodes;
+        }
+        current_nodes
+    };
+
+    for (parent_opt, targets) in target_level_data.iter_groups() {
+        let Some(parent_idx) = parent_opt else {
+            // Root-level targets have no parent — skip
+            skipped += targets.len();
+            continue;
+        };
+
+        // Resolve the source node(s) for this group's parent
+        let source_nodes = if target_level - source_level == 1 {
+            // Direct parent IS the source
+            vec![*parent_idx]
+        } else {
+            walk_to_sources(*parent_idx, target_level - 1)
+        };
+
+        if source_nodes.is_empty() {
+            skipped += targets.len();
+            continue;
+        }
+
         for &target_idx in targets {
             if detected_target_type.is_none() {
                 if let Some(node) = graph.get_node(target_idx) {
@@ -682,70 +734,50 @@ pub fn create_connections(
                 }
             }
 
-            // Walk up from target to source through parent maps
-            let mut current = target_idx;
-            // Collect the chain of nodes from target_level back to source_level
-            // chain[0] = node at target_level, chain[last] = node at source_level
-            let mut chain: Vec<(usize, NodeIndex)> = vec![(target_level, target_idx)];
-
-            let mut walk_ok = true;
-            for lvl in (source_level + 1..=target_level).rev() {
-                if let Some(&parent) = parent_maps[lvl].get(&current) {
-                    current = parent;
-                    chain.push((lvl - 1, parent));
-                } else {
-                    // Orphan node at this level — skip
-                    walk_ok = false;
-                    break;
+            for &source_idx in &source_nodes {
+                if detected_source_type.is_none() {
+                    if let Some(node) = graph.get_node(source_idx) {
+                        detected_source_type = Some(node.node_type.clone());
+                    }
                 }
-            }
 
-            if !walk_ok {
-                skipped += 1;
-                continue;
-            }
-
-            let source_idx = current;
-
-            if detected_source_type.is_none() {
-                if let Some(node) = graph.get_node(source_idx) {
-                    detected_source_type = Some(node.node_type.clone());
-                }
-            }
-
-            // Collect properties from intermediate nodes
-            let edge_props = if let Some(ref prop_spec) = copy_properties {
-                let mut props = HashMap::new();
-                // Walk the chain (which goes target → source), process each node
-                for &(_, node_idx) in &chain {
-                    if let Some(node) = graph.graph.node_weight(node_idx) {
-                        if let Some(requested_props) = prop_spec.get(&node.node_type) {
-                            if requested_props.is_empty() {
-                                // Empty list = copy all properties
-                                for (k, v) in node.property_iter(&graph.interner) {
-                                    props.insert(k.to_string(), v.clone());
-                                }
-                            } else {
-                                for prop_name in requested_props {
-                                    if let Some(val) = node.get_property(prop_name) {
-                                        props.insert(prop_name.clone(), val.clone());
+                // Collect properties from nodes in the chain (source → ... → target)
+                let edge_props = if let Some(ref prop_spec) = copy_properties {
+                    let mut props = HashMap::new();
+                    // Add source and target node properties
+                    for &node_idx in &[source_idx, target_idx] {
+                        if let Some(node) = graph.graph.node_weight(node_idx) {
+                            if let Some(requested_props) = prop_spec.get(&node.node_type) {
+                                if requested_props.is_empty() {
+                                    for (k, v) in node.property_iter(&graph.interner) {
+                                        props.insert(k.to_string(), v.clone());
+                                    }
+                                } else {
+                                    for prop_name in requested_props {
+                                        if let Some(val) = node.get_property(prop_name) {
+                                            props.insert(prop_name.clone(), val.clone());
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
-                props
-            } else {
-                HashMap::new()
-            };
+                    props
+                } else {
+                    HashMap::new()
+                };
 
-            if let Err(e) =
-                batch.add_connection(source_idx, target_idx, edge_props, graph, &connection_type)
-            {
-                skipped += 1;
-                errors.push(format!("Failed to add connection: {}", e));
-                continue;
+                if let Err(e) = batch.add_connection(
+                    source_idx,
+                    target_idx,
+                    edge_props,
+                    graph,
+                    &connection_type,
+                ) {
+                    skipped += 1;
+                    errors.push(format!("Failed to add connection: {}", e));
+                    continue;
+                }
             }
         }
     }
