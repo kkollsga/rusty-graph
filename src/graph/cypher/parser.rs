@@ -190,6 +190,27 @@ impl CypherParser {
                 Some(CypherToken::Call) => {
                     clauses.push(self.parse_call_clause()?);
                 }
+                Some(CypherToken::Identifier(s)) if s.eq_ignore_ascii_case("FORMAT") => {
+                    // FORMAT CSV — must be last clause
+                    self.advance(); // consume FORMAT
+                    match self.peek() {
+                        Some(CypherToken::Identifier(fmt)) if fmt.eq_ignore_ascii_case("CSV") => {
+                            self.advance(); // consume CSV
+                            return Ok(CypherQuery {
+                                clauses,
+                                explain,
+                                profile,
+                                output_format: OutputFormat::Csv,
+                            });
+                        }
+                        other => {
+                            return Err(format!(
+                                "Expected format name after FORMAT (supported: CSV), got {:?}",
+                                other
+                            ));
+                        }
+                    }
+                }
                 Some(t) => {
                     return Err(format!("Unexpected token at start of clause: {:?}", t));
                 }
@@ -205,6 +226,7 @@ impl CypherParser {
             clauses,
             explain,
             profile,
+            output_format: OutputFormat::Default,
         })
     }
 

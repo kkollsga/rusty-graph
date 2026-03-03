@@ -8,12 +8,22 @@ use crate::graph::pattern_matching::Pattern;
 // Top-Level Query
 // ============================================================================
 
+/// Output format for query results
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OutputFormat {
+    /// Default: ResultView (lazy row-by-row access)
+    Default,
+    /// FORMAT CSV: return result as a CSV string
+    Csv,
+}
+
 /// A complete Cypher query: a pipeline of clauses
 #[derive(Debug, Clone)]
 pub struct CypherQuery {
     pub clauses: Vec<Clause>,
     pub explain: bool,
     pub profile: bool,
+    pub output_format: OutputFormat,
 }
 
 /// Each clause in the query pipeline

@@ -5652,6 +5652,8 @@ impl KnowledgeGraph {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Cypher syntax error: {}", e))
         })?;
 
+        let output_csv = parsed.output_format == cypher::OutputFormat::Csv;
+
         // Convert params dict to HashMap<String, Value> (before optimize so pushdown can resolve params)
         let mut param_map = if let Some(params_dict) = params {
             let mut map = std::collections::HashMap::new();
@@ -5769,7 +5771,9 @@ impl KnowledgeGraph {
             // Resolve NodeRef values to node titles before Python conversion
             resolve_noderefs(&this.inner.graph, &mut result.rows);
             // Convert to Python
-            if to_df {
+            if output_csv {
+                result.to_csv().into_py_any(py)
+            } else if to_df {
                 let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
                 cypher::py_convert::preprocessed_result_to_dataframe(
                     py,
@@ -5802,13 +5806,31 @@ impl KnowledgeGraph {
             // Resolve NodeRef values to node titles before Python conversion
             let mut rows = result.rows;
             resolve_noderefs(&inner.graph, &mut rows);
-            let preprocessed = cypher::py_convert::preprocess_values_owned(rows);
-            if to_df {
-                cypher::py_convert::preprocessed_result_to_dataframe(py, &columns, &preprocessed)
+            if output_csv {
+                let csv_result = cypher::CypherResult {
+                    columns,
+                    rows,
+                    stats,
+                    profile,
+                };
+                csv_result.to_csv().into_py_any(py)
             } else {
-                let view =
-                    cypher::ResultView::from_preprocessed(columns, preprocessed, stats, profile);
-                Py::new(py, view).map(|v| v.into_any())
+                let preprocessed = cypher::py_convert::preprocess_values_owned(rows);
+                if to_df {
+                    cypher::py_convert::preprocessed_result_to_dataframe(
+                        py,
+                        &columns,
+                        &preprocessed,
+                    )
+                } else {
+                    let view = cypher::ResultView::from_preprocessed(
+                        columns,
+                        preprocessed,
+                        stats,
+                        profile,
+                    );
+                    Py::new(py, view).map(|v| v.into_any())
+                }
             }
         }
     }
@@ -6006,6 +6028,8 @@ impl Transaction {
                 ));
             }
 
+            let output_csv = parsed.output_format == cypher::OutputFormat::Csv;
+
             let executor = cypher::CypherExecutor::with_params(graph, &param_map, deadline);
             let result = executor.execute(&parsed).map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
@@ -6014,7 +6038,9 @@ impl Transaction {
                 ))
             })?;
 
-            if to_df {
+            if output_csv {
+                result.to_csv().into_py_any(py)
+            } else if to_df {
                 let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
                 cypher::py_convert::preprocessed_result_to_dataframe(
                     py,
@@ -6047,6 +6073,8 @@ impl Transaction {
                 return Py::new(py, view).map(|v| v.into_any());
             }
 
+            let output_csv = parsed.output_format == cypher::OutputFormat::Csv;
+
             let result = if cypher::is_mutation_query(&parsed) {
                 cypher::execute_mutable(working, &parsed, param_map, deadline).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
@@ -6064,7 +6092,9 @@ impl Transaction {
                 })?
             };
 
-            if to_df {
+            if output_csv {
+                result.to_csv().into_py_any(py)
+            } else if to_df {
                 let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
                 cypher::py_convert::preprocessed_result_to_dataframe(
                     py,

@@ -3068,8 +3068,11 @@ def cypher_query(query: str) -> str:
 
     Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, aggregations,
     path traversals, CREATE, SET, DELETE, and CALL procedures.
-    Returns up to 200 rows as formatted text."""
+    Append FORMAT CSV for compact CSV output (good for larger data transfers).
+    Returns up to 200 rows."""
     result = graph.cypher(query)
+    if isinstance(result, str):
+        return result  # FORMAT CSV already returned a string
     if len(result) == 0:
         return "Query returned no results."
     rows = [str(dict(row)) for row in result[:200]]
@@ -3099,6 +3102,7 @@ if __name__ == "__main__":
     <tool name="cypher_query" method="graph.cypher()" args="query">
       Execute Cypher queries. MATCH/WHERE/RETURN/CREATE/SET/DELETE,
       aggregations, CALL procedures (pagerank, cluster, etc.).
+      Append FORMAT CSV for compact CSV output (good for larger data transfers).
     </tool>
     <tool name="bug_report" method="graph.bug_report()" args="query, result, expected, description">
       File bug reports to reported_bugs.md. Input is sanitised.

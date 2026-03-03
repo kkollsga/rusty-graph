@@ -17,9 +17,11 @@ pub mod result_view;
 pub mod tokenizer;
 
 // Re-exports for convenience
+pub use ast::OutputFormat;
 pub use executor::{execute_mutable, is_mutation_query, CypherExecutor};
 pub use parser::parse_cypher;
 pub use planner::{optimize, rewrite_text_score};
+pub use result::CypherResult;
 pub use result_view::{ResultIter, ResultView};
 
 use crate::datatypes::values::Value;

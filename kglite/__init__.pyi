@@ -2312,7 +2312,7 @@ class KnowledgeGraph:
         *,
         to_df: bool = False,
         params: Optional[dict[str, Any]] = None,
-    ) -> Union[ResultView, pd.DataFrame]:
+    ) -> Union[ResultView, pd.DataFrame, str]:
         """Execute a Cypher query.
 
         Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, WITH,
@@ -2334,13 +2334,18 @@ class KnowledgeGraph:
         Each call is atomic: if any clause fails, the graph is unchanged.
         Property and composite indexes are automatically maintained.
 
+        **FORMAT CSV**: Append ``FORMAT CSV`` to any query to get results as
+        a CSV string instead of a ResultView. Good for large result transfers
+        and token-efficient LLM consumption in MCP servers.
+
         Args:
             query: Cypher query string.
             to_df: If ``True``, return a pandas DataFrame.
             params: Optional parameter dict for ``$param`` substitution.
 
         Returns:
-            List of row dicts by default, or a DataFrame when ``to_df=True``.
+            ResultView by default, DataFrame when ``to_df=True``,
+            or CSV string when the query ends with ``FORMAT CSV``.
 
         Example::
 
@@ -2355,6 +2360,9 @@ class KnowledgeGraph:
 
             # As DataFrame
             df = graph.cypher('MATCH (n:Person) RETURN n.name, n.age', to_df=True)
+
+            # As CSV string (good for large data transfers)
+            csv = graph.cypher('MATCH (n:Person) RETURN n.name, n.age FORMAT CSV')
 
             # CREATE nodes and edges
             graph.cypher("CREATE (n:Person {name: 'Alice', age: 30})")

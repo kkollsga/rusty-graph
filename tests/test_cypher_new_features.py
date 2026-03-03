@@ -178,3 +178,67 @@ class TestDateTimeAccessors:
         assert rows[0]['y'] == 2023
         assert rows[0]['m'] == 12
         assert rows[0]['da'] == 25
+
+
+class TestFormatCsv:
+    """Tests for FORMAT CSV output."""
+
+    def test_basic_csv(self, graph):
+        result = graph.cypher(
+            "MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age FORMAT CSV"
+        )
+        assert isinstance(result, str)
+        lines = result.strip().split('\n')
+        assert lines[0] == 'n.name,n.age'
+        assert lines[1] == 'Bob,25'
+        assert lines[2] == 'Alice,30'
+
+    def test_csv_with_nulls(self, graph):
+        result = graph.cypher(
+            "MATCH (n:Person) RETURN n.name, n.missing FORMAT CSV"
+        )
+        lines = result.strip().split('\n')
+        assert lines[0] == 'n.name,n.missing'
+        # Null renders as empty field
+        assert lines[1].endswith(',')
+
+    def test_csv_quoting(self):
+        g = KnowledgeGraph()
+        df = pd.DataFrame({'id': [1], 'name': ['Hello, World'], 'note': ['He said "hi"']})
+        g.add_nodes(df, 'Thing', 'id', 'name')
+        result = g.cypher(
+            "MATCH (n:Thing) RETURN n.name, n.note FORMAT CSV"
+        )
+        lines = result.strip().split('\n')
+        assert '"Hello, World"' in lines[1]
+        assert '""hi""' in lines[1]
+
+    def test_csv_empty_result(self, graph):
+        result = graph.cypher(
+            "MATCH (n:Person {name: 'Nobody'}) RETURN n.name FORMAT CSV"
+        )
+        assert isinstance(result, str)
+        lines = result.strip().split('\n')
+        assert len(lines) == 1  # header only
+
+    def test_csv_case_insensitive(self, graph):
+        result = graph.cypher(
+            "MATCH (n:Person) RETURN n.name format csv"
+        )
+        assert isinstance(result, str)
+        assert 'n.name' in result
+
+    def test_csv_with_aggregation(self, graph):
+        result = graph.cypher(
+            "MATCH (n:Person) RETURN count(n) AS cnt FORMAT CSV"
+        )
+        lines = result.strip().split('\n')
+        assert lines[0] == 'cnt'
+        assert lines[1] == '2'
+
+    def test_csv_overrides_to_df(self, graph):
+        """FORMAT CSV takes precedence — result is str even with to_df=True."""
+        result = graph.cypher(
+            "MATCH (n:Person) RETURN n.name FORMAT CSV", to_df=True
+        )
+        assert isinstance(result, str)

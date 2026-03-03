@@ -240,4 +240,74 @@ impl CypherResult {
             profile: None,
         }
     }
+
+    /// Serialize the result as a CSV string.
+    pub fn to_csv(&self) -> String {
+        let mut buf = String::new();
+        // Header
+        for (i, col) in self.columns.iter().enumerate() {
+            if i > 0 {
+                buf.push(',');
+            }
+            csv_field(&mut buf, col);
+        }
+        buf.push('\n');
+        // Rows
+        for row in &self.rows {
+            for (i, val) in row.iter().enumerate() {
+                if i > 0 {
+                    buf.push(',');
+                }
+                csv_value(&mut buf, val);
+            }
+            buf.push('\n');
+        }
+        buf
+    }
+}
+
+/// Write a CSV field, quoting if it contains comma, quote, or newline.
+fn csv_field(buf: &mut String, s: &str) {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        buf.push('"');
+        for c in s.chars() {
+            if c == '"' {
+                buf.push('"');
+            }
+            buf.push(c);
+        }
+        buf.push('"');
+    } else {
+        buf.push_str(s);
+    }
+}
+
+/// Write a Value as a CSV field.
+fn csv_value(buf: &mut String, val: &Value) {
+    match val {
+        Value::Null => {} // empty cell
+        Value::String(s) => csv_field(buf, s),
+        Value::Int64(n) => {
+            use std::fmt::Write;
+            let _ = write!(buf, "{}", n);
+        }
+        Value::Float64(f) => {
+            use std::fmt::Write;
+            let _ = write!(buf, "{}", f);
+        }
+        Value::Boolean(b) => buf.push_str(if *b { "true" } else { "false" }),
+        Value::UniqueId(u) => {
+            use std::fmt::Write;
+            let _ = write!(buf, "{}", u);
+        }
+        Value::DateTime(d) => buf.push_str(&d.format("%Y-%m-%d").to_string()),
+        Value::Point { lat, lon } => {
+            use std::fmt::Write;
+            let _ = write!(buf, "POINT({} {})", lon, lat);
+        }
+        Value::NodeRef(idx) => {
+            use std::fmt::Write;
+            let _ = write!(buf, "{}", idx);
+        }
+    }
 }
