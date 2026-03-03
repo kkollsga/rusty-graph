@@ -281,6 +281,24 @@ impl KnowledgeGraph {
         self.reports.add_report(report)
     }
 
+    /// Discover property keys by scanning node data (fallback for to_df).
+    fn discover_property_keys_from_data(
+        nodes: &[(&str, &Value, &Value, &schema::NodeData)],
+        interner: &schema::StringInterner,
+    ) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut keys = Vec::new();
+        for (_, _, _, node) in nodes {
+            for key in node.property_keys(interner) {
+                if seen.insert(key.to_string()) {
+                    keys.push(key.to_string());
+                }
+            }
+        }
+        keys.sort();
+        keys
+    }
+
     /// Infer the node type of the current (latest level) selection by sampling
     /// the first node. Returns None if the selection is empty.
     fn infer_selection_node_type(&self) -> Option<String> {
@@ -2537,22 +2555,35 @@ impl KnowledgeGraph {
     fn to_df(&self, py: Python<'_>, include_type: bool, include_id: bool) -> PyResult<Py<PyAny>> {
         // Collect nodes from the current selection
         let mut nodes_data: Vec<(&str, &Value, &Value, &schema::NodeData)> = Vec::new();
-        let mut prop_keys: Vec<String> = Vec::new();
-        let mut prop_keys_seen: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-
         for node_idx in self.selection.current_node_indices() {
             if let Some(node) = self.inner.get_node(node_idx) {
-                for key in node.property_keys(&self.inner.interner) {
-                    if prop_keys_seen.insert(key.to_string()) {
-                        prop_keys.push(key.to_string());
-                    }
-                }
                 nodes_data.push((&node.node_type, &node.id, &node.title, node));
             }
         }
 
-        prop_keys.sort();
+        // Fast path: use TypeSchema for key discovery when all nodes share a type
+        let prop_keys: Vec<String> = if nodes_data.len() > 50 {
+            let first_type = nodes_data[0].0;
+            let all_same = nodes_data.iter().all(|(nt, _, _, _)| *nt == first_type);
+            if all_same {
+                if let Some(schema) = self.inner.type_schemas.get(first_type) {
+                    let mut keys: Vec<String> = schema
+                        .iter()
+                        .filter_map(|(_, ik)| {
+                            self.inner.interner.try_resolve(ik).map(|s| s.to_string())
+                        })
+                        .collect();
+                    keys.sort();
+                    keys
+                } else {
+                    Self::discover_property_keys_from_data(&nodes_data, &self.inner.interner)
+                }
+            } else {
+                Self::discover_property_keys_from_data(&nodes_data, &self.inner.interner)
+            }
+        } else {
+            Self::discover_property_keys_from_data(&nodes_data, &self.inner.interner)
+        };
 
         // Build columnar dict-of-lists
         let n = nodes_data.len();
@@ -4650,8 +4681,17 @@ impl KnowledgeGraph {
     /// Return property statistics for a node type.
     #[pyo3(signature = (node_type, max_values=20))]
     fn properties(&self, node_type: &str, max_values: usize) -> PyResult<Py<PyAny>> {
-        let stats = introspection::compute_property_stats(&self.inner, node_type, max_values)
-            .map_err(PyErr::new::<pyo3::exceptions::PyKeyError, _>)?;
+        // Sample large types for faster response; exact stats for small types
+        let count = self
+            .inner
+            .type_indices
+            .get(node_type)
+            .map(|v| v.len())
+            .unwrap_or(0);
+        let sample = if count > 1000 { Some(500) } else { None };
+        let stats =
+            introspection::compute_property_stats(&self.inner, node_type, max_values, sample)
+                .map_err(PyErr::new::<pyo3::exceptions::PyKeyError, _>)?;
         Python::attach(|py| {
             let result = PyDict::new(py);
             for prop in &stats {

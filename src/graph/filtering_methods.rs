@@ -106,6 +106,11 @@ fn collect_regex_patterns(condition: &FilterCondition, cache: &mut HashMap<Strin
 /// Check equality with cross-type numeric comparison support.
 /// Handles Int64 <-> Float64 <-> UniqueId conversions to match Python's loose typing.
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
+    // Cypher three-valued logic: NULL ≠ anything (including NULL).
+    // Grouping/DISTINCT use Value's PartialEq directly, which is unaffected.
+    if matches!(a, Value::Null) || matches!(b, Value::Null) {
+        return false;
+    }
     // Direct equality check first
     if a == b {
         return true;
@@ -893,7 +898,10 @@ mod tests {
             &Value::String("abc".into()),
             &Value::String("abc".into())
         ));
-        assert!(values_equal(&Value::Null, &Value::Null));
+        // Cypher three-valued logic: NULL ≠ NULL (returns NULL, treated as false)
+        assert!(!values_equal(&Value::Null, &Value::Null));
+        assert!(!values_equal(&Value::Null, &Value::Int64(5)));
+        assert!(!values_equal(&Value::Int64(5), &Value::Null));
     }
 
     #[test]

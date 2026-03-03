@@ -704,13 +704,28 @@ impl<'a> CypherExecutor<'a> {
             if pa.is_shortest_path {
                 continue;
             }
+            // Identify the VLP edge variable from this pattern so we look up
+            // the correct path binding (not just the first one in the map).
+            let vlp_edge_var: Option<String> =
+                clause.patterns.get(pa.pattern_index).and_then(|pat| {
+                    pat.elements.iter().find_map(|elem| {
+                        if let PatternElement::Edge(ep) = elem {
+                            if ep.var_length.is_some() {
+                                return ep.variable.clone();
+                            }
+                        }
+                        None
+                    })
+                });
+
             for row in &mut result_rows {
-                // First try: find an existing VariableLengthPath binding
-                let path_binding = row
-                    .path_bindings
-                    .iter()
-                    .find(|(_, _)| true)
-                    .map(|(_, pb)| pb.clone());
+                // First try: find the VLP binding matching this pattern's edge variable
+                let path_binding = if let Some(ref vlp_var) = vlp_edge_var {
+                    row.path_bindings.get(vlp_var).cloned()
+                } else {
+                    // Fallback: pick first path binding (single-path case)
+                    row.path_bindings.iter().next().map(|(_, pb)| pb.clone())
+                };
                 if let Some(pb) = path_binding {
                     row.path_bindings.insert(pa.variable.clone(), pb);
                 } else {
@@ -1494,6 +1509,104 @@ impl<'a> CypherExecutor<'a> {
         total
     }
 
+    /// Count matches for a 5-element pattern traversed in reverse:
+    /// (a)-[e1]->(b)-[e2]->(c) counted from c (position 4) backward.
+    /// Reads elements [3],[2],[1],[0] with flipped edge directions.
+    fn count_two_hop_pattern_reverse(
+        &self,
+        pattern: &crate::graph::pattern_matching::Pattern,
+        last_idx: NodeIndex,
+    ) -> i64 {
+        use petgraph::Direction;
+
+        // Read pattern elements in reverse
+        let edge2 = match &pattern.elements[3] {
+            PatternElement::Edge(ep) => ep,
+            _ => return 0,
+        };
+        let mid_node = match &pattern.elements[2] {
+            PatternElement::Node(np) => np,
+            _ => return 0,
+        };
+        let edge1 = match &pattern.elements[1] {
+            PatternElement::Edge(ep) => ep,
+            _ => return 0,
+        };
+        let first_node = match &pattern.elements[0] {
+            PatternElement::Node(np) => np,
+            _ => return 0,
+        };
+
+        // Flip edge2 direction (we're traversing from c back toward b)
+        let dir2 = match edge2.direction {
+            EdgeDirection::Outgoing => Direction::Incoming,
+            EdgeDirection::Incoming => Direction::Outgoing,
+            EdgeDirection::Both => return 0,
+        };
+        let interned_conn2 = edge2.connection_type.as_deref().map(InternedKey::from_str);
+
+        // Flip edge1 direction (from b back toward a)
+        let dir1 = match edge1.direction {
+            EdgeDirection::Outgoing => Direction::Incoming,
+            EdgeDirection::Incoming => Direction::Outgoing,
+            EdgeDirection::Both => return 0,
+        };
+        let interned_conn1 = edge1.connection_type.as_deref().map(InternedKey::from_str);
+
+        let mut total: i64 = 0;
+
+        // First hop: last_idx --reverse(e2)--> middle nodes
+        for e2_ref in self.graph.graph.edges_directed(last_idx, dir2) {
+            if let Some(ik) = interned_conn2 {
+                if e2_ref.weight().connection_type != ik {
+                    continue;
+                }
+            }
+            let mid_idx = if dir2 == Direction::Outgoing {
+                e2_ref.target()
+            } else {
+                e2_ref.source()
+            };
+            // Check middle node type
+            if let Some(ref mid_type) = mid_node.node_type {
+                if let Some(nd) = self.graph.graph.node_weight(mid_idx) {
+                    if nd.get_node_type_ref() != mid_type {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+
+            // Second hop: mid_idx --reverse(e1)--> first nodes (just count)
+            for e1_ref in self.graph.graph.edges_directed(mid_idx, dir1) {
+                if let Some(ik) = interned_conn1 {
+                    if e1_ref.weight().connection_type != ik {
+                        continue;
+                    }
+                }
+                let first_idx = if dir1 == Direction::Outgoing {
+                    e1_ref.target()
+                } else {
+                    e1_ref.source()
+                };
+                // Check first node type
+                if let Some(ref first_type) = first_node.node_type {
+                    if let Some(nd) = self.graph.graph.node_weight(first_idx) {
+                        if nd.get_node_type_ref() != first_type {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                total += 1;
+            }
+        }
+
+        total
+    }
+
     /// Fused OPTIONAL MATCH + WITH count() execution.
     /// Instead of expanding each input row into N matched rows then aggregating,
     /// count compatible matches directly per input row — O(N×degree) with zero
@@ -1612,7 +1725,7 @@ impl<'a> CypherExecutor<'a> {
         match_clause: &MatchClause,
         return_clause: &ReturnClause,
         top_k: &Option<(usize, bool, usize)>,
-        existing: ResultSet,
+        _existing: ResultSet,
     ) -> Result<ResultSet, String> {
         // The MATCH must have exactly 1 pattern with 3 or 5 elements (validated by planner)
         let pattern = &match_clause.patterns[0];
@@ -1692,8 +1805,13 @@ impl<'a> CypherExecutor<'a> {
 
         // Helper: count edges for a node
         let count_for_node = |node_idx: petgraph::graph::NodeIndex| -> i64 {
-            if pattern.elements.len() == 5 && group_elem_idx == 0 {
-                self.count_two_hop_pattern(pattern, node_idx)
+            if pattern.elements.len() == 5 {
+                if group_elem_idx == 0 {
+                    self.count_two_hop_pattern(pattern, node_idx)
+                } else {
+                    // group is at position 4 — traverse backward from last node
+                    self.count_two_hop_pattern_reverse(pattern, node_idx)
+                }
             } else {
                 let mut bindings_for_count = Bindings::with_capacity(1);
                 bindings_for_count.insert(group_var.to_string(), node_idx);
@@ -1743,18 +1861,22 @@ impl<'a> CypherExecutor<'a> {
                         continue;
                     };
                     let count = count_for_node(node_idx);
+                    // MATCH semantics: skip nodes with zero matching edges
+                    if count == 0 {
+                        continue;
+                    }
                     heap.push(Reverse((count, node_idx)));
                     if heap.len() > limit {
                         heap.pop();
                     }
                 }
-                // Drain into sorted order (DESC)
-                let mut top: Vec<_> = heap
+                // Drain into sorted order (DESC): into_sorted_vec on
+                // BinaryHeap<Reverse<_>> yields ascending-of-Reverse = descending.
+                let top: Vec<_> = heap
                     .into_sorted_vec()
                     .into_iter()
                     .map(|Reverse(x)| x)
                     .collect();
-                top.reverse();
                 let mut rows = Vec::with_capacity(top.len());
                 for (count, node_idx) in top {
                     rows.push(build_row(node_idx, count)?);
@@ -1769,14 +1891,17 @@ impl<'a> CypherExecutor<'a> {
                         continue;
                     };
                     let count = count_for_node(node_idx);
+                    // MATCH semantics: skip nodes with zero matching edges
+                    if count == 0 {
+                        continue;
+                    }
                     heap.push((count, node_idx));
                     if heap.len() > limit {
                         heap.pop();
                     }
                 }
-                // Drain into sorted order (ASC)
-                let mut top: Vec<_> = heap.into_sorted_vec();
-                top.reverse();
+                // Drain into sorted order (ASC): into_sorted_vec yields ascending.
+                let top: Vec<_> = heap.into_sorted_vec();
                 let mut rows = Vec::with_capacity(top.len());
                 for (count, node_idx) in top {
                     rows.push(build_row(node_idx, count)?);
@@ -1791,14 +1916,24 @@ impl<'a> CypherExecutor<'a> {
                     continue;
                 };
                 let match_count = count_for_node(node_idx);
+                // MATCH semantics: skip nodes with zero matching edges
+                if match_count == 0 {
+                    continue;
+                }
                 rows.push(build_row(node_idx, match_count)?);
             }
             rows
         };
 
+        let columns: Vec<String> = return_clause
+            .items
+            .iter()
+            .map(return_item_column_name)
+            .collect();
+
         Ok(ResultSet {
             rows: result_rows,
-            columns: existing.columns,
+            columns,
         })
     }
 
@@ -1850,6 +1985,10 @@ impl<'a> CypherExecutor<'a> {
             .map(|&i| self.fold_constants_expr(&return_clause.items[i].expression))
             .collect();
 
+        // Pre-fold WHERE predicate once (converts In → InLiteralSet with HashSet, etc.)
+        let folded_where = where_predicate.map(|p| self.fold_constants_pred(p));
+        let folded_where_ref = folded_where.as_ref();
+
         // Single-pass: iterate nodes, evaluate group keys, update accumulators
         // Use a single reusable ResultRow to avoid per-node allocation
         let mut eval_row = ResultRow::new();
@@ -1896,8 +2035,8 @@ impl<'a> CypherExecutor<'a> {
             // Set the node binding for expression evaluation
             *eval_row.node_bindings.get_mut(node_var).unwrap() = node_idx;
 
-            // Check WHERE predicate
-            if let Some(pred) = where_predicate {
+            // Check WHERE predicate (using pre-folded version for optimal evaluation)
+            if let Some(pred) = folded_where_ref {
                 if !self.evaluate_predicate(pred, &eval_row).unwrap_or(false) {
                     continue;
                 }
@@ -2306,6 +2445,31 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
+        // Try index-accelerated filtering for IN predicates
+        let in_filters = Self::extract_in_indexable_predicates(&clause.predicate);
+        for (variable, property, values) in &in_filters {
+            if let Some(node_type) = self.infer_node_type(variable, &result_set) {
+                // Collect matching node indices from all IN values
+                let mut index_set: HashSet<petgraph::graph::NodeIndex> = HashSet::new();
+                let mut any_indexed = false;
+                for val in values {
+                    if let Some(matching_indices) =
+                        self.graph.lookup_by_index(&node_type, property, val)
+                    {
+                        any_indexed = true;
+                        index_set.extend(matching_indices);
+                    }
+                }
+                if any_indexed {
+                    result_set.rows.retain(|row| {
+                        row.node_bindings
+                            .get(variable.as_str())
+                            .is_some_and(|idx| index_set.contains(idx))
+                    });
+                }
+            }
+        }
+
         // Fold constant sub-expressions once before row iteration
         let folded_pred = self.fold_constants_pred(&clause.predicate);
 
@@ -2512,6 +2676,13 @@ impl<'a> CypherExecutor<'a> {
         results
     }
 
+    /// Extract IN predicates (variable.property IN [literals]) from AND-trees.
+    fn extract_in_indexable_predicates(predicate: &Predicate) -> Vec<(String, String, Vec<Value>)> {
+        let mut results = Vec::new();
+        Self::collect_in_indexable(predicate, &mut results);
+        results
+    }
+
     fn collect_indexable(predicate: &Predicate, results: &mut Vec<(String, String, Value)>) {
         match predicate {
             Predicate::Comparison {
@@ -2538,6 +2709,47 @@ impl<'a> CypherExecutor<'a> {
             Predicate::And(left, right) => {
                 Self::collect_indexable(left, results);
                 Self::collect_indexable(right, results);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_in_indexable(
+        predicate: &Predicate,
+        results: &mut Vec<(String, String, Vec<Value>)>,
+    ) {
+        match predicate {
+            Predicate::In {
+                expr: Expression::PropertyAccess { variable, property },
+                list,
+            } => {
+                let all_literal: Option<Vec<Value>> = list
+                    .iter()
+                    .map(|item| {
+                        if let Expression::Literal(v) = item {
+                            Some(v.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if let Some(values) = all_literal {
+                    results.push((variable.clone(), property.clone(), values));
+                }
+            }
+            Predicate::InLiteralSet {
+                expr: Expression::PropertyAccess { variable, property },
+                values,
+            } => {
+                results.push((
+                    variable.clone(),
+                    property.clone(),
+                    values.iter().cloned().collect(),
+                ));
+            }
+            Predicate::And(left, right) => {
+                Self::collect_in_indexable(left, results);
+                Self::collect_in_indexable(right, results);
             }
             _ => {}
         }
@@ -2596,6 +2808,14 @@ impl<'a> CypherExecutor<'a> {
                     }
                 }
                 Ok(false)
+            }
+            Predicate::InLiteralSet { expr, values } => {
+                let val = self.evaluate_expression(expr, row)?;
+                // Try fast HashSet lookup first, fall back to cross-type comparison
+                Ok(values.contains(&val)
+                    || values
+                        .iter()
+                        .any(|v| filtering_methods::values_equal(v, &val)))
             }
             Predicate::StartsWith { expr, pattern } => {
                 let val = self.evaluate_expression(expr, row)?;
@@ -3186,10 +3406,34 @@ impl<'a> CypherExecutor<'a> {
             Predicate::Not(inner) => Predicate::Not(Box::new(self.fold_constants_pred(inner))),
             Predicate::IsNull(e) => Predicate::IsNull(self.fold_constants_expr(e)),
             Predicate::IsNotNull(e) => Predicate::IsNotNull(self.fold_constants_expr(e)),
-            Predicate::In { expr, list } => Predicate::In {
-                expr: self.fold_constants_expr(expr),
-                list: list.iter().map(|i| self.fold_constants_expr(i)).collect(),
-            },
+            Predicate::In { expr, list } => {
+                let folded_expr = self.fold_constants_expr(expr);
+                let folded_list: Vec<Expression> =
+                    list.iter().map(|i| self.fold_constants_expr(i)).collect();
+                // If all items are literals, convert to InLiteralSet for O(1) lookup
+                let all_literal: Option<std::collections::HashSet<Value>> = folded_list
+                    .iter()
+                    .map(|item| {
+                        if let Expression::Literal(v) = item {
+                            Some(v.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if let Some(values) = all_literal {
+                    Predicate::InLiteralSet {
+                        expr: folded_expr,
+                        values,
+                    }
+                } else {
+                    Predicate::In {
+                        expr: folded_expr,
+                        list: folded_list,
+                    }
+                }
+            }
+            Predicate::InLiteralSet { .. } => pred.clone(),
             Predicate::StartsWith { expr, pattern } => Predicate::StartsWith {
                 expr: self.fold_constants_expr(expr),
                 pattern: self.fold_constants_expr(pattern),
@@ -6636,6 +6880,9 @@ impl<'a> CypherExecutor<'a> {
                         new_row.projected.insert(clause.alias.clone(), parsed_val);
                         new_rows.push(new_row);
                     }
+                }
+                Value::Null => {
+                    // UNWIND null produces zero rows per Cypher spec
                 }
                 _ => {
                     // Single value: move directly (no clone needed)

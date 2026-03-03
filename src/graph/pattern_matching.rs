@@ -949,7 +949,11 @@ impl<'a> PatternExecutor<'a> {
             let (mut new_matches, mut new_indices) = if matches.len() >= EXPANSION_RAYON_THRESHOLD
                 && self.max_matches.is_none()
             {
-                // Parallel expansion — each match's expand_from_node is independent
+                // Parallel expansion — each match's expand_from_node is independent.
+                // Errors (e.g. deadline exceeded) are captured via AtomicBool and
+                // the first error message is saved for propagation after the parallel section.
+                let had_error = std::sync::atomic::AtomicBool::new(false);
+                let first_error: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
                 let results: Vec<(PatternMatch, NodeIndex)> = matches
                     .par_iter()
                     .zip(current_indices.par_iter())
@@ -957,7 +961,12 @@ impl<'a> PatternExecutor<'a> {
                         let expansions =
                             match self.expand_from_node(source_idx, edge_pattern, node_pattern) {
                                 Ok(exp) => exp,
-                                Err(_) => return Vec::new(),
+                                Err(e) => {
+                                    if !had_error.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                        *first_error.lock().unwrap() = Some(e);
+                                    }
+                                    return Vec::new();
+                                }
                             };
                         expansions
                             .into_iter()
@@ -1011,7 +1020,31 @@ impl<'a> PatternExecutor<'a> {
                             .collect::<Vec<_>>()
                     })
                     .collect();
-                results.into_iter().unzip()
+                // Propagate any error that occurred during parallel expansion
+                if had_error.load(std::sync::atomic::Ordering::Relaxed) {
+                    let err = first_error
+                        .into_inner()
+                        .unwrap()
+                        .unwrap_or_else(|| "parallel expansion failed".to_string());
+                    return Err(err);
+                }
+                // Apply distinct-target dedup for parallel results (sequential path
+                // does this inline, but parallel path can't without synchronization).
+                let needs_dedup = i + 2 >= pattern.elements.len()
+                    && self
+                        .distinct_target_var
+                        .as_ref()
+                        .is_some_and(|dtv| node_pattern.variable.as_deref() == Some(dtv.as_str()));
+                if needs_dedup {
+                    let mut seen_targets = HashSet::new();
+                    let filtered: Vec<_> = results
+                        .into_iter()
+                        .filter(|(_, target_idx)| seen_targets.insert(*target_idx))
+                        .collect();
+                    filtered.into_iter().unzip()
+                } else {
+                    results.into_iter().unzip()
+                }
             } else {
                 // Sequential expansion with max_matches early-exit
                 let mut new_matches_seq = Vec::new();
@@ -1223,6 +1256,29 @@ impl<'a> PatternExecutor<'a> {
                 result.retain(|&idx| self.node_matches_properties(idx, props));
             }
             return Some(result);
+        }
+
+        // Fast path: IN on any indexed property — O(k) lookups via property index
+        for (prop_name, matcher) in props {
+            if let PropertyMatcher::In(values) = matcher {
+                if prop_name == "id" {
+                    continue; // handled above
+                }
+                let key = (node_type.to_string(), prop_name.clone());
+                if !self.graph.property_indices.contains_key(&key) {
+                    continue;
+                }
+                let mut result = Vec::with_capacity(values.len());
+                for val in values {
+                    if let Some(indices) = self.graph.lookup_by_index(node_type, prop_name, val) {
+                        result.extend(indices);
+                    }
+                }
+                if props.len() > 1 {
+                    result.retain(|&idx| self.node_matches_properties(idx, props));
+                }
+                return Some(result);
+            }
         }
 
         // Extract equality values from PropertyMatcher (resolve params)
@@ -1604,6 +1660,36 @@ impl<'a> PatternExecutor<'a> {
         queue.push_back((source, 0));
 
         let mut results = Vec::new();
+
+        // Zero-hop case: if min_hops == 0, the source node itself is a valid result
+        if min_hops == 0 {
+            let node_matches = if let Some(ref node_type) = node_pattern.node_type {
+                self.graph
+                    .graph
+                    .node_weight(source)
+                    .map(|n| &n.node_type == node_type)
+                    .unwrap_or(false)
+            } else {
+                true
+            };
+            let props_match = if let Some(ref props) = node_pattern.properties {
+                self.node_matches_properties(source, props)
+            } else {
+                true
+            };
+            if node_matches && props_match {
+                results.push((
+                    source,
+                    MatchBinding::VariableLengthPath {
+                        source,
+                        target: source,
+                        hops: 0,
+                        path: Vec::new(),
+                    },
+                ));
+            }
+        }
+
         let mut iter_count: usize = 0;
 
         while let Some((current, depth)) = queue.pop_front() {
@@ -1746,6 +1832,36 @@ impl<'a> PatternExecutor<'a> {
         let mut visited_at_depth: HashMap<(NodeIndex, usize), bool> = HashMap::new();
 
         queue.push_back((source, 0, Vec::new()));
+
+        // Zero-hop case: if min_hops == 0, the source node itself is a valid result
+        // (matching "zero hops" means the source IS the target).
+        if min_hops == 0 {
+            let node_matches = if let Some(ref node_type) = node_pattern.node_type {
+                if let Some(node) = self.graph.graph.node_weight(source) {
+                    &node.node_type == node_type
+                } else {
+                    false
+                }
+            } else {
+                true
+            };
+            let props_match = if let Some(ref props) = node_pattern.properties {
+                self.node_matches_properties(source, props)
+            } else {
+                true
+            };
+            if node_matches && props_match {
+                results.push((
+                    source,
+                    MatchBinding::VariableLengthPath {
+                        source,
+                        target: source,
+                        hops: 0,
+                        path: Vec::new(),
+                    },
+                ));
+            }
+        }
 
         let mut vlp_count: usize = 0;
         while let Some((current, depth, path)) = queue.pop_front() {

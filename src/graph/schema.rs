@@ -135,6 +135,12 @@ impl StringInterner {
             .expect("BUG: InternedKey not found in StringInterner")
     }
 
+    /// Resolve an InternedKey back to its string, returning None if unknown.
+    #[inline]
+    pub fn try_resolve(&self, key: InternedKey) -> Option<&str> {
+        self.strings.get(&key).map(|s| s.as_str())
+    }
+
     /// Number of interned strings.
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
@@ -2097,11 +2103,27 @@ impl DirGraph {
             schemas.insert(node_type.clone(), TypeSchema::from_keys(keys));
         }
 
+        // Fallback: if metadata is empty (loaded from file), scan nodes
+        if schemas.is_empty() {
+            for node_idx in self.graph.node_indices() {
+                if let Some(node) = self.graph.node_weight(node_idx) {
+                    let schema = schemas
+                        .entry(node.node_type.clone())
+                        .or_insert_with(TypeSchema::new);
+                    if let PropertyStorage::Map(map) = &node.properties {
+                        for &key in map.keys() {
+                            schema.add_key(key);
+                        }
+                    }
+                }
+            }
+        }
+
         let arc_schemas: HashMap<String, Arc<TypeSchema>> =
             schemas.into_iter().map(|(t, s)| (t, Arc::new(s))).collect();
 
         // Single pass: build type_indices AND convert Map → Compact
-        let type_count = self.node_type_metadata.len().max(4);
+        let type_count = arc_schemas.len().max(4);
         let avg_per_type = self.graph.node_count() / type_count.max(1);
         let mut new_type_indices: HashMap<String, Vec<NodeIndex>> =
             HashMap::with_capacity(type_count);

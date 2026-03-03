@@ -407,7 +407,11 @@ impl CypherParser {
                 CypherToken::DotDot => parts.push("..".to_string()),
                 CypherToken::Dot => parts.push(".".to_string()),
                 CypherToken::Identifier(s) => parts.push(s.clone()),
-                CypherToken::StringLit(s) => parts.push(format!("'{}'", s)),
+                CypherToken::StringLit(s) => {
+                    // Re-escape quotes so the pattern parser can re-tokenize correctly
+                    let escaped = s.replace('\\', "\\\\").replace('\'', "\\'");
+                    parts.push(format!("'{}'", escaped));
+                }
                 CypherToken::IntLit(n) => parts.push(n.to_string()),
                 CypherToken::FloatLit(f) => parts.push(f.to_string()),
                 CypherToken::True => parts.push("true".to_string()),
@@ -483,7 +487,10 @@ impl CypherParser {
                 CypherToken::DotDot => parts.push("..".to_string()),
                 CypherToken::Dot => parts.push(".".to_string()),
                 CypherToken::Identifier(s) => parts.push(s.clone()),
-                CypherToken::StringLit(s) => parts.push(format!("'{}'", s)),
+                CypherToken::StringLit(s) => {
+                    let escaped = s.replace('\\', "\\\\").replace('\'', "\\'");
+                    parts.push(format!("'{}'", escaped));
+                }
                 CypherToken::IntLit(n) => parts.push(n.to_string()),
                 CypherToken::FloatLit(f) => parts.push(f.to_string()),
                 CypherToken::True => parts.push("true".to_string()),

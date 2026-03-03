@@ -174,6 +174,12 @@ pub enum Predicate {
         expr: Expression,
         list: Vec<Expression>,
     },
+    /// Optimized IN with pre-evaluated literal values (produced by constant folding).
+    /// Uses HashSet for O(1) membership testing instead of per-row linear scan.
+    InLiteralSet {
+        expr: Expression,
+        values: std::collections::HashSet<Value>,
+    },
     StartsWith {
         expr: Expression,
         pattern: Expression,

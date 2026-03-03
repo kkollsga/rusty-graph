@@ -569,12 +569,15 @@ fn value_display_compact(v: &Value) -> String {
     }
 }
 
-/// Property stats for one node type. Scans all nodes of that type.
+/// Property stats for one node type.
 /// `max_values`: include `values` list when unique count ≤ this threshold (0 = never).
+/// `sample_size`: when Some(n), sample n evenly-spaced nodes instead of scanning all.
+///   Sampled non_null counts are scaled to the full population.
 pub fn compute_property_stats(
     graph: &DirGraph,
     node_type: &str,
     max_values: usize,
+    sample_size: Option<usize>,
 ) -> Result<Vec<PropertyStatInfo>, String> {
     let node_indices = graph
         .type_indices
@@ -622,13 +625,40 @@ pub fn compute_property_stats(
         }
     }
 
+    // Determine which nodes to scan (all or sampled)
+    let (scan_indices, sample_count): (Vec<petgraph::graph::NodeIndex>, usize) = match sample_size {
+        Some(n) if n > 0 && n < total_nodes => {
+            let step = total_nodes / n;
+            let sampled: Vec<_> = (0..n).map(|i| node_indices[i * step]).collect();
+            let count = sampled.len();
+            (sampled, count)
+        }
+        _ => {
+            // No sampling — scan all nodes
+            (node_indices.to_vec(), total_nodes)
+        }
+    };
+
     // Single pass: accumulate stats for all properties simultaneously
     let mut accum: HashMap<String, PropAccum> = HashMap::new();
     // Pre-insert built-in fields so they appear even when all null
     accum.insert("title".to_string(), PropAccum::new(value_cap));
     accum.insert("id".to_string(), PropAccum::new(value_cap));
 
-    for &idx in node_indices {
+    // When sampling, pre-populate property keys from TypeSchema (knows ALL keys)
+    if sample_size.is_some() {
+        if let Some(schema) = graph.type_schemas.get(node_type) {
+            for slot_key in schema.iter() {
+                if let Some(key_str) = graph.interner.try_resolve(slot_key.1) {
+                    accum
+                        .entry(key_str.to_string())
+                        .or_insert_with(|| PropAccum::new(value_cap));
+                }
+            }
+        }
+    }
+
+    for &idx in &scan_indices {
         if let Some(node) = graph.get_node(idx) {
             accum
                 .entry("id".to_string())
@@ -646,6 +676,13 @@ pub fn compute_property_stats(
             }
         }
     }
+
+    // When sampling, scale non_null counts to the full population
+    let scale_factor = if sample_count < total_nodes && sample_count > 0 {
+        total_nodes as f64 / sample_count as f64
+    } else {
+        1.0
+    };
 
     // Build ordered property list: type, title, id, then remaining sorted
     let mut results = Vec::new();
@@ -684,6 +721,7 @@ pub fn compute_property_stats(
                 .unwrap_or_else(|| pa.first_type.unwrap_or("unknown").to_string());
 
             let unique = pa.value_set.len();
+            let non_null = (pa.non_null as f64 * scale_factor).round() as usize;
             let values = if max_values > 0 && unique <= max_values && unique > 0 {
                 let mut vals: Vec<Value> = pa.value_set.into_iter().collect();
                 vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -695,7 +733,7 @@ pub fn compute_property_stats(
             results.push(PropertyStatInfo {
                 property_name: prop_name.clone(),
                 type_string,
-                non_null: pa.non_null,
+                non_null,
                 unique,
                 values,
             });
@@ -1972,7 +2010,7 @@ fn write_type_detail(
     ));
 
     // Properties (exclude builtins: type, title, id)
-    if let Ok(stats) = compute_property_stats(graph, node_type, 15) {
+    if let Ok(stats) = compute_property_stats(graph, node_type, 15, Some(200)) {
         let filtered: Vec<&PropertyStatInfo> = stats
             .iter()
             .filter(|p| !matches!(p.property_name.as_str(), "type" | "title" | "id"))

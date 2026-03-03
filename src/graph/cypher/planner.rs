@@ -14,6 +14,9 @@ pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<Stri
     // Recursively optimize nested queries (e.g., UNION right-arm)
     optimize_nested_queries(query, graph, params);
     push_where_into_match(query, params);
+    fold_or_to_in(query);
+    push_where_into_match(query, params); // second pass: push newly-created IN predicates
+    optimize_pattern_start_node(query, graph);
     push_limit_into_match(query, graph);
     push_distinct_into_match(query);
     fuse_count_short_circuits(query);
@@ -144,6 +147,8 @@ fn mark_skip_target_type_check(query: &mut CypherQuery, graph: &DirGraph) {
 /// Any trailing ORDER BY / LIMIT clauses are left in place since they
 /// operate on the tiny fused result set.
 fn fuse_count_short_circuits(query: &mut CypherQuery) {
+    use crate::graph::pattern_matching::EdgeDirection;
+
     if query.clauses.len() < 2 {
         return;
     }
@@ -270,8 +275,11 @@ fn fuse_count_short_circuits(query: &mut CypherQuery) {
             return;
         }
 
-        // Edge must have no property filters or var_length
-        if edge.properties.is_some() || edge.var_length.is_some() {
+        // Edge must have no property filters or var_length, and must be directed
+        if edge.properties.is_some()
+            || edge.var_length.is_some()
+            || edge.direction == EdgeDirection::Both
+        {
             return;
         }
 
@@ -411,6 +419,124 @@ fn is_edge_type_function(expr: &Expression, edge_var: Option<&str>) -> bool {
 /// Push simple equality predicates from WHERE into MATCH pattern properties.
 /// This enables the pattern executor to filter during matching rather than after.
 ///
+/// Fold OR chains of equalities on the same variable.property into IN predicates.
+///
+/// Example: `WHERE n.name = 'A' OR n.name = 'B' OR n.name = 'C'`
+/// Becomes: `WHERE n.name IN ['A', 'B', 'C']`
+///
+/// This enables predicate pushdown into MATCH patterns and index acceleration.
+/// Must run BEFORE `push_where_into_match`.
+fn fold_or_to_in(query: &mut CypherQuery) {
+    for clause in &mut query.clauses {
+        if let Clause::Where(ref mut w) = clause {
+            w.predicate = fold_or_to_in_pred(&w.predicate);
+        }
+    }
+}
+
+/// Recursively fold OR chains of same-property equalities into IN predicates.
+fn fold_or_to_in_pred(pred: &Predicate) -> Predicate {
+    match pred {
+        Predicate::Or(_, _) => {
+            // Collect all OR-chained equality comparisons
+            let mut equalities: Vec<(String, String, Expression)> = Vec::new();
+            let mut other_preds: Vec<Predicate> = Vec::new();
+            collect_or_equalities(pred, &mut equalities, &mut other_preds);
+
+            // Group equalities by (variable, property)
+            let mut groups: std::collections::HashMap<(String, String), Vec<Expression>> =
+                std::collections::HashMap::new();
+            for (var, prop, val_expr) in equalities {
+                groups.entry((var, prop)).or_default().push(val_expr);
+            }
+
+            // Build result predicates
+            let mut result_preds: Vec<Predicate> = Vec::new();
+
+            // Convert groups with 2+ equalities into IN predicates
+            for ((var, prop), values) in groups {
+                if values.len() >= 2 {
+                    result_preds.push(Predicate::In {
+                        expr: Expression::PropertyAccess {
+                            variable: var,
+                            property: prop,
+                        },
+                        list: values,
+                    });
+                } else {
+                    // Single equality — keep as comparison
+                    result_preds.push(Predicate::Comparison {
+                        left: Expression::PropertyAccess {
+                            variable: var,
+                            property: prop,
+                        },
+                        operator: ComparisonOp::Equals,
+                        right: values.into_iter().next().unwrap(),
+                    });
+                }
+            }
+
+            // Add back non-equality predicates (recursively folded)
+            for p in other_preds {
+                result_preds.push(fold_or_to_in_pred(&p));
+            }
+
+            // Combine with OR
+            if result_preds.len() == 1 {
+                result_preds.pop().unwrap()
+            } else {
+                let mut combined = result_preds.pop().unwrap();
+                for p in result_preds.into_iter().rev() {
+                    combined = Predicate::Or(Box::new(p), Box::new(combined));
+                }
+                combined
+            }
+        }
+        Predicate::And(l, r) => Predicate::And(
+            Box::new(fold_or_to_in_pred(l)),
+            Box::new(fold_or_to_in_pred(r)),
+        ),
+        Predicate::Not(inner) => Predicate::Not(Box::new(fold_or_to_in_pred(inner))),
+        other => other.clone(),
+    }
+}
+
+/// Collect equalities from an OR chain. Non-equality predicates go to `others`.
+fn collect_or_equalities(
+    pred: &Predicate,
+    equalities: &mut Vec<(String, String, Expression)>,
+    others: &mut Vec<Predicate>,
+) {
+    match pred {
+        Predicate::Or(left, right) => {
+            collect_or_equalities(left, equalities, others);
+            collect_or_equalities(right, equalities, others);
+        }
+        Predicate::Comparison {
+            left,
+            operator: ComparisonOp::Equals,
+            right,
+        } => {
+            if let Expression::PropertyAccess { variable, property } = left {
+                if matches!(right, Expression::Literal(_) | Expression::Parameter(_)) {
+                    equalities.push((variable.clone(), property.clone(), right.clone()));
+                    return;
+                }
+            }
+            if let Expression::PropertyAccess { variable, property } = right {
+                if matches!(left, Expression::Literal(_) | Expression::Parameter(_)) {
+                    equalities.push((variable.clone(), property.clone(), left.clone()));
+                    return;
+                }
+            }
+            others.push(pred.clone());
+        }
+        other => {
+            others.push(other.clone());
+        }
+    }
+}
+
 /// Example: MATCH (n:Person) WHERE n.age = 30
 /// Becomes: MATCH (n:Person {age: 30}) (WHERE removed if fully consumed)
 ///
@@ -422,7 +548,7 @@ fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<String, Value
     while i + 1 < query.clauses.len() {
         let can_push = matches!(
             (&query.clauses[i], &query.clauses[i + 1]),
-            (Clause::Match(_), Clause::Where(_))
+            (Clause::Match(_), Clause::Where(_)) | (Clause::OptionalMatch(_), Clause::Where(_))
         );
 
         if !can_push {
@@ -438,31 +564,38 @@ fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<String, Value
             continue;
         };
 
-        // Collect variables defined in the MATCH patterns
-        let match_vars: Vec<(String, Option<String>)> = if let Clause::Match(m) = &query.clauses[i]
-        {
-            collect_pattern_variables(&m.patterns)
-        } else {
-            i += 1;
-            continue;
+        // Collect variables defined in the MATCH/OPTIONAL MATCH patterns
+        let match_vars: Vec<(String, Option<String>)> = match &query.clauses[i] {
+            Clause::Match(m) => collect_pattern_variables(&m.patterns),
+            Clause::OptionalMatch(m) => collect_pattern_variables(&m.patterns),
+            _ => {
+                i += 1;
+                continue;
+            }
         };
 
         // Split predicate into pushable conditions and remainder
         let (pushable, pushable_in, pushable_cmp, remaining) =
             extract_pushable_equalities(&where_pred, &match_vars, params);
 
-        // Apply pushable conditions to MATCH patterns
+        // Apply pushable conditions to MATCH/OPTIONAL MATCH patterns
         if !pushable.is_empty() || !pushable_in.is_empty() || !pushable_cmp.is_empty() {
-            if let Clause::Match(ref mut m) = query.clauses[i] {
-                for (var_name, property, value) in &pushable {
-                    apply_property_to_patterns(&mut m.patterns, var_name, property, value.clone());
+            let patterns = match &mut query.clauses[i] {
+                Clause::Match(ref mut m) => &mut m.patterns,
+                Clause::OptionalMatch(ref mut m) => &mut m.patterns,
+                _ => {
+                    i += 1;
+                    continue;
                 }
-                for (var_name, property, values) in pushable_in {
-                    apply_in_property_to_patterns(&mut m.patterns, &var_name, &property, values);
-                }
-                for (var_name, property, op, value) in pushable_cmp {
-                    apply_comparison_to_patterns(&mut m.patterns, &var_name, &property, op, value);
-                }
+            };
+            for (var_name, property, value) in &pushable {
+                apply_property_to_patterns(patterns, var_name, property, value.clone());
+            }
+            for (var_name, property, values) in pushable_in {
+                apply_in_property_to_patterns(patterns, &var_name, &property, values);
+            }
+            for (var_name, property, op, value) in pushable_cmp {
+                apply_comparison_to_patterns(patterns, &var_name, &property, op, value);
             }
 
             // Update or remove WHERE clause
@@ -482,6 +615,124 @@ fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<String, Value
 }
 
 /// Push LIMIT into MATCH when there's no ORDER BY/aggregation between them.
+/// Reverse pattern direction when a later node has a more selective filter
+/// than the first node, so the pattern executor starts from fewer candidates.
+///
+/// Example: `(d:CourtDecision)-[:CITES]->(s)-[:SECTION_OF]->(l:Law {korttittel: 'X'})`
+/// → reversed to `(l:Law {korttittel: 'X'})<-[:SECTION_OF]-(s)<-[:CITES]-(d:CourtDecision)`
+///
+/// Must run AFTER `push_where_into_match` (so equality predicates are already in the pattern).
+fn optimize_pattern_start_node(query: &mut CypherQuery, graph: &DirGraph) {
+    use crate::graph::pattern_matching::EdgeDirection;
+
+    for clause in &mut query.clauses {
+        let (patterns, path_assignments) = match clause {
+            Clause::Match(m) => (&mut m.patterns, &m.path_assignments),
+            Clause::OptionalMatch(m) => (&mut m.patterns, &m.path_assignments),
+            _ => continue,
+        };
+        for (pi, pattern) in patterns.iter_mut().enumerate() {
+            if pattern.elements.len() < 3 {
+                continue;
+            }
+            // Don't reverse patterns with path assignments — breaks path semantics
+            if path_assignments.iter().any(|pa| pa.pattern_index == pi) {
+                continue;
+            }
+
+            let first_node = match &pattern.elements[0] {
+                PatternElement::Node(np) => np,
+                _ => continue,
+            };
+            let last_node = match pattern.elements.last() {
+                Some(PatternElement::Node(np)) => np,
+                _ => continue,
+            };
+
+            // Don't reverse if any edge is undirected or variable-length
+            let has_unsupported_edge = pattern.elements.iter().any(|elem| {
+                if let PatternElement::Edge(ep) = elem {
+                    ep.direction == EdgeDirection::Both || ep.var_length.is_some()
+                } else {
+                    false
+                }
+            });
+            if has_unsupported_edge {
+                continue;
+            }
+
+            let first_sel = estimate_node_selectivity(first_node, graph);
+            let last_sel = estimate_node_selectivity(last_node, graph);
+
+            // Only reverse if last node is significantly more selective (10× threshold)
+            if last_sel * 10 >= first_sel {
+                continue;
+            }
+
+            // Reverse: flip element order and flip each edge direction
+            pattern.elements.reverse();
+            for elem in &mut pattern.elements {
+                if let PatternElement::Edge(ep) = elem {
+                    ep.direction = match ep.direction {
+                        EdgeDirection::Outgoing => EdgeDirection::Incoming,
+                        EdgeDirection::Incoming => EdgeDirection::Outgoing,
+                        EdgeDirection::Both => EdgeDirection::Both,
+                    };
+                }
+            }
+        }
+    }
+}
+
+/// Estimate the number of candidate nodes for a node pattern.
+/// Lower = more selective = better as start node.
+fn estimate_node_selectivity(
+    np: &crate::graph::pattern_matching::NodePattern,
+    graph: &DirGraph,
+) -> usize {
+    let type_count = np
+        .node_type
+        .as_ref()
+        .and_then(|t| graph.type_indices.get(t))
+        .map(|idx| idx.len())
+        .unwrap_or(graph.graph.node_count());
+
+    match &np.properties {
+        None => type_count,
+        Some(props) if props.is_empty() => type_count,
+        Some(props) => {
+            // Check if any property has equality on an indexed field
+            if let Some(ref nt) = np.node_type {
+                for (prop, matcher) in props {
+                    match matcher {
+                        PropertyMatcher::Equals(val) => {
+                            if prop == "id" {
+                                return 1;
+                            }
+                            let key = (nt.clone(), prop.clone());
+                            if graph.property_indices.contains_key(&key) {
+                                if let Some(results) = graph.lookup_by_index(nt, prop, val) {
+                                    return results.len().max(1);
+                                }
+                                return 1;
+                            }
+                        }
+                        PropertyMatcher::EqualsParam(_) => {
+                            if prop == "id" {
+                                return 1;
+                            }
+                        }
+                        PropertyMatcher::In(vals) => return vals.len(),
+                        _ => {}
+                    }
+                }
+            }
+            // Heuristic: any property filter reduces candidates by ~10×
+            (type_count / 10).max(1)
+        }
+    }
+}
+
 /// This allows the pattern executor to stop early via max_matches.
 ///
 /// Safe when: MATCH → RETURN → LIMIT, with RETURN having no aggregation or DISTINCT.
@@ -662,6 +913,7 @@ fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
         let can_fuse = matches!(
             (&query.clauses[i], &query.clauses[i + 1]),
             (Clause::OptionalMatch(_), Clause::With(_))
+                | (Clause::OptionalMatch(_), Clause::Return(_))
         );
 
         if !can_fuse {
@@ -669,11 +921,11 @@ fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
             continue;
         }
 
-        // Check that the WITH contains count() aggregation and simple pass-through group keys
-        let fusable = if let Clause::With(w) = &query.clauses[i + 1] {
-            is_fusable_with_clause(w)
-        } else {
-            false
+        // Check that the WITH/RETURN contains count() aggregation and simple pass-through group keys
+        let fusable = match &query.clauses[i + 1] {
+            Clause::With(w) => is_fusable_with_clause(w),
+            Clause::Return(r) => is_fusable_return_clause(r),
+            _ => false,
         };
 
         if !fusable {
@@ -695,47 +947,56 @@ fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
 
         // Verify ALL count aggregate variables come from THIS OPTIONAL MATCH,
         // and none use DISTINCT (which the fused path cannot handle)
-        let all_counts_local = if let Clause::With(w) = &query.clauses[i + 1] {
-            w.items.iter().all(|item| {
-                if let Expression::FunctionCall {
-                    name,
-                    args,
-                    distinct,
-                } = &item.expression
-                {
-                    if name.eq_ignore_ascii_case("count") {
-                        // Reject DISTINCT — fused path can't deduplicate
-                        if *distinct {
-                            return false;
-                        }
-                        // count(*) is always fine
-                        if args.len() == 1 && matches!(args[0], Expression::Star) {
-                            return true;
-                        }
-                        // count(var) — var must come from this OPTIONAL MATCH
-                        if let Some(Expression::Variable(var)) = args.first() {
-                            return opt_match_vars.contains(var);
-                        }
-                        // count(expr) — not a simple variable, bail
+        let items = match &query.clauses[i + 1] {
+            Clause::With(w) => &w.items,
+            Clause::Return(r) => &r.items,
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        let all_counts_local = items.iter().all(|item| {
+            if let Expression::FunctionCall {
+                name,
+                args,
+                distinct,
+            } = &item.expression
+            {
+                if name.eq_ignore_ascii_case("count") {
+                    // Reject DISTINCT — fused path can't deduplicate
+                    if *distinct {
                         return false;
                     }
+                    // count(*) is always fine
+                    if args.len() == 1 && matches!(args[0], Expression::Star) {
+                        return true;
+                    }
+                    // count(var) — var must come from this OPTIONAL MATCH
+                    if let Some(Expression::Variable(var)) = args.first() {
+                        return opt_match_vars.contains(var);
+                    }
+                    // count(expr) — not a simple variable, bail
+                    return false;
                 }
-                true // non-aggregate items (group keys) are fine
-            })
-        } else {
-            false
-        };
+            }
+            true // non-aggregate items (group keys) are fine
+        });
 
         if !all_counts_local {
             i += 1;
             continue;
         }
 
-        // Extract both clauses and replace with fused variant
-        let with_clause = if let Clause::With(w) = query.clauses.remove(i + 1) {
-            w
-        } else {
-            unreachable!()
+        // Extract both clauses and replace with fused variant.
+        // Convert Return → With for the fused representation.
+        let with_clause = match query.clauses.remove(i + 1) {
+            Clause::With(w) => w,
+            Clause::Return(r) => WithClause {
+                items: r.items,
+                distinct: r.distinct,
+                where_clause: None,
+            },
+            _ => unreachable!(),
         };
         let match_clause = if let Clause::OptionalMatch(m) = query.clauses.remove(i) {
             m
@@ -774,6 +1035,37 @@ fn is_fusable_with_clause(with: &WithClause) -> bool {
         } else {
             // Group key must be a simple variable pass-through
             if !matches!(&item.expression, Expression::Variable(_)) {
+                return false;
+            }
+        }
+    }
+
+    has_count
+}
+
+/// Check if a RETURN clause is eligible for fusion with an OPTIONAL MATCH.
+/// Same as `is_fusable_with_clause` but allows PropertyAccess group keys
+/// (RETURN items can be `l.korttittel`, not just bare `l`).
+fn is_fusable_return_clause(ret: &ReturnClause) -> bool {
+    use super::executor::is_aggregate_expression;
+
+    let mut has_count = false;
+
+    for item in &ret.items {
+        if is_aggregate_expression(&item.expression) {
+            // Only fuse for count() — not sum/collect/avg etc.
+            match &item.expression {
+                Expression::FunctionCall { name, .. } if name.eq_ignore_ascii_case("count") => {
+                    has_count = true;
+                }
+                _ => return false, // Non-count aggregate → bail
+            }
+        } else {
+            // Group key must be a simple variable or property access
+            if !matches!(
+                &item.expression,
+                Expression::Variable(_) | Expression::PropertyAccess { .. }
+            ) {
                 return false;
             }
         }
@@ -891,7 +1183,7 @@ fn fuse_match_return_aggregate(query: &mut CypherQuery) {
         // Check RETURN: must have count() aggregate + group-by on one node variable.
         // Determine which variable is the group key (first or second).
         let fusable = if let Clause::Return(r) = &query.clauses[i + 1] {
-            if r.distinct {
+            if r.distinct || r.having.is_some() {
                 false
             } else {
                 let mut has_count = false;
@@ -1140,7 +1432,8 @@ fn fuse_node_scan_aggregate(query: &mut CypherQuery) {
         };
 
         // Validate MATCH: single pattern, single node element (no edges),
-        // no pushed-down property matchers (those benefit from index lookups).
+        // no pushed-down property matchers (those benefit from index lookups
+        // in the pattern executor, which the fused scan path bypasses).
         let is_single_node = if let Clause::Match(mc) = &query.clauses[match_idx] {
             let no_props = if let PatternElement::Node(np) = &mc.patterns[0].elements[0] {
                 np.properties.is_none()
@@ -1782,7 +2075,10 @@ fn apply_property_to_patterns(
             if let PatternElement::Node(ref mut np) = element {
                 if np.variable.as_deref() == Some(var_name) {
                     let props = np.properties.get_or_insert_with(Default::default);
-                    props.insert(property.to_string(), PropertyMatcher::Equals(value));
+                    // Don't overwrite an existing matcher (e.g. IN or Range)
+                    props
+                        .entry(property.to_string())
+                        .or_insert(PropertyMatcher::Equals(value));
                     return;
                 }
             }
@@ -1818,6 +2114,8 @@ fn apply_in_property_to_patterns(
 /// and replace with a fused clause that uses a min-heap (O(n log k) vs O(n log n))
 /// and projects RETURN expressions only for the k surviving rows.
 fn fuse_vector_score_order_limit(query: &mut CypherQuery) {
+    use super::executor::is_aggregate_expression;
+
     if query.clauses.len() < 3 {
         return;
     }
@@ -1841,7 +2139,11 @@ fn fuse_vector_score_order_limit(query: &mut CypherQuery) {
         // Extract references for analysis (before removing)
         let (score_idx, alias) = if let Clause::Return(r) = &query.clauses[i] {
             // Don't fuse if RETURN has aggregation or DISTINCT
-            if r.distinct {
+            if r.distinct
+                || r.items
+                    .iter()
+                    .any(|item| is_aggregate_expression(&item.expression))
+            {
                 i += 1;
                 continue;
             }
@@ -1975,11 +2277,8 @@ fn fuse_order_by_top_k(query: &mut CypherQuery) {
             continue;
         }
 
-        // Reject if a SKIP clause precedes LIMIT (SKIP+LIMIT needs full sort)
-        if i + 3 < query.clauses.len() && matches!(&query.clauses[i + 2], Clause::Skip(_)) {
-            i += 1;
-            continue;
-        }
+        // Note: SKIP before LIMIT (RETURN, ORDER BY, SKIP, LIMIT) is already handled:
+        // the pattern match above requires clauses[i+2] to be Limit, so SKIP at i+2 won't match.
 
         let (score_idx, sort_expression) = if let Clause::Return(r) = &query.clauses[i] {
             // Don't fuse if RETURN has DISTINCT
@@ -2130,6 +2429,7 @@ fn estimate_predicate_cost(pred: &Predicate) -> u32 {
         Predicate::Not(inner) => estimate_predicate_cost(inner) + 1,
         Predicate::IsNull(_) | Predicate::IsNotNull(_) => 2,
         Predicate::In { list, .. } => 3 + list.len() as u32,
+        Predicate::InLiteralSet { values, .. } => 2 + (values.len() > 16) as u32, // HashSet is O(1)
         Predicate::StartsWith { .. } | Predicate::EndsWith { .. } | Predicate::Contains { .. } => 5,
         Predicate::Exists { .. } => 100, // Pattern existence checks are expensive
     }
@@ -2562,6 +2862,7 @@ impl TextScoreCollector {
                 }
                 Ok(())
             }
+            Predicate::InLiteralSet { expr, .. } => self.rewrite_expr(expr, params),
             Predicate::StartsWith { expr, pattern }
             | Predicate::EndsWith { expr, pattern }
             | Predicate::Contains { expr, pattern } => {

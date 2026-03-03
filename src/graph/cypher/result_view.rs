@@ -115,6 +115,24 @@ impl ResultView {
         }
     }
 
+    /// Discover property keys by scanning all nodes (fallback path).
+    fn discover_property_keys(
+        nodes: &[&NodeData],
+        interner: &crate::graph::schema::StringInterner,
+    ) -> Vec<String> {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut keys: Vec<String> = Vec::new();
+        for node in nodes {
+            for key in node.property_keys(interner) {
+                if seen.insert(key) {
+                    keys.push(key.to_string());
+                }
+            }
+        }
+        keys.sort();
+        keys
+    }
+
     /// collect / sample with graph access: nodes + connection summaries.
     pub fn from_nodes_with_graph(
         graph: &DirGraph,
@@ -129,17 +147,28 @@ impl ResultView {
             .filter_map(|&idx| graph.get_node(idx))
             .collect();
 
-        // Compute union of property keys (single clone per unique key)
-        let mut seen: HashSet<&str> = HashSet::new();
-        let mut prop_keys: Vec<String> = Vec::new();
-        for node in &nodes_vec {
-            for key in node.property_keys(&graph.interner) {
-                if seen.insert(key) {
-                    prop_keys.push(key.to_string());
+        // Compute union of property keys.
+        // Fast path: if all nodes share a type, use TypeSchema (O(1) key discovery).
+        let prop_keys: Vec<String> = if nodes_vec.len() > 50 {
+            let first_type = &nodes_vec[0].node_type;
+            let all_same_type = nodes_vec.iter().all(|n| n.node_type == *first_type);
+            if all_same_type {
+                if let Some(schema) = graph.type_schemas.get(first_type) {
+                    let mut keys: Vec<String> = schema
+                        .iter()
+                        .filter_map(|(_, ik)| graph.interner.try_resolve(ik).map(|s| s.to_string()))
+                        .collect();
+                    keys.sort();
+                    keys
+                } else {
+                    Self::discover_property_keys(&nodes_vec, &graph.interner)
                 }
+            } else {
+                Self::discover_property_keys(&nodes_vec, &graph.interner)
             }
-        }
-        prop_keys.sort();
+        } else {
+            Self::discover_property_keys(&nodes_vec, &graph.interner)
+        };
 
         let mut columns = vec!["type".into(), "title".into(), "id".into()];
         columns.extend(prop_keys.iter().cloned());

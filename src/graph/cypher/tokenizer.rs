@@ -262,9 +262,11 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
                 let quote = ch;
                 i += 1; // consume opening quote
                 let mut s = String::new();
+                let mut closed = false;
                 while i < len {
                     if chars[i] == quote {
                         i += 1; // consume closing quote
+                        closed = true;
                         break;
                     }
                     if chars[i] == '\\' && i + 1 < len {
@@ -282,6 +284,9 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
                         s.push(chars[i]);
                         i += 1;
                     }
+                }
+                if !closed {
+                    return Err(format!("Unterminated string literal: {}{}", quote, s));
                 }
                 tokens.push(CypherToken::StringLit(s));
             }
@@ -363,10 +368,12 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
                 while i < len && chars[i] != '`' {
                     i += 1;
                 }
-                let ident: String = chars[start..i].iter().collect();
-                if i < len {
-                    i += 1; // consume closing backtick
+                if i >= len {
+                    let ident: String = chars[start..i].iter().collect();
+                    return Err(format!("Unterminated backtick identifier: `{}", ident));
                 }
+                let ident: String = chars[start..i].iter().collect();
+                i += 1; // consume closing backtick
                 tokens.push(CypherToken::Identifier(ident));
             }
 
