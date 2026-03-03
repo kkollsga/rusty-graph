@@ -295,7 +295,8 @@ class KnowledgeGraph:
             unique_id_field: Column used as unique identifier.
             node_title_field: Column used as display title. Defaults to ``unique_id_field``.
             columns: Whitelist of columns to include. ``None`` = all.
-            conflict_handling: ``'update'`` (default), ``'replace'``, ``'skip'``, or ``'preserve'``.
+            conflict_handling: ``'update'`` (default), ``'replace'``, ``'skip'``,
+                ``'preserve'``, or ``'sum'``. ``'sum'`` acts as ``'update'`` for nodes.
             skip_columns: Columns to exclude.
             column_types: Override column dtypes ``{'col': 'string'|'integer'|'float'|'datetime'|'uniqueid'}``.
                 Also supports spatial types: ``'location.lat'``, ``'location.lon'``,
@@ -331,7 +332,7 @@ class KnowledgeGraph:
 
     def add_connections(
         self,
-        data: pd.DataFrame,
+        data: Optional[pd.DataFrame],
         connection_type: str,
         source_type: str,
         source_id_field: str,
@@ -343,22 +344,58 @@ class KnowledgeGraph:
         skip_columns: Optional[list[str]] = None,
         conflict_handling: Optional[str] = None,
         column_types: Optional[dict[str, str]] = None,
+        query: Optional[str] = None,
+        extra_properties: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Add connections (edges) between existing nodes.
 
+        Two modes — supply **either** ``data`` (a pandas DataFrame) **or**
+        ``query`` (a Cypher string whose RETURN columns provide source/target IDs).
+
+        Example (from DataFrame)::
+
+            graph.add_connections(df, 'KNOWS', 'Person', 'src_id', 'Person', 'tgt_id')
+
+        Example (from Cypher query)::
+
+            graph.add_connections(
+                None, 'ENCLOSES', 'Play', 'play_id', 'StructuralElement', 'struct_id',
+                query=\"\"\"
+                    MATCH (p:Play), (s:StructuralElement)
+                    WHERE contains(p, s)
+                    RETURN DISTINCT p.id AS play_id, s.id AS struct_id
+                \"\"\",
+            )
+
+        Example (query with extra properties)::
+
+            graph.add_connections(
+                None, 'HC_IN_FORMATION', 'Discovery', 'src', 'Stratigraphy', 'tgt',
+                query='MATCH ... RETURN d.id AS src, s.id AS tgt',
+                extra_properties={'hc_rank': 1},
+            )
+
         Args:
-            data: DataFrame containing edge data.
+            data: DataFrame containing edge data, or ``None`` when using ``query``.
             connection_type: Label for this edge type (e.g. ``'KNOWS'``).
             source_type: Node type of source nodes.
-            source_id_field: Column with source node IDs.
+            source_id_field: Column with source node IDs (must appear in DataFrame or query RETURN).
             target_type: Node type of target nodes.
-            target_id_field: Column with target node IDs.
+            target_id_field: Column with target node IDs (must appear in DataFrame or query RETURN).
             source_title_field: Optional title column for source nodes.
             target_title_field: Optional title column for target nodes.
-            columns: Whitelist of property columns to include.
-            skip_columns: Columns to exclude.
-            conflict_handling: ``'update'``, ``'skip'``, or ``None``.
-            column_types: Override column dtypes.
+            columns: Whitelist of property columns to include (data mode only).
+            skip_columns: Columns to exclude (data mode only).
+            conflict_handling: ``'update'`` (default), ``'replace'``, ``'skip'``,
+                ``'preserve'``, or ``'sum'``. ``'sum'`` adds numeric edge properties
+                (Int64+Int64, Float64+Float64; mixed promotes to Float64).
+                Non-numeric properties overwrite like ``'update'``.
+            column_types: Override column dtypes (data mode only).
+            query: Cypher query string (alternative to ``data``). Must be a
+                read-only query whose RETURN clause includes columns matching
+                ``source_id_field`` and ``target_id_field``.
+            extra_properties: Dict of static properties to add to every edge
+                created from the query results (query mode only).
 
         Returns:
             Operation report dict with ``connections_created``, ``connections_skipped``, etc.
@@ -1181,7 +1218,7 @@ class KnowledgeGraph:
             connection_type: Label for the new edges (e.g. ``'A_TO_C'``).
             keep_selection: Preserve selection. Default ``False``.
             conflict_handling: ``'update'`` (default), ``'replace'``, ``'skip'``,
-                or ``'preserve'``.
+                ``'preserve'``, or ``'sum'``.
             properties: Copy properties from intermediate nodes onto the new
                 edges. Dict mapping node type to property names:
                 ``{'TypeB': ['score', 'weight']}``.

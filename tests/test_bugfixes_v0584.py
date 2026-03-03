@@ -170,9 +170,9 @@ class TestBug3DescribeParameterName:
     def test_describe_fluent_loading_uses_columns(self):
         g = KnowledgeGraph()
         desc = g.describe(fluent=["loading"])
-        # Should say "columns=" not "properties="
+        # Should say "columns=" not bare "properties=" (extra_properties= is fine)
         assert "columns=" in desc
-        assert "properties=None" not in desc
+        assert ", properties=" not in desc
 
 
 # ===========================================================================

@@ -333,6 +333,196 @@ impl DataFrame {
 
         Ok(())
     }
+
+    /// Create a DataFrame from Cypher query result rows.
+    ///
+    /// Converts row-oriented `Vec<Vec<Value>>` (from CypherResult) into the
+    /// columnar DataFrame format used by `add_connections` and other fluent APIs.
+    ///
+    /// Type inference: scans each column for the first non-Null value to determine
+    /// ColumnType. All-null columns default to Int64.
+    pub fn from_cypher_rows(columns: Vec<String>, rows: Vec<Vec<Value>>) -> Result<Self, String> {
+        let num_cols = columns.len();
+        let num_rows = rows.len();
+
+        if num_rows == 0 {
+            // Empty result: create DataFrame with Int64 columns (no rows)
+            let col_specs: Vec<(String, ColumnType)> = columns
+                .into_iter()
+                .map(|name| (name, ColumnType::Int64))
+                .collect();
+            return Ok(DataFrame::new(col_specs));
+        }
+
+        // Validate row width
+        for (i, row) in rows.iter().enumerate() {
+            if row.len() != num_cols {
+                return Err(format!(
+                    "Row {} has {} values but expected {} columns",
+                    i,
+                    row.len(),
+                    num_cols
+                ));
+            }
+        }
+
+        // Infer column types from first non-null value in each column
+        let mut col_types = vec![None; num_cols];
+        for row in &rows {
+            for (col_idx, val) in row.iter().enumerate() {
+                if col_types[col_idx].is_some() {
+                    continue;
+                }
+                col_types[col_idx] = match val {
+                    Value::UniqueId(_) => Some(ColumnType::UniqueId),
+                    Value::Int64(_) => Some(ColumnType::Int64),
+                    Value::Float64(_) => Some(ColumnType::Float64),
+                    Value::String(_) => Some(ColumnType::String),
+                    Value::Boolean(_) => Some(ColumnType::Boolean),
+                    Value::DateTime(_) => Some(ColumnType::DateTime),
+                    Value::Point { .. } => Some(ColumnType::String), // Serialize as WKT
+                    Value::Null | Value::NodeRef(_) => None,
+                };
+            }
+            if col_types.iter().all(|t| t.is_some()) {
+                break;
+            }
+        }
+
+        // Default all-null columns to Int64
+        let col_types: Vec<ColumnType> = col_types
+            .into_iter()
+            .map(|t| t.unwrap_or(ColumnType::Int64))
+            .collect();
+
+        // Build columnar data by transposing rows
+        let mut col_data: Vec<ColumnData> = col_types
+            .iter()
+            .map(|ct| match ct {
+                ColumnType::UniqueId => ColumnData::UniqueId(Vec::with_capacity(num_rows)),
+                ColumnType::Int64 => ColumnData::Int64(Vec::with_capacity(num_rows)),
+                ColumnType::Float64 => ColumnData::Float64(Vec::with_capacity(num_rows)),
+                ColumnType::String => ColumnData::String(Vec::with_capacity(num_rows)),
+                ColumnType::Boolean => ColumnData::Boolean(Vec::with_capacity(num_rows)),
+                ColumnType::DateTime => ColumnData::DateTime(Vec::with_capacity(num_rows)),
+            })
+            .collect();
+
+        for row in rows {
+            for (col_idx, val) in row.into_iter().enumerate() {
+                match &mut col_data[col_idx] {
+                    ColumnData::UniqueId(vec) => match val {
+                        Value::UniqueId(v) => vec.push(Some(v)),
+                        Value::Int64(v) => vec.push(Some(v as u32)),
+                        Value::Null => vec.push(None),
+                        _ => vec.push(None),
+                    },
+                    ColumnData::Int64(vec) => match val {
+                        Value::Int64(v) => vec.push(Some(v)),
+                        Value::UniqueId(v) => vec.push(Some(v as i64)),
+                        Value::Float64(v) => vec.push(Some(v as i64)),
+                        Value::Null => vec.push(None),
+                        _ => vec.push(None),
+                    },
+                    ColumnData::Float64(vec) => match val {
+                        Value::Float64(v) => vec.push(Some(v)),
+                        Value::Int64(v) => vec.push(Some(v as f64)),
+                        Value::UniqueId(v) => vec.push(Some(v as f64)),
+                        Value::Null => vec.push(None),
+                        _ => vec.push(None),
+                    },
+                    ColumnData::String(vec) => match val {
+                        Value::String(v) => vec.push(Some(v)),
+                        Value::Point { lat, lon } => {
+                            vec.push(Some(format!("POINT({} {})", lon, lat)))
+                        }
+                        Value::Int64(v) => vec.push(Some(v.to_string())),
+                        Value::Float64(v) => vec.push(Some(v.to_string())),
+                        Value::UniqueId(v) => vec.push(Some(v.to_string())),
+                        Value::Boolean(v) => vec.push(Some(v.to_string())),
+                        Value::DateTime(v) => vec.push(Some(v.to_string())),
+                        Value::Null => vec.push(None),
+                        _ => vec.push(None),
+                    },
+                    ColumnData::Boolean(vec) => match val {
+                        Value::Boolean(v) => vec.push(Some(v)),
+                        Value::Null => vec.push(None),
+                        _ => vec.push(None),
+                    },
+                    ColumnData::DateTime(vec) => match val {
+                        Value::DateTime(v) => vec.push(Some(v)),
+                        Value::Null => vec.push(None),
+                        _ => vec.push(None),
+                    },
+                }
+            }
+        }
+
+        // Assemble DataFrame
+        let mut column_indices = HashMap::with_capacity(num_cols);
+        let built_columns: Vec<Column> = columns
+            .into_iter()
+            .zip(col_types)
+            .zip(col_data)
+            .enumerate()
+            .map(|(idx, ((name, col_type), data))| {
+                column_indices.insert(name.clone(), idx);
+                Column {
+                    name,
+                    col_type,
+                    data,
+                }
+            })
+            .collect();
+
+        Ok(DataFrame {
+            columns: built_columns,
+            column_indices,
+        })
+    }
+
+    /// Add a constant-value column (every row gets the same value).
+    ///
+    /// Used by `add_connections(extra_properties=...)` to stamp static
+    /// properties onto edges derived from a Cypher query.
+    pub fn add_constant_column(&mut self, name: String, value: Value) -> Result<(), String> {
+        let num_rows = self.row_count();
+        let (col_type, data) = match value {
+            Value::UniqueId(v) => (
+                ColumnType::UniqueId,
+                ColumnData::UniqueId(vec![Some(v); num_rows]),
+            ),
+            Value::Int64(v) => (
+                ColumnType::Int64,
+                ColumnData::Int64(vec![Some(v); num_rows]),
+            ),
+            Value::Float64(v) => (
+                ColumnType::Float64,
+                ColumnData::Float64(vec![Some(v); num_rows]),
+            ),
+            Value::String(v) => (
+                ColumnType::String,
+                ColumnData::String(vec![Some(v); num_rows]),
+            ),
+            Value::Boolean(v) => (
+                ColumnType::Boolean,
+                ColumnData::Boolean(vec![Some(v); num_rows]),
+            ),
+            Value::DateTime(v) => (
+                ColumnType::DateTime,
+                ColumnData::DateTime(vec![Some(v); num_rows]),
+            ),
+            Value::Null => return Err("Cannot add a constant column with Null value".to_string()),
+            Value::Point { lat, lon } => (
+                ColumnType::String,
+                ColumnData::String(vec![Some(format!("POINT({} {})", lon, lat)); num_rows]),
+            ),
+            Value::NodeRef(_) => {
+                return Err("Cannot add a constant column with NodeRef value".to_string())
+            }
+        };
+        self.add_column(name, col_type, data)
+    }
 }
 
 impl std::fmt::Display for DataFrame {

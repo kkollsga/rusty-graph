@@ -53,11 +53,24 @@ pub enum NodeAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ConflictHandling {
-    Replace, // Replace all properties and title (current behavior)
-    Skip,    // Don't update existing nodes
+    Replace, // Replace all properties and title
+    Skip,    // Don't update existing nodes/edges
     #[default]
-    Update, // Update properties and title if provided
-    Preserve, // Update but prefer existing values
+    Update, // Merge properties, new values overwrite existing
+    Preserve, // Merge properties, existing values take precedence
+    Sum,     // Merge properties, add numeric values (edges); acts as Update for nodes
+}
+
+/// Add two Values if both are numeric. Mixed Int64+Float64 promotes to Float64.
+/// Non-numeric values fall back to Update behavior (new value overwrites).
+fn sum_values(existing: &Value, new: &Value) -> Value {
+    match (existing, new) {
+        (Value::Int64(a), Value::Int64(b)) => Value::Int64(a.wrapping_add(*b)),
+        (Value::Float64(a), Value::Float64(b)) => Value::Float64(a + b),
+        (Value::Int64(a), Value::Float64(b)) => Value::Float64(*a as f64 + b),
+        (Value::Float64(a), Value::Int64(b)) => Value::Float64(a + *b as f64),
+        _ => new.clone(),
+    }
 }
 
 #[derive(Debug)]
@@ -289,12 +302,11 @@ impl BatchProcessor {
                         }
                         node.properties.replace_all(interned_props);
                     }
-                    ConflictHandling::Update => {
-                        // Update only if provided
+                    ConflictHandling::Update | ConflictHandling::Sum => {
+                        // Update only if provided (Sum acts as Update for nodes)
                         if let Some(new_title) = update.title {
                             node.title = new_title;
                         }
-                        // Merge properties with preference to new values
                         for (k, v) in interned_props {
                             node.properties.insert(k, v);
                         }
@@ -557,6 +569,33 @@ impl ConnectionBatchProcessor {
                             stats.connections_created += 1;
                         }
                     }
+                    ConflictHandling::Sum => {
+                        // Sum numeric properties, overwrite non-numeric
+                        let interned_props: Vec<(InternedKey, Value)> = conn
+                            .properties
+                            .into_iter()
+                            .map(|(k, v)| {
+                                let key = graph.interner.get_or_intern(&k);
+                                (key, v)
+                            })
+                            .collect();
+                        if let Some(EdgeData {
+                            properties: edge_props,
+                            ..
+                        }) = graph.graph.edge_weight_mut(edge_idx)
+                        {
+                            for (k, v) in interned_props {
+                                if let Some((_, existing)) =
+                                    edge_props.iter_mut().find(|(ek, _)| *ek == k)
+                                {
+                                    *existing = sum_values(existing, &v);
+                                } else {
+                                    edge_props.push((k, v));
+                                }
+                            }
+                            stats.connections_created += 1;
+                        }
+                    }
                 }
             } else {
                 // Create new edge
@@ -615,5 +654,64 @@ impl ConnectionBatchProcessor {
 
     pub fn get_schema_properties(&self) -> &HashSet<String> {
         &self.schema_properties
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sum_values_int_int() {
+        assert_eq!(
+            sum_values(&Value::Int64(10), &Value::Int64(5)),
+            Value::Int64(15)
+        );
+    }
+
+    #[test]
+    fn test_sum_values_int_negative() {
+        assert_eq!(
+            sum_values(&Value::Int64(10), &Value::Int64(-3)),
+            Value::Int64(7)
+        );
+    }
+
+    #[test]
+    fn test_sum_values_float_float() {
+        match sum_values(&Value::Float64(1.5), &Value::Float64(2.5)) {
+            Value::Float64(v) => assert!((v - 4.0).abs() < 1e-10),
+            other => panic!("Expected Float64, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_sum_values_int_float_promotion() {
+        match sum_values(&Value::Int64(10), &Value::Float64(2.5)) {
+            Value::Float64(v) => assert!((v - 12.5).abs() < 1e-10),
+            other => panic!("Expected Float64, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_sum_values_float_int_promotion() {
+        match sum_values(&Value::Float64(3.5), &Value::Int64(2)) {
+            Value::Float64(v) => assert!((v - 5.5).abs() < 1e-10),
+            other => panic!("Expected Float64, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_sum_values_non_numeric_overwrites() {
+        assert_eq!(
+            sum_values(&Value::String("old".into()), &Value::String("new".into())),
+            Value::String("new".into()),
+        );
+    }
+
+    #[test]
+    fn test_sum_values_null_cases() {
+        assert_eq!(sum_values(&Value::Null, &Value::Int64(5)), Value::Int64(5));
+        assert_eq!(sum_values(&Value::Int64(5), &Value::Null), Value::Null);
     }
 }

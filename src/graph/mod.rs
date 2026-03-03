@@ -281,6 +281,47 @@ impl KnowledgeGraph {
         self.reports.add_report(report)
     }
 
+    /// Convert a ConnectionOperationReport to a Python dict and emit a warning
+    /// if any rows were skipped.
+    fn connection_report_to_py(
+        result: &reporting::ConnectionOperationReport,
+        connection_type: &str,
+    ) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            let report_dict = PyDict::new(py);
+            report_dict.set_item("operation", &result.operation_type)?;
+            report_dict.set_item("timestamp", result.timestamp.to_rfc3339())?;
+            report_dict.set_item("connections_created", result.connections_created)?;
+            report_dict.set_item("connections_skipped", result.connections_skipped)?;
+            report_dict.set_item("property_fields_tracked", result.property_fields_tracked)?;
+            report_dict.set_item("processing_time_ms", result.processing_time_ms)?;
+
+            let has_errors = !result.errors.is_empty() || result.connections_skipped > 0;
+            if !result.errors.is_empty() {
+                report_dict.set_item("errors", &result.errors)?;
+            }
+            report_dict.set_item("has_errors", has_errors)?;
+
+            if result.connections_skipped > 0 {
+                let total = result.connections_created + result.connections_skipped;
+                let detail = result.errors.join("; ");
+                let msg = std::ffi::CString::new(format!(
+                    "add_connections('{}'): {} of {} rows skipped. {}",
+                    connection_type, result.connections_skipped, total, detail
+                ))
+                .unwrap_or_default();
+                let _ = PyErr::warn(
+                    py,
+                    py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+                    msg.as_c_str(),
+                    1,
+                );
+            }
+
+            Ok(report_dict.into())
+        })
+    }
+
     /// Discover property keys by scanning node data (fallback for to_df).
     fn discover_property_keys_from_data(
         nodes: &[(&str, &Value, &Value, &schema::NodeData)],
@@ -1440,10 +1481,32 @@ impl KnowledgeGraph {
         })
     }
 
-    /// Add connections (edges) from a pandas DataFrame.
+    /// Add connections (edges) between existing nodes.
+    ///
+    /// Two modes — supply **either** `data` (a pandas DataFrame) **or** `query`
+    /// (a Cypher string whose RETURN columns provide source/target IDs):
+    ///
+    /// ```python
+    /// # From DataFrame (existing API):
+    /// graph.add_connections(df, "KNOWS", "Person", "src_id", "Person", "tgt_id")
+    ///
+    /// # From Cypher query (new):
+    /// graph.add_connections(
+    ///     None, "ENCLOSES", "Play", "play_id", "StructuralElement", "struct_id",
+    ///     query="MATCH (p:Play), (s:StructuralElement) WHERE contains(p, s) "
+    ///           "RETURN DISTINCT p.id AS play_id, s.id AS struct_id",
+    /// )
+    ///
+    /// # With extra static properties stamped onto every edge:
+    /// graph.add_connections(
+    ///     None, "HC_IN_FORMATION", "Discovery", "src", "Stratigraphy", "tgt",
+    ///     query="MATCH ... RETURN d.id AS src, s.id AS tgt",
+    ///     extra_properties={"hc_rank": 1},
+    /// )
+    /// ```
     ///
     /// Args:
-    ///     data: DataFrame containing connection data.
+    ///     data: DataFrame containing connection data, or None when using query.
     ///     connection_type: Label for this connection type (e.g. 'KNOWS').
     ///     source_type: Node type of the source nodes.
     ///     source_id_field: Column containing source node IDs.
@@ -1451,19 +1514,23 @@ impl KnowledgeGraph {
     ///     target_id_field: Column containing target node IDs.
     ///     source_title_field: Optional column to update source node titles.
     ///     target_title_field: Optional column to update target node titles.
-    ///     columns: Whitelist of columns to include as edge properties.
-    ///     skip_columns: Columns to exclude from edge properties.
+    ///     columns: Whitelist of columns to include as edge properties (data mode only).
+    ///     skip_columns: Columns to exclude from edge properties (data mode only).
     ///     conflict_handling: 'update' (default), 'replace', 'skip', or 'preserve'.
-    ///     column_types: Override column type detection.
+    ///     column_types: Override column type detection (data mode only).
+    ///     query: Cypher query string (alternative to data). Must be a read-only
+    ///         query that RETURNs columns matching source_id_field and target_id_field.
+    ///     extra_properties: Dict of static properties to add to every edge created
+    ///         from the query results (query mode only).
     ///
     /// Returns:
     ///     dict with 'connections_created', 'connections_skipped',
     ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
-    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None))]
+    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_connections(
         &mut self,
-        data: &Bound<'_, PyAny>,
+        data: Option<&Bound<'_, PyAny>>,
         connection_type: String,
         source_type: String,
         source_id_field: String,
@@ -1475,7 +1542,138 @@ impl KnowledgeGraph {
         skip_columns: Option<&Bound<'_, PyList>>,
         conflict_handling: Option<String>,
         column_types: Option<&Bound<'_, PyDict>>,
+        query: Option<String>,
+        extra_properties: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        use crate::datatypes::values::DataFrame as KgDataFrame;
+
+        // Validate: exactly one of data or query must be provided
+        let has_data = data.as_ref().map(|d| !d.is_none()).unwrap_or(false);
+
+        if has_data && query.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Cannot specify both 'data' and 'query'. Use one or the other.",
+            ));
+        }
+        if !has_data && query.is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Must specify either 'data' (DataFrame) or 'query' (Cypher query string).",
+            ));
+        }
+        if has_data && extra_properties.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "extra_properties is only supported with query mode, not data mode.",
+            ));
+        }
+        if query.is_some() {
+            if columns.is_some() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "'columns' is only supported with data mode, not query mode.",
+                ));
+            }
+            if skip_columns.is_some() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "'skip_columns' is only supported with data mode, not query mode.",
+                ));
+            }
+            if column_types.is_some() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "'column_types' is only supported with data mode, not query mode.",
+                ));
+            }
+        }
+
+        // ── Query path: run Cypher, convert to internal DataFrame ──
+        if let Some(query_str) = query {
+            // Parse the cypher query
+            let parsed = cypher::parse_cypher(&query_str).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Cypher syntax error in query: {}",
+                    e
+                ))
+            })?;
+
+            // Reject mutation queries — add_connections query must be read-only
+            if cypher::is_mutation_query(&parsed) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "The 'query' parameter must be a read-only query (MATCH...RETURN). \
+                     CREATE/SET/DELETE/MERGE are not allowed here.",
+                ));
+            }
+
+            // Execute read-only: clone Arc, execute without holding mutable borrow
+            let inner_clone = self.inner.clone();
+            let empty_params = HashMap::new();
+            let cypher_result = {
+                let executor =
+                    cypher::CypherExecutor::with_params(&inner_clone, &empty_params, None);
+                executor.execute(&parsed)
+            }
+            .map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Cypher execution error in add_connections query: {}",
+                    e
+                ))
+            })?;
+
+            // Resolve NodeRef values to actual IDs/titles
+            let mut rows = cypher_result.rows;
+            resolve_noderefs(&inner_clone.graph, &mut rows);
+
+            // Convert row-oriented Cypher result to columnar DataFrame
+            let mut df_result = KgDataFrame::from_cypher_rows(cypher_result.columns, rows)
+                .map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Failed to convert query results to DataFrame: {}",
+                        e
+                    ))
+                })?;
+
+            // Apply extra_properties as constant columns
+            if let Some(props_dict) = extra_properties {
+                for (key, val) in props_dict.iter() {
+                    let col_name: String = key.extract()?;
+                    let value = py_in::py_value_to_value(&val)?;
+                    df_result
+                        .add_constant_column(col_name.clone(), value)
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Failed to add extra_property '{}': {}",
+                                col_name, e
+                            ))
+                        })?;
+                }
+            }
+
+            // Drop the Arc clone so Arc::make_mut in get_graph_mut doesn't
+            // need to deep-copy the entire graph (refcount goes back to 1).
+            drop(inner_clone);
+
+            let graph = get_graph_mut(&mut self.inner);
+
+            let result = maintain_graph::add_connections(
+                graph,
+                df_result,
+                connection_type.clone(),
+                source_type,
+                source_id_field,
+                target_type,
+                target_id_field,
+                source_title_field,
+                target_title_field,
+                conflict_handling,
+            )
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+            self.selection.clear();
+            self.add_report(OperationReport::ConnectionOperation(result.clone()));
+
+            return Self::connection_report_to_py(&result, &connection_type);
+        }
+
+        // ── Data path: existing pandas DataFrame logic ──
+        let data = data.unwrap(); // Safe: validated above that has_data is true
+
         // Get all columns from the dataframe
         let df_cols = data.getattr("columns")?;
         let all_columns: Vec<String> = df_cols.extract()?;
@@ -1550,52 +1748,15 @@ impl KnowledgeGraph {
         if let Some(cfg) = temporal_cfg {
             graph
                 .temporal_edge_configs
-                .entry(connection_type)
+                .entry(connection_type.clone())
                 .or_default()
                 .push(cfg);
         }
 
         self.selection.clear();
-
-        // Store the report
         self.add_report(OperationReport::ConnectionOperation(result.clone()));
 
-        // Convert the report to a Python dictionary
-        Python::attach(|py| {
-            let report_dict = PyDict::new(py);
-            report_dict.set_item("operation", &result.operation_type)?;
-            report_dict.set_item("timestamp", result.timestamp.to_rfc3339())?;
-            report_dict.set_item("connections_created", result.connections_created)?;
-            report_dict.set_item("connections_skipped", result.connections_skipped)?;
-            report_dict.set_item("property_fields_tracked", result.property_fields_tracked)?;
-            report_dict.set_item("processing_time_ms", result.processing_time_ms)?;
-
-            // has_errors is true when there are errors OR connections were skipped
-            let has_errors = !result.errors.is_empty() || result.connections_skipped > 0;
-            if !result.errors.is_empty() {
-                report_dict.set_item("errors", &result.errors)?;
-            }
-            report_dict.set_item("has_errors", has_errors)?;
-
-            // Emit Python warning if rows were skipped
-            if result.connections_skipped > 0 {
-                let total = result.connections_created + result.connections_skipped;
-                let detail = result.errors.join("; ");
-                let msg = std::ffi::CString::new(format!(
-                    "add_connections: {} of {} rows skipped. {}",
-                    result.connections_skipped, total, detail
-                ))
-                .unwrap_or_default();
-                let _ = PyErr::warn(
-                    py,
-                    py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
-                    msg.as_c_str(),
-                    1,
-                );
-            }
-
-            Ok(report_dict.into())
-        })
+        Self::connection_report_to_py(&result, &connection_type)
     }
 
     // ========================================================================

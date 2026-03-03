@@ -46,9 +46,10 @@ pub fn add_nodes(
         Some("replace") => ConflictHandling::Replace,
         Some("skip") => ConflictHandling::Skip,
         Some("preserve") => ConflictHandling::Preserve,
+        Some("sum") => ConflictHandling::Sum,
         Some("update") | None => ConflictHandling::Update, // Default
         Some(other) => return Err(format!(
-            "Unknown conflict handling mode: '{}'. Valid options: 'update' (default), 'replace', 'skip', 'preserve'",
+            "Unknown conflict handling mode: '{}'. Valid options: 'update' (default), 'replace', 'skip', 'preserve', 'sum'",
             other
         )),
     };
@@ -267,9 +268,10 @@ pub fn add_connections(
         Some("replace") => ConflictHandling::Replace,
         Some("skip") => ConflictHandling::Skip,
         Some("preserve") => ConflictHandling::Preserve,
+        Some("sum") => ConflictHandling::Sum,
         Some("update") | None => ConflictHandling::Update, // Default
         Some(other) => return Err(format!(
-            "Unknown conflict handling mode: '{}'. Valid options: 'update' (default), 'replace', 'skip', 'preserve'",
+            "Unknown conflict handling mode: '{}'. Valid options: 'update' (default), 'replace', 'skip', 'preserve', 'sum'",
             other
         )),
     };
@@ -571,10 +573,11 @@ pub fn create_connections(
         Some("replace") => ConflictHandling::Replace,
         Some("skip") => ConflictHandling::Skip,
         Some("preserve") => ConflictHandling::Preserve,
+        Some("sum") => ConflictHandling::Sum,
         Some("update") | None => ConflictHandling::Update,
         Some(other) => {
             return Err(format!(
-                "Unknown conflict handling mode: '{}'. Valid: 'update' (default), 'replace', 'skip', 'preserve'",
+                "Unknown conflict handling mode: '{}'. Valid: 'update' (default), 'replace', 'skip', 'preserve', 'sum'",
                 other
             ))
         }

@@ -2812,8 +2812,8 @@ fn write_fluent_topic_loading(xml: &mut String) {
         "    <desc>Load nodes and connections from DataFrames or blueprint files.</desc>\n",
     );
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"add_nodes(df, type, id_field, title_field, columns=None, column_types=None, conflict_handling='skip', timeseries=None)\">Load nodes. column_types maps columns to spatial/temporal types.</m>\n");
-    xml.push_str("      <m sig=\"add_connections(df, conn_type, source_type, source_id_field, target_type, target_id_field, columns=None)\">Load edges.</m>\n");
+    xml.push_str("      <m sig=\"add_nodes(df, type, id_field, title_field, columns=None, column_types=None, conflict_handling='skip', timeseries=None)\">Load nodes. conflict_handling: 'update'|'replace'|'skip'|'preserve'|'sum'. column_types maps columns to spatial/temporal types.</m>\n");
+    xml.push_str("      <m sig=\"add_connections(data, conn_type, source_type, source_id_field, target_type, target_id_field, columns=None, conflict_handling='update', query=None, extra_properties=None)\">Load edges from DataFrame (data=df) or Cypher query (data=None, query='MATCH...RETURN...'). conflict_handling: 'update'|'replace'|'skip'|'preserve'|'sum'. extra_properties stamps static props onto query-mode edges.</m>\n");
     xml.push_str("      <m sig=\"add_nodes_bulk(specs)\">Bulk load multiple node types: [{'node_type': ..., 'data': df, ...}].</m>\n");
     xml.push_str(
         "      <m sig=\"add_connections_bulk(specs)\">Bulk load multiple connection types.</m>\n",
@@ -2826,6 +2826,7 @@ fn write_fluent_topic_loading(xml: &mut String) {
     );
     xml.push_str("      <ex desc=\"with spatial\">graph.add_nodes(df, 'City', 'id', 'name', column_types={'lat': 'location.lat', 'lon': 'location.lon'})</ex>\n");
     xml.push_str("      <ex desc=\"edges\">graph.add_connections(df, 'WORKS_AT', 'Person', 'person_id', 'Company', 'company_id')</ex>\n");
+    xml.push_str("      <ex desc=\"edges from query\">graph.add_connections(None, 'ENCLOSES', 'Play', 'play_id', 'Area', 'area_id', query='MATCH (p:Play), (a:Area) WHERE contains(p, a) RETURN DISTINCT p.id AS play_id, a.id AS area_id')</ex>\n");
     xml.push_str("      <ex desc=\"blueprint\">graph = kglite.from_blueprint('blueprint.json', verbose=True)</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </loading>\n");

@@ -78,3 +78,123 @@ class TestGetConnections:
         report = graph.add_connections(conn_df, 'LINKS', 'Node', 'source', 'Node', 'target')
         # Both connections should be created (multigraph)
         assert report['connections_created'] >= 1
+
+
+class TestConflictHandlingSum:
+    """Tests for conflict_handling='sum' on add_connections."""
+
+    def _make_graph(self):
+        graph = KnowledgeGraph()
+        nodes = pd.DataFrame({'id': [1, 2, 3], 'name': ['A', 'B', 'C']})
+        graph.add_nodes(nodes, 'Node', 'id', 'name')
+        edges = pd.DataFrame({
+            'src': [1, 1], 'tgt': [2, 3],
+            'weight': [10, 20], 'label': ['x', 'y'],
+        })
+        graph.add_connections(edges, 'LINK', 'Node', 'src', 'Node', 'tgt',
+                              columns=['weight', 'label'])
+        return graph
+
+    def test_sum_int_properties(self):
+        graph = self._make_graph()
+        edges2 = pd.DataFrame({'src': [1], 'tgt': [2], 'weight': [5]})
+        graph.add_connections(edges2, 'LINK', 'Node', 'src', 'Node', 'tgt',
+                              columns=['weight'], conflict_handling='sum')
+        result = graph.cypher(
+            "MATCH (:Node {id: 1})-[r:LINK]->(:Node {id: 2}) RETURN r.weight"
+        )
+        assert result[0]['r.weight'] == 15
+
+    def test_sum_float_properties(self):
+        graph = KnowledgeGraph()
+        nodes = pd.DataFrame({'id': [1, 2], 'name': ['A', 'B']})
+        graph.add_nodes(nodes, 'Node', 'id', 'name')
+        edges1 = pd.DataFrame({'src': [1], 'tgt': [2], 'score': [1.5]})
+        graph.add_connections(edges1, 'LINK', 'Node', 'src', 'Node', 'tgt',
+                              columns=['score'])
+        edges2 = pd.DataFrame({'src': [1], 'tgt': [2], 'score': [2.5]})
+        graph.add_connections(edges2, 'LINK', 'Node', 'src', 'Node', 'tgt',
+                              columns=['score'], conflict_handling='sum')
+        result = graph.cypher(
+            "MATCH (:Node {id: 1})-[r:LINK]->(:Node {id: 2}) RETURN r.score"
+        )
+        assert abs(result[0]['r.score'] - 4.0) < 1e-10
+
+    def test_sum_non_numeric_overwrites(self):
+        graph = self._make_graph()
+        edges2 = pd.DataFrame({'src': [1], 'tgt': [2], 'weight': [5], 'label': ['z']})
+        graph.add_connections(edges2, 'LINK', 'Node', 'src', 'Node', 'tgt',
+                              columns=['weight', 'label'], conflict_handling='sum')
+        result = graph.cypher(
+            "MATCH (:Node {id: 1})-[r:LINK]->(:Node {id: 2}) RETURN r.weight, r.label"
+        )
+        assert result[0]['r.weight'] == 15
+        assert result[0]['r.label'] == 'z'  # overwritten, not summed
+
+    def test_sum_new_edge_created(self):
+        graph = self._make_graph()
+        edges2 = pd.DataFrame({'src': [2], 'tgt': [3], 'weight': [42]})
+        report = graph.add_connections(edges2, 'LINK', 'Node', 'src', 'Node', 'tgt',
+                                       columns=['weight'], conflict_handling='sum')
+        assert report['connections_created'] == 1
+        result = graph.cypher(
+            "MATCH (:Node {id: 2})-[r:LINK]->(:Node {id: 3}) RETURN r.weight"
+        )
+        assert result[0]['r.weight'] == 42
+
+    def test_sum_new_property_added(self):
+        graph = self._make_graph()
+        edges2 = pd.DataFrame({'src': [1], 'tgt': [2], 'new_prop': [42]})
+        graph.add_connections(edges2, 'LINK', 'Node', 'src', 'Node', 'tgt',
+                              columns=['new_prop'], conflict_handling='sum')
+        result = graph.cypher(
+            "MATCH (:Node {id: 1})-[r:LINK]->(:Node {id: 2}) RETURN r.weight, r.new_prop"
+        )
+        assert result[0]['r.weight'] == 10  # unchanged
+        assert result[0]['r.new_prop'] == 42
+
+    def test_sum_on_nodes_behaves_as_update(self):
+        graph = KnowledgeGraph()
+        df1 = pd.DataFrame({'id': [1], 'name': ['A'], 'v': [10]})
+        df2 = pd.DataFrame({'id': [1], 'name': ['A'], 'v': [20]})
+        graph.add_nodes(df1, 'Node', 'id', 'name')
+        graph.add_nodes(df2, 'Node', 'id', 'name', conflict_handling='sum')
+        result = graph.cypher("MATCH (n:Node {id: 1}) RETURN n.v")
+        assert result[0]['n.v'] == 20  # overwrite, not 30
+
+
+class TestQueryModeParamValidation:
+    """Data-mode-only params should raise errors in query mode."""
+
+    def _make_graph(self):
+        graph = KnowledgeGraph()
+        nodes = pd.DataFrame({'id': [1, 2], 'name': ['A', 'B']})
+        graph.add_nodes(nodes, 'Node', 'id', 'name')
+        return graph
+
+    def test_columns_rejected_in_query_mode(self):
+        graph = self._make_graph()
+        with pytest.raises(ValueError, match="columns.*data mode"):
+            graph.add_connections(
+                None, 'LINK', 'Node', 'src', 'Node', 'tgt',
+                query="MATCH (a:Node {id: 1}), (b:Node {id: 2}) RETURN a.id AS src, b.id AS tgt",
+                columns=['src'],
+            )
+
+    def test_skip_columns_rejected_in_query_mode(self):
+        graph = self._make_graph()
+        with pytest.raises(ValueError, match="skip_columns.*data mode"):
+            graph.add_connections(
+                None, 'LINK', 'Node', 'src', 'Node', 'tgt',
+                query="MATCH (a:Node {id: 1}), (b:Node {id: 2}) RETURN a.id AS src, b.id AS tgt",
+                skip_columns=['tgt'],
+            )
+
+    def test_column_types_rejected_in_query_mode(self):
+        graph = self._make_graph()
+        with pytest.raises(ValueError, match="column_types.*data mode"):
+            graph.add_connections(
+                None, 'LINK', 'Node', 'src', 'Node', 'tgt',
+                query="MATCH (a:Node {id: 1}), (b:Node {id: 2}) RETURN a.id AS src, b.id AS tgt",
+                column_types={'src': 'integer'},
+            )
