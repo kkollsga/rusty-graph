@@ -7,7 +7,7 @@ or any other KGLite graph.
 
 Tools:
     graph_overview  — progressive schema disclosure (types, connections, Cypher ref)
-    cypher_query    — run any Cypher query (returns up to 200 rows)
+    cypher_query    — run any Cypher query (up to 15 rows inline, FORMAT CSV for full export)
     bug_report      — file a timestamped Cypher bug report
 
 Code graph tools (auto-enabled when the graph has Function/Class nodes):
@@ -32,6 +32,9 @@ Claude Desktop config:
 
 import argparse
 import sys
+import threading
+from datetime import datetime
+from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 
 import kglite
@@ -50,6 +53,8 @@ if not graph_path.exists():
     print(f"ERROR: {graph_path} not found.", file=sys.stderr)
     sys.exit(1)
 
+TEMP_DIR = graph_path.parent / "temp"
+
 graph = kglite.load(str(graph_path))
 
 if args.embedder:
@@ -64,6 +69,33 @@ if args.embedder:
             return self._model.encode(texts, show_progress_bar=False).tolist()
 
     graph.set_embedder(Embedder(args.embedder))
+
+# -- CSV file server -------------------------------------------------------
+
+_file_server_port = None
+_csv_hint_shown = False
+
+
+def _ensure_file_server():
+    """Start a background HTTP server serving temp/ files on a random port."""
+    global _file_server_port
+    if _file_server_port is not None:
+        return _file_server_port
+    TEMP_DIR.mkdir(exist_ok=True)
+
+    class CORSHandler(SimpleHTTPRequestHandler):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, directory=str(TEMP_DIR), **kw)
+
+        def end_headers(self):
+            self.send_header("Access-Control-Allow-Origin", "*")
+            super().end_headers()
+
+    server = HTTPServer(("127.0.0.1", 0), CORSHandler)
+    _file_server_port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return _file_server_port
+
 
 # -- MCP server ------------------------------------------------------------
 
@@ -101,20 +133,39 @@ def graph_overview(
 
 @mcp.tool()
 def cypher_query(query: str) -> str:
-    """Run a Cypher query against the knowledge graph. Returns up to 200 rows.
-
-    Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, WITH, OPTIONAL MATCH,
-    UNWIND, UNION, CREATE, SET, DELETE, MERGE, aggregations, path patterns,
-    CALL procedures (pagerank, louvain, etc.), and spatial/temporal functions.
-    Call graph_overview() first if you need the schema."""
+    """Run a Cypher query against the knowledge graph. Returns up to 15 rows
+    inline. Append FORMAT CSV to export full results to a CSV file (no row
+    limit). Call graph_overview() first if you need the schema."""
     try:
         result = graph.cypher(query)
+        if isinstance(result, str):  # FORMAT CSV returns a string
+            TEMP_DIR.mkdir(exist_ok=True)
+            filename = f"data-{datetime.now():%Y%m%d-%H%M%S}.csv"
+            (TEMP_DIR / filename).write_text(result)
+            port = _ensure_file_server()
+            url = f"http://localhost:{port}/{filename}"
+            rel_path = f"./temp/{filename}"
+            global _csv_hint_shown
+            if not _csv_hint_shown:
+                _csv_hint_shown = True
+                return (
+                    f"CSV exported: {url}\n\n"
+                    f"⚠️ DO NOT call read_source to load this data into context.\n"
+                    f"The CSV URL is served locally with CORS enabled — use fetch() in a generated\n"
+                    f"HTML file to load it at runtime. Do not read the data and hardcode it.\n"
+                    f"read_source is only for inspecting column names or small row slices.\n\n"
+                    f"read_source(file_path='{rel_path}') — add rows=[0,4] to inspect structure only."
+                )
+            return (
+                f"CSV exported: {url}\n"
+                f"read_source(file_path='{rel_path}') — add rows=[0,4] to inspect structure only."
+            )
         if len(result) == 0:
             return "No results."
-        rows = [str(dict(row)) for row in result[:200]]
+        rows = [str(dict(row)) for row in result[:15]]
         header = f"{len(result)} row(s)"
-        if len(result) > 200:
-            header += " (showing first 200)"
+        if len(result) > 15:
+            header += " (showing first 15)"
         return header + ":\n" + "\n".join(rows)
     except Exception as e:
         return f"Cypher error: {e}"

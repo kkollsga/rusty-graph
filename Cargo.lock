@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "kglite"
-version = "0.5.86"
+version = "0.5.88"
 dependencies = [
  "bincode",
  "chrono",

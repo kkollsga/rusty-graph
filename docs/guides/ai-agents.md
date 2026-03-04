@@ -20,32 +20,7 @@ prompt = f"You have a knowledge graph:\n{xml}\nAnswer the user's question using 
 
 ## MCP Server
 
-Expose the graph to any MCP-compatible agent (Claude, etc.) with a thin server:
-
-```python
-from mcp.server.fastmcp import FastMCP
-import kglite
-
-graph = kglite.load("my_graph.kgl")
-mcp = FastMCP("knowledge-graph")
-
-@mcp.tool()
-def describe(types: list[str] | None = None) -> str:
-    """Get the graph schema and Cypher reference."""
-    return graph.describe(types=types)
-
-@mcp.tool()
-def query(cypher: str) -> str:
-    """Run a Cypher query and return results."""
-    result = graph.cypher(cypher, to_df=True)
-    return result.to_markdown()
-
-mcp.run(transport="stdio")
-```
-
-The agent calls `describe()` once to learn the schema, then uses `query()` for everything — traversals, aggregations, filtering, and semantic search via `text_score()`. For large graphs, call `describe(types=['Field', 'Well'])` to drill into specific types.
-
-For code graphs, additional tools make exploration easier — see `examples/mcp_server.py` for a full example with `find_entity`, `read_source`, and `entity_context` tools.
+Expose the graph to any MCP-compatible agent (Claude, etc.) with a thin server. See the [MCP Servers guide](mcp-servers.md) for a complete walkthrough — server setup, tool patterns, FORMAT CSV export, security, and a copy-paste template.
 
 ## Adding Semantic Search (5-Minute Setup)
 

@@ -43,6 +43,7 @@ guides/timeseries
 guides/graph-algorithms
 guides/import-export
 guides/ai-agents
+guides/mcp-servers
 guides/code-tree
 guides/recipes
 ```
