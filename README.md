@@ -1,30 +1,25 @@
-# KGLite
+# KGLite — Lightweight Knowledge Graph for Python
 
 [![PyPI version](https://img.shields.io/pypi/v/kglite)](https://pypi.org/project/kglite/)
 [![Python versions](https://img.shields.io/pypi/pyversions/kglite)](https://pypi.org/project/kglite/)
 [![License: MIT](https://img.shields.io/pypi/l/kglite)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
+[![Docs](https://img.shields.io/readthedocs/kglite)](https://kglite.readthedocs.io)
 
-A knowledge graph that runs inside your Python process. Load data, query with Cypher, do semantic search — no server, no setup, no infrastructure.
+An embedded, in-memory knowledge graph database for Python — built in Rust for speed, with a Cypher query engine, semantic search, and first-class support for RAG pipelines and AI agents. No server, no setup, no infrastructure. Just `pip install kglite` and go.
 
-> **Two APIs:** Use **Cypher** for querying, mutations, and semantic search. Use the **fluent API** (`add_nodes` / `add_connections`) for bulk-loading DataFrames. Most agent and application code only needs `cypher()`.
+## Why KGLite?
 
-| | |
-|---|---|
-| Embedded, in-process | No server, no network; `import` and go |
-| In-memory | Persistence via `save()`/`load()` snapshots |
-| Cypher subset | Querying + mutations + `text_score()` for semantic search |
-| Single-label nodes | Each node has exactly one type |
-| Fluent bulk loading | Import DataFrames with `add_nodes()` / `add_connections()` |
+- **Zero infrastructure** — runs inside your Python process. No database server to install, configure, or maintain.
+- **Fast** — Rust core (via PyO3 + petgraph) with zero-copy where possible. Load millions of nodes without leaving Python.
+- **Query with Cypher** — familiar graph query language for pattern matching, mutations, aggregations, and traversals.
+- **Built for AI** — semantic search with `text_score()`, schema introspection via `describe()`, and a ready-made MCP server for LLM tool use.
+- **DataFrames in, DataFrames out** — bulk-load from pandas, query results as DataFrames. Fits naturally into data science workflows.
 
-**Requirements:** Python 3.10+ (CPython) | macOS (ARM/Intel), Linux (x86_64/aarch64), Windows (x86_64) | `pandas >= 1.5`
+## Quick Start
 
 ```bash
 pip install kglite
 ```
-
----
-
-## Quick Start — [Cypher guide](https://kglite.readthedocs.io/en/latest/guides/cypher.html)
 
 ```python
 import kglite
@@ -56,97 +51,76 @@ graph.save("my_graph.kgl")
 loaded = kglite.load("my_graph.kgl")
 ```
 
-### Bulk Loading from DataFrames — [docs](https://kglite.readthedocs.io/en/latest/guides/data-loading.html)
+## Use Cases
+
+### RAG & Retrieval Pipelines
+
+Store documents, chunks, and entities as a knowledge graph. Use `text_score()` for semantic similarity search and Cypher for structured retrieval — combine both for hybrid RAG.
 
 ```python
-import pandas as pd
-
-users_df = pd.DataFrame({
-    'user_id': [1001, 1002, 1003],
-    'name': ['Alice', 'Bob', 'Charlie'],
-    'age': [28, 35, 42]
-})
-graph.add_nodes(data=users_df, node_type='User', unique_id_field='user_id', node_title_field='name')
-```
-
-### Blueprint Loading (CSV → Graph) — [docs](https://kglite.readthedocs.io/en/latest/guides/blueprints.html)
-
-```python
-import kglite
-
-# Define a blueprint.json mapping CSVs to nodes and connections:
-# {
-#   "settings": {"root": "./data"},
-#   "nodes": {
-#     "Person": {
-#       "csv": "persons.csv", "pk": "person_id", "title": "name",
-#       "properties": {"age": "int", "city": "string"},
-#       "connections": {
-#         "junction_edges": {
-#           "KNOWS": {"csv": "knows.csv", "source_fk": "person_id",
-#                     "target": "Person", "target_fk": "friend_id"}
-#         }
-#       }
-#     }
-#   }
-# }
-
-graph = kglite.from_blueprint("blueprint.json")
-```
-
-### Code Review (Parse a Codebase) — [docs](https://kglite.readthedocs.io/en/latest/guides/code-tree.html)
-
-```python
-from kglite.code_tree import build
-
-graph = build(".")  # auto-detects pyproject.toml / Cargo.toml
-
-# Find the most-called functions
 graph.cypher("""
-    MATCH (caller:Function)-[:CALLS]->(f:Function)
-    RETURN f.name AS function, count(caller) AS callers
-    ORDER BY callers DESC LIMIT 10
-""")
-
-# Explore code
-graph.find("execute")              # search by name
-graph.source("execute_query")      # read source code
-graph.context("KnowledgeGraph")    # see struct with methods
+    MATCH (c:Chunk)
+    RETURN c.text, text_score(c.embedding, $query_vec) AS score
+    ORDER BY score DESC LIMIT 5
+""", params={"query_vec": query_embedding})
 ```
 
-### AI Agent Integration — [docs](https://kglite.readthedocs.io/en/latest/guides/ai-agents.html)
+### AI Agent Memory & Tool Use
+
+Give LLM agents a structured, queryable memory. `describe()` generates a progressive-disclosure schema that agents can reason over, and the included MCP server exposes the graph as a tool.
 
 ```python
-xml = graph.describe()  # progressive-disclosure schema for agents
+xml = graph.describe()  # schema for agent context
 prompt = f"You have a knowledge graph:\n{xml}\nAnswer using graph.cypher()."
 ```
 
----
+### Data Exploration & Analysis
+
+Load CSVs or DataFrames, explore relationships, run graph algorithms (shortest path, centrality, community detection), and export results — all without leaving your notebook.
+
+```python
+graph.add_nodes(data=users_df, node_type='User', unique_id_field='user_id', node_title_field='name')
+graph.cypher("MATCH path = shortestPath((a:User {name:'Alice'})-[*]-(b:User {name:'Eve'})) RETURN path")
+```
+
+### Codebase Analysis
+
+Parse Python and Rust codebases into a knowledge graph with functions, classes, calls, and imports. Search, trace dependencies, and review code structure.
+
+```python
+from kglite.code_tree import build
+graph = build(".")
+graph.cypher("MATCH (f:Function) RETURN f.name, f.file ORDER BY f.name")
+```
+
+## Key Features
+
+| Feature | Description |
+|---|---|
+| **Cypher queries** | MATCH, CREATE, SET, DELETE, MERGE, aggregations, ORDER BY, LIMIT, SKIP |
+| **Semantic search** | Vector embeddings + `text_score()` for similarity ranking |
+| **Graph algorithms** | Shortest path, centrality, community detection, clustering |
+| **Spatial** | Coordinates, WKT geometry, distance and containment queries |
+| **Timeseries** | Time-indexed data with `ts_*()` Cypher functions |
+| **Bulk loading** | Fluent API (`add_nodes` / `add_connections`) for DataFrames |
+| **Blueprints** | Declarative CSV-to-graph loading via JSON config |
+| **Import/Export** | Save/load snapshots, GraphML, CSV export |
+| **AI integration** | `describe()` introspection, MCP server, agent prompts |
+| **Code analysis** | Parse codebases via tree-sitter (`kglite.code_tree`) |
 
 ## Documentation
 
-Full documentation is available at **[kglite.readthedocs.io](https://kglite.readthedocs.io)**.
+Full docs at **[kglite.readthedocs.io](https://kglite.readthedocs.io)**:
 
-| Topic | Description |
-|---|---|
-| [Getting Started](https://kglite.readthedocs.io/en/latest/getting-started.html) | Installation, quick start, DataFrame loading |
-| [Core Concepts](https://kglite.readthedocs.io/en/latest/core-concepts.html) | Nodes, relationships, selections, return types |
-| [Cypher Guide](https://kglite.readthedocs.io/en/latest/guides/cypher.html) | Queries, mutations, transactions, parameters |
-| [Cypher Reference](https://kglite.readthedocs.io/en/latest/reference/cypher-reference.html) | Full reference for every clause and function |
-| [Data Loading](https://kglite.readthedocs.io/en/latest/guides/data-loading.html) | Fluent API, conflict handling, batch updates |
-| [Blueprints](https://kglite.readthedocs.io/en/latest/guides/blueprints.html) | Declarative CSV-to-graph loading via JSON |
-| [Querying](https://kglite.readthedocs.io/en/latest/guides/querying.html) | Filtering, traversal, schema introspection |
-| [Fluent API Reference](https://kglite.readthedocs.io/en/latest/reference/fluent-api.html) | Full reference for every fluent method |
-| [Semantic Search](https://kglite.readthedocs.io/en/latest/guides/semantic-search.html) | Embeddings, vector search, `text_score()` |
-| [AI Agents](https://kglite.readthedocs.io/en/latest/guides/ai-agents.html) | MCP server, `describe()`, agent prompts |
-| [Spatial](https://kglite.readthedocs.io/en/latest/guides/spatial.html) | Coordinates, geometry, distance, containment |
-| [Timeseries](https://kglite.readthedocs.io/en/latest/guides/timeseries.html) | Time-indexed data, `ts_*()` Cypher functions |
-| [Graph Algorithms](https://kglite.readthedocs.io/en/latest/guides/graph-algorithms.html) | Shortest path, centrality, community detection, clustering |
-| [Import & Export](https://kglite.readthedocs.io/en/latest/guides/import-export.html) | Save/load, GraphML, CSV, indexes, performance |
-| [Code Tree](https://kglite.readthedocs.io/en/latest/guides/code-tree.html) | Parse codebases into knowledge graphs |
-| [API Reference](https://kglite.readthedocs.io/en/latest/autoapi/kglite/index.html) | Auto-generated from type stubs |
+- [Getting Started](https://kglite.readthedocs.io/en/latest/getting-started.html) — installation, first graph, core concepts
+- [Cypher Guide](https://kglite.readthedocs.io/en/latest/guides/cypher.html) — queries, mutations, parameters
+- [Semantic Search](https://kglite.readthedocs.io/en/latest/guides/semantic-search.html) — embeddings, vector search
+- [AI Agents](https://kglite.readthedocs.io/en/latest/guides/ai-agents.html) — MCP server, `describe()`, agent prompts
+- [API Reference](https://kglite.readthedocs.io/en/latest/autoapi/kglite/index.html) — full auto-generated reference
 
----
+## Requirements
+
+Python 3.10+ (CPython) | macOS (ARM/Intel), Linux (x86_64/aarch64), Windows (x86_64) | `pandas >= 1.5`
 
 ## License
 
