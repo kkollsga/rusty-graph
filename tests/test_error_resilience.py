@@ -6,19 +6,22 @@ the original graph data was lost.
 """
 
 import pandas as pd
-import pytest
+
 import kglite
+import pytest
 
 
 @pytest.fixture
 def graph_with_data():
     """Create a graph with some initial data to verify preservation."""
     g = kglite.KnowledgeGraph()
-    df = pd.DataFrame({
-        "user_id": [1, 2, 3],
-        "name": ["Alice", "Bob", "Charlie"],
-        "age": [28, 35, 42],
-    })
+    df = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3],
+            "name": ["Alice", "Bob", "Charlie"],
+            "age": [28, 35, 42],
+        }
+    )
     g.add_nodes(data=df, node_type="Person", unique_id_field="user_id", node_title_field="name")
 
     edges_df = pd.DataFrame({"source_id": [1, 2], "target_id": [2, 3]})
@@ -131,8 +134,15 @@ class TestBulkLoadErrorResilience:
 
         # add_nodes_bulk with bad data
         with pytest.raises(Exception):
-            g.add_nodes_bulk([
-                {"node_type": "Bad", "unique_id_field": "missing_id", "node_title_field": "name", "data": pd.DataFrame({"x": [1]})}
-            ])
+            g.add_nodes_bulk(
+                [
+                    {
+                        "node_type": "Bad",
+                        "unique_id_field": "missing_id",
+                        "node_title_field": "name",
+                        "data": pd.DataFrame({"x": [1]}),
+                    }
+                ]
+            )
 
         assert g.graph_info()["node_count"] == 3

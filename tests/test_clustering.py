@@ -701,7 +701,6 @@ class TestBugReport:
         """Without path= argument, writes to reported_bugs.md in cwd."""
         monkeypatch.chdir(tmp_path)
         graph.bug_report("q", "r", "e", "d")
-        import pathlib
 
         assert (tmp_path / "reported_bugs.md").exists()
 

@@ -1,0 +1,28 @@
+# Stubtest allowlist for KGLite
+# PyO3 classes cannot be subclassed (@final) and are disjoint bases.
+# These are structural PyO3 artifacts, not stub errors.
+kglite.KnowledgeGraph
+kglite.ResultIter
+kglite.ResultView
+kglite.Transaction
+
+# EmbeddingModel is a typing.Protocol defined in stubs for type-checking.
+# It doesn't exist at runtime — users provide any object with the right methods.
+kglite.EmbeddingModel
+
+# PyO3 uses Option<T> for optional parameters, showing default=None at runtime.
+# The stubs document the effective defaults used in Rust (e.g., top_k=10, metric='cosine').
+# These are intentional — stubs are more informative for users than raw None defaults.
+kglite.KnowledgeGraph.embed_texts
+kglite.KnowledgeGraph.search_text
+kglite.KnowledgeGraph.vector_search
+
+# PyO3 uses Ellipsis (...) as sentinel for "not provided" vs explicit None.
+# Stubs use None as the default since Ellipsis isn't a valid type annotation default.
+kglite.KnowledgeGraph.collect_children
+kglite.KnowledgeGraph.traverse
+
+# Overloaded methods: stubtest compares against runtime's single dispatch signature.
+# The overloads are correct for type-checking but structurally differ from runtime.
+kglite.KnowledgeGraph.sample
+kglite.KnowledgeGraph.embeddings

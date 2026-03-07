@@ -1,34 +1,61 @@
 """Go language parser using tree-sitter-go."""
 
 from pathlib import Path
-from tree_sitter import Language, Parser
-import tree_sitter_go as ts_go
 
-from .base import LanguageParser, node_text, count_lines, extract_comment_annotations, get_type_parameters
+import tree_sitter_go as ts_go
+from tree_sitter import Language, Parser
+
+from .base import LanguageParser, count_lines, extract_comment_annotations, get_type_parameters, node_text
 from .models import (
-    ParseResult, FileInfo, FunctionInfo, ClassInfo,
-    EnumInfo, InterfaceInfo, TypeRelationship,
-    AttributeInfo, ConstantInfo,
+    AttributeInfo,
+    ClassInfo,
+    ConstantInfo,
+    FileInfo,
+    FunctionInfo,
+    InterfaceInfo,
+    ParseResult,
+    TypeRelationship,
 )
 
 GO_LANGUAGE = Language(ts_go.language())
 
-GO_NOISE_NAMES: frozenset[str] = frozenset({
-    # Builtins
-    "len", "cap", "append", "copy", "delete", "make", "new", "close",
-    "panic", "recover", "print", "println",
-    # Common interface methods
-    "Error", "String",
-    # fmt package
-    "Format", "Sprintf", "Fprintf", "Errorf", "Printf", "Println",
-    "Print", "Fprintln", "Fprint",
-    # log package
-    "Fatal", "Fatalf", "Fatalln",
-})
+GO_NOISE_NAMES: frozenset[str] = frozenset(
+    {
+        # Builtins
+        "len",
+        "cap",
+        "append",
+        "copy",
+        "delete",
+        "make",
+        "new",
+        "close",
+        "panic",
+        "recover",
+        "print",
+        "println",
+        # Common interface methods
+        "Error",
+        "String",
+        # fmt package
+        "Format",
+        "Sprintf",
+        "Fprintf",
+        "Errorf",
+        "Printf",
+        "Println",
+        "Print",
+        "Fprintln",
+        "Fprint",
+        # log package
+        "Fatal",
+        "Fatalf",
+        "Fatalln",
+    }
+)
 
 
 class GoParser(LanguageParser):
-
     @property
     def language_name(self) -> str:
         return "go"
@@ -69,11 +96,9 @@ class GoParser(LanguageParser):
             break
         return "\n".join(doc_lines) if doc_lines else None
 
-    def _get_name(self, node, source: bytes,
-                  name_type: str = "identifier") -> str | None:
+    def _get_name(self, node, source: bytes, name_type: str = "identifier") -> str | None:
         for child in node.children:
-            if child.type in (name_type, "type_identifier",
-                              "field_identifier"):
+            if child.type in (name_type, "type_identifier", "field_identifier"):
                 return node_text(child, source)
         return None
 
@@ -104,9 +129,13 @@ class GoParser(LanguageParser):
 
     # Node types that create nested function scopes — calls inside these
     # belong to the nested function/closure, not the enclosing one.
-    _NESTED_SCOPES = frozenset({
-        "function_declaration", "method_declaration", "func_literal",
-    })
+    _NESTED_SCOPES = frozenset(
+        {
+            "function_declaration",
+            "method_declaration",
+            "func_literal",
+        }
+    )
 
     def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
         """Extract function/method names called directly within a block.
@@ -158,17 +187,14 @@ class GoParser(LanguageParser):
                         return node_text(sub, source)
         return "main"
 
-    def _file_to_module_path(self, filepath: Path, src_root: Path,
-                              package_name: str) -> str:
+    def _file_to_module_path(self, filepath: Path, src_root: Path, package_name: str) -> str:
         rel = filepath.relative_to(src_root)
         parts = list(rel.parent.parts) if rel.parent != Path(".") else []
         if parts:
             return f"{package_name}/{'/'.join(parts)}"
         return package_name
 
-    def _extract_struct_fields(self, node, source: bytes,
-                                owner_qname: str,
-                                rel_path: str) -> list[AttributeInfo]:
+    def _extract_struct_fields(self, node, source: bytes, owner_qname: str, rel_path: str) -> list[AttributeInfo]:
         """Extract fields from a struct type's field_declaration_list."""
         attrs: list[AttributeInfo] = []
         for child in node.children:
@@ -181,8 +207,8 @@ class GoParser(LanguageParser):
                             if fc.type == "field_identifier":
                                 names.append(node_text(fc, source))
                             elif fc.type == "type_identifier" or (
-                                fc.is_named and fc.type not in (
-                                    "field_identifier", "tag", "comment")):
+                                fc.is_named and fc.type not in ("field_identifier", "tag", "comment")
+                            ):
                                 if type_ann is None and not names:
                                     # Embedded field: type name is also field name
                                     text = node_text(fc, source)
@@ -194,15 +220,17 @@ class GoParser(LanguageParser):
                                 elif type_ann is None:
                                     type_ann = node_text(fc, source)
                         for name in names:
-                            attrs.append(AttributeInfo(
-                                name=name,
-                                qualified_name=f"{owner_qname}.{name}",
-                                owner_qualified_name=owner_qname,
-                                type_annotation=type_ann,
-                                visibility=self._get_visibility(name),
-                                file_path=rel_path,
-                                line_number=field.start_point[0] + 1,
-                            ))
+                            attrs.append(
+                                AttributeInfo(
+                                    name=name,
+                                    qualified_name=f"{owner_qname}.{name}",
+                                    owner_qualified_name=owner_qname,
+                                    type_annotation=type_ann,
+                                    visibility=self._get_visibility(name),
+                                    file_path=rel_path,
+                                    line_number=field.start_point[0] + 1,
+                                )
+                            )
         return attrs
 
     def _get_receiver_type(self, node, source: bytes) -> str | None:
@@ -223,9 +251,7 @@ class GoParser(LanguageParser):
                 break  # Only check first parameter_list
         return None
 
-    def _get_interface_methods(self, node, source: bytes,
-                                module_path: str,
-                                rel_path: str) -> list[str]:
+    def _get_interface_methods(self, node, source: bytes, module_path: str, rel_path: str) -> list[str]:
         """Extract method signature names from an interface type."""
         methods: list[str] = []
         for child in node.children:
@@ -237,9 +263,9 @@ class GoParser(LanguageParser):
 
     # ── Parsing ─────────────────────────────────────────────────────────
 
-    def _parse_function(self, node, source: bytes, module_path: str,
-                        rel_path: str, is_method: bool = False,
-                        owner: str | None = None) -> FunctionInfo:
+    def _parse_function(
+        self, node, source: bytes, module_path: str, rel_path: str, is_method: bool = False, owner: str | None = None
+    ) -> FunctionInfo:
         name = self._get_name(node, source, "identifier") or "unknown"
         if owner:
             prefix = f"{module_path}.{owner}"
@@ -276,8 +302,7 @@ class GoParser(LanguageParser):
 
         rel_path = str(filepath.relative_to(src_root))
         package_name = self._get_package_name(root, source)
-        module_path = self._file_to_module_path(filepath, src_root,
-                                                 package_name)
+        module_path = self._file_to_module_path(filepath, src_root, package_name)
         loc = count_lines(source)
 
         file_info = FileInfo(
@@ -295,31 +320,41 @@ class GoParser(LanguageParser):
 
         for child in root.children:
             if child.type == "function_declaration":
-                result.functions.append(self._parse_function(
-                    child, source, module_path, rel_path,
-                ))
+                result.functions.append(
+                    self._parse_function(
+                        child,
+                        source,
+                        module_path,
+                        rel_path,
+                    )
+                )
 
             elif child.type == "method_declaration":
                 receiver_type = self._get_receiver_type(child, source)
                 fn = self._parse_function(
-                    child, source, module_path, rel_path,
-                    is_method=True, owner=receiver_type,
+                    child,
+                    source,
+                    module_path,
+                    rel_path,
+                    is_method=True,
+                    owner=receiver_type,
                 )
                 result.functions.append(fn)
                 # Create inherent relationship for method ownership
                 if receiver_type:
-                    result.type_relationships.append(TypeRelationship(
-                        source_type=receiver_type,
-                        target_type=None,
-                        relationship="inherent",
-                        methods=[fn],
-                    ))
+                    result.type_relationships.append(
+                        TypeRelationship(
+                            source_type=receiver_type,
+                            target_type=None,
+                            relationship="inherent",
+                            methods=[fn],
+                        )
+                    )
 
             elif child.type == "type_declaration":
                 for spec in child.children:
                     if spec.type == "type_spec":
-                        name = self._get_name(spec, source,
-                                              "type_identifier")
+                        name = self._get_name(spec, source, "type_identifier")
                         if not name:
                             continue
                         qname = f"{module_path}.{name}"
@@ -333,12 +368,18 @@ class GoParser(LanguageParser):
                             if sub.type == "type_identifier" and not saw_name:
                                 saw_name = True
                                 continue
-                            if sub.type in ("struct_type", "interface_type",
-                                            "type_identifier",
-                                            "qualified_type",
-                                            "pointer_type", "slice_type",
-                                            "map_type", "channel_type",
-                                            "function_type", "array_type"):
+                            if sub.type in (
+                                "struct_type",
+                                "interface_type",
+                                "type_identifier",
+                                "qualified_type",
+                                "pointer_type",
+                                "slice_type",
+                                "map_type",
+                                "channel_type",
+                                "function_type",
+                                "array_type",
+                            ):
                                 type_node = sub
                                 break
 
@@ -346,33 +387,35 @@ class GoParser(LanguageParser):
                             continue
 
                         if type_node.type == "struct_type":
-                            result.classes.append(ClassInfo(
-                                name=name,
-                                qualified_name=qname,
-                                kind="struct",
-                                visibility=self._get_visibility(name),
-                                file_path=rel_path,
-                                line_number=child.start_point[0] + 1,
-                                end_line=child.end_point[0] + 1,
-                                docstring=docstring,
-                                type_parameters=get_type_parameters(spec, source, "type_parameter_list"),
-                            ))
-                            result.attributes.extend(
-                                self._extract_struct_fields(
-                                    type_node, source, qname, rel_path))
+                            result.classes.append(
+                                ClassInfo(
+                                    name=name,
+                                    qualified_name=qname,
+                                    kind="struct",
+                                    visibility=self._get_visibility(name),
+                                    file_path=rel_path,
+                                    line_number=child.start_point[0] + 1,
+                                    end_line=child.end_point[0] + 1,
+                                    docstring=docstring,
+                                    type_parameters=get_type_parameters(spec, source, "type_parameter_list"),
+                                )
+                            )
+                            result.attributes.extend(self._extract_struct_fields(type_node, source, qname, rel_path))
 
                         elif type_node.type == "interface_type":
-                            result.interfaces.append(InterfaceInfo(
-                                name=name,
-                                qualified_name=qname,
-                                kind="interface",
-                                visibility=self._get_visibility(name),
-                                file_path=rel_path,
-                                line_number=child.start_point[0] + 1,
-                                end_line=child.end_point[0] + 1,
-                                docstring=docstring,
-                                type_parameters=get_type_parameters(spec, source, "type_parameter_list"),
-                            ))
+                            result.interfaces.append(
+                                InterfaceInfo(
+                                    name=name,
+                                    qualified_name=qname,
+                                    kind="interface",
+                                    visibility=self._get_visibility(name),
+                                    file_path=rel_path,
+                                    line_number=child.start_point[0] + 1,
+                                    end_line=child.end_point[0] + 1,
+                                    docstring=docstring,
+                                    type_parameters=get_type_parameters(spec, source, "type_parameter_list"),
+                                )
+                            )
                             # Parse interface method specs as functions
                             iface_rel = TypeRelationship(
                                 source_type=qname,
@@ -381,8 +424,7 @@ class GoParser(LanguageParser):
                             )
                             for ms in type_node.children:
                                 if ms.type == "method_spec":
-                                    fn_name = self._get_name(
-                                        ms, source, "field_identifier")
+                                    fn_name = self._get_name(ms, source, "field_identifier")
                                     if fn_name:
                                         fn = FunctionInfo(
                                             name=fn_name,
@@ -405,16 +447,18 @@ class GoParser(LanguageParser):
 
                         else:
                             # Type alias: type Foo = Bar or type Foo Bar
-                            result.constants.append(ConstantInfo(
-                                name=name,
-                                qualified_name=qname,
-                                kind="type_alias",
-                                type_annotation=node_text(type_node, source),
-                                value_preview=None,
-                                visibility=self._get_visibility(name),
-                                file_path=rel_path,
-                                line_number=child.start_point[0] + 1,
-                            ))
+                            result.constants.append(
+                                ConstantInfo(
+                                    name=name,
+                                    qualified_name=qname,
+                                    kind="type_alias",
+                                    type_annotation=node_text(type_node, source),
+                                    value_preview=None,
+                                    visibility=self._get_visibility(name),
+                                    file_path=rel_path,
+                                    line_number=child.start_point[0] + 1,
+                                )
+                            )
 
             elif child.type == "const_declaration":
                 for spec in child.children:
@@ -429,16 +473,18 @@ class GoParser(LanguageParser):
                                 type_ann = node_text(sub, source)
                             elif sub.type == "expression_list":
                                 val_text = node_text(sub, source)[:100]
-                        result.constants.append(ConstantInfo(
-                            name=name,
-                            qualified_name=f"{module_path}.{name}",
-                            kind="constant",
-                            type_annotation=type_ann,
-                            value_preview=val_text,
-                            visibility=self._get_visibility(name),
-                            file_path=rel_path,
-                            line_number=spec.start_point[0] + 1,
-                        ))
+                        result.constants.append(
+                            ConstantInfo(
+                                name=name,
+                                qualified_name=f"{module_path}.{name}",
+                                kind="constant",
+                                type_annotation=type_ann,
+                                value_preview=val_text,
+                                visibility=self._get_visibility(name),
+                                file_path=rel_path,
+                                line_number=spec.start_point[0] + 1,
+                            )
+                        )
 
             elif child.type == "var_declaration":
                 for spec in child.children:
@@ -453,16 +499,18 @@ class GoParser(LanguageParser):
                                 type_ann = node_text(sub, source)
                             elif sub.type == "expression_list":
                                 val_text = node_text(sub, source)[:100]
-                        result.constants.append(ConstantInfo(
-                            name=name,
-                            qualified_name=f"{module_path}.{name}",
-                            kind="static",
-                            type_annotation=type_ann,
-                            value_preview=val_text,
-                            visibility=self._get_visibility(name),
-                            file_path=rel_path,
-                            line_number=spec.start_point[0] + 1,
-                        ))
+                        result.constants.append(
+                            ConstantInfo(
+                                name=name,
+                                qualified_name=f"{module_path}.{name}",
+                                kind="static",
+                                type_annotation=type_ann,
+                                value_preview=val_text,
+                                visibility=self._get_visibility(name),
+                                file_path=rel_path,
+                                line_number=spec.start_point[0] + 1,
+                            )
+                        )
 
             elif child.type == "import_declaration":
                 for spec in child.children:

@@ -13,52 +13,62 @@ import tempfile
 from pathlib import Path
 
 import pandas as pd
+
 import kglite
 
 # -- Data (inline DataFrames) ----------------------------------------------
 
-regions = pd.DataFrame({
-    "id": [1, 2, 3],
-    "title": ["Northern Region", "Central Region", "Southern Region"],
-    "area_km2": [45000, 32000, 28000],
-})
+regions = pd.DataFrame(
+    {
+        "id": [1, 2, 3],
+        "title": ["Northern Region", "Central Region", "Southern Region"],
+        "area_km2": [45000, 32000, 28000],
+    }
+)
 
-facilities = pd.DataFrame({
-    "id": list(range(10, 22)),
-    "title": [f"Facility {chr(65 + i)}" for i in range(12)],
-    "facility_type": ["plant", "depot", "plant", "hub"] * 3,
-    "latitude": [62.0, 62.5, 63.0, 63.5, 64.0, 64.5,
-                 59.0, 59.5, 60.0, 60.5, 61.0, 61.5],
-    "longitude": [5.0, 5.5, 6.0, 6.5, 7.0, 7.5,
-                  5.0, 5.5, 6.0, 6.5, 7.0, 7.5],
-    "capacity": [500, 200, 800, 1200, 300, 600,
-                 450, 350, 900, 150, 700, 250],
-    "region_id": [1] * 6 + [3] * 3 + [2] * 3,
-})
+facilities = pd.DataFrame(
+    {
+        "id": list(range(10, 22)),
+        "title": [f"Facility {chr(65 + i)}" for i in range(12)],
+        "facility_type": ["plant", "depot", "plant", "hub"] * 3,
+        "latitude": [62.0, 62.5, 63.0, 63.5, 64.0, 64.5, 59.0, 59.5, 60.0, 60.5, 61.0, 61.5],
+        "longitude": [5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5],
+        "capacity": [500, 200, 800, 1200, 300, 600, 450, 350, 900, 150, 700, 250],
+        "region_id": [1] * 6 + [3] * 3 + [2] * 3,
+    }
+)
 
-sensors = pd.DataFrame({
-    "id": list(range(100, 124)),
-    "title": [f"Sensor {i:03d}" for i in range(100, 124)],
-    "sensor_type": (["temperature", "pressure", "flow", "vibration"] * 6),
-    "facility_id": [10 + (i % 12) for i in range(24)],
-})
+sensors = pd.DataFrame(
+    {
+        "id": list(range(100, 124)),
+        "title": [f"Sensor {i:03d}" for i in range(100, 124)],
+        "sensor_type": (["temperature", "pressure", "flow", "vibration"] * 6),
+        "facility_id": [10 + (i % 12) for i in range(24)],
+    }
+)
 
 # Connection data (junction CSVs need source_id / target_id columns)
-located_in = pd.DataFrame({
-    "source_id": facilities["id"],
-    "target_id": facilities["region_id"],
-})
+located_in = pd.DataFrame(
+    {
+        "source_id": facilities["id"],
+        "target_id": facilities["region_id"],
+    }
+)
 
-monitors = pd.DataFrame({
-    "source_id": sensors["id"],
-    "target_id": sensors["facility_id"],
-})
+monitors = pd.DataFrame(
+    {
+        "source_id": sensors["id"],
+        "target_id": sensors["facility_id"],
+    }
+)
 
-pipelines = pd.DataFrame({
-    "source_id": [10, 11, 12, 13, 16, 17, 18],
-    "target_id": [11, 12, 13, 14, 17, 18, 19],
-    "length_km": [45.2, 32.1, 58.7, 41.3, 28.9, 52.4, 36.8],
-})
+pipelines = pd.DataFrame(
+    {
+        "source_id": [10, 11, 12, 13, 16, 17, 18],
+        "target_id": [11, 12, 13, 14, 17, 18, 19],
+        "length_km": [45.2, 32.1, 58.7, 41.3, 28.9, 52.4, 36.8],
+    }
+)
 
 # -- Blueprint definition -------------------------------------------------
 
@@ -175,5 +185,4 @@ for row in graph.cypher("""
     RETURN r.title, count(f) AS facilities, sum(f.capacity) AS total_capacity
     ORDER BY total_capacity DESC
 """):
-    print(f"  {row['r.title']}: {row['facilities']} facilities, "
-          f"capacity {row['total_capacity']}")
+    print(f"  {row['r.title']}: {row['facilities']} facilities, capacity {row['total_capacity']}")

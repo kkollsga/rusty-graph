@@ -1,14 +1,16 @@
 """Tests for bug fixes in v0.5.84."""
 
-import pytest
 import random
-import pandas as pd
-from kglite import KnowledgeGraph
 
+import pandas as pd
+
+import pytest
+from kglite import KnowledgeGraph
 
 # ===========================================================================
 # Bug 2: Edge traversal without ORDER BY returns broken results
 # ===========================================================================
+
 
 @pytest.fixture
 def edge_graph():
@@ -16,13 +18,9 @@ def edge_graph():
     random.seed(42)
     g = KnowledgeGraph()
 
-    g.add_nodes(pd.DataFrame([
-        {"id": i, "name": f"Person_{i}"} for i in range(100)
-    ]), "Person", "id", "name")
+    g.add_nodes(pd.DataFrame([{"id": i, "name": f"Person_{i}"} for i in range(100)]), "Person", "id", "name")
 
-    g.add_nodes(pd.DataFrame([
-        {"id": i, "name": f"Company_{i}"} for i in range(50)
-    ]), "Company", "id", "name")
+    g.add_nodes(pd.DataFrame([{"id": i, "name": f"Company_{i}"} for i in range(50)]), "Company", "id", "name")
 
     edges = []
     for p in range(100):
@@ -32,8 +30,10 @@ def edge_graph():
     g.add_connections(
         data=pd.DataFrame(edges),
         connection_type="WORKS_AT",
-        source_type="Person", source_id_field="person_id",
-        target_type="Company", target_id_field="company_id",
+        source_type="Person",
+        source_id_field="person_id",
+        target_type="Company",
+        target_id_field="company_id",
         columns=["role"],
     )
     return g
@@ -87,27 +87,46 @@ class TestBug2EdgeTraversalWithoutOrderBy:
 # Bug 1: create_connections() silently creates 0 edges
 # ===========================================================================
 
+
 @pytest.fixture
 def simple_graph():
     """Simple graph with Person → Company edges."""
     g = KnowledgeGraph()
-    g.add_nodes(pd.DataFrame([
-        {"id": 1, "name": "Alice"},
-        {"id": 2, "name": "Bob"},
-    ]), "Person", "id", "name")
-    g.add_nodes(pd.DataFrame([
-        {"id": 10, "name": "Acme"},
-        {"id": 20, "name": "Globex"},
-    ]), "Company", "id", "name")
+    g.add_nodes(
+        pd.DataFrame(
+            [
+                {"id": 1, "name": "Alice"},
+                {"id": 2, "name": "Bob"},
+            ]
+        ),
+        "Person",
+        "id",
+        "name",
+    )
+    g.add_nodes(
+        pd.DataFrame(
+            [
+                {"id": 10, "name": "Acme"},
+                {"id": 20, "name": "Globex"},
+            ]
+        ),
+        "Company",
+        "id",
+        "name",
+    )
     g.add_connections(
-        data=pd.DataFrame([
-            {"pid": 1, "cid": 10},
-            {"pid": 1, "cid": 20},
-            {"pid": 2, "cid": 10},
-        ]),
+        data=pd.DataFrame(
+            [
+                {"pid": 1, "cid": 10},
+                {"pid": 1, "cid": 20},
+                {"pid": 2, "cid": 10},
+            ]
+        ),
         connection_type="WORKS_AT",
-        source_type="Person", source_id_field="pid",
-        target_type="Company", target_id_field="cid",
+        source_type="Person",
+        source_id_field="pid",
+        target_type="Company",
+        target_id_field="cid",
     )
     return g
 
@@ -116,26 +135,26 @@ class TestBug1CreateConnections:
     """create_connections() should create edges from the traversal chain."""
 
     def test_create_connections_basic(self, simple_graph):
-        result = simple_graph.select("Person").traverse(
-            "WORKS_AT", target_type="Company"
-        ).create_connections("PERSON_AT")
+        result = (
+            simple_graph.select("Person").traverse("WORKS_AT", target_type="Company").create_connections("PERSON_AT")
+        )
 
         res = result.cypher("MATCH ()-[:PERSON_AT]->() RETURN count(*) AS cnt")
         assert dict(res[0])["cnt"] == 3
 
     def test_create_connections_preserves_existing(self, simple_graph):
-        result = simple_graph.select("Person").traverse(
-            "WORKS_AT", target_type="Company"
-        ).create_connections("PERSON_AT")
+        result = (
+            simple_graph.select("Person").traverse("WORKS_AT", target_type="Company").create_connections("PERSON_AT")
+        )
 
         # Original WORKS_AT edges should still exist
         res = result.cypher("MATCH ()-[:WORKS_AT]->() RETURN count(*) AS cnt")
         assert dict(res[0])["cnt"] == 3
 
     def test_create_connections_correct_pairs(self, simple_graph):
-        result = simple_graph.select("Person").traverse(
-            "WORKS_AT", target_type="Company"
-        ).create_connections("PERSON_AT")
+        result = (
+            simple_graph.select("Person").traverse("WORKS_AT", target_type="Company").create_connections("PERSON_AT")
+        )
 
         res = result.cypher("""
             MATCH (p:Person)-[:PERSON_AT]->(c:Company)
@@ -149,9 +168,9 @@ class TestBug1CreateConnections:
 
     def test_create_connections_different_type_no_conflict(self, simple_graph):
         """Creating edges of type B should not affect existing edges of type A."""
-        result = simple_graph.select("Person").traverse(
-            "WORKS_AT", target_type="Company"
-        ).create_connections("SHORTCUT")
+        result = (
+            simple_graph.select("Person").traverse("WORKS_AT", target_type="Company").create_connections("SHORTCUT")
+        )
 
         # SHORTCUT edges created
         res = result.cypher("MATCH ()-[:SHORTCUT]->() RETURN count(*) AS cnt")
@@ -166,6 +185,7 @@ class TestBug1CreateConnections:
 # Bug 3: describe() documents wrong parameter name
 # ===========================================================================
 
+
 class TestBug3DescribeParameterName:
     def test_describe_fluent_loading_uses_columns(self):
         g = KnowledgeGraph()
@@ -179,18 +199,33 @@ class TestBug3DescribeParameterName:
 # Bug 4: traverse() first arg meaning with method='contains'
 # ===========================================================================
 
+
 class TestBug4TraverseContainsTargetType:
     def test_target_type_kwarg_with_contains_method(self):
         """When method='contains' is used, target_type= should be respected."""
         g = KnowledgeGraph()
-        g.add_nodes(pd.DataFrame([
-            {"id": 1, "name": "RegionA", "wkt_geometry": "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"},
-        ]), "Region", "id", "name")
+        g.add_nodes(
+            pd.DataFrame(
+                [
+                    {"id": 1, "name": "RegionA", "wkt_geometry": "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"},
+                ]
+            ),
+            "Region",
+            "id",
+            "name",
+        )
         g.set_spatial("Region", geometry="wkt_geometry")
 
-        g.add_nodes(pd.DataFrame([
-            {"id": 2, "name": "SiteX", "lat": 5.0, "lon": 5.0},
-        ]), "Site", "id", "name")
+        g.add_nodes(
+            pd.DataFrame(
+                [
+                    {"id": 2, "name": "SiteX", "lat": 5.0, "lon": 5.0},
+                ]
+            ),
+            "Site",
+            "id",
+            "name",
+        )
         g.set_spatial("Site", location=("lat", "lon"))
 
         # This should work: first arg = target node type (current behavior)
@@ -198,7 +233,5 @@ class TestBug4TraverseContainsTargetType:
         assert len(result.collect()) == 1
 
         # Also works with target_type= explicitly
-        result2 = g.select("Region").traverse(
-            target_type="Site", method="contains"
-        )
+        result2 = g.select("Region").traverse(target_type="Site", method="contains")
         assert len(result2.collect()) == 1

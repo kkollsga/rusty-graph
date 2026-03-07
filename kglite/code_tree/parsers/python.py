@@ -1,45 +1,110 @@
 """Python language parser using tree-sitter-python."""
 
-from pathlib import Path
 import re
-from tree_sitter import Language, Parser
-import tree_sitter_python as ts_python
+from pathlib import Path
 
-from .base import LanguageParser, node_text, count_lines, extract_comment_annotations, get_type_parameters
+import tree_sitter_python as ts_python
+from tree_sitter import Language, Parser
+
+from .base import LanguageParser, count_lines, extract_comment_annotations, get_type_parameters, node_text
 from .models import (
-    ParseResult, FileInfo, FunctionInfo, ClassInfo,
-    EnumInfo, InterfaceInfo, TypeRelationship,
-    AttributeInfo, ConstantInfo,
+    AttributeInfo,
+    ClassInfo,
+    ConstantInfo,
+    EnumInfo,
+    FileInfo,
+    FunctionInfo,
+    InterfaceInfo,
+    ParseResult,
+    TypeRelationship,
 )
 
 PY_LANGUAGE = Language(ts_python.language())
 
 # Base classes that indicate an enum
-_ENUM_BASES = frozenset({
-    "Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "auto",
-})
+_ENUM_BASES = frozenset(
+    {
+        "Enum",
+        "IntEnum",
+        "StrEnum",
+        "Flag",
+        "IntFlag",
+        "auto",
+    }
+)
 
 # Base classes that indicate a protocol/interface
-_PROTOCOL_BASES = frozenset({"Protocol",})
+_PROTOCOL_BASES = frozenset(
+    {
+        "Protocol",
+    }
+)
 
-_CONSTANT_RE = re.compile(r'^[A-Z][A-Z_0-9]+$')
+_CONSTANT_RE = re.compile(r"^[A-Z][A-Z_0-9]+$")
 
-PYTHON_NOISE_NAMES: frozenset[str] = frozenset({
-    # Builtins
-    "len", "str", "int", "float", "bool", "list", "dict", "set", "tuple",
-    "print", "isinstance", "issubclass", "type", "range", "enumerate",
-    "zip", "map", "filter", "sorted", "reversed", "any", "all",
-    "min", "max", "sum", "abs", "round", "hash", "id", "repr",
-    "super", "getattr", "setattr", "hasattr", "delattr",
-    "callable", "iter", "next", "open", "format",
-    # Common method names
-    "append", "extend", "update", "pop", "get", "keys", "values", "items",
-    "join", "split", "strip", "replace", "startswith", "endswith",
-})
+PYTHON_NOISE_NAMES: frozenset[str] = frozenset(
+    {
+        # Builtins
+        "len",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "print",
+        "isinstance",
+        "issubclass",
+        "type",
+        "range",
+        "enumerate",
+        "zip",
+        "map",
+        "filter",
+        "sorted",
+        "reversed",
+        "any",
+        "all",
+        "min",
+        "max",
+        "sum",
+        "abs",
+        "round",
+        "hash",
+        "id",
+        "repr",
+        "super",
+        "getattr",
+        "setattr",
+        "hasattr",
+        "delattr",
+        "callable",
+        "iter",
+        "next",
+        "open",
+        "format",
+        # Common method names
+        "append",
+        "extend",
+        "update",
+        "pop",
+        "get",
+        "keys",
+        "values",
+        "items",
+        "join",
+        "split",
+        "strip",
+        "replace",
+        "startswith",
+        "endswith",
+    }
+)
 
 
 class PythonParser(LanguageParser):
-
     @property
     def language_name(self) -> str:
         return "python"
@@ -91,7 +156,7 @@ class PythonParser(LanguageParser):
                         # Strip triple-quote delimiters
                         for delim in ('"""', "'''", '"', "'"):
                             if raw.startswith(delim) and raw.endswith(delim):
-                                return raw[len(delim):-len(delim)].strip()
+                                return raw[len(delim) : -len(delim)].strip()
                         return raw
                 break  # only first statement can be a docstring
             elif child.type != "comment":
@@ -177,9 +242,13 @@ class PythonParser(LanguageParser):
 
     # Node types that create nested function scopes — calls inside these
     # belong to the nested function, not the enclosing one.
-    _NESTED_SCOPES = frozenset({
-        "function_definition", "lambda", "decorated_definition",
-    })
+    _NESTED_SCOPES = frozenset(
+        {
+            "function_definition",
+            "lambda",
+            "decorated_definition",
+        }
+    )
 
     def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
         """Extract function/method names called directly within a block.
@@ -291,9 +360,9 @@ class PythonParser(LanguageParser):
                 flags["is_overload"] = True
         return flags
 
-    def _extract_class_attributes(self, class_node, source: bytes,
-                                   owner_qname: str, rel_path: str,
-                                   result: ParseResult):
+    def _extract_class_attributes(
+        self, class_node, source: bytes, owner_qname: str, rel_path: str, result: ParseResult
+    ):
         """Extract attributes from class body and __init__ self assignments."""
         block = self._get_block(class_node)
         if block is None:
@@ -324,20 +393,21 @@ class PythonParser(LanguageParser):
                                     default_val = val[:100]
                                     break
 
-                            result.attributes.append(AttributeInfo(
-                                name=attr_name,
-                                qualified_name=f"{owner_qname}.{attr_name}",
-                                owner_qualified_name=owner_qname,
-                                type_annotation=type_ann,
-                                visibility=self._get_visibility(attr_name),
-                                file_path=rel_path,
-                                line_number=child.start_point[0] + 1,
-                                default_value=default_val,
-                            ))
+                            result.attributes.append(
+                                AttributeInfo(
+                                    name=attr_name,
+                                    qualified_name=f"{owner_qname}.{attr_name}",
+                                    owner_qualified_name=owner_qname,
+                                    type_annotation=type_ann,
+                                    visibility=self._get_visibility(attr_name),
+                                    file_path=rel_path,
+                                    line_number=child.start_point[0] + 1,
+                                    default_value=default_val,
+                                )
+                            )
 
         # 2. self.x assignments in __init__
-        seen_names = {a.name for a in result.attributes
-                      if a.owner_qualified_name == owner_qname}
+        seen_names = {a.name for a in result.attributes if a.owner_qualified_name == owner_qname}
 
         for child in block.children:
             fn_node = None
@@ -352,14 +422,18 @@ class PythonParser(LanguageParser):
                 init_block = self._get_block(fn_node)
                 if init_block:
                     self._walk_self_attrs(
-                        init_block, source, owner_qname, rel_path,
-                        result, seen_names,
+                        init_block,
+                        source,
+                        owner_qname,
+                        rel_path,
+                        result,
+                        seen_names,
                     )
                 break
 
-    def _walk_self_attrs(self, node, source: bytes, owner_qname: str,
-                         rel_path: str, result: ParseResult,
-                         seen_names: set[str]):
+    def _walk_self_attrs(
+        self, node, source: bytes, owner_qname: str, rel_path: str, result: ParseResult, seen_names: set[str]
+    ):
         """Recursively find self.x = ... assignments."""
         if node.type == "assignment":
             left = node.children[0] if node.children else None
@@ -379,25 +453,26 @@ class PythonParser(LanguageParser):
                                 default_val = val[:100]
                                 break
 
-                        result.attributes.append(AttributeInfo(
-                            name=attr_name,
-                            qualified_name=f"{owner_qname}.{attr_name}",
-                            owner_qualified_name=owner_qname,
-                            type_annotation=None,
-                            visibility=self._get_visibility(attr_name),
-                            file_path=rel_path,
-                            line_number=node.start_point[0] + 1,
-                            default_value=default_val,
-                        ))
+                        result.attributes.append(
+                            AttributeInfo(
+                                name=attr_name,
+                                qualified_name=f"{owner_qname}.{attr_name}",
+                                owner_qualified_name=owner_qname,
+                                type_annotation=None,
+                                visibility=self._get_visibility(attr_name),
+                                file_path=rel_path,
+                                line_number=node.start_point[0] + 1,
+                                default_value=default_val,
+                            )
+                        )
         for c in node.children:
-            self._walk_self_attrs(c, source, owner_qname, rel_path,
-                                  result, seen_names)
+            self._walk_self_attrs(c, source, owner_qname, rel_path, result, seen_names)
 
     # ── Parsing ─────────────────────────────────────────────────────────
 
-    def _parse_function(self, node, source: bytes, module_path: str,
-                        rel_path: str, is_method: bool = False,
-                        owner: str | None = None) -> FunctionInfo:
+    def _parse_function(
+        self, node, source: bytes, module_path: str, rel_path: str, is_method: bool = False, owner: str | None = None
+    ) -> FunctionInfo:
         name = self._get_name(node, source)
         sep = "."
         prefix = f"{module_path}{sep}{owner}" if owner else module_path
@@ -421,9 +496,15 @@ class PythonParser(LanguageParser):
             type_parameters=get_type_parameters(node, source, "type_parameter"),
         )
 
-    def _parse_class(self, node, source: bytes, module_path: str,
-                     rel_path: str, result: ParseResult,
-                     decorators: list[str] | None = None):
+    def _parse_class(
+        self,
+        node,
+        source: bytes,
+        module_path: str,
+        rel_path: str,
+        result: ParseResult,
+        decorators: list[str] | None = None,
+    ):
         """Parse a class_definition node and populate the result."""
         name = self._get_name(node, source)
         qualified_name = f"{module_path}.{name}"
@@ -435,53 +516,61 @@ class PythonParser(LanguageParser):
         is_protocol = "Protocol" in bases
 
         if is_enum:
-            result.enums.append(EnumInfo(
-                name=name,
-                qualified_name=qualified_name,
-                visibility=self._get_visibility(name),
-                file_path=rel_path,
-                line_number=node.start_point[0] + 1,
-                end_line=node.end_point[0] + 1,
-                docstring=docstring,
-                variants=self._get_enum_variants(node, source),
-            ))
+            result.enums.append(
+                EnumInfo(
+                    name=name,
+                    qualified_name=qualified_name,
+                    visibility=self._get_visibility(name),
+                    file_path=rel_path,
+                    line_number=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    docstring=docstring,
+                    variants=self._get_enum_variants(node, source),
+                )
+            )
             return
 
         if is_protocol:
-            result.interfaces.append(InterfaceInfo(
-                name=name,
-                qualified_name=qualified_name,
-                kind="protocol",
-                visibility=self._get_visibility(name),
-                file_path=rel_path,
-                line_number=node.start_point[0] + 1,
-                end_line=node.end_point[0] + 1,
-                docstring=docstring,
-                type_parameters=get_type_parameters(node, source, "type_parameter"),
-            ))
+            result.interfaces.append(
+                InterfaceInfo(
+                    name=name,
+                    qualified_name=qualified_name,
+                    kind="protocol",
+                    visibility=self._get_visibility(name),
+                    file_path=rel_path,
+                    line_number=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    docstring=docstring,
+                    type_parameters=get_type_parameters(node, source, "type_parameter"),
+                )
+            )
         else:
-            result.classes.append(ClassInfo(
-                name=name,
-                qualified_name=qualified_name,
-                kind="class",
-                visibility=self._get_visibility(name),
-                file_path=rel_path,
-                line_number=node.start_point[0] + 1,
-                end_line=node.end_point[0] + 1,
-                docstring=docstring,
-                bases=bases,
-                type_parameters=get_type_parameters(node, source, "type_parameter"),
-                metadata={"decorators": decorators or []},
-            ))
+            result.classes.append(
+                ClassInfo(
+                    name=name,
+                    qualified_name=qualified_name,
+                    kind="class",
+                    visibility=self._get_visibility(name),
+                    file_path=rel_path,
+                    line_number=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    docstring=docstring,
+                    bases=bases,
+                    type_parameters=get_type_parameters(node, source, "type_parameter"),
+                    metadata={"decorators": decorators or []},
+                )
+            )
 
         # Inheritance / extends edges
         non_protocol_bases = [b for b in bases if b != "Protocol"]
         for base in non_protocol_bases:
-            result.type_relationships.append(TypeRelationship(
-                source_type=name,
-                target_type=base,
-                relationship="extends",
-            ))
+            result.type_relationships.append(
+                TypeRelationship(
+                    source_type=name,
+                    target_type=base,
+                    relationship="extends",
+                )
+            )
 
         # Parse methods inside the class body
         method_type_rel = TypeRelationship(
@@ -505,19 +594,31 @@ class PythonParser(LanguageParser):
                     elif inner and inner.type == "class_definition":
                         # Nested class
                         self._parse_class(
-                            inner, source, qualified_name, rel_path, result,
+                            inner,
+                            source,
+                            qualified_name,
+                            rel_path,
+                            result,
                             decorators=self._get_decorators(child, source),
                         )
                 elif child.type == "class_definition":
                     # Nested class without decorators
                     self._parse_class(
-                        child, source, qualified_name, rel_path, result,
+                        child,
+                        source,
+                        qualified_name,
+                        rel_path,
+                        result,
                     )
 
                 if fn_node:
                     fn = self._parse_function(
-                        fn_node, source, module_path, rel_path,
-                        is_method=True, owner=name,
+                        fn_node,
+                        source,
+                        module_path,
+                        rel_path,
+                        is_method=True,
+                        owner=name,
                     )
                     fn.decorators = fn_decorators
                     fn.metadata.update(self._classify_decorators(fn_decorators))
@@ -547,8 +648,12 @@ class PythonParser(LanguageParser):
             language="python",
         )
         fname = filepath.name
-        if (fname.startswith("test_") or fname.endswith("_test.py")
-                or "/tests/" in rel_path or rel_path.startswith("tests/")):
+        if (
+            fname.startswith("test_")
+            or fname.endswith("_test.py")
+            or "/tests/" in rel_path
+            or rel_path.startswith("tests/")
+        ):
             file_info.is_test = True
 
         result = ParseResult()
@@ -556,30 +661,48 @@ class PythonParser(LanguageParser):
 
         for child in root.children:
             if child.type == "function_definition":
-                result.functions.append(self._parse_function(
-                    child, source, module_path, rel_path,
-                    is_method=False, owner=None,
-                ))
+                result.functions.append(
+                    self._parse_function(
+                        child,
+                        source,
+                        module_path,
+                        rel_path,
+                        is_method=False,
+                        owner=None,
+                    )
+                )
 
             elif child.type == "decorated_definition":
                 inner = self._get_decorated_inner(child)
                 if inner and inner.type == "function_definition":
                     fn = self._parse_function(
-                        inner, source, module_path, rel_path,
-                        is_method=False, owner=None,
+                        inner,
+                        source,
+                        module_path,
+                        rel_path,
+                        is_method=False,
+                        owner=None,
                     )
                     fn.decorators = self._get_decorators(child, source)
                     fn.metadata.update(self._classify_decorators(fn.decorators))
                     result.functions.append(fn)
                 elif inner and inner.type == "class_definition":
                     self._parse_class(
-                        inner, source, module_path, rel_path, result,
+                        inner,
+                        source,
+                        module_path,
+                        rel_path,
+                        result,
                         decorators=self._get_decorators(child, source),
                     )
 
             elif child.type == "class_definition":
                 self._parse_class(
-                    child, source, module_path, rel_path, result,
+                    child,
+                    source,
+                    module_path,
+                    rel_path,
+                    result,
                 )
 
             elif child.type in ("import_statement", "import_from_statement"):
@@ -618,16 +741,18 @@ class PythonParser(LanguageParser):
                                     val = node_text(sc, source)
                                     default_val = val[:100]
                                     break
-                            result.constants.append(ConstantInfo(
-                                name=first_id,
-                                qualified_name=f"{module_path}.{first_id}",
-                                kind="constant",
-                                type_annotation=type_ann,
-                                value_preview=default_val,
-                                visibility=self._get_visibility(first_id),
-                                file_path=rel_path,
-                                line_number=child.start_point[0] + 1,
-                            ))
+                            result.constants.append(
+                                ConstantInfo(
+                                    name=first_id,
+                                    qualified_name=f"{module_path}.{first_id}",
+                                    kind="constant",
+                                    type_annotation=type_ann,
+                                    value_preview=default_val,
+                                    visibility=self._get_visibility(first_id),
+                                    file_path=rel_path,
+                                    line_number=child.start_point[0] + 1,
+                                )
+                            )
 
             elif child.type == "type_alias_statement":
                 # Python 3.12: type X = int
@@ -645,16 +770,18 @@ class PythonParser(LanguageParser):
                         elif saw_eq and sc.is_named:
                             val_text = node_text(sc, source)[:100]
                             break
-                    result.constants.append(ConstantInfo(
-                        name=alias_name,
-                        qualified_name=f"{module_path}.{alias_name}",
-                        kind="type_alias",
-                        type_annotation=val_text,
-                        value_preview=None,
-                        visibility=self._get_visibility(alias_name),
-                        file_path=rel_path,
-                        line_number=child.start_point[0] + 1,
-                    ))
+                    result.constants.append(
+                        ConstantInfo(
+                            name=alias_name,
+                            qualified_name=f"{module_path}.{alias_name}",
+                            kind="type_alias",
+                            type_annotation=val_text,
+                            value_preview=None,
+                            visibility=self._get_visibility(alias_name),
+                            file_path=rel_path,
+                            line_number=child.start_point[0] + 1,
+                        )
+                    )
 
         # Detect submodule declarations from __init__.py
         if filepath.name == "__init__.py":
@@ -662,8 +789,7 @@ class PythonParser(LanguageParser):
             for item in sorted(parent_dir.iterdir()):
                 if item.is_dir() and (item / "__init__.py").exists():
                     file_info.submodule_declarations.append(item.name)
-                elif (item.is_file() and item.suffix == ".py"
-                      and item.name != "__init__.py"):
+                elif item.is_file() and item.suffix == ".py" and item.name != "__init__.py":
                     file_info.submodule_declarations.append(
                         item.stem  # filename without .py
                     )

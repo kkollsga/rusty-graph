@@ -23,8 +23,7 @@ def _load_toml(path: Path) -> dict:
                 import tomli as _tl  # type: ignore[no-redef]
             except ImportError:
                 raise ImportError(
-                    "TOML parsing requires Python 3.11+ or the 'tomli' package. "
-                    "Install with: pip install tomli"
+                    "TOML parsing requires Python 3.11+ or the 'tomli' package. Install with: pip install tomli"
                 ) from None
         _tomllib = _tl
     with open(path, "rb") as f:
@@ -97,9 +96,13 @@ class PyProjectReader(ManifestReader):
         # Source root: find Python package directory
         py_root = _find_python_package(project_root, name)
         if py_root:
-            info.source_roots.append(SourceRoot(
-                path=py_root, language="python", label="python-package",
-            ))
+            info.source_roots.append(
+                SourceRoot(
+                    path=py_root,
+                    language="python",
+                    label="python-package",
+                )
+            )
 
         # Maturin: chain to Cargo.toml for Rust source roots
         if "maturin" in build_backend:
@@ -125,17 +128,25 @@ class PyProjectReader(ManifestReader):
         for tp in test_paths:
             test_dir = project_root / tp
             if test_dir.is_dir() and test_dir not in existing_test_paths:
-                info.test_roots.append(SourceRoot(
-                    path=test_dir, is_test=True, label="pytest",
-                ))
+                info.test_roots.append(
+                    SourceRoot(
+                        path=test_dir,
+                        is_test=True,
+                        label="pytest",
+                    )
+                )
         # Fallback: check tests/ or test/
         if not info.test_roots:
             for candidate in ("tests", "test"):
                 test_dir = project_root / candidate
                 if test_dir.is_dir() and test_dir not in existing_test_paths:
-                    info.test_roots.append(SourceRoot(
-                        path=test_dir, is_test=True, label="test-dir",
-                    ))
+                    info.test_roots.append(
+                        SourceRoot(
+                            path=test_dir,
+                            is_test=True,
+                            label="test-dir",
+                        )
+                    )
                     break
 
         return info
@@ -170,27 +181,38 @@ class CargoTomlReader(ManifestReader):
         # Source root: src/ directory
         src_dir = project_root / "src"
         if src_dir.is_dir():
-            info.source_roots.append(SourceRoot(
-                path=src_dir, language="rust", label="rust-crate",
-            ))
+            info.source_roots.append(
+                SourceRoot(
+                    path=src_dir,
+                    language="rust",
+                    label="rust-crate",
+                )
+            )
 
         # Workspace members
         workspace = data.get("workspace", {})
         for member_glob in workspace.get("members", []):
             for member_dir in sorted(project_root.glob(member_glob)):
                 if member_dir.is_dir() and (member_dir / "src").is_dir():
-                    info.source_roots.append(SourceRoot(
-                        path=member_dir / "src", language="rust",
-                        label=f"workspace:{member_dir.name}",
-                    ))
+                    info.source_roots.append(
+                        SourceRoot(
+                            path=member_dir / "src",
+                            language="rust",
+                            label=f"workspace:{member_dir.name}",
+                        )
+                    )
 
         # Test root: tests/ directory (integration tests)
         tests_dir = project_root / "tests"
         if tests_dir.is_dir():
-            info.test_roots.append(SourceRoot(
-                path=tests_dir, language="rust", is_test=True,
-                label="rust-integration-tests",
-            ))
+            info.test_roots.append(
+                SourceRoot(
+                    path=tests_dir,
+                    language="rust",
+                    is_test=True,
+                    label="rust-integration-tests",
+                )
+            )
 
         # Dependencies
         for name, spec in data.get("dependencies", {}).items():

@@ -26,6 +26,14 @@ __pycache__/
 
 # Performance baselines (dev artifacts)
 /baselines/
+/.benchmarks/
+
+# Hypothesis database (property-based testing cache)
+/.hypothesis/
+
+# Coverage data
+.coverage
+coverage.xml
 
 # Generated graph files
 *.kgl

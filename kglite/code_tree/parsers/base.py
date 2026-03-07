@@ -53,7 +53,7 @@ class LanguageParser(ABC):
 
 def node_text(node, source: bytes) -> str:
     """Extract the text of a tree-sitter node."""
-    return source[node.start_byte:node.end_byte].decode("utf8")
+    return source[node.start_byte : node.end_byte].decode("utf8")
 
 
 def count_lines(source: bytes) -> int:
@@ -61,8 +61,7 @@ def count_lines(source: bytes) -> int:
     return source.count(b"\n") + (1 if source and not source.endswith(b"\n") else 0)
 
 
-def get_type_parameters(node, source: bytes,
-                        node_type: str = "type_parameters") -> str | None:
+def get_type_parameters(node, source: bytes, node_type: str = "type_parameters") -> str | None:
     """Extract generic/template type parameters from a declaration node.
 
     Looks for a child of the given node_type (e.g. "type_parameters",
@@ -71,7 +70,7 @@ def get_type_parameters(node, source: bytes,
     """
     for child in node.children:
         if child.type == node_type:
-            text = source[child.start_byte:child.end_byte].decode("utf8")
+            text = source[child.start_byte : child.end_byte].decode("utf8")
             # Strip surrounding < > or [ ] if present
             if text.startswith("<") and text.endswith(">"):
                 text = text[1:-1].strip()
@@ -103,7 +102,7 @@ def extract_parameters_from_signature(signature: str) -> str | None:
             if depth == 0:
                 end = i
                 break
-    params_text = signature[start + 1:end].strip()
+    params_text = signature[start + 1 : end].strip()
     if not params_text:
         return None
     parts = [p.strip() for p in params_text.split(",")]
@@ -131,13 +130,15 @@ def extract_comment_annotations(
 
     def walk(node):
         if node.type in comment_types:
-            text = source[node.start_byte:node.end_byte].decode("utf8")
+            text = source[node.start_byte : node.end_byte].decode("utf8")
             for match in _ANNOTATION_PATTERN.finditer(text):
-                annotations.append({
-                    "kind": match.group(1).upper(),
-                    "text": match.group(2).strip()[:200],
-                    "line": node.start_point[0] + 1,
-                })
+                annotations.append(
+                    {
+                        "kind": match.group(1).upper(),
+                        "text": match.group(2).strip()[:200],
+                        "line": node.start_point[0] + 1,
+                    }
+                )
         for child in node.children:
             walk(child)
 

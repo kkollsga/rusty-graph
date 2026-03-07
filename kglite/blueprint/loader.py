@@ -10,8 +10,8 @@ from typing import Any, Union
 
 import numpy as np
 import pandas as pd
-import kglite
 
+import kglite
 
 # Blueprint property type -> KGLite column_types value
 _TYPE_MAP = {
@@ -132,7 +132,7 @@ class BlueprintLoader:
         """Execute the full loading sequence."""
         t0 = time.time()
         if self.verbose:
-            print(f"Loading blueprint...")
+            print("Loading blueprint...")
             print(f"  Root: {self.root}")
 
         # Collect all node specs (core + sub_nodes) with their parent info
@@ -212,9 +212,7 @@ class BlueprintLoader:
     ) -> None:
         """Create nodes for types without a CSV, from distinct FK values."""
         all_specs = core_specs + sub_specs
-        manual_types = {
-            s["_node_type"]: s for s in core_specs if s.get("_is_manual")
-        }
+        manual_types = {s["_node_type"]: s for s in core_specs if s.get("_is_manual")}
         if not manual_types:
             return
 
@@ -226,9 +224,7 @@ class BlueprintLoader:
 
             # Scan all FK edges across all specs to find references to this type
             for spec in all_specs:
-                for _edge_type, edge_def in (
-                    spec.get("connections", {}).get("fk_edges", {}).items()
-                ):
+                for _edge_type, edge_def in spec.get("connections", {}).get("fk_edges", {}).items():
                     if edge_def.get("target") != manual_type:
                         continue
                     csv_path = spec.get("csv")
@@ -275,9 +271,7 @@ class BlueprintLoader:
 
     # ── Phase 2 & 3: Load nodes ─────────────────────────────────────
 
-    def _load_nodes(
-        self, specs: list[dict[str, Any]], phase_name: str
-    ) -> None:
+    def _load_nodes(self, specs: list[dict[str, Any]], phase_name: str) -> None:
         """Load nodes from CSV files."""
         loadable = [s for s in specs if not s.get("_is_manual") and s.get("csv")]
         if not loadable:
@@ -321,9 +315,7 @@ class BlueprintLoader:
                 if col not in df.columns:
                     continue
                 if typ in {"date"} | _TEMPORAL_TYPES:
-                    df[col] = pd.to_datetime(
-                        df[col], unit="ms", errors="coerce"
-                    )
+                    df[col] = pd.to_datetime(df[col], unit="ms", errors="coerce")
 
             # Build column_types for non-spatial, non-bool types
             column_types = self._build_column_types(properties)
@@ -341,15 +333,10 @@ class BlueprintLoader:
             ts_param = None
             ts_config = spec.get("timeseries")
             if ts_config:
-                ts_param, df = self._prepare_timeseries(
-                    df, ts_config, skip, node_type
-                )
+                ts_param, df = self._prepare_timeseries(df, ts_config, skip, node_type)
 
             # Never skip the pk or title columns — add_nodes needs them
-            skip = [
-                c for c in skip
-                if c != pk and c != title
-            ]
+            skip = [c for c in skip if c != pk and c != title]
 
             try:
                 report = self.graph.add_nodes(
@@ -365,9 +352,7 @@ class BlueprintLoader:
                 self._report_error(node_type, f"add_nodes failed: {e}")
                 continue
 
-            count = report.get("nodes_created", 0) + report.get(
-                "nodes_updated", 0
-            )
+            count = report.get("nodes_created", 0) + report.get("nodes_updated", 0)
             self.stats["nodes_by_type"][node_type] = count
             self._loaded_types.add(node_type)
 
@@ -383,9 +368,7 @@ class BlueprintLoader:
                 label += " (with geometry)"
 
             if self.verbose:
-                print(
-                    f"    {node_type}: {count} nodes from {Path(csv_path).name}{label}"
-                )
+                print(f"    {node_type}: {count} nodes from {Path(csv_path).name}{label}")
 
     # ── Phase 4: FK edges ───────────────────────────────────────────
 
@@ -395,11 +378,7 @@ class BlueprintLoader:
         Also handles core nodes with a ``parent`` key — these get an
         implicit FK edge to their parent type.
         """
-        has_edges = any(
-            spec.get("connections", {}).get("fk_edges")
-            or spec.get("parent")
-            for spec in all_specs
-        )
+        has_edges = any(spec.get("connections", {}).get("fk_edges") or spec.get("parent") for spec in all_specs)
         if not has_edges:
             return
 
@@ -417,10 +396,13 @@ class BlueprintLoader:
             if parent_type and parent_fk:
                 edge_type = f"OF_{parent_type.upper()}"
                 fk_edges = dict(fk_edges)  # copy to avoid mutating spec
-                fk_edges.setdefault(edge_type, {
-                    "target": parent_type,
-                    "fk": parent_fk,
-                })
+                fk_edges.setdefault(
+                    edge_type,
+                    {
+                        "target": parent_type,
+                        "fk": parent_fk,
+                    },
+                )
 
             if not fk_edges or csv_path is None:
                 continue
@@ -486,21 +468,15 @@ class BlueprintLoader:
                         target_id_field=target_col,
                     )
                 except Exception as e:
-                    self._report_error(
-                        node_type, f"FK edge {edge_type} failed: {e}"
-                    )
+                    self._report_error(node_type, f"FK edge {edge_type} failed: {e}")
                     continue
 
                 count = report.get("connections_created", 0)
                 skipped = report.get("connections_skipped", 0)
-                self.stats["edges_by_type"][edge_type] = (
-                    self.stats["edges_by_type"].get(edge_type, 0) + count
-                )
+                self.stats["edges_by_type"][edge_type] = self.stats["edges_by_type"].get(edge_type, 0) + count
 
                 if self.verbose:
-                    print(
-                        f"    {node_type} -[{edge_type}]-> {target_type}: {count} edges"
-                    )
+                    print(f"    {node_type} -[{edge_type}]-> {target_type}: {count} edges")
 
                 if skipped:
                     errors = report.get("errors", [])
@@ -514,10 +490,7 @@ class BlueprintLoader:
 
     def _load_junction_edges(self, all_specs: list[dict[str, Any]]) -> None:
         """Create edges from junction (many-to-many) CSVs."""
-        has_junctions = any(
-            spec.get("connections", {}).get("junction_edges")
-            for spec in all_specs
-        )
+        has_junctions = any(spec.get("connections", {}).get("junction_edges") for spec in all_specs)
         if not has_junctions:
             return
 
@@ -526,9 +499,7 @@ class BlueprintLoader:
 
         for spec in all_specs:
             node_type = spec["_node_type"]
-            junction_edges = (
-                spec.get("connections", {}).get("junction_edges", {})
-            )
+            junction_edges = spec.get("connections", {}).get("junction_edges", {})
 
             for edge_type, junc_def in junction_edges.items():
                 csv_path = junc_def.get("csv")
@@ -559,9 +530,7 @@ class BlueprintLoader:
                     if col not in df.columns:
                         continue
                     if typ in {"date"} | _TEMPORAL_TYPES:
-                        df[col] = pd.to_datetime(
-                            df[col], unit="ms", errors="coerce"
-                        )
+                        df[col] = pd.to_datetime(df[col], unit="ms", errors="coerce")
 
                 # Build column_types for Rust (includes validFrom/validTo pass-through)
                 column_types = self._build_column_types(prop_types)
@@ -589,14 +558,10 @@ class BlueprintLoader:
 
                 count = report.get("connections_created", 0)
                 skipped = report.get("connections_skipped", 0)
-                self.stats["edges_by_type"][edge_type] = (
-                    self.stats["edges_by_type"].get(edge_type, 0) + count
-                )
+                self.stats["edges_by_type"][edge_type] = self.stats["edges_by_type"].get(edge_type, 0) + count
 
                 if self.verbose:
-                    print(
-                        f"    {node_type} -[{edge_type}]-> {target_type}: {count} edges"
-                    )
+                    print(f"    {node_type} -[{edge_type}]-> {target_type}: {count} edges")
 
                 if skipped:
                     errors = report.get("errors", [])
@@ -605,7 +570,6 @@ class BlueprintLoader:
                         f"{node_type} -[{edge_type}]-> {target_type}",
                         detail,
                     )
-
 
     # ── Helpers ──────────────────────────────────────────────────────
 
@@ -622,9 +586,7 @@ class BlueprintLoader:
         self._csv_cache[relative_path] = df.copy()  # cache gets a copy
         return df  # return original without extra copy
 
-    def _apply_filter(
-        self, df: pd.DataFrame, filt: dict[str, Any]
-    ) -> pd.DataFrame:
+    def _apply_filter(self, df: pd.DataFrame, filt: dict[str, Any]) -> pd.DataFrame:
         """Apply filters to a DataFrame.
 
         Supports two forms:
@@ -654,9 +616,7 @@ class BlueprintLoader:
                 df = df[df[col] == val]
         return df
 
-    def _apply_timeseries_filter(
-        self, df: pd.DataFrame, ts_config: dict[str, Any]
-    ) -> pd.DataFrame:
+    def _apply_timeseries_filter(self, df: pd.DataFrame, ts_config: dict[str, Any]) -> pd.DataFrame:
         """Drop aggregate rows (e.g. month=0) from timeseries data.
 
         Mirrors the filtering in ``_prepare_timeseries`` so FK edge building
@@ -670,9 +630,7 @@ class BlueprintLoader:
                 df = df[df[col] != 0]
         return df
 
-    def _build_column_types(
-        self, properties: dict[str, str]
-    ) -> dict[str, str]:
+    def _build_column_types(self, properties: dict[str, str]) -> dict[str, str]:
         """Convert blueprint property types to KGLite column_types dict."""
         result = {}
         for col, typ in properties.items():
@@ -695,8 +653,7 @@ class BlueprintLoader:
             from shapely.geometry import shape as shapely_shape
         except ImportError:
             raise ImportError(
-                "Blueprint uses geometry/location types which require shapely. "
-                "Install with: pip install shapely"
+                "Blueprint uses geometry/location types which require shapely. Install with: pip install shapely"
             ) from None
 
         if "_geometry" not in df.columns:
@@ -741,9 +698,7 @@ class BlueprintLoader:
 
         return df
 
-    def _apply_spatial_config(
-        self, node_type: str, properties: dict[str, str]
-    ) -> None:
+    def _apply_spatial_config(self, node_type: str, properties: dict[str, str]) -> None:
         """Call set_spatial() based on blueprint property types."""
         lat_col = None
         lon_col = None
@@ -799,10 +754,7 @@ class BlueprintLoader:
                     df = df[df[col] != 0]
                     dropped = before - len(df)
                     if dropped and self.verbose:
-                        print(
-                            f"      Dropped {dropped} rows with {col}=0 "
-                            f"(aggregate totals)"
-                        )
+                        print(f"      Dropped {dropped} rows with {col}=0 (aggregate totals)")
 
         # Rename channel columns: csv_col -> channel_name
         # channels_map is {channel_name: csv_column_name}

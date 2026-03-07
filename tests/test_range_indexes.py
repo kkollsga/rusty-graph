@@ -3,22 +3,27 @@
 Range indexes enable efficient range queries (>, >=, <, <=, BETWEEN)
 using BTreeMap under the hood.
 """
-import pytest
-import pandas as pd
-import kglite
-import tempfile
+
 import os
+import tempfile
+
+import pandas as pd
+
+import kglite
+import pytest
 
 
 @pytest.fixture
 def graph():
     """Graph with Person nodes having age property."""
     g = kglite.KnowledgeGraph()
-    df = pd.DataFrame({
-        "id": list(range(100)),
-        "title": [f"Person_{i}" for i in range(100)],
-        "age": list(range(20, 120)),  # ages 20-119
-    })
+    df = pd.DataFrame(
+        {
+            "id": list(range(100)),
+            "title": [f"Person_{i}" for i in range(100)],
+            "age": list(range(20, 120)),  # ages 20-119
+        }
+    )
     g.add_nodes(df, "Person", "id", "title")
     return g
 

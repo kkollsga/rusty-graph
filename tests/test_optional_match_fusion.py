@@ -1,7 +1,8 @@
 """Tests for OPTIONAL MATCH + WITH count() fusion optimization."""
 
-import pytest
 import time
+
+import pytest
 from kglite import KnowledgeGraph
 
 
@@ -57,8 +58,8 @@ class TestFusionCorrectness:
             RETURN h.name, cnt
         """)
         assert len(result) == 1
-        assert result[0]['h.name'] == 'Center'
-        assert result[0]['cnt'] == 10
+        assert result[0]["h.name"] == "Center"
+        assert result[0]["cnt"] == 10
 
     def test_no_matches_returns_zero(self, star_graph):
         """When OPTIONAL MATCH finds nothing, count should be 0."""
@@ -71,7 +72,7 @@ class TestFusionCorrectness:
         """)
         assert len(result) == 10
         for row in result:
-            assert row['cnt'] == 0
+            assert row["cnt"] == 0
 
     def test_mixed_counts(self, multi_type_graph):
         """Different nodes have different counts."""
@@ -82,12 +83,12 @@ class TestFusionCorrectness:
             RETURN p.name, project_count
             ORDER BY p.name
         """)
-        counts = {r['p.name']: r['project_count'] for r in result}
-        assert counts['P0'] == 2
-        assert counts['P1'] == 1
-        assert counts['P2'] == 1
-        assert counts['P3'] == 0
-        assert counts['P4'] == 0
+        counts = {r["p.name"]: r["project_count"] for r in result}
+        assert counts["P0"] == 2
+        assert counts["P1"] == 1
+        assert counts["P2"] == 1
+        assert counts["P3"] == 0
+        assert counts["P4"] == 0
 
     def test_with_where_on_count(self, multi_type_graph):
         """WHERE on the aggregated count filters correctly."""
@@ -99,8 +100,8 @@ class TestFusionCorrectness:
             RETURN p.name, cnt
             ORDER BY p.name
         """)
-        names = [r['p.name'] for r in result]
-        assert names == ['P0', 'P1', 'P2']
+        names = [r["p.name"] for r in result]
+        assert names == ["P0", "P1", "P2"]
 
     def test_chained_optional_match(self, multi_type_graph):
         """Two chained OPTIONAL MATCH + WITH count clauses."""
@@ -113,12 +114,12 @@ class TestFusionCorrectness:
             RETURN p.name, projects, skills
             ORDER BY p.name
         """)
-        data = {r['p.name']: (r['projects'], r['skills']) for r in result}
-        assert data['P0'] == (2, 2)
-        assert data['P1'] == (1, 1)
-        assert data['P2'] == (1, 0)
-        assert data['P3'] == (0, 0)
-        assert data['P4'] == (0, 0)
+        data = {r["p.name"]: (r["projects"], r["skills"]) for r in result}
+        assert data["P0"] == (2, 2)
+        assert data["P1"] == (1, 1)
+        assert data["P2"] == (1, 0)
+        assert data["P3"] == (0, 0)
+        assert data["P4"] == (0, 0)
 
     def test_node_properties_survive_fusion(self, star_graph):
         """Node properties accessible after fused OPTIONAL MATCH + WITH."""
@@ -129,8 +130,8 @@ class TestFusionCorrectness:
             WITH h, count(s) AS cnt
             RETURN h.name, h.city, cnt
         """)
-        assert result[0]['h.city'] == 'Oslo'
-        assert result[0]['cnt'] == 10
+        assert result[0]["h.city"] == "Oslo"
+        assert result[0]["cnt"] == 10
 
 
 class TestFusionPerformance:
@@ -163,7 +164,7 @@ class TestFusionPerformance:
         assert len(result) == 200
         # Each person should have 20 items
         for row in result:
-            assert row['item_count'] == 20
+            assert row["item_count"] == 20
 
         # With fusion: should be well under 1 second
         # Without fusion (200 * 20 = 4000 expanded rows): would be slower

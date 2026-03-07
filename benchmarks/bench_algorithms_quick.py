@@ -1,7 +1,10 @@
 """Quick benchmark for graph algorithm performance (Steps 2,3,4 optimizations)."""
+
 import random
 import time
+
 import pandas as pd
+
 import kglite
 
 SEED = 42
@@ -9,6 +12,7 @@ N_PERSONS = 10_000
 N_PAPERS = 20_000
 N_TOPICS = 500
 N_INSTITUTIONS = 200
+
 
 def generate_data():
     rng = random.Random(SEED)
@@ -39,13 +43,19 @@ def generate_data():
 
     # Deterministic structure
     for i in range(0, 300, 3):
-        cites.extend([(i, i+1), (i+1, i+2), (i+2, i)])
-        collaborates.extend([(i, i+1), (i+1, i+2), (i+2, i)])
+        cites.extend([(i, i + 1), (i + 1, i + 2), (i + 2, i)])
+        collaborates.extend([(i, i + 1), (i + 1, i + 2), (i + 2, i)])
     for pid in range(100):
         cites.extend([(pid, 5000), (pid, 5001)])
 
-    return {"authored": authored, "cites": cites, "covers": covers,
-            "affiliated": affiliated, "collaborates": collaborates}
+    return {
+        "authored": authored,
+        "cites": cites,
+        "covers": covers,
+        "affiliated": affiliated,
+        "collaborates": collaborates,
+    }
+
 
 def setup_graph(data):
     g = kglite.KnowledgeGraph()
@@ -54,17 +64,38 @@ def setup_graph(data):
     g.add_nodes(pd.DataFrame({"id": range(N_TOPICS)}), "Topic", "id", "id")
     g.add_nodes(pd.DataFrame({"id": range(N_INSTITUTIONS)}), "Institution", "id", "id")
 
-    g.add_connections(pd.DataFrame(data["authored"], columns=["person_id", "paper_id"]),
-                      "AUTHORED", "Person", "person_id", "Paper", "paper_id")
-    g.add_connections(pd.DataFrame(data["cites"], columns=["paper_id", "cited_id"]),
-                      "CITES", "Paper", "paper_id", "Paper", "cited_id")
-    g.add_connections(pd.DataFrame(data["covers"], columns=["paper_id", "topic_id"]),
-                      "COVERS", "Paper", "paper_id", "Topic", "topic_id")
-    g.add_connections(pd.DataFrame(data["affiliated"], columns=["person_id", "inst_id"]),
-                      "AFFILIATED", "Person", "person_id", "Institution", "inst_id")
-    g.add_connections(pd.DataFrame(data["collaborates"], columns=["pid1", "pid2"]),
-                      "COLLABORATES", "Person", "pid1", "Person", "pid2")
+    g.add_connections(
+        pd.DataFrame(data["authored"], columns=["person_id", "paper_id"]),
+        "AUTHORED",
+        "Person",
+        "person_id",
+        "Paper",
+        "paper_id",
+    )
+    g.add_connections(
+        pd.DataFrame(data["cites"], columns=["paper_id", "cited_id"]), "CITES", "Paper", "paper_id", "Paper", "cited_id"
+    )
+    g.add_connections(
+        pd.DataFrame(data["covers"], columns=["paper_id", "topic_id"]),
+        "COVERS",
+        "Paper",
+        "paper_id",
+        "Topic",
+        "topic_id",
+    )
+    g.add_connections(
+        pd.DataFrame(data["affiliated"], columns=["person_id", "inst_id"]),
+        "AFFILIATED",
+        "Person",
+        "person_id",
+        "Institution",
+        "inst_id",
+    )
+    g.add_connections(
+        pd.DataFrame(data["collaborates"], columns=["pid1", "pid2"]), "COLLABORATES", "Person", "pid1", "Person", "pid2"
+    )
     return g
+
 
 def bench(label, fn, runs=3):
     # Warmup
@@ -75,8 +106,9 @@ def bench(label, fn, runs=3):
         fn()
         times.append(time.perf_counter() - t0)
     best = min(times)
-    print(f"  {label:40s} {best*1000:10.1f} ms")
+    print(f"  {label:40s} {best * 1000:10.1f} ms")
     return best
+
 
 print("Building graph...")
 data = generate_data()
@@ -90,25 +122,20 @@ print(f"Graph: {total_nodes} nodes, {total_edges} edges\n")
 print("Algorithm benchmarks (best of 3 runs):")
 print("=" * 55)
 
-bench("degree_centrality",
-      lambda: g.cypher("CALL degree_centrality() YIELD node, score"))
+bench("degree_centrality", lambda: g.cypher("CALL degree_centrality() YIELD node, score"))
 
-bench("pagerank",
-      lambda: g.cypher("CALL pagerank() YIELD node, score"))
+bench("pagerank", lambda: g.cypher("CALL pagerank() YIELD node, score"))
 
-bench("label_propagation",
-      lambda: g.cypher("CALL label_propagation() YIELD node, community"))
+bench("label_propagation", lambda: g.cypher("CALL label_propagation() YIELD node, community"))
 
-bench("louvain",
-      lambda: g.cypher("CALL louvain() YIELD node, community"))
+bench("louvain", lambda: g.cypher("CALL louvain() YIELD node, community"))
 
-bench("betweenness(sample=1000)",
-      lambda: g.cypher("CALL betweenness_centrality({sample_size: 1000}) YIELD node, score"))
+bench(
+    "betweenness(sample=1000)", lambda: g.cypher("CALL betweenness_centrality({sample_size: 1000}) YIELD node, score")
+)
 
-bench("closeness(full)",
-      lambda: g.cypher("CALL closeness_centrality() YIELD node, score"))
+bench("closeness(full)", lambda: g.cypher("CALL closeness_centrality() YIELD node, score"))
 
-bench("betweenness(full)",
-      lambda: g.cypher("CALL betweenness_centrality() YIELD node, score"))
+bench("betweenness(full)", lambda: g.cypher("CALL betweenness_centrality() YIELD node, score"))
 
 print("\nDone.")

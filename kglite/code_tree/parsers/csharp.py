@@ -1,40 +1,84 @@
 """C# language parser using tree-sitter-c-sharp."""
 
 from pathlib import Path
-from tree_sitter import Language, Parser
-import tree_sitter_c_sharp as ts_csharp
 
-from .base import LanguageParser, node_text, count_lines, get_type_parameters, extract_comment_annotations
+import tree_sitter_c_sharp as ts_csharp
+from tree_sitter import Language, Parser
+
+from .base import LanguageParser, count_lines, extract_comment_annotations, get_type_parameters, node_text
 from .models import (
-    ParseResult, FileInfo, FunctionInfo, ClassInfo,
-    EnumInfo, InterfaceInfo, TypeRelationship,
-    AttributeInfo, ConstantInfo,
+    AttributeInfo,
+    ClassInfo,
+    ConstantInfo,
+    EnumInfo,
+    FileInfo,
+    FunctionInfo,
+    InterfaceInfo,
+    ParseResult,
+    TypeRelationship,
 )
 
 CSHARP_LANGUAGE = Language(ts_csharp.language())
 
-CSHARP_NOISE_NAMES: frozenset[str] = frozenset({
-    # Object methods
-    "ToString", "Equals", "GetHashCode", "CompareTo", "GetType",
-    "ReferenceEquals", "MemberwiseClone",
-    # Collection methods
-    "Count", "Add", "Remove", "Contains", "Clear", "Insert",
-    "ContainsKey", "TryGetValue", "Keys", "Values",
-    "IndexOf", "CopyTo",
-    # LINQ
-    "Any", "All", "Select", "Where", "FirstOrDefault", "First",
-    "LastOrDefault", "Last", "Single", "SingleOrDefault",
-    "ToList", "ToArray", "ToDictionary",
-    "OrderBy", "OrderByDescending", "GroupBy",
-    "Sum", "Max", "Min", "Average", "Aggregate",
-    # I/O
-    "Write", "WriteLine", "ReadLine", "Read", "Format",
-    "Close", "Dispose", "Flush",
-})
+CSHARP_NOISE_NAMES: frozenset[str] = frozenset(
+    {
+        # Object methods
+        "ToString",
+        "Equals",
+        "GetHashCode",
+        "CompareTo",
+        "GetType",
+        "ReferenceEquals",
+        "MemberwiseClone",
+        # Collection methods
+        "Count",
+        "Add",
+        "Remove",
+        "Contains",
+        "Clear",
+        "Insert",
+        "ContainsKey",
+        "TryGetValue",
+        "Keys",
+        "Values",
+        "IndexOf",
+        "CopyTo",
+        # LINQ
+        "Any",
+        "All",
+        "Select",
+        "Where",
+        "FirstOrDefault",
+        "First",
+        "LastOrDefault",
+        "Last",
+        "Single",
+        "SingleOrDefault",
+        "ToList",
+        "ToArray",
+        "ToDictionary",
+        "OrderBy",
+        "OrderByDescending",
+        "GroupBy",
+        "Sum",
+        "Max",
+        "Min",
+        "Average",
+        "Aggregate",
+        # I/O
+        "Write",
+        "WriteLine",
+        "ReadLine",
+        "Read",
+        "Format",
+        "Close",
+        "Dispose",
+        "Flush",
+    }
+)
 
 
 class CSharpParser(LanguageParser):
-
     @property
     def language_name(self) -> str:
         return "csharp"
@@ -52,8 +96,7 @@ class CSharpParser(LanguageParser):
 
     # ── Helpers ─────────────────────────────────────────────────────────
 
-    def _get_visibility(self, node, source: bytes,
-                        default: str = "private") -> str:
+    def _get_visibility(self, node, source: bytes, default: str = "private") -> str:
         """Extract visibility from modifier keywords."""
         for child in node.children:
             if child.type == "modifier":
@@ -116,8 +159,7 @@ class CSharpParser(LanguageParser):
             break
         return "\n".join(doc_lines) if doc_lines else None
 
-    def _get_name(self, node, source: bytes,
-                  name_type: str = "identifier") -> str | None:
+    def _get_name(self, node, source: bytes, name_type: str = "identifier") -> str | None:
         for child in node.children:
             if child.type == name_type:
                 return node_text(child, source)
@@ -136,24 +178,42 @@ class CSharpParser(LanguageParser):
         for child in node.children:
             if child.type == "identifier":
                 break
-            if child.type in ("predefined_type", "type_identifier",
-                              "generic_name", "nullable_type",
-                              "array_type", "void_keyword",
-                              "qualified_name"):
+            if child.type in (
+                "predefined_type",
+                "type_identifier",
+                "generic_name",
+                "nullable_type",
+                "array_type",
+                "void_keyword",
+                "qualified_name",
+            ):
                 text = node_text(child, source)
-                if text not in ("public", "private", "protected",
-                                "internal", "static", "virtual",
-                                "override", "abstract", "async",
-                                "sealed", "partial"):
+                if text not in (
+                    "public",
+                    "private",
+                    "protected",
+                    "internal",
+                    "static",
+                    "virtual",
+                    "override",
+                    "abstract",
+                    "async",
+                    "sealed",
+                    "partial",
+                ):
                     return text
         return None
 
     # Node types that create nested function scopes — calls inside these
     # belong to the nested method/lambda, not the enclosing one.
-    _NESTED_SCOPES = frozenset({
-        "method_declaration", "constructor_declaration",
-        "lambda_expression", "local_function_statement",
-    })
+    _NESTED_SCOPES = frozenset(
+        {
+            "method_declaration",
+            "constructor_declaration",
+            "lambda_expression",
+            "local_function_statement",
+        }
+    )
 
     def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
         """Extract function/method names called directly within a block.
@@ -195,8 +255,7 @@ class CSharpParser(LanguageParser):
             elif node.type == "object_creation_expression":
                 line = node.start_point[0] + 1
                 for child in node.children:
-                    if child.type in ("identifier", "type_identifier",
-                                      "generic_name"):
+                    if child.type in ("identifier", "type_identifier", "generic_name"):
                         calls.append((node_text(child, source), line))
                         break
             for child in node.children:
@@ -219,8 +278,7 @@ class CSharpParser(LanguageParser):
                         return node_text(sub, source)
         return ""
 
-    def _file_to_module_path(self, filepath: Path, src_root: Path,
-                              namespace: str) -> str:
+    def _file_to_module_path(self, filepath: Path, src_root: Path, namespace: str) -> str:
         if namespace:
             return namespace
         rel = filepath.relative_to(src_root)
@@ -233,8 +291,7 @@ class CSharpParser(LanguageParser):
         for child in node.children:
             if child.type == "base_list":
                 for sub in child.children:
-                    if sub.type in ("identifier", "type_identifier",
-                                    "generic_name", "qualified_name"):
+                    if sub.type in ("identifier", "type_identifier", "generic_name", "qualified_name"):
                         bases.append(node_text(sub, source))
         return bases
 
@@ -251,8 +308,9 @@ class CSharpParser(LanguageParser):
 
     # ── Parsing ─────────────────────────────────────────────────────────
 
-    def _parse_method(self, node, source: bytes, module_path: str,
-                      rel_path: str, owner: str | None = None) -> FunctionInfo:
+    def _parse_method(
+        self, node, source: bytes, module_path: str, rel_path: str, owner: str | None = None
+    ) -> FunctionInfo:
         name = self._get_name(node, source) or "unknown"
         if owner:
             prefix = f"{module_path}.{owner}"
@@ -301,9 +359,9 @@ class CSharpParser(LanguageParser):
             end_line=node.end_point[0] + 1,
         )
 
-    def _parse_type_declaration(self, node, source: bytes, module_path: str,
-                                 rel_path: str, result: ParseResult,
-                                 outer_name: str | None = None):
+    def _parse_type_declaration(
+        self, node, source: bytes, module_path: str, rel_path: str, result: ParseResult, outer_name: str | None = None
+    ):
         """Parse class, struct, record, or interface declaration."""
         name = self._get_name(node, source) or "unknown"
         if outer_name:
@@ -326,25 +384,28 @@ class CSharpParser(LanguageParser):
             metadata["is_partial"] = True
 
         if node.type == "interface_declaration":
-            result.interfaces.append(InterfaceInfo(
-                name=name,
-                qualified_name=qualified_name,
-                kind="interface",
-                visibility=self._get_visibility(node, source,
-                                                default="internal"),
-                file_path=rel_path,
-                line_number=node.start_point[0] + 1,
-                docstring=docstring,
-                type_parameters=get_type_parameters(node, source, "type_parameter_list"),
-                end_line=node.end_point[0] + 1,
-            ))
+            result.interfaces.append(
+                InterfaceInfo(
+                    name=name,
+                    qualified_name=qualified_name,
+                    kind="interface",
+                    visibility=self._get_visibility(node, source, default="internal"),
+                    file_path=rel_path,
+                    line_number=node.start_point[0] + 1,
+                    docstring=docstring,
+                    type_parameters=get_type_parameters(node, source, "type_parameter_list"),
+                    end_line=node.end_point[0] + 1,
+                )
+            )
             # Interface extends
             for base in base_types:
-                result.type_relationships.append(TypeRelationship(
-                    source_type=name,
-                    target_type=base,
-                    relationship="extends",
-                ))
+                result.type_relationships.append(
+                    TypeRelationship(
+                        source_type=name,
+                        target_type=base,
+                        relationship="extends",
+                    )
+                )
         else:
             # class, struct, record
             if node.type == "struct_declaration":
@@ -352,43 +413,47 @@ class CSharpParser(LanguageParser):
             else:
                 kind = "class"
 
-            result.classes.append(ClassInfo(
-                name=name,
-                qualified_name=qualified_name,
-                kind=kind,
-                visibility=self._get_visibility(node, source,
-                                                default="internal"),
-                file_path=rel_path,
-                line_number=node.start_point[0] + 1,
-                docstring=docstring,
-                bases=base_types[:1],  # First base is the class
-                type_parameters=get_type_parameters(node, source, "type_parameter_list"),
-                metadata=metadata,
-                end_line=node.end_point[0] + 1,
-            ))
+            result.classes.append(
+                ClassInfo(
+                    name=name,
+                    qualified_name=qualified_name,
+                    kind=kind,
+                    visibility=self._get_visibility(node, source, default="internal"),
+                    file_path=rel_path,
+                    line_number=node.start_point[0] + 1,
+                    docstring=docstring,
+                    bases=base_types[:1],  # First base is the class
+                    type_parameters=get_type_parameters(node, source, "type_parameter_list"),
+                    metadata=metadata,
+                    end_line=node.end_point[0] + 1,
+                )
+            )
 
             # Relationships — first base could be class (extends),
             # rest are interfaces (implements)
             if base_types:
-                result.type_relationships.append(TypeRelationship(
-                    source_type=name,
-                    target_type=base_types[0],
-                    relationship="extends",
-                ))
-                for iface in base_types[1:]:
-                    result.type_relationships.append(TypeRelationship(
+                result.type_relationships.append(
+                    TypeRelationship(
                         source_type=name,
-                        target_type=iface,
-                        relationship="implements",
-                    ))
+                        target_type=base_types[0],
+                        relationship="extends",
+                    )
+                )
+                for iface in base_types[1:]:
+                    result.type_relationships.append(
+                        TypeRelationship(
+                            source_type=name,
+                            target_type=iface,
+                            relationship="implements",
+                        )
+                    )
 
         # Parse body
-        self._parse_type_body(node, source, module_path, rel_path,
-                              name, qualified_name, result)
+        self._parse_type_body(node, source, module_path, rel_path, name, qualified_name, result)
 
-    def _parse_type_body(self, node, source: bytes, module_path: str,
-                         rel_path: str, type_name: str,
-                         type_qname: str, result: ParseResult):
+    def _parse_type_body(
+        self, node, source: bytes, module_path: str, rel_path: str, type_name: str, type_qname: str, result: ParseResult
+    ):
         """Parse methods, properties, fields from a type body."""
         method_type_rel = TypeRelationship(
             source_type=type_qname,
@@ -399,41 +464,38 @@ class CSharpParser(LanguageParser):
         for child in node.children:
             if child.type == "declaration_list":
                 for item in child.children:
-                    if item.type in ("method_declaration",
-                                     "constructor_declaration"):
+                    if item.type in ("method_declaration", "constructor_declaration"):
                         fn = self._parse_method(
-                            item, source, module_path, rel_path,
+                            item,
+                            source,
+                            module_path,
+                            rel_path,
                             owner=type_name,
                         )
                         result.functions.append(fn)
                         method_type_rel.methods.append(fn)
 
                     elif item.type == "field_declaration":
-                        self._parse_field(item, source, rel_path,
-                                          type_name, type_qname, result)
+                        self._parse_field(item, source, rel_path, type_name, type_qname, result)
 
                     elif item.type == "property_declaration":
-                        self._parse_property(item, source, rel_path,
-                                             type_qname, result)
+                        self._parse_property(item, source, rel_path, type_qname, result)
 
-                    elif item.type in ("class_declaration",
-                                       "struct_declaration",
-                                       "record_declaration",
-                                       "interface_declaration"):
-                        self._parse_type_declaration(
-                            item, source, module_path, rel_path,
-                            result, outer_name=type_name)
+                    elif item.type in (
+                        "class_declaration",
+                        "struct_declaration",
+                        "record_declaration",
+                        "interface_declaration",
+                    ):
+                        self._parse_type_declaration(item, source, module_path, rel_path, result, outer_name=type_name)
 
                     elif item.type == "enum_declaration":
-                        self._parse_enum(item, source, module_path,
-                                         rel_path, result)
+                        self._parse_enum(item, source, module_path, rel_path, result)
 
         if method_type_rel.methods:
             result.type_relationships.append(method_type_rel)
 
-    def _parse_field(self, node, source: bytes, rel_path: str,
-                     type_name: str, type_qname: str,
-                     result: ParseResult):
+    def _parse_field(self, node, source: bytes, rel_path: str, type_name: str, type_qname: str, result: ParseResult):
         """Parse a field_declaration as AttributeInfo or ConstantInfo."""
         is_static = self._has_modifier(node, source, "static")
         is_const = self._has_modifier(node, source, "const")
@@ -445,9 +507,14 @@ class CSharpParser(LanguageParser):
         for child in node.children:
             if child.type == "variable_declaration":
                 for sub in child.children:
-                    if sub.type in ("predefined_type", "type_identifier",
-                                    "generic_name", "nullable_type",
-                                    "array_type", "qualified_name"):
+                    if sub.type in (
+                        "predefined_type",
+                        "type_identifier",
+                        "generic_name",
+                        "nullable_type",
+                        "array_type",
+                        "qualified_name",
+                    ):
                         type_ann = node_text(sub, source)
                         break
                 # Extract variable declarators
@@ -466,77 +533,85 @@ class CSharpParser(LanguageParser):
                                 break
 
                         if is_const or (is_static and is_readonly):
-                            result.constants.append(ConstantInfo(
-                                name=name,
-                                qualified_name=f"{type_qname}.{name}",
-                                kind="constant",
-                                type_annotation=type_ann,
-                                value_preview=val_text,
-                                visibility=visibility,
-                                file_path=rel_path,
-                                line_number=node.start_point[0] + 1,
-                            ))
+                            result.constants.append(
+                                ConstantInfo(
+                                    name=name,
+                                    qualified_name=f"{type_qname}.{name}",
+                                    kind="constant",
+                                    type_annotation=type_ann,
+                                    value_preview=val_text,
+                                    visibility=visibility,
+                                    file_path=rel_path,
+                                    line_number=node.start_point[0] + 1,
+                                )
+                            )
                         else:
-                            result.attributes.append(AttributeInfo(
-                                name=name,
-                                qualified_name=f"{type_qname}.{name}",
-                                owner_qualified_name=type_qname,
-                                type_annotation=type_ann,
-                                visibility=visibility,
-                                file_path=rel_path,
-                                line_number=node.start_point[0] + 1,
-                                default_value=val_text,
-                            ))
+                            result.attributes.append(
+                                AttributeInfo(
+                                    name=name,
+                                    qualified_name=f"{type_qname}.{name}",
+                                    owner_qualified_name=type_qname,
+                                    type_annotation=type_ann,
+                                    visibility=visibility,
+                                    file_path=rel_path,
+                                    line_number=node.start_point[0] + 1,
+                                    default_value=val_text,
+                                )
+                            )
 
-    def _parse_property(self, node, source: bytes, rel_path: str,
-                        type_qname: str, result: ParseResult):
+    def _parse_property(self, node, source: bytes, rel_path: str, type_qname: str, result: ParseResult):
         """Parse a property_declaration as AttributeInfo."""
         name = self._get_name(node, source)
         if not name:
             return
         type_ann = None
         for child in node.children:
-            if child.type in ("predefined_type", "type_identifier",
-                              "generic_name", "nullable_type",
-                              "array_type", "qualified_name"):
+            if child.type in (
+                "predefined_type",
+                "type_identifier",
+                "generic_name",
+                "nullable_type",
+                "array_type",
+                "qualified_name",
+            ):
                 type_ann = node_text(child, source)
                 break
-        result.attributes.append(AttributeInfo(
-            name=name,
-            qualified_name=f"{type_qname}.{name}",
-            owner_qualified_name=type_qname,
-            type_annotation=type_ann,
-            visibility=self._get_visibility(node, source),
-            file_path=rel_path,
-            line_number=node.start_point[0] + 1,
-        ))
+        result.attributes.append(
+            AttributeInfo(
+                name=name,
+                qualified_name=f"{type_qname}.{name}",
+                owner_qualified_name=type_qname,
+                type_annotation=type_ann,
+                visibility=self._get_visibility(node, source),
+                file_path=rel_path,
+                line_number=node.start_point[0] + 1,
+            )
+        )
 
-    def _parse_enum(self, node, source: bytes, module_path: str,
-                    rel_path: str, result: ParseResult):
+    def _parse_enum(self, node, source: bytes, module_path: str, rel_path: str, result: ParseResult):
         name = self._get_name(node, source) or "unknown"
-        result.enums.append(EnumInfo(
-            name=name,
-            qualified_name=f"{module_path}.{name}",
-            visibility=self._get_visibility(node, source, default="internal"),
-            file_path=rel_path,
-            line_number=node.start_point[0] + 1,
-            docstring=self._get_doc_comment(node, source),
-            variants=self._get_enum_members(node, source),
-            end_line=node.end_point[0] + 1,
-        ))
+        result.enums.append(
+            EnumInfo(
+                name=name,
+                qualified_name=f"{module_path}.{name}",
+                visibility=self._get_visibility(node, source, default="internal"),
+                file_path=rel_path,
+                line_number=node.start_point[0] + 1,
+                docstring=self._get_doc_comment(node, source),
+                variants=self._get_enum_members(node, source),
+                end_line=node.end_point[0] + 1,
+            )
+        )
 
-    def _parse_top_level(self, node, source: bytes, module_path: str,
-                         rel_path: str, result: ParseResult,
-                         file_info: FileInfo):
+    def _parse_top_level(
+        self, node, source: bytes, module_path: str, rel_path: str, result: ParseResult, file_info: FileInfo
+    ):
         """Parse top-level declarations, handling namespace nesting."""
-        if node.type in ("class_declaration", "struct_declaration",
-                         "record_declaration", "interface_declaration"):
-            self._parse_type_declaration(node, source, module_path,
-                                         rel_path, result)
+        if node.type in ("class_declaration", "struct_declaration", "record_declaration", "interface_declaration"):
+            self._parse_type_declaration(node, source, module_path, rel_path, result)
         elif node.type == "enum_declaration":
             self._parse_enum(node, source, module_path, rel_path, result)
-        elif node.type in ("namespace_declaration",
-                           "file_scoped_namespace_declaration"):
+        elif node.type in ("namespace_declaration", "file_scoped_namespace_declaration"):
             # Extract namespace and recurse into its body
             ns_name = None
             for child in node.children:
@@ -545,13 +620,11 @@ class CSharpParser(LanguageParser):
                 elif child.type == "declaration_list":
                     ns_path = ns_name if ns_name else module_path
                     for item in child.children:
-                        self._parse_top_level(item, source, ns_path,
-                                              rel_path, result, file_info)
+                        self._parse_top_level(item, source, ns_path, rel_path, result, file_info)
                 else:
                     # file_scoped_namespace: children are siblings
                     if ns_name and child.is_named:
-                        self._parse_top_level(child, source, ns_name,
-                                              rel_path, result, file_info)
+                        self._parse_top_level(child, source, ns_name, rel_path, result, file_info)
         elif node.type == "using_directive":
             for child in node.children:
                 if child.type in ("qualified_name", "identifier"):
@@ -561,8 +634,7 @@ class CSharpParser(LanguageParser):
             # Top-level statements in C# 9+
             for child in node.children:
                 if child.is_named:
-                    self._parse_top_level(child, source, module_path,
-                                          rel_path, result, file_info)
+                    self._parse_top_level(child, source, module_path, rel_path, result, file_info)
 
     def parse_file(self, filepath: Path, src_root: Path) -> ParseResult:
         source = filepath.read_bytes()
@@ -582,18 +654,21 @@ class CSharpParser(LanguageParser):
             language="csharp",
         )
         stem = filepath.stem
-        if (stem.endswith("Test") or stem.endswith("Tests")
-                or "/Tests/" in rel_path or "/.Tests/" in rel_path
-                or rel_path.startswith("Tests/")
-                or rel_path.startswith("tests/")):
+        if (
+            stem.endswith("Test")
+            or stem.endswith("Tests")
+            or "/Tests/" in rel_path
+            or "/.Tests/" in rel_path
+            or rel_path.startswith("Tests/")
+            or rel_path.startswith("tests/")
+        ):
             file_info.is_test = True
 
         result = ParseResult()
         result.files.append(file_info)
 
         for child in root.children:
-            self._parse_top_level(child, source, module_path, rel_path,
-                                  result, file_info)
+            self._parse_top_level(child, source, module_path, rel_path, result, file_info)
 
         file_info.annotations = extract_comment_annotations(root, source)
 

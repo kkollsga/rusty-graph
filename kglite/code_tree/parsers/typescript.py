@@ -1,51 +1,107 @@
 """TypeScript and JavaScript parsers using tree-sitter."""
 
 from pathlib import Path
+
 from tree_sitter import Language, Parser
 
-from .base import LanguageParser, node_text, count_lines, get_type_parameters, extract_comment_annotations
+from .base import LanguageParser, count_lines, extract_comment_annotations, get_type_parameters, node_text
 from .models import (
-    ParseResult, FileInfo, FunctionInfo, ClassInfo,
-    EnumInfo, InterfaceInfo, TypeRelationship,
-    AttributeInfo, ConstantInfo,
+    AttributeInfo,
+    ClassInfo,
+    ConstantInfo,
+    EnumInfo,
+    FileInfo,
+    FunctionInfo,
+    InterfaceInfo,
+    ParseResult,
+    TypeRelationship,
 )
 
 
 def _get_ts_language():
     import tree_sitter_typescript as ts_typescript
+
     return Language(ts_typescript.language_typescript())
 
 
 def _get_tsx_language():
     import tree_sitter_typescript as ts_typescript
+
     return Language(ts_typescript.language_tsx())
 
 
 def _get_js_language():
     import tree_sitter_javascript as ts_javascript
+
     return Language(ts_javascript.language())
 
 
-JSTS_NOISE_NAMES: frozenset[str] = frozenset({
-    # Array methods
-    "push", "pop", "shift", "unshift", "map", "filter", "reduce",
-    "forEach", "find", "findIndex", "some", "every", "includes",
-    "indexOf", "slice", "splice", "concat", "join", "flat", "flatMap",
-    "sort", "reverse",
-    # Object methods
-    "keys", "values", "entries", "assign", "freeze",
-    "hasOwnProperty", "toString", "valueOf",
-    # String methods
-    "trim", "split", "replace", "match", "test", "search",
-    "startsWith", "endsWith", "substring", "toLowerCase", "toUpperCase",
-    # Promise methods
-    "then", "catch", "finally", "resolve", "reject",
-    # Console methods
-    "log", "warn", "error", "info", "debug",
-    # DOM / common
-    "addEventListener", "removeEventListener", "querySelector",
-    "getElementById", "createElement",
-})
+JSTS_NOISE_NAMES: frozenset[str] = frozenset(
+    {
+        # Array methods
+        "push",
+        "pop",
+        "shift",
+        "unshift",
+        "map",
+        "filter",
+        "reduce",
+        "forEach",
+        "find",
+        "findIndex",
+        "some",
+        "every",
+        "includes",
+        "indexOf",
+        "slice",
+        "splice",
+        "concat",
+        "join",
+        "flat",
+        "flatMap",
+        "sort",
+        "reverse",
+        # Object methods
+        "keys",
+        "values",
+        "entries",
+        "assign",
+        "freeze",
+        "hasOwnProperty",
+        "toString",
+        "valueOf",
+        # String methods
+        "trim",
+        "split",
+        "replace",
+        "match",
+        "test",
+        "search",
+        "startsWith",
+        "endsWith",
+        "substring",
+        "toLowerCase",
+        "toUpperCase",
+        # Promise methods
+        "then",
+        "catch",
+        "finally",
+        "resolve",
+        "reject",
+        # Console methods
+        "log",
+        "warn",
+        "error",
+        "info",
+        "debug",
+        # DOM / common
+        "addEventListener",
+        "removeEventListener",
+        "querySelector",
+        "getElementById",
+        "createElement",
+    }
+)
 
 
 class _BaseJSTSParser(LanguageParser):
@@ -60,12 +116,10 @@ class _BaseJSTSParser(LanguageParser):
 
     # ── Helpers ─────────────────────────────────────────────────────────
 
-    def _get_name(self, node, source: bytes,
-                  name_type: str = "identifier") -> str:
+    def _get_name(self, node, source: bytes, name_type: str = "identifier") -> str:
         """Get the first identifier-like child as the item name."""
         for child in node.children:
-            if child.type in (name_type, "type_identifier",
-                              "property_identifier"):
+            if child.type in (name_type, "type_identifier", "property_identifier"):
                 return node_text(child, source)
         return "unknown"
 
@@ -177,10 +231,15 @@ class _BaseJSTSParser(LanguageParser):
 
     # Node types that create nested function scopes — calls inside these
     # belong to the nested function, not the enclosing one.
-    _NESTED_SCOPES = frozenset({
-        "function_declaration", "function", "arrow_function",
-        "method_definition", "generator_function_declaration",
-    })
+    _NESTED_SCOPES = frozenset(
+        {
+            "function_declaration",
+            "function",
+            "arrow_function",
+            "method_definition",
+            "generator_function_declaration",
+        }
+    )
 
     def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
         """Extract function/method names called directly within a block.
@@ -208,8 +267,7 @@ class _BaseJSTSParser(LanguageParser):
                             prop_name = node_text(prop, source)
                             obj_text = node_text(obj, source)
                             hint = obj_text.rsplit(".", 1)[-1]
-                            if hint in ("this", "super", "window",
-                                        "document", "console"):
+                            if hint in ("this", "super", "window", "document", "console"):
                                 calls.append((prop_name, line))
                             else:
                                 calls.append((f"{hint}.{prop_name}", line))
@@ -217,8 +275,7 @@ class _BaseJSTSParser(LanguageParser):
                             calls.append((node_text(prop, source), line))
                         else:
                             for child in reversed(func.children):
-                                if child.type in ("property_identifier",
-                                                   "identifier"):
+                                if child.type in ("property_identifier", "identifier"):
                                     calls.append((node_text(child, source), line))
                                     break
             elif node.type == "new_expression":
@@ -240,7 +297,7 @@ class _BaseJSTSParser(LanguageParser):
         # Strip extension from last part
         for ext in (".ts", ".tsx", ".js", ".jsx", ".mjs"):
             if parts[-1].endswith(ext):
-                parts[-1] = parts[-1][:-len(ext)]
+                parts[-1] = parts[-1][: -len(ext)]
                 break
         # index files represent the directory
         if parts[-1] == "index":
@@ -267,16 +324,12 @@ class _BaseJSTSParser(LanguageParser):
             break
         return decorators
 
-    def _extract_class_fields(self, body, source: bytes,
-                              rel_path: str, owner_qualified: str,
-                              result: ParseResult):
+    def _extract_class_fields(self, body, source: bytes, rel_path: str, owner_qualified: str, result: ParseResult):
         """Extract class field/property declarations as AttributeInfo."""
         if body is None:
             return
         for child in body.children:
-            if child.type not in ("public_field_definition",
-                                  "property_declaration",
-                                  "field_definition"):
+            if child.type not in ("public_field_definition", "property_declaration", "field_definition"):
                 continue
             # Get field name
             name = None
@@ -304,16 +357,18 @@ class _BaseJSTSParser(LanguageParser):
                 elif saw_eq:
                     default_val = node_text(sub, source)[:100]
                     break
-            result.attributes.append(AttributeInfo(
-                name=name,
-                qualified_name=f"{owner_qualified}.{name}",
-                owner_qualified_name=owner_qualified,
-                type_annotation=type_ann,
-                visibility=visibility,
-                file_path=rel_path,
-                line_number=child.start_point[0] + 1,
-                default_value=default_val,
-            ))
+            result.attributes.append(
+                AttributeInfo(
+                    name=name,
+                    qualified_name=f"{owner_qualified}.{name}",
+                    owner_qualified_name=owner_qualified,
+                    type_annotation=type_ann,
+                    visibility=visibility,
+                    file_path=rel_path,
+                    line_number=child.start_point[0] + 1,
+                    default_value=default_val,
+                )
+            )
 
     def _get_enum_members(self, node, source: bytes) -> list[str]:
         """Extract member names from an enum body."""
@@ -335,9 +390,9 @@ class _BaseJSTSParser(LanguageParser):
 
     # ── Parsing ─────────────────────────────────────────────────────────
 
-    def _parse_function(self, node, source: bytes, module_path: str,
-                        rel_path: str, is_method: bool = False,
-                        owner: str | None = None) -> FunctionInfo:
+    def _parse_function(
+        self, node, source: bytes, module_path: str, rel_path: str, is_method: bool = False, owner: str | None = None
+    ) -> FunctionInfo:
         name = self._get_name(node, source)
         if owner:
             prefix = f"{module_path}.{owner}"
@@ -372,8 +427,7 @@ class _BaseJSTSParser(LanguageParser):
             metadata=metadata,
         )
 
-    def _parse_class(self, node, source: bytes, module_path: str,
-                     rel_path: str, result: ParseResult):
+    def _parse_class(self, node, source: bytes, module_path: str, rel_path: str, result: ParseResult):
         """Parse a class_declaration node."""
         name = self._get_name(node, source)
         qualified_name = f"{module_path}.{name}"
@@ -385,35 +439,41 @@ class _BaseJSTSParser(LanguageParser):
         if decorators:
             metadata["decorators"] = decorators
 
-        result.classes.append(ClassInfo(
-            name=name,
-            qualified_name=qualified_name,
-            kind="class",
-            visibility=self._get_visibility(node, source),
-            file_path=rel_path,
-            line_number=node.start_point[0] + 1,
-            docstring=docstring,
-            end_line=node.end_point[0] + 1,
-            bases=extends,
-            type_parameters=get_type_parameters(node, source),
-            metadata=metadata,
-        ))
+        result.classes.append(
+            ClassInfo(
+                name=name,
+                qualified_name=qualified_name,
+                kind="class",
+                visibility=self._get_visibility(node, source),
+                file_path=rel_path,
+                line_number=node.start_point[0] + 1,
+                docstring=docstring,
+                end_line=node.end_point[0] + 1,
+                bases=extends,
+                type_parameters=get_type_parameters(node, source),
+                metadata=metadata,
+            )
+        )
 
         # EXTENDS edges
         for base in extends:
-            result.type_relationships.append(TypeRelationship(
-                source_type=name,
-                target_type=base,
-                relationship="extends",
-            ))
+            result.type_relationships.append(
+                TypeRelationship(
+                    source_type=name,
+                    target_type=base,
+                    relationship="extends",
+                )
+            )
 
         # IMPLEMENTS edges
         for iface in implements:
-            result.type_relationships.append(TypeRelationship(
-                source_type=name,
-                target_type=iface,
-                relationship="implements",
-            ))
+            result.type_relationships.append(
+                TypeRelationship(
+                    source_type=name,
+                    target_type=iface,
+                    relationship="implements",
+                )
+            )
 
         # Parse methods and fields
         method_type_rel = TypeRelationship(
@@ -426,7 +486,11 @@ class _BaseJSTSParser(LanguageParser):
         if body:
             # Extract class fields/properties as AttributeInfo
             self._extract_class_fields(
-                body, source, rel_path, qualified_name, result,
+                body,
+                source,
+                rel_path,
+                qualified_name,
+                result,
             )
 
             for child in body.children:
@@ -438,8 +502,12 @@ class _BaseJSTSParser(LanguageParser):
 
                 if fn_node:
                     fn = self._parse_function(
-                        fn_node, source, module_path, rel_path,
-                        is_method=True, owner=name,
+                        fn_node,
+                        source,
+                        module_path,
+                        rel_path,
+                        is_method=True,
+                        owner=name,
                     )
                     result.functions.append(fn)
                     method_type_rel.methods.append(fn)
@@ -447,33 +515,36 @@ class _BaseJSTSParser(LanguageParser):
         if method_type_rel.methods:
             result.type_relationships.append(method_type_rel)
 
-    def _parse_interface(self, node, source: bytes, module_path: str,
-                         rel_path: str, result: ParseResult):
+    def _parse_interface(self, node, source: bytes, module_path: str, rel_path: str, result: ParseResult):
         """Parse an interface_declaration node (TypeScript only)."""
         name = self._get_name(node, source)
         qualified_name = f"{module_path}.{name}"
         extends, _ = self._get_heritage(node, source)
         docstring = self._get_docstring(node, source)
 
-        result.interfaces.append(InterfaceInfo(
-            name=name,
-            qualified_name=qualified_name,
-            kind="interface",
-            visibility=self._get_visibility(node, source),
-            file_path=rel_path,
-            line_number=node.start_point[0] + 1,
-            docstring=docstring,
-            end_line=node.end_point[0] + 1,
-            type_parameters=get_type_parameters(node, source),
-        ))
+        result.interfaces.append(
+            InterfaceInfo(
+                name=name,
+                qualified_name=qualified_name,
+                kind="interface",
+                visibility=self._get_visibility(node, source),
+                file_path=rel_path,
+                line_number=node.start_point[0] + 1,
+                docstring=docstring,
+                end_line=node.end_point[0] + 1,
+                type_parameters=get_type_parameters(node, source),
+            )
+        )
 
         # Interface extends edges (interface extending another interface)
         for base in extends:
-            result.type_relationships.append(TypeRelationship(
-                source_type=name,
-                target_type=base,
-                relationship="extends",
-            ))
+            result.type_relationships.append(
+                TypeRelationship(
+                    source_type=name,
+                    target_type=base,
+                    relationship="extends",
+                )
+            )
 
         # Parse interface method signatures
         iface_rel = TypeRelationship(
@@ -484,42 +555,51 @@ class _BaseJSTSParser(LanguageParser):
         for child in node.children:
             if child.type in ("interface_body", "object_type"):
                 for item in child.children:
-                    if item.type in ("method_signature",
-                                     "method_definition"):
+                    if item.type in ("method_signature", "method_definition"):
                         fn = self._parse_function(
-                            item, source, module_path, rel_path,
-                            is_method=True, owner=name,
+                            item,
+                            source,
+                            module_path,
+                            rel_path,
+                            is_method=True,
+                            owner=name,
                         )
                         result.functions.append(fn)
                         iface_rel.methods.append(fn)
         if iface_rel.methods:
             result.type_relationships.append(iface_rel)
 
-    def _parse_enum(self, node, source: bytes, module_path: str,
-                    rel_path: str, result: ParseResult):
+    def _parse_enum(self, node, source: bytes, module_path: str, rel_path: str, result: ParseResult):
         """Parse an enum_declaration node."""
         name = self._get_name(node, source)
         qualified_name = f"{module_path}.{name}"
 
-        result.enums.append(EnumInfo(
-            name=name,
-            qualified_name=qualified_name,
-            visibility=self._get_visibility(node, source),
-            file_path=rel_path,
-            line_number=node.start_point[0] + 1,
-            docstring=self._get_docstring(node, source),
-            end_line=node.end_point[0] + 1,
-            variants=self._get_enum_members(node, source),
-        ))
+        result.enums.append(
+            EnumInfo(
+                name=name,
+                qualified_name=qualified_name,
+                visibility=self._get_visibility(node, source),
+                file_path=rel_path,
+                line_number=node.start_point[0] + 1,
+                docstring=self._get_docstring(node, source),
+                end_line=node.end_point[0] + 1,
+                variants=self._get_enum_members(node, source),
+            )
+        )
 
-    def _parse_top_level(self, node, source: bytes, module_path: str,
-                         rel_path: str, result: ParseResult,
-                         file_info: FileInfo):
+    def _parse_top_level(
+        self, node, source: bytes, module_path: str, rel_path: str, result: ParseResult, file_info: FileInfo
+    ):
         """Parse a top-level AST node."""
         if node.type in ("function_declaration", "function"):
-            result.functions.append(self._parse_function(
-                node, source, module_path, rel_path,
-            ))
+            result.functions.append(
+                self._parse_function(
+                    node,
+                    source,
+                    module_path,
+                    rel_path,
+                )
+            )
         elif node.type == "class_declaration":
             self._parse_class(node, source, module_path, rel_path, result)
         elif node.type == "interface_declaration":
@@ -529,33 +609,45 @@ class _BaseJSTSParser(LanguageParser):
         elif node.type == "export_statement":
             # Track exported names
             for child in node.children:
-                if child.type in ("function_declaration", "class_declaration",
-                                   "interface_declaration", "enum_declaration",
-                                   "type_alias_declaration"):
+                if child.type in (
+                    "function_declaration",
+                    "class_declaration",
+                    "interface_declaration",
+                    "enum_declaration",
+                    "type_alias_declaration",
+                ):
                     self._parse_top_level(
-                        child, source, module_path, rel_path, result, file_info,
+                        child,
+                        source,
+                        module_path,
+                        rel_path,
+                        result,
+                        file_info,
                     )
                     name = self._get_name(child, source)
                     if name != "unknown":
                         file_info.exports.append(name)
                 elif child.type == "lexical_declaration":
                     self._parse_top_level(
-                        child, source, module_path, rel_path, result, file_info,
+                        child,
+                        source,
+                        module_path,
+                        rel_path,
+                        result,
+                        file_info,
                     )
                     # Extract names from variable declarators
                     for sub in child.children:
                         if sub.type == "variable_declarator":
                             name_node = sub.child_by_field_name("name")
                             if name_node:
-                                file_info.exports.append(
-                                    node_text(name_node, source))
+                                file_info.exports.append(node_text(name_node, source))
                 elif child.type == "export_clause":
                     for sub in child.children:
                         if sub.type == "export_specifier":
                             for inner in sub.children:
                                 if inner.type == "identifier":
-                                    file_info.exports.append(
-                                        node_text(inner, source))
+                                    file_info.exports.append(node_text(inner, source))
                                     break
         elif node.type == "import_statement":
             # Extract the module path from the import source
@@ -582,16 +674,18 @@ class _BaseJSTSParser(LanguageParser):
                     elif saw_eq:
                         value_node = child
                         break
-            result.constants.append(ConstantInfo(
-                name=name,
-                qualified_name=f"{module_path}.{name}",
-                kind="type_alias",
-                type_annotation=None,
-                value_preview=node_text(value_node, source)[:100] if value_node else None,
-                visibility=self._get_visibility(node, source),
-                file_path=rel_path,
-                line_number=node.start_point[0] + 1,
-            ))
+            result.constants.append(
+                ConstantInfo(
+                    name=name,
+                    qualified_name=f"{module_path}.{name}",
+                    kind="type_alias",
+                    type_annotation=None,
+                    value_preview=node_text(value_node, source)[:100] if value_node else None,
+                    visibility=self._get_visibility(node, source),
+                    file_path=rel_path,
+                    line_number=node.start_point[0] + 1,
+                )
+            )
         elif node.type == "lexical_declaration":
             for child in node.children:
                 if child.type == "variable_declarator":
@@ -601,7 +695,10 @@ class _BaseJSTSParser(LanguageParser):
                         # const foo = () => {} or const foo = function() {}
                         if name_node:
                             fn = self._parse_function(
-                                value, source, module_path, rel_path,
+                                value,
+                                source,
+                                module_path,
+                                rel_path,
                             )
                             fn.name = node_text(name_node, source)
                             fn.qualified_name = f"{module_path}.{fn.name}"
@@ -617,16 +714,18 @@ class _BaseJSTSParser(LanguageParser):
                                     text = text[1:].strip()
                                 type_ann = text
                                 break
-                        result.constants.append(ConstantInfo(
-                            name=name,
-                            qualified_name=f"{module_path}.{name}",
-                            kind="constant",
-                            type_annotation=type_ann,
-                            value_preview=node_text(value, source)[:100] if value else None,
-                            visibility=self._get_visibility(node, source),
-                            file_path=rel_path,
-                            line_number=child.start_point[0] + 1,
-                        ))
+                        result.constants.append(
+                            ConstantInfo(
+                                name=name,
+                                qualified_name=f"{module_path}.{name}",
+                                kind="constant",
+                                type_annotation=type_ann,
+                                value_preview=node_text(value, source)[:100] if value else None,
+                                visibility=self._get_visibility(node, source),
+                                file_path=rel_path,
+                                line_number=child.start_point[0] + 1,
+                            )
+                        )
 
     def parse_file(self, filepath: Path, src_root: Path) -> ParseResult:
         source = filepath.read_bytes()
@@ -645,12 +744,25 @@ class _BaseJSTSParser(LanguageParser):
             language=self.language_name,
         )
         fname = filepath.name
-        if (any(fname.endswith(ext) for ext in (
-                ".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx",
-                ".test.js", ".spec.js", ".test.jsx", ".spec.jsx",
-                ".test.mjs", ".spec.mjs"))
-                or "/__tests__/" in rel_path
-                or rel_path.startswith("__tests__/")):
+        if (
+            any(
+                fname.endswith(ext)
+                for ext in (
+                    ".test.ts",
+                    ".spec.ts",
+                    ".test.tsx",
+                    ".spec.tsx",
+                    ".test.js",
+                    ".spec.js",
+                    ".test.jsx",
+                    ".spec.jsx",
+                    ".test.mjs",
+                    ".spec.mjs",
+                )
+            )
+            or "/__tests__/" in rel_path
+            or rel_path.startswith("__tests__/")
+        ):
             file_info.is_test = True
 
         result = ParseResult()
@@ -658,7 +770,12 @@ class _BaseJSTSParser(LanguageParser):
 
         for child in root.children:
             self._parse_top_level(
-                child, source, module_path, rel_path, result, file_info,
+                child,
+                source,
+                module_path,
+                rel_path,
+                result,
+                file_info,
             )
 
         file_info.annotations = extract_comment_annotations(root, source)
@@ -667,7 +784,6 @@ class _BaseJSTSParser(LanguageParser):
 
 
 class TypeScriptParser(_BaseJSTSParser):
-
     @property
     def language_name(self) -> str:
         return "typescript"
@@ -684,7 +800,6 @@ class TypeScriptParser(_BaseJSTSParser):
 
 
 class JavaScriptParser(_BaseJSTSParser):
-
     @property
     def language_name(self) -> str:
         return "javascript"

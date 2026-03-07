@@ -61,28 +61,28 @@ class TestLouvainCommunities:
         """Louvain should detect two clear communities."""
         result = two_cluster_graph.louvain_communities()
 
-        assert 'communities' in result
-        assert 'modularity' in result
-        assert 'num_communities' in result
+        assert "communities" in result
+        assert "modularity" in result
+        assert "num_communities" in result
 
         # Should find 2 communities (or close to it)
-        assert result['num_communities'] >= 2
+        assert result["num_communities"] >= 2
 
     def test_all_nodes_assigned(self, two_cluster_graph):
         """Every node should be assigned to a community."""
         result = two_cluster_graph.louvain_communities()
 
         all_nodes = set()
-        for comm_id, members in result['communities'].items():
+        for comm_id, members in result["communities"].items():
             for node in members:
-                all_nodes.add(node['title'])
+                all_nodes.add(node["title"])
 
-        assert all_nodes == {'Alice', 'Bob', 'Charlie', 'Dave', 'Eve', 'Frank'}
+        assert all_nodes == {"Alice", "Bob", "Charlie", "Dave", "Eve", "Frank"}
 
     def test_modularity_positive(self, two_cluster_graph):
         """Modularity should be positive for clustered graph."""
         result = two_cluster_graph.louvain_communities()
-        assert result['modularity'] > 0
+        assert result["modularity"] > 0
 
     def test_cluster_members_together(self, two_cluster_graph):
         """Nodes in the same cluster should be in the same community."""
@@ -90,20 +90,20 @@ class TestLouvainCommunities:
 
         # Build name -> community mapping
         name_to_community = {}
-        for comm_id, members in result['communities'].items():
+        for comm_id, members in result["communities"].items():
             for node in members:
-                name_to_community[node['title']] = comm_id
+                name_to_community[node["title"]] = comm_id
 
         # Cluster 1 nodes should share a community
-        assert name_to_community['Alice'] == name_to_community['Bob']
-        assert name_to_community['Alice'] == name_to_community['Charlie']
+        assert name_to_community["Alice"] == name_to_community["Bob"]
+        assert name_to_community["Alice"] == name_to_community["Charlie"]
 
         # Cluster 2 nodes should share a community
-        assert name_to_community['Dave'] == name_to_community['Eve']
-        assert name_to_community['Dave'] == name_to_community['Frank']
+        assert name_to_community["Dave"] == name_to_community["Eve"]
+        assert name_to_community["Dave"] == name_to_community["Frank"]
 
         # The two clusters should be different communities
-        assert name_to_community['Alice'] != name_to_community['Dave']
+        assert name_to_community["Alice"] != name_to_community["Dave"]
 
     def test_resolution_parameter(self, two_cluster_graph):
         """Higher resolution should produce more communities."""
@@ -111,16 +111,16 @@ class TestLouvainCommunities:
         high_res = two_cluster_graph.louvain_communities(resolution=3.0)
 
         # Higher resolution tends to find more communities
-        assert high_res['num_communities'] >= low_res['num_communities']
+        assert high_res["num_communities"] >= low_res["num_communities"]
 
     def test_empty_graph(self):
         """Louvain on empty graph returns empty result."""
         graph = KnowledgeGraph()
         result = graph.louvain_communities()
 
-        assert result['num_communities'] == 0
-        assert result['modularity'] == 0.0
-        assert len(result['communities']) == 0
+        assert result["num_communities"] == 0
+        assert result["modularity"] == 0.0
+        assert len(result["communities"]) == 0
 
     def test_single_node(self):
         """Single node → single community."""
@@ -128,7 +128,7 @@ class TestLouvainCommunities:
         graph.cypher("CREATE (:Person {name: 'Alice'})")
 
         result = graph.louvain_communities()
-        assert result['num_communities'] == 1
+        assert result["num_communities"] == 1
 
     def test_no_edges(self):
         """Nodes with no edges → each in own community."""
@@ -138,8 +138,8 @@ class TestLouvainCommunities:
         graph.cypher("CREATE (:Person {name: 'Charlie'})")
 
         result = graph.louvain_communities()
-        assert result['num_communities'] == 3
-        assert result['modularity'] == 0.0
+        assert result["num_communities"] == 3
+        assert result["modularity"] == 0.0
 
     def test_fully_connected(self):
         """Fully connected graph → single community."""
@@ -153,7 +153,7 @@ class TestLouvainCommunities:
         graph.cypher("MATCH (b:Person {name: 'B'}), (c:Person {name: 'C'}) CREATE (b)-[:KNOWS]->(c)")
 
         result = graph.louvain_communities()
-        assert result['num_communities'] == 1
+        assert result["num_communities"] == 1
 
     def test_weight_property(self):
         """Weighted edges affect community assignment."""
@@ -172,8 +172,8 @@ class TestLouvainCommunities:
             CREATE (b)-[:KNOWS {weight: 1}]->(c)
         """)
 
-        result = graph.louvain_communities(weight_property='weight')
-        assert result['num_communities'] >= 1  # At least some structure detected
+        result = graph.louvain_communities(weight_property="weight")
+        assert result["num_communities"] >= 1  # At least some structure detected
 
 
 class TestLabelPropagation:
@@ -183,53 +183,53 @@ class TestLabelPropagation:
         """Label propagation returns valid community structure."""
         result = two_cluster_graph.label_propagation()
 
-        assert 'communities' in result
-        assert 'modularity' in result
-        assert 'num_communities' in result
+        assert "communities" in result
+        assert "modularity" in result
+        assert "num_communities" in result
 
         # LP may merge clusters across bridges, so just check it returns >= 1
-        assert result['num_communities'] >= 1
+        assert result["num_communities"] >= 1
 
     def test_all_nodes_assigned(self, two_cluster_graph):
         """Every node should be assigned to a community."""
         result = two_cluster_graph.label_propagation()
 
         all_nodes = set()
-        for comm_id, members in result['communities'].items():
+        for comm_id, members in result["communities"].items():
             for node in members:
-                all_nodes.add(node['title'])
+                all_nodes.add(node["title"])
 
-        assert all_nodes == {'Alice', 'Bob', 'Charlie', 'Dave', 'Eve', 'Frank'}
+        assert all_nodes == {"Alice", "Bob", "Charlie", "Dave", "Eve", "Frank"}
 
     def test_converges(self, two_cluster_graph):
         """Algorithm should converge within max_iterations."""
         result = two_cluster_graph.label_propagation(max_iterations=100)
-        assert result['num_communities'] >= 1
+        assert result["num_communities"] >= 1
 
     def test_cluster_members_together(self, two_cluster_graph):
         """Nodes in same cluster should be in same community."""
         result = two_cluster_graph.label_propagation()
 
         name_to_community = {}
-        for comm_id, members in result['communities'].items():
+        for comm_id, members in result["communities"].items():
             for node in members:
-                name_to_community[node['title']] = comm_id
+                name_to_community[node["title"]] = comm_id
 
         # Cluster 1 nodes should share a community
-        assert name_to_community['Alice'] == name_to_community['Bob']
-        assert name_to_community['Alice'] == name_to_community['Charlie']
+        assert name_to_community["Alice"] == name_to_community["Bob"]
+        assert name_to_community["Alice"] == name_to_community["Charlie"]
 
         # Cluster 2 nodes should share a community
-        assert name_to_community['Dave'] == name_to_community['Eve']
-        assert name_to_community['Dave'] == name_to_community['Frank']
+        assert name_to_community["Dave"] == name_to_community["Eve"]
+        assert name_to_community["Dave"] == name_to_community["Frank"]
 
     def test_empty_graph(self):
         """Label propagation on empty graph."""
         graph = KnowledgeGraph()
         result = graph.label_propagation()
 
-        assert result['num_communities'] == 0
-        assert len(result['communities']) == 0
+        assert result["num_communities"] == 0
+        assert len(result["communities"]) == 0
 
     def test_single_node(self):
         """Single node → single community."""
@@ -237,7 +237,7 @@ class TestLabelPropagation:
         graph.cypher("CREATE (:Person {name: 'Alice'})")
 
         result = graph.label_propagation()
-        assert result['num_communities'] == 1
+        assert result["num_communities"] == 1
 
     def test_max_iterations_respected(self):
         """With max_iterations=1, algorithm runs at most once."""
@@ -246,19 +246,19 @@ class TestLabelPropagation:
         graph.cypher("CREATE (:Person {name: 'B'})")
 
         result = graph.label_propagation(max_iterations=1)
-        assert result['num_communities'] >= 1
+        assert result["num_communities"] >= 1
 
     def test_result_structure(self, two_cluster_graph):
         """Verify the structure of returned data."""
         result = two_cluster_graph.label_propagation()
 
-        assert isinstance(result['communities'], dict)
-        assert isinstance(result['modularity'], float)
-        assert isinstance(result['num_communities'], int)
+        assert isinstance(result["communities"], dict)
+        assert isinstance(result["modularity"], float)
+        assert isinstance(result["num_communities"], int)
 
-        for comm_id, members in result['communities'].items():
+        for comm_id, members in result["communities"].items():
             assert isinstance(members, list)
             for node in members:
-                assert 'title' in node
-                assert 'type' in node
-                assert 'id' in node
+                assert "title" in node
+                assert "type" in node
+                assert "id" in node

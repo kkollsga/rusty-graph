@@ -1,8 +1,9 @@
 """Tests for Cypher ts_*() timeseries functions with NaiveDate keys."""
 
-import pytest
 import pandas as pd
+
 import kglite
+import pytest
 
 
 @pytest.fixture
@@ -13,8 +14,11 @@ def ts_graph():
     g.add_nodes(df, "Field", "id", "title")
 
     g.set_timeseries(
-        "Field", resolution="month", channels=["oil", "gas"],
-        units={"oil": "MSm3", "gas": "BSm3"}, bin_type="total",
+        "Field",
+        resolution="month",
+        channels=["oil", "gas"],
+        units={"oil": "MSm3", "gas": "BSm3"},
+        bin_type="total",
     )
 
     # TROLL: 2019-12 through 2021-01
@@ -36,24 +40,18 @@ def ts_graph():
 
 
 def test_ts_at_exact(ts_graph):
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_at(f.oil, '2020-2') AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_at(f.oil, '2020-2') AS val")
     assert result[0]["val"] == 1.5
 
 
 def test_ts_at_missing_key(ts_graph):
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_at(f.oil, '2022-1') AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_at(f.oil, '2022-1') AS val")
     assert result[0]["val"] is None
 
 
 def test_ts_at_year_returns_jan(ts_graph):
     """ts_at with year precision returns the Jan 1 value (first-of-year key)."""
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_at(f.oil, '2020') AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_at(f.oil, '2020') AS val")
     # '2020' → NaiveDate(2020-01-01) → matches 2020-01-01 key → oil = 1.0
     assert result[0]["val"] == 1.0
 
@@ -63,33 +61,25 @@ def test_ts_at_year_returns_jan(ts_graph):
 
 def test_ts_sum_single_year(ts_graph):
     """ts_sum(f.oil, '2020') = sum of all months in 2020."""
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_sum(f.oil, '2020') AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_sum(f.oil, '2020') AS val")
     assert abs(result[0]["val"] - 4.5) < 1e-10  # 1.0 + 1.5 + 2.0
 
 
 def test_ts_sum_range(ts_graph):
     """ts_sum(f.oil, '2020', '2021') = sum from 2020 through 2021."""
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_sum(f.oil, '2020', '2021') AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_sum(f.oil, '2020', '2021') AS val")
     assert abs(result[0]["val"] - 7.5) < 1e-10  # 1.0 + 1.5 + 2.0 + 3.0
 
 
 def test_ts_sum_month_range(ts_graph):
     """ts_sum(f.oil, '2020-1', '2020-2') = sum of Jan and Feb."""
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_sum(f.oil, '2020-1', '2020-2') AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_sum(f.oil, '2020-1', '2020-2') AS val")
     assert abs(result[0]["val"] - 2.5) < 1e-10  # 1.0 + 1.5
 
 
 def test_ts_sum_all(ts_graph):
     """ts_sum(f.oil) = sum of entire series."""
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_sum(f.oil) AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_sum(f.oil) AS val")
     assert abs(result[0]["val"] - 8.4) < 1e-10  # 0.9 + 1.0 + 1.5 + 2.0 + 3.0
 
 
@@ -97,9 +87,7 @@ def test_ts_sum_all(ts_graph):
 
 
 def test_ts_avg_single_year(ts_graph):
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_avg(f.oil, '2020') AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_avg(f.oil, '2020') AS val")
     assert abs(result[0]["val"] - 1.5) < 1e-10  # (1.0 + 1.5 + 2.0) / 3
 
 
@@ -107,16 +95,12 @@ def test_ts_avg_single_year(ts_graph):
 
 
 def test_ts_min(ts_graph):
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_min(f.oil, '2020') AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_min(f.oil, '2020') AS val")
     assert result[0]["val"] == 1.0
 
 
 def test_ts_max(ts_graph):
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_max(f.oil, '2020') AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_max(f.oil, '2020') AS val")
     assert result[0]["val"] == 2.0
 
 
@@ -124,9 +108,7 @@ def test_ts_max(ts_graph):
 
 
 def test_ts_count(ts_graph):
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_count(f.oil) AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_count(f.oil) AS val")
     assert result[0]["val"] == 5
 
 
@@ -145,16 +127,12 @@ def test_ts_count_with_nan():
 
 
 def test_ts_first(ts_graph):
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_first(f.oil) AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_first(f.oil) AS val")
     assert result[0]["val"] == 0.9
 
 
 def test_ts_last(ts_graph):
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_last(f.oil) AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_last(f.oil) AS val")
     assert result[0]["val"] == 3.0
 
 
@@ -162,17 +140,13 @@ def test_ts_last(ts_graph):
 
 
 def test_ts_delta(ts_graph):
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_delta(f.oil, '2019', '2021') AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_delta(f.oil, '2019', '2021') AS val")
     # value at first entry in [2021,...] - first entry in [2019,...] = 3.0 - 0.9 = 2.1
     assert abs(result[0]["val"] - 2.1) < 1e-10
 
 
 def test_ts_delta_exact_months(ts_graph):
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_delta(f.oil, '2020-1', '2020-3') AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_delta(f.oil, '2020-1', '2020-3') AS val")
     # value at [2020,3] - value at [2020,1] = 2.0 - 1.0 = 1.0
     assert abs(result[0]["val"] - 1.0) < 1e-10
 
@@ -181,9 +155,7 @@ def test_ts_delta_exact_months(ts_graph):
 
 
 def test_ts_series(ts_graph):
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'EKOFISK'}) RETURN ts_series(f.oil) AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'EKOFISK'}) RETURN ts_series(f.oil) AS val")
     series = result[0]["val"]  # auto-parsed from JSON to native Python list
     assert len(series) == 3
     assert series[0]["time"] == "2020-01-01"
@@ -192,9 +164,7 @@ def test_ts_series(ts_graph):
 
 
 def test_ts_series_with_range(ts_graph):
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_series(f.oil, '2020', '2020') AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_series(f.oil, '2020', '2020') AS val")
     series = result[0]["val"]  # auto-parsed from JSON to native Python list
     assert len(series) == 3  # 3 months in 2020
 
@@ -204,9 +174,7 @@ def test_ts_series_with_range(ts_graph):
 
 def test_day_query_on_month_data_returns_zero(ts_graph):
     """Day precision on month data returns 0 (no matching keys, not an error)."""
-    result = ts_graph.cypher(
-        "MATCH (f:Field {title: 'TROLL'}) RETURN ts_sum(f.oil, '2020-2-15') AS val"
-    )
+    result = ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_sum(f.oil, '2020-2-15') AS val")
     assert result[0]["val"] == 0.0
 
 
@@ -242,9 +210,7 @@ def test_order_by_ts_function(ts_graph):
 
 def test_ts_missing_channel(ts_graph):
     with pytest.raises(Exception, match="water"):
-        ts_graph.cypher(
-            "MATCH (f:Field {title: 'TROLL'}) RETURN ts_sum(f.water)"
-        )
+        ts_graph.cypher("MATCH (f:Field {title: 'TROLL'}) RETURN ts_sum(f.water)")
 
 
 def test_ts_no_timeseries_data():
@@ -359,8 +325,11 @@ def production_graph():
     df = pd.DataFrame({"id": [1, 2], "title": ["TROLL", "EKOFISK"]})
     g.add_nodes(df, "Field", "id", "title")
     g.set_timeseries(
-        "Field", resolution="month", channels=["oil", "gas"],
-        units={"oil": "MSm3", "gas": "BSm3"}, bin_type="total",
+        "Field",
+        resolution="month",
+        channels=["oil", "gas"],
+        units={"oil": "MSm3", "gas": "BSm3"},
+        bin_type="total",
     )
 
     # TROLL: 2019-01 through 2020-12 (24 months)

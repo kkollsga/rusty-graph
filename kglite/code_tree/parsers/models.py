@@ -6,11 +6,11 @@ from pathlib import Path
 
 @dataclass
 class FileInfo:
-    path: str                  # relative to src_root
+    path: str  # relative to src_root
     filename: str
     loc: int
-    module_path: str           # language-specific qualified path
-    language: str              # "rust", "python", "typescript", "javascript"
+    module_path: str  # language-specific qualified path
+    language: str  # "rust", "python", "typescript", "javascript"
     submodule_declarations: list[str] = field(default_factory=list)
     imports: list[str] = field(default_factory=list)
     exports: list[str] = field(default_factory=list)  # __all__, pub items
@@ -40,9 +40,10 @@ class FunctionInfo:
 @dataclass
 class ClassInfo:
     """Represents structs (Rust), classes (Python/TS)."""
+
     name: str
     qualified_name: str
-    kind: str                  # "struct" | "class" -> determines graph node type
+    kind: str  # "struct" | "class" -> determines graph node type
     visibility: str
     file_path: str
     line_number: int
@@ -69,9 +70,10 @@ class EnumInfo:
 @dataclass
 class InterfaceInfo:
     """Represents traits (Rust), protocols (Python), interfaces (TS)."""
+
     name: str
     qualified_name: str
-    kind: str                  # "trait" | "protocol" | "interface"
+    kind: str  # "trait" | "protocol" | "interface"
     visibility: str
     file_path: str
     line_number: int
@@ -83,8 +85,9 @@ class InterfaceInfo:
 @dataclass
 class AttributeInfo:
     """Class/struct field or property."""
+
     name: str
-    qualified_name: str        # e.g. "chromadb.Collection.name"
+    qualified_name: str  # e.g. "chromadb.Collection.name"
     owner_qualified_name: str  # e.g. "chromadb.Collection"
     type_annotation: str | None
     visibility: str
@@ -96,9 +99,10 @@ class AttributeInfo:
 @dataclass
 class ConstantInfo:
     """Top-level constant, type alias, or static variable."""
+
     name: str
     qualified_name: str
-    kind: str                  # "constant" | "type_alias" | "static"
+    kind: str  # "constant" | "type_alias" | "static"
     type_annotation: str | None
     value_preview: str | None  # first ~100 chars of the value
     visibility: str
@@ -109,15 +113,17 @@ class ConstantInfo:
 @dataclass
 class TypeRelationship:
     """Represents an impl block (Rust), inheritance (Python), or implements (TS)."""
+
     source_type: str
-    target_type: str | None    # None for inherent impl
-    relationship: str          # "implements" | "extends" | "inherent"
+    target_type: str | None  # None for inherent impl
+    relationship: str  # "implements" | "extends" | "inherent"
     methods: list[FunctionInfo] = field(default_factory=list)
 
 
 @dataclass
 class ParseResult:
     """Unified result from any language parser."""
+
     files: list[FileInfo] = field(default_factory=list)
     functions: list[FunctionInfo] = field(default_factory=list)
     classes: list[ClassInfo] = field(default_factory=list)
@@ -146,25 +152,28 @@ class ParseResult:
 @dataclass
 class SourceRoot:
     """A directory containing source code to parse."""
-    path: Path                          # absolute path to directory
-    language: str | None = None         # if known; None = auto-detect
+
+    path: Path  # absolute path to directory
+    language: str | None = None  # if known; None = auto-detect
     is_test: bool = False
-    label: str | None = None            # e.g. "python-package", "rust-crate"
+    label: str | None = None  # e.g. "python-package", "rust-crate"
 
 
 @dataclass
 class DependencyInfo:
     """A project dependency declared in a manifest."""
+
     name: str
     version_spec: str | None = None
     is_dev: bool = False
     is_optional: bool = False
-    group: str | None = None            # optional dep group name
+    group: str | None = None  # optional dep group name
 
 
 @dataclass
 class ProjectInfo:
     """Project metadata extracted from a manifest file."""
+
     name: str
     version: str | None = None
     description: str | None = None
@@ -176,5 +185,5 @@ class ProjectInfo:
     source_roots: list[SourceRoot] = field(default_factory=list)
     test_roots: list[SourceRoot] = field(default_factory=list)
     dependencies: list[DependencyInfo] = field(default_factory=list)
-    build_system: str | None = None     # "maturin", "setuptools", "cargo", etc.
+    build_system: str | None = None  # "maturin", "setuptools", "cargo", etc.
     metadata: dict = field(default_factory=dict)

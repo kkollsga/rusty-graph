@@ -5,9 +5,9 @@ import os
 import tempfile
 
 import pandas as pd
-import pytest
 
 import kglite
+import pytest
 
 
 @pytest.fixture
@@ -57,11 +57,7 @@ class TestSetGetEmbeddings:
 
     def test_embeddings_filtered_selection(self, graph_with_embeddings):
         graph = graph_with_embeddings
-        embs = (
-            graph.select("Article")
-            .where({"category": "politics"})
-            .embeddings("summary")
-        )
+        embs = graph.select("Article").where({"category": "politics"}).embeddings("summary")
 
         assert len(embs) == 2
         assert 1 in embs  # Alpha
@@ -72,9 +68,7 @@ class TestSetGetEmbeddings:
         df = pd.DataFrame({"id": [1, 2], "title": ["A", "B"]})
         graph.add_nodes(df, "Node", "id", "title")
 
-        result = graph.set_embeddings(
-            "Node", "title", {1: [1.0, 2.0], 2: [3.0, 4.0], 999: [5.0, 6.0]}
-        )
+        result = graph.set_embeddings("Node", "title", {1: [1.0, 2.0], 2: [3.0, 4.0], 999: [5.0, 6.0]})
 
         assert result["embeddings_stored"] == 2
         assert result["skipped"] == 1
@@ -85,9 +79,7 @@ class TestSetGetEmbeddings:
         graph.add_nodes(df, "Node", "id", "title")
 
         with pytest.raises(ValueError, match="Inconsistent embedding dimensions"):
-            graph.set_embeddings(
-                "Node", "title", {1: [1.0, 2.0], 2: [3.0, 4.0, 5.0]}
-            )
+            graph.set_embeddings("Node", "title", {1: [1.0, 2.0], 2: [3.0, 4.0, 5.0]})
 
     def test_set_embeddings_empty_dict(self):
         graph = kglite.KnowledgeGraph()
@@ -198,9 +190,7 @@ class TestVectorSearch:
         graph = graph_with_embeddings
 
         # Search for vectors similar to [1, 0, 0] (Alpha direction)
-        results = graph.select("Article").vector_search(
-            "summary", [1.0, 0.0, 0.0], top_k=3
-        )
+        results = graph.select("Article").vector_search("summary", [1.0, 0.0, 0.0], top_k=3)
 
         assert len(results) == 3
         # Alpha (exact match) should be first
@@ -216,9 +206,7 @@ class TestVectorSearch:
 
         # Search only within "sports" category
         results = (
-            graph.select("Article")
-            .where({"category": "sports"})
-            .vector_search("summary", [0.0, 1.0, 0.0], top_k=10)
+            graph.select("Article").where({"category": "sports"}).vector_search("summary", [0.0, 1.0, 0.0], top_k=10)
         )
 
         # Only sports articles: Beta(2) and Epsilon(5)
@@ -229,9 +217,7 @@ class TestVectorSearch:
 
     def test_search_result_contains_properties(self, graph_with_embeddings):
         graph = graph_with_embeddings
-        results = graph.select("Article").vector_search(
-            "summary", [1.0, 0.0, 0.0], top_k=1
-        )
+        results = graph.select("Article").vector_search("summary", [1.0, 0.0, 0.0], top_k=1)
 
         assert len(results) == 1
         r = results[0]
@@ -245,9 +231,7 @@ class TestVectorSearch:
 
     def test_search_top_k_limits_results(self, graph_with_embeddings):
         graph = graph_with_embeddings
-        results = graph.select("Article").vector_search(
-            "summary", [1.0, 0.0, 0.0], top_k=2
-        )
+        results = graph.select("Article").vector_search("summary", [1.0, 0.0, 0.0], top_k=2)
 
         assert len(results) == 2
 
@@ -284,22 +268,20 @@ class TestVectorSearch:
 
         with pytest.raises(ValueError, match="dimension"):
             graph.select("Article").vector_search(
-                "summary", [1.0, 0.0], top_k=3  # 2D instead of 3D
+                "summary",
+                [1.0, 0.0],
+                top_k=3,  # 2D instead of 3D
             )
 
     def test_search_invalid_metric(self, graph_with_embeddings):
         graph = graph_with_embeddings
 
         with pytest.raises(ValueError, match="Unknown metric"):
-            graph.select("Article").vector_search(
-                "summary", [1.0, 0.0, 0.0], metric="manhattan"
-            )
+            graph.select("Article").vector_search("summary", [1.0, 0.0, 0.0], metric="manhattan")
 
     def test_search_to_df(self, graph_with_embeddings):
         graph = graph_with_embeddings
-        df = graph.select("Article").vector_search(
-            "summary", [1.0, 0.0, 0.0], top_k=3, to_df=True
-        )
+        df = graph.select("Article").vector_search("summary", [1.0, 0.0, 0.0], top_k=3, to_df=True)
 
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 3
@@ -354,9 +336,7 @@ class TestEmbeddingPersistence:
             assert listing[0]["count"] == 5
 
             # Verify vector search still works
-            results = loaded.select("Article").vector_search(
-                "summary", [1.0, 0.0, 0.0], top_k=3
-            )
+            results = loaded.select("Article").vector_search("summary", [1.0, 0.0, 0.0], top_k=3)
             assert len(results) == 3
             assert results[0]["id"] == 1
             assert results[0]["score"] == pytest.approx(1.0, abs=1e-5)
@@ -422,9 +402,7 @@ class TestAddNodesEmbeddings:
             assert "text_emb" not in node
 
         # Vector search should work
-        results = graph.select("Doc").vector_search(
-            "text", [1.0, 0.0], top_k=2
-        )
+        results = graph.select("Doc").vector_search("text", [1.0, 0.0], top_k=2)
         assert len(results) == 2
         assert results[0]["id"] == 1  # Most similar to [1, 0]
 
@@ -449,9 +427,7 @@ class TestCypherVectorScore:
     def test_vector_score_in_where(self, graph_with_embeddings):
         graph = graph_with_embeddings
         result = graph.cypher(
-            "MATCH (n:Article) "
-            "WHERE vector_score(n, 'summary_emb', [1.0, 0.0, 0.0]) > 0.9 "
-            "RETURN n.title AS title",
+            "MATCH (n:Article) WHERE vector_score(n, 'summary_emb', [1.0, 0.0, 0.0]) > 0.9 RETURN n.title AS title",
             to_df=True,
         )
         titles = result["title"].tolist()
@@ -500,18 +476,12 @@ class TestCypherVectorScore:
     def test_vector_score_missing_embedding(self, graph_with_embeddings):
         graph = graph_with_embeddings
         with pytest.raises(RuntimeError, match="no embedding"):
-            graph.cypher(
-                "MATCH (n:Article) "
-                "RETURN vector_score(n, 'nonexistent_emb', [1.0, 0.0, 0.0]) AS score"
-            )
+            graph.cypher("MATCH (n:Article) RETURN vector_score(n, 'nonexistent_emb', [1.0, 0.0, 0.0]) AS score")
 
     def test_vector_score_dimension_mismatch(self, graph_with_embeddings):
         graph = graph_with_embeddings
         with pytest.raises(RuntimeError, match="dimension"):
-            graph.cypher(
-                "MATCH (n:Article) "
-                "RETURN vector_score(n, 'summary_emb', [1.0, 0.0]) AS score"
-            )
+            graph.cypher("MATCH (n:Article) RETURN vector_score(n, 'summary_emb', [1.0, 0.0]) AS score")
 
 
 # ── embed_texts / search_text (text-level API) ────────────────────────────
@@ -691,9 +661,7 @@ class TestEmbedTexts:
     def test_embed_texts_show_progress_false(self):
         """show_progress=False skips tqdm."""
         graph = kglite.KnowledgeGraph()
-        df = pd.DataFrame(
-            {"id": [1, 2], "title": ["A", "B"], "text": ["hello", "world"]}
-        )
+        df = pd.DataFrame({"id": [1, 2], "title": ["A", "B"], "text": ["hello", "world"]})
         graph.add_nodes(df, "Node", "id", "title")
         graph.set_embedder(MockEmbedder(dimension=3))
 
@@ -726,9 +694,7 @@ class TestEmbedTexts:
     def test_embed_texts_skips_existing_partial(self):
         """Adding new nodes then re-running embeds only new ones."""
         graph = kglite.KnowledgeGraph()
-        df1 = pd.DataFrame(
-            {"id": [1, 2], "title": ["A", "B"], "text": ["hello", "world"]}
-        )
+        df1 = pd.DataFrame({"id": [1, 2], "title": ["A", "B"], "text": ["hello", "world"]})
         graph.add_nodes(df1, "Item", "id", "title")
         graph.set_embedder(MockEmbedder(dimension=3))
 
@@ -736,9 +702,7 @@ class TestEmbedTexts:
         assert r1["embedded"] == 2
 
         # Add more nodes
-        df2 = pd.DataFrame(
-            {"id": [3, 4], "title": ["C", "D"], "text": ["foo", "bar"]}
-        )
+        df2 = pd.DataFrame({"id": [3, 4], "title": ["C", "D"], "text": ["foo", "bar"]})
         graph.add_nodes(df2, "Item", "id", "title")
 
         # Re-run: only new nodes get embedded
@@ -753,9 +717,7 @@ class TestEmbedTexts:
     def test_embed_texts_replace(self):
         """replace=True re-embeds everything."""
         graph = kglite.KnowledgeGraph()
-        df = pd.DataFrame(
-            {"id": [1, 2], "title": ["A", "B"], "text": ["hello", "world"]}
-        )
+        df = pd.DataFrame({"id": [1, 2], "title": ["A", "B"], "text": ["hello", "world"]})
         graph.add_nodes(df, "Item", "id", "title")
         graph.set_embedder(MockEmbedder(dimension=3))
 
@@ -792,9 +754,7 @@ class TestSearchText:
         graph.embed_texts("Article", "summary", show_progress=False)
 
         # Search with text — uses "summary" which resolves to "summary_emb"
-        results = graph.select("Article").search_text(
-            "summary", "artificial intelligence", top_k=3
-        )
+        results = graph.select("Article").search_text("summary", "artificial intelligence", top_k=3)
 
         assert len(results) == 3
         # First result should be the exact text match
@@ -818,11 +778,7 @@ class TestSearchText:
         graph.set_embedder(MockEmbedder(dimension=4))
         graph.embed_texts("Doc", "text", show_progress=False)
 
-        results = (
-            graph.select("Doc")
-            .where({"category": "tech"})
-            .search_text("text", "AI paper", top_k=5)
-        )
+        results = graph.select("Doc").where({"category": "tech"}).search_text("text", "AI paper", top_k=5)
 
         # Only tech docs
         ids = [r["id"] for r in results]
@@ -833,17 +789,13 @@ class TestSearchText:
     def test_search_text_to_df(self):
         """search_text with to_df=True returns DataFrame."""
         graph = kglite.KnowledgeGraph()
-        df = pd.DataFrame(
-            {"id": [1, 2], "title": ["A", "B"], "text": ["hello", "world"]}
-        )
+        df = pd.DataFrame({"id": [1, 2], "title": ["A", "B"], "text": ["hello", "world"]})
         graph.add_nodes(df, "Node", "id", "title")
 
         graph.set_embedder(MockEmbedder(dimension=3))
         graph.embed_texts("Node", "text", show_progress=False)
 
-        result = graph.select("Node").search_text(
-            "text", "hello", top_k=2, to_df=True
-        )
+        result = graph.select("Node").search_text("text", "hello", top_k=2, to_df=True)
 
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 2
@@ -869,12 +821,8 @@ class TestSearchText:
         query_vec = model.embed(["alpha beta"])[0]
 
         # Both paths — search_text uses "text" → "text_emb"
-        text_results = graph.select("Node").search_text(
-            "text", "alpha beta", top_k=3
-        )
-        vec_results = graph.select("Node").vector_search(
-            "text", query_vec, top_k=3
-        )
+        text_results = graph.select("Node").search_text("text", "alpha beta", top_k=3)
+        vec_results = graph.select("Node").vector_search("text", query_vec, top_k=3)
 
         assert len(text_results) == len(vec_results)
         for tr, vr in zip(text_results, vec_results):
@@ -1104,25 +1052,19 @@ class TestCypherTextScore:
         query_vec = model.embed([query])[0]
 
         ts_result = graph.cypher(
-            "MATCH (n:Article) "
-            "RETURN n.title, text_score(n, 'summary', $q) AS score "
-            "ORDER BY score DESC",
+            "MATCH (n:Article) RETURN n.title, text_score(n, 'summary', $q) AS score ORDER BY score DESC",
             params={"q": query},
             to_df=True,
         )
         vs_result = graph.cypher(
-            "MATCH (n:Article) "
-            "RETURN n.title, vector_score(n, 'summary_emb', $v) AS score "
-            "ORDER BY score DESC",
+            "MATCH (n:Article) RETURN n.title, vector_score(n, 'summary_emb', $v) AS score ORDER BY score DESC",
             params={"v": query_vec},
             to_df=True,
         )
         assert len(ts_result) == len(vs_result)
         for i in range(len(ts_result)):
             assert ts_result.iloc[i]["n.title"] == vs_result.iloc[i]["n.title"]
-            assert ts_result.iloc[i]["score"] == pytest.approx(
-                vs_result.iloc[i]["score"], abs=1e-5
-            )
+            assert ts_result.iloc[i]["score"] == pytest.approx(vs_result.iloc[i]["score"], abs=1e-5)
 
     def test_text_score_no_embedder_error(self):
         """text_score without set_embedder raises helpful error."""
@@ -1132,28 +1074,19 @@ class TestCypherTextScore:
         graph.set_embeddings("Article", "summary", {1: [1.0, 0.0, 0.0]})
 
         with pytest.raises(RuntimeError, match="set_embedder"):
-            graph.cypher(
-                "MATCH (n:Article) "
-                "RETURN text_score(n, 'summary', 'hello') AS score"
-            )
+            graph.cypher("MATCH (n:Article) RETURN text_score(n, 'summary', 'hello') AS score")
 
     def test_text_score_wrong_arg_count(self):
         """text_score with wrong number of args raises clear error."""
         graph, _ = self._make_graph()
         with pytest.raises(ValueError, match="3 arguments"):
-            graph.cypher(
-                "MATCH (n:Article) "
-                "RETURN text_score(n, 'summary') AS score"
-            )
+            graph.cypher("MATCH (n:Article) RETURN text_score(n, 'summary') AS score")
 
     def test_text_score_non_string_column(self):
         """text_score with non-string column name raises."""
         graph, _ = self._make_graph()
         with pytest.raises(ValueError, match="string literal"):
-            graph.cypher(
-                "MATCH (n:Article) "
-                "RETURN text_score(n, n.summary, 'hello') AS score"
-            )
+            graph.cypher("MATCH (n:Article) RETURN text_score(n, n.summary, 'hello') AS score")
 
     def test_text_score_fused_topk(self):
         """text_score benefits from fused top-k optimization."""
@@ -1164,7 +1097,7 @@ class TestCypherTextScore:
             "text_score(n, 'summary', 'artificial intelligence') AS score "
             "ORDER BY score DESC LIMIT 2"
         )
-        ops = [r['operation'] for r in plan.to_list()]
+        ops = [r["operation"] for r in plan.to_list()]
         assert any("FusedVectorScoreTopK" in op for op in ops)
 
     def test_text_score_load_unload_lifecycle(self):
@@ -1184,10 +1117,7 @@ class TestCypherTextScore:
         model.load_count = 0
         model.unload_count = 0
 
-        graph.cypher(
-            "MATCH (n:Node) "
-            "RETURN text_score(n, 'text', 'hello') AS score"
-        )
+        graph.cypher("MATCH (n:Node) RETURN text_score(n, 'text', 'hello') AS score")
         assert model.load_count == 1
         assert model.unload_count == 1
 

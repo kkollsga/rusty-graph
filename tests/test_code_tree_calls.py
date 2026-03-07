@@ -4,12 +4,13 @@ import pytest
 
 ts = pytest.importorskip("tree_sitter", reason="requires tree-sitter")
 
-from kglite.code_tree.parsers.models import FunctionInfo  # noqa: E402
 from kglite.code_tree.builder import _build_call_edges  # noqa: E402
+from kglite.code_tree.parsers.models import FunctionInfo  # noqa: E402
 
 
-def _fn(name: str, qualified_name: str, file_path: str = "a.py",
-        calls: list[tuple[str, int]] | None = None) -> FunctionInfo:
+def _fn(
+    name: str, qualified_name: str, file_path: str = "a.py", calls: list[tuple[str, int]] | None = None
+) -> FunctionInfo:
     """Helper to create a minimal FunctionInfo for testing."""
     return FunctionInfo(
         name=name,
@@ -32,8 +33,7 @@ class TestTierSameOwner:
     def test_same_class_preferred(self):
         """ClassA.caller calling run() should resolve to ClassA.run, not ClassB.run."""
         funcs = [
-            _fn("caller", "mod.ClassA.caller", "a.py",
-                calls=[("run", 10)]),
+            _fn("caller", "mod.ClassA.caller", "a.py", calls=[("run", 10)]),
             _fn("run", "mod.ClassA.run", "a.py"),
             _fn("run", "mod.ClassB.run", "b.py"),
         ]
@@ -45,8 +45,7 @@ class TestTierSameOwner:
     def test_same_module_preferred(self):
         """Rust: crate::server::handle calling process() prefers crate::server::process."""
         funcs = [
-            _fn("handle", "crate::server::handle", "src/server.rs",
-                calls=[("process", 5)]),
+            _fn("handle", "crate::server::handle", "src/server.rs", calls=[("process", 5)]),
             _fn("process", "crate::server::process", "src/server.rs"),
             _fn("process", "crate::client::process", "src/client.rs"),
         ]
@@ -61,8 +60,7 @@ class TestTierSameFile:
     def test_same_file_preferred(self):
         """When no owner match, prefer target in the same file."""
         funcs = [
-            _fn("main", "main", "app.py",
-                calls=[("helper", 3)]),
+            _fn("main", "main", "app.py", calls=[("helper", 3)]),
             _fn("helper", "utils.helper", "app.py"),
             _fn("helper", "other.helper", "other.py"),
         ]
@@ -73,8 +71,7 @@ class TestTierSameFile:
     def test_different_files_no_preference(self):
         """When caller's file doesn't match any target, use all targets."""
         funcs = [
-            _fn("main", "main", "main.py",
-                calls=[("helper", 3)]),
+            _fn("main", "main", "main.py", calls=[("helper", 3)]),
             _fn("helper", "a.helper", "a.py"),
             _fn("helper", "b.helper", "b.py"),
         ]
@@ -89,8 +86,7 @@ class TestTierSameLanguage:
     def test_rust_prefers_rust(self):
         """Rust caller should prefer :: targets over . targets."""
         funcs = [
-            _fn("handle", "crate::api::handle", "src/api.rs",
-                calls=[("connect", 10)]),
+            _fn("handle", "crate::api::handle", "src/api.rs", calls=[("connect", 10)]),
             _fn("connect", "crate::db::connect", "src/db.rs"),
             _fn("connect", "db.connect", "db.py"),
         ]
@@ -101,8 +97,7 @@ class TestTierSameLanguage:
     def test_python_prefers_python(self):
         """Python caller should prefer . targets over :: targets."""
         funcs = [
-            _fn("run", "app.run", "app.py",
-                calls=[("connect", 5)]),
+            _fn("run", "app.run", "app.py", calls=[("connect", 5)]),
             _fn("connect", "db.connect", "db.py"),
             _fn("connect", "crate::db::connect", "src/db.rs"),
         ]
@@ -117,8 +112,7 @@ class TestReceiverHint:
     def test_receiver_hint_narrows(self):
         """Server.start() should resolve to Server's start method."""
         funcs = [
-            _fn("main", "app.main", "main.py",
-                calls=[("Server.start", 10)]),
+            _fn("main", "app.main", "main.py", calls=[("Server.start", 10)]),
             _fn("start", "app.Server.start", "server.py"),
             _fn("start", "app.Client.start", "client.py"),
         ]
@@ -129,8 +123,7 @@ class TestReceiverHint:
     def test_receiver_hint_no_match_falls_through(self):
         """If receiver hint matches nothing, continue to tier resolution."""
         funcs = [
-            _fn("main", "app.main", "main.py",
-                calls=[("Unknown.start", 10)]),
+            _fn("main", "app.main", "main.py", calls=[("Unknown.start", 10)]),
             _fn("start", "app.Server.start", "main.py"),
             _fn("start", "app.Client.start", "client.py"),
         ]
@@ -146,8 +139,7 @@ class TestGlobalFallback:
     def test_fallback_to_all(self):
         """No owner/file/language match → all targets."""
         funcs = [
-            _fn("entry", "entry", "entry.c",
-                calls=[("init", 1)]),
+            _fn("entry", "entry", "entry.c", calls=[("init", 1)]),
             # Two targets, both in different files, no separators for owner
             _fn("init", "init_a", "a.c"),
             _fn("init", "init_b", "b.c"),
@@ -158,8 +150,7 @@ class TestGlobalFallback:
     def test_single_target_no_ambiguity(self):
         """Single target — no disambiguation needed."""
         funcs = [
-            _fn("main", "mod.main", "main.py",
-                calls=[("unique_fn", 1)]),
+            _fn("main", "mod.main", "main.py", calls=[("unique_fn", 1)]),
             _fn("unique_fn", "lib.unique_fn", "lib.py"),
         ]
         df = _build_call_edges(funcs)
@@ -173,8 +164,7 @@ class TestMaxTargets:
     def test_max_targets_skips(self):
         """When remaining targets exceed max_targets, skip the call."""
         funcs = [
-            _fn("caller", "caller", "main.py",
-                calls=[("common", 1)]),
+            _fn("caller", "caller", "main.py", calls=[("common", 1)]),
         ]
         # Add 6 targets (default max_targets=5)
         for i in range(6):
@@ -185,8 +175,7 @@ class TestMaxTargets:
     def test_tier_reduces_below_max(self):
         """Tier resolution can reduce targets below max_targets threshold."""
         funcs = [
-            _fn("caller", "pkg.caller", "pkg/main.py",
-                calls=[("common", 1)]),
+            _fn("caller", "pkg.caller", "pkg/main.py", calls=[("common", 1)]),
         ]
         # 6 total targets, but only 2 in same file
         for i in range(4):
@@ -205,8 +194,7 @@ class TestExcludedNames:
 
     def test_excluded_skipped(self):
         funcs = [
-            _fn("main", "app.main", "main.py",
-                calls=[("print", 1), ("helper", 2)]),
+            _fn("main", "app.main", "main.py", calls=[("print", 1), ("helper", 2)]),
             _fn("print", "builtins.print", "builtins.py"),
             _fn("helper", "app.helper", "main.py"),
         ]
@@ -220,8 +208,7 @@ class TestSelfCallExcluded:
 
     def test_no_self_edge(self):
         funcs = [
-            _fn("recurse", "mod.recurse", "mod.py",
-                calls=[("recurse", 5)]),
+            _fn("recurse", "mod.recurse", "mod.py", calls=[("recurse", 5)]),
         ]
         df = _build_call_edges(funcs)
         assert len(df) == 0

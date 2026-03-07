@@ -1,11 +1,12 @@
 """Tests for kglite.blueprint.from_blueprint()."""
 
 import json
-import pytest
-import pandas as pd
-import kglite
-from kglite.blueprint import from_blueprint
 
+import pandas as pd
+
+import kglite
+import pytest
+from kglite.blueprint import from_blueprint
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -33,9 +34,7 @@ def _minimal_blueprint(tmp_path):
     )
     _write_csv(tmp_path / "persons.csv", persons)
 
-    knows = pd.DataFrame(
-        {"source_id": [1, 2], "target_id": [2, 3]}
-    )
+    knows = pd.DataFrame({"source_id": [1, 2], "target_id": [2, 3]})
     _write_csv(tmp_path / "knows.csv", knows)
 
     bp = {
@@ -78,9 +77,7 @@ class TestBasicLoading:
         graph = from_blueprint(bp_path, save=False)
 
         # Check nodes
-        result = graph.cypher(
-            "MATCH (p:Person) RETURN p.name ORDER BY p.name"
-        )
+        result = graph.cypher("MATCH (p:Person) RETURN p.name ORDER BY p.name")
         names = [r["p.name"] for r in result]
         assert names == ["Alice", "Bob", "Charlie"]
 
@@ -98,10 +95,7 @@ class TestBasicLoading:
         bp_path = _minimal_blueprint(tmp_path)
         graph = from_blueprint(bp_path, save=False)
 
-        result = graph.cypher(
-            "MATCH (a:Person)-[:KNOWS]->(b:Person) "
-            "RETURN a.name AS src, b.name AS tgt ORDER BY src"
-        )
+        result = graph.cypher("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS src, b.name AS tgt ORDER BY src")
         edges = [(r["src"], r["tgt"]) for r in result]
         assert edges == [("Alice", "Bob"), ("Bob", "Charlie")]
 
@@ -120,9 +114,7 @@ class TestBasicLoading:
 
 class TestFKEdges:
     def test_fk_edges(self, tmp_path):
-        companies = pd.DataFrame(
-            {"company_id": [10, 20], "name": ["Acme", "Globex"]}
-        )
+        companies = pd.DataFrame({"company_id": [10, 20], "name": ["Acme", "Globex"]})
         persons = pd.DataFrame(
             {
                 "person_id": [1, 2, 3],
@@ -164,8 +156,7 @@ class TestFKEdges:
         graph = from_blueprint(tmp_path / "bp.json", save=False)
 
         result = graph.cypher(
-            "MATCH (p:Person)-[:WORKS_AT]->(c:Company) "
-            "RETURN p.name AS person, c.name AS company ORDER BY person"
+            "MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN p.name AS person, c.name AS company ORDER BY person"
         )
         edges = [(r["person"], r["company"]) for r in result]
         assert edges == [
@@ -177,9 +168,7 @@ class TestFKEdges:
 
 class TestSubNodes:
     def test_sub_nodes_with_parent_fk(self, tmp_path):
-        fields = pd.DataFrame(
-            {"field_id": [1, 2], "name": ["Troll", "Ekofisk"]}
-        )
+        fields = pd.DataFrame({"field_id": [1, 2], "name": ["Troll", "Ekofisk"]})
         reserves = pd.DataFrame(
             {
                 "field_id": [1, 1, 2],
@@ -224,17 +213,12 @@ class TestSubNodes:
         graph = from_blueprint(tmp_path / "bp.json", save=False)
 
         # Check sub-nodes created
-        result = graph.cypher(
-            "MATCH (r:Reserve) RETURN r.oil ORDER BY r.oil"
-        )
+        result = graph.cypher("MATCH (r:Reserve) RETURN r.oil ORDER BY r.oil")
         oils = [r["r.oil"] for r in result]
         assert oils == [100.0, 110.0, 200.0]
 
         # Check edges to parent
-        result = graph.cypher(
-            "MATCH (r:Reserve)-[:OF_FIELD]->(f:Field) "
-            "RETURN f.title AS field, r.oil ORDER BY r.oil"
-        )
+        result = graph.cypher("MATCH (r:Reserve)-[:OF_FIELD]->(f:Field) RETURN f.title AS field, r.oil ORDER BY r.oil")
         assert len(result) == 3
         assert result[0]["field"] == "Troll"
 
@@ -280,16 +264,13 @@ class TestManualNodes:
         graph = from_blueprint(tmp_path / "bp.json", save=False)
 
         # Check manual nodes created
-        result = graph.cypher(
-            "MATCH (o:Ocean) RETURN o.title ORDER BY o.title"
-        )
+        result = graph.cypher("MATCH (o:Ocean) RETURN o.title ORDER BY o.title")
         names = [r["o.title"] for r in result]
         assert names == ["North Sea", "Norwegian Sea"]
 
         # Check FK edges to manual nodes
         result = graph.cypher(
-            "MATCH (f:Field)-[:IN_OCEAN]->(o:Ocean) "
-            "RETURN f.title AS field, o.title AS ocean ORDER BY field"
+            "MATCH (f:Field)-[:IN_OCEAN]->(o:Ocean) RETURN f.title AS field, o.title AS ocean ORDER BY field"
         )
         assert len(result) == 3
 
@@ -314,9 +295,7 @@ class TestAutoId:
         _write_blueprint(tmp_path / "bp.json", bp)
         graph = from_blueprint(tmp_path / "bp.json", save=False)
 
-        result = graph.cypher(
-            "MATCH (i:Item) RETURN i.id, i.title ORDER BY i.id"
-        )
+        result = graph.cypher("MATCH (i:Item) RETURN i.id, i.title ORDER BY i.id")
         ids = [r["i.id"] for r in result]
         assert ids == [1, 2, 3]
 
@@ -419,9 +398,7 @@ class TestTimeseries:
 
         # Check timeseries data is accessible
         result = graph.cypher(
-            "MATCH (p:Production) "
-            "RETURN p.title, ts_sum(p.oil, '2020') AS total_oil "
-            "ORDER BY total_oil DESC"
+            "MATCH (p:Production) RETURN p.title, ts_sum(p.oil, '2020') AS total_oil ORDER BY total_oil DESC"
         )
         assert len(result) == 2
         # Troll: 1.0 + 1.5 + 2.0 = 4.5
@@ -439,7 +416,7 @@ class TestSaveOutput:
         bp["settings"]["output"] = "output/graph.kgl"
         _write_blueprint(bp_path, bp)
 
-        graph = from_blueprint(bp_path, save=True)
+        from_blueprint(bp_path, save=True)
         assert (tmp_path / "output" / "graph.kgl").exists()
 
         # Verify saved graph can be loaded
@@ -560,8 +537,7 @@ class TestJunctionEdgeProperties:
         graph = from_blueprint(tmp_path / "bp.json", save=False)
 
         result = graph.cypher(
-            "MATCH (p:Person)-[r:RATED]->(m:Movie) "
-            "RETURN p.name, m.title, r.score ORDER BY p.name, m.title"
+            "MATCH (p:Person)-[r:RATED]->(m:Movie) RETURN p.name, m.title, r.score ORDER BY p.name, m.title"
         )
         assert len(result) == 3
         assert result[0]["r.score"] == 5

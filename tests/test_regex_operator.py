@@ -8,7 +8,7 @@ from kglite import KnowledgeGraph
 def name_graph():
     """Graph with various names for regex testing."""
     g = KnowledgeGraph()
-    for name in ['Alice', 'Bob', 'Charlie', 'alice', 'ALICE', 'Alex', 'Brian']:
+    for name in ["Alice", "Bob", "Charlie", "alice", "ALICE", "Alex", "Brian"]:
         g.cypher(f"CREATE (:Person {{name: '{name}'}})")
     return g
 
@@ -24,8 +24,8 @@ class TestRegexBasic:
             RETURN p.name
             ORDER BY p.name
         """)
-        names = [r['p.name'] for r in result]
-        assert names == ['Alice', 'alice']
+        names = [r["p.name"] for r in result]
+        assert names == ["Alice", "alice"]
 
     def test_anchored_match(self, name_graph):
         """Anchored pattern with ^ and $."""
@@ -35,8 +35,8 @@ class TestRegexBasic:
             RETURN p.name
             ORDER BY p.name
         """)
-        names = [r['p.name'] for r in result]
-        assert names == ['ALICE', 'Alex', 'Alice']
+        names = [r["p.name"] for r in result]
+        assert names == ["ALICE", "Alex", "Alice"]
 
     def test_exact_match(self, name_graph):
         """Exact match with anchors."""
@@ -46,7 +46,7 @@ class TestRegexBasic:
             RETURN p.name
         """)
         assert len(result) == 1
-        assert result[0]['p.name'] == 'Bob'
+        assert result[0]["p.name"] == "Bob"
 
     def test_no_match(self, name_graph):
         """Pattern that matches nothing."""
@@ -69,8 +69,8 @@ class TestRegexAdvanced:
             RETURN p.name
             ORDER BY p.name
         """)
-        names = [r['p.name'] for r in result]
-        assert names == ['ALICE', 'Alice', 'alice']
+        names = [r["p.name"] for r in result]
+        assert names == ["ALICE", "Alice", "alice"]
 
     def test_character_class(self, name_graph):
         """Character class [A-C] match."""
@@ -80,8 +80,8 @@ class TestRegexAdvanced:
             RETURN p.name
             ORDER BY p.name
         """)
-        names = [r['p.name'] for r in result]
-        assert names == ['ALICE', 'Alex', 'Alice', 'Bob', 'Brian', 'Charlie']
+        names = [r["p.name"] for r in result]
+        assert names == ["ALICE", "Alex", "Alice", "Bob", "Brian", "Charlie"]
 
     def test_alternation(self, name_graph):
         """Alternation with |."""
@@ -91,12 +91,13 @@ class TestRegexAdvanced:
             RETURN p.name
             ORDER BY p.name
         """)
-        names = [r['p.name'] for r in result]
-        assert names == ['Bob', 'Charlie']
+        names = [r["p.name"] for r in result]
+        assert names == ["Bob", "Charlie"]
 
     def test_invalid_regex_raises_error(self, name_graph):
         """Invalid regex pattern raises a RuntimeError."""
         import pytest
+
         with pytest.raises(RuntimeError, match="Invalid regular expression"):
             name_graph.cypher("""
                 MATCH (p:Person)
@@ -112,5 +113,5 @@ class TestRegexAdvanced:
             RETURN p.name
             ORDER BY p.name
         """)
-        names = [r['p.name'] for r in result]
-        assert names == ['Bob', 'Brian', 'Charlie', 'alice']
+        names = [r["p.name"] for r in result]
+        assert names == ["Bob", "Brian", "Charlie", "alice"]

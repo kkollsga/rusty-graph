@@ -14,8 +14,8 @@ import random
 import time
 
 import pandas as pd
-import pytest
 
+import pytest
 from kglite import KnowledgeGraph
 
 pytestmark = pytest.mark.benchmark
@@ -67,11 +67,13 @@ def _build_scale_free_graph(n_nodes: int, edges_per_node: int = 4, seed: int = 4
 
     # --- Load into KGLite ---
     graph = KnowledgeGraph()
-    node_df = pd.DataFrame({
-        "id": list(range(n_nodes)),
-        "name": [f"N{i}" for i in range(n_nodes)],
-        "group": [i % 20 for i in range(n_nodes)],
-    })
+    node_df = pd.DataFrame(
+        {
+            "id": list(range(n_nodes)),
+            "name": [f"N{i}" for i in range(n_nodes)],
+            "group": [i % 20 for i in range(n_nodes)],
+        }
+    )
     graph.add_nodes(node_df, "Node", "id", "name")
 
     edge_list = [{"src": s, "tgt": t} for s, t in edge_set]
@@ -122,16 +124,10 @@ def _run_multihop(graph, seed_ids, hops, timeout_s=QUERY_TIMEOUT_S):
     seed_list = ", ".join(str(s) for s in seed_ids)
 
     if hops == 1:
-        query = (
-            f"MATCH (n:Node)-[:LINKED]->(m:Node) "
-            f"WHERE n.id IN [{seed_list}] "
-            f"RETURN count(DISTINCT m) AS cnt"
-        )
+        query = f"MATCH (n:Node)-[:LINKED]->(m:Node) WHERE n.id IN [{seed_list}] RETURN count(DISTINCT m) AS cnt"
     else:
         query = (
-            f"MATCH (n:Node)-[:LINKED*1..{hops}]->(m:Node) "
-            f"WHERE n.id IN [{seed_list}] "
-            f"RETURN count(DISTINCT m) AS cnt"
+            f"MATCH (n:Node)-[:LINKED*1..{hops}]->(m:Node) WHERE n.id IN [{seed_list}] RETURN count(DISTINCT m) AS cnt"
         )
 
     # Use KGLite's built-in timeout
@@ -278,9 +274,9 @@ class TestMultiHopSingleSeed:
         # Use only the top-1 seed
         cnt, elapsed = _run_multihop(graph, [seeds[0]], hops)
         if cnt is None:
-            print(f"  {n_nodes//1000}K, 1 seed | {hops}-hop: TIMEOUT")
+            print(f"  {n_nodes // 1000}K, 1 seed | {hops}-hop: TIMEOUT")
         else:
-            print(f"  {n_nodes//1000}K, 1 seed | {hops}-hop: {elapsed:.1f}ms, {cnt:,} reached")
+            print(f"  {n_nodes // 1000}K, 1 seed | {hops}-hop: {elapsed:.1f}ms, {cnt:,} reached")
 
 
 # ============================================================================

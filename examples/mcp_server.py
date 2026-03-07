@@ -37,8 +37,9 @@ from datetime import datetime
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 
-import kglite
 from mcp.server.fastmcp import FastMCP
+
+import kglite
 
 # -- Args & loading --------------------------------------------------------
 
@@ -157,8 +158,7 @@ def cypher_query(query: str) -> str:
                     f"read_source(file_path='{rel_path}') — add rows=[0,4] to inspect structure only."
                 )
             return (
-                f"CSV exported: {url}\n"
-                f"read_source(file_path='{rel_path}') — add rows=[0,4] to inspect structure only."
+                f"CSV exported: {url}\nread_source(file_path='{rel_path}') — add rows=[0,4] to inspect structure only."
             )
         if len(result) == 0:
             return "No results."
@@ -223,7 +223,9 @@ if has_code:
                 else:
                     sig = f"  {r['signature']}" if r.get("signature") else ""
                     lines.append(f"{r.get('type', '?')}: {r.get('qualified_name', '?')}")
-                    lines.append(f"  {r.get('file_path', '?')}:{r.get('line_number', '?')}-{r.get('end_line', '?')}{sig}")
+                    lines.append(
+                        f"  {r.get('file_path', '?')}:{r.get('line_number', '?')}-{r.get('end_line', '?')}{sig}"
+                    )
             return "\n".join(lines)
         except Exception as e:
             return f"Error: {e}"
@@ -234,6 +236,7 @@ if has_code:
         Set hops > 1 for multi-hop expansion."""
         try:
             import json
+
             ctx = graph.context(name, node_type=node_type, hops=hops)
             if ctx.get("error"):
                 return ctx["error"]

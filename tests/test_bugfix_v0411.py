@@ -13,7 +13,7 @@ from kglite import KnowledgeGraph
 def social_graph():
     """Small social graph: Alice->Bob->Charlie, Alice->Charlie."""
     g = KnowledgeGraph()
-    for name in ['Alice', 'Bob', 'Charlie']:
+    for name in ["Alice", "Bob", "Charlie"]:
         g.cypher(f"CREATE (:Person {{name: '{name}'}})")
     g.cypher("MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) CREATE (a)-[:KNOWS]->(b)")
     g.cypher("MATCH (a:Person {name: 'Bob'}), (b:Person {name: 'Charlie'}) CREATE (a)-[:KNOWS]->(b)")
@@ -31,20 +31,18 @@ class TestLabelsFunction:
 
     def test_labels_returns_list(self, social_graph):
         rows = social_graph.cypher("MATCH (n:Person {name: 'Alice'}) RETURN labels(n)")
-        labels = rows[0]['labels(n)']
+        labels = rows[0]["labels(n)"]
         assert isinstance(labels, list)
-        assert labels == ['Person']
+        assert labels == ["Person"]
 
     def test_labels_index_zero(self, social_graph):
         rows = social_graph.cypher("MATCH (n:Person {name: 'Alice'}) RETURN labels(n)[0] AS label")
-        assert rows[0]['label'] == 'Person'
+        assert rows[0]["label"] == "Person"
 
     def test_labels_in_where(self, social_graph):
-        rows = social_graph.cypher(
-            "MATCH (n:Person) WHERE labels(n)[0] = 'Person' RETURN n.name ORDER BY n.name"
-        )
-        names = [r['n.name'] for r in rows]
-        assert names == ['Alice', 'Bob', 'Charlie']
+        rows = social_graph.cypher("MATCH (n:Person) WHERE labels(n)[0] = 'Person' RETURN n.name ORDER BY n.name")
+        names = [r["n.name"] for r in rows]
+        assert names == ["Alice", "Bob", "Charlie"]
 
 
 class TestIndexAccess:
@@ -53,41 +51,37 @@ class TestIndexAccess:
     def test_list_literal_index(self):
         g = KnowledgeGraph()
         rows = g.cypher("UNWIND [1] AS d RETURN [10, 20, 30][0] AS val")
-        assert rows[0]['val'] == 10
+        assert rows[0]["val"] == 10
 
     def test_list_literal_index_middle(self):
         g = KnowledgeGraph()
         rows = g.cypher("UNWIND [1] AS d RETURN [10, 20, 30][1] AS val")
-        assert rows[0]['val'] == 20
+        assert rows[0]["val"] == 20
 
     def test_negative_index(self):
         g = KnowledgeGraph()
         rows = g.cypher("UNWIND [1] AS d RETURN [10, 20, 30][-1] AS val")
-        assert rows[0]['val'] == 30
+        assert rows[0]["val"] == 30
 
     def test_out_of_bounds_returns_null(self):
         g = KnowledgeGraph()
         rows = g.cypher("UNWIND [1] AS d RETURN [10, 20, 30][99] AS val")
-        assert rows[0]['val'] is None
+        assert rows[0]["val"] is None
 
     def test_collect_then_index(self, social_graph):
-        rows = social_graph.cypher(
-            "MATCH (n:Person) WITH collect(n.name) AS names RETURN names[0] AS first"
-        )
+        rows = social_graph.cypher("MATCH (n:Person) WITH collect(n.name) AS names RETURN names[0] AS first")
         # collect order is not guaranteed, but should return a valid name
-        assert rows[0]['first'] in ['Alice', 'Bob', 'Charlie']
+        assert rows[0]["first"] in ["Alice", "Bob", "Charlie"]
 
     def test_column_name_for_index(self):
         g = KnowledgeGraph()
         rows = g.cypher("UNWIND [1] AS d RETURN [1, 2][0]")
-        assert '[1, 2][0]' in rows[0]
+        assert "[1, 2][0]" in rows[0]
 
     def test_index_on_function_result(self, social_graph):
         """Index on function call result like labels(n)[0]."""
-        rows = social_graph.cypher(
-            "MATCH (n:Person {name: 'Bob'}) RETURN labels(n)[0] AS lbl"
-        )
-        assert rows[0]['lbl'] == 'Person'
+        rows = social_graph.cypher("MATCH (n:Person {name: 'Bob'}) RETURN labels(n)[0] AS lbl")
+        assert rows[0]["lbl"] == "Person"
 
 
 # ============================================================================
@@ -103,33 +97,33 @@ class TestPathFunctionReturnTypes:
             "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..5]->(b:Person {name: 'Charlie'})) "
             "RETURN nodes(p)"
         )
-        nodes = rows[0]['nodes(p)']
+        nodes = rows[0]["nodes(p)"]
         assert isinstance(nodes, list)
         assert all(isinstance(n, dict) for n in nodes)
-        titles = [n['title'] for n in nodes]
-        assert 'Alice' in titles
-        assert 'Charlie' in titles
+        titles = [n["title"] for n in nodes]
+        assert "Alice" in titles
+        assert "Charlie" in titles
 
     def test_relationships_returns_list_of_strings(self, social_graph):
         rows = social_graph.cypher(
             "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..5]->(b:Person {name: 'Bob'})) "
             "RETURN relationships(p)"
         )
-        rels = rows[0]['relationships(p)']
+        rels = rows[0]["relationships(p)"]
         assert isinstance(rels, list)
         assert all(isinstance(r, str) for r in rels)
-        assert rels == ['KNOWS']
+        assert rels == ["KNOWS"]
 
     def test_collect_returns_list(self, social_graph):
         rows = social_graph.cypher("MATCH (n:Person) RETURN collect(n.name) AS names")
-        names = rows[0]['names']
+        names = rows[0]["names"]
         assert isinstance(names, list)
-        assert set(names) == {'Alice', 'Bob', 'Charlie'}
+        assert set(names) == {"Alice", "Bob", "Charlie"}
 
     def test_list_comprehension_returns_list(self):
         g = KnowledgeGraph()
         rows = g.cypher("UNWIND [1] AS d RETURN [x IN [1, 2, 3] | x * 10] AS tens")
-        tens = rows[0]['tens']
+        tens = rows[0]["tens"]
         assert isinstance(tens, list)
         assert tens == [10, 20, 30]
 
@@ -152,7 +146,7 @@ class TestWithOptionalMatchHang:
             ORDER BY friend.name
         """)
         assert len(rows) >= 1
-        assert rows[0]['p.name'] == 'Alice'
+        assert rows[0]["p.name"] == "Alice"
 
     def test_with_aggregation_then_optional_match(self, social_graph):
         """WITH aggregation then OPTIONAL MATCH (the original hang scenario)."""
@@ -164,8 +158,8 @@ class TestWithOptionalMatchHang:
             ORDER BY p.name
         """)
         # Should have results for all 3 people
-        names = sorted(set(r['p.name'] for r in rows))
-        assert names == ['Alice', 'Bob', 'Charlie']
+        names = sorted(set(r["p.name"] for r in rows))
+        assert names == ["Alice", "Bob", "Charlie"]
 
     def test_multiple_with_chains(self, social_graph):
         """Multiple WITH clauses chained together."""
@@ -175,8 +169,8 @@ class TestWithOptionalMatchHang:
             WITH p, 'hello' AS greeting
             RETURN p.name, greeting
         """)
-        assert rows[0]['p.name'] == 'Alice'
-        assert rows[0]['greeting'] == 'hello'
+        assert rows[0]["p.name"] == "Alice"
+        assert rows[0]["greeting"] == "hello"
 
 
 # ============================================================================
@@ -208,12 +202,12 @@ class TestPreBindingOptimization:
             WITH c, wells, count(l) AS licences
             RETURN c.name, wells, licences ORDER BY wells DESC
         """)
-        equinor = next(r for r in rows if r['c.name'] == 'Equinor')
-        shell = next(r for r in rows if r['c.name'] == 'Shell')
-        assert equinor['wells'] == 2
-        assert equinor['licences'] == 1
-        assert shell['wells'] == 1
-        assert shell['licences'] == 0
+        equinor = next(r for r in rows if r["c.name"] == "Equinor")
+        shell = next(r for r in rows if r["c.name"] == "Shell")
+        assert equinor["wells"] == 2
+        assert equinor["licences"] == 1
+        assert shell["wells"] == 1
+        assert shell["licences"] == 0
 
     def test_subsequent_match_uses_bindings(self):
         """Regular MATCH after WITH should also use pre-bindings."""
@@ -232,10 +226,10 @@ class TestPreBindingOptimization:
             RETURN p.name, c.name ORDER BY p.name
         """)
         assert len(rows) == 2
-        assert rows[0]['p.name'] == 'Alice'
-        assert rows[0]['c.name'] == 'Oslo'
-        assert rows[1]['p.name'] == 'Bob'
-        assert rows[1]['c.name'] == 'London'
+        assert rows[0]["p.name"] == "Alice"
+        assert rows[0]["c.name"] == "Oslo"
+        assert rows[1]["p.name"] == "Bob"
+        assert rows[1]["c.name"] == "London"
 
     def test_optional_match_null_for_unmatched(self):
         """OPTIONAL MATCH produces nulls when no match, not cross-products."""
@@ -252,7 +246,7 @@ class TestPreBindingOptimization:
             RETURN p.name, pet.name ORDER BY p.name
         """)
         assert len(rows) == 2
-        alice = next(r for r in rows if r['p.name'] == 'Alice')
-        bob = next(r for r in rows if r['p.name'] == 'Bob')
-        assert alice['pet.name'] == 'Rex'
-        assert bob['pet.name'] is None
+        alice = next(r for r in rows if r["p.name"] == "Alice")
+        bob = next(r for r in rows if r["p.name"] == "Bob")
+        assert alice["pet.name"] == "Rex"
+        assert bob["pet.name"] is None

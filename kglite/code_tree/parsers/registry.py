@@ -1,6 +1,7 @@
 """Language detection and parser registry."""
 
 from pathlib import Path
+
 from .base import LanguageParser
 
 EXTENSION_MAP: dict[str, str] = {
@@ -30,30 +31,39 @@ def get_parser(language: str) -> LanguageParser:
     """Get a parser instance for the given language name."""
     if language == "rust":
         from .rust import RustParser
+
         return RustParser()
     elif language == "python":
         from .python import PythonParser
+
         return PythonParser()
     elif language == "typescript":
         from .typescript import TypeScriptParser
+
         return TypeScriptParser()
     elif language == "javascript":
         from .typescript import JavaScriptParser
+
         return JavaScriptParser()
     elif language == "go":
         from .go import GoParser
+
         return GoParser()
     elif language == "java":
         from .java import JavaParser
+
         return JavaParser()
     elif language == "csharp":
         from .csharp import CSharpParser
+
         return CSharpParser()
     elif language == "c":
         from .cpp import CParser
+
         return CParser()
     elif language == "cpp":
         from .cpp import CppParser
+
         return CppParser()
     else:
         raise ValueError(f"Unsupported language: {language}")

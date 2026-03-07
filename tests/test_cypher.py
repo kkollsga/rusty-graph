@@ -1,7 +1,8 @@
 """Tests for cypher() — full Cypher query pipeline."""
 
-import pytest
 import pandas as pd
+
+import pytest
 from kglite import KnowledgeGraph
 
 
@@ -10,35 +11,42 @@ def cypher_graph():
     """Graph optimized for Cypher tests."""
     graph = KnowledgeGraph()
 
-    people = pd.DataFrame({
-        'person_id': [1, 2, 3, 4, 5],
-        'name': ['Alice', 'Bob', 'Charlie', 'Diana', 'Eve'],
-        'age': [30, 25, 35, 28, 40],
-        'city': ['Oslo', 'Bergen', 'Oslo', 'Bergen', 'Oslo'],
-        'salary': [70000, 55000, 80000, 65000, 90000],
-        'email': ['alice@test.com', None, 'charlie@test.com', None, 'eve@test.com'],
-    })
-    graph.add_nodes(people, 'Person', 'person_id', 'name')
+    people = pd.DataFrame(
+        {
+            "person_id": [1, 2, 3, 4, 5],
+            "name": ["Alice", "Bob", "Charlie", "Diana", "Eve"],
+            "age": [30, 25, 35, 28, 40],
+            "city": ["Oslo", "Bergen", "Oslo", "Bergen", "Oslo"],
+            "salary": [70000, 55000, 80000, 65000, 90000],
+            "email": ["alice@test.com", None, "charlie@test.com", None, "eve@test.com"],
+        }
+    )
+    graph.add_nodes(people, "Person", "person_id", "name")
 
-    products = pd.DataFrame({
-        'product_id': [101, 102, 103],
-        'name': ['Laptop', 'Phone', 'Tablet'],
-        'price': [999.99, 699.99, 349.99],
-    })
-    graph.add_nodes(products, 'Product', 'product_id', 'name')
+    products = pd.DataFrame(
+        {
+            "product_id": [101, 102, 103],
+            "name": ["Laptop", "Phone", "Tablet"],
+            "price": [999.99, 699.99, 349.99],
+        }
+    )
+    graph.add_nodes(products, "Product", "product_id", "name")
 
-    knows = pd.DataFrame({
-        'from_id': [1, 1, 2, 3, 4],
-        'to_id': [2, 3, 3, 4, 5],
-    })
-    graph.add_connections(knows, 'KNOWS', 'Person', 'from_id', 'Person', 'to_id')
+    knows = pd.DataFrame(
+        {
+            "from_id": [1, 1, 2, 3, 4],
+            "to_id": [2, 3, 3, 4, 5],
+        }
+    )
+    graph.add_connections(knows, "KNOWS", "Person", "from_id", "Person", "to_id")
 
-    purchased = pd.DataFrame({
-        'person_id': [1, 1, 2, 3],
-        'product_id': [101, 102, 103, 101],
-    })
-    graph.add_connections(purchased, 'PURCHASED', 'Person', 'person_id',
-                          'Product', 'product_id')
+    purchased = pd.DataFrame(
+        {
+            "person_id": [1, 1, 2, 3],
+            "product_id": [101, 102, 103, 101],
+        }
+    )
+    graph.add_connections(purchased, "PURCHASED", "Person", "person_id", "Product", "product_id")
 
     return graph
 
@@ -47,30 +55,25 @@ class TestBasicQueries:
     def test_simple_match_return(self, cypher_graph):
         rows = cypher_graph.cypher("MATCH (n:Person) RETURN n.title")
         assert len(rows) == 5
-        assert 'n.title' in rows[0]
+        assert "n.title" in rows[0]
 
     def test_match_with_alias(self, cypher_graph):
         rows = cypher_graph.cypher("MATCH (n:Person) RETURN n.title AS name")
-        assert 'name' in rows[0]
-        names = {r['name'] for r in rows}
-        assert 'Alice' in names
+        assert "name" in rows[0]
+        names = {r["name"] for r in rows}
+        assert "Alice" in names
 
     def test_edge_pattern(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.title, b.title"
-        )
+        rows = cypher_graph.cypher("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.title, b.title")
         assert len(rows) == 5
 
     def test_multi_hop(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (a:Person)-[:PURCHASED]->(p:Product) RETURN a.title, p.title"
-        )
+        rows = cypher_graph.cypher("MATCH (a:Person)-[:PURCHASED]->(p:Product) RETURN a.title, p.title")
         assert len(rows) == 4
 
     def test_cross_type(self, cypher_graph):
         rows = cypher_graph.cypher(
-            "MATCH (p:Person)-[:PURCHASED]->(pr:Product) "
-            "RETURN p.title AS person, pr.title AS product"
+            "MATCH (p:Person)-[:PURCHASED]->(pr:Product) RETURN p.title AS person, pr.title AS product"
         )
         assert len(rows) == 4
 
@@ -81,160 +84,120 @@ class TestBasicQueries:
 
 class TestWhereClause:
     def test_comparison_gt(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.age > 30 RETURN n.title, n.age"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.age > 30 RETURN n.title, n.age")
         for row in rows:
-            assert row['n.age'] > 30
+            assert row["n.age"] > 30
 
     def test_equality(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.city = 'Oslo' RETURN n.title"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.city = 'Oslo' RETURN n.title")
         assert len(rows) == 3
 
     def test_not_equals(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.city <> 'Oslo' RETURN n.title"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.city <> 'Oslo' RETURN n.title")
         assert len(rows) == 2
 
     def test_and(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.age > 25 AND n.city = 'Oslo' RETURN n.title"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.age > 25 AND n.city = 'Oslo' RETURN n.title")
         for row in rows:
-            assert row['n.title'] in ['Alice', 'Charlie', 'Eve']
+            assert row["n.title"] in ["Alice", "Charlie", "Eve"]
 
     def test_or(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.age < 26 OR n.age > 39 RETURN n.title"
-        )
-        names = {r['n.title'] for r in rows}
-        assert 'Bob' in names
-        assert 'Eve' in names
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.age < 26 OR n.age > 39 RETURN n.title")
+        names = {r["n.title"] for r in rows}
+        assert "Bob" in names
+        assert "Eve" in names
 
     def test_not(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE NOT n.city = 'Oslo' RETURN n.title"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE NOT n.city = 'Oslo' RETURN n.title")
         assert len(rows) == 2
 
     def test_is_null(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.email IS NULL RETURN n.title"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.email IS NULL RETURN n.title")
         assert len(rows) == 2
 
     def test_is_not_null(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n.title"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n.title")
         assert len(rows) == 3
 
     def test_in_list(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.city IN ['Oslo', 'Bergen'] RETURN n.title"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.city IN ['Oslo', 'Bergen'] RETURN n.title")
         assert len(rows) == 5
 
     def test_contains(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.title CONTAINS 'li' RETURN n.title"
-        )
-        names = {r['n.title'] for r in rows}
-        assert 'Alice' in names
-        assert 'Charlie' in names
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.title CONTAINS 'li' RETURN n.title")
+        names = {r["n.title"] for r in rows}
+        assert "Alice" in names
+        assert "Charlie" in names
 
     def test_starts_with(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.title STARTS WITH 'A' RETURN n.title"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.title STARTS WITH 'A' RETURN n.title")
         assert len(rows) == 1
 
     def test_ends_with(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.title ENDS WITH 'e' RETURN n.title"
-        )
-        names = {r['n.title'] for r in rows}
-        assert 'Alice' in names
-        assert 'Eve' in names
-        assert 'Charlie' in names
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.title ENDS WITH 'e' RETURN n.title")
+        names = {r["n.title"] for r in rows}
+        assert "Alice" in names
+        assert "Eve" in names
+        assert "Charlie" in names
 
 
 class TestOrderByLimitSkip:
     def test_order_by_asc(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) RETURN n.title, n.age ORDER BY n.age"
-        )
-        ages = [r['n.age'] for r in rows]
+        rows = cypher_graph.cypher("MATCH (n:Person) RETURN n.title, n.age ORDER BY n.age")
+        ages = [r["n.age"] for r in rows]
         assert ages == sorted(ages)
 
     def test_order_by_desc(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) RETURN n.title, n.age ORDER BY n.age DESC"
-        )
-        ages = [r['n.age'] for r in rows]
+        rows = cypher_graph.cypher("MATCH (n:Person) RETURN n.title, n.age ORDER BY n.age DESC")
+        ages = [r["n.age"] for r in rows]
         assert ages == sorted(ages, reverse=True)
 
     def test_limit(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) RETURN n.title LIMIT 3"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) RETURN n.title LIMIT 3")
         assert len(rows) == 3
 
     def test_skip(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) RETURN n.title ORDER BY n.age SKIP 2"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) RETURN n.title ORDER BY n.age SKIP 2")
         assert len(rows) == 3
 
     def test_skip_and_limit(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) RETURN n.title, n.age ORDER BY n.age SKIP 1 LIMIT 2"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) RETURN n.title, n.age ORDER BY n.age SKIP 1 LIMIT 2")
         assert len(rows) == 2
-        ages = [r['n.age'] for r in rows]
+        ages = [r["n.age"] for r in rows]
         assert ages == [28, 30]
 
 
 class TestAggregation:
     def test_count_star(self, cypher_graph):
         rows = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS total")
-        assert rows[0]['total'] == 5
+        assert rows[0]["total"] == 5
 
     def test_count_with_grouping(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) RETURN n.city AS city, count(*) AS cnt"
-        )
-        cities = {r['city']: r['cnt'] for r in rows}
-        assert cities['Oslo'] == 3
-        assert cities['Bergen'] == 2
+        rows = cypher_graph.cypher("MATCH (n:Person) RETURN n.city AS city, count(*) AS cnt")
+        cities = {r["city"]: r["cnt"] for r in rows}
+        assert cities["Oslo"] == 3
+        assert cities["Bergen"] == 2
 
     def test_sum(self, cypher_graph):
         rows = cypher_graph.cypher("MATCH (n:Person) RETURN sum(n.salary) AS total")
-        assert rows[0]['total'] == 360000
+        assert rows[0]["total"] == 360000
 
     def test_avg(self, cypher_graph):
         rows = cypher_graph.cypher("MATCH (n:Person) RETURN avg(n.age) AS avg_age")
-        assert abs(rows[0]['avg_age'] - 31.6) < 0.1
+        assert abs(rows[0]["avg_age"] - 31.6) < 0.1
 
     def test_min_max(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) RETURN min(n.age) AS youngest, max(n.age) AS oldest"
-        )
-        assert rows[0]['youngest'] == 25
-        assert rows[0]['oldest'] == 40
+        rows = cypher_graph.cypher("MATCH (n:Person) RETURN min(n.age) AS youngest, max(n.age) AS oldest")
+        assert rows[0]["youngest"] == 25
+        assert rows[0]["oldest"] == 40
 
     def test_distinct(self, cypher_graph):
         rows = cypher_graph.cypher("MATCH (n:Person) RETURN DISTINCT n.city")
         assert len(rows) == 2
 
     def test_count_distinct(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) RETURN count(DISTINCT n.city) AS unique_cities"
-        )
-        assert rows[0]['unique_cities'] == 2
+        rows = cypher_graph.cypher("MATCH (n:Person) RETURN count(DISTINCT n.city) AS unique_cities")
+        assert rows[0]["unique_cities"] == 2
 
 
 class TestWithClause:
@@ -246,7 +209,7 @@ class TestWithClause:
             ORDER BY friend_count DESC
         """)
         assert len(rows) > 0
-        counts = [r['friend_count'] for r in rows]
+        counts = [r["friend_count"] for r in rows]
         assert counts == sorted(counts, reverse=True)
 
 
@@ -262,39 +225,29 @@ class TestOptionalMatch:
 
 class TestExpressions:
     def test_arithmetic(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Product) RETURN n.title, n.price * 1.25 AS with_tax"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Product) RETURN n.title, n.price * 1.25 AS with_tax")
         for row in rows:
-            assert row['with_tax'] > row.get('n.price', 0) or 'with_tax' in row
+            assert row["with_tax"] > row.get("n.price", 0) or "with_tax" in row
 
     def test_coalesce(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) RETURN n.title, coalesce(n.email, 'no email') AS contact"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) RETURN n.title, coalesce(n.email, 'no email') AS contact")
         for row in rows:
-            assert row['contact'] != '' or row['contact'] is not None
+            assert row["contact"] != "" or row["contact"] is not None
 
     def test_predicate_pushdown(self, cypher_graph):
         """Predicate pushdown should produce same results as without."""
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.age = 30 RETURN n.title"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.age = 30 RETURN n.title")
         assert len(rows) == 1
-        assert rows[0]['n.title'] == 'Alice'
+        assert rows[0]["n.title"] == "Alice"
 
 
 class TestEmptyResults:
     def test_no_matching_nodes(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:NonExistent) RETURN n.title"
-        )
+        rows = cypher_graph.cypher("MATCH (n:NonExistent) RETURN n.title")
         assert len(rows) == 0
 
     def test_where_eliminates_all(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.age > 100 RETURN n.title"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.age > 100 RETURN n.title")
         assert len(rows) == 0
 
 
@@ -316,10 +269,10 @@ class TestCaseExpressions:
             ORDER BY n.name
         """)
         assert len(rows) == 5
-        alice = next(r for r in rows if r['name'] == 'Alice')
-        assert alice['level'] == 'senior'  # age 30
-        bob = next(r for r in rows if r['name'] == 'Bob')
-        assert bob['level'] == 'junior'  # age 25
+        alice = next(r for r in rows if r["name"] == "Alice")
+        assert alice["level"] == "senior"  # age 30
+        bob = next(r for r in rows if r["name"] == "Bob")
+        assert bob["level"] == "junior"  # age 25
 
     def test_simple_case(self, cypher_graph):
         """CASE expr WHEN val THEN result ... END."""
@@ -329,10 +282,10 @@ class TestCaseExpressions:
                    CASE n.city WHEN 'Oslo' THEN 'capital' WHEN 'Bergen' THEN 'west' ELSE 'other' END AS region
             ORDER BY n.name
         """)
-        alice = next(r for r in rows if r['name'] == 'Alice')
-        assert alice['region'] == 'capital'
-        bob = next(r for r in rows if r['name'] == 'Bob')
-        assert bob['region'] == 'west'
+        alice = next(r for r in rows if r["name"] == "Alice")
+        assert alice["region"] == "capital"
+        bob = next(r for r in rows if r["name"] == "Bob")
+        assert bob["region"] == "west"
 
     def test_case_no_else_returns_null(self, cypher_graph):
         """CASE without ELSE returns null when no match."""
@@ -344,7 +297,7 @@ class TestCaseExpressions:
         """)
         # No one lives in Trondheim, so all should be null
         for row in rows:
-            assert row['status'] is None
+            assert row["status"] is None
 
     def test_case_multiple_when(self, cypher_graph):
         """CASE with multiple WHEN clauses — first match wins."""
@@ -358,12 +311,12 @@ class TestCaseExpressions:
                    END AS tier
             ORDER BY n.name
         """)
-        eve = next(r for r in rows if r['name'] == 'Eve')
-        assert eve['tier'] == 'veteran'  # age 40 — first match wins
-        alice = next(r for r in rows if r['name'] == 'Alice')
-        assert alice['tier'] == 'experienced'  # age 30
-        bob = next(r for r in rows if r['name'] == 'Bob')
-        assert bob['tier'] == 'newcomer'  # age 25
+        eve = next(r for r in rows if r["name"] == "Eve")
+        assert eve["tier"] == "veteran"  # age 40 — first match wins
+        alice = next(r for r in rows if r["name"] == "Alice")
+        assert alice["tier"] == "experienced"  # age 30
+        bob = next(r for r in rows if r["name"] == "Bob")
+        assert bob["tier"] == "newcomer"  # age 25
 
 
 class TestCaseEdgeCases:
@@ -377,10 +330,10 @@ class TestCaseEdgeCases:
             RETURN n.name AS name
             ORDER BY n.name
         """)
-        names = [r['name'] for r in rows]
-        assert 'Alice' in names  # age 30
-        assert 'Eve' in names    # age 40
-        assert 'Bob' not in names  # age 25
+        names = [r["name"] for r in rows]
+        assert "Alice" in names  # age 30
+        assert "Eve" in names  # age 40
+        assert "Bob" not in names  # age 25
 
     def test_case_with_null_property(self, cypher_graph):
         """CASE on a property that might be null."""
@@ -390,7 +343,7 @@ class TestCaseEdgeCases:
             RETURN CASE WHEN n.age IS NULL THEN 'unknown' ELSE 'known' END AS status
         """)
         assert len(rows) == 1
-        assert rows[0]['status'] == 'unknown'
+        assert rows[0]["status"] == "unknown"
 
     def test_case_no_else_no_match_returns_null(self, cypher_graph):
         """CASE without ELSE returns null when no WHEN matches."""
@@ -401,7 +354,7 @@ class TestCaseEdgeCases:
             ORDER BY n.name
         """)
         for row in rows:
-            assert row['label'] is None
+            assert row["label"] is None
 
 
 class TestParameters:
@@ -409,54 +362,51 @@ class TestParameters:
 
     def test_single_parameter(self, cypher_graph):
         rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.age > $min_age RETURN n.name AS name ORDER BY n.name",
-            params={'min_age': 30}
+            "MATCH (n:Person) WHERE n.age > $min_age RETURN n.name AS name ORDER BY n.name", params={"min_age": 30}
         )
-        names = [r['name'] for r in rows]
-        assert 'Charlie' in names  # age 35
-        assert 'Eve' in names      # age 40
-        assert 'Alice' not in names  # age 30, not > 30
-        assert 'Bob' not in names    # age 25
+        names = [r["name"] for r in rows]
+        assert "Charlie" in names  # age 35
+        assert "Eve" in names  # age 40
+        assert "Alice" not in names  # age 30, not > 30
+        assert "Bob" not in names  # age 25
 
     def test_multiple_parameters(self, cypher_graph):
         rows = cypher_graph.cypher(
             "MATCH (n:Person) WHERE n.city = $city AND n.age > $age RETURN n.name AS name",
-            params={'city': 'Oslo', 'age': 30}
+            params={"city": "Oslo", "age": 30},
         )
-        names = [r['name'] for r in rows]
-        assert 'Charlie' in names  # Oslo, age 35
-        assert 'Eve' in names      # Oslo, age 40
-        assert 'Alice' not in names  # Oslo, age 30 (not > 30)
+        names = [r["name"] for r in rows]
+        assert "Charlie" in names  # Oslo, age 35
+        assert "Eve" in names  # Oslo, age 40
+        assert "Alice" not in names  # Oslo, age 30 (not > 30)
 
     def test_missing_parameter_error(self, cypher_graph):
         with pytest.raises(RuntimeError, match="Missing parameter"):
-            cypher_graph.cypher(
-                "MATCH (n:Person) WHERE n.age > $nonexistent RETURN n.name"
-            )
+            cypher_graph.cypher("MATCH (n:Person) WHERE n.age > $nonexistent RETURN n.name")
 
     def test_parameter_with_to_df(self, cypher_graph):
         df = cypher_graph.cypher(
             "MATCH (n:Person) WHERE n.age >= $min_age RETURN n.name AS name, n.age AS age ORDER BY n.age",
-            params={'min_age': 35}, to_df=True
+            params={"min_age": 35},
+            to_df=True,
         )
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 2  # Charlie (35) and Eve (40)
-        assert list(df['name']) == ['Charlie', 'Eve']
+        assert list(df["name"]) == ["Charlie", "Eve"]
 
     def test_string_parameter(self, cypher_graph):
         rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.city = $city RETURN n.name AS name ORDER BY n.name",
-            params={'city': 'Bergen'}
+            "MATCH (n:Person) WHERE n.city = $city RETURN n.name AS name ORDER BY n.name", params={"city": "Bergen"}
         )
-        names = [r['name'] for r in rows]
-        assert names == ['Bob', 'Diana']
+        names = [r["name"] for r in rows]
+        assert names == ["Bob", "Diana"]
 
     def test_parameter_in_return(self, cypher_graph):
         rows = cypher_graph.cypher(
             "MATCH (n:Person) RETURN n.name AS name, $label AS category ORDER BY n.name LIMIT 1",
-            params={'label': 'person'}
+            params={"label": "person"},
         )
-        assert rows[0]['category'] == 'person'
+        assert rows[0]["category"] == "person"
 
 
 class TestExistingFeatures:
@@ -472,9 +422,9 @@ class TestExistingFeatures:
             UNION
             MATCH (n:Person) WHERE n.age > 35 RETURN n.name AS name
         """)
-        names = {r['name'] for r in rows}
+        names = {r["name"] for r in rows}
         # Oslo: Alice, Charlie, Eve; age > 35: Eve; UNION deduplicates
-        assert names == {'Alice', 'Charlie', 'Eve'}
+        assert names == {"Alice", "Charlie", "Eve"}
 
     def test_union_all(self, cypher_graph):
         rows = cypher_graph.cypher("""
@@ -482,7 +432,7 @@ class TestExistingFeatures:
             UNION ALL
             MATCH (n:Person) WHERE n.age > 35 RETURN n.name AS name
         """)
-        names = [r['name'] for r in rows]
+        names = [r["name"] for r in rows]
         # Oslo: Alice, Charlie, Eve; age > 35: Eve; UNION ALL keeps duplicates
         assert len(names) == 4  # 3 + 1 (Eve appears twice)
 
@@ -492,10 +442,10 @@ class TestExistingFeatures:
             WHERE a.name = 'Alice'
             RETURN DISTINCT b.name AS friend
         """)
-        names = {r['friend'] for r in rows}
+        names = {r["friend"] for r in rows}
         # Alice->Bob, Alice->Charlie, Bob->Charlie, Charlie->Diana
-        assert 'Bob' in names
-        assert 'Charlie' in names
+        assert "Bob" in names
+        assert "Charlie" in names
 
     def test_coalesce_function(self, cypher_graph):
         rows = cypher_graph.cypher("""
@@ -503,10 +453,10 @@ class TestExistingFeatures:
             RETURN n.name AS name, coalesce(n.email, 'no email') AS contact
             ORDER BY n.name
         """)
-        bob = next(r for r in rows if r['name'] == 'Bob')
-        assert bob['contact'] == 'no email'
-        alice = next(r for r in rows if r['name'] == 'Alice')
-        assert alice['contact'] == 'alice@test.com'
+        bob = next(r for r in rows if r["name"] == "Bob")
+        assert bob["contact"] == "no email"
+        alice = next(r for r in rows if r["name"] == "Alice")
+        assert alice["contact"] == "alice@test.com"
 
     def test_collect_aggregate(self, cypher_graph):
         rows = cypher_graph.cypher("""
@@ -522,29 +472,25 @@ class TestCreateClause:
 
     def test_create_node(self, cypher_graph):
         """CREATE (n:City {name: 'Trondheim'}) creates a new node."""
-        before_cnt = cypher_graph.cypher("MATCH (n:City) RETURN count(*) AS cnt")[0]['cnt']
+        before_cnt = cypher_graph.cypher("MATCH (n:City) RETURN count(*) AS cnt")[0]["cnt"]
 
         cypher_graph.cypher("CREATE (n:City {name: 'Trondheim'})")
         stats = cypher_graph.last_mutation_stats
         assert stats is not None
-        assert stats['nodes_created'] == 1
+        assert stats["nodes_created"] == 1
 
-        after_cnt = cypher_graph.cypher("MATCH (n:City) RETURN count(*) AS cnt")[0]['cnt']
+        after_cnt = cypher_graph.cypher("MATCH (n:City) RETURN count(*) AS cnt")[0]["cnt"]
         assert after_cnt == before_cnt + 1
 
     def test_create_node_with_properties(self, cypher_graph):
         """CREATE with multiple properties stores them on the node."""
-        cypher_graph.cypher(
-            "CREATE (n:Person {name: 'Frank', age: 45, city: 'Trondheim'})"
-        )
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.name = 'Frank' RETURN n.name, n.age, n.city"
-        )
+        cypher_graph.cypher("CREATE (n:Person {name: 'Frank', age: 45, city: 'Trondheim'})")
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.name = 'Frank' RETURN n.name, n.age, n.city")
         assert len(rows) == 1
         row = rows[0]
-        assert row['n.name'] == 'Frank'
-        assert row['n.age'] == 45
-        assert row['n.city'] == 'Trondheim'
+        assert row["n.name"] == "Frank"
+        assert row["n.age"] == 45
+        assert row["n.city"] == "Trondheim"
 
     def test_create_edge_after_match(self, cypher_graph):
         """MATCH (a) MATCH (b) CREATE (a)-[:REL]->(b) creates an edge."""
@@ -553,7 +499,7 @@ class TestCreateClause:
             MATCH (b:Person) WHERE b.name = 'Eve'
             CREATE (a)-[:FRIENDS]->(b)
         """)
-        assert cypher_graph.last_mutation_stats['relationships_created'] == 1
+        assert cypher_graph.last_mutation_stats["relationships_created"] == 1
 
         # Verify the edge exists
         check = cypher_graph.cypher("""
@@ -561,41 +507,32 @@ class TestCreateClause:
             RETURN a.name AS src, b.name AS tgt
         """)
         assert len(check) == 1
-        assert check[0]['src'] == 'Alice'
-        assert check[0]['tgt'] == 'Eve'
+        assert check[0]["src"] == "Alice"
+        assert check[0]["tgt"] == "Eve"
 
     def test_create_path(self, cypher_graph):
         """CREATE (a:X)-[:R]->(b:Y) creates both nodes and the edge."""
-        cypher_graph.cypher(
-            "CREATE (a:Team {name: 'Alpha'})-[:MEMBER]->(b:Team {name: 'Beta'})"
-        )
+        cypher_graph.cypher("CREATE (a:Team {name: 'Alpha'})-[:MEMBER]->(b:Team {name: 'Beta'})")
         stats = cypher_graph.last_mutation_stats
-        assert stats['nodes_created'] == 2
-        assert stats['relationships_created'] == 1
+        assert stats["nodes_created"] == 2
+        assert stats["relationships_created"] == 1
 
     def test_create_with_params(self, cypher_graph):
         """CREATE with $param substitution for property values."""
-        cypher_graph.cypher(
-            "CREATE (n:Person {name: $name, age: $age})",
-            params={'name': 'Grace', 'age': 29}
-        )
-        assert cypher_graph.last_mutation_stats['nodes_created'] == 1
+        cypher_graph.cypher("CREATE (n:Person {name: $name, age: $age})", params={"name": "Grace", "age": 29})
+        assert cypher_graph.last_mutation_stats["nodes_created"] == 1
 
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.name = 'Grace' RETURN n.age"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.name = 'Grace' RETURN n.age")
         assert len(rows) == 1
-        assert rows[0]['n.age'] == 29
+        assert rows[0]["n.age"] == 29
 
     def test_create_return_created_node(self, cypher_graph):
         """CREATE ... RETURN should return data about created nodes."""
-        result = cypher_graph.cypher(
-            "CREATE (n:Animal {name: 'Rex', species: 'Dog'}) RETURN n.name, n.species"
-        )
+        result = cypher_graph.cypher("CREATE (n:Animal {name: 'Rex', species: 'Dog'}) RETURN n.name, n.species")
         assert result.stats is not None
         assert len(result) == 1
-        assert result[0]['n.name'] == 'Rex'
-        assert result[0]['n.species'] == 'Dog'
+        assert result[0]["n.name"] == "Rex"
+        assert result[0]["n.species"] == "Dog"
 
 
 class TestSetClause:
@@ -607,10 +544,8 @@ class TestSetClause:
             MATCH (n:Person) WHERE n.name = 'Alice'
             SET n.city = 'Trondheim'
         """)
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.city"
-        )
-        assert rows[0]['n.city'] == 'Trondheim'
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.city")
+        assert rows[0]["n.city"] == "Trondheim"
 
     def test_set_multiple_properties(self, cypher_graph):
         """SET n.a = x, n.b = y updates multiple properties."""
@@ -618,14 +553,12 @@ class TestSetClause:
             MATCH (n:Person) WHERE n.name = 'Bob'
             SET n.city = 'Stavanger', n.age = 26
         """)
-        assert cypher_graph.last_mutation_stats['properties_set'] == 2
+        assert cypher_graph.last_mutation_stats["properties_set"] == 2
 
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.name = 'Bob' RETURN n.city, n.age"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.name = 'Bob' RETURN n.city, n.age")
         row = rows[0]
-        assert row['n.city'] == 'Stavanger'
-        assert row['n.age'] == 26
+        assert row["n.city"] == "Stavanger"
+        assert row["n.age"] == 26
 
     def test_set_title(self, cypher_graph):
         """SET n.name = 'X' updates the node title."""
@@ -633,12 +566,10 @@ class TestSetClause:
             MATCH (n:Person) WHERE n.name = 'Charlie'
             SET n.name = 'Charles'
         """)
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.name = 'Charles' RETURN n.name, n.title"
-        )
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.name = 'Charles' RETURN n.name, n.title")
         assert len(rows) == 1
-        assert rows[0]['n.name'] == 'Charles'
-        assert rows[0]['n.title'] == 'Charles'
+        assert rows[0]["n.name"] == "Charles"
+        assert rows[0]["n.title"] == "Charles"
 
     def test_set_id_error(self, cypher_graph):
         """SET n.id = x should raise an error (id is immutable)."""
@@ -654,10 +585,8 @@ class TestSetClause:
             MATCH (n:Person) WHERE n.name = 'Alice'
             SET n.age = 30 + 1
         """)
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.age"
-        )
-        assert rows[0]['n.age'] == 31
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.age")
+        assert rows[0]["n.age"] == 31
 
 
 class TestMutationStats:
@@ -665,14 +594,12 @@ class TestMutationStats:
 
     def test_create_returns_stats(self, cypher_graph):
         """CREATE stores stats in last_mutation_stats."""
-        cypher_graph.cypher(
-            "CREATE (a:X {name: 'A'})-[:R]->(b:X {name: 'B'})"
-        )
+        cypher_graph.cypher("CREATE (a:X {name: 'A'})-[:R]->(b:X {name: 'B'})")
         stats = cypher_graph.last_mutation_stats
         assert stats is not None
-        assert stats['nodes_created'] == 2
-        assert stats['relationships_created'] == 1
-        assert stats['properties_set'] == 0  # properties on CREATE don't count as SET
+        assert stats["nodes_created"] == 2
+        assert stats["relationships_created"] == 1
+        assert stats["properties_set"] == 0  # properties on CREATE don't count as SET
 
     def test_set_returns_stats(self, cypher_graph):
         """SET stores stats in last_mutation_stats with properties_set count."""
@@ -682,14 +609,14 @@ class TestMutationStats:
         """)
         stats = cypher_graph.last_mutation_stats
         assert stats is not None
-        assert stats['properties_set'] == 2
-        assert stats['nodes_created'] == 0
+        assert stats["properties_set"] == 2
+        assert stats["nodes_created"] == 0
 
     def test_read_query_no_stats(self):
         """Read-only queries should not update last_mutation_stats."""
         fresh = KnowledgeGraph()
-        people = pd.DataFrame({'id': [1], 'name': ['Alice']})
-        fresh.add_nodes(people, 'Person', 'id', 'name')
+        people = pd.DataFrame({"id": [1], "name": ["Alice"]})
+        fresh.add_nodes(people, "Person", "id", "name")
         fresh.cypher("MATCH (n:Person) RETURN n.name")
         assert fresh.last_mutation_stats is None
 
@@ -701,7 +628,7 @@ class TestMutationStats:
         """)
         stats = cypher_graph.last_mutation_stats
         assert stats is not None
-        assert stats['nodes_deleted'] == 1
+        assert stats["nodes_deleted"] == 1
 
     def test_remove_returns_stats(self, cypher_graph):
         """REMOVE stores properties_removed in last_mutation_stats."""
@@ -711,7 +638,7 @@ class TestMutationStats:
         """)
         stats = cypher_graph.last_mutation_stats
         assert stats is not None
-        assert stats['properties_removed'] == 1
+        assert stats["properties_removed"] == 1
 
 
 class TestDeleteClause:
@@ -719,15 +646,15 @@ class TestDeleteClause:
 
     def test_detach_delete_node(self, cypher_graph):
         """DETACH DELETE removes a node and its edges."""
-        before_cnt = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")[0]['cnt']
+        before_cnt = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")[0]["cnt"]
 
         cypher_graph.cypher("""
             MATCH (n:Person) WHERE n.name = 'Eve'
             DETACH DELETE n
         """)
-        assert cypher_graph.last_mutation_stats['nodes_deleted'] == 1
+        assert cypher_graph.last_mutation_stats["nodes_deleted"] == 1
 
-        after_cnt = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")[0]['cnt']
+        after_cnt = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")[0]["cnt"]
         assert after_cnt == before_cnt - 1
 
     def test_detach_delete_node_with_edges(self, cypher_graph):
@@ -737,8 +664,8 @@ class TestDeleteClause:
             DETACH DELETE n
         """)
         stats = cypher_graph.last_mutation_stats
-        assert stats['nodes_deleted'] == 1
-        assert stats['relationships_deleted'] > 0
+        assert stats["nodes_deleted"] == 1
+        assert stats["relationships_deleted"] > 0
 
     def test_delete_node_error_has_edges(self, cypher_graph):
         """Plain DELETE on a node with edges should error."""
@@ -750,20 +677,16 @@ class TestDeleteClause:
 
     def test_delete_relationship(self, cypher_graph):
         """DELETE r removes a relationship but keeps nodes."""
-        before_persons = cypher_graph.cypher(
-            "MATCH (n:Person) RETURN count(*) AS cnt"
-        )[0]['cnt']
+        before_persons = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")[0]["cnt"]
 
         cypher_graph.cypher("""
             MATCH (a:Person)-[r:KNOWS]->(b:Person)
             DELETE r
         """)
-        assert cypher_graph.last_mutation_stats['relationships_deleted'] > 0
+        assert cypher_graph.last_mutation_stats["relationships_deleted"] > 0
 
         # Nodes should still be there
-        after_persons = cypher_graph.cypher(
-            "MATCH (n:Person) RETURN count(*) AS cnt"
-        )[0]['cnt']
+        after_persons = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")[0]["cnt"]
         assert after_persons == before_persons
 
 
@@ -776,10 +699,8 @@ class TestRemoveClause:
             MATCH (n:Person) WHERE n.name = 'Alice'
             REMOVE n.age
         """)
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.age AS age"
-        )
-        assert rows[0]['age'] is None
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.age AS age")
+        assert rows[0]["age"] is None
 
     def test_remove_multiple_properties(self, cypher_graph):
         """REMOVE n.a, n.b removes multiple properties."""
@@ -787,7 +708,7 @@ class TestRemoveClause:
             MATCH (n:Person) WHERE n.name = 'Alice'
             REMOVE n.age, n.city
         """)
-        assert cypher_graph.last_mutation_stats['properties_removed'] == 2
+        assert cypher_graph.last_mutation_stats["properties_removed"] == 2
 
     def test_remove_nonexistent_is_noop(self, cypher_graph):
         """REMOVE on a non-existent property is a no-op."""
@@ -795,7 +716,7 @@ class TestRemoveClause:
             MATCH (n:Person) WHERE n.name = 'Alice'
             REMOVE n.nonexistent
         """)
-        assert cypher_graph.last_mutation_stats['properties_removed'] == 0
+        assert cypher_graph.last_mutation_stats["properties_removed"] == 0
 
 
 class TestMergeClause:
@@ -803,49 +724,41 @@ class TestMergeClause:
 
     def test_merge_creates_node(self, cypher_graph):
         """MERGE creates a node when no match is found."""
-        before_cnt = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")[0]['cnt']
+        before_cnt = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")[0]["cnt"]
         cypher_graph.cypher("MERGE (n:Person {name: 'Frank'})")
-        assert cypher_graph.last_mutation_stats['nodes_created'] == 1
+        assert cypher_graph.last_mutation_stats["nodes_created"] == 1
 
-        after_cnt = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")[0]['cnt']
+        after_cnt = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")[0]["cnt"]
         assert after_cnt == before_cnt + 1
 
     def test_merge_matches_existing(self, cypher_graph):
         """MERGE does not create when a match is found."""
-        before_cnt = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")[0]['cnt']
+        before_cnt = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")[0]["cnt"]
         cypher_graph.cypher("MERGE (n:Person {name: 'Alice'})")
-        assert cypher_graph.last_mutation_stats['nodes_created'] == 0
+        assert cypher_graph.last_mutation_stats["nodes_created"] == 0
 
-        after_cnt = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")[0]['cnt']
+        after_cnt = cypher_graph.cypher("MATCH (n:Person) RETURN count(*) AS cnt")[0]["cnt"]
         assert after_cnt == before_cnt
 
     def test_merge_on_create_set(self, cypher_graph):
         """MERGE ON CREATE SET runs when creating."""
-        cypher_graph.cypher(
-            "MERGE (n:Person {name: 'Frank'}) ON CREATE SET n.age = 40"
-        )
+        cypher_graph.cypher("MERGE (n:Person {name: 'Frank'}) ON CREATE SET n.age = 40")
         stats = cypher_graph.last_mutation_stats
-        assert stats['nodes_created'] == 1
-        assert stats['properties_set'] == 1
+        assert stats["nodes_created"] == 1
+        assert stats["properties_set"] == 1
 
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.name = 'Frank' RETURN n.age AS age"
-        )
-        assert rows[0]['age'] == 40
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.name = 'Frank' RETURN n.age AS age")
+        assert rows[0]["age"] == 40
 
     def test_merge_on_match_set(self, cypher_graph):
         """MERGE ON MATCH SET runs when matching existing."""
-        cypher_graph.cypher(
-            "MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.visits = 1"
-        )
+        cypher_graph.cypher("MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.visits = 1")
         stats = cypher_graph.last_mutation_stats
-        assert stats['nodes_created'] == 0
-        assert stats['properties_set'] == 1
+        assert stats["nodes_created"] == 0
+        assert stats["properties_set"] == 1
 
-        rows = cypher_graph.cypher(
-            "MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.visits AS visits"
-        )
-        assert rows[0]['visits'] == 1
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.visits AS visits")
+        assert rows[0]["visits"] == 1
 
     def test_merge_relationship_exists(self, cypher_graph):
         """MERGE does not create duplicate edge when one already exists."""
@@ -853,7 +766,7 @@ class TestMergeClause:
             MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
             MERGE (a)-[r:KNOWS]->(b)
         """)
-        assert cypher_graph.last_mutation_stats['relationships_created'] == 0
+        assert cypher_graph.last_mutation_stats["relationships_created"] == 0
 
     def test_merge_creates_relationship(self, cypher_graph):
         """MERGE creates edge when no matching edge exists."""
@@ -861,12 +774,13 @@ class TestMergeClause:
             MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
             MERGE (a)-[r:FRIENDS]->(b)
         """)
-        assert cypher_graph.last_mutation_stats['relationships_created'] == 1
+        assert cypher_graph.last_mutation_stats["relationships_created"] == 1
 
 
 # ============================================================================
 # Mutation stats return format
 # ============================================================================
+
 
 class TestMutationStatsReturn:
     """Mutation queries return stats directly (not just via last_mutation_stats)."""
@@ -876,7 +790,7 @@ class TestMutationStatsReturn:
         g = KnowledgeGraph()
         result = g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
         assert result.stats is not None
-        assert result.stats['nodes_created'] == 1
+        assert result.stats["nodes_created"] == 1
         assert len(result) == 0
 
     def test_set_returns_stats(self):
@@ -885,7 +799,7 @@ class TestMutationStatsReturn:
         g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
         result = g.cypher("MATCH (p:Person {name: 'Alice'}) SET p.age = 31")
         assert result.stats is not None
-        assert result.stats['properties_set'] >= 1
+        assert result.stats["properties_set"] >= 1
 
     def test_delete_returns_stats(self):
         """DETACH DELETE returns ResultView with stats."""
@@ -893,16 +807,16 @@ class TestMutationStatsReturn:
         g.cypher("CREATE (:Person {name: 'Alice'})")
         result = g.cypher("MATCH (p:Person {name: 'Alice'}) DETACH DELETE p")
         assert result.stats is not None
-        assert result.stats['nodes_deleted'] == 1
+        assert result.stats["nodes_deleted"] == 1
 
     def test_mutation_with_return_has_rows_and_stats(self):
         """CREATE ... RETURN returns ResultView with both rows and stats."""
         g = KnowledgeGraph()
         result = g.cypher("CREATE (n:Person {name: 'Bob', age: 25}) RETURN n.name AS name")
         assert result.stats is not None
-        assert result.stats['nodes_created'] == 1
+        assert result.stats["nodes_created"] == 1
         assert len(result) == 1
-        assert result[0]['name'] == 'Bob'
+        assert result[0]["name"] == "Bob"
 
     def test_read_query_returns_result_view(self):
         """Read query returns ResultView with no stats."""
@@ -911,7 +825,7 @@ class TestMutationStatsReturn:
         result = g.cypher("MATCH (p:Person) RETURN p.name AS name")
         assert result.stats is None
         assert len(result) == 1
-        assert result[0]['name'] == 'Alice'
+        assert result[0]["name"] == "Alice"
 
     def test_last_mutation_stats_backwards_compat(self):
         """last_mutation_stats property still works."""
@@ -919,12 +833,13 @@ class TestMutationStatsReturn:
         g.cypher("CREATE (:Person {name: 'Alice'})")
         stats = g.last_mutation_stats
         assert stats is not None
-        assert stats['nodes_created'] == 1
+        assert stats["nodes_created"] == 1
 
 
 # ============================================================================
 # Parameter in MATCH inline properties
 # ============================================================================
+
 
 class TestParamInMatchPatterns:
     """$param in MATCH (n:Type {prop: $param}) inline properties."""
@@ -934,36 +849,27 @@ class TestParamInMatchPatterns:
         g = KnowledgeGraph()
         g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
         g.cypher("CREATE (:Person {name: 'Bob', age: 25})")
-        result = g.cypher(
-            "MATCH (p:Person {name: $name}) RETURN p.age AS age",
-            params={'name': 'Alice'}
-        )
+        result = g.cypher("MATCH (p:Person {name: $name}) RETURN p.age AS age", params={"name": "Alice"})
         assert len(result) == 1
-        assert result[0] == {'age': 30}
+        assert result[0] == {"age": 30}
 
     def test_integer_param_in_match(self):
         """MATCH (n:Person {age: $age}) resolves integer parameter."""
         g = KnowledgeGraph()
         g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
         g.cypher("CREATE (:Person {name: 'Bob', age: 25})")
-        result = g.cypher(
-            "MATCH (p:Person {age: $age}) RETURN p.name AS name",
-            params={'age': 30}
-        )
+        result = g.cypher("MATCH (p:Person {age: $age}) RETURN p.name AS name", params={"age": 30})
         assert len(result) == 1
-        assert result[0] == {'name': 'Alice'}
+        assert result[0] == {"name": "Alice"}
 
     def test_param_in_where_predicate_pushdown(self):
         """WHERE p.name = $name is pushed into MATCH for index acceleration."""
         g = KnowledgeGraph()
         g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
         g.cypher("CREATE (:Person {name: 'Bob', age: 25})")
-        result = g.cypher(
-            "MATCH (p:Person) WHERE p.name = $name RETURN p.age AS age",
-            params={'name': 'Alice'}
-        )
+        result = g.cypher("MATCH (p:Person) WHERE p.name = $name RETURN p.age AS age", params={"name": "Alice"})
         assert len(result) == 1
-        assert result[0] == {'age': 30}
+        assert result[0] == {"age": 30}
 
     def test_multiple_params_in_match(self):
         """Multiple $params in same MATCH pattern."""
@@ -972,15 +878,16 @@ class TestParamInMatchPatterns:
         g.cypher("CREATE (:Person {name: 'Bob', age: 30, city: 'Bergen'})")
         result = g.cypher(
             "MATCH (p:Person {age: $age}) WHERE p.city = $city RETURN p.name AS name",
-            params={'age': 30, 'city': 'Oslo'}
+            params={"age": 30, "city": "Oslo"},
         )
         assert len(result) == 1
-        assert result[0] == {'name': 'Alice'}
+        assert result[0] == {"name": "Alice"}
 
 
 # ============================================================================
 # WITH clause property access regression (v0.4.17)
 # ============================================================================
+
 
 class TestWithPropertyAccess:
     """Node properties must survive WITH clause — regression test for v0.4.17."""
@@ -1000,10 +907,10 @@ class TestWithPropertyAccess:
             RETURN p.name AS name, p.age AS age, p.city AS city, friends
         """)
         assert len(result) == 1
-        assert result[0]['name'] == 'Alice'
-        assert result[0]['age'] == 30
-        assert result[0]['city'] == 'Oslo'
-        assert result[0]['friends'] == 1
+        assert result[0]["name"] == "Alice"
+        assert result[0]["age"] == 30
+        assert result[0]["city"] == "Oslo"
+        assert result[0]["friends"] == 1
 
     def test_with_passthrough_preserves_properties(self):
         """WITH p (no aggregation) then RETURN p.prop should work."""
@@ -1015,9 +922,9 @@ class TestWithPropertyAccess:
             RETURN p.name AS name, p.age AS age, p.city AS city
         """)
         assert len(result) == 1
-        assert result[0]['name'] == 'Alice'
-        assert result[0]['age'] == 30
-        assert result[0]['city'] == 'Oslo'
+        assert result[0]["name"] == "Alice"
+        assert result[0]["age"] == 30
+        assert result[0]["city"] == "Oslo"
 
     def test_double_with_preserves_properties(self):
         """Node passing through two WITH clauses retains all properties."""
@@ -1042,11 +949,11 @@ class TestWithPropertyAccess:
             RETURN l.title AS law, l.law_id AS law_id, l.dept AS dept, case_cites, reg_basis
         """)
         assert len(result) == 1
-        assert result[0]['law'] == 'Criminal Code'
-        assert result[0]['law_id'] == 'LOV-2005'
-        assert result[0]['dept'] == 'Justice'
-        assert result[0]['case_cites'] == 1
-        assert result[0]['reg_basis'] == 1
+        assert result[0]["law"] == "Criminal Code"
+        assert result[0]["law_id"] == "LOV-2005"
+        assert result[0]["dept"] == "Justice"
+        assert result[0]["case_cites"] == 1
+        assert result[0]["reg_basis"] == 1
 
     def test_with_where_on_node_property(self):
         """WHERE on node property after WITH still works."""
@@ -1073,9 +980,9 @@ class TestWithPropertyAccess:
             RETURN p.name AS name, p.age AS age, friends
         """)
         assert len(result) == 1
-        assert result[0]['name'] == 'Alice'
-        assert result[0]['age'] == 30
-        assert result[0]['friends'] == 2
+        assert result[0]["name"] == "Alice"
+        assert result[0]["age"] == 30
+        assert result[0]["friends"] == 2
 
 
 # ── range() function ─────────────────────────────────────────────────────
@@ -1104,9 +1011,7 @@ class TestRange:
         assert len(result) == 0
 
     def test_range_in_return(self, cypher_graph):
-        result = cypher_graph.cypher(
-            "MATCH (p:Person {name: 'Alice'}) RETURN range(1, 3) AS r"
-        )
+        result = cypher_graph.cypher("MATCH (p:Person {name: 'Alice'}) RETURN range(1, 3) AS r")
         assert result[0]["r"] == [1, 2, 3]
 
     def test_range_step_zero_errors(self, cypher_graph):
@@ -1118,6 +1023,7 @@ class TestRange:
 # Variable binding in MATCH pattern properties
 # ============================================================================
 
+
 class TestVariableBindingInPatterns:
     """WITH/UNWIND variables used in MATCH pattern properties: {prop: varName}."""
 
@@ -1126,9 +1032,7 @@ class TestVariableBindingInPatterns:
         g = KnowledgeGraph()
         g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
         g.cypher("CREATE (:Person {name: 'Bob', age: 25})")
-        result = g.cypher(
-            'WITH "Alice" AS name MATCH (p:Person {name: name}) RETURN p.age AS age'
-        )
+        result = g.cypher('WITH "Alice" AS name MATCH (p:Person {name: name}) RETURN p.age AS age')
         assert len(result) == 1
         assert result[0] == {"age": 30}
 
@@ -1151,9 +1055,7 @@ class TestVariableBindingInPatterns:
         g = KnowledgeGraph()
         g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
         g.cypher("CREATE (:Person {name: 'Bob', age: 25})")
-        result = g.cypher(
-            "WITH 30 AS target_age MATCH (p:Person {age: target_age}) RETURN p.name AS name"
-        )
+        result = g.cypher("WITH 30 AS target_age MATCH (p:Person {age: target_age}) RETURN p.name AS name")
         assert len(result) == 1
         assert result[0] == {"name": "Alice"}
 
@@ -1161,9 +1063,7 @@ class TestVariableBindingInPatterns:
         """Variable binding that matches nothing returns empty result."""
         g = KnowledgeGraph()
         g.cypher("CREATE (:Person {name: 'Alice'})")
-        result = g.cypher(
-            'WITH "Nobody" AS name MATCH (p:Person {name: name}) RETURN p'
-        )
+        result = g.cypher('WITH "Nobody" AS name MATCH (p:Person {name: name}) RETURN p')
         assert len(result) == 0
 
     def test_variable_with_multiple_match_patterns(self):
@@ -1185,6 +1085,7 @@ class TestVariableBindingInPatterns:
 # Map literals in expressions
 # ============================================================================
 
+
 class TestMapLiterals:
     """Map literal expressions: {key: expr, key2: expr}."""
 
@@ -1192,14 +1093,13 @@ class TestMapLiterals:
         """RETURN {name: n.name, age: n.age} AS person_map."""
         g = KnowledgeGraph()
         g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
-        result = g.cypher(
-            "MATCH (n:Person) RETURN {name: n.name, age: n.age} AS m"
-        )
+        result = g.cypher("MATCH (n:Person) RETURN {name: n.name, age: n.age} AS m")
         assert len(result) == 1
         m = result[0]["m"]
         # Result may be a dict (auto-parsed) or JSON string
         if isinstance(m, str):
             import json
+
             m = json.loads(m)
         assert m["name"] == "Alice"
         assert m["age"] == 30
@@ -1212,6 +1112,7 @@ class TestMapLiterals:
         m = result[0]["point"]
         if isinstance(m, str):
             import json
+
             m = json.loads(m)
         assert m["x"] == 1
         assert m["y"] == 2
@@ -1220,13 +1121,12 @@ class TestMapLiterals:
         """Map literal values can be expressions, not just literals."""
         g = KnowledgeGraph()
         g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
-        result = g.cypher(
-            "MATCH (n:Person) RETURN {name: n.name, next_age: n.age + 1} AS m"
-        )
+        result = g.cypher("MATCH (n:Person) RETURN {name: n.name, next_age: n.age + 1} AS m")
         assert len(result) == 1
         m = result[0]["m"]
         if isinstance(m, str):
             import json
+
             m = json.loads(m)
         assert m["name"] == "Alice"
         assert m["next_age"] == 31
@@ -1239,19 +1139,19 @@ class TestMapLiterals:
         m = result[0]["m"]
         if isinstance(m, str):
             import json
+
             m = json.loads(m)
         assert m == {}
 
     def test_map_literal_with_string_values(self):
         """Map literal with string values."""
         g = KnowledgeGraph()
-        result = g.cypher(
-            'RETURN {status: "active", role: "admin"} AS m'
-        )
+        result = g.cypher('RETURN {status: "active", role: "admin"} AS m')
         assert len(result) == 1
         m = result[0]["m"]
         if isinstance(m, str):
             import json
+
             m = json.loads(m)
         assert m["status"] == "active"
         assert m["role"] == "admin"

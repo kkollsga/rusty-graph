@@ -32,6 +32,11 @@ classifiers = [
 ]
 dependencies = [
     "pandas>=1.5",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+code-tree = [
     "tree-sitter>=0.21",
     "tree-sitter-rust",
     "tree-sitter-python",
@@ -43,15 +48,27 @@ dependencies = [
     "tree-sitter-cpp",
     "tree-sitter-c-sharp",
 ]
-dynamic = ["version"]
 
 [project.urls]
 Homepage = "https://github.com/kkollsga/kglite"
 Repository = "https://github.com/kkollsga/kglite"
 Documentation = "https://kglite.readthedocs.io"
+Changelog = "https://github.com/kkollsga/kglite/blob/main/CHANGELOG.md"
+Issues = "https://github.com/kkollsga/kglite/issues"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
+"benchmarks/*" = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -60,3 +77,18 @@ markers = [
     "slow: slow tests taking >5s (deselect with '-m not slow')",
 ]
 addopts = "-m 'not benchmark'"
+
+[tool.mypy]
+ignore_missing_imports = true
+exclude = "kglite/(code_tree|blueprint)/"
+
+[[tool.mypy.overrides]]
+module = ["kglite.code_tree.*", "kglite.blueprint.*"]
+ignore_errors = true
+
+[tool.coverage.run]
+source = ["kglite"]
+omit = ["kglite/code_tree/*"]
+
+[tool.coverage.report]
+exclude_lines = ["if __name__", "pragma: no cover", "raise NotImplementedError"]

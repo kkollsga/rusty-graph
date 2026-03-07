@@ -1,8 +1,9 @@
 """Tests for timeseries Python API."""
 
-import pytest
 import pandas as pd
+
 import kglite
+import pytest
 
 
 @pytest.fixture
@@ -25,8 +26,11 @@ def graph_with_fields():
 def test_set_timeseries_config(graph_with_fields):
     g = graph_with_fields
     g.set_timeseries(
-        "Field", resolution="month", channels=["oil", "gas"],
-        units={"oil": "MSm3", "gas": "BSm3"}, bin_type="total",
+        "Field",
+        resolution="month",
+        channels=["oil", "gas"],
+        units={"oil": "MSm3", "gas": "BSm3"},
+        bin_type="total",
     )
     config = g.timeseries_config("Field")
     assert config is not None
@@ -340,8 +344,11 @@ def test_add_timeseries_unsorted_data(graph_with_fields):
 def test_save_load_roundtrip(graph_with_fields, tmp_path):
     g = graph_with_fields
     g.set_timeseries(
-        "Field", resolution="month", channels=["oil"],
-        units={"oil": "MSm3"}, bin_type="total",
+        "Field",
+        resolution="month",
+        channels=["oil"],
+        units={"oil": "MSm3"},
+        bin_type="total",
     )
     g.set_time_index(1, ["2020-01", "2020-02"])
     g.add_ts_channel(1, "oil", [1.0, 2.0])

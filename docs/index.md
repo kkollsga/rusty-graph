@@ -23,15 +23,14 @@ pip install kglite
 
 ```{toctree}
 :maxdepth: 2
-:caption: Getting Started
+:caption: Tutorials
 
 getting-started
-core-concepts
 ```
 
 ```{toctree}
 :maxdepth: 2
-:caption: Guides
+:caption: How-to Guides
 
 guides/cypher
 guides/data-loading
@@ -46,6 +45,15 @@ guides/ai-agents
 guides/mcp-servers
 guides/code-tree
 guides/recipes
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Explanation
+
+core-concepts
+explanation/architecture
+explanation/design-decisions
 ```
 
 ```{toctree}

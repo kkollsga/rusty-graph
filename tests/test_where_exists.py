@@ -62,8 +62,8 @@ class TestWhereExists:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result]
-        assert names == ['Alice', 'Bob']
+        names = [row["p.name"] for row in result]
+        assert names == ["Alice", "Bob"]
 
     def test_exists_with_label_filter(self, social_graph):
         """Find people who purchased something."""
@@ -74,8 +74,8 @@ class TestWhereExists:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result]
-        assert names == ['Alice', 'Bob']
+        names = [row["p.name"] for row in result]
+        assert names == ["Alice", "Bob"]
 
     def test_exists_no_match(self, social_graph):
         """EXISTS returns false when no matching pattern."""
@@ -96,8 +96,8 @@ class TestWhereExists:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result]
-        assert names == ['Charlie', 'Diana']
+        names = [row["p.name"] for row in result]
+        assert names == ["Charlie", "Diana"]
 
     def test_not_exists_purchase(self, social_graph):
         """NOT EXISTS — find people who haven't purchased anything."""
@@ -108,8 +108,8 @@ class TestWhereExists:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result]
-        assert names == ['Charlie', 'Diana']
+        names = [row["p.name"] for row in result]
+        assert names == ["Charlie", "Diana"]
 
     def test_exists_with_property_filter(self, social_graph):
         """EXISTS with property filter in inner pattern."""
@@ -121,8 +121,8 @@ class TestWhereExists:
         """)
 
         # Alice knows Charlie (Oslo), Bob knows Charlie (Oslo)
-        names = [row['p.name'] for row in result]
-        assert names == ['Alice', 'Bob']
+        names = [row["p.name"] for row in result]
+        assert names == ["Alice", "Bob"]
 
     def test_exists_with_specific_target(self, social_graph):
         """EXISTS with specific property on target."""
@@ -133,7 +133,7 @@ class TestWhereExists:
         """)
 
         assert len(result) == 1
-        assert result[0]['p.name'] == 'Alice'
+        assert result[0]["p.name"] == "Alice"
 
     def test_exists_and_other_conditions(self, social_graph):
         """EXISTS combined with other WHERE conditions."""
@@ -145,7 +145,7 @@ class TestWhereExists:
 
         # Alice is in Oslo and knows people
         assert len(result) == 1
-        assert result[0]['p.name'] == 'Alice'
+        assert result[0]["p.name"] == "Alice"
 
     def test_exists_or_condition(self, social_graph):
         """EXISTS combined with OR."""
@@ -157,8 +157,8 @@ class TestWhereExists:
         """)
 
         # Alice and Bob know people, Diana is in Stavanger
-        names = [row['p.name'] for row in result]
-        assert names == ['Alice', 'Bob', 'Diana']
+        names = [row["p.name"] for row in result]
+        assert names == ["Alice", "Bob", "Diana"]
 
     def test_exists_incoming_relationship(self, social_graph):
         """EXISTS with incoming relationship direction."""
@@ -170,8 +170,8 @@ class TestWhereExists:
         """)
 
         # Bob is known by Alice, Charlie is known by Alice and Bob
-        names = [row['p.name'] for row in result]
-        assert names == ['Bob', 'Charlie']
+        names = [row["p.name"] for row in result]
+        assert names == ["Bob", "Charlie"]
 
 
 class TestWhereExistsEdgeCases:
@@ -208,7 +208,7 @@ class TestWhereExistsEdgeCases:
         """)
 
         assert len(result) == 1
-        assert result[0]['p.name'] == 'Alice'
+        assert result[0]["p.name"] == "Alice"
 
     def test_exists_multiple_relationship_types(self, social_graph):
         """EXISTS checking for multiple relationship types."""
@@ -220,8 +220,8 @@ class TestWhereExistsEdgeCases:
         """)
 
         # Only Alice and Bob know people AND purchased something
-        names = [row['p.name'] for row in result]
-        assert names == ['Alice', 'Bob']
+        names = [row["p.name"] for row in result]
+        assert names == ["Alice", "Bob"]
 
     def test_not_exists_with_multiple_conditions(self, social_graph):
         """NOT EXISTS with additional conditions."""
@@ -233,8 +233,8 @@ class TestWhereExistsEdgeCases:
         """)
 
         # Charlie and Diana don't know anyone and haven't purchased anything
-        names = [row['p.name'] for row in result]
-        assert names == ['Charlie', 'Diana']
+        names = [row["p.name"] for row in result]
+        assert names == ["Charlie", "Diana"]
 
 
 class TestExistsMatchSyntax:
@@ -256,7 +256,7 @@ class TestExistsMatchSyntax:
             ORDER BY p.name
         """)
 
-        assert [r['p.name'] for r in result_with_match] == [r['p.name'] for r in result_without_match]
+        assert [r["p.name"] for r in result_with_match] == [r["p.name"] for r in result_without_match]
 
     def test_not_exists_match_keyword(self, social_graph):
         """NOT EXISTS { MATCH (pattern) } works correctly."""
@@ -267,8 +267,8 @@ class TestExistsMatchSyntax:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result]
-        assert names == ['Charlie', 'Diana']
+        names = [row["p.name"] for row in result]
+        assert names == ["Charlie", "Diana"]
 
     def test_exists_match_with_label(self, social_graph):
         """EXISTS { MATCH (pattern) } with edge type filter."""
@@ -279,8 +279,8 @@ class TestExistsMatchSyntax:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result]
-        assert names == ['Alice', 'Bob']
+        names = [row["p.name"] for row in result]
+        assert names == ["Alice", "Bob"]
 
 
 class TestExistsParenSyntax:
@@ -313,7 +313,7 @@ class TestExistsParenSyntax:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result]
+        names = [row["p.name"] for row in result]
         # Same result as brace syntax
         brace_result = social_graph.cypher("""
             MATCH (p:Person)
@@ -321,7 +321,7 @@ class TestExistsParenSyntax:
             RETURN p.name
             ORDER BY p.name
         """)
-        assert names == [row['p.name'] for row in brace_result]
+        assert names == [row["p.name"] for row in brace_result]
 
     def test_exists_paren_with_label(self, social_graph):
         """EXISTS((...)) with specific edge type."""
@@ -334,7 +334,7 @@ class TestExistsParenSyntax:
 
         assert len(result) > 0
         for row in result:
-            assert isinstance(row['p.name'], str)
+            assert isinstance(row["p.name"], str)
 
 
 class TestInlinePatternPredicates:
@@ -349,8 +349,8 @@ class TestInlinePatternPredicates:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result]
-        assert names == ['Alice', 'Bob']
+        names = [row["p.name"] for row in result]
+        assert names == ["Alice", "Bob"]
 
     def test_inline_pattern_matches_exists(self, social_graph):
         """Inline pattern produces same results as EXISTS { ... }."""
@@ -375,8 +375,8 @@ class TestInlinePatternPredicates:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result]
-        assert names == ['Charlie', 'Diana']
+        names = [row["p.name"] for row in result]
+        assert names == ["Charlie", "Diana"]
 
     def test_inline_pattern_with_label(self, social_graph):
         """Inline pattern with specific relationship type."""
@@ -387,8 +387,8 @@ class TestInlinePatternPredicates:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result]
-        assert names == ['Alice', 'Bob']
+        names = [row["p.name"] for row in result]
+        assert names == ["Alice", "Bob"]
 
     def test_inline_pattern_incoming(self, social_graph):
         """Inline pattern with incoming relationship."""
@@ -399,8 +399,8 @@ class TestInlinePatternPredicates:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result]
-        assert names == ['Bob', 'Charlie']
+        names = [row["p.name"] for row in result]
+        assert names == ["Bob", "Charlie"]
 
     def test_inline_pattern_with_property(self, social_graph):
         """Inline pattern with property filter on target node."""
@@ -411,8 +411,8 @@ class TestInlinePatternPredicates:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result]
-        assert names == ['Alice', 'Bob']
+        names = [row["p.name"] for row in result]
+        assert names == ["Alice", "Bob"]
 
     def test_inline_pattern_combined_with_and(self, social_graph):
         """Inline pattern combined with AND condition."""
@@ -423,7 +423,7 @@ class TestInlinePatternPredicates:
         """)
 
         assert len(result) == 1
-        assert result[0]['p.name'] == 'Alice'
+        assert result[0]["p.name"] == "Alice"
 
     def test_inline_pattern_combined_with_or(self, social_graph):
         """Inline pattern combined with OR condition."""
@@ -434,8 +434,8 @@ class TestInlinePatternPredicates:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result]
-        assert names == ['Alice', 'Bob', 'Diana']
+        names = [row["p.name"] for row in result]
+        assert names == ["Alice", "Bob", "Diana"]
 
     def test_inline_pattern_no_match(self, social_graph):
         """Inline pattern that matches nothing."""
@@ -456,5 +456,5 @@ class TestInlinePatternPredicates:
             ORDER BY p.name
         """)
 
-        names = [row['p.name'] for row in result]
-        assert names == ['Charlie', 'Diana']
+        names = [row["p.name"] for row in result]
+        assert names == ["Charlie", "Diana"]

@@ -4,20 +4,24 @@ Transactions provide snapshot isolation: mutations are applied to a working
 copy and only committed to the original graph on tx.commit(). On rollback
 (or exception), no changes are applied.
 """
-import pytest
-import kglite
+
 import pandas as pd
+
+import kglite
+import pytest
 
 
 @pytest.fixture
 def graph():
     """Graph with a few Person nodes."""
     g = kglite.KnowledgeGraph()
-    df = pd.DataFrame({
-        "id": [1, 2, 3],
-        "title": ["Alice", "Bob", "Charlie"],
-        "age": [30, 25, 35],
-    })
+    df = pd.DataFrame(
+        {
+            "id": [1, 2, 3],
+            "title": ["Alice", "Bob", "Charlie"],
+            "age": [30, 25, 35],
+        }
+    )
     g.add_nodes(df, "Person", "id", "title")
     return g
 

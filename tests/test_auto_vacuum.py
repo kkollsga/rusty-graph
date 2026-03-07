@@ -3,21 +3,26 @@
 Auto-vacuum automatically compacts the graph after DELETE operations
 when fragmentation exceeds a configurable threshold.
 """
-import pytest
-import pandas as pd
-import kglite
-import tempfile
+
 import os
+import tempfile
+
+import pandas as pd
+
+import kglite
+import pytest
 
 
 def make_large_graph(n=500):
     """Create a graph with n Person nodes."""
     g = kglite.KnowledgeGraph()
-    df = pd.DataFrame({
-        "id": list(range(n)),
-        "title": [f"Person_{i}" for i in range(n)],
-        "age": [20 + (i % 50) for i in range(n)],
-    })
+    df = pd.DataFrame(
+        {
+            "id": list(range(n)),
+            "title": [f"Person_{i}" for i in range(n)],
+            "age": [20 + (i % 50) for i in range(n)],
+        }
+    )
     g.add_nodes(df, "Person", "id", "title")
     return g
 
@@ -167,11 +172,13 @@ class TestAutoVacuumPersistence:
         # Single add_nodes with interleaved ages — deletions leave mid-graph tombstones
         ids = list(range(600))
         ages = [25 if i % 2 == 0 else 50 for i in range(600)]  # even=remove, odd=keep
-        df = pd.DataFrame({
-            "id": ids,
-            "title": [f"P_{i}" for i in range(600)],
-            "age": ages,
-        })
+        df = pd.DataFrame(
+            {
+                "id": ids,
+                "title": [f"P_{i}" for i in range(600)],
+                "age": ages,
+            }
+        )
         g.add_nodes(df, "Person", "id", "title")
         g.set_auto_vacuum(0.15)
 
@@ -196,11 +203,13 @@ class TestAutoVacuumPersistence:
         # Use a single add_nodes with interleaved ages so deletions leave mid-graph tombstones
         ids = list(range(600))
         ages = [25 if i % 2 == 0 else 50 for i in range(600)]  # even=remove, odd=keep
-        df = pd.DataFrame({
-            "id": ids,
-            "title": [f"P_{i}" for i in range(600)],
-            "age": ages,
-        })
+        df = pd.DataFrame(
+            {
+                "id": ids,
+                "title": [f"P_{i}" for i in range(600)],
+                "age": ages,
+            }
+        )
         g.add_nodes(df, "Person", "id", "title")
         g.set_auto_vacuum(None)
 

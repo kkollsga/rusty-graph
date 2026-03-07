@@ -3,11 +3,14 @@
 Verifies that read-only Cypher queries release the GIL and can run
 concurrently from multiple Python threads.
 """
-import pytest
-import pandas as pd
-import kglite
+
 import threading
 import time
+
+import pandas as pd
+
+import kglite
+import pytest
 
 
 @pytest.fixture
@@ -15,20 +18,24 @@ def large_graph():
     """Graph with enough nodes to make queries non-trivial."""
     g = kglite.KnowledgeGraph()
     n = 5000
-    df = pd.DataFrame({
-        "id": list(range(n)),
-        "title": [f"Person_{i}" for i in range(n)],
-        "age": [20 + (i % 80) for i in range(n)],
-        "city": [["Oslo", "Bergen", "Trondheim", "Stavanger"][i % 4] for i in range(n)],
-    })
+    df = pd.DataFrame(
+        {
+            "id": list(range(n)),
+            "title": [f"Person_{i}" for i in range(n)],
+            "age": [20 + (i % 80) for i in range(n)],
+            "city": [["Oslo", "Bergen", "Trondheim", "Stavanger"][i % 4] for i in range(n)],
+        }
+    )
     g.add_nodes(df, "Person", "id", "title")
 
     # Add some edges
-    edges = pd.DataFrame({
-        "source": list(range(0, n - 1)),
-        "target": list(range(1, n)),
-        "type": ["KNOWS"] * (n - 1),
-    })
+    edges = pd.DataFrame(
+        {
+            "source": list(range(0, n - 1)),
+            "target": list(range(1, n)),
+            "type": ["KNOWS"] * (n - 1),
+        }
+    )
     g.add_connections(edges, "KNOWS", "Person", "source", "Person", "target")
     return g
 
@@ -43,9 +50,7 @@ class TestConcurrentReads:
 
         def query_thread(thread_id, city):
             try:
-                result = large_graph.cypher(
-                    f"MATCH (n:Person) WHERE n.city = '{city}' RETURN count(n) AS cnt"
-                )
+                result = large_graph.cypher(f"MATCH (n:Person) WHERE n.city = '{city}' RETURN count(n) AS cnt")
                 results[thread_id] = result[0]["cnt"]
             except Exception as e:
                 errors.append((thread_id, str(e)))
@@ -70,18 +75,14 @@ class TestConcurrentReads:
     def test_concurrent_reads_produce_correct_results(self, large_graph):
         """Results from concurrent reads match sequential reads."""
         # Get sequential baseline
-        sequential = large_graph.cypher(
-            "MATCH (n:Person) WHERE n.age > 50 RETURN count(n) AS cnt"
-        )[0]["cnt"]
+        sequential = large_graph.cypher("MATCH (n:Person) WHERE n.age > 50 RETURN count(n) AS cnt")[0]["cnt"]
 
         results = []
         errors = []
 
         def query_thread():
             try:
-                result = large_graph.cypher(
-                    "MATCH (n:Person) WHERE n.age > 50 RETURN count(n) AS cnt"
-                )
+                result = large_graph.cypher("MATCH (n:Person) WHERE n.age > 50 RETURN count(n) AS cnt")
                 results.append(result[0]["cnt"])
             except Exception as e:
                 errors.append(str(e))
@@ -102,9 +103,7 @@ class TestReadWriteIsolation:
 
     def test_read_during_no_mutation(self, large_graph):
         """Simple sanity: reads work fine when no mutations happening."""
-        result = large_graph.cypher(
-            "MATCH (n:Person) RETURN count(n) AS cnt"
-        )
+        result = large_graph.cypher("MATCH (n:Person) RETURN count(n) AS cnt")
         assert result[0]["cnt"] == 5000
 
 

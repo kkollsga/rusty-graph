@@ -56,6 +56,13 @@ jobs:
           check-name: 'Python tests (py3.12)'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 15
+      - name: Wait for Python lint
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'Python lint'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
 
   build:
     name: Build wheels - ${{ matrix.os }} - ${{ matrix.target }} - py${{ matrix.python-version }}

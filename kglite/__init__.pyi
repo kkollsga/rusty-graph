@@ -9,7 +9,6 @@ import pandas as pd
 
 __version__: str
 
-
 @runtime_checkable
 class EmbeddingModel(Protocol):
     """Protocol for embedding models passed to ``embed_texts`` / ``search_text``.
@@ -83,13 +82,11 @@ class EmbeddingModel(Protocol):
         """
         ...
 
-
 class ResultIter:
     """Iterator for ResultView. Converts one row per step."""
 
     def __iter__(self) -> ResultIter: ...
     def __next__(self) -> dict[str, Any]: ...
-
 
 class ResultView:
     """Lazy result container — data stays in Rust until accessed from Python.
@@ -183,7 +180,6 @@ class ResultView:
         """Vertical card format: one key-value per line, rows separated by blank lines."""
         ...
 
-
 def load(path: str) -> KnowledgeGraph:
     """Load a graph from a binary file previously saved with ``save()``.
 
@@ -194,7 +190,6 @@ def load(path: str) -> KnowledgeGraph:
         A new KnowledgeGraph with the loaded data.
     """
     ...
-
 
 def from_blueprint(
     blueprint_path: Union[str, Path],
@@ -228,7 +223,6 @@ def from_blueprint(
         graph = kglite.from_blueprint("blueprint.json", verbose=True)
     """
     ...
-
 
 class KnowledgeGraph:
     """A high-performance knowledge graph with typed nodes, connections, and
@@ -765,7 +759,6 @@ class KnowledgeGraph:
         ...
 
     def __len__(self) -> int: ...
-
     def indices(self) -> list[int]:
         """Return raw graph indices for selected nodes."""
         ...
@@ -820,18 +813,7 @@ class KnowledgeGraph:
         self,
         name: str,
         node_type: Optional[str] = None,
-    ) -> dict[str, Any]: ...
-    @overload
-    def source(
-        self,
-        name: list[str],
-        node_type: Optional[str] = None,
-    ) -> list[dict[str, Any]]: ...
-    def source(
-        self,
-        name: str | list[str],
-        node_type: Optional[str] = None,
-    ) -> dict[str, Any] | list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """Get the source location of one or more code entities.
 
         Resolves names or qualified names to code entities and returns
@@ -848,7 +830,12 @@ class KnowledgeGraph:
             List of names: list of such dicts.
         """
         ...
-
+    @overload
+    def source(
+        self,
+        name: list[str],
+        node_type: Optional[str] = None,
+    ) -> list[dict[str, Any]]: ...
     def context(
         self,
         name: str,
@@ -1608,10 +1595,7 @@ class KnowledgeGraph:
         ...
 
     @overload
-    def sample(self, node_type: str, n: int = 5) -> ResultView: ...
-    @overload
-    def sample(self, n: int = 5) -> ResultView: ...
-    def sample(self, node_type_or_n: Union[str, int, None] = None, n: Optional[int] = None) -> ResultView:
+    def sample(self, node_type: str, n: int = 5) -> ResultView:
         """Return a quick sample of nodes.
 
         Can be called as:
@@ -1633,7 +1617,8 @@ class KnowledgeGraph:
             ValueError: If no selection and no node type given.
         """
         ...
-
+    @overload
+    def sample(self, n: int = 5) -> ResultView: ...
     def indexes(self) -> list[dict[str, Any]]:
         """Return a unified list of all indexes.
 
@@ -1880,12 +1865,15 @@ class KnowledgeGraph:
         """
         ...
 
-    def connected_components(self, weak: Optional[bool] = None) -> list[list[dict[str, Any]]]:
+    def connected_components(
+        self, weak: Optional[bool] = None, titles_only: Optional[bool] = None
+    ) -> list[list[dict[str, Any]]]:
         """Find connected components in the graph.
 
         Args:
             weak: If ``True`` (default), find weakly connected components.
                 If ``False``, find strongly connected components.
+            titles_only: If ``True``, return lists of node titles instead of full dicts.
 
         Returns:
             List of components (largest first), each a list of node info dicts.
@@ -1918,6 +1906,7 @@ class KnowledgeGraph:
         self,
         normalized: Optional[bool] = None,
         sample_size: Optional[int] = None,
+        connection_types: Optional[Union[str, list[str]]] = None,
         top_k: Optional[int] = None,
         as_dict: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
@@ -1928,6 +1917,7 @@ class KnowledgeGraph:
         Args:
             normalized: Normalise scores to ``[0, 1]``. Default ``True``.
             sample_size: Sample source nodes for faster computation on large graphs.
+            connection_types: Only traverse these relationship types (str or list).
             top_k: Return only the top *K* nodes.
             as_dict: Return ``{id: score}`` dict instead of list of dicts.
             timeout_ms: Abort after this many milliseconds, returning partial results.
@@ -1944,6 +1934,7 @@ class KnowledgeGraph:
         damping_factor: Optional[float] = None,
         max_iterations: Optional[int] = None,
         tolerance: Optional[float] = None,
+        connection_types: Optional[Union[str, list[str]]] = None,
         top_k: Optional[int] = None,
         as_dict: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
@@ -1955,6 +1946,7 @@ class KnowledgeGraph:
             damping_factor: Probability of following a link. Default ``0.85``.
             max_iterations: Maximum iterations. Default ``100``.
             tolerance: Convergence threshold. Default ``1e-6``.
+            connection_types: Only traverse these relationship types (str or list).
             top_k: Return only the top *K* nodes.
             as_dict: Return ``{id: score}`` dict instead of list of dicts.
             timeout_ms: Abort after this many milliseconds, returning partial results.
@@ -1969,6 +1961,7 @@ class KnowledgeGraph:
     def degree_centrality(
         self,
         normalized: Optional[bool] = None,
+        connection_types: Optional[Union[str, list[str]]] = None,
         top_k: Optional[int] = None,
         as_dict: Optional[bool] = None,
         timeout_ms: Optional[int] = None,
@@ -1978,6 +1971,7 @@ class KnowledgeGraph:
 
         Args:
             normalized: Normalise by ``(n-1)``. Default ``True``.
+            connection_types: Only count these relationship types (str or list).
             top_k: Return only the top *K* nodes.
             as_dict: Return ``{id: score}`` dict instead of list of dicts.
             timeout_ms: Abort after this many milliseconds, returning partial results.
@@ -2114,7 +2108,6 @@ class KnowledgeGraph:
     def export_csv(
         self,
         path: str,
-        *,
         selection_only: Optional[bool] = None,
         verbose: bool = False,
     ) -> dict[str, Any]:
@@ -2312,6 +2305,7 @@ class KnowledgeGraph:
         *,
         to_df: bool = False,
         params: Optional[dict[str, Any]] = None,
+        timeout_ms: Optional[int] = None,
     ) -> Union[ResultView, pd.DataFrame, str]:
         """Execute a Cypher query.
 
@@ -2907,11 +2901,7 @@ class KnowledgeGraph:
         """
         ...
 
-    def embeddings(self, *args, **kwargs) -> dict[Any, list[float]]: ...
-
-    def embedding(
-        self, node_type: str, text_column: str, node_id: Any
-    ) -> list[float] | None:
+    def embedding(self, node_type: str, text_column: str, node_id: Any) -> list[float] | None:
         """Retrieve a single node's embedding vector.
 
         Args:
@@ -3063,7 +3053,6 @@ class KnowledgeGraph:
                 # auto-closes on exit (no commit needed)
         """
         ...
-
 
 class Transaction:
     """An isolated transaction on a KnowledgeGraph.

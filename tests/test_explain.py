@@ -51,7 +51,7 @@ class TestExplainBasic:
         graph.cypher("EXPLAIN CREATE (:Person {name: 'Charlie'})")
         # If it had executed, there would be 3 Persons
         result = graph.cypher("MATCH (n:Person) RETURN count(n) AS cnt")
-        assert result[0]['cnt'] == 2
+        assert result[0]["cnt"] == 2
 
     def test_explain_cardinality_estimates(self, graph):
         """MATCH steps include estimated row counts based on type_indices."""

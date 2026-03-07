@@ -1,12 +1,12 @@
 """Tests for export_csv: organized CSV directory export with blueprint."""
 
-import csv
 import json
 import os
 import shutil
 import tempfile
 
 import pandas as pd
+
 import pytest
 from kglite import KnowledgeGraph
 
@@ -24,26 +24,32 @@ def graph_with_subnodes():
     """Graph with parent/child types for sub-node nesting tests."""
     graph = KnowledgeGraph()
 
-    wells = pd.DataFrame({
-        "well_id": ["W1", "W2"],
-        "name": ["Well Alpha", "Well Beta"],
-        "depth": [3000, 4500],
-    })
+    wells = pd.DataFrame(
+        {
+            "well_id": ["W1", "W2"],
+            "name": ["Well Alpha", "Well Beta"],
+            "depth": [3000, 4500],
+        }
+    )
     graph.add_nodes(wells, "Well", "well_id", "name")
 
-    logs = pd.DataFrame({
-        "log_id": ["L1", "L2", "L3"],
-        "name": ["GR Log 1", "GR Log 2", "DT Log 1"],
-        "tool": ["GR", "GR", "DT"],
-        "well_fk": ["W1", "W1", "W2"],
-    })
+    logs = pd.DataFrame(
+        {
+            "log_id": ["L1", "L2", "L3"],
+            "name": ["GR Log 1", "GR Log 2", "DT Log 1"],
+            "tool": ["GR", "GR", "DT"],
+            "well_fk": ["W1", "W1", "W2"],
+        }
+    )
     graph.add_nodes(logs, "Log", "log_id", "name")
     graph.set_parent_type("Log", "Well")
 
-    edges = pd.DataFrame({
-        "from_id": ["L1", "L2", "L3"],
-        "to_id": ["W1", "W1", "W2"],
-    })
+    edges = pd.DataFrame(
+        {
+            "from_id": ["L1", "L2", "L3"],
+            "to_id": ["W1", "W1", "W2"],
+        }
+    )
     graph.add_connections(edges, "OF_WELL", "Log", "from_id", "Well", "to_id")
 
     return graph
@@ -261,11 +267,13 @@ class TestExportCsvEdgeCases:
 
     def test_special_characters_in_values(self, export_dir):
         graph = KnowledgeGraph()
-        df = pd.DataFrame({
-            "pk": [1],
-            "name": ['O\'Brien & "Co"'],
-            "note": ["has, commas"],
-        })
+        df = pd.DataFrame(
+            {
+                "pk": [1],
+                "name": ['O\'Brien & "Co"'],
+                "note": ["has, commas"],
+            }
+        )
         graph.add_nodes(df, "Entity", "pk", "name")
 
         out = os.path.join(export_dir, "out")

@@ -13,8 +13,7 @@ try:
     import tree_sitter  # noqa: F401
 except ImportError:
     raise ImportError(
-        "The kglite.code_tree module requires tree-sitter. "
-        "Install with: pip install kglite[code-tree]"
+        "The kglite.code_tree module requires tree-sitter. Install with: pip install kglite[code-tree]"
     ) from None
 
 from .builder import build

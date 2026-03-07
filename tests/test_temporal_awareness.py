@@ -1,9 +1,12 @@
 """Tests for temporal awareness — auto-filtering nodes and connections by date."""
-import pytest
-import pandas as pd
-import tempfile
+
 import os
+import tempfile
+
+import pandas as pd
+
 import kglite
+import pytest
 
 
 @pytest.fixture
@@ -12,31 +15,39 @@ def temporal_graph():
     g = kglite.KnowledgeGraph()
 
     # Fields
-    df_fields = pd.DataFrame({
-        "id": [1, 2],
-        "title": ["DRAUGEN", "ORMEN LANGE"],
-    })
+    df_fields = pd.DataFrame(
+        {
+            "id": [1, 2],
+            "title": ["DRAUGEN", "ORMEN LANGE"],
+        }
+    )
     g.add_nodes(df_fields, "Field", "id", "title")
 
     # Companies
-    df_companies = pd.DataFrame({
-        "id": [10, 20, 30],
-        "title": ["Equinor", "Shell", "BP"],
-    })
+    df_companies = pd.DataFrame(
+        {
+            "id": [10, 20, 30],
+            "title": ["Equinor", "Shell", "BP"],
+        }
+    )
     g.add_nodes(df_companies, "Company", "id", "title")
 
     # HAS_LICENSEE connections — temporal via column_types
-    df_lic = pd.DataFrame({
-        "field_id": [1, 1, 2],
-        "company_id": [10, 20, 30],
-        "fldLicenseeFrom": ["2000-01-01", "2011-01-01", "1990-01-01"],
-        "fldLicenseeTo": ["2010-12-31", "2099-12-31", None],  # None = still active
-    })
+    df_lic = pd.DataFrame(
+        {
+            "field_id": [1, 1, 2],
+            "company_id": [10, 20, 30],
+            "fldLicenseeFrom": ["2000-01-01", "2011-01-01", "1990-01-01"],
+            "fldLicenseeTo": ["2010-12-31", "2099-12-31", None],  # None = still active
+        }
+    )
     g.add_connections(
         df_lic,
         "HAS_LICENSEE",
-        source_type="Field", source_id_field="field_id",
-        target_type="Company", target_id_field="company_id",
+        source_type="Field",
+        source_id_field="field_id",
+        target_type="Company",
+        target_id_field="company_id",
         column_types={
             "fldLicenseeFrom": "validFrom",
             "fldLicenseeTo": "validTo",
@@ -52,14 +63,19 @@ def temporal_node_graph():
     g = kglite.KnowledgeGraph()
 
     # FieldStatus nodes with temporal validity via column_types
-    df = pd.DataFrame({
-        "id": [1, 2, 3],
-        "title": ["Producing", "Shut down", "Producing again"],
-        "date_from": ["2000-01-01", "2010-06-01", "2020-01-01"],
-        "date_to": ["2010-05-31", "2019-12-31", None],  # None = still active
-    })
+    df = pd.DataFrame(
+        {
+            "id": [1, 2, 3],
+            "title": ["Producing", "Shut down", "Producing again"],
+            "date_from": ["2000-01-01", "2010-06-01", "2020-01-01"],
+            "date_to": ["2010-05-31", "2019-12-31", None],  # None = still active
+        }
+    )
     g.add_nodes(
-        df, "FieldStatus", "id", "title",
+        df,
+        "FieldStatus",
+        "id",
+        "title",
         column_types={
             "date_from": "validFrom",
             "date_to": "validTo",
@@ -98,12 +114,7 @@ class TestDateContext:
     def test_date_shift_connections(self, temporal_graph):
         """date('2005') shifts traversal to 2005 context."""
         result = (
-            temporal_graph
-            .date("2005")
-            .select("Field")
-            .where({"title": "DRAUGEN"})
-            .traverse("HAS_LICENSEE")
-            .collect()
+            temporal_graph.date("2005").select("Field").where({"title": "DRAUGEN"}).traverse("HAS_LICENSEE").collect()
         )
         # In 2005, only Equinor (2000-2010) was licensee
         titles = [r["title"] for r in result]
@@ -112,24 +123,14 @@ class TestDateContext:
 
     def test_date_shift_nodes(self, temporal_node_graph):
         """date('2015') selects status valid in 2015."""
-        result = (
-            temporal_node_graph
-            .date("2015")
-            .select("FieldStatus")
-            .collect()
-        )
+        result = temporal_node_graph.date("2015").select("FieldStatus").collect()
         assert len(result) == 1
         assert result[0]["title"] == "Shut down"
 
     def test_date_year_only(self, temporal_graph):
         """date('2005') is interpreted as 2005-01-01."""
         result = (
-            temporal_graph
-            .date("2005")
-            .select("Field")
-            .where({"title": "DRAUGEN"})
-            .traverse("HAS_LICENSEE")
-            .collect()
+            temporal_graph.date("2005").select("Field").where({"title": "DRAUGEN"}).traverse("HAS_LICENSEE").collect()
         )
         assert len(result) >= 1
 
@@ -148,13 +149,7 @@ class TestTemporalTraverse:
 
     def test_auto_filter_current(self, temporal_graph):
         """Default traverse filters to current connections."""
-        result = (
-            temporal_graph
-            .select("Field")
-            .where({"title": "DRAUGEN"})
-            .traverse("HAS_LICENSEE")
-            .collect()
-        )
+        result = temporal_graph.select("Field").where({"title": "DRAUGEN"}).traverse("HAS_LICENSEE").collect()
         # Today > 2011, so only Shell (2011-2099)
         titles = [r["title"] for r in result]
         assert "Shell" in titles
@@ -163,8 +158,7 @@ class TestTemporalTraverse:
     def test_temporal_false_disables(self, temporal_graph):
         """temporal=False disables filtering."""
         result = (
-            temporal_graph
-            .select("Field")
+            temporal_graph.select("Field")
             .where({"title": "DRAUGEN"})
             .traverse("HAS_LICENSEE", temporal=False)
             .collect()
@@ -176,11 +170,7 @@ class TestTemporalTraverse:
     def test_at_override(self, temporal_graph):
         """at='2005' overrides to point-in-time."""
         result = (
-            temporal_graph
-            .select("Field")
-            .where({"title": "DRAUGEN"})
-            .traverse("HAS_LICENSEE", at="2005")
-            .collect()
+            temporal_graph.select("Field").where({"title": "DRAUGEN"}).traverse("HAS_LICENSEE", at="2005").collect()
         )
         titles = [r["title"] for r in result]
         assert "Equinor" in titles
@@ -188,13 +178,7 @@ class TestTemporalTraverse:
 
     def test_null_valid_to_means_active(self, temporal_graph):
         """NULL valid_to = still active (open-ended)."""
-        result = (
-            temporal_graph
-            .select("Field")
-            .where({"title": "ORMEN LANGE"})
-            .traverse("HAS_LICENSEE")
-            .collect()
-        )
+        result = temporal_graph.select("Field").where({"title": "ORMEN LANGE"}).traverse("HAS_LICENSEE").collect()
         # BP has null valid_to → always current
         titles = [r["title"] for r in result]
         assert "BP" in titles
@@ -226,8 +210,7 @@ class TestValidAtAutoDetect:
     def test_valid_at_auto_fields(self, temporal_node_graph):
         """valid_at with temporal config auto-detects fields."""
         result = (
-            temporal_node_graph
-            .select("FieldStatus", temporal=False)  # get all first
+            temporal_node_graph.select("FieldStatus", temporal=False)  # get all first
             .valid_at("2015-06-15")
             .collect()
         )
@@ -236,22 +219,14 @@ class TestValidAtAutoDetect:
 
     def test_valid_at_no_args_uses_today(self, temporal_node_graph):
         """valid_at() with no args uses reference date (today)."""
-        result = (
-            temporal_node_graph
-            .select("FieldStatus", temporal=False)
-            .valid_at()
-            .collect()
-        )
+        result = temporal_node_graph.select("FieldStatus", temporal=False).valid_at().collect()
         assert len(result) == 1
         assert result[0]["title"] == "Producing again"
 
     def test_valid_during_auto_fields(self, temporal_node_graph):
         """valid_during with temporal config auto-detects fields."""
         result = (
-            temporal_node_graph
-            .select("FieldStatus", temporal=False)
-            .valid_during("2005-01-01", "2015-01-01")
-            .collect()
+            temporal_node_graph.select("FieldStatus", temporal=False).valid_during("2005-01-01", "2015-01-01").collect()
         )
         # Overlaps with "Producing" (2000-2010) and "Shut down" (2010-2019)
         assert len(result) == 2
@@ -269,12 +244,7 @@ class TestSaveLoadTemporal:
             g2 = kglite.load(path)
 
             # Config should be preserved — traverse should still auto-filter
-            result = (
-                g2.select("Field")
-                .where({"title": "DRAUGEN"})
-                .traverse("HAS_LICENSEE")
-                .collect()
-            )
+            result = g2.select("Field").where({"title": "DRAUGEN"}).traverse("HAS_LICENSEE").collect()
             titles = [r["title"] for r in result]
             assert "Shell" in titles
             assert "Equinor" not in titles
@@ -302,8 +272,7 @@ class TestDateRange:
     def test_range_includes_overlapping_connections(self, temporal_graph):
         """date('2005', '2015') includes both Equinor (2000-2010) and Shell (2011-2099)."""
         result = (
-            temporal_graph
-            .date("2005", "2015")
+            temporal_graph.date("2005", "2015")
             .select("Field")
             .where({"title": "DRAUGEN"})
             .traverse("HAS_LICENSEE")
@@ -316,8 +285,7 @@ class TestDateRange:
     def test_range_excludes_outside_connections(self, temporal_graph):
         """date('1990', '1999') excludes connections that don't overlap."""
         result = (
-            temporal_graph
-            .date("1990", "1999")
+            temporal_graph.date("1990", "1999")
             .select("Field")
             .where({"title": "DRAUGEN"})
             .traverse("HAS_LICENSEE")
@@ -330,12 +298,7 @@ class TestDateRange:
 
     def test_range_nodes(self, temporal_node_graph):
         """date('2005', '2015') includes overlapping node statuses."""
-        result = (
-            temporal_node_graph
-            .date("2005", "2015")
-            .select("FieldStatus")
-            .collect()
-        )
+        result = temporal_node_graph.date("2005", "2015").select("FieldStatus").collect()
         # "Producing" (2000-2010) and "Shut down" (2010-2019) overlap 2005-2015
         assert len(result) == 2
         titles = [r["title"] for r in result]
@@ -345,8 +308,7 @@ class TestDateRange:
     def test_range_year_expansion(self, temporal_graph):
         """End date '2010' expands to 2010-12-31 (includes Equinor ending 2010-12-31)."""
         result = (
-            temporal_graph
-            .date("2010", "2010")
+            temporal_graph.date("2010", "2010")
             .select("Field")
             .where({"title": "DRAUGEN"})
             .traverse("HAS_LICENSEE")
@@ -362,23 +324,13 @@ class TestDateAll:
 
     def test_all_disables_node_filtering(self, temporal_node_graph):
         """date('all') returns all nodes regardless of validity."""
-        result = (
-            temporal_node_graph
-            .date("all")
-            .select("FieldStatus")
-            .collect()
-        )
+        result = temporal_node_graph.date("all").select("FieldStatus").collect()
         assert len(result) == 3
 
     def test_all_disables_connection_filtering(self, temporal_graph):
         """date('all') returns all connections regardless of validity."""
         result = (
-            temporal_graph
-            .date("all")
-            .select("Field")
-            .where({"title": "DRAUGEN"})
-            .traverse("HAS_LICENSEE")
-            .collect()
+            temporal_graph.date("all").select("Field").where({"title": "DRAUGEN"}).traverse("HAS_LICENSEE").collect()
         )
         titles = [r["title"] for r in result]
         assert "Equinor" in titles
@@ -386,13 +338,7 @@ class TestDateAll:
 
     def test_all_then_reset(self, temporal_node_graph):
         """date('all').date() resets back to today filtering."""
-        result = (
-            temporal_node_graph
-            .date("all")
-            .date()
-            .select("FieldStatus")
-            .collect()
-        )
+        result = temporal_node_graph.date("all").date().select("FieldStatus").collect()
         assert len(result) == 1
         assert result[0]["title"] == "Producing again"
 

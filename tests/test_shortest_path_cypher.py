@@ -9,7 +9,7 @@ def chain_graph():
     """Linear chain: Alice -> Bob -> Charlie -> Dave -> Eve."""
     graph = KnowledgeGraph()
 
-    for name in ['Alice', 'Bob', 'Charlie', 'Dave', 'Eve']:
+    for name in ["Alice", "Bob", "Charlie", "Dave", "Eve"]:
         graph.cypher(f"CREATE (:Person {{name: '{name}'}})")
 
     graph.cypher("MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) CREATE (a)-[:KNOWS]->(b)")
@@ -25,7 +25,7 @@ def diamond_graph():
     """Diamond graph with shortcut: A -> B -> D and A -> C -> D (two paths of length 2)."""
     graph = KnowledgeGraph()
 
-    for name in ['A', 'B', 'C', 'D']:
+    for name in ["A", "B", "C", "D"]:
         graph.cypher(f"CREATE (:Node {{name: '{name}'}})")
 
     graph.cypher("MATCH (a:Node {name: 'A'}), (b:Node {name: 'B'}) CREATE (a)-[:EDGE]->(b)")
@@ -41,7 +41,7 @@ def shortcut_graph():
     """Graph where direct edge is shorter than chain: A->B->C and A->C (shortcut)."""
     graph = KnowledgeGraph()
 
-    for name in ['A', 'B', 'C']:
+    for name in ["A", "B", "C"]:
         graph.cypher(f"CREATE (:Node {{name: '{name}'}})")
 
     graph.cypher("MATCH (a:Node {name: 'A'}), (b:Node {name: 'B'}) CREATE (a)-[:EDGE]->(b)")
@@ -61,7 +61,7 @@ class TestShortestPathBasic:
             "RETURN length(p)"
         )
         assert len(result) == 1
-        assert result[0]['length(p)'] == 4
+        assert result[0]["length(p)"] == 4
 
     def test_adjacent_nodes(self, chain_graph):
         """Shortest path between directly connected nodes."""
@@ -70,25 +70,23 @@ class TestShortestPathBasic:
             "RETURN length(p)"
         )
         assert len(result) == 1
-        assert result[0]['length(p)'] == 1
+        assert result[0]["length(p)"] == 1
 
     def test_shortcut_found(self, shortcut_graph):
         """Direct shortcut should be found over longer chain."""
         result = shortcut_graph.cypher(
-            "MATCH p = shortestPath((a:Node {name: 'A'})-[*..10]->(b:Node {name: 'C'})) "
-            "RETURN length(p)"
+            "MATCH p = shortestPath((a:Node {name: 'A'})-[*..10]->(b:Node {name: 'C'})) RETURN length(p)"
         )
         assert len(result) == 1
-        assert result[0]['length(p)'] == 1  # direct edge A->C
+        assert result[0]["length(p)"] == 1  # direct edge A->C
 
     def test_diamond_length(self, diamond_graph):
         """Both paths through diamond are length 2."""
         result = diamond_graph.cypher(
-            "MATCH p = shortestPath((a:Node {name: 'A'})-[:EDGE*..10]->(b:Node {name: 'D'})) "
-            "RETURN length(p)"
+            "MATCH p = shortestPath((a:Node {name: 'A'})-[:EDGE*..10]->(b:Node {name: 'D'})) RETURN length(p)"
         )
         assert len(result) == 1
-        assert result[0]['length(p)'] == 2
+        assert result[0]["length(p)"] == 2
 
     def test_no_path_returns_empty(self, chain_graph):
         """No path between disconnected nodes returns empty result."""
@@ -118,7 +116,7 @@ class TestShortestPathFunctions:
             "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
             "RETURN length(p)"
         )
-        assert result[0]['length(p)'] == 2
+        assert result[0]["length(p)"] == 2
 
     def test_nodes_function(self, chain_graph):
         """nodes(p) returns list of node dicts."""
@@ -126,10 +124,10 @@ class TestShortestPathFunctions:
             "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
             "RETURN nodes(p)"
         )
-        nodes = result[0]['nodes(p)']
+        nodes = result[0]["nodes(p)"]
         assert isinstance(nodes, list)
-        titles = [n['title'] for n in nodes]
-        assert titles == ['Alice', 'Bob', 'Charlie']
+        titles = [n["title"] for n in nodes]
+        assert titles == ["Alice", "Bob", "Charlie"]
 
     def test_relationships_function(self, chain_graph):
         """relationships(p) returns list of relationship type strings."""
@@ -137,9 +135,9 @@ class TestShortestPathFunctions:
             "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
             "RETURN relationships(p)"
         )
-        rels = result[0]['relationships(p)']
+        rels = result[0]["relationships(p)"]
         assert isinstance(rels, list)
-        assert rels == ['KNOWS', 'KNOWS']
+        assert rels == ["KNOWS", "KNOWS"]
 
     def test_all_path_functions_together(self, chain_graph):
         """All path functions work in the same RETURN."""
@@ -148,14 +146,14 @@ class TestShortestPathFunctions:
             "RETURN length(p), nodes(p), relationships(p)"
         )
         row = result[0]
-        assert row['length(p)'] == 3
-        nodes = row['nodes(p)']
+        assert row["length(p)"] == 3
+        nodes = row["nodes(p)"]
         assert isinstance(nodes, list)
-        titles = [n['title'] for n in nodes]
-        assert 'Alice' in titles and 'Dave' in titles
-        rels = row['relationships(p)']
+        titles = [n["title"] for n in nodes]
+        assert "Alice" in titles and "Dave" in titles
+        rels = row["relationships(p)"]
         assert isinstance(rels, list)
-        assert all(r == 'KNOWS' for r in rels)
+        assert all(r == "KNOWS" for r in rels)
 
     def test_source_target_variables(self, chain_graph):
         """Source and target node variables are accessible."""
@@ -164,9 +162,9 @@ class TestShortestPathFunctions:
             "RETURN a.name, b.name, length(p)"
         )
         row = result[0]
-        assert row['a.name'] == 'Alice'
-        assert row['b.name'] == 'Dave'
-        assert row['length(p)'] == 3
+        assert row["a.name"] == "Alice"
+        assert row["b.name"] == "Dave"
+        assert row["length(p)"] == 3
 
 
 class TestShortestPathEdgeCases:
@@ -194,10 +192,9 @@ class TestShortestPathEdgeCases:
     def test_multiple_types_unfiltered(self, shortcut_graph):
         """Without edge type filter, any edge type is traversed."""
         result = shortcut_graph.cypher(
-            "MATCH p = shortestPath((a:Node {name: 'A'})-[*..10]->(b:Node {name: 'C'})) "
-            "RETURN length(p)"
+            "MATCH p = shortestPath((a:Node {name: 'A'})-[*..10]->(b:Node {name: 'C'})) RETURN length(p)"
         )
-        assert result[0]['length(p)'] == 1  # uses SHORTCUT
+        assert result[0]["length(p)"] == 1  # uses SHORTCUT
 
     def test_columns_correct(self, chain_graph):
         """Row dicts have correct keys."""
@@ -206,7 +203,7 @@ class TestShortestPathEdgeCases:
             "RETURN length(p), nodes(p), relationships(p)"
         )
         assert len(result) == 1
-        assert set(result[0].keys()) == {'length(p)', 'nodes(p)', 'relationships(p)'}
+        assert set(result[0].keys()) == {"length(p)", "nodes(p)", "relationships(p)"}
 
 
 class TestShortestPathWithClause:
@@ -220,7 +217,7 @@ class TestShortestPathWithClause:
             "RETURN length(p)"
         )
         assert len(result) == 1
-        assert result[0]['length(p)'] == 2
+        assert result[0]["length(p)"] == 2
 
     def test_nodes_after_with(self, chain_graph):
         """nodes(p) works after path passes through WITH."""
@@ -229,9 +226,9 @@ class TestShortestPathWithClause:
             "WITH p "
             "RETURN nodes(p)"
         )
-        nodes = result[0]['nodes(p)']
-        titles = [n['title'] for n in nodes]
-        assert titles == ['Alice', 'Bob', 'Charlie']
+        nodes = result[0]["nodes(p)"]
+        titles = [n["title"] for n in nodes]
+        assert titles == ["Alice", "Bob", "Charlie"]
 
     def test_path_with_aggregation(self, chain_graph):
         """length(p) works after WITH that includes aggregation."""
@@ -241,8 +238,8 @@ class TestShortestPathWithClause:
             "RETURN length(p), dummy"
         )
         assert len(result) == 1
-        assert result[0]['length(p)'] == 4
-        assert result[0]['dummy'] == 1
+        assert result[0]["length(p)"] == 4
+        assert result[0]["dummy"] == 1
 
     def test_empty_graph(self):
         """shortestPath on empty graph returns no rows."""
@@ -250,8 +247,7 @@ class TestShortestPathWithClause:
         # This should fail to parse or return empty — depends on whether patterns can match
         # With no nodes of type Person, both source and target candidates are empty
         result = graph.cypher(
-            "MATCH p = shortestPath((a:Person {name: 'X'})-[:KNOWS*..10]->(b:Person {name: 'Y'})) "
-            "RETURN length(p)"
+            "MATCH p = shortestPath((a:Person {name: 'X'})-[:KNOWS*..10]->(b:Person {name: 'Y'})) RETURN length(p)"
         )
         assert len(result) == 0
 
@@ -262,11 +258,10 @@ class TestShortestPathUndirected:
     def test_undirected_finds_reverse_path(self, chain_graph):
         """Undirected -[]- syntax should find path even against edge direction."""
         result = chain_graph.cypher(
-            "MATCH p = shortestPath((a:Person {name: 'Eve'})-[:KNOWS*..10]-(b:Person {name: 'Alice'})) "
-            "RETURN length(p)"
+            "MATCH p = shortestPath((a:Person {name: 'Eve'})-[:KNOWS*..10]-(b:Person {name: 'Alice'})) RETURN length(p)"
         )
         assert len(result) == 1
-        assert result[0]['length(p)'] == 4
+        assert result[0]["length(p)"] == 4
 
     def test_directed_still_respects_direction(self, chain_graph):
         """Directed -[]-> syntax should still require edge direction."""
@@ -283,20 +278,19 @@ class TestShortestPathUndirected:
             "RETURN nodes(p), length(p)"
         )
         assert len(result) == 1
-        nodes = result[0]['nodes(p)']
+        nodes = result[0]["nodes(p)"]
         assert len(nodes) == 5
-        titles = [n['title'] for n in nodes]
-        assert titles[0] == 'Eve'
-        assert titles[-1] == 'Alice'
+        titles = [n["title"] for n in nodes]
+        assert titles[0] == "Eve"
+        assert titles[-1] == "Alice"
 
     def test_undirected_forward_also_works(self, chain_graph):
         """Undirected syntax also works in the forward direction."""
         result = chain_graph.cypher(
-            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]-(b:Person {name: 'Eve'})) "
-            "RETURN length(p)"
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]-(b:Person {name: 'Eve'})) RETURN length(p)"
         )
         assert len(result) == 1
-        assert result[0]['length(p)'] == 4
+        assert result[0]["length(p)"] == 4
 
 
 class TestShortestPathConsistency:
@@ -307,76 +301,86 @@ class TestShortestPathConsistency:
         graph = KnowledgeGraph()
         # Use add_nodes so nodes have proper unique IDs for the fluent API
         import pandas as pd
-        nodes = pd.DataFrame({'name': ['Alice', 'Bob', 'Charlie', 'Dave', 'Eve']})
-        graph.add_nodes(data=nodes, node_type='Person', unique_id_field='name')
+
+        nodes = pd.DataFrame({"name": ["Alice", "Bob", "Charlie", "Dave", "Eve"]})
+        graph.add_nodes(data=nodes, node_type="Person", unique_id_field="name")
         graph.add_connections(
-            source_type='Person', target_type='Person',
-            data=pd.DataFrame({
-                'source': ['Alice', 'Bob', 'Charlie', 'Dave'],
-                'target': ['Bob', 'Charlie', 'Dave', 'Eve'],
-            }),
-            source_id_field='source', target_id_field='target',
-            connection_type='KNOWS',
+            source_type="Person",
+            target_type="Person",
+            data=pd.DataFrame(
+                {
+                    "source": ["Alice", "Bob", "Charlie", "Dave"],
+                    "target": ["Bob", "Charlie", "Dave", "Eve"],
+                }
+            ),
+            source_id_field="source",
+            target_id_field="target",
+            connection_type="KNOWS",
         )
         # Fluent API (always undirected)
         fluent_result = graph.shortest_path(
-            source_type='Person', source_id='Alice',
-            target_type='Person', target_id='Eve',
+            source_type="Person",
+            source_id="Alice",
+            target_type="Person",
+            target_id="Eve",
         )
         # Cypher undirected
         cypher_result = graph.cypher(
-            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]-(b:Person {name: 'Eve'})) "
-            "RETURN length(p)"
+            "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]-(b:Person {name: 'Eve'})) RETURN length(p)"
         )
         assert fluent_result is not None
         assert len(cypher_result) == 1
-        assert fluent_result['length'] == cypher_result[0]['length(p)']
+        assert fluent_result["length"] == cypher_result[0]["length(p)"]
 
     def test_reverse_undirected_cypher_matches_fluent_api(self):
         """Reverse undirected Cypher should match reverse fluent API."""
         graph = KnowledgeGraph()
         import pandas as pd
-        nodes = pd.DataFrame({'name': ['Alice', 'Bob', 'Charlie', 'Dave', 'Eve']})
-        graph.add_nodes(data=nodes, node_type='Person', unique_id_field='name')
+
+        nodes = pd.DataFrame({"name": ["Alice", "Bob", "Charlie", "Dave", "Eve"]})
+        graph.add_nodes(data=nodes, node_type="Person", unique_id_field="name")
         graph.add_connections(
-            source_type='Person', target_type='Person',
-            data=pd.DataFrame({
-                'source': ['Alice', 'Bob', 'Charlie', 'Dave'],
-                'target': ['Bob', 'Charlie', 'Dave', 'Eve'],
-            }),
-            source_id_field='source', target_id_field='target',
-            connection_type='KNOWS',
+            source_type="Person",
+            target_type="Person",
+            data=pd.DataFrame(
+                {
+                    "source": ["Alice", "Bob", "Charlie", "Dave"],
+                    "target": ["Bob", "Charlie", "Dave", "Eve"],
+                }
+            ),
+            source_id_field="source",
+            target_id_field="target",
+            connection_type="KNOWS",
         )
         # Fluent API (always undirected — finds path against edge direction)
         fluent_result = graph.shortest_path(
-            source_type='Person', source_id='Eve',
-            target_type='Person', target_id='Alice',
+            source_type="Person",
+            source_id="Eve",
+            target_type="Person",
+            target_id="Alice",
         )
         # Cypher undirected
         cypher_result = graph.cypher(
-            "MATCH p = shortestPath((a:Person {name: 'Eve'})-[:KNOWS*..10]-(b:Person {name: 'Alice'})) "
-            "RETURN length(p)"
+            "MATCH p = shortestPath((a:Person {name: 'Eve'})-[:KNOWS*..10]-(b:Person {name: 'Alice'})) RETURN length(p)"
         )
         assert fluent_result is not None
         assert len(cypher_result) == 1
-        assert fluent_result['length'] == cypher_result[0]['length(p)']
+        assert fluent_result["length"] == cypher_result[0]["length(p)"]
 
     def test_connection_type_filter_in_cypher(self, shortcut_graph):
         """Cypher should respect connection type filter in shortestPath."""
         # With [:EDGE*] filter — must use only EDGE connections (A->B->C = 2 hops)
         result_filtered = shortcut_graph.cypher(
-            "MATCH p = shortestPath((a:Node {name: 'A'})-[:EDGE*..10]->(b:Node {name: 'C'})) "
-            "RETURN length(p)"
+            "MATCH p = shortestPath((a:Node {name: 'A'})-[:EDGE*..10]->(b:Node {name: 'C'})) RETURN length(p)"
         )
         # Without type filter — can use SHORTCUT (A->C = 1 hop)
         result_unfiltered = shortcut_graph.cypher(
-            "MATCH p = shortestPath((a:Node {name: 'A'})-[*..10]->(b:Node {name: 'C'})) "
-            "RETURN length(p)"
+            "MATCH p = shortestPath((a:Node {name: 'A'})-[*..10]->(b:Node {name: 'C'})) RETURN length(p)"
         )
         assert len(result_filtered) == 1
-        assert result_filtered[0]['length(p)'] == 2  # only EDGE edges
+        assert result_filtered[0]["length(p)"] == 2  # only EDGE edges
         assert len(result_unfiltered) == 1
-        assert result_unfiltered[0]['length(p)'] == 1  # uses SHORTCUT
+        assert result_unfiltered[0]["length(p)"] == 1  # uses SHORTCUT
 
     def test_directed_cypher_respects_direction(self, chain_graph):
         """Directed Cypher should not find path against edge direction."""
@@ -389,11 +393,10 @@ class TestShortestPathConsistency:
 
         # Undirected: Eve -[:KNOWS*]- Alice — should find path
         result_undirected = chain_graph.cypher(
-            "MATCH p = shortestPath((a:Person {name: 'Eve'})-[:KNOWS*..10]-(b:Person {name: 'Alice'})) "
-            "RETURN length(p)"
+            "MATCH p = shortestPath((a:Person {name: 'Eve'})-[:KNOWS*..10]-(b:Person {name: 'Alice'})) RETURN length(p)"
         )
         assert len(result_undirected) == 1
-        assert result_undirected[0]['length(p)'] == 4
+        assert result_undirected[0]["length(p)"] == 4
 
 
 class TestNormalMatchNotBroken:
@@ -404,7 +407,7 @@ class TestNormalMatchNotBroken:
         graph = KnowledgeGraph()
         graph.cypher("CREATE (:Person {name: 'Alice'})")
         result = graph.cypher("MATCH (n:Person) RETURN n.name")
-        assert result[0]['n.name'] == 'Alice'
+        assert result[0]["n.name"] == "Alice"
 
     def test_edge_match(self):
         """Normal edge MATCH still works."""
@@ -413,8 +416,8 @@ class TestNormalMatchNotBroken:
         graph.cypher("CREATE (:Person {name: 'Bob'})")
         graph.cypher("MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) CREATE (a)-[:KNOWS]->(b)")
         result = graph.cypher("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name")
-        assert result[0]['a.name'] == 'Alice'
-        assert result[0]['b.name'] == 'Bob'
+        assert result[0]["a.name"] == "Alice"
+        assert result[0]["b.name"] == "Bob"
 
     def test_multi_pattern_match(self):
         """Comma-separated patterns still work."""
@@ -422,8 +425,8 @@ class TestNormalMatchNotBroken:
         graph.cypher("CREATE (:Person {name: 'Alice'})")
         graph.cypher("CREATE (:Person {name: 'Bob'})")
         result = graph.cypher("MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) RETURN a.name, b.name")
-        assert result[0]['a.name'] == 'Alice'
-        assert result[0]['b.name'] == 'Bob'
+        assert result[0]["a.name"] == "Alice"
+        assert result[0]["b.name"] == "Bob"
 
     def test_where_clause_match(self):
         """MATCH with WHERE still works."""
@@ -432,4 +435,4 @@ class TestNormalMatchNotBroken:
         graph.cypher("CREATE (:Person {name: 'Bob', age: 25})")
         result = graph.cypher("MATCH (n:Person) WHERE n.age > 28 RETURN n.name")
         assert len(result) == 1
-        assert result[0]['n.name'] == 'Alice'
+        assert result[0]["n.name"] == "Alice"

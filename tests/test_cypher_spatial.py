@@ -1,7 +1,9 @@
 """Tests for Cypher spatial functions: point(), distance(), contains(), etc."""
-import pytest
+
 import pandas as pd
+
 import kglite
+import pytest
 
 
 @pytest.fixture
@@ -53,10 +55,7 @@ def geo_graph():
 
 class TestPoint:
     def test_point_constructor(self, geo_graph):
-        rows = geo_graph.cypher(
-            "MATCH (n:City) WHERE n.title = 'Oslo' "
-            "RETURN point(59.91, 10.75) AS p"
-        ).to_list()
+        rows = geo_graph.cypher("MATCH (n:City) WHERE n.title = 'Oslo' RETURN point(59.91, 10.75) AS p").to_list()
         assert len(rows) == 1
         p = rows[0]["p"]
         assert isinstance(p, dict)
@@ -65,8 +64,7 @@ class TestPoint:
 
     def test_point_from_property(self, geo_graph):
         rows = geo_graph.cypher(
-            "MATCH (n:City) WHERE n.title = 'Oslo' "
-            "RETURN point(n.latitude, n.longitude) AS p"
+            "MATCH (n:City) WHERE n.title = 'Oslo' RETURN point(n.latitude, n.longitude) AS p"
         ).to_list()
         assert len(rows) == 1
         p = rows[0]["p"]
@@ -100,8 +98,7 @@ class TestDistance:
     def test_distance_two_points(self, geo_graph):
         """Oslo to Bergen should be ~305 km (~305,000 m)."""
         rows = geo_graph.cypher(
-            "MATCH (n:City) WHERE n.title = 'Oslo' "
-            "RETURN distance(point(59.91, 10.75), point(60.39, 5.32)) AS d"
+            "MATCH (n:City) WHERE n.title = 'Oslo' RETURN distance(point(59.91, 10.75), point(60.39, 5.32)) AS d"
         ).to_list()
         d = rows[0]["d"]
         assert 300_000 < d < 310_000
@@ -109,16 +106,14 @@ class TestDistance:
     def test_distance_four_args(self, geo_graph):
         """4-arg shorthand should give same result."""
         rows = geo_graph.cypher(
-            "MATCH (n:City) WHERE n.title = 'Oslo' "
-            "RETURN distance(59.91, 10.75, 60.39, 5.32) AS d"
+            "MATCH (n:City) WHERE n.title = 'Oslo' RETURN distance(59.91, 10.75, 60.39, 5.32) AS d"
         ).to_list()
         d = rows[0]["d"]
         assert 300_000 < d < 310_000
 
     def test_distance_same_point(self, geo_graph):
         rows = geo_graph.cypher(
-            "MATCH (n:City) WHERE n.title = 'Oslo' "
-            "RETURN distance(point(60.0, 10.0), point(60.0, 10.0)) AS d"
+            "MATCH (n:City) WHERE n.title = 'Oslo' RETURN distance(point(60.0, 10.0), point(60.0, 10.0)) AS d"
         ).to_list()
         assert rows[0]["d"] == 0.0
 
@@ -160,9 +155,7 @@ class TestDistance:
 
     def test_distance_wrong_arg_count(self, geo_graph):
         with pytest.raises(Exception, match="distance.*requires"):
-            geo_graph.cypher(
-                "MATCH (n:City) RETURN distance(point(1,2), point(3,4), point(5,6))"
-            )
+            geo_graph.cypher("MATCH (n:City) RETURN distance(point(1,2), point(3,4), point(5,6))")
 
 
 # ============================================================================
@@ -185,9 +178,7 @@ class TestContains:
     def test_contains_with_wkt_and_point(self, geo_graph):
         """contains() with WKT string property and point literal."""
         rows = geo_graph.cypher(
-            "MATCH (a:Area) "
-            "WHERE contains(a.geometry, point(59.91, 10.75)) "
-            "RETURN a.title AS title ORDER BY title"
+            "MATCH (a:Area) WHERE contains(a.geometry, point(59.91, 10.75)) RETURN a.title AS title ORDER BY title"
         ).to_list()
         titles = [r["title"] for r in rows]
         assert "SouthNorway" in titles
@@ -196,10 +187,7 @@ class TestContains:
     def test_contains_false(self, geo_graph):
         """Trondheim (63.43, 10.40) is outside SouthNorway (max lat 62)."""
         rows = geo_graph.cypher(
-            "MATCH (a:Area) "
-            "WHERE a.title = 'SouthNorway' "
-            "AND contains(a.geometry, point(63.43, 10.40)) "
-            "RETURN a.title"
+            "MATCH (a:Area) WHERE a.title = 'SouthNorway' AND contains(a.geometry, point(63.43, 10.40)) RETURN a.title"
         ).to_list()
         assert len(rows) == 0
 
@@ -250,10 +238,7 @@ class TestIntersects:
 class TestCentroid:
     def test_centroid_polygon(self, geo_graph):
         """Centroid of SmallBox should be (59.5, 10.5)."""
-        rows = geo_graph.cypher(
-            "MATCH (a:Area) WHERE a.title = 'SmallBox' "
-            "RETURN centroid(a.geometry) AS c"
-        ).to_list()
+        rows = geo_graph.cypher("MATCH (a:Area) WHERE a.title = 'SmallBox' RETURN centroid(a.geometry) AS c").to_list()
         c = rows[0]["c"]
         assert isinstance(c, dict)
         assert abs(c["latitude"] - 59.5) < 0.01
@@ -278,15 +263,13 @@ class TestCentroid:
 class TestAccessors:
     def test_latitude(self, geo_graph):
         rows = geo_graph.cypher(
-            "MATCH (n:City) WHERE n.title = 'Oslo' "
-            "RETURN latitude(point(59.91, 10.75)) AS lat"
+            "MATCH (n:City) WHERE n.title = 'Oslo' RETURN latitude(point(59.91, 10.75)) AS lat"
         ).to_list()
         assert abs(rows[0]["lat"] - 59.91) < 0.001
 
     def test_longitude(self, geo_graph):
         rows = geo_graph.cypher(
-            "MATCH (n:City) WHERE n.title = 'Oslo' "
-            "RETURN longitude(point(59.91, 10.75)) AS lon"
+            "MATCH (n:City) WHERE n.title = 'Oslo' RETURN longitude(point(59.91, 10.75)) AS lon"
         ).to_list()
         assert abs(rows[0]["lon"] - 10.75) < 0.001
 
@@ -310,8 +293,7 @@ class TestSpatialAggregation:
     def test_avg_distance(self, geo_graph):
         """Average distance from Oslo to all cities."""
         rows = geo_graph.cypher(
-            "MATCH (n:City) "
-            "RETURN avg(distance(point(n.latitude, n.longitude), point(59.91, 10.75))) AS avg_dist"
+            "MATCH (n:City) RETURN avg(distance(point(n.latitude, n.longitude), point(59.91, 10.75))) AS avg_dist"
         ).to_list()
         assert rows[0]["avg_dist"] > 0
 

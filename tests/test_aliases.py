@@ -4,22 +4,27 @@ When users call add_nodes(df, 'Type', 'npdid', 'prospect_name'),
 the original column names should still work as property accessors in Cypher queries,
 where() calls, and the fluent API.
 """
-import pytest
-import pandas as pd
-import kglite
-import tempfile
+
 import os
+import tempfile
+
+import pandas as pd
+
+import kglite
+import pytest
 
 
 @pytest.fixture
 def graph_with_aliases():
     """Graph where original column names differ from canonical id/title."""
     g = kglite.KnowledgeGraph()
-    df = pd.DataFrame({
-        "npdid": [1, 2, 3],
-        "prospect_name": ["Alpha", "Beta", "Gamma"],
-        "status": ["active", "inactive", "active"],
-    })
+    df = pd.DataFrame(
+        {
+            "npdid": [1, 2, 3],
+            "prospect_name": ["Alpha", "Beta", "Gamma"],
+            "status": ["active", "inactive", "active"],
+        }
+    )
     g.add_nodes(df, "Prospect", "npdid", "prospect_name")
     return g
 
@@ -28,11 +33,13 @@ def graph_with_aliases():
 def graph_default_fields():
     """Graph where id/title fields use default names (no aliasing)."""
     g = kglite.KnowledgeGraph()
-    df = pd.DataFrame({
-        "id": [10, 20, 30],
-        "title": ["X", "Y", "Z"],
-        "category": ["A", "B", "A"],
-    })
+    df = pd.DataFrame(
+        {
+            "id": [10, 20, 30],
+            "title": ["X", "Y", "Z"],
+            "category": ["A", "B", "A"],
+        }
+    )
     g.add_nodes(df, "Item", "id", "title")
     return g
 
@@ -48,25 +55,19 @@ class TestCypherAliasResolution:
 
     def test_cypher_alias_title_field(self, graph_with_aliases):
         """n.prospect_name should resolve to the title field."""
-        result = graph_with_aliases.cypher(
-            "MATCH (n:Prospect) RETURN n.prospect_name ORDER BY n.prospect_name"
-        )
+        result = graph_with_aliases.cypher("MATCH (n:Prospect) RETURN n.prospect_name ORDER BY n.prospect_name")
         values = [r["n.prospect_name"] for r in result]
         assert values == ["Alpha", "Beta", "Gamma"]
 
     def test_cypher_canonical_still_works(self, graph_with_aliases):
         """n.id and n.title should still work alongside aliases."""
-        result = graph_with_aliases.cypher(
-            "MATCH (n:Prospect) RETURN n.id, n.title ORDER BY n.id"
-        )
+        result = graph_with_aliases.cypher("MATCH (n:Prospect) RETURN n.id, n.title ORDER BY n.id")
         assert result[0]["n.id"] == 1
         assert result[0]["n.title"] == "Alpha"
 
     def test_cypher_where_with_alias(self, graph_with_aliases):
         """WHERE clause should resolve aliases."""
-        result = graph_with_aliases.cypher(
-            "MATCH (n:Prospect) WHERE n.npdid = 2 RETURN n.prospect_name"
-        )
+        result = graph_with_aliases.cypher("MATCH (n:Prospect) WHERE n.npdid = 2 RETURN n.prospect_name")
         assert len(result) == 1
         assert result[0]["n.prospect_name"] == "Beta"
 
@@ -135,14 +136,22 @@ class TestMultipleNodeTypes:
 
     def test_different_aliases_per_type(self):
         g = kglite.KnowledgeGraph()
-        df1 = pd.DataFrame({
-            "npdid": [1, 2], "prospect_name": ["A", "B"], "area": ["North", "South"],
-        })
+        df1 = pd.DataFrame(
+            {
+                "npdid": [1, 2],
+                "prospect_name": ["A", "B"],
+                "area": ["North", "South"],
+            }
+        )
         g.add_nodes(df1, "Prospect", "npdid", "prospect_name")
 
-        df2 = pd.DataFrame({
-            "well_id": [10, 20], "well_name": ["W1", "W2"], "depth": [100, 200],
-        })
+        df2 = pd.DataFrame(
+            {
+                "well_id": [10, 20],
+                "well_name": ["W1", "W2"],
+                "depth": [100, 200],
+            }
+        )
         g.add_nodes(df2, "Well", "well_id", "well_name")
 
         # Each type should resolve its own aliases

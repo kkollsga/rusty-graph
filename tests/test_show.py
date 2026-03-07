@@ -1,7 +1,9 @@
 """Tests for the show() display method."""
-import pytest
+
 import pandas as pd
+
 import kglite
+import pytest
 
 
 @pytest.fixture
@@ -9,27 +11,33 @@ def discovery_graph():
     """Graph with Discovery -> Prospect -> Wellbore chains."""
     g = kglite.KnowledgeGraph()
     # Discoveries
-    df_disc = pd.DataFrame({
-        "id": [1, 2, 3],
-        "title": ["Johan Sverdrup", "Troll", "Ekofisk"],
-        "status": ["producing", "producing", "producing"],
-    })
+    df_disc = pd.DataFrame(
+        {
+            "id": [1, 2, 3],
+            "title": ["Johan Sverdrup", "Troll", "Ekofisk"],
+            "status": ["producing", "producing", "producing"],
+        }
+    )
     g.add_nodes(df_disc, "Discovery", "id", "title")
 
     # Prospects
-    df_pros = pd.DataFrame({
-        "id": [10, 20, 30],
-        "title": ["Alpha", "Beta", "Gamma"],
-        "area": ["North Sea", "North Sea", "Barents"],
-    })
+    df_pros = pd.DataFrame(
+        {
+            "id": [10, 20, 30],
+            "title": ["Alpha", "Beta", "Gamma"],
+            "area": ["North Sea", "North Sea", "Barents"],
+        }
+    )
     g.add_nodes(df_pros, "Prospect", "id", "title")
 
     # Wellbores
-    df_well = pd.DataFrame({
-        "id": [100, 200, 300],
-        "title": ["W1", "W2", "W3"],
-        "depth": [1500, 2500, 3500],
-    })
+    df_well = pd.DataFrame(
+        {
+            "id": [100, 200, 300],
+            "title": ["W1", "W2", "W3"],
+            "depth": [1500, 2500, 3500],
+        }
+    )
     g.add_nodes(df_well, "Wellbore", "id", "title")
 
     # Discovery -> Prospect connections
@@ -78,7 +86,7 @@ class TestShowSingleLevel:
 
     def test_limit(self, discovery_graph):
         output = discovery_graph.select("Discovery").show(["id"], limit=2)
-        lines = [l for l in output.strip().split("\n") if l.startswith("Discovery")]
+        lines = [line for line in output.strip().split("\n") if line.startswith("Discovery")]
         assert len(lines) == 2
         assert "... and 1 more" in output
 
@@ -87,12 +95,7 @@ class TestShowMultiLevel:
     """show() after traverse() — displays traversal chains."""
 
     def test_two_level_chain(self, discovery_graph):
-        output = (
-            discovery_graph
-            .select("Discovery")
-            .traverse("HAS_PROSPECT")
-            .show(["id", "title"])
-        )
+        output = discovery_graph.select("Discovery").traverse("HAS_PROSPECT").show(["id", "title"])
         # Discovery 1 connects to Prospect 10 and 20
         assert "Discovery(1, Johan Sverdrup) -> Prospect(" in output
         # Discovery 2 connects to Prospect 30
@@ -100,11 +103,7 @@ class TestShowMultiLevel:
 
     def test_three_level_chain(self, discovery_graph):
         output = (
-            discovery_graph
-            .select("Discovery")
-            .traverse("HAS_PROSPECT")
-            .traverse("TESTED_BY")
-            .show(["id", "title"])
+            discovery_graph.select("Discovery").traverse("HAS_PROSPECT").traverse("TESTED_BY").show(["id", "title"])
         )
         # Full chain: Discovery -> Prospect -> Wellbore
         assert "->" in output
@@ -112,33 +111,18 @@ class TestShowMultiLevel:
         assert "Wellbore(" in output
 
     def test_single_column_chain(self, discovery_graph):
-        output = (
-            discovery_graph
-            .select("Discovery")
-            .traverse("HAS_PROSPECT")
-            .show(["id"])
-        )
+        output = discovery_graph.select("Discovery").traverse("HAS_PROSPECT").show(["id"])
         assert "Discovery(1) -> Prospect(" in output
 
     def test_dead_end_omitted(self, discovery_graph):
         """Roots with no traversal results are omitted."""
-        output = (
-            discovery_graph
-            .select("Discovery")
-            .traverse("HAS_PROSPECT")
-            .show(["id"])
-        )
+        output = discovery_graph.select("Discovery").traverse("HAS_PROSPECT").show(["id"])
         # Discovery 3 has no HAS_PROSPECT connections → not in output
         assert "Discovery(3)" not in output
 
     def test_chain_limit(self, discovery_graph):
-        output = (
-            discovery_graph
-            .select("Discovery")
-            .traverse("HAS_PROSPECT")
-            .show(["id"], limit=1)
-        )
-        chain_lines = [l for l in output.strip().split("\n") if "->" in l]
+        output = discovery_graph.select("Discovery").traverse("HAS_PROSPECT").show(["id"], limit=1)
+        chain_lines = [line for line in output.strip().split("\n") if "->" in line]
         assert len(chain_lines) == 1
 
     def test_no_results(self):

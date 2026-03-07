@@ -1,37 +1,80 @@
 """Java language parser using tree-sitter-java."""
 
 from pathlib import Path
-from tree_sitter import Language, Parser
-import tree_sitter_java as ts_java
 
-from .base import LanguageParser, node_text, count_lines, get_type_parameters, extract_comment_annotations
+import tree_sitter_java as ts_java
+from tree_sitter import Language, Parser
+
+from .base import LanguageParser, count_lines, extract_comment_annotations, get_type_parameters, node_text
 from .models import (
-    ParseResult, FileInfo, FunctionInfo, ClassInfo,
-    EnumInfo, InterfaceInfo, TypeRelationship,
-    AttributeInfo, ConstantInfo,
+    AttributeInfo,
+    ClassInfo,
+    ConstantInfo,
+    EnumInfo,
+    FileInfo,
+    FunctionInfo,
+    InterfaceInfo,
+    ParseResult,
+    TypeRelationship,
 )
 
 JAVA_LANGUAGE = Language(ts_java.language())
 
-JAVA_NOISE_NAMES: frozenset[str] = frozenset({
-    # Object methods
-    "toString", "equals", "hashCode", "compareTo", "getClass",
-    "notify", "notifyAll", "wait", "clone", "finalize",
-    # Collection methods
-    "length", "size", "get", "set", "add", "remove", "contains",
-    "isEmpty", "put", "keySet", "values", "entrySet",
-    "iterator", "next", "hasNext", "clear",
-    # Stream API
-    "stream", "map", "filter", "collect", "forEach", "reduce",
-    "flatMap", "sorted", "distinct", "limit",
-    # I/O
-    "println", "printf", "print", "format",
-    "read", "write", "close", "flush",
-})
+JAVA_NOISE_NAMES: frozenset[str] = frozenset(
+    {
+        # Object methods
+        "toString",
+        "equals",
+        "hashCode",
+        "compareTo",
+        "getClass",
+        "notify",
+        "notifyAll",
+        "wait",
+        "clone",
+        "finalize",
+        # Collection methods
+        "length",
+        "size",
+        "get",
+        "set",
+        "add",
+        "remove",
+        "contains",
+        "isEmpty",
+        "put",
+        "keySet",
+        "values",
+        "entrySet",
+        "iterator",
+        "next",
+        "hasNext",
+        "clear",
+        # Stream API
+        "stream",
+        "map",
+        "filter",
+        "collect",
+        "forEach",
+        "reduce",
+        "flatMap",
+        "sorted",
+        "distinct",
+        "limit",
+        # I/O
+        "println",
+        "printf",
+        "print",
+        "format",
+        "read",
+        "write",
+        "close",
+        "flush",
+    }
+)
 
 
 class JavaParser(LanguageParser):
-
     @property
     def language_name(self) -> str:
         return "java"
@@ -106,8 +149,7 @@ class JavaParser(LanguageParser):
                 return "\n".join(lines).strip()
         return None
 
-    def _get_name(self, node, source: bytes,
-                  name_type: str = "identifier") -> str | None:
+    def _get_name(self, node, source: bytes, name_type: str = "identifier") -> str | None:
         for child in node.children:
             if child.type == name_type:
                 return node_text(child, source)
@@ -131,18 +173,28 @@ class JavaParser(LanguageParser):
         for child in node.children:
             if child.type == "identifier":
                 break
-            if child.type in ("void_type", "integral_type", "boolean_type",
-                              "floating_point_type", "type_identifier",
-                              "generic_type", "array_type",
-                              "scoped_type_identifier"):
+            if child.type in (
+                "void_type",
+                "integral_type",
+                "boolean_type",
+                "floating_point_type",
+                "type_identifier",
+                "generic_type",
+                "array_type",
+                "scoped_type_identifier",
+            ):
                 return node_text(child, source)
         return None
 
     # Node types that create nested function scopes — calls inside these
     # belong to the nested method/lambda, not the enclosing one.
-    _NESTED_SCOPES = frozenset({
-        "method_declaration", "constructor_declaration", "lambda_expression",
-    })
+    _NESTED_SCOPES = frozenset(
+        {
+            "method_declaration",
+            "constructor_declaration",
+            "lambda_expression",
+        }
+    )
 
     def _extract_calls(self, body_node, source: bytes) -> list[tuple[str, int]]:
         """Extract function/method names called directly within a block.
@@ -194,8 +246,7 @@ class JavaParser(LanguageParser):
                         return node_text(sub, source)
         return ""
 
-    def _file_to_module_path(self, filepath: Path, src_root: Path,
-                              package: str) -> str:
+    def _file_to_module_path(self, filepath: Path, src_root: Path, package: str) -> str:
         if package:
             return package
         # Fallback: use directory structure
@@ -230,8 +281,7 @@ class JavaParser(LanguageParser):
                             elif t.type == "generic_type":
                                 for inner in t.children:
                                     if inner.type == "type_identifier":
-                                        interfaces.append(
-                                            node_text(inner, source))
+                                        interfaces.append(node_text(inner, source))
                                         break
         return interfaces
 
@@ -249,8 +299,9 @@ class JavaParser(LanguageParser):
 
     # ── Parsing ─────────────────────────────────────────────────────────
 
-    def _parse_method(self, node, source: bytes, module_path: str,
-                      rel_path: str, owner: str | None = None) -> FunctionInfo:
+    def _parse_method(
+        self, node, source: bytes, module_path: str, rel_path: str, owner: str | None = None
+    ) -> FunctionInfo:
         if node.type == "constructor_declaration":
             name = self._get_name(node, source) or "unknown"
         else:
@@ -295,9 +346,9 @@ class JavaParser(LanguageParser):
             metadata=metadata,
         )
 
-    def _parse_class(self, node, source: bytes, module_path: str,
-                     rel_path: str, result: ParseResult,
-                     outer_name: str | None = None):
+    def _parse_class(
+        self, node, source: bytes, module_path: str, rel_path: str, result: ParseResult, outer_name: str | None = None
+    ):
         """Parse a class_declaration node (handles nested classes)."""
         name = self._get_name(node, source) or "unknown"
         if outer_name:
@@ -317,43 +368,55 @@ class JavaParser(LanguageParser):
         if self._has_modifier(node, source, "abstract"):
             metadata["is_abstract"] = True
 
-        result.classes.append(ClassInfo(
-            name=name,
-            qualified_name=qualified_name,
-            kind="class",
-            visibility=self._get_visibility(node, source),
-            file_path=rel_path,
-            line_number=node.start_point[0] + 1,
-            end_line=node.end_point[0] + 1,
-            docstring=docstring,
-            bases=bases,
-            type_parameters=get_type_parameters(node, source),
-            metadata=metadata,
-        ))
+        result.classes.append(
+            ClassInfo(
+                name=name,
+                qualified_name=qualified_name,
+                kind="class",
+                visibility=self._get_visibility(node, source),
+                file_path=rel_path,
+                line_number=node.start_point[0] + 1,
+                end_line=node.end_point[0] + 1,
+                docstring=docstring,
+                bases=bases,
+                type_parameters=get_type_parameters(node, source),
+                metadata=metadata,
+            )
+        )
 
         # EXTENDS edge
         if superclass:
-            result.type_relationships.append(TypeRelationship(
-                source_type=name,
-                target_type=superclass,
-                relationship="extends",
-            ))
+            result.type_relationships.append(
+                TypeRelationship(
+                    source_type=name,
+                    target_type=superclass,
+                    relationship="extends",
+                )
+            )
 
         # IMPLEMENTS edges
         for iface in interfaces:
-            result.type_relationships.append(TypeRelationship(
-                source_type=name,
-                target_type=iface,
-                relationship="implements",
-            ))
+            result.type_relationships.append(
+                TypeRelationship(
+                    source_type=name,
+                    target_type=iface,
+                    relationship="implements",
+                )
+            )
 
         # Parse class body
-        self._parse_class_body(node, source, module_path, rel_path,
-                               name, qualified_name, result)
+        self._parse_class_body(node, source, module_path, rel_path, name, qualified_name, result)
 
-    def _parse_class_body(self, node, source: bytes, module_path: str,
-                          rel_path: str, class_name: str,
-                          class_qname: str, result: ParseResult):
+    def _parse_class_body(
+        self,
+        node,
+        source: bytes,
+        module_path: str,
+        rel_path: str,
+        class_name: str,
+        class_qname: str,
+        result: ParseResult,
+    ):
         """Parse methods, fields, and nested classes from a class body."""
         method_type_rel = TypeRelationship(
             source_type=class_qname,
@@ -364,40 +427,43 @@ class JavaParser(LanguageParser):
         for child in node.children:
             if child.type == "class_body":
                 for item in child.children:
-                    if item.type in ("method_declaration",
-                                     "constructor_declaration"):
+                    if item.type in ("method_declaration", "constructor_declaration"):
                         fn = self._parse_method(
-                            item, source, module_path, rel_path,
+                            item,
+                            source,
+                            module_path,
+                            rel_path,
                             owner=class_name,
                         )
                         result.functions.append(fn)
                         method_type_rel.methods.append(fn)
 
                     elif item.type == "field_declaration":
-                        self._parse_field(item, source, module_path,
-                                          rel_path, class_name,
-                                          class_qname, result)
+                        self._parse_field(item, source, module_path, rel_path, class_name, class_qname, result)
 
                     elif item.type == "class_declaration":
                         # Nested class
-                        self._parse_class(item, source, module_path,
-                                          rel_path, result,
-                                          outer_name=class_name)
+                        self._parse_class(item, source, module_path, rel_path, result, outer_name=class_name)
 
                     elif item.type == "interface_declaration":
-                        self._parse_interface(item, source, module_path,
-                                              rel_path, result)
+                        self._parse_interface(item, source, module_path, rel_path, result)
 
                     elif item.type == "enum_declaration":
-                        self._parse_enum(item, source, module_path,
-                                         rel_path, result)
+                        self._parse_enum(item, source, module_path, rel_path, result)
 
         if method_type_rel.methods:
             result.type_relationships.append(method_type_rel)
 
-    def _parse_field(self, node, source: bytes, module_path: str,
-                     rel_path: str, class_name: str,
-                     class_qname: str, result: ParseResult):
+    def _parse_field(
+        self,
+        node,
+        source: bytes,
+        module_path: str,
+        rel_path: str,
+        class_name: str,
+        class_qname: str,
+        result: ParseResult,
+    ):
         """Parse a field_declaration as AttributeInfo or ConstantInfo."""
         is_static = self._has_modifier(node, source, "static")
         is_final = self._has_modifier(node, source, "final")
@@ -406,10 +472,16 @@ class JavaParser(LanguageParser):
         # Extract type
         type_ann = None
         for child in node.children:
-            if child.type in ("type_identifier", "integral_type",
-                              "boolean_type", "floating_point_type",
-                              "void_type", "generic_type", "array_type",
-                              "scoped_type_identifier"):
+            if child.type in (
+                "type_identifier",
+                "integral_type",
+                "boolean_type",
+                "floating_point_type",
+                "void_type",
+                "generic_type",
+                "array_type",
+                "scoped_type_identifier",
+            ):
                 type_ann = node_text(child, source)
                 break
 
@@ -430,55 +502,62 @@ class JavaParser(LanguageParser):
 
                 if is_static and is_final:
                     # static final -> constant
-                    result.constants.append(ConstantInfo(
-                        name=name,
-                        qualified_name=f"{class_qname}.{name}",
-                        kind="constant",
-                        type_annotation=type_ann,
-                        value_preview=val_text,
-                        visibility=visibility,
-                        file_path=rel_path,
-                        line_number=node.start_point[0] + 1,
-                    ))
+                    result.constants.append(
+                        ConstantInfo(
+                            name=name,
+                            qualified_name=f"{class_qname}.{name}",
+                            kind="constant",
+                            type_annotation=type_ann,
+                            value_preview=val_text,
+                            visibility=visibility,
+                            file_path=rel_path,
+                            line_number=node.start_point[0] + 1,
+                        )
+                    )
                 else:
-                    result.attributes.append(AttributeInfo(
-                        name=name,
-                        qualified_name=f"{class_qname}.{name}",
-                        owner_qualified_name=class_qname,
-                        type_annotation=type_ann,
-                        visibility=visibility,
-                        file_path=rel_path,
-                        line_number=node.start_point[0] + 1,
-                        default_value=val_text,
-                    ))
+                    result.attributes.append(
+                        AttributeInfo(
+                            name=name,
+                            qualified_name=f"{class_qname}.{name}",
+                            owner_qualified_name=class_qname,
+                            type_annotation=type_ann,
+                            visibility=visibility,
+                            file_path=rel_path,
+                            line_number=node.start_point[0] + 1,
+                            default_value=val_text,
+                        )
+                    )
 
-    def _parse_interface(self, node, source: bytes, module_path: str,
-                         rel_path: str, result: ParseResult):
+    def _parse_interface(self, node, source: bytes, module_path: str, rel_path: str, result: ParseResult):
         """Parse an interface_declaration node."""
         name = self._get_name(node, source) or "unknown"
         qualified_name = f"{module_path}.{name}"
         extends = self._get_interfaces(node, source)
         docstring = self._get_doc_comment(node, source)
 
-        result.interfaces.append(InterfaceInfo(
-            name=name,
-            qualified_name=qualified_name,
-            kind="interface",
-            visibility=self._get_visibility(node, source),
-            file_path=rel_path,
-            line_number=node.start_point[0] + 1,
-            end_line=node.end_point[0] + 1,
-            docstring=docstring,
-            type_parameters=get_type_parameters(node, source),
-        ))
+        result.interfaces.append(
+            InterfaceInfo(
+                name=name,
+                qualified_name=qualified_name,
+                kind="interface",
+                visibility=self._get_visibility(node, source),
+                file_path=rel_path,
+                line_number=node.start_point[0] + 1,
+                end_line=node.end_point[0] + 1,
+                docstring=docstring,
+                type_parameters=get_type_parameters(node, source),
+            )
+        )
 
         # Interface extends edges
         for base in extends:
-            result.type_relationships.append(TypeRelationship(
-                source_type=name,
-                target_type=base,
-                relationship="extends",
-            ))
+            result.type_relationships.append(
+                TypeRelationship(
+                    source_type=name,
+                    target_type=base,
+                    relationship="extends",
+                )
+            )
 
         # Parse interface method signatures
         iface_rel = TypeRelationship(
@@ -491,7 +570,10 @@ class JavaParser(LanguageParser):
                 for item in child.children:
                     if item.type == "method_declaration":
                         fn = self._parse_method(
-                            item, source, module_path, rel_path,
+                            item,
+                            source,
+                            module_path,
+                            rel_path,
                             owner=name,
                         )
                         result.functions.append(fn)
@@ -499,22 +581,23 @@ class JavaParser(LanguageParser):
         if iface_rel.methods:
             result.type_relationships.append(iface_rel)
 
-    def _parse_enum(self, node, source: bytes, module_path: str,
-                    rel_path: str, result: ParseResult):
+    def _parse_enum(self, node, source: bytes, module_path: str, rel_path: str, result: ParseResult):
         """Parse an enum_declaration node."""
         name = self._get_name(node, source) or "unknown"
         qualified_name = f"{module_path}.{name}"
 
-        result.enums.append(EnumInfo(
-            name=name,
-            qualified_name=qualified_name,
-            visibility=self._get_visibility(node, source),
-            file_path=rel_path,
-            line_number=node.start_point[0] + 1,
-            end_line=node.end_point[0] + 1,
-            docstring=self._get_doc_comment(node, source),
-            variants=self._get_enum_constants(node, source),
-        ))
+        result.enums.append(
+            EnumInfo(
+                name=name,
+                qualified_name=qualified_name,
+                visibility=self._get_visibility(node, source),
+                file_path=rel_path,
+                line_number=node.start_point[0] + 1,
+                end_line=node.end_point[0] + 1,
+                docstring=self._get_doc_comment(node, source),
+                variants=self._get_enum_constants(node, source),
+            )
+        )
 
     def parse_file(self, filepath: Path, src_root: Path) -> ParseResult:
         source = filepath.read_bytes()
@@ -534,9 +617,12 @@ class JavaParser(LanguageParser):
             language="java",
         )
         stem = filepath.stem
-        if (stem.endswith("Test") or stem.endswith("Tests")
-                or "/src/test/" in rel_path
-                or rel_path.startswith("src/test/")):
+        if (
+            stem.endswith("Test")
+            or stem.endswith("Tests")
+            or "/src/test/" in rel_path
+            or rel_path.startswith("src/test/")
+        ):
             file_info.is_test = True
 
         result = ParseResult()
@@ -544,14 +630,11 @@ class JavaParser(LanguageParser):
 
         for child in root.children:
             if child.type == "class_declaration":
-                self._parse_class(child, source, module_path, rel_path,
-                                  result)
+                self._parse_class(child, source, module_path, rel_path, result)
             elif child.type == "interface_declaration":
-                self._parse_interface(child, source, module_path, rel_path,
-                                      result)
+                self._parse_interface(child, source, module_path, rel_path, result)
             elif child.type == "enum_declaration":
-                self._parse_enum(child, source, module_path, rel_path,
-                                 result)
+                self._parse_enum(child, source, module_path, rel_path, result)
             elif child.type == "import_declaration":
                 for sub in child.children:
                     if sub.type == "scoped_identifier":

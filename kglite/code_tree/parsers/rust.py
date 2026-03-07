@@ -2,43 +2,89 @@
 
 import re
 from pathlib import Path
-from tree_sitter import Language, Parser
+
 import tree_sitter_rust as ts_rust
+from tree_sitter import Language, Parser
 
 from .base import (
-    LanguageParser, node_text, count_lines, get_type_parameters,
+    LanguageParser,
+    count_lines,
     extract_comment_annotations,
+    get_type_parameters,
+    node_text,
 )
 from .models import (
-    ParseResult, FileInfo, FunctionInfo, ClassInfo,
-    EnumInfo, InterfaceInfo, TypeRelationship,
-    AttributeInfo, ConstantInfo,
+    AttributeInfo,
+    ClassInfo,
+    ConstantInfo,
+    EnumInfo,
+    FileInfo,
+    FunctionInfo,
+    InterfaceInfo,
+    ParseResult,
+    TypeRelationship,
 )
 
 RUST_LANGUAGE = Language(ts_rust.language())
 
-RUST_NOISE_NAMES: frozenset[str] = frozenset({
-    # Iterator / collection methods
-    "len", "is_empty", "contains", "get", "insert", "remove", "push", "pop",
-    "clear", "extend", "iter", "next", "collect", "map", "filter",
-    "with_capacity", "reserve",
-    # Clone / conversion traits
-    "clone", "to_string", "to_owned", "from", "into", "as_ref", "as_mut",
-    # Common trait methods
-    "new", "default", "fmt", "eq", "ne", "cmp", "partial_cmp", "hash",
-    "deref", "drop",
-    # Option/Result methods
-    "unwrap", "expect", "ok", "err", "map_err", "unwrap_or",
-    "unwrap_or_else", "unwrap_or_default",
-    # Display / Debug
-    "write", "writeln",
-    # Set/Get patterns
-    "set",
-})
+RUST_NOISE_NAMES: frozenset[str] = frozenset(
+    {
+        # Iterator / collection methods
+        "len",
+        "is_empty",
+        "contains",
+        "get",
+        "insert",
+        "remove",
+        "push",
+        "pop",
+        "clear",
+        "extend",
+        "iter",
+        "next",
+        "collect",
+        "map",
+        "filter",
+        "with_capacity",
+        "reserve",
+        # Clone / conversion traits
+        "clone",
+        "to_string",
+        "to_owned",
+        "from",
+        "into",
+        "as_ref",
+        "as_mut",
+        # Common trait methods
+        "new",
+        "default",
+        "fmt",
+        "eq",
+        "ne",
+        "cmp",
+        "partial_cmp",
+        "hash",
+        "deref",
+        "drop",
+        # Option/Result methods
+        "unwrap",
+        "expect",
+        "ok",
+        "err",
+        "map_err",
+        "unwrap_or",
+        "unwrap_or_else",
+        "unwrap_or_default",
+        # Display / Debug
+        "write",
+        "writeln",
+        # Set/Get patterns
+        "set",
+    }
+)
 
 
 class RustParser(LanguageParser):
-
     @property
     def language_name(self) -> str:
         return "rust"
@@ -266,8 +312,7 @@ class RustParser(LanguageParser):
             return "crate"
         return "crate::" + "::".join(parts)
 
-    def _extract_struct_fields(self, node, source: bytes,
-                                owner_qname: str, rel_path: str) -> list:
+    def _extract_struct_fields(self, node, source: bytes, owner_qname: str, rel_path: str) -> list:
         """Extract fields from a struct's field_declaration_list."""
         attrs = []
         for child in node.children:
@@ -289,15 +334,17 @@ class RustParser(LanguageParser):
                             elif saw_colon and type_ann is None and fc.is_named:
                                 type_ann = node_text(fc, source)
                         if name:
-                            attrs.append(AttributeInfo(
-                                name=name,
-                                qualified_name=f"{owner_qname}::{name}",
-                                owner_qualified_name=owner_qname,
-                                type_annotation=type_ann,
-                                visibility=vis,
-                                file_path=rel_path,
-                                line_number=field.start_point[0] + 1,
-                            ))
+                            attrs.append(
+                                AttributeInfo(
+                                    name=name,
+                                    qualified_name=f"{owner_qname}::{name}",
+                                    owner_qualified_name=owner_qname,
+                                    type_annotation=type_ann,
+                                    visibility=vis,
+                                    file_path=rel_path,
+                                    line_number=field.start_point[0] + 1,
+                                )
+                            )
         return attrs
 
     def _get_enum_variants(self, node, source: bytes) -> tuple[list[str], list[dict]]:
@@ -357,10 +404,16 @@ class RustParser(LanguageParser):
 
     # ── Parsing ─────────────────────────────────────────────────────────
 
-    def _parse_function(self, node, source: bytes, module_path: str,
-                        file_path: str, is_method: bool = False,
-                        owner: str | None = None,
-                        impl_is_pymethods: bool = False) -> FunctionInfo:
+    def _parse_function(
+        self,
+        node,
+        source: bytes,
+        module_path: str,
+        file_path: str,
+        is_method: bool = False,
+        owner: str | None = None,
+        impl_is_pymethods: bool = False,
+    ) -> FunctionInfo:
         name = self._get_name(node, source, "identifier") or "unknown"
         prefix = f"{module_path}::{owner}" if owner else module_path
         qualified_name = f"{prefix}::{name}"
@@ -374,9 +427,7 @@ class RustParser(LanguageParser):
 
         is_pymethod = self._is_pymethod_fn(attrs, impl_is_pymethods)
         is_ffi = any("#[no_mangle]" in a for a in attrs)
-        is_test = any(a in ("#[test]", "#[bench]") or
-                       "#[tokio::test" in a or "#[rstest" in a
-                       for a in attrs)
+        is_test = any(a in ("#[test]", "#[bench]") or "#[tokio::test" in a or "#[rstest" in a for a in attrs)
         ffi_kind = None
         if is_pymethod:
             ffi_kind = "pyo3"
@@ -419,16 +470,23 @@ class RustParser(LanguageParser):
             metadata=metadata,
         )
 
-    def _parse_items(self, node, source: bytes, module_path: str,
-                     rel_path: str, file_info: FileInfo,
-                     result: ParseResult) -> None:
+    def _parse_items(
+        self, node, source: bytes, module_path: str, rel_path: str, file_info: FileInfo, result: ParseResult
+    ) -> None:
         """Parse all item-level children of a node (top-level or inside mod block)."""
         for child in node.children:
             if child.type == "function_item":
-                result.functions.append(self._parse_function(
-                    child, source, module_path, rel_path,
-                    is_method=False, owner=None, impl_is_pymethods=False,
-                ))
+                result.functions.append(
+                    self._parse_function(
+                        child,
+                        source,
+                        module_path,
+                        rel_path,
+                        is_method=False,
+                        owner=None,
+                        impl_is_pymethods=False,
+                    )
+                )
 
             elif child.type == "struct_item":
                 name = self._get_name(child, source, "type_identifier") or "unknown"
@@ -443,51 +501,55 @@ class RustParser(LanguageParser):
                     py_name = self._extract_py_name(attrs, "#[pyclass")
                     if py_name:
                         metadata["py_name"] = py_name
-                result.classes.append(ClassInfo(
-                    name=name,
-                    qualified_name=qname,
-                    kind="struct",
-                    visibility=visibility,
-                    file_path=rel_path,
-                    line_number=child.start_point[0] + 1,
-                    docstring=self._get_doc_comment(child, source),
-                    type_parameters=get_type_parameters(child, source),
-                    end_line=child.end_point[0] + 1,
-                    metadata=metadata,
-                ))
-                # Extract struct fields as attributes
-                result.attributes.extend(
-                    self._extract_struct_fields(child, source, qname, rel_path)
+                result.classes.append(
+                    ClassInfo(
+                        name=name,
+                        qualified_name=qname,
+                        kind="struct",
+                        visibility=visibility,
+                        file_path=rel_path,
+                        line_number=child.start_point[0] + 1,
+                        docstring=self._get_doc_comment(child, source),
+                        type_parameters=get_type_parameters(child, source),
+                        end_line=child.end_point[0] + 1,
+                        metadata=metadata,
+                    )
                 )
+                # Extract struct fields as attributes
+                result.attributes.extend(self._extract_struct_fields(child, source, qname, rel_path))
 
             elif child.type == "enum_item":
                 name = self._get_name(child, source, "type_identifier") or "unknown"
                 variant_names, variant_details = self._get_enum_variants(child, source)
-                result.enums.append(EnumInfo(
-                    name=name,
-                    qualified_name=f"{module_path}::{name}",
-                    visibility=self._get_visibility(child),
-                    file_path=rel_path,
-                    line_number=child.start_point[0] + 1,
-                    docstring=self._get_doc_comment(child, source),
-                    variants=variant_names,
-                    end_line=child.end_point[0] + 1,
-                    variant_details=variant_details if variant_details else None,
-                ))
+                result.enums.append(
+                    EnumInfo(
+                        name=name,
+                        qualified_name=f"{module_path}::{name}",
+                        visibility=self._get_visibility(child),
+                        file_path=rel_path,
+                        line_number=child.start_point[0] + 1,
+                        docstring=self._get_doc_comment(child, source),
+                        variants=variant_names,
+                        end_line=child.end_point[0] + 1,
+                        variant_details=variant_details if variant_details else None,
+                    )
+                )
 
             elif child.type == "trait_item":
                 name = self._get_name(child, source, "type_identifier") or "unknown"
-                result.interfaces.append(InterfaceInfo(
-                    name=name,
-                    qualified_name=f"{module_path}::{name}",
-                    kind="trait",
-                    visibility=self._get_visibility(child),
-                    file_path=rel_path,
-                    line_number=child.start_point[0] + 1,
-                    docstring=self._get_doc_comment(child, source),
-                    type_parameters=get_type_parameters(child, source),
-                    end_line=child.end_point[0] + 1,
-                ))
+                result.interfaces.append(
+                    InterfaceInfo(
+                        name=name,
+                        qualified_name=f"{module_path}::{name}",
+                        kind="trait",
+                        visibility=self._get_visibility(child),
+                        file_path=rel_path,
+                        line_number=child.start_point[0] + 1,
+                        docstring=self._get_doc_comment(child, source),
+                        type_parameters=get_type_parameters(child, source),
+                        end_line=child.end_point[0] + 1,
+                    )
+                )
                 # Extract trait method signatures as functions
                 trait_rel = TypeRelationship(
                     source_type=f"{module_path}::{name}",
@@ -499,8 +561,12 @@ class RustParser(LanguageParser):
                         for item in tc.children:
                             if item.type in ("function_item", "function_signature_item"):
                                 fn = self._parse_function(
-                                    item, source, module_path, rel_path,
-                                    is_method=True, owner=name,
+                                    item,
+                                    source,
+                                    module_path,
+                                    rel_path,
+                                    is_method=True,
+                                    owner=name,
                                     impl_is_pymethods=False,
                                 )
                                 result.functions.append(fn)
@@ -521,19 +587,15 @@ class RustParser(LanguageParser):
                 for c in child.children:
                     if not c.is_named and node_text(c, source) == "for":
                         seen_for = True
-                    elif c.type in ("type_identifier", "generic_type",
-                                    "scoped_type_identifier"):
+                    elif c.type in ("type_identifier", "generic_type", "scoped_type_identifier"):
                         (types_after if seen_for else types_before).append(c)
 
                 if seen_for and types_before and types_after:
-                    trait_name = self._extract_type_name_from_node(
-                        types_before[0], source)
-                    self_type = self._extract_type_name_from_node(
-                        types_after[0], source)
+                    trait_name = self._extract_type_name_from_node(types_before[0], source)
+                    self_type = self._extract_type_name_from_node(types_after[0], source)
                 elif types_before:
                     trait_name = None
-                    self_type = self._extract_type_name_from_node(
-                        types_before[0], source)
+                    self_type = self._extract_type_name_from_node(types_before[0], source)
                 else:
                     continue
 
@@ -556,8 +618,12 @@ class RustParser(LanguageParser):
                         for item in ic.children:
                             if item.type == "function_item":
                                 fn_info = self._parse_function(
-                                    item, source, module_path, rel_path,
-                                    is_method=True, owner=self_type,
+                                    item,
+                                    source,
+                                    module_path,
+                                    rel_path,
+                                    is_method=True,
+                                    owner=self_type,
                                     impl_is_pymethods=pymethods,
                                 )
                                 type_rel.methods.append(fn_info)
@@ -568,8 +634,7 @@ class RustParser(LanguageParser):
             elif child.type == "use_declaration":
                 path_text = None
                 for uc in child.children:
-                    if uc.type in ("scoped_identifier", "use_wildcard",
-                                   "scoped_use_list", "identifier"):
+                    if uc.type in ("scoped_identifier", "use_wildcard", "scoped_use_list", "identifier"):
                         path_text = node_text(uc, source)
                 if path_text:
                     file_info.imports.append(path_text)
@@ -586,8 +651,7 @@ class RustParser(LanguageParser):
                     if decl_list is not None:
                         # Inline module — recurse with updated module path
                         inner_path = f"{module_path}::{mod_name}"
-                        self._parse_items(decl_list, source, inner_path,
-                                          rel_path, file_info, result)
+                        self._parse_items(decl_list, source, inner_path, rel_path, file_info, result)
                     else:
                         # External module declaration (mod name;)
                         file_info.submodule_declarations.append(mod_name)
@@ -603,16 +667,18 @@ class RustParser(LanguageParser):
                         elif saw_eq and tc.is_named:
                             val_text = node_text(tc, source)[:100]
                             break
-                    result.constants.append(ConstantInfo(
-                        name=name,
-                        qualified_name=f"{module_path}::{name}",
-                        kind="type_alias",
-                        type_annotation=val_text,
-                        value_preview=None,
-                        visibility=self._get_visibility(child),
-                        file_path=rel_path,
-                        line_number=child.start_point[0] + 1,
-                    ))
+                    result.constants.append(
+                        ConstantInfo(
+                            name=name,
+                            qualified_name=f"{module_path}::{name}",
+                            kind="type_alias",
+                            type_annotation=val_text,
+                            value_preview=None,
+                            visibility=self._get_visibility(child),
+                            file_path=rel_path,
+                            line_number=child.start_point[0] + 1,
+                        )
+                    )
 
             elif child.type in ("const_item", "static_item"):
                 name = self._get_name(child, source, "identifier")
@@ -634,16 +700,18 @@ class RustParser(LanguageParser):
                             val = node_text(tc, source)
                             val_text = val[:100]
                             break
-                    result.constants.append(ConstantInfo(
-                        name=name,
-                        qualified_name=f"{module_path}::{name}",
-                        kind=kind,
-                        type_annotation=type_ann,
-                        value_preview=val_text,
-                        visibility=self._get_visibility(child),
-                        file_path=rel_path,
-                        line_number=child.start_point[0] + 1,
-                    ))
+                    result.constants.append(
+                        ConstantInfo(
+                            name=name,
+                            qualified_name=f"{module_path}::{name}",
+                            kind=kind,
+                            type_annotation=type_ann,
+                            value_preview=val_text,
+                            visibility=self._get_visibility(child),
+                            file_path=rel_path,
+                            line_number=child.start_point[0] + 1,
+                        )
+                    )
 
     def parse_file(self, filepath: Path, src_root: Path) -> ParseResult:
         source = filepath.read_bytes()
@@ -662,10 +730,15 @@ class RustParser(LanguageParser):
             language="rust",
         )
         stem = filepath.stem
-        if (stem.endswith("_test") or stem.endswith("_tests")
-                or stem.startswith("test_")
-                or "/tests/" in rel_path or rel_path.startswith("tests/")
-                or "/benches/" in rel_path or rel_path.startswith("benches/")):
+        if (
+            stem.endswith("_test")
+            or stem.endswith("_tests")
+            or stem.startswith("test_")
+            or "/tests/" in rel_path
+            or rel_path.startswith("tests/")
+            or "/benches/" in rel_path
+            or rel_path.startswith("benches/")
+        ):
             file_info.is_test = True
 
         result = ParseResult()

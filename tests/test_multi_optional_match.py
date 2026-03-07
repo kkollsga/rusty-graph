@@ -9,7 +9,6 @@ containing count(DISTINCT ...) returned incorrect (inflated) results due to:
 import pytest
 from kglite import KnowledgeGraph
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
@@ -134,10 +133,10 @@ class TestMultiOptionalMatchCorrectness:
         """)
         assert len(result) == 5
         for i, row in enumerate(result):
-            assert row['c.name'] == f'Case{i}'
-            assert row['kw'] == kw_counts[i], f"Case{i}: expected kw={kw_counts[i]}, got {row['kw']}"
-            assert row['jg'] == judge_counts[i], f"Case{i}: expected jg={judge_counts[i]}, got {row['jg']}"
-            assert row['ct'] == cite_counts[i], f"Case{i}: expected ct={cite_counts[i]}, got {row['ct']}"
+            assert row["c.name"] == f"Case{i}"
+            assert row["kw"] == kw_counts[i], f"Case{i}: expected kw={kw_counts[i]}, got {row['kw']}"
+            assert row["jg"] == judge_counts[i], f"Case{i}: expected jg={judge_counts[i]}, got {row['jg']}"
+            assert row["ct"] == cite_counts[i], f"Case{i}: expected ct={cite_counts[i]}, got {row['ct']}"
 
     def test_three_optional_match_plain_counts(self, court_graph):
         """Same as above but without DISTINCT — count(k) instead of count(DISTINCT k)."""
@@ -154,9 +153,9 @@ class TestMultiOptionalMatchCorrectness:
         # Even with plain count, DISTINCT should give the right per-node count
         # because the Cartesian product duplicates each (c, k) pair M*P times
         for i, row in enumerate(result):
-            assert row['kw'] == kw_counts[i]
-            assert row['jg'] == judge_counts[i]
-            assert row['ct'] == cite_counts[i]
+            assert row["kw"] == kw_counts[i]
+            assert row["jg"] == judge_counts[i]
+            assert row["ct"] == cite_counts[i]
 
     def test_two_optional_match_different_counts(self, court_graph):
         """Two OPTIONAL MATCHes in one WITH — simpler case of the same bug."""
@@ -171,8 +170,8 @@ class TestMultiOptionalMatchCorrectness:
         """)
         assert len(result) == 5
         for i, row in enumerate(result):
-            assert row['kw'] == kw_counts[i]
-            assert row['jg'] == judge_counts[i]
+            assert row["kw"] == kw_counts[i]
+            assert row["jg"] == judge_counts[i]
 
     def test_aggregate_over_multi_optional_match(self, court_graph):
         """The full bug report query: aggregate stats across all decisions."""
@@ -194,20 +193,21 @@ class TestMultiOptionalMatchCorrectness:
         """)
         assert len(result) == 1
         row = result[0]
-        assert row['total'] == 5
+        assert row["total"] == 5
         # kw_counts = [3, 0, 5, 1, 2] → 1 zero
-        assert row['no_keywords'] == 1
+        assert row["no_keywords"] == 1
         # judge_counts = [2, 3, 0, 4, 1] → 1 zero
-        assert row['no_judges'] == 1
+        assert row["no_judges"] == 1
         # cite_counts = [1, 2, 3, 0, 4] → 1 zero
-        assert row['no_citations'] == 1
+        assert row["no_citations"] == 1
         # The three averages should differ
-        assert abs(row['avg_keywords'] - sum(kw_counts) / 5) < 0.01
-        assert abs(row['avg_judges'] - sum(judge_counts) / 5) < 0.01
-        assert abs(row['avg_citations'] - sum(cite_counts) / 5) < 0.01
+        assert abs(row["avg_keywords"] - sum(kw_counts) / 5) < 0.01
+        assert abs(row["avg_judges"] - sum(judge_counts) / 5) < 0.01
+        assert abs(row["avg_citations"] - sum(cite_counts) / 5) < 0.01
         # Crucially: averages must NOT all be equal
-        assert not (row['avg_keywords'] == row['avg_judges'] == row['avg_citations']), \
+        assert not (row["avg_keywords"] == row["avg_judges"] == row["avg_citations"]), (
             "All three averages are identical — Cartesian product / fusion bug!"
+        )
 
 
 class TestMultiOptionalMatchWithNotExists:
@@ -218,7 +218,7 @@ class TestMultiOptionalMatchWithNotExists:
         g, kw_counts, judge_counts, cite_counts = court_graph
 
         # Get counts via OPTIONAL MATCH approach
-        opt_result = g.cypher("""
+        g.cypher("""
             MATCH (c:CourtDecision)
             OPTIONAL MATCH (c)-[:HAS_KEYWORD]->(k:Keyword)
             OPTIONAL MATCH (c)-[:JUDGED_BY]->(j:Judge)
@@ -229,13 +229,14 @@ class TestMultiOptionalMatchWithNotExists:
         """)
 
         # Cross-check each relationship independently
-        for rel, counts in [('HAS_KEYWORD', kw_counts), ('JUDGED_BY', judge_counts), ('CITES', cite_counts)]:
+        for rel, counts in [("HAS_KEYWORD", kw_counts), ("JUDGED_BY", judge_counts), ("CITES", cite_counts)]:
             no_match = g.cypher(f"""
                 MATCH (c:CourtDecision) WHERE NOT EXISTS((c)-[:{rel}]->()) RETURN count(*) AS cnt
             """)
             expected_zeros = sum(1 for c in counts if c == 0)
-            assert no_match[0]['cnt'] == expected_zeros, \
+            assert no_match[0]["cnt"] == expected_zeros, (
                 f"NOT EXISTS for {rel}: expected {expected_zeros}, got {no_match[0]['cnt']}"
+            )
 
     def test_single_optional_match_each_matches_combined(self, court_graph):
         """Running each OPTIONAL MATCH independently should match the combined query."""
@@ -277,12 +278,15 @@ class TestMultiOptionalMatchWithNotExists:
         """)
 
         for i in range(5):
-            assert combined[i]['kw'] == kw_ind[i]['kw'], \
+            assert combined[i]["kw"] == kw_ind[i]["kw"], (
                 f"Case{i} kw: combined={combined[i]['kw']} vs individual={kw_ind[i]['kw']}"
-            assert combined[i]['jg'] == jg_ind[i]['jg'], \
+            )
+            assert combined[i]["jg"] == jg_ind[i]["jg"], (
                 f"Case{i} jg: combined={combined[i]['jg']} vs individual={jg_ind[i]['jg']}"
-            assert combined[i]['ct'] == ct_ind[i]['ct'], \
+            )
+            assert combined[i]["ct"] == ct_ind[i]["ct"], (
                 f"Case{i} ct: combined={combined[i]['ct']} vs individual={ct_ind[i]['ct']}"
+            )
 
 
 class TestDistinctNodeIdentity:
@@ -295,8 +299,7 @@ class TestDistinctNodeIdentity:
             MATCH (p:Person {name: 'Alice'})-[:TAGGED]->(t:Tag)
             RETURN count(DISTINCT t) AS tag_count
         """)
-        assert result[0]['tag_count'] == 3, \
-            f"Expected 3 distinct tags (by identity), got {result[0]['tag_count']}"
+        assert result[0]["tag_count"] == 3, f"Expected 3 distinct tags (by identity), got {result[0]['tag_count']}"
 
     def test_distinct_with_optional_match_duplicate_titles(self, duplicate_title_graph):
         """OPTIONAL MATCH + count(DISTINCT) also uses node identity."""
@@ -307,7 +310,7 @@ class TestDistinctNodeIdentity:
             WITH p, count(DISTINCT t) AS tag_count
             RETURN p.name, tag_count
         """)
-        assert result[0]['tag_count'] == 3
+        assert result[0]["tag_count"] == 3
 
 
 class TestChainedOptionalMatchVsSingleWith:
@@ -343,12 +346,15 @@ class TestChainedOptionalMatchVsSingleWith:
 
         assert len(single) == len(chained) == 5
         for i in range(5):
-            assert single[i]['kw'] == chained[i]['kw'], \
+            assert single[i]["kw"] == chained[i]["kw"], (
                 f"Case{i} kw mismatch: single={single[i]['kw']}, chained={chained[i]['kw']}"
-            assert single[i]['jg'] == chained[i]['jg'], \
+            )
+            assert single[i]["jg"] == chained[i]["jg"], (
                 f"Case{i} jg mismatch: single={single[i]['jg']}, chained={chained[i]['jg']}"
-            assert single[i]['ct'] == chained[i]['ct'], \
+            )
+            assert single[i]["ct"] == chained[i]["ct"], (
                 f"Case{i} ct mismatch: single={single[i]['ct']}, chained={chained[i]['ct']}"
+            )
 
 
 class TestEdgeCases:
@@ -367,9 +373,9 @@ class TestEdgeCases:
             RETURN p.name, friends, jobs, skills
         """)
         assert len(result) == 1
-        assert result[0]['friends'] == 0
-        assert result[0]['jobs'] == 0
-        assert result[0]['skills'] == 0
+        assert result[0]["friends"] == 0
+        assert result[0]["jobs"] == 0
+        assert result[0]["skills"] == 0
 
     def test_one_optional_match_has_results_others_empty(self):
         """Only one OPTIONAL MATCH has results — others should be 0."""
@@ -387,8 +393,8 @@ class TestEdgeCases:
             WITH p, count(DISTINCT f) AS friends, count(DISTINCT s) AS skills
             RETURN p.name, friends, skills
         """)
-        assert result[0]['friends'] == 0
-        assert result[0]['skills'] == 1
+        assert result[0]["friends"] == 0
+        assert result[0]["skills"] == 1
 
     def test_count_star_with_multi_optional_match(self):
         """count(*) should reflect the Cartesian product size, not deduplicated."""
@@ -414,8 +420,8 @@ class TestEdgeCases:
             WITH p, count(DISTINCT s) AS skills, count(DISTINCT pr) AS projects
             RETURN p.name, skills, projects
         """)
-        assert result[0]['skills'] == 2
-        assert result[0]['projects'] == 3
+        assert result[0]["skills"] == 2
+        assert result[0]["projects"] == 3
 
     def test_multi_optional_match_with_where_filter(self):
         """WHERE on aggregated counts after multi-OPTIONAL-MATCH."""
@@ -439,9 +445,9 @@ class TestEdgeCases:
             RETURN p.name, friends, skills
         """)
         assert len(result) == 1
-        assert result[0]['p.name'] == 'P0'
-        assert result[0]['friends'] == 2
-        assert result[0]['skills'] == 1
+        assert result[0]["p.name"] == "P0"
+        assert result[0]["friends"] == 2
+        assert result[0]["skills"] == 1
 
 
 class TestScaleStress:
@@ -464,7 +470,7 @@ class TestScaleStress:
         for i in range(n_anchors):
             # Type A: i % 5 connections (0, 1, 2, 3, 4, 0, 1, ...)
             a_count = i % 5
-            expected_a[f'A{i}'] = a_count
+            expected_a[f"A{i}"] = a_count
             for j in range(a_count):
                 g.cypher(f"CREATE (:TypeA {{name: 'TA{i}_{j}'}})")
                 g.cypher(f"""
@@ -474,7 +480,7 @@ class TestScaleStress:
 
             # Type B: (i + 2) % 7 connections (different distribution)
             b_count = (i + 2) % 7
-            expected_b[f'A{i}'] = b_count
+            expected_b[f"A{i}"] = b_count
             for j in range(b_count):
                 g.cypher(f"CREATE (:TypeB {{name: 'TB{i}_{j}'}})")
                 g.cypher(f"""
@@ -484,7 +490,7 @@ class TestScaleStress:
 
             # Type C: (i * 3) % 4 connections (yet another distribution)
             c_count = (i * 3) % 4
-            expected_c[f'A{i}'] = c_count
+            expected_c[f"A{i}"] = c_count
             for j in range(c_count):
                 g.cypher(f"CREATE (:TypeC {{name: 'TC{i}_{j}'}})")
                 g.cypher(f"""
@@ -505,13 +511,10 @@ class TestScaleStress:
 
         assert len(result) == n_anchors
         for row in result:
-            name = row['a.name']
-            assert row['cnt_a'] == expected_a[name], \
-                f"{name} REL_A: expected {expected_a[name]}, got {row['cnt_a']}"
-            assert row['cnt_b'] == expected_b[name], \
-                f"{name} REL_B: expected {expected_b[name]}, got {row['cnt_b']}"
-            assert row['cnt_c'] == expected_c[name], \
-                f"{name} REL_C: expected {expected_c[name]}, got {row['cnt_c']}"
+            name = row["a.name"]
+            assert row["cnt_a"] == expected_a[name], f"{name} REL_A: expected {expected_a[name]}, got {row['cnt_a']}"
+            assert row["cnt_b"] == expected_b[name], f"{name} REL_B: expected {expected_b[name]}, got {row['cnt_b']}"
+            assert row["cnt_c"] == expected_c[name], f"{name} REL_C: expected {expected_c[name]}, got {row['cnt_c']}"
 
     def test_aggregate_summary_matches_individual_queries(self):
         """Aggregate summary from multi-OPTIONAL-MATCH should match individual queries."""
@@ -555,10 +558,10 @@ class TestScaleStress:
             RETURN sum(cnt) AS total, avg(cnt) AS average
         """)
 
-        assert combined[0]['total_a'] == ind_a[0]['total']
-        assert combined[0]['total_b'] == ind_b[0]['total']
-        assert abs(combined[0]['avg_a'] - ind_a[0]['average']) < 0.001
-        assert abs(combined[0]['avg_b'] - ind_b[0]['average']) < 0.001
+        assert combined[0]["total_a"] == ind_a[0]["total"]
+        assert combined[0]["total_b"] == ind_b[0]["total"]
+        assert abs(combined[0]["avg_a"] - ind_a[0]["average"]) < 0.001
+        assert abs(combined[0]["avg_b"] - ind_b[0]["average"]) < 0.001
 
 
 class TestFusionStillWorksForSingleOptionalMatch:
@@ -585,7 +588,7 @@ class TestFusionStillWorksForSingleOptionalMatch:
         """)
         assert len(result) == 10
         for i, row in enumerate(result):
-            assert row['cnt'] == i, f"P{i}: expected {i}, got {row['cnt']}"
+            assert row["cnt"] == i, f"P{i}: expected {i}, got {row['cnt']}"
 
     def test_explain_shows_fusion_for_single(self):
         """EXPLAIN should show fusion for single OPTIONAL MATCH + count()."""
@@ -598,9 +601,8 @@ class TestFusionStillWorksForSingleOptionalMatch:
             WITH x, count(y) AS cnt
             RETURN x.name, cnt
         """)
-        ops = [r['operation'] for r in plan.to_list()]
-        assert any('FusedOptionalMatchAggregate' in op for op in ops), \
-            f"Expected fusion in plan, got: {ops}"
+        ops = [r["operation"] for r in plan.to_list()]
+        assert any("FusedOptionalMatchAggregate" in op for op in ops), f"Expected fusion in plan, got: {ops}"
 
     def test_explain_no_fusion_for_multi_optional_with_distinct(self):
         """EXPLAIN should NOT show fusion for multi-OPTIONAL-MATCH + count(DISTINCT)."""
@@ -614,6 +616,7 @@ class TestFusionStillWorksForSingleOptionalMatch:
             WITH x, count(DISTINCT a) AS ca, count(DISTINCT b) AS cb
             RETURN x.name, ca, cb
         """)
-        ops = [r['operation'] for r in plan.to_list()]
-        assert not any('FusedOptionalMatchAggregate' in op for op in ops), \
+        ops = [r["operation"] for r in plan.to_list()]
+        assert not any("FusedOptionalMatchAggregate" in op for op in ops), (
             f"Should not fuse multi-OPTIONAL-MATCH + DISTINCT, got: {ops}"
+        )

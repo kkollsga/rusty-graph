@@ -40,6 +40,21 @@ jobs:
       - name: Run Rust tests
         run: cargo test
 
+  python-lint:
+    name: Python lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Check formatting
+        run: ruff format --check .
+
+      - name: Check linting
+        run: ruff check .
+
   python-tests:
     name: Python tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -70,18 +85,31 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-py${{ matrix.python-version }}-
 
       - name: Install dependencies
-        run: pip install maturin pytest pandas
+        run: pip install maturin pytest pytest-cov pandas hypothesis
 
       - name: Build and install extension
         run: pip install .
 
       - name: Run Python tests
-        run: pytest tests/ -v --tb=short
+        run: pytest tests/ -v --tb=short --cov=kglite --cov-report=xml
+
+      - name: Run stubtest
+        if: matrix.python-version == '3.12'
+        run: |
+          pip install mypy pandas-stubs
+          python -m mypy.stubtest kglite --ignore-missing-stub --mypy-config-file mypy_stubtest.ini --allowlist stubtest_allowlist.txt
+
+      - name: Upload coverage
+        if: matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   python-benchmarks:
     name: Benchmarks
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
 
@@ -105,10 +133,21 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-bench-
 
       - name: Install dependencies
-        run: pip install maturin pytest pandas
+        run: pip install maturin pytest pytest-benchmark pandas
 
       - name: Build and install extension
         run: pip install .
 
-      - name: Run benchmarks
-        run: pytest tests/benchmarks/ -v -m benchmark -s
+      - name: Run tracked benchmarks
+        run: pytest tests/benchmarks/test_bench_core.py -m benchmark --benchmark-json=benchmark-results.json
+
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: 'pytest'
+          output-file-path: benchmark-results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          alert-threshold: '150%'
+          comment-on-alert: true
+          fail-on-alert: false

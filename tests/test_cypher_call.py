@@ -44,11 +44,11 @@ class TestCallPagerank:
         """)
         assert len(result) == 6
         # Center should have lowest pagerank in a star (outgoing only, no incoming)
-        names = [r['node.name'] for r in result]
-        assert isinstance(result[0]['score'], float)
+        names = [r["node.name"] for r in result]
+        assert isinstance(result[0]["score"], float)
         # All leaves should appear
         for i in range(1, 6):
-            assert f'Leaf{i}' in names
+            assert f"Leaf{i}" in names
 
     def test_with_limit(self, graph):
         result = graph.cypher("""
@@ -65,7 +65,7 @@ class TestCallPagerank:
             ORDER BY score DESC
         """)
         assert len(result) == 6
-        assert all(isinstance(r['score'], float) for r in result)
+        assert all(isinstance(r["score"], float) for r in result)
 
     def test_with_where_filter(self, graph):
         result = graph.cypher("""
@@ -74,8 +74,8 @@ class TestCallPagerank:
             RETURN node.name, score
             ORDER BY score DESC
         """)
-        names = [r['node.name'] for r in result]
-        assert 'Center' not in names
+        names = [r["node.name"] for r in result]
+        assert "Center" not in names
         assert len(result) == 5
 
     def test_node_type_access(self, graph):
@@ -84,7 +84,7 @@ class TestCallPagerank:
             RETURN node.type AS type, node.name AS name, score
             LIMIT 1
         """)
-        assert result[0]['type'] == 'Person'
+        assert result[0]["type"] == "Person"
 
 
 class TestCallBetweenness:
@@ -98,7 +98,7 @@ class TestCallBetweenness:
         """)
         assert len(result) == 3
         # Center node should have high betweenness in star topology
-        assert result[0]['node.name'] == 'Center'
+        assert result[0]["node.name"] == "Center"
 
     def test_alias(self, graph):
         result = graph.cypher("""
@@ -106,7 +106,7 @@ class TestCallBetweenness:
             RETURN node.name, score
             LIMIT 1
         """)
-        assert 'node.name' in result[0]
+        assert "node.name" in result[0]
 
     def test_normalized_param(self, graph):
         result = graph.cypher("""
@@ -114,7 +114,7 @@ class TestCallBetweenness:
             RETURN node.name, score
             ORDER BY score DESC LIMIT 1
         """)
-        assert isinstance(result[0]['score'], float)
+        assert isinstance(result[0]["score"], float)
 
 
 class TestCallDegree:
@@ -128,7 +128,7 @@ class TestCallDegree:
         """)
         assert len(result) == 6
         # Center has most connections
-        assert result[0]['node.name'] == 'Center'
+        assert result[0]["node.name"] == "Center"
 
     def test_alias_form(self, graph):
         result = graph.cypher("""
@@ -136,7 +136,7 @@ class TestCallDegree:
             RETURN node.name, score
             ORDER BY score DESC LIMIT 1
         """)
-        assert result[0]['node.name'] == 'Center'
+        assert result[0]["node.name"] == "Center"
 
 
 class TestCallCloseness:
@@ -148,7 +148,7 @@ class TestCallCloseness:
             RETURN node.name, score
             ORDER BY score DESC LIMIT 1
         """)
-        assert isinstance(result[0]['score'], float)
+        assert isinstance(result[0]["score"], float)
 
 
 class TestCallLouvain:
@@ -160,7 +160,7 @@ class TestCallLouvain:
             RETURN node.name, community
         """)
         assert len(result) == 6
-        assert all(isinstance(r['community'], int) for r in result)
+        assert all(isinstance(r["community"], int) for r in result)
 
     def test_aggregation(self, graph):
         result = graph.cypher("""
@@ -169,7 +169,7 @@ class TestCallLouvain:
             ORDER BY size DESC
         """)
         assert len(result) > 0
-        total = sum(r['size'] for r in result)
+        total = sum(r["size"] for r in result)
         assert total == 6
 
     def test_with_resolution(self, graph):
@@ -189,7 +189,7 @@ class TestCallLabelPropagation:
             RETURN node.name, community
         """)
         assert len(result) == 6
-        assert all(isinstance(r['community'], int) for r in result)
+        assert all(isinstance(r["community"], int) for r in result)
 
 
 class TestCallConnectedComponents:
@@ -202,7 +202,7 @@ class TestCallConnectedComponents:
         """)
         # Star graph is fully connected
         assert len(result) == 1
-        assert result[0]['size'] == 6
+        assert result[0]["size"] == 6
 
     def test_multiple_components(self):
         g = KnowledgeGraph()
@@ -220,8 +220,8 @@ class TestCallConnectedComponents:
             ORDER BY size DESC
         """)
         assert len(result) == 2
-        assert result[0]['size'] == 2
-        assert result[1]['size'] == 1
+        assert result[0]["size"] == 2
+        assert result[1]["size"] == 1
 
     def test_node_access(self, graph):
         result = graph.cypher("""
@@ -242,8 +242,8 @@ class TestCallYieldAlias:
             ORDER BY s DESC LIMIT 3
         """)
         assert len(result) == 3
-        assert 'n.name' in result[0]
-        assert 's' in result[0]
+        assert "n.name" in result[0]
+        assert "s" in result[0]
 
     def test_yield_partial(self, graph):
         """YIELD only score, not node."""
@@ -253,7 +253,7 @@ class TestCallYieldAlias:
             ORDER BY score DESC LIMIT 3
         """)
         assert len(result) == 3
-        assert 'score' in result[0]
+        assert "score" in result[0]
 
 
 class TestCallErrors:
@@ -281,5 +281,5 @@ class TestCallExplain:
             RETURN node.name, score
             ORDER BY score DESC LIMIT 10
         """)
-        ops = [r['operation'] for r in result.to_list()]
-        assert any('Call' in op for op in ops)
+        ops = [r["operation"] for r in result.to_list()]
+        assert any("Call" in op for op in ops)
