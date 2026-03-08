@@ -12,7 +12,7 @@ jobs:
       should_publish: ${{ steps.check.outputs.should_publish }}
       version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Check version against PyPI
         id: check
         run: |
@@ -133,7 +133,7 @@ jobs:
           - target: ''
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Python ${{ matrix.python-version }}
@@ -155,7 +155,7 @@ jobs:
         run: Get-ChildItem -Recurse wheels
         shell: pwsh
       - name: Upload wheels as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.python-version }}
           path: wheels/*.whl
@@ -168,7 +168,7 @@ jobs:
       contents: write
       id-token: write  # Required for Trusted Publishing
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
