@@ -66,6 +66,9 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["kglite"]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E402"]
 "benchmarks/*" = ["E402"]
