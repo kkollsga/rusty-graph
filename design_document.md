@@ -83,7 +83,7 @@ Opening paragraph with ALL high-value keywords    ← Most important text for SE
 - **Matrix testing:** Test against multiple language/runtime versions. Use `fail-fast: false` so a failure in one version doesn't cancel the others.
 - **Trusted publishing / keyless auth:** Most registries support OIDC-based publishing (PyPI Trusted Publishers, npm provenance, crates.io). No secrets to manage or rotate.
 - **Changelog extraction:** Parse your changelog to auto-populate release notes. Avoids manual copy-paste and ensures releases always have notes.
-- **Benchmarks as separate workflow:** Use manual trigger only. Benchmarks are slow and noisy — don't block CI with them.
+- **Benchmarks:** Two modes. Manual trigger for local comparison (`make bench-save`, `make bench-compare`). Automatic on pushes to main for historical tracking — store results as JSON and use a benchmark action to detect regressions over time. Alert but don't block (`fail-on-alert: false`).
 - **Coverage in CI:** Collect coverage during test runs. Upload to a service (Codecov, Coveralls) on one matrix version only to avoid duplicates.
 
 #### Example: PyPI version check (GitHub Actions)
@@ -124,22 +124,34 @@ ci-gate:
 
 ## 3. Documentation
 
-### Architecture
+### Architecture: The Diátaxis Framework
+
+Structure documentation around the four Diátaxis quadrants. Each quadrant serves a different user need and writing style:
 
 ```text
 docs/
 ├── config file             ← Doc generator config (Sphinx, MkDocs, Docusaurus, etc.)
-├── index                   ← Landing page with navigation
-├── getting-started         ← Installation + first steps
-├── core-concepts           ← Mental model for the library
-├── guides/                 ← Task-oriented how-to guides (10-15 files)
-│   ├── feature-a
-│   ├── feature-b
-│   └── ...
-└── reference/              ← Auto-generated + hand-written reference
+├── index                   ← Landing page with toctree organized by quadrant
+│
+├── Tutorials               ← Learning-oriented: "Follow along to learn"
+│   └── getting-started     ← Installation + first working example
+│
+├── How-to Guides           ← Task-oriented: "How do I do X?"
+│   ├── guides/feature-a
+│   ├── guides/feature-b
+│   └── ... (10-15 files)
+│
+├── Explanation             ← Understanding-oriented: "Why does it work this way?"
+│   ├── core-concepts       ← Mental model for the library
+│   ├── architecture        ← How the internals work
+│   └── design-decisions    ← Why key tradeoffs were made
+│
+└── Reference               ← Information-oriented: "What are the exact signatures?"
     ├── api                 ← Auto-generated from source/stubs
     └── dsl-reference       ← Hand-written DSL/query language docs (if applicable)
 ```
+
+**Key insight:** Most projects mix tutorials and how-to guides, or put explanatory content inside reference docs. Diátaxis forces clean separation — a tutorial walks you through learning, a how-to guide solves a specific problem, explanation helps you understand *why*, and reference gives precise details. Reorganizing existing content into these quadrants (relabeling toctree captions, moving pages) usually requires zero file renames and zero broken links.
 
 ### Key patterns
 
@@ -147,6 +159,7 @@ docs/
 - **Hosted docs with auto-deploy:** Use a service that rebuilds on every push (ReadTheDocs, GitHub Pages, Netlify). Zero manual deployment.
 - **Separate guide content from README:** README is a landing page. Don't duplicate guide content there — link to the docs site instead.
 - **Single source of truth for reference docs:** If you maintain reference documentation (API specs, query language docs, etc.), keep one canonical file and include/import it into both the docs site and any other surfaces.
+- **Explanation pages are the most neglected quadrant.** Write at least two: one explaining *how* the internals work (architecture), one explaining *why* key decisions were made (design decisions). These pages help contributors onboard and help advanced users predict behavior.
 
 #### Example: Sphinx AutoAPI from type stubs (Python/Rust)
 
@@ -164,6 +177,7 @@ autoapi_file_patterns = ["*.pyi"]  # read stubs, not compiled modules
 - Type stubs (`.pyi`) are underrated as a documentation tool — they provide IDE support, doc generation source, and a readable API surface all in one file.
 - 5-10 task-oriented guides are more valuable than exhaustive API reference alone. Users search for "how do I do X", not "what does method Y accept."
 - Include reference docs from the repo root into the docs build (via includes/symlinks). Avoids maintaining two copies that drift apart.
+- Adopting Diátaxis doesn't require moving files — relabeling toctree captions and adding 2-3 explanation pages is usually enough to transform a flat doc structure into one users can navigate by intent.
 
 ---
 
@@ -178,8 +192,10 @@ tests/
 ├── test_edge_cases         ← Boundary conditions
 ├── test_error_handling     ← Error handling + recovery
 ├── test_feature_x          ← Feature-specific tests
+├── test_property_based     ← Hypothesis property-based tests
 └── benchmarks/             ← Performance tests (separate from CI)
-    ├── test_performance
+    ├── test_bench_core     ← pytest-benchmark tracked benchmarks
+    ├── test_performance    ← Manual timing / parametrized benchmarks
     └── test_comparison     ← vs. alternatives
 ```
 
@@ -191,6 +207,9 @@ tests/
 - **Optional dependency handling:** If your library has optional features with heavy dependencies, ensure tests for those features are gracefully skipped when the dependency is missing. Use collection hooks and per-test skip guards (belt-and-suspenders).
 - **Domain-specific fixtures:** If your library serves a specific domain, include realistic fixtures — they catch edge cases that synthetic data misses.
 - **Coverage as informational:** Report coverage but don't block PRs on it. NumPy sets Codecov to `informational: true` — coverage metrics are useful for trend analysis, not gatekeeping. This avoids the "fix coverage to merge a typo fix" problem.
+- **Property-based testing (Hypothesis):** Instead of hand-picking inputs, let Hypothesis generate random valid inputs and verify that invariants always hold. Property tests catch edge cases humans don't think to write. Good properties to test: count invariants (add N items → count == N), filter correctness (WHERE only returns matches), idempotency (creating an index doesn't change results), API parity (Cypher vs. fluent API return same data), type roundtrips (values survive store→retrieve), sort correctness, delete consistency.
+- **Stubtest for compiled extensions:** If your library ships `.pyi` type stubs, run `mypy.stubtest` in CI to verify stubs match the actual runtime module. This catches real bugs: missing parameters, wrong signatures, stale methods. For PyO3/pybind11 extensions, maintain an allowlist for legitimate structural differences (no subclassing, `Option<T>` defaults, sentinel values). Stubtest found 5 real drift issues in our stubs that would have caused wrong IDE autocompletion.
+- **Historical benchmark tracking:** Use pytest-benchmark to record performance metrics as JSON, then use `benchmark-action/github-action-benchmark` in CI to track results over time, alert on regressions (e.g., >150% of baseline), and auto-push results to a `gh-pages` branch. Keep existing manual-timing benchmarks for parametrized comparisons — they serve a different purpose.
 
 #### Example: Optional dependency auto-skip (Python/pytest)
 
@@ -207,6 +226,105 @@ def pytest_collect_file(parent, file_path):
 
 # test_code_tree_calls.py — per-test guard (belt-and-suspenders)
 ts = pytest.importorskip("tree_sitter", reason="requires tree-sitter")
+```
+
+#### Example: Property-based tests (Hypothesis)
+
+Test invariants that must hold for ALL valid inputs, not just hand-picked examples:
+
+```python
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+@given(n=st.integers(min_value=1, max_value=50))
+@settings(max_examples=30)
+def test_node_count_invariant(n):
+    """Adding N nodes increases count by exactly N."""
+    graph = KnowledgeGraph()
+    df = pd.DataFrame({"nid": list(range(n)), "name": [f"item_{i}" for i in range(n)]})
+    graph.add_nodes(df, "Thing", "nid", "name")
+    result = graph.select("Thing").collect()
+    assert len(result) == n
+
+@given(n=st.integers(min_value=5, max_value=30),
+       target_city=st.sampled_from(["Oslo", "Bergen", "Stavanger"]))
+@settings(max_examples=30)
+def test_filter_returns_only_matching(n, target_city):
+    """WHERE filter only returns nodes matching the condition."""
+    # ... build graph with city property ...
+    result = graph.select("Person").where({"city": target_city}).collect()
+    for node in result:
+        assert node["city"] == target_city
+```
+
+#### Example: Stubtest for compiled extensions
+
+```bash
+# Run stubtest to verify .pyi stubs match the compiled module
+python -m mypy.stubtest mylib --allowlist stubtest_allowlist.txt
+```
+
+The allowlist handles legitimate PyO3/pybind11 structural differences:
+
+```text
+# stubtest_allowlist.txt
+
+# PyO3 classes cannot be subclassed (@final) and are disjoint bases.
+mylib.MyClass
+
+# PyO3 uses Option<T>, showing default=None at runtime.
+# Stubs document effective defaults (e.g., top_k=10).
+mylib.MyClass.method_with_option_defaults
+
+# Overloaded methods structurally differ from runtime's single dispatch.
+mylib.MyClass.overloaded_method
+```
+
+CI step (run after building the extension, one Python version only):
+
+```yaml
+- name: Run stubtest
+  if: matrix.python-version == '3.12'
+  run: |
+    pip install mypy
+    python -m mypy.stubtest mylib --allowlist stubtest_allowlist.txt
+```
+
+#### Example: Historical benchmark tracking (pytest-benchmark + CI)
+
+```python
+@pytest.mark.benchmark
+def test_bench_add_nodes(benchmark):
+    """Bulk node insertion (1000 nodes)."""
+    graph = MyLib()
+    data = build_test_data(1000)
+    benchmark(graph.add_nodes, data)
+```
+
+Makefile targets for local use:
+
+```makefile
+bench-save:
+	pytest tests/benchmarks/ -m benchmark --benchmark-save=baseline
+bench-compare:
+	pytest tests/benchmarks/ -m benchmark --benchmark-compare
+```
+
+CI tracking on pushes to main:
+
+```yaml
+- name: Run tracked benchmarks
+  run: pytest tests/benchmarks/ -m benchmark --benchmark-json=benchmark-results.json
+
+- name: Store benchmark result
+  uses: benchmark-action/github-action-benchmark@v1
+  with:
+    tool: 'pytest'
+    output-file-path: benchmark-results.json
+    auto-push: true
+    alert-threshold: '150%'
+    comment-on-alert: true
+    fail-on-alert: false      # alert but don't block — benchmarks are noisy
 ```
 
 #### Example: Codecov config (informational, not blocking)
@@ -239,6 +357,10 @@ exclude_lines = ["if __name__", "pragma: no cover", "raise NotImplementedError"]
 - The `pytest_collect_file()` hook is cleaner than per-file skip logic for handling optional dependencies across many test files.
 - A `make cov` target that shows missing lines locally is more actionable than a badge showing a percentage.
 - Strict marker/config validation catches silent test misconfiguration early.
+- Property-based tests find bugs that hand-written tests miss. The investment is ~30 lines per property, and Hypothesis shrinks failing cases to minimal reproducers automatically.
+- Stubtest is the single most effective tool for keeping type stubs in sync with a compiled extension. It found 5 real signature drift issues that manual review missed — wrong parameter names, missing parameters, stale overloads.
+- For PyO3 extensions, stubtest requires a well-maintained allowlist. Group allowlist entries by category (structural differences, Option defaults, overloads) with comments explaining why each entry exists.
+- Historical benchmark tracking with `fail-on-alert: false` is the right default. Benchmarks are inherently noisy — alerting on regressions is useful, but blocking merges on them creates false negatives. Use alerts for investigation, not gates.
 
 ---
 
@@ -607,11 +729,12 @@ Add `SECURITY.md` to `.github/` with instructions for reporting vulnerabilities 
   □ Keyless / trusted publishing
   □ Benchmark workflow (manual trigger)
 
-□ Documentation
+□ Documentation (Diátaxis framework)
   □ Doc generator with auto-deploy on push
-  □ Getting started guide
-  □ 5-10 task-oriented guides
-  □ Auto-generated API reference
+  □ Tutorials: getting started guide
+  □ How-to Guides: 5-10 task-oriented guides
+  □ Explanation: architecture + design decisions pages
+  □ Reference: auto-generated API + hand-written DSL docs
   □ Single source of truth for reference docs
 
 □ Testing
@@ -620,6 +743,9 @@ Add `SECURITY.md` to `.github/` with instructions for reporting vulnerabilities 
   □ Benchmark / slow test separation via markers
   □ Coverage reporting (local + CI)
   □ Strict marker/config validation
+  □ Property-based tests (Hypothesis) for core invariants
+  □ Stubtest verification (.pyi stubs match compiled extension)
+  □ Historical benchmark tracking (pytest-benchmark + CI action)
 
 □ Project Metadata
   □ Keywords and categories in package manifest
