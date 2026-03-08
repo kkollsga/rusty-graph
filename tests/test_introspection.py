@@ -321,6 +321,29 @@ class TestDescribe:
         assert "KNOWS" in conn_types
         assert "WORKS_AT" in conn_types
 
+    def test_connections_show_property_names(self, social_graph):
+        """Default describe should show edge property names in connections."""
+        root = ET.fromstring(social_graph.describe())
+        conns = root.findall(".//connections/conn")
+        knows = [c for c in conns if c.attrib["type"] == "KNOWS"][0]
+        assert "properties" in knows.attrib
+        assert "since" in knows.attrib["properties"]
+        works_at = [c for c in conns if c.attrib["type"] == "WORKS_AT"][0]
+        assert "properties" in works_at.attrib
+        assert "start_year" in works_at.attrib["properties"]
+
+    def test_connections_no_properties_omits_attr(self):
+        """Connections without edge properties should not have properties attr."""
+        g = KnowledgeGraph()
+        nodes = pd.DataFrame({"nid": [1, 2], "name": ["A", "B"]})
+        g.add_nodes(nodes, "Item", "nid", "name")
+        edges = pd.DataFrame({"src": [1], "tgt": [2]})
+        g.add_connections(edges, "LINKS", "Item", "src", "Item", "tgt")
+        root = ET.fromstring(g.describe())
+        conns = root.findall(".//connections/conn")
+        links = [c for c in conns if c.attrib["type"] == "LINKS"][0]
+        assert "properties" not in links.attrib
+
     def test_extensions_present(self, small_graph):
         root = ET.fromstring(small_graph.describe())
         ext = root.find("extensions")

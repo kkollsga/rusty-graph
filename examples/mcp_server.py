@@ -119,12 +119,12 @@ def graph_overview(
     """Get graph schema, connection details, or Cypher language reference.
 
     Three independent axes — call with no args first for the overview:
-      graph_overview()                            — inventory of node types
+      graph_overview()                            — inventory + connections with property names
       graph_overview(types=["Type"])              — property schemas, samples
-      graph_overview(connections=True)            — all connection types
-      graph_overview(connections=["CITES"])        — deep-dive with properties
+      graph_overview(connections=True)            — all connection types with properties
+      graph_overview(connections=["CALLS"])       — deep-dive: property stats, sample edges
       graph_overview(cypher=True)                 — Cypher reference
-      graph_overview(cypher=["temporal","MATCH"])  — detailed docs with examples
+      graph_overview(cypher=["temporal","MATCH"]) — detailed docs with examples
     """
     try:
         return graph.describe(types=types, connections=connections, cypher=cypher)

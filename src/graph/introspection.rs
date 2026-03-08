@@ -11,12 +11,13 @@ use std::collections::{HashMap, HashSet};
 
 // ── Return types ────────────────────────────────────────────────────────────
 
-/// Statistics about a connection type: count, source/target node types.
+/// Statistics about a connection type: count, source/target node types, property names.
 pub struct ConnectionTypeStats {
     pub connection_type: String,
     pub count: usize,
     pub source_types: Vec<String>,
     pub target_types: Vec<String>,
+    pub property_names: Vec<String>,
 }
 
 /// Summary of a node type: count and property schemas with types.
@@ -255,11 +256,14 @@ pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStat
                 source_types.sort();
                 let mut target_types: Vec<String> = info.target_types.iter().cloned().collect();
                 target_types.sort();
+                let mut property_names: Vec<String> = info.property_types.keys().cloned().collect();
+                property_names.sort();
                 ConnectionTypeStats {
                     connection_type: conn_type.clone(),
                     count: counts.get(conn_type).copied().unwrap_or(0),
                     source_types,
                     target_types,
+                    property_names,
                 }
             })
             .collect();
@@ -268,35 +272,52 @@ pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStat
     }
 
     // Fallback: scan all edges (pre-metadata graphs)
-    let mut stats: HashMap<String, (usize, HashSet<String>, HashSet<String>)> = HashMap::new();
+    struct Accum {
+        count: usize,
+        sources: HashSet<String>,
+        targets: HashSet<String>,
+        props: HashSet<String>,
+    }
+    let mut stats: HashMap<String, Accum> = HashMap::new();
 
     for edge_ref in graph.graph.edge_references() {
         let edge_data = edge_ref.weight();
         let entry = stats
             .entry(edge_data.connection_type_str(&graph.interner).to_string())
-            .or_insert_with(|| (0, HashSet::new(), HashSet::new()));
-        entry.0 += 1;
+            .or_insert_with(|| Accum {
+                count: 0,
+                sources: HashSet::new(),
+                targets: HashSet::new(),
+                props: HashSet::new(),
+            });
+        entry.count += 1;
 
         if let Some(source_node) = graph.get_node(edge_ref.source()) {
-            entry.1.insert(source_node.node_type.clone());
+            entry.sources.insert(source_node.node_type.clone());
         }
         if let Some(target_node) = graph.get_node(edge_ref.target()) {
-            entry.2.insert(target_node.node_type.clone());
+            entry.targets.insert(target_node.node_type.clone());
+        }
+        for key in edge_data.property_keys(&graph.interner) {
+            entry.props.insert(key.to_string());
         }
     }
 
     let mut result: Vec<ConnectionTypeStats> = stats
         .into_iter()
-        .map(|(conn_type, (count, src_set, tgt_set))| {
-            let mut source_types: Vec<String> = src_set.into_iter().collect();
+        .map(|(conn_type, acc)| {
+            let mut source_types: Vec<String> = acc.sources.into_iter().collect();
             source_types.sort();
-            let mut target_types: Vec<String> = tgt_set.into_iter().collect();
+            let mut target_types: Vec<String> = acc.targets.into_iter().collect();
             target_types.sort();
+            let mut property_names: Vec<String> = acc.props.into_iter().collect();
+            property_names.sort();
             ConnectionTypeStats {
                 connection_type: conn_type,
-                count,
+                count: acc.count,
                 source_types,
                 target_types,
+                property_names,
             }
         })
         .collect();
@@ -1007,12 +1028,21 @@ fn write_connection_map(xml: &mut String, graph: &DirGraph, conn_stats: &[Connec
                 } else {
                     String::new()
                 };
+            let props_attr = if ct.property_names.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " properties=\"{}\"",
+                    xml_escape(&ct.property_names.join(","))
+                )
+            };
             xml.push_str(&format!(
-                "    <conn type=\"{}\" count=\"{}\" from=\"{}\" to=\"{}\"{}/>\n",
+                "    <conn type=\"{}\" count=\"{}\" from=\"{}\" to=\"{}\"{}{}/>\n",
                 xml_escape(&ct.connection_type),
                 ct.count,
                 sources.join(","),
                 targets.join(","),
+                props_attr,
                 temporal_attr,
             ));
         }
@@ -1099,26 +1129,13 @@ fn write_connections_overview(xml: &mut String, graph: &DirGraph) {
     }
     xml.push_str("<connections>\n");
     for ct in &conn_stats {
-        // Collect property names for this connection type
-        let prop_names: Vec<String> = {
-            let mut props: HashSet<String> = HashSet::new();
-            for edge_ref in graph.graph.edge_references() {
-                let ed = edge_ref.weight();
-                if ed.connection_type_str(&graph.interner) == ct.connection_type {
-                    for key in ed.property_keys(&graph.interner) {
-                        props.insert(key.to_string());
-                    }
-                }
-            }
-            let mut sorted: Vec<String> = props.into_iter().collect();
-            sorted.sort();
-            sorted
-        };
-
-        let props_attr = if prop_names.is_empty() {
+        let props_attr = if ct.property_names.is_empty() {
             String::new()
         } else {
-            format!(" properties=\"{}\"", xml_escape(&prop_names.join(",")))
+            format!(
+                " properties=\"{}\"",
+                xml_escape(&ct.property_names.join(","))
+            )
         };
 
         xml.push_str(&format!(
@@ -2288,7 +2305,7 @@ fn build_inventory(graph: &DirGraph) -> String {
     write_exploration_hints(&mut xml, graph, &conn_stats);
 
     xml.push_str(
-        "  <hint>Use describe(types=['TypeName']) for properties, children, connections, and samples.</hint>\n",
+        "  <hint>Use describe(types=['TypeName']) for properties, samples. Use describe(connections=['CONN_TYPE']) for edge property stats and samples.</hint>\n",
     );
     xml.push_str("</graph>");
     xml
@@ -3054,10 +3071,10 @@ def graph_overview(
     """Get graph schema, connection details, or Cypher language reference.
 
     Three independent axes — call with no args first for the overview:
-      graph_overview()                            — inventory of node types
+      graph_overview()                            — inventory + connections with property names
       graph_overview(types=["Field"])             — property schemas, samples
-      graph_overview(connections=True)            — all connection types overview
-      graph_overview(connections=["BELONGS_TO"])  — deep-dive with properties
+      graph_overview(connections=True)            — all connection types with properties
+      graph_overview(connections=["BELONGS_TO"])  — deep-dive: property stats, sample edges
       graph_overview(cypher=True)                 — Cypher clauses, functions, procedures
       graph_overview(cypher=["cluster","MATCH"])  — detailed docs with examples"""
     return graph.describe(types=types, connections=connections, cypher=cypher)

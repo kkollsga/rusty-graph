@@ -1421,7 +1421,8 @@ class KnowledgeGraph:
 
         **Node types** (``types`` parameter):
 
-        - ``describe()`` — Inventory overview with compact type descriptors.
+        - ``describe()`` — Inventory overview with compact type descriptors
+          and connections with edge property names.
         - ``describe(types=['Field', 'Well'])`` — Focused detail for
           specific types with properties, connections, and samples.
 
@@ -1431,6 +1432,7 @@ class KnowledgeGraph:
           source/target node types, and property names.
         - ``describe(connections=['BELONGS_TO'])`` — Deep-dive with per-pair
           counts, property stats with sample values, and sample edges.
+          Use this to discover what data edges carry.
 
         **Cypher** (``cypher`` parameter):
 

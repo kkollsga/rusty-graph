@@ -5,6 +5,14 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-03-08
+
+### Changed
+
+- **`describe()` default output now shows edge property names** in the `<connections>` section, improving agent discoverability of edge data without requiring `describe(connections=True)`.
+- Improved hint text in describe output to guide agents toward `describe(connections=['CONN_TYPE'])` for edge property stats.
+- `write_connections_overview` now reuses pre-computed metadata instead of scanning all edges (performance improvement).
+
 ## [0.6.0] - 2026-03-07
 
 ### Added
