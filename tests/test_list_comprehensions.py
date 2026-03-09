@@ -1,7 +1,8 @@
 """Tests for list comprehension in Cypher queries."""
 
-from kglite import KnowledgeGraph
 import pytest
+
+from kglite import KnowledgeGraph
 
 
 class TestListComprehensions:

@@ -4,10 +4,10 @@ import os
 import tempfile
 
 import pandas as pd
+import pytest
 
 import kglite
 from kglite import KnowledgeGraph
-import pytest
 
 
 class TestBasicSaveLoad:

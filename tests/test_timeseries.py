@@ -1,9 +1,9 @@
 """Tests for timeseries Python API."""
 
 import pandas as pd
+import pytest
 
 import kglite
-import pytest
 
 
 @pytest.fixture

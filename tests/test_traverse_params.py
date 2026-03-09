@@ -1,9 +1,9 @@
 """Tests for traverse() parameter enhancements: target_type, where alias, where_connection alias."""
 
 import pandas as pd
+import pytest
 
 import kglite
-import pytest
 
 
 @pytest.fixture

@@ -1,9 +1,9 @@
 """Tests for Cypher map projections: n {.prop1, .prop2, alias: expr}"""
 
 import pandas as pd
+import pytest
 
 import kglite
-import pytest
 
 
 @pytest.fixture

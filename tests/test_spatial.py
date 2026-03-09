@@ -1,9 +1,9 @@
 """Tests for spatial/geometry operations."""
 
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
-import pytest
 
 
 @pytest.fixture

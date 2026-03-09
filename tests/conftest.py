@@ -3,9 +3,9 @@
 import importlib
 
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
-import pytest
 
 
 def pytest_collect_file(parent, file_path):  # noqa: ARG001

@@ -1,9 +1,9 @@
 """Tests for fluent API parity features: regex, NOT, offset, filter_any, group_by, has_connection."""
 
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
-import pytest
 
 
 @pytest.fixture

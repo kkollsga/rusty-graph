@@ -1,9 +1,9 @@
 """Benchmark-specific fixtures with larger graphs."""
 
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
-import pytest
 
 
 @pytest.fixture

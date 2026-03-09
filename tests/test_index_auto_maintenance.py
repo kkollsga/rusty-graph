@@ -1,9 +1,9 @@
 """Tests for index auto-maintenance during Cypher mutations (CREATE, SET, REMOVE, MERGE)."""
 
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
-import pytest
 
 
 @pytest.fixture

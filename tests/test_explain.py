@@ -1,7 +1,8 @@
 """Tests for EXPLAIN and PROFILE query plan output."""
 
-from kglite import KnowledgeGraph
 import pytest
+
+from kglite import KnowledgeGraph
 
 
 @pytest.fixture

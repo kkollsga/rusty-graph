@@ -1,7 +1,8 @@
 """Tests for CALL procedure() YIELD columns — graph algorithm support in Cypher."""
 
-from kglite import KnowledgeGraph
 import pytest
+
+from kglite import KnowledgeGraph
 
 
 @pytest.fixture

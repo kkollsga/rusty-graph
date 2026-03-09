@@ -8,9 +8,9 @@ import os
 import tempfile
 
 import pandas as pd
+import pytest
 
 import kglite
-import pytest
 
 
 def make_large_graph(n=500):

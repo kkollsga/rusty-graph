@@ -3,10 +3,10 @@
 import json
 
 import pandas as pd
+import pytest
 
 import kglite
 from kglite.blueprint import from_blueprint
-import pytest
 
 # ── Helpers ──────────────────────────────────────────────────────────
 

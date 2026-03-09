@@ -4,8 +4,9 @@ Tests all known edge cases and validates semantics against Neo4j/openCypher
 specifications where applicable.
 """
 
-import kglite as rg
 import pytest
+
+import kglite as rg
 
 
 @pytest.fixture

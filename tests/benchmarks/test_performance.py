@@ -3,9 +3,9 @@
 import time
 
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
-import pytest
 
 pytestmark = pytest.mark.benchmark
 

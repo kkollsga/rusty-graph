@@ -1,9 +1,9 @@
 """Tests for Cypher temporal filtering functions: valid_at, valid_during."""
 
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
-import pytest
 
 
 @pytest.fixture

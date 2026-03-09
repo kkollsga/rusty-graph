@@ -6,9 +6,9 @@ import shutil
 import tempfile
 
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
-import pytest
 
 
 @pytest.fixture

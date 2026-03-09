@@ -5,9 +5,9 @@ error cases, type metadata maintenance, and index updates.
 """
 
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
-import pytest
 
 
 @pytest.fixture

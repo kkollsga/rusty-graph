@@ -1,9 +1,9 @@
 """Tests for index management: create, drop, list, composite, performance."""
 
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
-import pytest
 
 
 @pytest.fixture

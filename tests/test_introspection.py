@@ -3,9 +3,9 @@
 import xml.etree.ElementTree as ET
 
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
-import pytest
 
 # ── schema() ────────────────────────────────────────────────────────────────
 

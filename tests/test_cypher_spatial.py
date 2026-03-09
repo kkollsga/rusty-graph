@@ -1,9 +1,9 @@
 """Tests for Cypher spatial functions: point(), distance(), contains(), etc."""
 
 import pandas as pd
+import pytest
 
 import kglite
-import pytest
 
 
 @pytest.fixture

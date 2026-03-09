@@ -5,9 +5,9 @@ including edge cases like NaN, None, large integers, unicode, and various pandas
 """
 
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
-import pytest
 
 # ---------------------------------------------------------------------------
 # Fixtures

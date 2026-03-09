@@ -1,7 +1,6 @@
 """Tests for shapely/geopandas integration with spatial operations."""
 
 import pandas as pd
-
 import pytest
 
 shapely = pytest.importorskip("shapely")

@@ -5,9 +5,9 @@ Run with: make bench-save (to save a baseline) or make bench-compare (to compare
 """
 
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
-import pytest
 
 # ---------------------------------------------------------------------------
 # Fixtures

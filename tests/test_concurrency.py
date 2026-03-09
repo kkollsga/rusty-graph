@@ -8,9 +8,9 @@ import threading
 import time
 
 import pandas as pd
+import pytest
 
 import kglite
-import pytest
 
 
 @pytest.fixture

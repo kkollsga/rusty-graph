@@ -1,9 +1,9 @@
 """Tests for spatial configuration (location, geometry, point, shape types)."""
 
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
-import pytest
 
 
 @pytest.fixture

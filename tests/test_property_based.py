@@ -8,9 +8,9 @@ find edge cases humans wouldn't write.
 from hypothesis import given, settings
 from hypothesis import strategies as st
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
-import pytest
 
 # ---------------------------------------------------------------------------
 # Strategies

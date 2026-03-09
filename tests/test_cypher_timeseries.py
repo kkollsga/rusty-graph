@@ -1,9 +1,9 @@
 """Tests for Cypher ts_*() timeseries functions with NaiveDate keys."""
 
 import pandas as pd
+import pytest
 
 import kglite
-import pytest
 
 
 @pytest.fixture

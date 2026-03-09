@@ -1,9 +1,9 @@
 """Tests for graph maintenance operations: reindex(), vacuum(), graph_info()."""
 
 import pandas as pd
+import pytest
 
 from kglite import KnowledgeGraph
-import pytest
 
 
 @pytest.fixture

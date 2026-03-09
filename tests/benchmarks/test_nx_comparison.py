@@ -16,7 +16,6 @@ import tempfile
 import time
 
 import pandas as pd
-
 import pytest
 
 nx = pytest.importorskip("networkx", reason="networkx required for comparison benchmarks")
