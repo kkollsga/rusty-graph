@@ -8,12 +8,12 @@ Run accuracy only: pytest tests/benchmarks/test_nx_comparison.py -v -s -k "Accur
 Run performance only: pytest tests/benchmarks/test_nx_comparison.py -v -s -k "Performance"
 """
 
+from collections import defaultdict
 import math
 import pickle
 import random
 import tempfile
 import time
-from collections import defaultdict
 
 import pandas as pd
 

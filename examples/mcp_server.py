@@ -31,11 +31,11 @@ Claude Desktop config:
 """
 
 import argparse
-import sys
-import threading
 from datetime import datetime
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
+import sys
+import threading
 
 from mcp.server.fastmcp import FastMCP
 

@@ -1,7 +1,7 @@
 """Tests for CALL cluster() — general-purpose clustering, plus round(x,d) and || operator."""
 
-import pytest
 from kglite import KnowledgeGraph
+import pytest
 
 
 @pytest.fixture

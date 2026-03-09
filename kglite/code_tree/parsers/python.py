@@ -1,10 +1,10 @@
 """Python language parser using tree-sitter-python."""
 
-import re
 from pathlib import Path
+import re
 
-import tree_sitter_python as ts_python
 from tree_sitter import Language, Parser
+import tree_sitter_python as ts_python
 
 from .base import LanguageParser, count_lines, extract_comment_annotations, get_type_parameters, node_text
 from .models import (

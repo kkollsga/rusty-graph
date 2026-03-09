@@ -5,8 +5,8 @@ Bug 2: nodes(p)/relationships(p) returned strings instead of Python lists
 Bug 3: Multi-hop Cypher with OPTIONAL MATCH + chained WITH hung indefinitely
 """
 
-import pytest
 from kglite import KnowledgeGraph
+import pytest
 
 
 @pytest.fixture

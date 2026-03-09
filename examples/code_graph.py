@@ -10,8 +10,8 @@ Generates: Function, Class, Struct, Enum, Module, File nodes
 Requires: pip install kglite[code-tree]
 """
 
-import sys
 from pathlib import Path
+import sys
 
 from kglite.code_tree import build
 

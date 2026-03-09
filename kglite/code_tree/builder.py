@@ -9,10 +9,10 @@ EXTENDS, HAS_METHOD, HAS_SUBMODULE, IMPORTS).
 
 from __future__ import annotations
 
-import json
-import re
 from collections import defaultdict
+import json
 from pathlib import Path
+import re
 
 import pandas as pd
 

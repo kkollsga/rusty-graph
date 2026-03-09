@@ -5,8 +5,8 @@ import json
 import pandas as pd
 
 import kglite
-import pytest
 from kglite.blueprint import from_blueprint
+import pytest
 
 # ── Helpers ──────────────────────────────────────────────────────────
 

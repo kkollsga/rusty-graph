@@ -6,8 +6,8 @@ containing count(DISTINCT ...) returned incorrect (inflated) results due to:
 2. Cartesian product fan-out not being properly deduplicated
 """
 
-import pytest
 from kglite import KnowledgeGraph
+import pytest
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

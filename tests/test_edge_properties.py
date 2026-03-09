@@ -1,7 +1,7 @@
 """Tests for relationship/edge property access in Cypher queries."""
 
-import pytest
 from kglite import KnowledgeGraph
+import pytest
 
 
 @pytest.fixture

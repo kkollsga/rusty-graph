@@ -4,8 +4,8 @@ import random
 
 import pandas as pd
 
-import pytest
 from kglite import KnowledgeGraph
+import pytest
 
 # ===========================================================================
 # Bug 2: Edge traversal without ORDER BY returns broken results

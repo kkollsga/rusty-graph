@@ -2,8 +2,8 @@
 
 import time
 
-import pytest
 from kglite import KnowledgeGraph
+import pytest
 
 
 @pytest.fixture

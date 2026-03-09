@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
+from tree_sitter import Language, Parser
 import tree_sitter_c as ts_c
 import tree_sitter_cpp as ts_cpp
-from tree_sitter import Language, Parser
 
 from .base import LanguageParser, count_lines, extract_comment_annotations, get_type_parameters, node_text
 from .models import (

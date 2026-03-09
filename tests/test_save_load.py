@@ -6,8 +6,8 @@ import tempfile
 import pandas as pd
 
 import kglite
-import pytest
 from kglite import KnowledgeGraph
+import pytest
 
 
 class TestBasicSaveLoad:

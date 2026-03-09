@@ -9,8 +9,8 @@ All data is defined inline and written to a temporary directory.
 """
 
 import json
-import tempfile
 from pathlib import Path
+import tempfile
 
 import pandas as pd
 

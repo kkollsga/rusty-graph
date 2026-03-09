@@ -5,12 +5,12 @@ not just hand-picked examples. Hypothesis generates random inputs to
 find edge cases humans wouldn't write.
 """
 
-import pandas as pd
 from hypothesis import given, settings
 from hypothesis import strategies as st
+import pandas as pd
 
-import pytest
 from kglite import KnowledgeGraph
+import pytest
 
 # ---------------------------------------------------------------------------
 # Strategies

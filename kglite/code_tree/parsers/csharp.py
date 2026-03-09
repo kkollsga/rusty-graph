@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-import tree_sitter_c_sharp as ts_csharp
 from tree_sitter import Language, Parser
+import tree_sitter_c_sharp as ts_csharp
 
 from .base import LanguageParser, count_lines, extract_comment_annotations, get_type_parameters, node_text
 from .models import (

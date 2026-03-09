@@ -1,10 +1,10 @@
 """Rust language parser using tree-sitter-rust."""
 
-import re
 from pathlib import Path
+import re
 
-import tree_sitter_rust as ts_rust
 from tree_sitter import Language, Parser
+import tree_sitter_rust as ts_rust
 
 from .base import (
     LanguageParser,

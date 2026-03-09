@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-import tree_sitter_go as ts_go
 from tree_sitter import Language, Parser
+import tree_sitter_go as ts_go
 
 from .base import LanguageParser, count_lines, extract_comment_annotations, get_type_parameters, node_text
 from .models import (

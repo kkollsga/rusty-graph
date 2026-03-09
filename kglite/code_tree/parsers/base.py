@@ -1,8 +1,8 @@
 """Abstract base class for language parsers and shared helpers."""
 
-import re
 from abc import ABC, abstractmethod
 from pathlib import Path
+import re
 
 from .models import ParseResult
 

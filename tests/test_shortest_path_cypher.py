@@ -1,7 +1,7 @@
 """Tests for shortestPath() in Cypher queries."""
 
-import pytest
 from kglite import KnowledgeGraph
+import pytest
 
 
 @pytest.fixture
