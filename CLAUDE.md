@@ -48,9 +48,9 @@ Commit format: `type: short description` (`feat`, `fix`, `docs`, `refactor`, `te
 
 Update `CHANGELOG.md` `[Unreleased]` for user-visible changes. Skip for internal refactors, CI, test-only, formatting.
 
-**NEVER push without explicit user approval.** Before pushing:
+**NEVER push — the user pushes manually.** Before a release:
 1. Confirm version number with user (bump patch +0.0.1)
 2. Update `Cargo.toml` version + promote changelog
-3. Commit, then push after user approves
+3. Commit, then let the user push
 
 Version source of truth: `Cargo.toml` line 3.

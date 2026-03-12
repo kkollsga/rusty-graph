@@ -298,8 +298,11 @@ class PythonParser(LanguageParser):
         """
         rel = filepath.relative_to(src_root)
         parts = list(rel.parts)
-        # Strip file extension from last part
-        parts[-1] = parts[-1].replace(".py", "")
+        # Strip file extension from last part (.pyi before .py to avoid partial match)
+        if parts[-1].endswith(".pyi"):
+            parts[-1] = parts[-1][:-4]
+        else:
+            parts[-1] = parts[-1].replace(".py", "")
         # __init__ means the directory itself is the module
         if parts[-1] == "__init__":
             parts = parts[:-1]
@@ -648,9 +651,10 @@ class PythonParser(LanguageParser):
             language="python",
         )
         fname = filepath.name
+        stem = filepath.stem
         if (
             fname.startswith("test_")
-            or fname.endswith("_test.py")
+            or stem.endswith("_test")
             or "/tests/" in rel_path
             or rel_path.startswith("tests/")
         ):
@@ -783,15 +787,19 @@ class PythonParser(LanguageParser):
                         )
                     )
 
-        # Detect submodule declarations from __init__.py
-        if filepath.name == "__init__.py":
+        # Detect submodule declarations from __init__.py / __init__.pyi
+        if filepath.name in ("__init__.py", "__init__.pyi"):
             parent_dir = filepath.parent
             for item in sorted(parent_dir.iterdir()):
                 if item.is_dir() and (item / "__init__.py").exists():
                     file_info.submodule_declarations.append(item.name)
-                elif item.is_file() and item.suffix == ".py" and item.name != "__init__.py":
+                elif (
+                    item.is_file()
+                    and item.suffix in (".py", ".pyi")
+                    and item.name not in ("__init__.py", "__init__.pyi")
+                ):
                     file_info.submodule_declarations.append(
-                        item.stem  # filename without .py
+                        item.stem  # filename without extension
                     )
 
         file_info.annotations = extract_comment_annotations(root, source)
