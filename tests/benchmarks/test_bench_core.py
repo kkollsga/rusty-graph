@@ -142,9 +142,11 @@ def bench_graph_columnar():
 @pytest.mark.benchmark
 def test_bench_columnar_enable(benchmark, bench_graph):
     """Time to convert from compact to columnar storage."""
+
     def enable():
         bench_graph.disable_columnar()
         bench_graph.enable_columnar()
+
     benchmark(enable)
 
 
@@ -171,7 +173,9 @@ def test_bench_columnar_save_kgl(benchmark, bench_graph_columnar, tmp_path):
 def test_bench_save_mmap(benchmark, bench_graph_columnar, tmp_path):
     """Save columnar graph in mmap directory format."""
     counter = [0]
+
     def save():
         bench_graph_columnar.save_mmap(str(tmp_path / f"mmap_{counter[0]}"))
         counter[0] += 1
+
     benchmark(save)

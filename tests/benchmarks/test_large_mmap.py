@@ -107,8 +107,7 @@ def build_graph(target_gb):
         elapsed = time.perf_counter() - t0
         pct = (batch_idx + 1) / num_batches * 100
         print(
-            f"  Nodes: batch {batch_idx + 1}/{num_batches}  "
-            f"({pct:.0f}%)  {fmt_time(elapsed)}  RSS={fmt_mb(rss_mb())}",
+            f"  Nodes: batch {batch_idx + 1}/{num_batches}  ({pct:.0f}%)  {fmt_time(elapsed)}  RSS={fmt_mb(rss_mb())}",
             end="\r",
         )
     print()
@@ -133,8 +132,7 @@ def build_graph(target_gb):
         elapsed = time.perf_counter() - t1
         pct = (batch_idx + 1) / edge_batches * 100
         print(
-            f"  Edges: batch {batch_idx + 1}/{edge_batches}  "
-            f"({pct:.0f}%)  {fmt_time(elapsed)}  RSS={fmt_mb(rss_mb())}",
+            f"  Edges: batch {batch_idx + 1}/{edge_batches}  ({pct:.0f}%)  {fmt_time(elapsed)}  RSS={fmt_mb(rss_mb())}",
             end="\r",
         )
     print()
@@ -280,9 +278,13 @@ def print_summary(build_stats, io_results, mmap_timings, kgl_timings, disk_stats
     print(f"  Peak RSS:       {fmt_mb(build_stats['build_rss_mb']):>12s}")
     print()
     print(f"  {'':40s} {'mmap':>12s} {'kgl':>12s}")
-    print(f"  {'Save time':40s} {fmt_time(io_results['save_mmap_time']):>12s} {fmt_time(io_results['save_kgl_time']):>12s}")
+    print(
+        f"  {'Save time':40s} {fmt_time(io_results['save_mmap_time']):>12s} {fmt_time(io_results['save_kgl_time']):>12s}"
+    )
     print(f"  {'File size':40s} {fmt_mb(io_results['mmap_size_mb']):>12s} {fmt_mb(io_results['kgl_size_mb']):>12s}")
-    print(f"  {'Load time':40s} {fmt_time(io_results['load_mmap_time']):>12s} {fmt_time(io_results['load_kgl_time']):>12s}")
+    print(
+        f"  {'Load time':40s} {fmt_time(io_results['load_mmap_time']):>12s} {fmt_time(io_results['load_kgl_time']):>12s}"
+    )
     print()
 
     print(f"  {'Query':40s} {'mmap':>12s} {'compact':>12s} {'ratio':>8s}")
