@@ -15,6 +15,7 @@ use petgraph::Direction;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySlice};
 use pyo3::IntoPyObjectExt;
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 /// A single connection summary for display: connection type, target type, id, title.
@@ -183,7 +184,9 @@ impl ResultView {
                 ];
                 for key in &prop_keys {
                     row.push(PreProcessedValue::Plain(
-                        node.get_property(key).cloned().unwrap_or(Value::Null),
+                        node.get_property(key)
+                            .map(Cow::into_owned)
+                            .unwrap_or(Value::Null),
                     ));
                 }
                 row

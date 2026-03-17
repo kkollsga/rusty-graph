@@ -496,8 +496,8 @@ pub fn to_csv_dir(
             for &idx in indices {
                 if let Some(node) = graph.graph.node_weight(idx) {
                     if let Some(val) = node.get_property(col) {
-                        if !matches!(val, Value::Null) {
-                            prop_types.insert(col.clone(), value_type_name(val));
+                        if !matches!(*val, Value::Null) {
+                            prop_types.insert(col.clone(), value_type_name(&val));
                             break;
                         }
                     }
@@ -524,7 +524,7 @@ pub fn to_csv_dir(
                 for col in &prop_cols {
                     csv.push(',');
                     if let Some(val) = node.get_property(col) {
-                        csv.push_str(&escape_csv(&value_to_string(val)));
+                        csv.push_str(&escape_csv(&value_to_string(&val)));
                     }
                 }
                 csv.push('\n');

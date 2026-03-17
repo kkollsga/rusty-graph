@@ -2,6 +2,7 @@
 use crate::datatypes::values::{FilterCondition, Value};
 use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, SelectionOperation};
 use petgraph::graph::NodeIndex;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 /// Constant for the "type" field key used in type filtering
@@ -381,7 +382,7 @@ fn filter_nodes_by_conditions(
                     let value = field_cache.entry((idx, key.as_str())).or_insert_with(|| {
                         // Resolve alias: original column name → canonical field
                         let resolved = graph.resolve_alias(&node.node_type, key);
-                        node.get_field_ref(resolved).cloned()
+                        node.get_field_ref(resolved).map(Cow::into_owned)
                     });
 
                     match value {
@@ -412,7 +413,7 @@ fn sort_nodes_by_fields(
             for (field, _) in sort_fields {
                 value_cache.insert(
                     (node_idx, field.as_str()),
-                    node.get_field_ref(field).cloned(),
+                    node.get_field_ref(field).map(Cow::into_owned),
                 );
             }
         }
@@ -663,7 +664,7 @@ pub fn filter_nodes_any(
                 conditions.iter().all(|(key, condition)| {
                     let resolved = graph.resolve_alias(&node.node_type, key);
                     match node.get_field_ref(resolved) {
-                        Some(v) => matches_condition_cached(v, condition, &regex_cache),
+                        Some(v) => matches_condition_cached(&v, condition, &regex_cache),
                         None => matches!(condition, FilterCondition::IsNull),
                     }
                 })

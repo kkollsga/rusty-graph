@@ -9,6 +9,7 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::{EdgeRef, NodeIndexable};
 use petgraph::Direction;
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
@@ -1428,18 +1429,18 @@ impl<'a> PatternExecutor<'a> {
                 // Resolve alias: original column name → canonical field
                 let resolved = self.graph.resolve_alias(&node.node_type, key);
                 // Check special fields first: name/title maps to title, id maps to id
-                // Use references to avoid cloning
-                let value: Option<&Value> = if resolved == "name" || resolved == "title" {
-                    Some(&node.title)
+                // Use Cow to avoid cloning when possible
+                let value: Option<Cow<'_, Value>> = if resolved == "name" || resolved == "title" {
+                    Some(Cow::Borrowed(&node.title))
                 } else if resolved == "id" {
-                    Some(&node.id)
+                    Some(Cow::Borrowed(&node.id))
                 } else {
                     node.get_property(resolved)
                 };
 
                 match value {
                     Some(v) => {
-                        if !self.value_matches(v, matcher) {
+                        if !self.value_matches(&v, matcher) {
                             return false;
                         }
                     }

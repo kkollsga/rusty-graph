@@ -2,6 +2,7 @@
 use crate::datatypes::values::Value;
 use crate::graph::schema::{CurrentSelection, DirGraph, NodeData};
 use petgraph::graph::NodeIndex;
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 #[derive(Debug)]
@@ -156,12 +157,12 @@ fn calculate_stats_for_nodes(
     for &node_idx in nodes {
         if let Some(node) = graph.get_node(node_idx) {
             if let Some(value) = get_node_property(node, property) {
-                match value {
+                match &*value {
                     Value::Null => continue,
                     Value::String(s) if s.is_empty() => continue,
                     _ => {
                         stats.valid_count += 1;
-                        seen_types.insert(match value {
+                        seen_types.insert(match &*value {
                             Value::String(_) => "string",
                             Value::Int64(_) => "int64",
                             Value::Float64(_) => "float64",
@@ -175,7 +176,7 @@ fn calculate_stats_for_nodes(
                     }
                 }
 
-                if let Some(num) = try_convert_to_float(value) {
+                if let Some(num) = try_convert_to_float(&value) {
                     found_numeric = true;
                     sum += num;
                     min = min.min(num);
@@ -219,6 +220,6 @@ fn try_convert_to_float(value: &Value) -> Option<f64> {
     }
 }
 
-fn get_node_property<'a>(node: &'a NodeData, property: &str) -> Option<&'a Value> {
+fn get_node_property<'a>(node: &'a NodeData, property: &str) -> Option<Cow<'a, Value>> {
     node.get_property(property)
 }

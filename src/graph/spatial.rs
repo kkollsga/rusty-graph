@@ -321,7 +321,7 @@ pub fn contains_point(
         if let Some(node) = graph.graph.node_weight(node_idx) {
             let wkt_value = node.get_property(geometry_field);
 
-            if let Some(Value::String(wkt_str)) = wkt_value {
+            if let Some(Value::String(wkt_str)) = wkt_value.as_deref() {
                 if let Ok(geometry) = parse_wkt(wkt_str) {
                     let contains = match &geometry {
                         Geometry::Polygon(p) => p.contains(&query_point),
@@ -372,7 +372,7 @@ pub fn intersects_geometry(
         if let Some(node) = graph.graph.node_weight(node_idx) {
             let wkt_value = node.get_property(geometry_field);
 
-            if let Some(Value::String(wkt_str)) = wkt_value {
+            if let Some(Value::String(wkt_str)) = wkt_value.as_deref() {
                 if let Ok(node_geometry) = parse_wkt(wkt_str) {
                     if geometries_intersect(&node_geometry, &query_geometry) {
                         matching_nodes.push(node_idx);
@@ -443,14 +443,20 @@ pub(crate) fn node_location(
     lon_field: &str,
     geom_fallback: Option<&str>,
 ) -> Option<(f64, f64)> {
-    let lat = node.get_property(lat_field).and_then(value_to_f64);
-    let lon = node.get_property(lon_field).and_then(value_to_f64);
+    let lat = node
+        .get_property(lat_field)
+        .as_deref()
+        .and_then(value_to_f64);
+    let lon = node
+        .get_property(lon_field)
+        .as_deref()
+        .and_then(value_to_f64);
     if let (Some(lat), Some(lon)) = (lat, lon) {
         return Some((lat, lon));
     }
     // Fallback: geometry centroid
     if let Some(geom_field) = geom_fallback {
-        if let Some(Value::String(wkt)) = node.get_property(geom_field) {
+        if let Some(Value::String(wkt)) = node.get_property(geom_field).as_deref() {
             if let Ok(geom) = parse_wkt(wkt) {
                 if let Ok((lat, lon)) = geometry_centroid(&geom) {
                     return Some((lat, lon));

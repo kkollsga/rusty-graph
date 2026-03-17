@@ -15,6 +15,7 @@ pub mod batch_operations;
 pub mod bug_report;
 pub mod calculations;
 pub mod clustering;
+pub mod column_store;
 pub mod cypher;
 pub mod data_retrieval;
 pub mod debugging;
@@ -26,6 +27,7 @@ pub mod introspection;
 pub mod io_operations;
 pub mod lookups;
 pub mod maintain_graph;
+pub mod mmap_vec;
 pub mod pattern_matching;
 pub mod reporting;
 pub mod schema;
@@ -454,11 +456,11 @@ impl KnowledgeGraph {
                     if let Some(node) = self.inner.get_node(idx) {
                         let name_match = node
                             .get_field_ref("name")
-                            .map(|v| v == &name_val)
+                            .map(|v| *v == name_val)
                             .unwrap_or(false)
                             || node
                                 .get_field_ref("title")
-                                .map(|v| v == &name_val)
+                                .map(|v| *v == name_val)
                                 .unwrap_or(false);
                         if name_match {
                             matches.push((idx, node.to_node_info(&self.inner.interner)));
@@ -510,22 +512,22 @@ impl KnowledgeGraph {
         dict.set_item("qualified_name", py_out::value_to_py(py, &node.id)?)?;
 
         if let Some(v) = node.get_field_ref("file_path") {
-            dict.set_item("file_path", py_out::value_to_py(py, v)?)?;
+            dict.set_item("file_path", py_out::value_to_py(py, &v)?)?;
         }
         if let Some(v) = node.get_field_ref("line_number") {
-            dict.set_item("line_number", py_out::value_to_py(py, v)?)?;
+            dict.set_item("line_number", py_out::value_to_py(py, &v)?)?;
         }
         if let Some(v) = node.get_field_ref("end_line") {
-            dict.set_item("end_line", py_out::value_to_py(py, v)?)?;
+            dict.set_item("end_line", py_out::value_to_py(py, &v)?)?;
         }
         if let (Some(Value::Int64(start)), Some(Value::Int64(end))) = (
-            node.get_field_ref("line_number"),
-            node.get_field_ref("end_line"),
+            node.get_field_ref("line_number").as_deref(),
+            node.get_field_ref("end_line").as_deref(),
         ) {
             dict.set_item("line_count", end - start + 1)?;
         }
         if let Some(v) = node.get_field_ref("signature") {
-            dict.set_item("signature", py_out::value_to_py(py, v)?)?;
+            dict.set_item("signature", py_out::value_to_py(py, &v)?)?;
         }
 
         Ok(dict.into())
@@ -534,7 +536,7 @@ impl KnowledgeGraph {
     /// Check if a node's field value contains the given lowercase string (case-insensitive).
     fn field_contains_ci(node: &schema::NodeData, field: &str, needle_lower: &str) -> bool {
         node.get_field_ref(field)
-            .and_then(|v| match v {
+            .and_then(|v| match &*v {
                 Value::String(s) => Some(s.to_lowercase().contains(needle_lower)),
                 _ => None,
             })
@@ -544,7 +546,7 @@ impl KnowledgeGraph {
     /// Check if a node's field value starts with the given lowercase string (case-insensitive).
     fn field_starts_with_ci(node: &schema::NodeData, field: &str, prefix_lower: &str) -> bool {
         node.get_field_ref(field)
-            .and_then(|v| match v {
+            .and_then(|v| match &*v {
                 Value::String(s) => Some(s.to_lowercase().starts_with(prefix_lower)),
                 _ => None,
             })
@@ -2773,8 +2775,9 @@ impl KnowledgeGraph {
                 ic.append(py_out::value_to_py(py, id)?)?;
             }
             for (j, key) in prop_keys.iter().enumerate() {
-                let val = node.get_property(key).unwrap_or(&Value::Null);
-                prop_cols[j].append(py_out::value_to_py(py, val)?)?;
+                let val = node.get_property(key);
+                let val_ref = val.as_deref().unwrap_or(&Value::Null);
+                prop_cols[j].append(py_out::value_to_py(py, val_ref)?)?;
             }
         }
 
@@ -2844,7 +2847,7 @@ impl KnowledgeGraph {
                 keys.sort();
                 for key in keys {
                     if let Some(val) = node.get_property(key) {
-                        let s = format_value(val);
+                        let s = format_value(&val);
                         let display = if s.len() > 80 {
                             let keep = (80 - 5) / 2;
                             format!("{} ... {}", &s[..keep], &s[s.len() - keep..])
@@ -2906,13 +2909,13 @@ impl KnowledgeGraph {
             for col in &columns {
                 let resolved = self.inner.resolve_alias(&node.node_type, col);
                 if let Some(val) = node.get_field_ref(resolved) {
-                    if matches!(val, Value::Null) {
+                    if matches!(&*val, Value::Null) {
                         continue;
                     }
                     if !first {
                         s.push_str(", ");
                     }
-                    let v = format_value_compact(val);
+                    let v = format_value_compact(&val);
                     if v.len() > 80 {
                         let keep = (80 - 5) / 2;
                         s.push_str(&v[..keep]);
@@ -3180,11 +3183,11 @@ impl KnowledgeGraph {
                                 // "exact" (default)
                                 let name_val = Value::String(name.to_string());
                                 node.get_field_ref("name")
-                                    .map(|v| v == &name_val)
+                                    .map(|v| *v == name_val)
                                     .unwrap_or(false)
                                     || node
                                         .get_field_ref("title")
-                                        .map(|v| v == &name_val)
+                                        .map(|v| *v == name_val)
                                         .unwrap_or(false)
                             }
                         };
@@ -3315,7 +3318,7 @@ impl KnowledgeGraph {
             result.set_item("node", &node_dict)?;
 
             // defined_in (file_path shortcut)
-            if let Some(Value::String(fp)) = target_node.get_field_ref("file_path") {
+            if let Some(Value::String(fp)) = target_node.get_field_ref("file_path").as_deref() {
                 result.set_item("defined_in", fp)?;
             }
 
@@ -3539,15 +3542,15 @@ impl KnowledgeGraph {
                     Value::String(s) => s.clone(),
                     _ => String::new(),
                 };
-                let line = match node.get_field_ref("line_number") {
+                let line = match node.get_field_ref("line_number").as_deref() {
                     Some(Value::Int64(n)) => *n,
                     _ => 0,
                 };
-                let end = match node.get_field_ref("end_line") {
+                let end = match node.get_field_ref("end_line").as_deref() {
                     Some(Value::Int64(n)) => *n,
                     _ => 0,
                 };
-                let sig = match node.get_field_ref("signature") {
+                let sig = match node.get_field_ref("signature").as_deref() {
                     Some(Value::String(s)) => Some(s.clone()),
                     _ => None,
                 };
@@ -3643,6 +3646,37 @@ impl KnowledgeGraph {
     fn reindex(&mut self) {
         let graph = Arc::make_mut(&mut self.inner);
         graph.reindex();
+    }
+
+    /// Convert node properties to columnar storage.
+    ///
+    /// Properties are moved from per-node storage into per-type column stores,
+    /// reducing memory usage for homogeneous typed columns (int64, float64, etc.).
+    /// Automatically compacts properties first if not already compacted.
+    ///
+    /// Example:
+    ///     ```python
+    ///     graph.enable_columnar()
+    ///     assert graph.is_columnar()
+    ///     ```
+    fn enable_columnar(&mut self) {
+        let graph = Arc::make_mut(&mut self.inner);
+        graph.enable_columnar();
+    }
+
+    /// Convert columnar properties back to compact per-node storage.
+    ///
+    /// This is the inverse of enable_columnar(). Useful before saving
+    /// or when columnar storage is no longer needed.
+    fn disable_columnar(&mut self) {
+        let graph = Arc::make_mut(&mut self.inner);
+        graph.disable_columnar();
+    }
+
+    /// Returns True if any nodes use columnar property storage.
+    #[getter]
+    fn is_columnar(&self) -> bool {
+        self.inner.is_columnar()
     }
 
     /// Compact the graph by removing tombstones left by node/edge deletions.
@@ -4408,7 +4442,7 @@ impl KnowledgeGraph {
             for idx in nodes {
                 if let Some(node) = self.inner.get_node(idx) {
                     let resolved_group = self.inner.resolve_alias(&node.node_type, group_prop);
-                    let key = match node.get_field_ref(resolved_group) {
+                    let key = match node.get_field_ref(resolved_group).as_deref() {
                         Some(Value::String(s)) => s.clone(),
                         Some(Value::Int64(i)) => i.to_string(),
                         Some(v) => format!("{:?}", v),
@@ -4416,7 +4450,7 @@ impl KnowledgeGraph {
                     };
                     let resolved_prop = self.inner.resolve_alias(&node.node_type, property);
                     if let Some(val) = node.get_field_ref(resolved_prop) {
-                        let num = match val {
+                        let num = match &*val {
                             Value::Int64(i) => Some(*i as f64),
                             Value::Float64(f) => Some(*f),
                             Value::UniqueId(u) => Some(*u as f64),
@@ -4587,7 +4621,7 @@ impl KnowledgeGraph {
             for idx in nodes {
                 if let Some(node) = self.inner.get_node(idx) {
                     let resolved = self.inner.resolve_alias(&node.node_type, property);
-                    let key = match node.get_field_ref(resolved) {
+                    let key = match node.get_field_ref(resolved).as_deref() {
                         Some(Value::String(s)) => s.clone(),
                         Some(Value::Int64(i)) => i.to_string(),
                         Some(Value::Float64(f)) => format!("{}", f),
@@ -5013,6 +5047,28 @@ impl KnowledgeGraph {
         let inner = self.inner.clone();
         let path_owned = path.to_string();
         py.detach(move || io_operations::write_graph_to_file(&inner, &path_owned))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))
+    }
+
+    /// Save graph in mmap directory format.
+    ///
+    /// Creates a directory with memory-mapped column files for each node type.
+    /// This format enables instant loading of large graphs via mmap, and
+    /// supports out-of-core (larger-than-RAM) workloads.
+    ///
+    /// Args:
+    ///     path: Directory path to create. Will be created if it doesn't exist.
+    ///
+    /// Example:
+    ///     ```python
+    ///     graph.enable_columnar()
+    ///     graph.save_mmap("/tmp/my_graph")
+    ///     ```
+    fn save_mmap(&mut self, py: Python<'_>, path: &str) -> PyResult<()> {
+        io_operations::prepare_save(&mut self.inner);
+        let inner = self.inner.clone();
+        let path_owned = path.to_string();
+        py.detach(move || io_operations::write_graph_mmap(&inner, &path_owned))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))
     }
 

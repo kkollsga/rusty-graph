@@ -59,7 +59,7 @@ pub fn node_is_temporally_valid(
 ) -> bool {
     // Check valid_from
     if let Some(val) = node.get_field_ref(&config.valid_from) {
-        match val {
+        match &*val {
             Value::DateTime(d) => {
                 if d > reference {
                     return false;
@@ -72,7 +72,7 @@ pub fn node_is_temporally_valid(
 
     // Check valid_to
     if let Some(val) = node.get_field_ref(&config.valid_to) {
-        match val {
+        match &*val {
             Value::DateTime(d) => {
                 if d < reference {
                     return false;
@@ -138,7 +138,7 @@ pub fn node_overlaps_range(
 ) -> bool {
     // Check valid_from <= end
     if let Some(val) = node.get_field_ref(&config.valid_from) {
-        match val {
+        match &*val {
             Value::DateTime(d) => {
                 if d > end {
                     return false;
@@ -151,7 +151,7 @@ pub fn node_overlaps_range(
 
     // Check valid_to >= start
     if let Some(val) = node.get_field_ref(&config.valid_to) {
-        match val {
+        match &*val {
             Value::DateTime(d) => {
                 if d < start {
                     return false;

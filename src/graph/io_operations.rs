@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::path::Path;
 use std::sync::Arc;
 
 /// Return a pinned bincode configuration that is identical to the legacy
@@ -718,5 +719,226 @@ fn finalize_load(mut dir_graph: DirGraph) -> KnowledgeGraph {
         last_mutation_stats: None,
         embedder: None,
         temporal_context: TemporalContext::default(),
+    }
+}
+
+// ─── Mmap directory format ──────────────────────────────────────────────────
+
+/// Manifest for the mmap directory save format.
+#[derive(Debug, Serialize, Deserialize)]
+struct MmapManifest {
+    /// Column schema per node type: type_name → { prop_name → column_type_tag }
+    column_schemas: HashMap<String, HashMap<String, String>>,
+    /// Row count per node type.
+    row_counts: HashMap<String, u32>,
+    /// File metadata (same as .kgl format for shared state).
+    #[serde(flatten)]
+    file_meta: FileMetadata,
+}
+
+/// Save graph in mmap directory format.
+///
+/// Directory layout:
+/// ```text
+/// <dir>/
+/// ├── manifest.json
+/// ├── topology.zst      # zstd-compressed bincode of graph (properties as Compact)
+/// ├── Person/
+/// │   ├── age.i64       # raw i64 array
+/// │   ├── age.null      # null bitmap (u8 per row)
+/// │   ├── full_name.off # u64 string offsets
+/// │   ├── full_name.str # raw UTF-8 bytes
+/// │   └── full_name.null
+/// └── Company/
+///     └── ...
+/// ```
+pub fn write_graph_mmap(graph: &DirGraph, dir: &str) -> io::Result<()> {
+    let dir_path = Path::new(dir);
+    std::fs::create_dir_all(dir_path)?;
+
+    // 1. If columnar, save column files per type
+    let mut column_schemas: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut row_counts: HashMap<String, u32> = HashMap::new();
+
+    for (type_name, store) in &graph.column_stores {
+        let type_dir = dir_path.join(type_name);
+        store.save_to_dir(&type_dir, &graph.interner)?;
+
+        // Build column schema from store
+        let mut cols = HashMap::new();
+        for (slot, ik) in store.schema().iter() {
+            let prop_name = graph.interner.resolve(ik);
+            // Get type tag from the column
+            if let Some(col) = store.columns_ref().get(slot as usize) {
+                cols.insert(prop_name.to_string(), col.type_tag().to_string());
+            }
+        }
+        column_schemas.insert(type_name.clone(), cols);
+        row_counts.insert(type_name.clone(), store.row_count());
+    }
+
+    // 2. Save topology (graph structure) — convert Columnar → Compact first
+    let mut graph_clone = graph.clone();
+    graph_clone.disable_columnar();
+    let topology_raw = {
+        let _guard = SerdeSerializeGuard::new(&graph_clone.interner);
+        bincode_options()
+            .serialize(&graph_clone.graph)
+            .map_err(io::Error::other)?
+    };
+    let topology_compressed = zstd_compress(&topology_raw)?;
+    std::fs::write(dir_path.join("topology.zst"), &topology_compressed)?;
+
+    // 3. Serialize embeddings if any
+    if !graph.embeddings.is_empty() {
+        let emb_raw = bincode_options()
+            .serialize(&graph.embeddings)
+            .map_err(io::Error::other)?;
+        let emb_compressed = zstd_compress(&emb_raw)?;
+        std::fs::write(dir_path.join("embeddings.zst"), &emb_compressed)?;
+    }
+
+    // 4. Write manifest
+    let manifest = MmapManifest {
+        column_schemas,
+        row_counts,
+        file_meta: build_file_metadata(graph),
+    };
+    let manifest_json = serde_json::to_string_pretty(&manifest).map_err(io::Error::other)?;
+    std::fs::write(dir_path.join("manifest.json"), manifest_json)?;
+
+    Ok(())
+}
+
+/// Load graph from mmap directory format.
+pub fn load_graph_mmap(dir: &str) -> io::Result<KnowledgeGraph> {
+    use crate::graph::column_store::ColumnStore;
+
+    let dir_path = Path::new(dir);
+
+    // 1. Read manifest
+    let manifest_str = std::fs::read_to_string(dir_path.join("manifest.json"))?;
+    let manifest: MmapManifest = serde_json::from_str(&manifest_str).map_err(io::Error::other)?;
+
+    // 2. Load topology
+    let topology_compressed = std::fs::read(dir_path.join("topology.zst"))?;
+    let topology_raw = zstd::decode_all(std::io::Cursor::new(&topology_compressed))?;
+
+    let mut interner = StringInterner::new();
+    let graph = {
+        let _guard = SerdeDeserializeGuard::new(&mut interner);
+        bincode_options()
+            .deserialize(&topology_raw)
+            .map_err(io::Error::other)?
+    };
+
+    // 3. Load embeddings if present
+    let embeddings = if dir_path.join("embeddings.zst").exists() {
+        let emb_compressed = std::fs::read(dir_path.join("embeddings.zst"))?;
+        let emb_raw = zstd::decode_all(std::io::Cursor::new(&emb_compressed))?;
+        bincode_options()
+            .deserialize(&emb_raw)
+            .map_err(io::Error::other)?
+    } else {
+        HashMap::new()
+    };
+
+    // 4. Build DirGraph from metadata (reuse from_graph for field defaults)
+    let meta = &manifest.file_meta;
+    let mut dir_graph = DirGraph::from_graph(graph);
+    dir_graph.interner = interner;
+    dir_graph.schema_definition = meta.schema_definition.clone();
+    dir_graph.property_index_keys = meta.property_index_keys.clone();
+    dir_graph.composite_index_keys = meta.composite_index_keys.clone();
+    dir_graph.range_index_keys = meta.range_index_keys.clone();
+    dir_graph.node_type_metadata = meta.node_type_metadata.clone();
+    dir_graph.connection_type_metadata = meta.connection_type_metadata.clone();
+    dir_graph.id_field_aliases = meta.id_field_aliases.clone();
+    dir_graph.title_field_aliases = meta.title_field_aliases.clone();
+    dir_graph.auto_vacuum_threshold = meta.auto_vacuum_threshold;
+    dir_graph.spatial_configs = meta.spatial_configs.clone();
+    dir_graph.timeseries_configs = meta.timeseries_configs.clone();
+    dir_graph.temporal_node_configs = meta.temporal_node_configs.clone();
+    dir_graph.temporal_edge_configs = meta.temporal_edge_configs.clone();
+    dir_graph.embeddings = embeddings;
+
+    // 5. Rebuild type indices and compact properties
+    dir_graph.rebuild_type_indices_and_compact();
+    dir_graph.build_connection_types_cache();
+    dir_graph.rebuild_indices_from_keys();
+
+    // 6. Enable columnar storage from the saved column files
+    for (type_name, col_schema) in &manifest.column_schemas {
+        if let Some(type_schema) = dir_graph.type_schemas.get(type_name) {
+            let type_meta = dir_graph
+                .node_type_metadata
+                .get(type_name)
+                .cloned()
+                .unwrap_or_default();
+            let mut store =
+                ColumnStore::new(Arc::clone(type_schema), &type_meta, &dir_graph.interner);
+
+            // Load column data from files
+            let type_dir = dir_path.join(type_name);
+            if type_dir.exists() {
+                let row_count = manifest.row_counts.get(type_name).copied().unwrap_or(0);
+                store.load_from_dir(&type_dir, col_schema, &dir_graph.interner, row_count)?;
+            }
+
+            dir_graph
+                .column_stores
+                .insert(type_name.clone(), Arc::new(store));
+        }
+    }
+
+    // 7. Convert nodes to use columnar storage if column stores were loaded
+    if !dir_graph.column_stores.is_empty() {
+        // Re-point nodes to their columnar stores
+        for (type_name, store) in &dir_graph.column_stores {
+            if let Some(indices) = dir_graph.type_indices.get(type_name) {
+                for (row_id, &node_idx) in indices.iter().enumerate() {
+                    if let Some(node) = dir_graph.graph.node_weight_mut(node_idx) {
+                        node.properties = crate::graph::schema::PropertyStorage::Columnar {
+                            store: Arc::clone(store),
+                            row_id: row_id as u32,
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(KnowledgeGraph {
+        inner: Arc::new(dir_graph),
+        selection: CowSelection::new(),
+        reports: OperationReports::new(),
+        last_mutation_stats: None,
+        embedder: None,
+        temporal_context: TemporalContext::default(),
+    })
+}
+
+/// Build FileMetadata from a DirGraph (shared between .kgl and mmap formats).
+fn build_file_metadata(graph: &DirGraph) -> FileMetadata {
+    FileMetadata {
+        core_data_version: CURRENT_CORE_DATA_VERSION,
+        library_version: graph.save_metadata.library_version.clone(),
+        schema_definition: graph.schema_definition.clone(),
+        property_index_keys: graph.property_index_keys.clone(),
+        composite_index_keys: graph.composite_index_keys.clone(),
+        range_index_keys: graph.range_index_keys.clone(),
+        node_type_metadata: graph.node_type_metadata.clone(),
+        connection_type_metadata: graph.connection_type_metadata.clone(),
+        id_field_aliases: graph.id_field_aliases.clone(),
+        title_field_aliases: graph.title_field_aliases.clone(),
+        auto_vacuum_threshold: graph.auto_vacuum_threshold,
+        spatial_configs: graph.spatial_configs.clone(),
+        timeseries_configs: graph.timeseries_configs.clone(),
+        temporal_node_configs: graph.temporal_node_configs.clone(),
+        temporal_edge_configs: graph.temporal_edge_configs.clone(),
+        graph_compressed_size: None,
+        timeseries_data_version: 2,
+        embedding_compressed_size: None,
+        compression: "zstd".to_string(),
     }
 }

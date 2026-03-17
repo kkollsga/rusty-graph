@@ -554,7 +554,7 @@ impl KnowledgeGraph {
 
         for &node_idx in &node_indices {
             if let Some(node) = self.inner.graph.node_weight(node_idx) {
-                match node.get_property(text_column) {
+                match node.get_property(text_column).as_deref() {
                     Some(crate::datatypes::values::Value::String(s)) if !s.is_empty() => {
                         // Skip nodes that already have an embedding
                         if existing_store

@@ -397,8 +397,8 @@ fn sample_unique_values(
             }
             if let Some(node) = graph.get_node(idx) {
                 if let Some(val) = node.get_property(property) {
-                    if !is_null_value(val) {
-                        let s = match val {
+                    if !is_null_value(&val) {
+                        let s = match &*val {
                             Value::String(s) => s.clone(),
                             Value::Int64(n) => n.to_string(),
                             Value::Float64(f) => f.to_string(),
@@ -1091,10 +1091,10 @@ fn compute_edge_property_stats(
             if let Some(v) = ed.get_property(prop_name) {
                 if !is_null_value(v) {
                     non_null += 1;
-                    value_set.insert(v.clone());
                     if first_type.is_none() {
                         first_type = Some(value_type_name(v));
                     }
+                    value_set.insert(v.clone());
                 }
             }
         }
@@ -2523,6 +2523,19 @@ fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"export_csv(directory)\">CSV tree + blueprint.json (round-trips with from_blueprint).</method>\n");
     xml.push_str("    <method sig=\"save(path)\">Binary .kgl file.</method>\n");
     xml.push_str("    <method sig=\"kglite.load(path)\">Restore from .kgl file.</method>\n");
+    xml.push_str("    <method sig=\"save_mmap(path)\">Mmap directory format for large/out-of-core graphs.</method>\n");
+    xml.push_str(
+        "    <method sig=\"kglite.load_mmap(path)\">Restore from mmap directory.</method>\n",
+    );
+    xml.push_str("  </group>\n");
+
+    // Columnar storage
+    xml.push_str("  <group name=\"columnar\">\n");
+    xml.push_str("    <method sig=\"enable_columnar()\">Convert properties to per-type columnar stores (lower memory).</method>\n");
+    xml.push_str("    <method sig=\"disable_columnar()\">Convert back to compact per-node storage.</method>\n");
+    xml.push_str(
+        "    <method sig=\"is_columnar\">Property: True if columnar storage is active.</method>\n",
+    );
     xml.push_str("  </group>\n");
 
     // Set operations
@@ -2862,6 +2875,8 @@ fn write_fluent_topic_export(xml: &mut String) {
         "      <m sig=\"save(path)\">Binary .kgl file (fast, complete graph state).</m>\n",
     );
     xml.push_str("      <m sig=\"kglite.load(path)\">Restore from .kgl file.</m>\n");
+    xml.push_str("      <m sig=\"save_mmap(path)\">Mmap directory format for large/out-of-core graphs. Requires enable_columnar() first.</m>\n");
+    xml.push_str("      <m sig=\"kglite.load_mmap(path)\">Restore from mmap directory (instant startup via mmap).</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str(
@@ -2871,6 +2886,7 @@ fn write_fluent_topic_export(xml: &mut String) {
     xml.push_str(
         "      <ex desc=\"binary\">graph.save('graph.kgl'); g2 = kglite.load('graph.kgl')</ex>\n",
     );
+    xml.push_str("      <ex desc=\"mmap\">graph.enable_columnar(); graph.save_mmap('/tmp/g'); g2 = kglite.load_mmap('/tmp/g')</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </export>\n");
 }

@@ -78,7 +78,7 @@ fn validate_single_node(
 
         let has_field = node
             .get_property(required_field)
-            .map(|v| !matches!(v, Value::Null))
+            .map(|v| !matches!(*v, Value::Null))
             .unwrap_or(false);
 
         if !has_field {
@@ -93,13 +93,13 @@ fn validate_single_node(
     // Check field types
     for (field, expected_type) in &schema.field_types {
         if let Some(value) = node.get_property(field) {
-            if !value_matches_type(value, expected_type) {
+            if !value_matches_type(&value, expected_type) {
                 errors.push(ValidationError::TypeMismatch {
                     node_type: node_type.to_string(),
                     node_title: title.clone(),
                     field: field.clone(),
                     expected_type: expected_type.clone(),
-                    actual_type: get_value_type_name(value),
+                    actual_type: get_value_type_name(&value),
                 });
             }
         }

@@ -22,6 +22,7 @@ use petgraph::graph::NodeIndex;
 use petgraph::visit::{EdgeRef, NodeIndexable};
 use petgraph::Direction;
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
@@ -1270,9 +1271,9 @@ impl<'a> CypherExecutor<'a> {
                         let val = nd.get_property(key);
                         let ok = match matcher {
                             PropertyMatcher::Equals(expected) => val
-                                .as_ref()
+                                .as_deref()
                                 .is_some_and(|v| filtering_methods::values_equal(v, expected)),
-                            PropertyMatcher::In(values) => val.as_ref().is_some_and(|v| {
+                            PropertyMatcher::In(values) => val.as_deref().is_some_and(|v| {
                                 values
                                     .iter()
                                     .any(|exp| filtering_methods::values_equal(v, exp))
@@ -2565,6 +2566,7 @@ impl<'a> CypherExecutor<'a> {
                 };
                 let lat = match node
                     .get_property(&spec.lat_prop)
+                    .as_deref()
                     .and_then(value_operations::value_to_f64)
                 {
                     Some(v) => v,
@@ -2572,6 +2574,7 @@ impl<'a> CypherExecutor<'a> {
                 };
                 let lon = match node
                     .get_property(&spec.lon_prop)
+                    .as_deref()
                     .and_then(value_operations::value_to_f64)
                 {
                     Some(v) => v,
@@ -4023,7 +4026,7 @@ impl<'a> CypherExecutor<'a> {
 
         // Primary geometry + bounding box
         let geometry = config.geometry.as_ref().and_then(|geom_f| {
-            if let Some(Value::String(wkt)) = node.get_property(geom_f) {
+            if let Some(Value::String(wkt)) = node.get_property(geom_f).as_deref() {
                 if let Ok(geom) = self.parse_wkt_cached(wkt) {
                     let bbox = geom.bounding_rect();
                     return Some((geom, bbox));
@@ -4034,15 +4037,21 @@ impl<'a> CypherExecutor<'a> {
 
         // Primary location
         let location = config.location.as_ref().and_then(|(lat_f, lon_f)| {
-            let lat = value_operations::value_to_f64(node.get_property(lat_f)?)?;
-            let lon = value_operations::value_to_f64(node.get_property(lon_f)?)?;
+            let lat = node
+                .get_property(lat_f)
+                .as_deref()
+                .and_then(value_operations::value_to_f64)?;
+            let lon = node
+                .get_property(lon_f)
+                .as_deref()
+                .and_then(value_operations::value_to_f64)?;
             Some((lat, lon))
         });
 
         // Named shapes
         let mut shapes = HashMap::new();
         for (name, field) in &config.shapes {
-            if let Some(Value::String(wkt)) = node.get_property(field) {
+            if let Some(Value::String(wkt)) = node.get_property(field).as_deref() {
                 if let Ok(geom) = self.parse_wkt_cached(wkt) {
                     let bbox = geom.bounding_rect();
                     shapes.insert(name.clone(), (geom, bbox));
@@ -4055,8 +4064,10 @@ impl<'a> CypherExecutor<'a> {
         for (name, (lat_f, lon_f)) in &config.points {
             if let (Some(lat), Some(lon)) = (
                 node.get_property(lat_f)
+                    .as_deref()
                     .and_then(value_operations::value_to_f64),
                 node.get_property(lon_f)
+                    .as_deref()
                     .and_then(value_operations::value_to_f64),
             ) {
                 points.insert(name.clone(), (lat, lon));
@@ -7216,7 +7227,7 @@ impl<'a> CypherExecutor<'a> {
                     let mut all_present = true;
                     for prop in prop_names {
                         if let Some(val) = node.get_property(prop) {
-                            if let Some(f) = value_to_f64(val) {
+                            if let Some(f) = value_to_f64(&val) {
                                 vals.push(f);
                             } else {
                                 all_present = false;
@@ -7944,8 +7955,8 @@ fn execute_set(
                         Some(node) => {
                             let nt = node.get_node_type_ref().to_string();
                             let old = match property.as_str() {
-                                "name" => node.get_field_ref("name").cloned(),
-                                _ => node.get_field_ref(property).cloned(),
+                                "name" => node.get_field_ref("name").map(Cow::into_owned),
+                                _ => node.get_field_ref(property).map(Cow::into_owned),
                             };
                             (old, nt)
                         }
@@ -8367,7 +8378,7 @@ fn try_match_merge_pattern(
                             } else {
                                 node.get_field_ref(key)
                             };
-                            value == Some(expected)
+                            value.as_deref() == Some(expected)
                         })
                     } else {
                         false
@@ -8800,7 +8811,7 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
         _ => {
             // Check real property first (most common case)
             if let Some(val) = node.get_property(resolved) {
-                return val.clone();
+                return val.into_owned();
             }
             // Fall through to spatial virtual properties only if not found
             if let Some(config) = graph.get_spatial_config(&node.node_type) {
@@ -8808,10 +8819,10 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
                 if resolved == "location" {
                     if let Some((lat_f, lon_f)) = &config.location {
                         let lat = value_operations::value_to_f64(
-                            node.get_property(lat_f).unwrap_or(&Value::Null),
+                            node.get_property(lat_f).as_deref().unwrap_or(&Value::Null),
                         );
                         let lon = value_operations::value_to_f64(
-                            node.get_property(lon_f).unwrap_or(&Value::Null),
+                            node.get_property(lon_f).as_deref().unwrap_or(&Value::Null),
                         );
                         if let (Some(lat), Some(lon)) = (lat, lon) {
                             return Value::Point { lat, lon };
@@ -8822,17 +8833,17 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
                 if resolved == "geometry" {
                     if let Some(geom_f) = &config.geometry {
                         if let Some(val) = node.get_property(geom_f) {
-                            return val.clone();
+                            return val.into_owned();
                         }
                     }
                 }
                 // Named points → synthesize Point
                 if let Some((lat_f, lon_f)) = config.points.get(resolved) {
                     let lat = value_operations::value_to_f64(
-                        node.get_property(lat_f).unwrap_or(&Value::Null),
+                        node.get_property(lat_f).as_deref().unwrap_or(&Value::Null),
                     );
                     let lon = value_operations::value_to_f64(
-                        node.get_property(lon_f).unwrap_or(&Value::Null),
+                        node.get_property(lon_f).as_deref().unwrap_or(&Value::Null),
                     );
                     if let (Some(lat), Some(lon)) = (lat, lon) {
                         return Value::Point { lat, lon };
@@ -8841,7 +8852,7 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
                 // Named shapes → return WKT string
                 if let Some(shape_f) = config.shapes.get(resolved) {
                     if let Some(val) = node.get_property(shape_f) {
-                        return val.clone();
+                        return val.into_owned();
                     }
                 }
             }
@@ -9729,7 +9740,7 @@ mod tests {
             .node_weight(petgraph::graph::NodeIndex::new(0))
             .unwrap();
         assert_eq!(
-            node.get_field_ref("name"),
+            node.get_field_ref("name").as_deref(),
             Some(&Value::String("Alice".to_string()))
         );
     }
@@ -9747,7 +9758,10 @@ mod tests {
             .graph
             .node_weight(petgraph::graph::NodeIndex::new(0))
             .unwrap();
-        assert_eq!(node.get_field_ref("price"), Some(&Value::Int64(999)));
+        assert_eq!(
+            node.get_field_ref("price").as_deref(),
+            Some(&Value::Int64(999))
+        );
         assert_eq!(node.get_node_type_ref(), "Product");
     }
 
@@ -9803,7 +9817,7 @@ mod tests {
             .node_weight(petgraph::graph::NodeIndex::new(0))
             .unwrap();
         assert_eq!(
-            node.get_field_ref("name"),
+            node.get_field_ref("name").as_deref(),
             Some(&Value::String("Charlie".to_string()))
         );
     }
@@ -9838,7 +9852,10 @@ mod tests {
             .graph
             .node_weight(petgraph::graph::NodeIndex::new(0))
             .unwrap();
-        assert_eq!(node.get_field_ref("age"), Some(&Value::Int64(31)));
+        assert_eq!(
+            node.get_field_ref("age").as_deref(),
+            Some(&Value::Int64(31))
+        );
     }
 
     #[test]
@@ -9856,7 +9873,7 @@ mod tests {
             .node_weight(petgraph::graph::NodeIndex::new(0))
             .unwrap();
         assert_eq!(
-            node.get_field_ref("name"),
+            node.get_field_ref("name").as_deref(),
             Some(&Value::String("Alicia".to_string()))
         );
     }
@@ -9887,7 +9904,10 @@ mod tests {
             .graph
             .node_weight(petgraph::graph::NodeIndex::new(0))
             .unwrap();
-        assert_eq!(node.get_field_ref("age"), Some(&Value::Int64(31)));
+        assert_eq!(
+            node.get_field_ref("age").as_deref(),
+            Some(&Value::Int64(31))
+        );
     }
 
     #[test]
@@ -10018,7 +10038,7 @@ mod tests {
             .graph
             .node_weight(petgraph::graph::NodeIndex::new(0))
             .unwrap();
-        assert_eq!(node.get_field_ref("age"), None);
+        assert_eq!(node.get_field_ref("age").as_deref(), None);
     }
 
     #[test]
@@ -10099,7 +10119,10 @@ mod tests {
             .graph
             .node_weight(petgraph::graph::NodeIndex::new(0))
             .unwrap();
-        assert_eq!(node.get_field_ref("visits"), Some(&Value::Int64(1)));
+        assert_eq!(
+            node.get_field_ref("visits").as_deref(),
+            Some(&Value::Int64(1))
+        );
     }
 
     #[test]

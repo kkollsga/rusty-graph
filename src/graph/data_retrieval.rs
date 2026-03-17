@@ -3,6 +3,7 @@ use crate::datatypes::values::{format_value, Value};
 use crate::graph::schema::{CurrentSelection, DirGraph, NodeInfo};
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -125,12 +126,13 @@ pub fn get_nodes(
                     if let Some(node) = graph.get_node(*p) {
                         (
                             node.get_field_ref("title")
+                                .as_deref()
                                 .and_then(|v| match v {
                                     Value::String(s) => Some(s.clone()),
                                     _ => None,
                                 })
                                 .unwrap_or_else(|| "Unknown".to_string()),
-                            node.get_field_ref("id").cloned(),
+                            node.get_field_ref("id").map(Cow::into_owned),
                             Some(node.get_node_type_ref().to_string()),
                         )
                     } else {
@@ -189,7 +191,7 @@ pub fn get_property_values(
                             graph
                                 .get_node(idx)
                                 .and_then(|node| node.get_field_ref(prop))
-                                .cloned()
+                                .map(Cow::into_owned)
                                 .unwrap_or(Value::Null)
                         })
                         .collect()
@@ -200,7 +202,7 @@ pub fn get_property_values(
             let parent_title = match parent {
                 Some(p) => {
                     if let Some(node) = graph.get_node(*p) {
-                        if let Some(Value::String(title)) = node.get_field_ref("title") {
+                        if let Some(Value::String(title)) = node.get_field_ref("title").as_deref() {
                             title.clone()
                         } else {
                             "Unknown".to_string()
@@ -257,7 +259,7 @@ pub fn get_unique_values(
                 for &idx in &filtered_children {
                     if let Some(node) = graph.get_node(idx) {
                         if let Some(value) = node.get_field_ref(property) {
-                            unique_values.insert(value.clone());
+                            unique_values.insert(value.into_owned());
                         }
                     }
                 }
@@ -265,7 +267,9 @@ pub fn get_unique_values(
                 let parent_title = match parent {
                     Some(p) => {
                         if let Some(node) = graph.get_node(*p) {
-                            if let Some(Value::String(title)) = node.get_field_ref("title") {
+                            if let Some(Value::String(title)) =
+                                node.get_field_ref("title").as_deref()
+                            {
                                 title.clone()
                             } else {
                                 "Unknown".to_string()
@@ -299,7 +303,7 @@ pub fn get_unique_values(
                 for &idx in &filtered_children {
                     if let Some(node) = graph.get_node(idx) {
                         if let Some(value) = node.get_field_ref(property) {
-                            all_unique_values.insert(value.clone());
+                            all_unique_values.insert(value.into_owned());
                         }
                     }
                 }
@@ -457,11 +461,11 @@ pub fn get_connections(
                                 edge_data.connection_type_str(&graph.interner).to_string(),
                                 source_node
                                     .get_field_ref("id")
-                                    .cloned()
+                                    .map(Cow::into_owned)
                                     .unwrap_or(Value::Null),
                                 source_node
                                     .get_field_ref("title")
-                                    .cloned()
+                                    .map(Cow::into_owned)
                                     .unwrap_or(Value::Null),
                                 edge_data.properties_cloned(&graph.interner),
                                 node_props,
@@ -485,11 +489,11 @@ pub fn get_connections(
                                 edge_data.connection_type_str(&graph.interner).to_string(),
                                 target_node
                                     .get_field_ref("id")
-                                    .cloned()
+                                    .map(Cow::into_owned)
                                     .unwrap_or(Value::Null),
                                 target_node
                                     .get_field_ref("title")
-                                    .cloned()
+                                    .map(Cow::into_owned)
                                     .unwrap_or(Value::Null),
                                 edge_data.properties_cloned(&graph.interner),
                                 node_props,
@@ -518,12 +522,13 @@ pub fn get_connections(
                         if let Some(node) = graph.get_node(p) {
                             (
                                 node.get_field_ref("title")
+                                    .as_deref()
                                     .and_then(|v| match v {
                                         Value::String(s) => Some(s.clone()),
                                         _ => None,
                                     })
                                     .unwrap_or_else(|| "Unknown".to_string()),
-                                node.get_field_ref("id").cloned(),
+                                node.get_field_ref("id").map(Cow::into_owned),
                                 Some(node.get_node_type_ref().to_string()),
                             )
                         } else {

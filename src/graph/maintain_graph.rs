@@ -758,7 +758,7 @@ pub fn create_connections(
                                 } else {
                                     for prop_name in requested_props {
                                         if let Some(val) = node.get_property(prop_name) {
-                                            props.insert(prop_name.clone(), val.clone());
+                                            props.insert(prop_name.clone(), val.into_owned());
                                         }
                                     }
                                 }
@@ -1088,7 +1088,7 @@ pub fn add_properties(
                     PropertySpec::CopyList(prop_names) => {
                         for prop_name in prop_names {
                             if let Some(val) = ancestor_node.get_property(prop_name) {
-                                props_to_set.insert(prop_name.clone(), val.clone());
+                                props_to_set.insert(prop_name.clone(), val.into_owned());
                             }
                         }
                     }
@@ -1104,7 +1104,7 @@ pub fn add_properties(
                                     props_to_set.insert(target_name.clone(), val);
                                 }
                             } else if let Some(val) = ancestor_node.get_property(source_expr) {
-                                props_to_set.insert(target_name.clone(), val.clone());
+                                props_to_set.insert(target_name.clone(), val.into_owned());
                             }
                         }
                     }
@@ -1245,12 +1245,18 @@ fn resolve_location(
 ) -> Option<(f64, f64)> {
     let sc = spatial_config?;
     if let Some((ref lat_f, ref lon_f)) = sc.location {
-        let lat = mg_value_to_f64(node.get_property(lat_f)?)?;
-        let lon = mg_value_to_f64(node.get_property(lon_f)?)?;
+        let lat = node
+            .get_property(lat_f)
+            .as_deref()
+            .and_then(mg_value_to_f64)?;
+        let lon = node
+            .get_property(lon_f)
+            .as_deref()
+            .and_then(mg_value_to_f64)?;
         return Some((lat, lon));
     }
     if let Some(ref geom_f) = sc.geometry {
-        if let Some(Value::String(wkt)) = node.get_property(geom_f) {
+        if let Some(Value::String(wkt)) = node.get_property(geom_f).as_deref() {
             if let Ok(geom) = spatial::parse_wkt(wkt) {
                 return spatial::geometry_centroid(&geom).ok();
             }
@@ -1265,7 +1271,7 @@ fn resolve_geometry(
 ) -> Option<geo::geometry::Geometry<f64>> {
     let sc = spatial_config?;
     let geom_field = sc.geometry.as_deref()?;
-    match node.get_property(geom_field) {
+    match node.get_property(geom_field).as_deref() {
         Some(Value::String(wkt)) => spatial::parse_wkt(wkt).ok(),
         _ => None,
     }
@@ -1321,7 +1327,7 @@ fn add_properties_aggregate(
                                         updates
                                             .entry(target_idx)
                                             .or_default()
-                                            .insert(prop_name.clone(), val.clone());
+                                            .insert(prop_name.clone(), val.into_owned());
                                     }
                                 }
                             }
@@ -1373,7 +1379,9 @@ fn add_properties_aggregate(
                                     .iter()
                                     .filter_map(|&idx| {
                                         graph.get_node(idx).and_then(|n| {
-                                            n.get_property(prop).and_then(mg_value_to_f64)
+                                            n.get_property(prop)
+                                                .as_deref()
+                                                .and_then(mg_value_to_f64)
                                         })
                                     })
                                     .collect()
@@ -1426,7 +1434,7 @@ fn add_properties_aggregate(
                                             updates
                                                 .entry(target_idx)
                                                 .or_default()
-                                                .insert(target_name.clone(), val.clone());
+                                                .insert(target_name.clone(), val.into_owned());
                                         }
                                     }
                                 }

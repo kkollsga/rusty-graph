@@ -5,6 +5,16 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4] - 2026-03-18
+
+### Added
+
+- **Columnar property storage** — `enable_columnar()` / `disable_columnar()` convert node properties to per-type column stores, reducing memory usage for homogeneous typed columns (int64, float64, string, etc.). `is_columnar` property reports current storage mode.
+- **Memory-mapped directory format** — `save_mmap(path)` / `kglite.load_mmap(path)` persist graphs as mmap-backed column files, enabling instant startup and out-of-core (larger-than-RAM) workloads. Directory layout: `manifest.json` + `topology.zst` + per-type column files.
+- **`memmap2` dependency** for memory-mapped file I/O.
+- Columnar and mmap benchmarks in `test_bench_core.py` (5 new benchmarks).
+- Comprehensive test suite for columnar storage and mmap format (28 new Python tests, 30+ new Rust tests).
+
 ## [0.6.1] - 2026-03-08
 
 ### Changed

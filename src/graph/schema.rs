@@ -4,6 +4,7 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
 use petgraph::visit::NodeIndexable;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -262,6 +263,7 @@ impl TypeSchema {
 }
 
 /// Helper enum for returning one of two iterator types without boxing.
+#[allow(dead_code)]
 pub(crate) enum Either<L, R> {
     Left(L),
     Right(R),
@@ -294,6 +296,7 @@ where
 /// Compact property storage for nodes.
 /// - `Map`: transient during deserialization (before compaction).
 /// - `Compact`: steady state with a shared `TypeSchema` and dense `Vec<Value>`.
+/// - `Columnar`: column-oriented storage via a shared `ColumnStore`.
 pub(crate) enum PropertyStorage {
     /// HashMap storage (used during deserialization, before `compact_properties()`).
     Map(HashMap<InternedKey, Value>),
@@ -303,18 +306,29 @@ pub(crate) enum PropertyStorage {
         schema: Arc<TypeSchema>,
         values: Vec<Value>,
     },
+    /// Column-oriented storage — properties live in a per-type `ColumnStore`.
+    /// The node's row is identified by `row_id`.
+    Columnar {
+        store: Arc<crate::graph::column_store::ColumnStore>,
+        row_id: u32,
+    },
 }
 
 impl PropertyStorage {
     /// Look up a property value by interned key. Returns None if absent or Value::Null.
+    ///
+    /// Returns `Cow::Borrowed` for Map/Compact variants (zero-copy).
+    /// Future Columnar variant will return `Cow::Owned`.
     #[inline]
-    pub fn get(&self, key: InternedKey) -> Option<&Value> {
+    pub fn get(&self, key: InternedKey) -> Option<Cow<'_, Value>> {
         match self {
-            PropertyStorage::Map(map) => map.get(&key),
+            PropertyStorage::Map(map) => map.get(&key).map(Cow::Borrowed),
             PropertyStorage::Compact { schema, values } => schema
                 .slot(key)
                 .and_then(|slot| values.get(slot as usize))
-                .filter(|v| !matches!(v, Value::Null)),
+                .filter(|v| !matches!(v, Value::Null))
+                .map(Cow::Borrowed),
+            PropertyStorage::Columnar { store, row_id } => store.get(*row_id, key).map(Cow::Owned),
         }
     }
 
@@ -342,6 +356,9 @@ impl PropertyStorage {
                     values.resize(slot + 1, Value::Null);
                 }
                 values[slot] = value;
+            }
+            PropertyStorage::Columnar { store, row_id } => {
+                Arc::make_mut(store).set(*row_id, key, &value, None);
             }
         }
     }
@@ -374,6 +391,11 @@ impl PropertyStorage {
                     values[slot] = value;
                 }
             }
+            PropertyStorage::Columnar { store, row_id } => {
+                if store.get(*row_id, key).is_none() {
+                    Arc::make_mut(store).set(*row_id, key, &value, None);
+                }
+            }
         }
     }
 
@@ -394,6 +416,13 @@ impl PropertyStorage {
                     None
                 }
             }),
+            PropertyStorage::Columnar { store, row_id } => {
+                let old = store.get(*row_id, key);
+                if old.is_some() {
+                    Arc::make_mut(store).set(*row_id, key, &Value::Null, None);
+                }
+                old
+            }
         }
     }
 
@@ -422,6 +451,22 @@ impl PropertyStorage {
                     values[slot] = value;
                 }
             }
+            PropertyStorage::Columnar { store, row_id } => {
+                let st = Arc::make_mut(store);
+                // Clear existing properties by setting all to null
+                let props: Vec<_> = st
+                    .row_properties(*row_id)
+                    .into_iter()
+                    .map(|(k, _)| k)
+                    .collect();
+                for k in props {
+                    st.set(*row_id, k, &Value::Null, None);
+                }
+                // Insert new pairs
+                for (key, value) in pairs {
+                    st.set(*row_id, key, &value, None);
+                }
+            }
         }
     }
 
@@ -432,16 +477,18 @@ impl PropertyStorage {
             PropertyStorage::Compact { values, .. } => {
                 values.iter().filter(|v| !matches!(v, Value::Null)).count()
             }
+            PropertyStorage::Columnar { store, row_id } => store.row_properties(*row_id).len(),
         }
     }
 
     /// Iterate over property keys as strings. Requires interner for resolution.
-    pub fn keys<'a>(&'a self, interner: &'a StringInterner) -> impl Iterator<Item = &'a str> + 'a {
+    pub fn keys<'a>(
+        &'a self,
+        interner: &'a StringInterner,
+    ) -> Box<dyn Iterator<Item = &'a str> + 'a> {
         match self {
-            PropertyStorage::Map(map) => {
-                Either::Left(map.keys().map(move |k| interner.resolve(*k)))
-            }
-            PropertyStorage::Compact { schema, values } => Either::Right(
+            PropertyStorage::Map(map) => Box::new(map.keys().map(move |k| interner.resolve(*k))),
+            PropertyStorage::Compact { schema, values } => Box::new(
                 schema
                     .slots
                     .iter()
@@ -449,20 +496,32 @@ impl PropertyStorage {
                     .filter(move |(i, _)| values.get(*i).is_some_and(|v| !matches!(v, Value::Null)))
                     .map(move |(_, ik)| interner.resolve(*ik)),
             ),
+            PropertyStorage::Columnar { store, row_id } => {
+                // Collect keys for Columnar since we can't return references into the store
+                let props = store.row_properties(*row_id);
+                let keys: Vec<&'a str> = props
+                    .iter()
+                    .filter_map(|(ik, _)| interner.try_resolve(*ik))
+                    .collect();
+                Box::new(keys.into_iter())
+            }
         }
     }
 
     /// Iterate over (key_string, &Value) pairs. Requires interner for resolution.
+    /// For Map/Compact, yields borrowed references. For Columnar, yields owned values
+    /// (the Cow return type from `get()` handles this — callers should use `get()` directly
+    /// for Columnar when possible).
     pub fn iter<'a>(
         &'a self,
         interner: &'a StringInterner,
-    ) -> impl Iterator<Item = (&'a str, &'a Value)> + 'a {
+    ) -> Box<dyn Iterator<Item = (&'a str, &'a Value)> + 'a> {
         match self {
             PropertyStorage::Map(map) => {
-                Either::Left(map.iter().map(move |(k, v)| (interner.resolve(*k), v)))
+                Box::new(map.iter().map(move |(k, v)| (interner.resolve(*k), v)))
             }
             PropertyStorage::Compact { schema, values } => {
-                Either::Right(schema.slots.iter().enumerate().filter_map(move |(i, ik)| {
+                Box::new(schema.slots.iter().enumerate().filter_map(move |(i, ik)| {
                     values.get(i).and_then(|v| {
                         if matches!(v, Value::Null) {
                             None
@@ -472,6 +531,44 @@ impl PropertyStorage {
                     })
                 }))
             }
+            PropertyStorage::Columnar { .. } => {
+                // Columnar can't return &Value references (data isn't stored as Values).
+                // Return empty — callers should use columnar_iter() instead.
+                // In practice, iter() is only called from export/introspection paths
+                // that first convert to Compact via save().
+                Box::new(std::iter::empty())
+            }
+        }
+    }
+
+    /// Iterate over (key_string, Value) pairs for Columnar storage.
+    /// Returns owned values. Works for all variants.
+    #[allow(dead_code)]
+    pub fn iter_owned<'a>(&'a self, interner: &'a StringInterner) -> Vec<(String, Value)> {
+        match self {
+            PropertyStorage::Map(map) => map
+                .iter()
+                .map(|(k, v)| (interner.resolve(*k).to_string(), v.clone()))
+                .collect(),
+            PropertyStorage::Compact { schema, values } => schema
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(i, ik)| {
+                    values.get(i).and_then(|v| {
+                        if matches!(v, Value::Null) {
+                            None
+                        } else {
+                            Some((interner.resolve(*ik).to_string(), v.clone()))
+                        }
+                    })
+                })
+                .collect(),
+            PropertyStorage::Columnar { store, row_id } => store
+                .row_properties(*row_id)
+                .into_iter()
+                .filter_map(|(ik, v)| interner.try_resolve(ik).map(|s| (s.to_string(), v)))
+                .collect(),
         }
     }
 
@@ -501,6 +598,10 @@ impl Clone for PropertyStorage {
                 schema: Arc::clone(schema),
                 values: values.clone(),
             },
+            PropertyStorage::Columnar { store, row_id } => PropertyStorage::Columnar {
+                store: Arc::clone(store),
+                row_id: *row_id,
+            },
         }
     }
 }
@@ -512,6 +613,9 @@ impl std::fmt::Debug for PropertyStorage {
             PropertyStorage::Compact { values, .. } => {
                 f.debug_tuple("Compact").field(values).finish()
             }
+            PropertyStorage::Columnar { row_id, .. } => {
+                f.debug_struct("Columnar").field("row_id", row_id).finish()
+            }
         }
     }
 }
@@ -520,10 +624,10 @@ impl PartialEq for PropertyStorage {
     fn eq(&self, other: &Self) -> bool {
         // Compare logical content: same set of (InternedKey, non-Null Value) pairs.
         // This is only used in tests (NodeData derives PartialEq).
-        fn collect_entries(ps: &PropertyStorage) -> Vec<(InternedKey, &Value)> {
+        fn collect_entries(ps: &PropertyStorage) -> Vec<(InternedKey, Value)> {
             match ps {
                 PropertyStorage::Map(map) => {
-                    let mut entries: Vec<_> = map.iter().map(|(&k, v)| (k, v)).collect();
+                    let mut entries: Vec<_> = map.iter().map(|(&k, v)| (k, v.clone())).collect();
                     entries.sort_by_key(|(k, _)| k.0);
                     entries
                 }
@@ -537,11 +641,16 @@ impl PartialEq for PropertyStorage {
                                 if matches!(v, Value::Null) {
                                     None
                                 } else {
-                                    Some((ik, v))
+                                    Some((ik, v.clone()))
                                 }
                             })
                         })
                         .collect();
+                    entries.sort_by_key(|(k, _)| k.0);
+                    entries
+                }
+                PropertyStorage::Columnar { store, row_id } => {
+                    let mut entries: Vec<_> = store.row_properties(*row_id);
                     entries.sort_by_key(|(k, _)| k.0);
                     entries
                 }
@@ -566,6 +675,15 @@ impl Serialize for PropertyStorage {
                             map_ser.serialize_entry(ik, v)?;
                         }
                     }
+                }
+                map_ser.end()
+            }
+            PropertyStorage::Columnar { store, row_id } => {
+                // Materialize properties from column store for serialization
+                let props = store.row_properties(*row_id);
+                let mut map_ser = serializer.serialize_map(Some(props.len()))?;
+                for (ik, v) in &props {
+                    map_ser.serialize_entry(ik, v)?;
                 }
                 map_ser.end()
             }
@@ -1094,6 +1212,11 @@ pub struct DirGraph {
     /// Edges of this type are auto-filtered by validity period in traverse().
     #[serde(default)]
     pub(crate) temporal_edge_configs: HashMap<String, Vec<TemporalConfig>>,
+    /// Per-type columnar property stores. When populated, nodes of these types
+    /// use `PropertyStorage::Columnar` instead of `Compact`.
+    /// Not persisted — rebuilt on load if columnar mode is enabled.
+    #[serde(skip)]
+    pub(crate) column_stores: HashMap<String, Arc<crate::graph::column_store::ColumnStore>>,
     /// If true, Cypher mutations (CREATE, SET, DELETE, REMOVE, MERGE) are rejected
     /// and describe() omits mutation documentation.
     #[serde(skip)]
@@ -1146,6 +1269,7 @@ impl DirGraph {
             timeseries_store: HashMap::new(),
             temporal_node_configs: HashMap::new(),
             temporal_edge_configs: HashMap::new(),
+            column_stores: HashMap::new(),
             read_only: false,
             version: 0,
             interner: StringInterner::new(),
@@ -1183,6 +1307,7 @@ impl DirGraph {
             timeseries_store: HashMap::new(),
             temporal_node_configs: HashMap::new(),
             temporal_edge_configs: HashMap::new(),
+            column_stores: HashMap::new(),
             read_only: false,
             version: 0,
             interner: StringInterner::new(),
@@ -1541,7 +1666,7 @@ impl DirGraph {
             for &idx in node_indices {
                 if let Some(node) = self.graph.node_weight(idx) {
                     if let Some(value) = node.get_property(property) {
-                        index.entry(value.clone()).or_default().push(idx);
+                        index.entry(value.into_owned()).or_default().push(idx);
                     }
                 }
             }
@@ -1618,7 +1743,7 @@ impl DirGraph {
             for &idx in node_indices {
                 if let Some(node) = self.graph.node_weight(idx) {
                     if let Some(value) = node.get_property(property) {
-                        index.entry(value.clone()).or_default().push(idx);
+                        index.entry(value.into_owned()).or_default().push(idx);
                     }
                 }
             }
@@ -1685,7 +1810,11 @@ impl DirGraph {
                     // Extract values for all properties in order
                     let values: Vec<Value> = properties
                         .iter()
-                        .map(|p| node.get_property(p).cloned().unwrap_or(Value::Null))
+                        .map(|p| {
+                            node.get_property(p)
+                                .map(Cow::into_owned)
+                                .unwrap_or(Value::Null)
+                        })
                         .collect();
 
                     // Only index if at least one value is non-null
@@ -1807,7 +1936,10 @@ impl DirGraph {
                 .keys()
                 .chain(self.range_indices.keys())
                 .filter(|(nt, _)| nt == node_type)
-                .filter_map(|key| node.get_property(&key.1).map(|v| (key.clone(), v.clone())))
+                .filter_map(|key| {
+                    node.get_property(&key.1)
+                        .map(|v| (key.clone(), v.into_owned()))
+                })
                 .collect()
         };
         for (key, value) in &prop_updates {
@@ -1832,7 +1964,11 @@ impl DirGraph {
                     let vals: Vec<Value> = key
                         .1
                         .iter()
-                        .map(|p| node.get_property(p).cloned().unwrap_or(Value::Null))
+                        .map(|p| {
+                            node.get_property(p)
+                                .map(Cow::into_owned)
+                                .unwrap_or(Value::Null)
+                        })
                         .collect();
                     if vals.iter().any(|v| !matches!(v, Value::Null)) {
                         Some((key.clone(), CompositeValue(vals)))
@@ -2045,7 +2181,7 @@ impl DirGraph {
         // Phase 1: Build TypeSchemas from node_type_metadata (O(types), not O(N×P))
         let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
         for (node_type, props) in &self.node_type_metadata {
-            let keys = props.keys().map(|name| InternedKey::from_str(name));
+            let keys = props.keys().map(|name| self.interner.get_or_intern(name));
             schemas.insert(node_type.clone(), TypeSchema::from_keys(keys));
         }
 
@@ -2099,7 +2235,7 @@ impl DirGraph {
         // Build TypeSchemas from metadata (O(types))
         let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
         for (node_type, props) in &self.node_type_metadata {
-            let keys = props.keys().map(|name| InternedKey::from_str(name));
+            let keys = props.keys().map(|name| self.interner.get_or_intern(name));
             schemas.insert(node_type.clone(), TypeSchema::from_keys(keys));
         }
 
@@ -2157,6 +2293,117 @@ impl DirGraph {
 
         self.type_indices = new_type_indices;
         self.type_schemas = arc_schemas;
+    }
+
+    /// Convert all node properties from Compact to Columnar storage.
+    /// Properties are moved into per-type `ColumnStore` instances.
+    /// This reduces memory usage by eliminating per-node `Value` enum overhead
+    /// for homogeneous typed columns.
+    pub fn enable_columnar(&mut self) {
+        use crate::graph::column_store::ColumnStore;
+
+        // Ensure properties are compacted first
+        if self.type_schemas.is_empty() {
+            self.compact_properties();
+        }
+
+        // Build a ColumnStore per node type
+        let mut stores: HashMap<String, ColumnStore> = HashMap::new();
+        // Track row_id assignment per type
+        let mut row_ids: HashMap<String, HashMap<NodeIndex, u32>> = HashMap::new();
+
+        // First pass: create stores and push rows
+        for (node_type, indices) in &self.type_indices {
+            let schema = match self.type_schemas.get(node_type) {
+                Some(s) => Arc::clone(s),
+                None => continue,
+            };
+            let meta = self
+                .node_type_metadata
+                .get(node_type)
+                .cloned()
+                .unwrap_or_default();
+
+            let mut store = ColumnStore::new(schema, &meta, &self.interner);
+            let mut type_row_ids = HashMap::with_capacity(indices.len());
+
+            for &idx in indices {
+                if let Some(node) = self.graph.node_weight(idx) {
+                    // Collect properties from current storage
+                    let pairs: Vec<(InternedKey, Value)> = match &node.properties {
+                        PropertyStorage::Compact { schema, values } => schema
+                            .slots
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, &ik)| {
+                                values.get(i).and_then(|v| {
+                                    if matches!(v, Value::Null) {
+                                        None
+                                    } else {
+                                        Some((ik, v.clone()))
+                                    }
+                                })
+                            })
+                            .collect(),
+                        PropertyStorage::Map(map) => {
+                            map.iter().map(|(&k, v)| (k, v.clone())).collect()
+                        }
+                        PropertyStorage::Columnar { .. } => continue, // already columnar
+                    };
+
+                    let row_id = store.push_row(&pairs);
+                    type_row_ids.insert(idx, row_id);
+                }
+            }
+
+            stores.insert(node_type.clone(), store);
+            row_ids.insert(node_type.clone(), type_row_ids);
+        }
+
+        // Wrap stores in Arc
+        let arc_stores: HashMap<String, Arc<ColumnStore>> =
+            stores.into_iter().map(|(t, s)| (t, Arc::new(s))).collect();
+
+        // Second pass: replace PropertyStorage in each node
+        for (node_type, type_row_ids) in &row_ids {
+            if let Some(store) = arc_stores.get(node_type) {
+                for (&idx, &row_id) in type_row_ids {
+                    if let Some(node) = self.graph.node_weight_mut(idx) {
+                        node.properties = PropertyStorage::Columnar {
+                            store: Arc::clone(store),
+                            row_id,
+                        };
+                    }
+                }
+            }
+        }
+
+        self.column_stores = arc_stores;
+    }
+
+    /// Convert all Columnar properties back to Compact.
+    /// Used before serialization to produce backward-compatible .kgl files.
+    pub fn disable_columnar(&mut self) {
+        let node_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
+        for node_idx in node_indices {
+            let node = self.graph.node_weight_mut(node_idx).unwrap();
+            if let PropertyStorage::Columnar { store, row_id } = &node.properties {
+                let pairs = store.row_properties(*row_id);
+                if let Some(schema) = self.type_schemas.get(&node.node_type) {
+                    node.properties = PropertyStorage::from_compact(pairs.into_iter(), schema);
+                } else {
+                    // Fallback to Map
+                    let map: HashMap<InternedKey, Value> = pairs.into_iter().collect();
+                    node.properties = PropertyStorage::Map(map);
+                }
+            }
+        }
+        self.column_stores.clear();
+    }
+
+    /// Returns true if any nodes are using columnar storage.
+    pub fn is_columnar(&self) -> bool {
+        !self.column_stores.is_empty()
     }
 
     pub fn reindex(&mut self) {
@@ -2438,19 +2685,23 @@ impl NodeData {
 
     /// Returns a reference to the field value without cloning.
     /// Uses hash-based lookup — no interner needed.
+    ///
+    /// Returns `Cow::Borrowed` for in-memory storage (zero-copy).
     #[inline]
-    pub fn get_field_ref(&self, field: &str) -> Option<&Value> {
+    pub fn get_field_ref(&self, field: &str) -> Option<Cow<'_, Value>> {
         match field {
-            "id" => Some(&self.id),
-            "title" => Some(&self.title),
+            "id" => Some(Cow::Borrowed(&self.id)),
+            "title" => Some(Cow::Borrowed(&self.title)),
             _ => self.properties.get(InternedKey::from_str(field)),
         }
     }
 
-    /// Returns a reference to a property value (excludes id/title/type).
+    /// Returns a property value (excludes id/title/type).
     /// Uses hash-based lookup — no interner needed.
+    ///
+    /// Returns `Cow::Borrowed` for in-memory storage (zero-copy).
     #[inline]
-    pub fn get_property(&self, key: &str) -> Option<&Value> {
+    pub fn get_property(&self, key: &str) -> Option<Cow<'_, Value>> {
         self.properties.get(InternedKey::from_str(key))
     }
 
@@ -3310,5 +3561,144 @@ mod maintenance_tests {
             &Value::String("Oslo".to_string()),
         );
         assert!(g.property_indices.is_empty());
+    }
+
+    // ─── Columnar storage tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_enable_columnar_preserves_properties() {
+        let mut g = make_test_graph(5, false);
+        // Add metadata so columnar knows types
+        let mut meta = HashMap::new();
+        meta.insert("age".to_string(), "int64".to_string());
+        g.node_type_metadata.insert("Person".to_string(), meta);
+        g.compact_properties();
+
+        // Snapshot properties before
+        let before: Vec<(Value, Value, i64)> = g
+            .type_indices
+            .get("Person")
+            .unwrap()
+            .iter()
+            .map(|&idx| {
+                let n = g.graph.node_weight(idx).unwrap();
+                let age = n
+                    .get_property("age")
+                    .map(|c| match c.as_ref() {
+                        Value::Int64(v) => *v,
+                        _ => panic!("expected Int64"),
+                    })
+                    .unwrap();
+                (n.id.clone(), n.title.clone(), age)
+            })
+            .collect();
+
+        g.enable_columnar();
+        assert!(g.is_columnar());
+
+        // Verify properties match
+        let after: Vec<(Value, Value, i64)> = g
+            .type_indices
+            .get("Person")
+            .unwrap()
+            .iter()
+            .map(|&idx| {
+                let n = g.graph.node_weight(idx).unwrap();
+                let age = n
+                    .get_property("age")
+                    .map(|c| match c.as_ref() {
+                        Value::Int64(v) => *v,
+                        _ => panic!("expected Int64"),
+                    })
+                    .unwrap();
+                (n.id.clone(), n.title.clone(), age)
+            })
+            .collect();
+
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn test_columnar_roundtrip_via_disable() {
+        let mut g = make_test_graph(3, false);
+        let mut meta = HashMap::new();
+        meta.insert("age".to_string(), "int64".to_string());
+        g.node_type_metadata.insert("Person".to_string(), meta);
+        g.compact_properties();
+
+        // Enable columnar, then disable back to Compact
+        g.enable_columnar();
+        assert!(g.is_columnar());
+        g.disable_columnar();
+        assert!(!g.is_columnar());
+
+        // Verify properties still work
+        let idx = g.type_indices.get("Person").unwrap()[0];
+        let node = g.graph.node_weight(idx).unwrap();
+        assert!(matches!(node.properties, PropertyStorage::Compact { .. }));
+        assert!(node.get_property("age").is_some());
+    }
+
+    #[test]
+    fn test_columnar_set_property() {
+        let mut g = make_test_graph(2, false);
+        let mut meta = HashMap::new();
+        meta.insert("age".to_string(), "int64".to_string());
+        g.node_type_metadata.insert("Person".to_string(), meta);
+        g.compact_properties();
+        g.enable_columnar();
+
+        let idx = g.type_indices.get("Person").unwrap()[0];
+        let node = g.graph.node_weight_mut(idx).unwrap();
+
+        // Update existing property
+        node.set_property("age", Value::Int64(99), &mut g.interner);
+        assert_eq!(
+            node.get_property("age").map(|c| c.into_owned()),
+            Some(Value::Int64(99))
+        );
+    }
+
+    #[test]
+    fn test_columnar_property_count_and_keys() {
+        let mut g = make_test_graph(2, false);
+        let mut meta = HashMap::new();
+        meta.insert("age".to_string(), "int64".to_string());
+        g.node_type_metadata.insert("Person".to_string(), meta);
+        g.compact_properties();
+        g.enable_columnar();
+
+        let idx = g.type_indices.get("Person").unwrap()[0];
+        let node = g.graph.node_weight(idx).unwrap();
+
+        assert_eq!(node.property_count(), 1); // just "age"
+        let keys: Vec<&str> = node.property_keys(&g.interner).collect();
+        assert_eq!(keys, vec!["age"]);
+    }
+
+    #[test]
+    fn test_columnar_serialize_roundtrip() {
+        let mut g = make_test_graph(3, false);
+        let mut meta = HashMap::new();
+        meta.insert("age".to_string(), "int64".to_string());
+        g.node_type_metadata.insert("Person".to_string(), meta);
+        g.compact_properties();
+        g.enable_columnar();
+
+        // Serialize (Columnar should produce same output as Compact)
+        let serialized = {
+            let _guard = SerdeSerializeGuard::new(&g.interner);
+            bincode::serialize(&g.graph).unwrap()
+        };
+
+        // Deserialize into a new graph — will come back as Map
+        let graph2: Graph = {
+            let _guard = SerdeDeserializeGuard::new(&mut g.interner);
+            bincode::deserialize(&serialized).unwrap()
+        };
+        let node0 = graph2.node_weight(NodeIndex::new(0)).unwrap();
+
+        // Properties should survive the round-trip
+        assert!(node0.get_property("age").is_some());
     }
 }

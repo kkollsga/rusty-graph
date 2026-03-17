@@ -658,7 +658,7 @@ fn resolve_geometry_field<'a>(
 
 /// Extract a parsed WKT geometry from a node's properties.
 fn node_geometry(node: &NodeData, geom_field: &str) -> Option<Geometry<f64>> {
-    match node.get_property(geom_field) {
+    match node.get_property(geom_field).as_deref() {
         Some(Value::String(wkt)) => spatial::parse_wkt(wkt).ok(),
         _ => None,
     }
@@ -721,8 +721,14 @@ fn resolve_node_geom(
 }
 
 fn extract_lat_lon(node: &NodeData, lat_field: &str, lon_field: &str) -> Option<(f64, f64)> {
-    let lat = value_to_f64(node.get_property(lat_field)?)?;
-    let lon = value_to_f64(node.get_property(lon_field)?)?;
+    let lat = node
+        .get_property(lat_field)
+        .as_deref()
+        .and_then(value_to_f64)?;
+    let lon = node
+        .get_property(lon_field)
+        .as_deref()
+        .and_then(value_to_f64)?;
     Some((lat, lon))
 }
 
@@ -1388,6 +1394,7 @@ fn cluster_traversal(
         for feat in features {
             let val = node
                 .get_property(feat)
+                .as_deref()
                 .and_then(value_to_f64)
                 .unwrap_or(0.0);
             row.push(val);
@@ -1506,7 +1513,7 @@ pub fn get_children_properties(
             if let Some(parent) = parent_opt {
                 // Get parent title
                 let parent_title = if let Some(node) = graph.get_node(parent) {
-                    match node.get_field_ref("title") {
+                    match node.get_field_ref("title").as_deref() {
                         Some(Value::String(s)) => s.clone(),
                         _ => format!("node_{}", parent.index()),
                     }
@@ -1519,7 +1526,7 @@ pub fn get_children_properties(
 
                 for &child_idx in children {
                     if let Some(node) = graph.get_node(child_idx) {
-                        let value = match node.get_field_ref(property) {
+                        let value = match node.get_field_ref(property).as_deref() {
                             Some(Value::String(s)) => s.clone(),
                             Some(Value::Int64(i)) => i.to_string(),
                             Some(Value::Float64(f)) => f.to_string(),

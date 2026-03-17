@@ -302,7 +302,7 @@ impl KnowledgeGraph {
                         self.inner
                             .get_node(idx)
                             .and_then(|node| node.get_field_ref("id"))
-                            .map(|id| py_out::value_to_py(py, id).unwrap_or_else(|_| py.None()))
+                            .map(|id| py_out::value_to_py(py, &id).unwrap_or_else(|_| py.None()))
                     })
                     .collect();
                 Ok(PyList::new(py, ids)?.into())
