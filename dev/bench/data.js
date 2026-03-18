@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1773825180395,
+  "lastUpdate": 1773840166054,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -536,6 +536,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.000023263914626234657",
             "extra": "mean: 1.1125655539033985 msec\nrounds: 807"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "3b354eea70d1db37953988caed3ad54a63ae3458",
+          "message": "feat: v3 unified columnar file format with temp dir cleanup (0.6.6)\n\nReplace v1/v2/mmap formats with a single v3 .kgl file that separates\ntopology from per-type columnar sections (zstd-compressed). Loaded\ngraphs use memory-mapped temp files for larger-than-RAM support.\n\nKey changes:\n- v3 file format: magic b\"RGF\\x03\", stripped topology + packed columns\n- StripPropertiesGuard for zero-property topology serialization\n- Temp dir cleanup via Drop impl on DirGraph (fixes leak)\n- save() auto-enables columnar, stays columnar (no disable step)\n- Removed save_mmap/load_mmap, v1/v2 format support\n- Extracted zstd/bincode helpers, metadata transfer helpers\n- Eliminated double buffering in column packing\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+          "timestamp": "2026-03-18T14:20:29+01:00",
+          "tree_id": "2da0afa3a845b5c6a2917ac6168e72baec881dd9",
+          "url": "https://github.com/kkollsga/kglite/commit/3b354eea70d1db37953988caed3ad54a63ae3458"
+        },
+        "date": 1773840165555,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1101.3481817317424,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002056349199709084",
+            "extra": "mean: 907.9780732262307 usec\nrounds: 437"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 802.2126876074095,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00013128762800941891",
+            "extra": "mean: 1.2465522117114463 msec\nrounds: 666"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 14444.550561180231,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000004817296429905994",
+            "extra": "mean: 69.23026062766554 usec\nrounds: 5928"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1732.2687191915606,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000018170894874734658",
+            "extra": "mean: 577.277641119499 usec\nrounds: 822"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 699739.776120289,
+            "unit": "iter/sec",
+            "range": "stddev: 4.2632281285469257e-7",
+            "extra": "mean: 1.429102695211219 usec\nrounds: 67491"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 139546.60615321182,
+            "unit": "iter/sec",
+            "range": "stddev: 9.205252742538655e-7",
+            "extra": "mean: 7.166064640096472 usec\nrounds: 20560"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2849.275921046513,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000020535197019987336",
+            "extra": "mean: 350.9663604754394 usec\nrounds: 4458"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1689.8248650784988,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000025516190140046365",
+            "extra": "mean: 591.777302290759 usec\nrounds: 1353"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 14404.707976558664,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000039865235179666005",
+            "extra": "mean: 69.4217475027844 usec\nrounds: 11513"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 1320.6289614826972,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00028020348396644935",
+            "extra": "mean: 757.2149552719785 usec\nrounds: 939"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 1338.9915065872563,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000017305102997708155",
+            "extra": "mean: 746.8307267674476 usec\nrounds: 1259"
           }
         ]
       }
