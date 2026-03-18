@@ -345,6 +345,22 @@ impl PropertyStorage {
         }
     }
 
+    /// Look up a property value by interned key, returning an owned Value.
+    /// More efficient than `get()` for callers that always need ownership
+    /// (avoids Cow wrapping/unwrapping overhead).
+    #[inline]
+    pub fn get_value(&self, key: InternedKey) -> Option<Value> {
+        match self {
+            PropertyStorage::Map(map) => map.get(&key).cloned(),
+            PropertyStorage::Compact { schema, values } => schema
+                .slot(key)
+                .and_then(|slot| values.get(slot as usize))
+                .filter(|v| !matches!(v, Value::Null))
+                .cloned(),
+            PropertyStorage::Columnar { store, row_id } => store.get(*row_id, key),
+        }
+    }
+
     /// Check if a property exists (non-Null).
     #[inline]
     pub fn contains(&self, key: InternedKey) -> bool {
@@ -2828,6 +2844,13 @@ impl NodeData {
     #[inline]
     pub fn get_property(&self, key: &str) -> Option<Cow<'_, Value>> {
         self.properties.get(InternedKey::from_str(key))
+    }
+
+    /// Like `get_property` but returns owned Value directly (no Cow overhead).
+    /// Preferred in the Cypher executor hot path where ownership is always needed.
+    #[inline]
+    pub fn get_property_value(&self, key: &str) -> Option<Value> {
+        self.properties.get_value(InternedKey::from_str(key))
     }
 
     /// Returns an iterator over property keys (excludes id/title/type).

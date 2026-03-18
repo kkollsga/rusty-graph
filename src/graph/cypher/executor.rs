@@ -8799,9 +8799,8 @@ fn evaluate_comparison(
     }
 }
 
-/// Resolve a property from a NodeData.
-/// Checks field aliases so that original column names (e.g. "npdid") resolve to "id"/"title".
-/// Also resolves spatial virtual properties from SpatialConfig.
+/// Resolve a node property, returning an owned Value directly.
+/// Uses `get_property_value()` to avoid Cow wrapping/unwrapping overhead.
 fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> Value {
     let resolved = graph.resolve_alias(&node.node_type, property);
     match resolved {
@@ -8809,13 +8808,11 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
         "title" | "name" => node.title.clone(),
         "type" | "node_type" | "label" => Value::String(node.node_type.clone()),
         _ => {
-            // Check real property first (most common case)
-            if let Some(val) = node.get_property(resolved) {
-                return val.into_owned();
+            if let Some(val) = node.get_property_value(resolved) {
+                return val;
             }
             // Fall through to spatial virtual properties only if not found
             if let Some(config) = graph.get_spatial_config(&node.node_type) {
-                // "location" → synthesize Point from location config
                 if resolved == "location" {
                     if let Some((lat_f, lon_f)) = &config.location {
                         let lat = value_operations::value_to_f64(
@@ -8829,15 +8826,13 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
                         }
                     }
                 }
-                // "geometry" → return WKT string from geometry config
                 if resolved == "geometry" {
                     if let Some(geom_f) = &config.geometry {
-                        if let Some(val) = node.get_property(geom_f) {
-                            return val.into_owned();
+                        if let Some(val) = node.get_property_value(geom_f) {
+                            return val;
                         }
                     }
                 }
-                // Named points → synthesize Point
                 if let Some((lat_f, lon_f)) = config.points.get(resolved) {
                     let lat = value_operations::value_to_f64(
                         node.get_property(lat_f).as_deref().unwrap_or(&Value::Null),
@@ -8849,10 +8844,9 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
                         return Value::Point { lat, lon };
                     }
                 }
-                // Named shapes → return WKT string
                 if let Some(shape_f) = config.shapes.get(resolved) {
-                    if let Some(val) = node.get_property(shape_f) {
-                        return val.into_owned();
+                    if let Some(val) = node.get_property_value(shape_f) {
+                        return val;
                     }
                 }
             }

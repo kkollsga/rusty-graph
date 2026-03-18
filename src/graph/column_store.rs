@@ -60,6 +60,10 @@ pub enum TypedColumn {
 }
 
 /// Number of days from the Unix epoch to chrono's internal epoch.
+/// Column data smaller than this threshold is loaded into heap Vec instead of
+/// being written to a temp file and mmap'd. Avoids file I/O overhead for small columns.
+const MMAP_THRESHOLD: usize = 262_144; // 256 KB
+
 const UNIX_EPOCH_DATE: NaiveDate = match NaiveDate::from_ymd_opt(1970, 1, 1) {
     Some(d) => d,
     None => unreachable!(),
@@ -271,6 +275,30 @@ impl TypedColumn {
                 }
                 Some(val.clone())
             }
+        }
+    }
+
+    /// Get a string column value as a borrowed &str, avoiding heap allocation.
+    /// Returns None if the column is not a Str variant, row is out of bounds, or null.
+    #[inline]
+    pub fn get_str(&self, row: u32) -> Option<&str> {
+        let idx = row as usize;
+        match self {
+            TypedColumn::Str {
+                offsets,
+                data,
+                nulls,
+            } => {
+                if idx >= nulls.len() || nulls.get(idx) != 0 {
+                    return None;
+                }
+                let start = offsets.get(idx) as usize;
+                let end = offsets.get(idx + 1) as usize;
+                let bytes = data.slice(start, end);
+                // SAFETY: We only write valid UTF-8 via Value::String.
+                Some(unsafe { std::str::from_utf8_unchecked(bytes) })
+            }
+            _ => None,
         }
     }
 
@@ -695,6 +723,34 @@ impl ColumnStore {
         self.columns.get(slot as usize)?.get(row_id)
     }
 
+    /// Resolve a property name to a column slot index.
+    #[inline]
+    pub fn slot(&self, key: InternedKey) -> Option<u16> {
+        self.schema.slot(key)
+    }
+
+    /// Fast property access by pre-resolved slot index.
+    /// Caller must ensure row_id is valid and not tombstoned.
+    #[inline]
+    pub fn get_by_slot(&self, row_id: u32, slot: u16) -> Option<Value> {
+        self.columns.get(slot as usize)?.get(row_id)
+    }
+
+    /// Fast string access by pre-resolved slot. Returns borrowed &str without allocation.
+    #[inline]
+    pub fn get_str_by_slot(&self, row_id: u32, slot: u16) -> Option<&str> {
+        self.columns.get(slot as usize)?.get_str(row_id)
+    }
+
+    /// Fast string comparison by pre-resolved slot. No allocation.
+    #[inline]
+    pub fn compare_str_by_slot(&self, row_id: u32, slot: u16, target: &str) -> bool {
+        self.columns
+            .get(slot as usize)
+            .and_then(|c| c.get_str(row_id))
+            .is_some_and(|s| s == target)
+    }
+
     /// Set a property value for a given row.
     /// Extends the schema if the key is new.
     pub fn set(
@@ -1102,7 +1158,8 @@ impl ColumnStore {
         col_name: &str,
         ext: &str,
     ) -> io::Result<MmapOrVec<T>> {
-        if let Some(dir) = temp_dir {
+        // Skip mmap for small columns — file I/O overhead exceeds memory savings
+        if let Some(dir) = temp_dir.filter(|_| bytes.len() >= MMAP_THRESHOLD) {
             let path = dir.join(format!("{col_name}.{ext}"));
             std::fs::write(&path, bytes)?;
             MmapOrVec::load_mapped(&path, len)
@@ -1129,7 +1186,8 @@ impl ColumnStore {
         col_name: &str,
         ext: &str,
     ) -> io::Result<MmapBytes> {
-        if let Some(dir) = temp_dir {
+        // Skip mmap for small data — file I/O overhead exceeds memory savings
+        if let Some(dir) = temp_dir.filter(|_| bytes.len() >= MMAP_THRESHOLD) {
             let path = dir.join(format!("{col_name}.{ext}"));
             std::fs::write(&path, bytes)?;
             MmapBytes::load_mapped(&path, bytes.len())

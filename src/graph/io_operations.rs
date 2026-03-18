@@ -25,6 +25,7 @@ use bincode::Options;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -332,18 +333,38 @@ pub fn write_graph_v3(graph: &DirGraph, path: &str) -> io::Result<()> {
 
 // ─── Load ────────────────────────────────────────────────────────────────────
 
+/// Minimum file size to use mmap for the initial file read.
+/// Below this threshold, `std::fs::read()` is faster (avoids mmap syscall overhead).
+const FILE_MMAP_THRESHOLD: u64 = 65_536; // 64 KB
+
 pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
     let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut buf = Vec::new();
-    reader.read_to_end(&mut buf)?;
+    let file_len = file.metadata()?.len();
 
+    // For large files, mmap avoids the full copy into a Vec<u8>
+    if file_len >= FILE_MMAP_THRESHOLD {
+        let mmap = unsafe { Mmap::map(&file)? };
+        if mmap.len() < 4 {
+            return Err(io::Error::other(
+                "File is too small to be a valid kglite file.",
+            ));
+        }
+        if mmap[..4] == V3_MAGIC {
+            return load_v3(&mmap);
+        }
+        return Err(io::Error::other(
+            "Unrecognized file format. This file was saved with an older version of kglite. \
+             Please rebuild the graph with the current version and save again.",
+        ));
+    }
+
+    // Small files: direct read is faster
+    let buf = std::fs::read(path)?;
     if buf.len() < 4 {
         return Err(io::Error::other(
             "File is too small to be a valid kglite file.",
         ));
     }
-
     if buf[..4] == V3_MAGIC {
         load_v3(&buf)
     } else {
