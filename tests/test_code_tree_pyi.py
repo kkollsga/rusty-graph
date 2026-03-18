@@ -1,7 +1,6 @@
 """Tests for .pyi (type stub) file parsing in code_tree."""
 
 import textwrap
-from pathlib import Path
 
 import pytest
 

@@ -20,10 +20,9 @@ import time
 
 import pandas as pd
 
-# Ensure the project root is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-import kglite
 
+import kglite  # noqa: E402
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -214,7 +213,7 @@ def run_queries(kg, label, total_nodes):
     timings = {}
 
     queries = [
-        ("point lookup (id=42)", f"MATCH (n:Item) WHERE n.nid = 42 RETURN n.name, n.prop_0"),
+        ("point lookup (id=42)", "MATCH (n:Item) WHERE n.nid = 42 RETURN n.name, n.prop_0"),
         ("range scan (nid > N-100)", f"MATCH (n:Item) WHERE n.nid > {total_nodes - 100} RETURN n.name"),
         ("string filter", "MATCH (n:Item) WHERE n.prop_0 STARTS WITH 'val_0_0_' RETURN count(n) AS cnt"),
         ("aggregation", "MATCH (n:Item) RETURN count(n) AS cnt"),
@@ -279,11 +278,13 @@ def print_summary(build_stats, io_results, mmap_timings, kgl_timings, disk_stats
     print()
     print(f"  {'':40s} {'mmap':>12s} {'kgl':>12s}")
     print(
-        f"  {'Save time':40s} {fmt_time(io_results['save_mmap_time']):>12s} {fmt_time(io_results['save_kgl_time']):>12s}"
+        f"  {'Save time':40s} {fmt_time(io_results['save_mmap_time']):>12s}"
+        f" {fmt_time(io_results['save_kgl_time']):>12s}"
     )
     print(f"  {'File size':40s} {fmt_mb(io_results['mmap_size_mb']):>12s} {fmt_mb(io_results['kgl_size_mb']):>12s}")
     print(
-        f"  {'Load time':40s} {fmt_time(io_results['load_mmap_time']):>12s} {fmt_time(io_results['load_kgl_time']):>12s}"
+        f"  {'Load time':40s} {fmt_time(io_results['load_mmap_time']):>12s}"
+        f" {fmt_time(io_results['load_kgl_time']):>12s}"
     )
     print()
 
