@@ -3673,6 +3673,32 @@ impl KnowledgeGraph {
         graph.disable_columnar();
     }
 
+    /// Move mmap-backed columnar data back to heap memory.
+    ///
+    /// Useful after deleting nodes when you want data back in RAM for
+    /// faster access. Internally rebuilds columnar stores from scratch
+    /// (disable_columnar + enable_columnar) with the memory limit
+    /// temporarily suspended to prevent re-spilling.
+    ///
+    /// No-op if the graph is not in columnar mode.
+    ///
+    /// Example:
+    ///     ```python
+    ///     graph.unspill()
+    ///     info = graph.graph_info()
+    ///     assert not info['columnar_is_mapped']
+    ///     ```
+    fn unspill(&mut self) {
+        let graph = Arc::make_mut(&mut self.inner);
+        if !graph.is_columnar() {
+            return;
+        }
+        let saved_limit = graph.memory_limit.take();
+        graph.disable_columnar();
+        graph.enable_columnar();
+        graph.memory_limit = saved_limit;
+    }
+
     /// Returns True if any nodes use columnar property storage.
     #[getter]
     fn is_columnar(&self) -> bool {
@@ -3704,6 +3730,7 @@ impl KnowledgeGraph {
         let graph = get_graph_mut(&mut self.inner);
 
         let tombstones_before = graph.graph.node_bound() - graph.graph.node_count();
+        let was_columnar = graph.is_columnar();
         let old_to_new = graph.vacuum();
         let nodes_remapped = old_to_new.len();
 
@@ -3716,6 +3743,7 @@ impl KnowledgeGraph {
             let result = PyDict::new(py);
             result.set_item("nodes_remapped", nodes_remapped)?;
             result.set_item("tombstones_removed", tombstones_before)?;
+            result.set_item("columnar_rebuilt", was_columnar)?;
             Ok(result.into())
         })
     }
@@ -3756,6 +3784,19 @@ impl KnowledgeGraph {
             dict.set_item("composite_index_count", info.composite_index_count)?;
             dict.set_item("format_version", self.inner.save_metadata.format_version)?;
             dict.set_item("library_version", &self.inner.save_metadata.library_version)?;
+            // Columnar memory info
+            let heap_bytes: usize = self
+                .inner
+                .column_stores
+                .values()
+                .map(|s| s.heap_bytes())
+                .sum();
+            let is_mapped = self.inner.column_stores.values().any(|s| s.is_mapped());
+            dict.set_item("columnar_heap_bytes", heap_bytes)?;
+            dict.set_item("columnar_is_mapped", is_mapped)?;
+            dict.set_item("memory_limit", self.inner.memory_limit)?;
+            dict.set_item("columnar_total_rows", info.columnar_total_rows)?;
+            dict.set_item("columnar_live_rows", info.columnar_live_rows)?;
             Ok(dict.into())
         })
     }
@@ -3788,6 +3829,34 @@ impl KnowledgeGraph {
         }
         let graph = get_graph_mut(&mut self.inner);
         graph.auto_vacuum_threshold = threshold;
+        Ok(())
+    }
+
+    /// Configure automatic memory-pressure spill for columnar storage.
+    ///
+    /// When a memory limit is set, enable_columnar() will automatically
+    /// spill the largest column stores to temporary files on disk when
+    /// the total heap usage exceeds the limit.
+    ///
+    /// Args:
+    ///     limit_bytes: Maximum heap bytes for columnar data, or None to disable.
+    ///     spill_dir: Directory for spill files. Defaults to system temp dir.
+    ///
+    /// Example:
+    ///     ```python
+    ///     graph.set_memory_limit(500_000_000)  # 500 MB limit
+    ///     graph.enable_columnar()  # auto-spills if over limit
+    ///     graph.set_memory_limit(None)  # disable limit
+    ///     ```
+    #[pyo3(signature = (limit_bytes, spill_dir=None))]
+    fn set_memory_limit(
+        &mut self,
+        limit_bytes: Option<usize>,
+        spill_dir: Option<String>,
+    ) -> PyResult<()> {
+        let graph = get_graph_mut(&mut self.inner);
+        graph.memory_limit = limit_bytes;
+        graph.spill_dir = spill_dir.map(std::path::PathBuf::from);
         Ok(())
     }
 

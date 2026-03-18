@@ -777,13 +777,13 @@ pub fn write_graph_mmap(graph: &DirGraph, dir: &str) -> io::Result<()> {
         row_counts.insert(type_name.clone(), store.row_count());
     }
 
-    // 2. Save topology (graph structure) — convert Columnar → Compact first
-    let mut graph_clone = graph.clone();
-    graph_clone.disable_columnar();
+    // 2. Save topology (graph structure)
+    // PropertyStorage::Columnar has a custom Serialize impl that materializes
+    // properties from the column store on-the-fly, so no clone/conversion needed.
     let topology_raw = {
-        let _guard = SerdeSerializeGuard::new(&graph_clone.interner);
+        let _guard = SerdeSerializeGuard::new(&graph.interner);
         bincode_options()
-            .serialize(&graph_clone.graph)
+            .serialize(&graph.graph)
             .map_err(io::Error::other)?
     };
     let topology_compressed = zstd_compress(&topology_raw)?;

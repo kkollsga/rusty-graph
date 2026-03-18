@@ -82,7 +82,7 @@ impl TypedColumn {
                 data: MmapOrVec::new(),
                 nulls: MmapOrVec::new(),
             },
-            "bool" => TypedColumn::Bool {
+            "bool" | "boolean" => TypedColumn::Bool {
                 data: MmapOrVec::new(),
                 nulls: MmapOrVec::new(),
             },
@@ -260,7 +260,8 @@ impl TypedColumn {
                 let start = offsets.get(idx) as usize;
                 let end = offsets.get(idx + 1) as usize;
                 let bytes = data.slice(start, end);
-                let s = String::from_utf8_lossy(bytes).into_owned();
+                // SAFETY: We only write valid UTF-8 via Value::String, so skip validation.
+                let s = unsafe { String::from_utf8_unchecked(bytes.to_vec()) };
                 Some(Value::String(s))
             }
             TypedColumn::Mixed { data } => {
@@ -420,6 +421,23 @@ impl TypedColumn {
             TypedColumn::Date { data, .. } => data.is_mapped(),
             TypedColumn::Str { data, .. } => data.is_mapped(),
             TypedColumn::Mixed { .. } => false,
+        }
+    }
+
+    /// Heap-resident bytes across all sub-buffers (0 if fully mmap'd).
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            TypedColumn::Int64 { data, nulls } => data.heap_bytes() + nulls.heap_bytes(),
+            TypedColumn::Float64 { data, nulls } => data.heap_bytes() + nulls.heap_bytes(),
+            TypedColumn::UniqueId { data, nulls } => data.heap_bytes() + nulls.heap_bytes(),
+            TypedColumn::Bool { data, nulls } => data.heap_bytes() + nulls.heap_bytes(),
+            TypedColumn::Date { data, nulls } => data.heap_bytes() + nulls.heap_bytes(),
+            TypedColumn::Str {
+                offsets,
+                data,
+                nulls,
+            } => offsets.heap_bytes() + data.heap_bytes() + nulls.heap_bytes(),
+            TypedColumn::Mixed { data } => data.len() * std::mem::size_of::<Value>(),
         }
     }
 
@@ -631,23 +649,25 @@ impl ColumnStore {
     pub fn push_row(&mut self, values: &[(InternedKey, Value)]) -> u32 {
         let row_id = self.row_count;
 
-        // Initialize all columns with null for this row
-        for col in &mut self.columns {
-            col.push_null();
-        }
-
-        // Fill in provided values
+        // Build slot→value lookup to push values directly (avoids null-then-overwrite).
+        let mut slot_values: Vec<Option<&Value>> = vec![None; self.columns.len()];
         for (key, value) in values {
             if let Some(slot) = self.schema.slot(*key) {
-                let col = &mut self.columns[slot as usize];
-                // Overwrite the null we just pushed with the actual value
-                if col.set(row_id, value).is_err() {
-                    // Type mismatch — demote column to Mixed
-                    self.demote_to_mixed(slot as usize);
-                    let _ = self.columns[slot as usize].set(row_id, value);
-                }
+                slot_values[slot as usize] = Some(value);
             }
-            // Keys not in schema are silently dropped (schema was built from metadata)
+        }
+
+        for (slot, slot_val) in slot_values.iter().enumerate() {
+            let col = &mut self.columns[slot];
+            if let Some(value) = slot_val {
+                if col.push(value).is_err() {
+                    // Type mismatch — demote column to Mixed and retry
+                    self.demote_to_mixed(slot);
+                    let _ = self.columns[slot].push(value);
+                }
+            } else {
+                col.push_null();
+            }
         }
 
         self.row_count += 1;
@@ -788,6 +808,12 @@ impl ColumnStore {
     /// Whether any column is file-backed.
     pub fn is_mapped(&self) -> bool {
         self.columns.iter().any(|c| c.is_mapped())
+    }
+
+    /// Heap-resident bytes across all columns (0 if fully mmap'd).
+    pub fn heap_bytes(&self) -> usize {
+        let col_bytes: usize = self.columns.iter().map(|c| c.heap_bytes()).sum();
+        col_bytes + self.tombstones.len()
     }
 
     /// Save all columns to a directory for the mmap format.

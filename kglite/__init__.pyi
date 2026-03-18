@@ -937,13 +937,14 @@ class KnowledgeGraph:
         """
         ...
 
-    def vacuum(self) -> dict[str, int]:
+    def vacuum(self) -> dict[str, Any]:
         """Compact the graph by removing tombstones left by node/edge deletions.
 
         With StableDiGraph, deletions leave holes in the internal storage.
         Over time, this wastes memory and degrades iteration performance.
         ``vacuum()`` rebuilds the graph with contiguous indices, then rebuilds
-        all indexes.
+        all indexes. If columnar storage is active, column stores are also
+        rebuilt to eliminate orphaned rows from deleted nodes.
 
         **Important**: This resets the current selection since node indices change.
         Call this between query chains, not in the middle of one.
@@ -952,6 +953,7 @@ class KnowledgeGraph:
             dict with keys:
                 - ``nodes_remapped``: Number of nodes that were remapped
                 - ``tombstones_removed``: Number of tombstone slots reclaimed
+                - ``columnar_rebuilt``: Whether columnar stores were rebuilt
 
         Example::
 
@@ -1018,6 +1020,11 @@ class KnowledgeGraph:
                 - ``type_count``: Number of distinct node types
                 - ``property_index_count``: Number of single-property indexes
                 - ``composite_index_count``: Number of composite indexes
+                - ``columnar_heap_bytes``: Heap-resident bytes in columnar stores
+                - ``columnar_is_mapped``: Whether any columnar data is file-backed
+                - ``memory_limit``: Configured memory limit (None if unset)
+                - ``columnar_total_rows``: Total rows in columnar stores (includes orphaned)
+                - ``columnar_live_rows``: Rows backed by live nodes
 
         Example::
 
@@ -1681,6 +1688,43 @@ class KnowledgeGraph:
         This is the inverse of :meth:`enable_columnar`. Useful before
         saving to ``.kgl`` format or when columnar storage is no longer
         needed.
+        """
+        ...
+
+    def unspill(self) -> None:
+        """Move mmap-backed columnar data back to heap memory.
+
+        Useful after deleting nodes when you want data back in RAM for
+        faster access. Internally rebuilds columnar stores from scratch
+        with the memory limit temporarily suspended to prevent re-spilling.
+
+        No-op if the graph is not in columnar mode.
+
+        Example::
+
+            graph.unspill()
+            info = graph.graph_info()
+            assert not info['columnar_is_mapped']
+        """
+        ...
+
+    def set_memory_limit(self, limit_bytes: int | None, spill_dir: str | None = None) -> None:
+        """Configure automatic memory-pressure spill for columnar storage.
+
+        When a memory limit is set, :meth:`enable_columnar` will
+        automatically spill the largest column stores to temporary files
+        on disk when total heap usage exceeds the limit.
+
+        Args:
+            limit_bytes: Maximum heap bytes for columnar data, or ``None``
+                to disable the limit.
+            spill_dir: Directory for spill files. Defaults to system temp dir.
+
+        Example::
+
+            graph.set_memory_limit(500_000_000)  # 500 MB limit
+            graph.enable_columnar()  # auto-spills if over limit
+            graph.set_memory_limit(None)  # disable limit
         """
         ...
 

@@ -130,8 +130,9 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
             MmapOrVec::Mapped { mmap, len, .. } => {
                 assert!(index < *len, "MmapOrVec index out of bounds");
                 let offset = index * std::mem::size_of::<T>();
-                let slice = &mmap[offset..offset + std::mem::size_of::<T>()];
-                unsafe { std::ptr::read_unaligned(slice.as_ptr() as *const T) }
+                // SAFETY: mmap regions are page-aligned, elements stored contiguously
+                // from the start, so all accesses are naturally aligned.
+                unsafe { std::ptr::read(mmap.as_ptr().add(offset) as *const T) }
             }
         }
     }
@@ -143,9 +144,9 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
             MmapOrVec::Mapped { mmap, len, .. } => {
                 assert!(index < *len, "MmapOrVec index out of bounds");
                 let offset = index * std::mem::size_of::<T>();
-                let slice = &mut mmap[offset..offset + std::mem::size_of::<T>()];
+                // SAFETY: mmap regions are page-aligned, elements stored contiguously.
                 unsafe {
-                    std::ptr::write_unaligned(slice.as_mut_ptr() as *mut T, value);
+                    std::ptr::write(mmap.as_mut_ptr().add(offset) as *mut T, value);
                 }
             }
         }
@@ -179,9 +180,8 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
                     *capacity = new_cap;
                 }
                 let offset = *len * std::mem::size_of::<T>();
-                let slice = &mut mmap[offset..offset + std::mem::size_of::<T>()];
                 unsafe {
-                    std::ptr::write_unaligned(slice.as_mut_ptr() as *mut T, value);
+                    std::ptr::write(mmap.as_mut_ptr().add(offset) as *mut T, value);
                 }
                 *len += 1;
             }
@@ -224,7 +224,7 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
             std::slice::from_raw_parts(data.as_ptr() as *const u8, len * std::mem::size_of::<T>())
         };
         mmap[..src_bytes.len()].copy_from_slice(src_bytes);
-        mmap.flush()?;
+        mmap.flush_async()?;
 
         *self = MmapOrVec::Mapped {
             mmap,
@@ -243,17 +243,26 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         if matches!(self, MmapOrVec::Heap { .. }) {
             return;
         }
-        let len = self.len();
-        let mut data = Vec::with_capacity(len);
-        for i in 0..len {
-            data.push(self.get(i));
-        }
+        let data = match self {
+            MmapOrVec::Mapped { mmap, len, .. } => {
+                unsafe { std::slice::from_raw_parts(mmap.as_ptr() as *const T, *len) }.to_vec()
+            }
+            _ => unreachable!(),
+        };
         *self = MmapOrVec::Heap { data };
     }
 
     /// Whether this buffer is file-backed.
     pub fn is_mapped(&self) -> bool {
         matches!(self, MmapOrVec::Mapped { .. })
+    }
+
+    /// Heap-resident bytes (0 if file-backed).
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            MmapOrVec::Heap { data } => data.len() * std::mem::size_of::<T>(),
+            MmapOrVec::Mapped { .. } => 0,
+        }
     }
 
     /// Flush mmap to disk (no-op for heap).
@@ -310,12 +319,8 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
     pub fn to_vec(&self) -> Vec<T> {
         match self {
             MmapOrVec::Heap { data } => data.clone(),
-            MmapOrVec::Mapped { .. } => {
-                let mut v = Vec::with_capacity(self.len());
-                for i in 0..self.len() {
-                    v.push(self.get(i));
-                }
-                v
+            MmapOrVec::Mapped { mmap, len, .. } => {
+                unsafe { std::slice::from_raw_parts(mmap.as_ptr() as *const T, *len) }.to_vec()
             }
         }
     }
@@ -468,7 +473,7 @@ impl MmapBytes {
         file.set_len(cap as u64)?;
         let mut mmap = unsafe { MmapOptions::new().len(cap).map_mut(&file)? };
         mmap[..len].copy_from_slice(data);
-        mmap.flush()?;
+        mmap.flush_async()?;
         *self = MmapBytes::Mapped {
             mmap,
             len,
@@ -493,6 +498,14 @@ impl MmapBytes {
 
     pub fn is_mapped(&self) -> bool {
         matches!(self, MmapBytes::Mapped { .. })
+    }
+
+    /// Heap-resident bytes (0 if file-backed).
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            MmapBytes::Heap { data } => data.len(),
+            MmapBytes::Mapped { .. } => 0,
+        }
     }
 
     pub fn flush(&self) -> io::Result<()> {

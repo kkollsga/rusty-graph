@@ -1217,6 +1217,13 @@ pub struct DirGraph {
     /// Not persisted — rebuilt on load if columnar mode is enabled.
     #[serde(skip)]
     pub(crate) column_stores: HashMap<String, Arc<crate::graph::column_store::ColumnStore>>,
+    /// Memory limit for columnar heap storage. If Some(n), `enable_columnar()`
+    /// will spill columns to temp files when total heap_bytes exceeds n.
+    #[serde(skip)]
+    pub(crate) memory_limit: Option<usize>,
+    /// Directory for spill files. Defaults to std::env::temp_dir()/kglite_spill_<pid>.
+    #[serde(skip)]
+    pub(crate) spill_dir: Option<std::path::PathBuf>,
     /// If true, Cypher mutations (CREATE, SET, DELETE, REMOVE, MERGE) are rejected
     /// and describe() omits mutation documentation.
     #[serde(skip)]
@@ -1270,6 +1277,8 @@ impl DirGraph {
             temporal_node_configs: HashMap::new(),
             temporal_edge_configs: HashMap::new(),
             column_stores: HashMap::new(),
+            memory_limit: None,
+            spill_dir: None,
             read_only: false,
             version: 0,
             interner: StringInterner::new(),
@@ -1308,6 +1317,8 @@ impl DirGraph {
             temporal_node_configs: HashMap::new(),
             temporal_edge_configs: HashMap::new(),
             column_stores: HashMap::new(),
+            memory_limit: None,
+            spill_dir: None,
             read_only: false,
             version: 0,
             interner: StringInterner::new(),
@@ -2360,6 +2371,37 @@ impl DirGraph {
             row_ids.insert(node_type.clone(), type_row_ids);
         }
 
+        // Spill to disk if over memory limit
+        if let Some(limit) = self.memory_limit {
+            let total: usize = stores.values().map(|s| s.heap_bytes()).sum();
+            if total > limit {
+                let spill_dir = self.spill_dir.clone().unwrap_or_else(|| {
+                    std::env::temp_dir().join(format!("kglite_spill_{}", std::process::id()))
+                });
+                // Spill stores from largest to smallest until under limit
+                let mut by_size: Vec<_> = stores
+                    .iter()
+                    .map(|(t, s)| (t.clone(), s.heap_bytes()))
+                    .collect();
+                by_size.sort_by(|a, b| b.1.cmp(&a.1));
+                let mut remaining = total;
+                for (type_name, bytes) in by_size {
+                    if remaining <= limit {
+                        break;
+                    }
+                    let type_dir = spill_dir.join(&type_name);
+                    if let Some(store) = stores.get_mut(&type_name) {
+                        if store
+                            .materialize_to_files(&type_dir, &self.interner)
+                            .is_ok()
+                        {
+                            remaining -= bytes;
+                        }
+                    }
+                }
+            }
+        }
+
         // Wrap stores in Arc
         let arc_stores: HashMap<String, Arc<ColumnStore>> =
             stores.into_iter().map(|(t, s)| (t, Arc::new(s))).collect();
@@ -2449,8 +2491,19 @@ impl DirGraph {
         let old_node_count = self.graph.node_count();
         let old_node_bound = self.graph.node_bound();
 
-        // No tombstones — nothing to compact
+        // No petgraph tombstones — but columnar stores may still have orphaned rows
+        // (e.g., all nodes deleted → petgraph is empty but column data remains).
         if old_node_count == old_node_bound {
+            let columnar_orphaned = self.column_stores.iter().any(|(t, s)| {
+                let live = self.type_indices.get(t).map(|v| v.len()).unwrap_or(0);
+                (s.row_count() as usize) > live
+            });
+            if columnar_orphaned {
+                let saved_limit = self.memory_limit.take();
+                self.disable_columnar();
+                self.enable_columnar();
+                self.memory_limit = saved_limit;
+            }
             return HashMap::new();
         }
 
@@ -2504,6 +2557,16 @@ impl DirGraph {
 
         // Rebuild all indexes from the compacted graph
         self.reindex();
+
+        // Rebuild columnar stores if active — old stores have orphaned rows
+        // from deleted nodes. The disable/enable cycle reads only live nodes,
+        // producing fresh ColumnStores with no dead rows.
+        if !self.column_stores.is_empty() {
+            let saved_limit = self.memory_limit.take();
+            self.disable_columnar();
+            self.enable_columnar();
+            self.memory_limit = saved_limit;
+        }
 
         old_to_new
     }
@@ -2564,6 +2627,16 @@ impl DirGraph {
             type_count: self.type_indices.len(),
             property_index_count: self.property_indices.len(),
             composite_index_count: self.composite_indices.len(),
+            columnar_total_rows: self
+                .column_stores
+                .values()
+                .map(|s| s.row_count() as usize)
+                .sum(),
+            columnar_live_rows: self
+                .column_stores
+                .keys()
+                .map(|t| self.type_indices.get(t).map(|v| v.len()).unwrap_or(0))
+                .sum(),
         }
     }
 }
@@ -2595,6 +2668,10 @@ pub struct GraphInfo {
     pub property_index_count: usize,
     /// Number of composite indexes
     pub composite_index_count: usize,
+    /// Total rows across all columnar stores (including orphaned from deletions)
+    pub columnar_total_rows: usize,
+    /// Rows backed by live nodes (columnar_total_rows - columnar_live_rows = orphaned)
+    pub columnar_live_rows: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
