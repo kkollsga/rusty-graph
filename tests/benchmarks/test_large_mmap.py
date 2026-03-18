@@ -1,8 +1,7 @@
-"""Large-graph stress test for columnar + mmap storage.
+"""Large-graph stress test for v3 columnar file format.
 
-Creates a graph that approaches or exceeds available RAM, saves it in mmap
-directory format, reloads it, and measures query performance on the
-disk-backed graph.
+Creates a graph that approaches or exceeds available RAM, saves it as a v3
+.kgl file, reloads it, and measures query performance on the loaded graph.
 
 Usage (standalone — not part of normal test suite):
     python tests/benchmarks/test_large_mmap.py                 # default ~2 GB
@@ -34,15 +33,6 @@ def rss_mb():
     if sys.platform == "darwin":
         return usage.ru_maxrss / (1024 * 1024)
     return usage.ru_maxrss / 1024
-
-
-def dir_size_mb(path):
-    """Total size of a directory tree in MB."""
-    total = 0
-    for dirpath, _dirnames, filenames in os.walk(path):
-        for f in filenames:
-            total += os.path.getsize(os.path.join(dirpath, f))
-    return total / (1024 * 1024)
 
 
 def fmt_time(seconds):
@@ -149,36 +139,14 @@ def build_graph(target_gb):
     return kg, stats
 
 
-# ── Columnar conversion ──────────────────────────────────────────────────────
-
-
-def convert_columnar(kg):
-    section("Converting to columnar storage")
-    t0 = time.perf_counter()
-    kg.enable_columnar()
-    elapsed = time.perf_counter() - t0
-    print(f"  enable_columnar(): {fmt_time(elapsed)}  RSS={fmt_mb(rss_mb())}")
-    assert kg.is_columnar
-    return elapsed
-
-
 # ── Save / Load ───────────────────────────────────────────────────────────────
 
 
-def save_and_load(kg, mmap_dir, kgl_path):
+def save_and_load(kg, kgl_path):
     results = {}
 
-    # ── save_mmap ──
-    section("Saving mmap directory")
-    t0 = time.perf_counter()
-    kg.save_mmap(mmap_dir)
-    results["save_mmap_time"] = time.perf_counter() - t0
-    results["mmap_size_mb"] = dir_size_mb(mmap_dir)
-    print(f"  save_mmap(): {fmt_time(results['save_mmap_time'])}")
-    print(f"  Directory size: {fmt_mb(results['mmap_size_mb'])}")
-
-    # ── save .kgl for comparison ──
-    section("Saving .kgl (for comparison)")
+    # ── save v3 .kgl ──
+    section("Saving v3 .kgl file")
     t0 = time.perf_counter()
     kg.save(kgl_path)
     results["save_kgl_time"] = time.perf_counter() - t0
@@ -186,22 +154,15 @@ def save_and_load(kg, mmap_dir, kgl_path):
     print(f"  save(): {fmt_time(results['save_kgl_time'])}")
     print(f"  File size: {fmt_mb(results['kgl_size_mb'])}")
 
-    # ── load_mmap ──
-    section("Loading from mmap directory")
+    # ── load v3 .kgl ──
+    section("Loading from v3 .kgl file")
     t0 = time.perf_counter()
-    kg2 = kglite.load_mmap(mmap_dir)
-    results["load_mmap_time"] = time.perf_counter() - t0
-    print(f"  load_mmap(): {fmt_time(results['load_mmap_time'])}  RSS={fmt_mb(rss_mb())}")
-    print(f"  is_columnar: {kg2.is_columnar}")
-
-    # ── load .kgl for comparison ──
-    section("Loading from .kgl (for comparison)")
-    t0 = time.perf_counter()
-    kg3 = kglite.load(kgl_path)
+    kg2 = kglite.load(kgl_path)
     results["load_kgl_time"] = time.perf_counter() - t0
     print(f"  load(): {fmt_time(results['load_kgl_time'])}  RSS={fmt_mb(rss_mb())}")
+    print(f"  is_columnar: {kg2.is_columnar}")
 
-    return kg2, kg3, results
+    return kg2, results
 
 
 # ── Queries ───────────────────────────────────────────────────────────────────
@@ -244,12 +205,12 @@ def run_queries(kg, label, total_nodes):
 # ── Disk-lookup stress (cold reads) ──────────────────────────────────────────
 
 
-def disk_lookup_test(mmap_dir, total_nodes):
-    """Load mmap graph and do random-ish point lookups to exercise disk paging."""
+def disk_lookup_test(kgl_path, total_nodes):
+    """Load v3 graph and do random-ish point lookups to exercise disk paging."""
     section("Disk lookup stress test (cold reads after fresh load)")
 
     # Fresh load — pages are cold
-    kg = kglite.load_mmap(mmap_dir)
+    kg = kglite.load(kgl_path)
     lookup_ids = [i * (total_nodes // 50) for i in range(50)]  # 50 evenly-spaced lookups
 
     t0 = time.perf_counter()
@@ -267,7 +228,7 @@ def disk_lookup_test(mmap_dir, total_nodes):
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 
-def print_summary(build_stats, io_results, mmap_timings, kgl_timings, disk_stats):
+def print_summary(build_stats, io_results, query_timings, disk_stats):
     section("SUMMARY")
     n = build_stats["total_nodes"]
     e = build_stats["total_edges"]
@@ -276,24 +237,14 @@ def print_summary(build_stats, io_results, mmap_timings, kgl_timings, disk_stats
     print(f"  Build time:     {fmt_time(build_stats['node_time'] + build_stats['edge_time']):>12s}")
     print(f"  Peak RSS:       {fmt_mb(build_stats['build_rss_mb']):>12s}")
     print()
-    print(f"  {'':40s} {'mmap':>12s} {'kgl':>12s}")
-    print(
-        f"  {'Save time':40s} {fmt_time(io_results['save_mmap_time']):>12s}"
-        f" {fmt_time(io_results['save_kgl_time']):>12s}"
-    )
-    print(f"  {'File size':40s} {fmt_mb(io_results['mmap_size_mb']):>12s} {fmt_mb(io_results['kgl_size_mb']):>12s}")
-    print(
-        f"  {'Load time':40s} {fmt_time(io_results['load_mmap_time']):>12s}"
-        f" {fmt_time(io_results['load_kgl_time']):>12s}"
-    )
+    print(f"  {'Save time':40s} {fmt_time(io_results['save_kgl_time']):>12s}")
+    print(f"  {'File size':40s} {fmt_mb(io_results['kgl_size_mb']):>12s}")
+    print(f"  {'Load time':40s} {fmt_time(io_results['load_kgl_time']):>12s}")
     print()
 
-    print(f"  {'Query':40s} {'mmap':>12s} {'compact':>12s} {'ratio':>8s}")
-    for name in mmap_timings:
-        mt = mmap_timings[name]
-        ct = kgl_timings.get(name, 0)
-        ratio = mt / ct if ct > 0 else float("inf")
-        print(f"  {name:40s} {fmt_time(mt):>12s} {fmt_time(ct):>12s} {ratio:>7.2f}x")
+    print(f"  {'Query':40s} {'v3 columnar':>12s}")
+    for name, t in query_timings.items():
+        print(f"  {name:40s} {fmt_time(t):>12s}")
 
     print()
     print(f"  Cold disk lookups:  {disk_stats['cold_lookups']} lookups in {fmt_time(disk_stats['cold_total'])}")
@@ -304,7 +255,7 @@ def print_summary(build_stats, io_results, mmap_timings, kgl_timings, disk_stats
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Large-graph mmap stress test")
+    parser = argparse.ArgumentParser(description="Large-graph v3 stress test")
     parser.add_argument(
         "--target-gb",
         type=float,
@@ -320,41 +271,36 @@ def main():
         "--dir",
         type=str,
         default=None,
-        help="Directory for mmap output (default: temp dir)",
+        help="Directory for output (default: temp dir)",
     )
     args = parser.parse_args()
 
     print(f"Target: ~{args.target_gb} GB graph on {os.cpu_count()} cores, RSS baseline={fmt_mb(rss_mb())}")
 
     tmpdir = args.dir or tempfile.mkdtemp(prefix="kglite_stress_")
-    mmap_dir = os.path.join(tmpdir, "graph_mmap")
     kgl_path = os.path.join(tmpdir, "graph.kgl")
 
     try:
         # Build
         kg, build_stats = build_graph(args.target_gb)
 
-        # Columnar conversion
-        convert_columnar(kg)
-
-        # Save & load
-        kg_mmap, kg_kgl, io_results = save_and_load(kg, mmap_dir, kgl_path)
+        # Save & load (v3 auto-enables columnar)
+        kg_loaded, io_results = save_and_load(kg, kgl_path)
 
         # Free the original graph to reclaim memory
         del kg
 
-        # Query comparison: mmap vs compact (.kgl loaded)
-        mmap_timings = run_queries(kg_mmap, "mmap-backed graph", build_stats["total_nodes"])
-        kgl_timings = run_queries(kg_kgl, ".kgl-loaded graph (compact)", build_stats["total_nodes"])
+        # Query performance on v3-loaded graph
+        query_timings = run_queries(kg_loaded, "v3-loaded graph", build_stats["total_nodes"])
 
-        # Free compact graph
-        del kg_kgl, kg_mmap
+        # Free loaded graph
+        del kg_loaded
 
         # Disk lookup stress (fresh load, cold pages)
-        disk_stats = disk_lookup_test(mmap_dir, build_stats["total_nodes"])
+        disk_stats = disk_lookup_test(kgl_path, build_stats["total_nodes"])
 
         # Summary
-        print_summary(build_stats, io_results, mmap_timings, kgl_timings, disk_stats)
+        print_summary(build_stats, io_results, query_timings, disk_stats)
 
     finally:
         if not args.keep and not args.dir:

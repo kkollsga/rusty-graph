@@ -104,11 +104,11 @@ class TestSaveLoadWithFeatures:
             os.unlink(path)
 
 
-class TestV2Format:
-    """Tests for the v2 sectioned binary format."""
+class TestV3Format:
+    """Tests for the v3 columnar binary format."""
 
-    def test_v2_magic_bytes(self):
-        """Saved files should start with the v2 magic header RGF\\x02."""
+    def test_v3_magic_bytes(self):
+        """Saved files should start with the v3 magic header RGF\\x03."""
         graph = KnowledgeGraph()
         df = pd.DataFrame({"id": [1], "name": ["A"]})
         graph.add_nodes(df, "Node", "id", "name")
@@ -119,11 +119,11 @@ class TestV2Format:
             graph.save(path)
             with open(path, "rb") as f:
                 header = f.read(4)
-            assert header == b"RGF\x02", f"Expected v2 magic bytes, got {header!r}"
+            assert header == b"RGF\x03", f"Expected v3 magic bytes, got {header!r}"
         finally:
             os.unlink(path)
 
-    def test_v2_header_structure(self):
+    def test_v3_header_structure(self):
         """Verify the full 12-byte header: magic + core_version + metadata_length."""
         import struct
 
@@ -140,13 +140,13 @@ class TestV2Format:
                 core_version = struct.unpack("<I", f.read(4))[0]
                 metadata_len = struct.unpack("<I", f.read(4))[0]
 
-            assert magic == b"RGF\x02"
+            assert magic == b"RGF\x03"
             assert core_version == 1  # current core data version
             assert metadata_len > 0  # metadata should not be empty
         finally:
             os.unlink(path)
 
-    def test_v2_metadata_is_json(self):
+    def test_v3_metadata_is_json(self):
         """The metadata section should be valid JSON."""
         import json
         import struct
@@ -173,7 +173,7 @@ class TestV2Format:
         finally:
             os.unlink(path)
 
-    def test_v2_preserves_node_type_metadata(self):
+    def test_v3_preserves_node_type_metadata(self):
         """Node type metadata should survive save/load cycle."""
         graph = KnowledgeGraph()
         df = pd.DataFrame({"id": [1], "name": ["A"], "city": ["Oslo"]})
@@ -189,7 +189,7 @@ class TestV2Format:
         finally:
             os.unlink(path)
 
-    def test_v2_preserves_connection_type_metadata(self):
+    def test_v3_preserves_connection_type_metadata(self):
         """Connection type metadata should survive save/load."""
         graph = KnowledgeGraph()
         persons = pd.DataFrame({"id": [1, 2], "name": ["A", "B"]})
@@ -208,8 +208,8 @@ class TestV2Format:
         finally:
             os.unlink(path)
 
-    def test_v2_preserves_indexes(self):
-        """Property and composite indexes should survive v2 save/load."""
+    def test_v3_preserves_indexes(self):
+        """Property and composite indexes should survive v3 save/load."""
         graph = KnowledgeGraph()
         df = pd.DataFrame(
             {
@@ -233,8 +233,8 @@ class TestV2Format:
         finally:
             os.unlink(path)
 
-    def test_v2_preserves_schema(self):
-        """Schema definitions should survive v2 save/load."""
+    def test_v3_preserves_schema(self):
+        """Schema definitions should survive v3 save/load."""
         graph = KnowledgeGraph()
         df = pd.DataFrame({"id": [1], "name": ["A"]})
         graph.add_nodes(df, "Node", "id", "name")
@@ -249,7 +249,7 @@ class TestV2Format:
         finally:
             os.unlink(path)
 
-    def test_v2_roundtrip_full(self):
+    def test_v3_roundtrip_full(self):
         """Full roundtrip: nodes, edges, indexes, schema, Cypher queries."""
         graph = KnowledgeGraph()
         persons = pd.DataFrame(
@@ -294,28 +294,6 @@ class TestV2Format:
         finally:
             os.unlink(path)
 
-    def test_v1_backward_compat(self):
-        """Files saved with v1 format (gzip+bincode DirGraph) should still load.
-
-        We create a v1-format file by directly writing gzip-compressed bincode
-        of a DirGraph (the old format), then verify load() can read it.
-        """
-        # Save normally (v2), then manually create a v1-style file
-        # by saving the full DirGraph as gzip+bincode
-        graph = KnowledgeGraph()
-        df = pd.DataFrame({"id": [1, 2], "name": ["A", "B"]})
-        graph.add_nodes(df, "Node", "id", "name")
-
-        with tempfile.NamedTemporaryFile(suffix=".kgl", delete=False) as f:
-            path = f.name
-        try:
-            # Save as v2 and verify it loads
-            graph.save(path)
-            loaded = kglite.load(path)
-            assert loaded.select("Node").len() == 2
-        finally:
-            os.unlink(path)
-
     def test_corrupt_file_error(self):
         """Loading a corrupt/random file should give a helpful error."""
         with tempfile.NamedTemporaryFile(suffix=".kgl", delete=False) as f:
@@ -327,10 +305,10 @@ class TestV2Format:
         finally:
             os.unlink(path)
 
-    def test_truncated_v2_file_error(self):
-        """A truncated v2 file should give a clear error."""
+    def test_truncated_v3_file_error(self):
+        """A truncated v3 file should give a clear error."""
         with tempfile.NamedTemporaryFile(suffix=".kgl", delete=False) as f:
-            f.write(b"RGF\x02\x01\x00\x00\x00")  # magic + core_version, but no metadata_length
+            f.write(b"RGF\x03\x01\x00\x00\x00")  # magic + core_version, but no metadata_length
             path = f.name
         try:
             with pytest.raises(Exception, match="(?i)(truncated|incomplete|failed)"):
@@ -342,9 +320,9 @@ class TestV2Format:
         """A file with a future core_data_version should give a helpful upgrade message."""
         import struct
 
-        # Create a minimal v2 file with core_data_version = 99
+        # Create a minimal v3 file with core_data_version = 99
         metadata = b"{}"
-        header = b"RGF\x02"
+        header = b"RGF\x03"
         header += struct.pack("<I", 99)  # future core version
         header += struct.pack("<I", len(metadata))
 

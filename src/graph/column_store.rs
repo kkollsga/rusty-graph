@@ -519,41 +519,44 @@ impl TypedColumn {
         }
     }
 
-    /// Save column data to files for the save_mmap directory format.
-    #[allow(dead_code)]
-    pub fn save_to_dir(&self, base_dir: &Path, col_name: &str) -> io::Result<()> {
+    /// Write column data to a writer (for v3 packed format).
+    /// Writes data bytes, then null bytes. For strings: offsets + data + nulls.
+    /// For mixed: bincode-serialized Vec<Value>.
+    pub fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()> {
         match self {
             TypedColumn::Int64 { data, nulls } => {
-                data.save_to_file(&base_dir.join(format!("{col_name}.i64")))?;
-                nulls.save_to_file(&base_dir.join(format!("{col_name}.null")))?;
+                data.write_to(writer)?;
+                nulls.write_to(writer)?;
             }
             TypedColumn::Float64 { data, nulls } => {
-                data.save_to_file(&base_dir.join(format!("{col_name}.f64")))?;
-                nulls.save_to_file(&base_dir.join(format!("{col_name}.null")))?;
+                data.write_to(writer)?;
+                nulls.write_to(writer)?;
             }
             TypedColumn::UniqueId { data, nulls } => {
-                data.save_to_file(&base_dir.join(format!("{col_name}.u32")))?;
-                nulls.save_to_file(&base_dir.join(format!("{col_name}.null")))?;
+                data.write_to(writer)?;
+                nulls.write_to(writer)?;
             }
             TypedColumn::Bool { data, nulls } => {
-                data.save_to_file(&base_dir.join(format!("{col_name}.bool")))?;
-                nulls.save_to_file(&base_dir.join(format!("{col_name}.null")))?;
+                data.write_to(writer)?;
+                nulls.write_to(writer)?;
             }
             TypedColumn::Date { data, nulls } => {
-                data.save_to_file(&base_dir.join(format!("{col_name}.i32")))?;
-                nulls.save_to_file(&base_dir.join(format!("{col_name}.null")))?;
+                data.write_to(writer)?;
+                nulls.write_to(writer)?;
             }
             TypedColumn::Str {
                 offsets,
                 data,
                 nulls,
             } => {
-                offsets.save_to_file(&base_dir.join(format!("{col_name}.off")))?;
-                data.save_to_file(&base_dir.join(format!("{col_name}.str")))?;
-                nulls.save_to_file(&base_dir.join(format!("{col_name}.null")))?;
+                offsets.write_to(writer)?;
+                data.write_to(writer)?;
+                nulls.write_to(writer)?;
             }
-            TypedColumn::Mixed { .. } => {
-                // Mixed columns saved via bincode fallback in manifest
+            TypedColumn::Mixed { data } => {
+                let encoded = bincode::serialize(data)
+                    .map_err(|e| io::Error::other(format!("bincode error: {}", e)))?;
+                writer.write_all(&encoded)?;
             }
         }
         Ok(())
@@ -816,138 +819,344 @@ impl ColumnStore {
         col_bytes + self.tombstones.len()
     }
 
-    /// Save all columns to a directory for the mmap format.
-    pub fn save_to_dir(&self, dir: &Path, interner: &StringInterner) -> io::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        for (slot, ik) in self.schema.iter() {
-            let col_name = interner.resolve(ik);
-            if let Some(col) = self.columns.get(slot as usize) {
-                col.save_to_dir(dir, col_name)?;
-            }
-        }
-        Ok(())
-    }
-
     /// Access columns for introspection (e.g., getting type tags).
     pub fn columns_ref(&self) -> &[TypedColumn] {
         &self.columns
     }
 
-    /// Load column data from a directory (mmap format).
-    /// `col_schema` maps property_name → type_tag (e.g., "int64", "string").
-    /// `row_count` is the number of valid rows in each column.
-    pub fn load_from_dir(
-        &mut self,
-        dir: &Path,
-        col_schema: &HashMap<String, String>,
-        interner: &StringInterner,
-        row_count: u32,
-    ) -> io::Result<()> {
-        use crate::graph::mmap_vec::{MmapBytes, MmapOrVec};
+    /// Serialize all columns to a packed byte buffer for the v3 file format.
+    ///
+    /// Format per column:
+    ///   [2B] col_name_len  [NB] col_name_utf8
+    ///   [2B] type_tag_len  [NB] type_tag
+    ///   [8B] data_len      [NB] data_bytes (+ null_bytes for typed columns)
+    ///   For "string": data_bytes = offsets + str_data + null_bitmap
+    ///   For "mixed": data_bytes = bincode(Vec<Value>)
+    pub fn write_packed(&self, interner: &StringInterner) -> io::Result<Vec<u8>> {
+        let mut buf: Vec<u8> = Vec::new();
 
-        self.row_count = row_count;
-        self.tombstones = vec![false; row_count as usize];
+        // Number of columns
+        let num_cols = self.columns.len() as u32;
+        buf.extend_from_slice(&num_cols.to_le_bytes());
 
         for (slot, ik) in self.schema.iter() {
             let col_name = interner.resolve(ik);
-            let type_tag = col_schema
-                .get(col_name)
-                .map(|s| s.as_str())
-                .unwrap_or("mixed");
+            let col = &self.columns[slot as usize];
+            let type_tag = col.type_tag();
 
-            let col = match type_tag {
-                "int64" => {
-                    let data = MmapOrVec::<i64>::load_mapped(
-                        &dir.join(format!("{col_name}.i64")),
-                        row_count as usize,
-                    )?;
-                    let nulls = MmapOrVec::<u8>::load_mapped(
-                        &dir.join(format!("{col_name}.null")),
-                        row_count as usize,
-                    )?;
-                    TypedColumn::Int64 { data, nulls }
-                }
-                "float64" => {
-                    let data = MmapOrVec::<f64>::load_mapped(
-                        &dir.join(format!("{col_name}.f64")),
-                        row_count as usize,
-                    )?;
-                    let nulls = MmapOrVec::<u8>::load_mapped(
-                        &dir.join(format!("{col_name}.null")),
-                        row_count as usize,
-                    )?;
-                    TypedColumn::Float64 { data, nulls }
-                }
-                "uniqueid" => {
-                    let data = MmapOrVec::<u32>::load_mapped(
-                        &dir.join(format!("{col_name}.u32")),
-                        row_count as usize,
-                    )?;
-                    let nulls = MmapOrVec::<u8>::load_mapped(
-                        &dir.join(format!("{col_name}.null")),
-                        row_count as usize,
-                    )?;
-                    TypedColumn::UniqueId { data, nulls }
-                }
-                "bool" => {
-                    let data = MmapOrVec::<u8>::load_mapped(
-                        &dir.join(format!("{col_name}.bool")),
-                        row_count as usize,
-                    )?;
-                    let nulls = MmapOrVec::<u8>::load_mapped(
-                        &dir.join(format!("{col_name}.null")),
-                        row_count as usize,
-                    )?;
-                    TypedColumn::Bool { data, nulls }
-                }
-                "date" => {
-                    let data = MmapOrVec::<i32>::load_mapped(
-                        &dir.join(format!("{col_name}.i32")),
-                        row_count as usize,
-                    )?;
-                    let nulls = MmapOrVec::<u8>::load_mapped(
-                        &dir.join(format!("{col_name}.null")),
-                        row_count as usize,
-                    )?;
-                    TypedColumn::Date { data, nulls }
-                }
-                "string" => {
-                    // String columns have n+1 offsets (n rows + sentinel)
-                    let offsets = MmapOrVec::<u64>::load_mapped(
-                        &dir.join(format!("{col_name}.off")),
-                        row_count as usize + 1,
-                    )?;
-                    // Data length is the last offset value
-                    let data_len = if !offsets.is_empty() {
-                        offsets.get(offsets.len() - 1) as usize
-                    } else {
-                        0
-                    };
-                    let data =
-                        MmapBytes::load_mapped(&dir.join(format!("{col_name}.str")), data_len)?;
-                    let nulls = MmapOrVec::<u8>::load_mapped(
-                        &dir.join(format!("{col_name}.null")),
-                        row_count as usize,
-                    )?;
-                    TypedColumn::Str {
-                        offsets,
-                        data,
-                        nulls,
-                    }
-                }
-                _ => {
-                    // Mixed — no file-backed loading, just create empty with nulls
-                    let data = vec![Value::Null; row_count as usize];
-                    TypedColumn::Mixed { data }
-                }
+            // Column name
+            let name_bytes = col_name.as_bytes();
+            buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+            buf.extend_from_slice(name_bytes);
+
+            // Type tag
+            let tag_bytes = type_tag.as_bytes();
+            buf.extend_from_slice(&(tag_bytes.len() as u16).to_le_bytes());
+            buf.extend_from_slice(tag_bytes);
+
+            // Column data — write length placeholder, then data directly, then patch length
+            let len_offset = buf.len();
+            buf.extend_from_slice(&0u64.to_le_bytes()); // placeholder
+            col.write_to(&mut buf)?;
+            let data_len = (buf.len() - len_offset - 8) as u64;
+            buf[len_offset..len_offset + 8].copy_from_slice(&data_len.to_le_bytes());
+        }
+
+        Ok(buf)
+    }
+
+    /// Load columns from a packed byte buffer (v3 format).
+    ///
+    /// If `temp_dir` is `Some`, writes column data to temp files and mmaps them
+    /// (for larger-than-RAM support). If `None`, loads into heap.
+    pub fn load_packed(
+        schema: Arc<TypeSchema>,
+        type_meta: &HashMap<String, String>,
+        interner: &StringInterner,
+        packed: &[u8],
+        row_count: u32,
+        temp_dir: Option<&Path>,
+    ) -> io::Result<Self> {
+        use std::io::Read;
+
+        let mut store = ColumnStore::new(Arc::clone(&schema), type_meta, interner);
+        store.row_count = row_count;
+        store.tombstones = vec![false; row_count as usize];
+
+        let mut cursor = std::io::Cursor::new(packed);
+
+        // Read number of columns
+        let mut u32_buf = [0u8; 4];
+        cursor.read_exact(&mut u32_buf)?;
+        let num_cols = u32::from_le_bytes(u32_buf);
+
+        for _ in 0..num_cols {
+            // Column name
+            let mut u16_buf = [0u8; 2];
+            cursor.read_exact(&mut u16_buf)?;
+            let name_len = u16::from_le_bytes(u16_buf) as usize;
+            let mut name_bytes = vec![0u8; name_len];
+            cursor.read_exact(&mut name_bytes)?;
+            let col_name = String::from_utf8(name_bytes)
+                .map_err(|e| io::Error::other(format!("invalid column name: {}", e)))?;
+
+            // Type tag
+            cursor.read_exact(&mut u16_buf)?;
+            let tag_len = u16::from_le_bytes(u16_buf) as usize;
+            let mut tag_bytes = vec![0u8; tag_len];
+            cursor.read_exact(&mut tag_bytes)?;
+            let type_tag = String::from_utf8(tag_bytes)
+                .map_err(|e| io::Error::other(format!("invalid type tag: {}", e)))?;
+
+            // Data blob
+            let mut u64_buf = [0u8; 8];
+            cursor.read_exact(&mut u64_buf)?;
+            let data_len = u64::from_le_bytes(u64_buf) as usize;
+            let mut data_blob = vec![0u8; data_len];
+            cursor.read_exact(&mut data_blob)?;
+
+            // Find the slot for this column
+            let ik = InternedKey::from_str(&col_name);
+            let slot = match schema.slot(ik) {
+                Some(s) => s as usize,
+                None => continue, // schema doesn't have this column, skip
             };
 
-            if let Some(existing) = self.columns.get_mut(slot as usize) {
-                *existing = col;
+            // Build the TypedColumn from the data blob
+            let col = Self::unpack_column(&type_tag, &data_blob, row_count, temp_dir, &col_name)?;
+
+            if slot < store.columns.len() {
+                store.columns[slot] = col;
             }
         }
 
-        Ok(())
+        Ok(store)
+    }
+
+    /// Unpack a single column from its raw data blob.
+    fn unpack_column(
+        type_tag: &str,
+        data_blob: &[u8],
+        row_count: u32,
+        temp_dir: Option<&Path>,
+        col_name: &str,
+    ) -> io::Result<TypedColumn> {
+        let rc = row_count as usize;
+        match type_tag {
+            "int64" => {
+                let data_size = rc * std::mem::size_of::<i64>();
+                let null_size = rc;
+                Self::check_blob_size(data_blob, data_size + null_size, type_tag, col_name)?;
+                let data = Self::load_typed_vec::<i64>(
+                    &data_blob[..data_size],
+                    rc,
+                    temp_dir,
+                    col_name,
+                    "i64",
+                )?;
+                let nulls = Self::load_typed_vec::<u8>(
+                    &data_blob[data_size..],
+                    rc,
+                    temp_dir,
+                    col_name,
+                    "null",
+                )?;
+                Ok(TypedColumn::Int64 { data, nulls })
+            }
+            "float64" => {
+                let data_size = rc * std::mem::size_of::<f64>();
+                let null_size = rc;
+                Self::check_blob_size(data_blob, data_size + null_size, type_tag, col_name)?;
+                let data = Self::load_typed_vec::<f64>(
+                    &data_blob[..data_size],
+                    rc,
+                    temp_dir,
+                    col_name,
+                    "f64",
+                )?;
+                let nulls = Self::load_typed_vec::<u8>(
+                    &data_blob[data_size..],
+                    rc,
+                    temp_dir,
+                    col_name,
+                    "null",
+                )?;
+                Ok(TypedColumn::Float64 { data, nulls })
+            }
+            "uniqueid" => {
+                let data_size = rc * std::mem::size_of::<u32>();
+                let null_size = rc;
+                Self::check_blob_size(data_blob, data_size + null_size, type_tag, col_name)?;
+                let data = Self::load_typed_vec::<u32>(
+                    &data_blob[..data_size],
+                    rc,
+                    temp_dir,
+                    col_name,
+                    "u32",
+                )?;
+                let nulls = Self::load_typed_vec::<u8>(
+                    &data_blob[data_size..],
+                    rc,
+                    temp_dir,
+                    col_name,
+                    "null",
+                )?;
+                Ok(TypedColumn::UniqueId { data, nulls })
+            }
+            "bool" | "boolean" => {
+                let data_size = rc; // u8 per row
+                let null_size = rc;
+                Self::check_blob_size(data_blob, data_size + null_size, type_tag, col_name)?;
+                let data = Self::load_typed_vec::<u8>(
+                    &data_blob[..data_size],
+                    rc,
+                    temp_dir,
+                    col_name,
+                    "bool",
+                )?;
+                let nulls = Self::load_typed_vec::<u8>(
+                    &data_blob[data_size..],
+                    rc,
+                    temp_dir,
+                    col_name,
+                    "null",
+                )?;
+                Ok(TypedColumn::Bool { data, nulls })
+            }
+            "date" | "datetime" => {
+                let data_size = rc * std::mem::size_of::<i32>();
+                let null_size = rc;
+                Self::check_blob_size(data_blob, data_size + null_size, type_tag, col_name)?;
+                let data = Self::load_typed_vec::<i32>(
+                    &data_blob[..data_size],
+                    rc,
+                    temp_dir,
+                    col_name,
+                    "i32",
+                )?;
+                let nulls = Self::load_typed_vec::<u8>(
+                    &data_blob[data_size..],
+                    rc,
+                    temp_dir,
+                    col_name,
+                    "null",
+                )?;
+                Ok(TypedColumn::Date { data, nulls })
+            }
+            "string" => {
+                // offsets: (rc+1) * u64, then str_data, then nulls: rc * u8
+                let offsets_size = (rc + 1) * std::mem::size_of::<u64>();
+                if data_blob.len() < offsets_size {
+                    return Err(io::Error::other(format!(
+                        "column '{}' (string): blob too small for offsets ({} < {})",
+                        col_name,
+                        data_blob.len(),
+                        offsets_size
+                    )));
+                }
+                let offsets_bytes = &data_blob[..offsets_size];
+                let rest = &data_blob[offsets_size..];
+
+                // Determine string data length from last offset
+                let last_offset = u64::from_le_bytes(
+                    offsets_bytes[offsets_size - 8..offsets_size]
+                        .try_into()
+                        .unwrap(),
+                ) as usize;
+                let null_size = rc;
+
+                if rest.len() < last_offset + null_size {
+                    return Err(io::Error::other(format!(
+                        "column '{}' (string): blob too small for data+nulls",
+                        col_name
+                    )));
+                }
+                let str_bytes = &rest[..last_offset];
+                let null_bytes = &rest[last_offset..last_offset + null_size];
+
+                let offsets =
+                    Self::load_typed_vec::<u64>(offsets_bytes, rc + 1, temp_dir, col_name, "off")?;
+                let data = Self::load_bytes(str_bytes, temp_dir, col_name, "str")?;
+                let nulls = Self::load_typed_vec::<u8>(null_bytes, rc, temp_dir, col_name, "null")?;
+                Ok(TypedColumn::Str {
+                    offsets,
+                    data,
+                    nulls,
+                })
+            }
+            _ => {
+                // Mixed — bincode deserialize
+                let data: Vec<Value> = bincode::deserialize(data_blob).map_err(|e| {
+                    io::Error::other(format!("bincode error for '{}': {}", col_name, e))
+                })?;
+                Ok(TypedColumn::Mixed { data })
+            }
+        }
+    }
+
+    /// Load raw bytes into a MmapOrVec<T>, optionally via temp file + mmap.
+    fn load_typed_vec<T: Copy + Default + 'static>(
+        bytes: &[u8],
+        len: usize,
+        temp_dir: Option<&Path>,
+        col_name: &str,
+        ext: &str,
+    ) -> io::Result<MmapOrVec<T>> {
+        if let Some(dir) = temp_dir {
+            let path = dir.join(format!("{col_name}.{ext}"));
+            std::fs::write(&path, bytes)?;
+            MmapOrVec::load_mapped(&path, len)
+        } else {
+            // Load into heap
+            let elem_size = std::mem::size_of::<T>();
+            if elem_size == 0 {
+                return Ok(MmapOrVec::new());
+            }
+            let mut data = Vec::with_capacity(len);
+            for i in 0..len {
+                let offset = i * elem_size;
+                let val = unsafe { std::ptr::read(bytes.as_ptr().add(offset) as *const T) };
+                data.push(val);
+            }
+            Ok(MmapOrVec::Heap { data })
+        }
+    }
+
+    /// Load raw bytes into a MmapBytes, optionally via temp file + mmap.
+    fn load_bytes(
+        bytes: &[u8],
+        temp_dir: Option<&Path>,
+        col_name: &str,
+        ext: &str,
+    ) -> io::Result<MmapBytes> {
+        if let Some(dir) = temp_dir {
+            let path = dir.join(format!("{col_name}.{ext}"));
+            std::fs::write(&path, bytes)?;
+            MmapBytes::load_mapped(&path, bytes.len())
+        } else {
+            Ok(MmapBytes::Heap {
+                data: bytes.to_vec(),
+            })
+        }
+    }
+
+    fn check_blob_size(
+        blob: &[u8],
+        expected: usize,
+        type_tag: &str,
+        col_name: &str,
+    ) -> io::Result<()> {
+        if blob.len() < expected {
+            Err(io::Error::other(format!(
+                "column '{}' ({}): blob too small ({} < {})",
+                col_name,
+                type_tag,
+                blob.len(),
+                expected
+            )))
+        } else {
+            Ok(())
+        }
     }
 }
 

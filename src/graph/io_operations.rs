@@ -2,25 +2,22 @@
 //
 // Versioned binary format for KnowledgeGraph persistence.
 //
-// File format v2 layout:
-//   [0..4]    Magic: b"RGF\x02" (Rusty Graph Format, version 2)
+// File format v3 layout:
+//   [0..4]    Magic: b"RGF\x03" (Rusty Graph Format, version 3)
 //   [4..8]    core_data_version: u32 LE (tracks NodeData/EdgeData/Value changes)
 //   [8..12]   metadata_length: u32 LE
-//   [12..12+N]  JSON metadata (UTF-8, uncompressed)
-//   [12+N..12+N+G]  Gzip-compressed bincode of StableDiGraph<NodeData, EdgeData>
-//   [12+N+G..]  (optional) Gzip-compressed bincode of embedding stores
-//               Present only when metadata.graph_compressed_size is set.
-//
-// Format detection (first bytes):
-//   b"RGF\x02"  → v2 (sectioned format)
-//   0x1f 0x8b   → v1 (gzip-compressed full DirGraph)
-//   other       → v0 (raw bincode full DirGraph)
+//   [12..12+N]  JSON metadata (column schemas, section sizes, all config)
+//   [section]  topology.zst — graph structure WITHOUT node properties
+//   [section]  columns_<Type>.zst — one per node type, packed column data
+//   [section]  embeddings.zst (optional)
+//   [section]  timeseries.zst (optional)
 
+use crate::graph::column_store::ColumnStore;
 use crate::graph::reporting::OperationReports;
 use crate::graph::schema::{
     CompositeIndexKey, ConnectionTypeInfo, CowSelection, DirGraph, EmbeddingStore, IndexKey,
-    SaveMetadata, SchemaDefinition, SerdeDeserializeGuard, SerdeSerializeGuard, SpatialConfig,
-    StringInterner, TemporalConfig,
+    PropertyStorage, SaveMetadata, SchemaDefinition, SerdeDeserializeGuard, SerdeSerializeGuard,
+    SpatialConfig, StringInterner, StripPropertiesGuard, TemporalConfig,
 };
 use crate::graph::timeseries::{NodeTimeseries, TimeseriesConfig};
 use crate::graph::{KnowledgeGraph, TemporalContext};
@@ -32,7 +29,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
-use std::path::Path;
 use std::sync::Arc;
 
 /// Return a pinned bincode configuration that is identical to the legacy
@@ -52,8 +48,8 @@ fn bincode_options() -> impl bincode::Options {
         .with_limit(2 * 1024 * 1024 * 1024) // 2 GiB
 }
 
-/// Magic bytes for the v2 sectioned format: "RGF\x02"
-const V2_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x02];
+/// Magic bytes for the v3 columnar format: "RGF\x03"
+const V3_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x03];
 
 /// Current core data version. Bump ONLY when NodeData, EdgeData, or Value enum changes.
 /// This is independent of metadata — metadata uses JSON and handles changes via serde defaults.
@@ -61,16 +57,25 @@ const CURRENT_CORE_DATA_VERSION: u32 = 1;
 
 /// File format version exposed for tests and diagnostics.
 #[allow(dead_code)]
-pub const CURRENT_FORMAT_VERSION: u32 = 2;
+pub const CURRENT_FORMAT_VERSION: u32 = 3;
 
-/// Metadata serialized as JSON in v2 files. All fields use `#[serde(default)]`
+/// Column section metadata for v3 format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct V3ColumnSection {
+    type_name: String,
+    compressed_size: u64,
+    row_count: u32,
+    columns: HashMap<String, String>, // prop_name → type_tag
+}
+
+/// Metadata serialized as JSON in v3 files. All fields use `#[serde(default)]`
 /// so that adding/removing fields never breaks existing files.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct FileMetadata {
     /// Core data version at save time — must match or be migratable.
     #[serde(default)]
     core_data_version: u32,
-    /// Library version string at save time (e.g. "0.4.22").
+    /// Library version string at save time (e.g. "0.6.5").
     #[serde(default)]
     library_version: String,
     /// Optional schema definition.
@@ -112,26 +117,21 @@ struct FileMetadata {
     /// Temporal configuration per connection type (valid_from/valid_to on edges).
     #[serde(default)]
     temporal_edge_configs: HashMap<String, Vec<TemporalConfig>>,
-    /// Compressed size of the graph section in bytes.
-    /// When present, bytes after graph_compressed_size contain the embedding section.
-    #[serde(default)]
-    graph_compressed_size: Option<u64>,
     /// Timeseries data version: 1 = Vec<Vec<i64>> keys (legacy), 2 = NaiveDate keys.
-    /// Files with version < 2 must be rebuilt.
     #[serde(default = "default_ts_data_version")]
     timeseries_data_version: u32,
-    /// Compressed size of the embedding section in bytes.
-    /// When present (along with graph_compressed_size), the timeseries section
-    /// follows after graph + embedding sections.
+    /// v3: compressed size of topology section.
     #[serde(default)]
-    embedding_compressed_size: Option<u64>,
-    /// Compression algorithm: "zstd" (default for new files) or "gzip" (legacy).
-    #[serde(default = "default_compression")]
-    compression: String,
-}
-
-fn default_compression() -> String {
-    "gzip".to_string() // Legacy files without this field used gzip
+    topology_compressed_size: u64,
+    /// v3: column sections metadata (one per node type).
+    #[serde(default)]
+    column_sections: Vec<V3ColumnSection>,
+    /// v3: compressed size of embedding section (0 if none).
+    #[serde(default)]
+    embeddings_compressed_size: u64,
+    /// v3: compressed size of timeseries section (0 if none).
+    #[serde(default)]
+    timeseries_compressed_size: u64,
 }
 
 fn default_auto_vacuum_threshold() -> Option<f64> {
@@ -139,7 +139,60 @@ fn default_auto_vacuum_threshold() -> Option<f64> {
 }
 
 fn default_ts_data_version() -> u32 {
-    1 // Legacy files without this field used Vec<Vec<i64>> keys
+    2
+}
+
+// ─── Metadata transfer helpers ───────────────────────────────────────────────
+
+impl FileMetadata {
+    /// Build metadata from a DirGraph, leaving v3 section sizes at zero
+    /// (caller fills them in after compression).
+    fn from_graph(graph: &DirGraph) -> Self {
+        FileMetadata {
+            core_data_version: CURRENT_CORE_DATA_VERSION,
+            library_version: env!("CARGO_PKG_VERSION").to_string(),
+            schema_definition: graph.schema_definition.clone(),
+            property_index_keys: graph.property_index_keys.clone(),
+            composite_index_keys: graph.composite_index_keys.clone(),
+            range_index_keys: graph.range_index_keys.clone(),
+            node_type_metadata: graph.node_type_metadata.clone(),
+            connection_type_metadata: graph.connection_type_metadata.clone(),
+            id_field_aliases: graph.id_field_aliases.clone(),
+            title_field_aliases: graph.title_field_aliases.clone(),
+            auto_vacuum_threshold: graph.auto_vacuum_threshold,
+            spatial_configs: graph.spatial_configs.clone(),
+            timeseries_configs: graph.timeseries_configs.clone(),
+            temporal_node_configs: graph.temporal_node_configs.clone(),
+            temporal_edge_configs: graph.temporal_edge_configs.clone(),
+            timeseries_data_version: 2,
+            // Section sizes filled in by caller:
+            topology_compressed_size: 0,
+            column_sections: Vec::new(),
+            embeddings_compressed_size: 0,
+            timeseries_compressed_size: 0,
+        }
+    }
+
+    /// Apply metadata fields to a DirGraph during load.
+    fn apply_to(self, graph: &mut DirGraph) {
+        graph.schema_definition = self.schema_definition;
+        graph.property_index_keys = self.property_index_keys;
+        graph.composite_index_keys = self.composite_index_keys;
+        graph.range_index_keys = self.range_index_keys;
+        graph.node_type_metadata = self.node_type_metadata;
+        graph.connection_type_metadata = self.connection_type_metadata;
+        graph.id_field_aliases = self.id_field_aliases;
+        graph.title_field_aliases = self.title_field_aliases;
+        graph.auto_vacuum_threshold = self.auto_vacuum_threshold;
+        graph.spatial_configs = self.spatial_configs;
+        graph.timeseries_configs = self.timeseries_configs;
+        graph.temporal_node_configs = self.temporal_node_configs;
+        graph.temporal_edge_configs = self.temporal_edge_configs;
+        graph.save_metadata = SaveMetadata {
+            format_version: 3,
+            library_version: self.library_version,
+        };
+    }
 }
 
 // ─── Save ────────────────────────────────────────────────────────────────────
@@ -156,116 +209,121 @@ fn zstd_compress(data: &[u8]) -> io::Result<Vec<u8>> {
     zstd::encode_all(std::io::Cursor::new(data), 1)
 }
 
-/// Decompress data using the algorithm specified in metadata.
-fn decompress_section(data: &[u8], compression: &str) -> io::Result<Vec<u8>> {
-    match compression {
-        "zstd" => zstd::decode_all(std::io::Cursor::new(data)),
-        _ => {
-            // Legacy gzip
-            let mut decoder = GzDecoder::new(data);
-            let mut buf = Vec::new();
-            decoder.read_to_end(&mut buf)?;
-            Ok(buf)
-        }
-    }
+/// Decompress zstd-compressed data.
+fn zstd_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
+    zstd::decode_all(std::io::Cursor::new(data))
 }
 
-/// Serialize, compress, and write graph data to file. Heavy I/O, safe to run without GIL.
-pub fn write_graph_to_file(graph: &DirGraph, path: &str) -> io::Result<()> {
-    // Serialize graph to raw bincode first, then compress
-    let graph_raw = {
+/// Serialize a value using the project's pinned bincode options.
+fn bincode_ser<T: Serialize>(val: &T) -> io::Result<Vec<u8>> {
+    bincode_options().serialize(val).map_err(io::Error::other)
+}
+
+/// Deserialize a value using the project's pinned bincode options.
+fn bincode_deser<'a, T: Deserialize<'a>>(buf: &'a [u8]) -> io::Result<T> {
+    bincode_options()
+        .deserialize(buf)
+        .map_err(|e| io::Error::other(format!("bincode deserialization failed: {}", e)))
+}
+
+/// Serialize, compress, and write graph data to v3 file. Heavy I/O, safe to run without GIL.
+///
+/// The graph MUST have columnar storage enabled before calling this function.
+/// The caller (Python `save()`) handles auto-enable/disable.
+pub fn write_graph_v3(graph: &DirGraph, path: &str) -> io::Result<()> {
+    // 1. Serialize topology with properties stripped (v3: node props are in column sections)
+    let topology_raw = {
+        let _strip = StripPropertiesGuard::new();
         let _guard = SerdeSerializeGuard::new(&graph.interner);
-        bincode_options()
-            .serialize(&graph.graph)
-            .map_err(io::Error::other)?
+        bincode_ser(&graph.graph)?
     };
-    let graph_compressed = zstd_compress(&graph_raw)?;
+    let topology_compressed = zstd_compress(&topology_raw)?;
+    drop(topology_raw); // free before compressing columns
 
-    // Compress embeddings if any exist
-    let has_embeddings = !graph.embeddings.is_empty();
-    let embedding_compressed = if has_embeddings {
-        let raw = bincode_options()
-            .serialize(&graph.embeddings)
-            .map_err(io::Error::other)?;
+    // 2. Serialize column sections (one per node type)
+    let mut column_sections_meta: Vec<V3ColumnSection> = Vec::new();
+    let mut column_sections_data: Vec<Vec<u8>> = Vec::new();
+
+    for (type_name, store) in &graph.column_stores {
+        let packed = store.write_packed(&graph.interner)?;
+        let compressed = zstd_compress(&packed)?;
+        drop(packed); // free uncompressed before next type
+
+        // Build column schema
+        let mut cols = HashMap::new();
+        for (slot, ik) in store.schema().iter() {
+            let prop_name = graph.interner.resolve(ik);
+            if let Some(col) = store.columns_ref().get(slot as usize) {
+                cols.insert(prop_name.to_string(), col.type_tag().to_string());
+            }
+        }
+
+        column_sections_meta.push(V3ColumnSection {
+            type_name: type_name.clone(),
+            compressed_size: compressed.len() as u64,
+            row_count: store.row_count(),
+            columns: cols,
+        });
+        column_sections_data.push(compressed);
+    }
+
+    // 3. Compress embeddings if any
+    let embedding_compressed = if !graph.embeddings.is_empty() {
+        let raw = bincode_ser(&graph.embeddings)?;
         Some(zstd_compress(&raw)?)
     } else {
         None
     };
 
-    // Compress timeseries if any exist
-    let has_timeseries = !graph.timeseries_store.is_empty();
-    let timeseries_compressed = if has_timeseries {
-        let raw = bincode_options()
-            .serialize(&graph.timeseries_store)
-            .map_err(io::Error::other)?;
+    // 4. Compress timeseries if any
+    let timeseries_compressed = if !graph.timeseries_store.is_empty() {
+        let raw = bincode_ser(&graph.timeseries_store)?;
         Some(zstd_compress(&raw)?)
     } else {
         None
     };
 
-    let has_extra_sections = has_embeddings || has_timeseries;
-
-    // Build JSON metadata from DirGraph fields
-    let metadata = FileMetadata {
-        core_data_version: CURRENT_CORE_DATA_VERSION,
-        library_version: env!("CARGO_PKG_VERSION").to_string(),
-        schema_definition: graph.schema_definition.clone(),
-        property_index_keys: graph.property_index_keys.clone(),
-        composite_index_keys: graph.composite_index_keys.clone(),
-        range_index_keys: graph.range_index_keys.clone(),
-        node_type_metadata: graph.node_type_metadata.clone(),
-        connection_type_metadata: graph.connection_type_metadata.clone(),
-        id_field_aliases: graph.id_field_aliases.clone(),
-        title_field_aliases: graph.title_field_aliases.clone(),
-        auto_vacuum_threshold: graph.auto_vacuum_threshold,
-        spatial_configs: graph.spatial_configs.clone(),
-        timeseries_configs: graph.timeseries_configs.clone(),
-        temporal_node_configs: graph.temporal_node_configs.clone(),
-        temporal_edge_configs: graph.temporal_edge_configs.clone(),
-        timeseries_data_version: 2, // NaiveDate keys
-        graph_compressed_size: if has_extra_sections {
-            Some(graph_compressed.len() as u64)
-        } else {
-            None
-        },
-        embedding_compressed_size: if has_timeseries {
-            // When timeseries exists, we must know the embedding section boundary
-            Some(
-                embedding_compressed
-                    .as_ref()
-                    .map(|b| b.len() as u64)
-                    .unwrap_or(0),
-            )
-        } else {
-            None
-        },
-        compression: "zstd".to_string(),
-    };
+    // 5. Build metadata (common fields from graph, then fill in section sizes)
+    let mut metadata = FileMetadata::from_graph(graph);
+    metadata.topology_compressed_size = topology_compressed.len() as u64;
+    metadata.column_sections = column_sections_meta;
+    metadata.embeddings_compressed_size = embedding_compressed
+        .as_ref()
+        .map(|b| b.len() as u64)
+        .unwrap_or(0);
+    metadata.timeseries_compressed_size = timeseries_compressed
+        .as_ref()
+        .map(|b| b.len() as u64)
+        .unwrap_or(0);
 
     let metadata_json = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
 
+    // 6. Write file
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
 
-    // Write header: magic (4B) + core_data_version (4B) + metadata_length (4B)
-    writer.write_all(&V2_MAGIC)?;
+    // Header: magic (4B) + core_data_version (4B) + metadata_length (4B)
+    writer.write_all(&V3_MAGIC)?;
     writer.write_all(&CURRENT_CORE_DATA_VERSION.to_le_bytes())?;
     writer.write_all(&(metadata_json.len() as u32).to_le_bytes())?;
-
-    // Write JSON metadata (uncompressed — small and self-describing)
     writer.write_all(&metadata_json)?;
 
-    // Write pre-compressed graph data
-    writer.write_all(&graph_compressed)?;
+    // Topology section
+    writer.write_all(&topology_compressed)?;
 
-    // Write embedding section if present
-    if let Some(emb_data) = embedding_compressed {
-        writer.write_all(&emb_data)?;
+    // Column sections (one per node type, in metadata order)
+    for section_data in &column_sections_data {
+        writer.write_all(section_data)?;
     }
 
-    // Write timeseries section if present
-    if let Some(ts_data) = timeseries_compressed {
-        writer.write_all(&ts_data)?;
+    // Embeddings section
+    if let Some(emb_data) = &embedding_compressed {
+        writer.write_all(emb_data)?;
+    }
+
+    // Timeseries section
+    if let Some(ts_data) = &timeseries_compressed {
+        writer.write_all(ts_data)?;
     }
 
     writer.flush()?;
@@ -286,27 +344,21 @@ pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
         ));
     }
 
-    // Detect format by first bytes
-    let dir_graph = if buf[..4] == V2_MAGIC {
-        load_v2(&buf)?
-    } else if buf.len() >= 2 && buf[0] == 0x1f && buf[1] == 0x8b {
-        load_v1(&buf)?
+    if buf[..4] == V3_MAGIC {
+        load_v3(&buf)
     } else {
-        return Err(io::Error::other(
-            "Unrecognized file format. This file was likely saved with a very old version of \
-             kglite (pre-v0.4.18) that used raw bincode without compression. \
-             Please rebuild the graph with the current version.",
-        ));
-    };
-
-    Ok(finalize_load(dir_graph))
+        Err(io::Error::other(
+            "Unrecognized file format. This file was saved with an older version of kglite. \
+             Please rebuild the graph with the current version and save again.",
+        ))
+    }
 }
 
-/// Load v2 sectioned format: header + JSON metadata + gzip bincode graph + optional embeddings.
-fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
+/// Load v3 columnar format.
+fn load_v3(buf: &[u8]) -> io::Result<KnowledgeGraph> {
     if buf.len() < 12 {
         return Err(io::Error::other(
-            "v2 file is truncated — header incomplete.",
+            "v3 file is truncated — header incomplete.",
         ));
     }
 
@@ -314,204 +366,163 @@ fn load_v2(buf: &[u8]) -> io::Result<DirGraph> {
     let core_version = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
     let metadata_len = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]) as usize;
 
-    let metadata_end = 12 + metadata_len;
-    if buf.len() < metadata_end {
+    if core_version > CURRENT_CORE_DATA_VERSION {
         return Err(io::Error::other(format!(
-            "v2 file is truncated — expected {} bytes of metadata but file has only {} bytes after header.",
-            metadata_len,
-            buf.len() - 12
+            "File uses core data version {} but this library only supports up to version {}. \
+             Please upgrade kglite.",
+            core_version, CURRENT_CORE_DATA_VERSION,
         )));
     }
 
-    // Parse JSON metadata (self-describing — missing/extra fields handled by serde defaults)
+    let metadata_end = 12 + metadata_len;
+    if buf.len() < metadata_end {
+        return Err(io::Error::other(
+            "v3 file is truncated — metadata incomplete.",
+        ));
+    }
+
+    // Parse JSON metadata
     let metadata: FileMetadata = serde_json::from_slice(&buf[12..metadata_end])
-        .map_err(|e| io::Error::other(format!("Failed to parse v2 metadata JSON: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("Failed to parse v3 metadata: {}", e)))?;
 
-    // Determine graph section boundaries
-    let graph_start = metadata_end;
-    let (graph_bytes, embedding_bytes, timeseries_bytes) = match metadata.graph_compressed_size {
-        Some(graph_size) => {
-            let graph_end = graph_start + graph_size as usize;
-            if buf.len() < graph_end {
-                return Err(io::Error::other(
-                    "v2 file is truncated — graph section incomplete.",
-                ));
-            }
-            // When embedding_compressed_size is set, we know the exact embedding boundary
-            match metadata.embedding_compressed_size {
-                Some(emb_size) => {
-                    let emb_end = graph_end + emb_size as usize;
-                    let emb_bytes = if emb_size > 0 {
-                        Some(&buf[graph_end..emb_end])
-                    } else {
-                        None
-                    };
-                    let ts_bytes = if buf.len() > emb_end {
-                        Some(&buf[emb_end..])
-                    } else {
-                        None
-                    };
-                    (&buf[graph_start..graph_end], emb_bytes, ts_bytes)
-                }
-                None => {
-                    // Old format: all remaining bytes after graph are embeddings
-                    (&buf[graph_start..graph_end], Some(&buf[graph_end..]), None)
-                }
-            }
-        }
-        None => (&buf[graph_start..], None, None),
+    // Section offsets
+    let topology_start = metadata_end;
+    let topology_end = topology_start + metadata.topology_compressed_size as usize;
+
+    // Decompress + deserialize topology (properties are empty maps)
+    let topology_compressed = &buf[topology_start..topology_end];
+    let topology_raw = zstd_decompress(topology_compressed)?;
+
+    let mut interner = StringInterner::new();
+    let graph: crate::graph::schema::Graph = {
+        let _guard = SerdeDeserializeGuard::new(&mut interner);
+        bincode_deser(&topology_raw)?
     };
+    drop(topology_raw);
 
-    // Decompress and deserialize graph (interner is populated as a side effect)
-    let (graph, interner) = load_core_data(graph_bytes, core_version, &metadata.compression)?;
+    // Extract v3 section metadata before apply_to consumes the rest
+    let column_sections = metadata.column_sections.clone();
+    let embeddings_compressed_size = metadata.embeddings_compressed_size;
+    let timeseries_compressed_size = metadata.timeseries_compressed_size;
 
     // Reassemble DirGraph
     let mut dir_graph = DirGraph::from_graph(graph);
     dir_graph.interner = interner;
-    dir_graph.schema_definition = metadata.schema_definition;
-    dir_graph.property_index_keys = metadata.property_index_keys;
-    dir_graph.composite_index_keys = metadata.composite_index_keys;
-    dir_graph.range_index_keys = metadata.range_index_keys;
-    dir_graph.node_type_metadata = metadata.node_type_metadata;
-    dir_graph.connection_type_metadata = metadata.connection_type_metadata;
-    dir_graph.id_field_aliases = metadata.id_field_aliases;
-    dir_graph.title_field_aliases = metadata.title_field_aliases;
-    dir_graph.auto_vacuum_threshold = metadata.auto_vacuum_threshold;
-    dir_graph.spatial_configs = metadata.spatial_configs;
-    dir_graph.timeseries_configs = metadata.timeseries_configs;
-    dir_graph.temporal_node_configs = metadata.temporal_node_configs;
-    dir_graph.temporal_edge_configs = metadata.temporal_edge_configs;
-    dir_graph.save_metadata = SaveMetadata {
-        format_version: 2,
-        library_version: metadata.library_version,
-    };
+    metadata.apply_to(&mut dir_graph);
 
-    // Load embeddings if present
-    if let Some(emb_bytes) = embedding_bytes {
-        if !emb_bytes.is_empty() {
-            let decompressed = decompress_section(emb_bytes, &metadata.compression)?;
-            let embeddings: HashMap<(String, String), EmbeddingStore> =
-                bincode_options().deserialize(&decompressed).map_err(|e| {
-                    io::Error::other(format!("Failed to deserialize embedding data: {}", e))
-                })?;
-            dir_graph.embeddings = embeddings;
-        }
+    // Rebuild type indices and schemas (needed for ColumnStore construction).
+    // Note: rebuild_indices_from_keys is deferred until after column loading
+    // because properties are empty at this point (stripped during save).
+    dir_graph.rebuild_type_indices_and_compact();
+    dir_graph.build_connection_types_cache();
+
+    // Load column sections one type at a time
+    let mut section_offset = topology_end;
+
+    // Create temp directory for mmap column files (unique per load to avoid collisions)
+    let temp_dir = std::env::temp_dir().join(format!(
+        "kglite_v3_{}_{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    // Register for cleanup on DirGraph drop
+    if let Ok(mut dirs) = dir_graph.temp_dirs.lock() {
+        dirs.push(temp_dir.clone());
     }
 
-    // Load timeseries if present
-    if let Some(ts_bytes) = timeseries_bytes {
-        if !ts_bytes.is_empty() {
-            if metadata.timeseries_data_version < 2 {
-                eprintln!(
-                    "Warning: Timeseries data in this file uses legacy format (v{}). \
-                     Timeseries data was not loaded — please re-import from source data.",
-                    metadata.timeseries_data_version
-                );
-            } else {
-                let decompressed = decompress_section(ts_bytes, &metadata.compression)?;
-                let ts_store: HashMap<usize, NodeTimeseries> =
-                    bincode_options().deserialize(&decompressed).map_err(|e| {
-                        io::Error::other(format!("Failed to deserialize timeseries data: {}", e))
-                    })?;
-                dir_graph.timeseries_store = ts_store;
+    for section_meta in &column_sections {
+        let section_end = section_offset + section_meta.compressed_size as usize;
+        if buf.len() < section_end {
+            return Err(io::Error::other(format!(
+                "v3 file truncated — column section '{}' incomplete.",
+                section_meta.type_name
+            )));
+        }
+
+        let compressed = &buf[section_offset..section_end];
+        let packed = zstd_decompress(compressed)?;
+
+        // Get the type schema
+        if let Some(type_schema) = dir_graph.type_schemas.get(&section_meta.type_name) {
+            let type_meta = dir_graph
+                .node_type_metadata
+                .get(&section_meta.type_name)
+                .cloned()
+                .unwrap_or_default();
+
+            // Create temp dir for this type's column files
+            let type_temp_dir = temp_dir.join(&section_meta.type_name);
+            std::fs::create_dir_all(&type_temp_dir)?;
+
+            let store = ColumnStore::load_packed(
+                Arc::clone(type_schema),
+                &type_meta,
+                &dir_graph.interner,
+                &packed,
+                section_meta.row_count,
+                Some(&type_temp_dir),
+            )?;
+            drop(packed); // free before next type
+
+            dir_graph
+                .column_stores
+                .insert(section_meta.type_name.clone(), Arc::new(store));
+        }
+
+        section_offset = section_end;
+    }
+
+    // Re-point nodes to columnar storage
+    for (type_name, store) in &dir_graph.column_stores {
+        if let Some(indices) = dir_graph.type_indices.get(type_name) {
+            for (row_id, &node_idx) in indices.iter().enumerate() {
+                if let Some(node) = dir_graph.graph.node_weight_mut(node_idx) {
+                    node.properties = PropertyStorage::Columnar {
+                        store: Arc::clone(store),
+                        row_id: row_id as u32,
+                    };
+                }
             }
         }
     }
 
-    Ok(dir_graph)
-}
+    // Now that nodes have columnar properties, rebuild property/range/composite indices
+    dir_graph.rebuild_indices_from_keys();
 
-/// Load v1 format: gzip-compressed bincode of full DirGraph.
-fn load_v1(buf: &[u8]) -> io::Result<DirGraph> {
-    // v1 serializes full DirGraph — interner field is serde(skip) so it
-    // starts empty, but InternedKey::deserialize populates the thread-local.
-    let mut interner = StringInterner::new();
-    let mut dir_graph: DirGraph = {
-        let _guard = SerdeDeserializeGuard::new(&mut interner);
-        let gz = GzDecoder::new(buf);
-        bincode_options().deserialize_from(gz).map_err(|e| {
-            io::Error::other(format!(
-                "Failed to load v1 (gzip+bincode) file. This file may have been saved with an \
-                         incompatible version of kglite. Error: {}",
-                e
-            ))
-        })?
-    };
-    dir_graph.interner = interner;
-
-    // v1 files stored format_version in save_metadata
-    let saved_version = dir_graph.save_metadata.format_version;
-    if saved_version > 1 {
-        return Err(io::Error::other(format!(
-            "v1 file claims format_version {} (library {}), but v1 loader only supports version 0-1. \
-             This should not happen — file may be corrupt.",
-            saved_version, dir_graph.save_metadata.library_version,
-        )));
+    // Load embeddings if present
+    if embeddings_compressed_size > 0 {
+        let emb_end = section_offset + embeddings_compressed_size as usize;
+        if buf.len() >= emb_end {
+            let emb_compressed = &buf[section_offset..emb_end];
+            let emb_raw = zstd_decompress(emb_compressed)?;
+            let embeddings: HashMap<(String, String), EmbeddingStore> = bincode_deser(&emb_raw)?;
+            dir_graph.embeddings = embeddings;
+            section_offset = emb_end;
+        }
     }
 
-    Ok(dir_graph)
-}
-
-/// Decompress and deserialize the core graph data, running migrations if needed.
-fn load_core_data(
-    graph_bytes: &[u8],
-    file_core_version: u32,
-    compression: &str,
-) -> io::Result<(crate::graph::schema::Graph, StringInterner)> {
-    if file_core_version > CURRENT_CORE_DATA_VERSION {
-        return Err(io::Error::other(format!(
-            "File uses core data version {} but this library only supports up to version {}. \
-             Please upgrade kglite to load this file.",
-            file_core_version, CURRENT_CORE_DATA_VERSION,
-        )));
+    // Load timeseries if present
+    if timeseries_compressed_size > 0 {
+        let ts_end = section_offset + timeseries_compressed_size as usize;
+        if buf.len() >= ts_end {
+            let ts_compressed = &buf[section_offset..ts_end];
+            let ts_raw = zstd_decompress(ts_compressed)?;
+            let ts_store: HashMap<usize, NodeTimeseries> = bincode_deser(&ts_raw)?;
+            dir_graph.timeseries_store = ts_store;
+        }
     }
 
-    // Decompress graph bytes
-    let decompressed = decompress_section(graph_bytes, compression)?;
-
-    // Set up interner for deserialization — InternedKey::deserialize registers
-    // each string key as a side effect, so the interner is fully populated after load.
-    let mut interner = StringInterner::new();
-    let graph: crate::graph::schema::Graph = {
-        let _guard = SerdeDeserializeGuard::new(&mut interner);
-        bincode_options().deserialize(&decompressed).map_err(|e| {
-            io::Error::other(format!(
-                "Failed to deserialize graph data (core version {}). Error: {}",
-                file_core_version, e
-            ))
-        })?
-    };
-
-    // Run migration chain: version N → N+1 → ... → CURRENT_CORE_DATA_VERSION
-    if file_core_version < CURRENT_CORE_DATA_VERSION {
-        migrate_core_data(graph, file_core_version).map(|g| (g, interner))
-    } else {
-        Ok((graph, interner))
-    }
-}
-
-/// Migrate core graph data from an older version to the current version.
-/// Called sequentially: v1→v2, v2→v3, etc.
-///
-/// Currently a no-op since CURRENT_CORE_DATA_VERSION is 1.
-/// When NodeData/EdgeData/Value changes in the future, add migration steps here:
-///
-/// ```ignore
-/// fn migrate_core_data(graph: Graph, from: u32) -> io::Result<Graph> {
-///     let mut g = graph;
-///     if from < 2 { g = migrate_v1_to_v2(g)?; }
-///     if from < 3 { g = migrate_v2_to_v3(g)?; }
-///     Ok(g)
-/// }
-/// ```
-fn migrate_core_data(
-    graph: crate::graph::schema::Graph,
-    from_version: u32,
-) -> io::Result<crate::graph::schema::Graph> {
-    // No migrations needed yet (only version 1 exists).
-    // This function exists as infrastructure for future core data changes.
-    let _ = from_version;
-    Ok(graph)
+    Ok(KnowledgeGraph {
+        inner: Arc::new(dir_graph),
+        selection: CowSelection::new(),
+        reports: OperationReports::new(),
+        last_mutation_stats: None,
+        embedder: None,
+        temporal_context: TemporalContext::default(),
+    })
 }
 
 // ─── Embedding Export / Import ────────────────────────────────────────────
@@ -704,241 +715,4 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
         imported: total_imported,
         skipped: total_skipped,
     })
-}
-
-/// Rebuild caches and wrap in KnowledgeGraph.
-fn finalize_load(mut dir_graph: DirGraph) -> KnowledgeGraph {
-    dir_graph.rebuild_type_indices_and_compact();
-    dir_graph.build_connection_types_cache();
-    dir_graph.rebuild_indices_from_keys();
-
-    KnowledgeGraph {
-        inner: Arc::new(dir_graph),
-        selection: CowSelection::new(),
-        reports: OperationReports::new(),
-        last_mutation_stats: None,
-        embedder: None,
-        temporal_context: TemporalContext::default(),
-    }
-}
-
-// ─── Mmap directory format ──────────────────────────────────────────────────
-
-/// Manifest for the mmap directory save format.
-#[derive(Debug, Serialize, Deserialize)]
-struct MmapManifest {
-    /// Column schema per node type: type_name → { prop_name → column_type_tag }
-    column_schemas: HashMap<String, HashMap<String, String>>,
-    /// Row count per node type.
-    row_counts: HashMap<String, u32>,
-    /// File metadata (same as .kgl format for shared state).
-    #[serde(flatten)]
-    file_meta: FileMetadata,
-}
-
-/// Save graph in mmap directory format.
-///
-/// Directory layout:
-/// ```text
-/// <dir>/
-/// ├── manifest.json
-/// ├── topology.zst      # zstd-compressed bincode of graph (properties as Compact)
-/// ├── Person/
-/// │   ├── age.i64       # raw i64 array
-/// │   ├── age.null      # null bitmap (u8 per row)
-/// │   ├── full_name.off # u64 string offsets
-/// │   ├── full_name.str # raw UTF-8 bytes
-/// │   └── full_name.null
-/// └── Company/
-///     └── ...
-/// ```
-pub fn write_graph_mmap(graph: &DirGraph, dir: &str) -> io::Result<()> {
-    let dir_path = Path::new(dir);
-    std::fs::create_dir_all(dir_path)?;
-
-    // 1. If columnar, save column files per type
-    let mut column_schemas: HashMap<String, HashMap<String, String>> = HashMap::new();
-    let mut row_counts: HashMap<String, u32> = HashMap::new();
-
-    for (type_name, store) in &graph.column_stores {
-        let type_dir = dir_path.join(type_name);
-        store.save_to_dir(&type_dir, &graph.interner)?;
-
-        // Build column schema from store
-        let mut cols = HashMap::new();
-        for (slot, ik) in store.schema().iter() {
-            let prop_name = graph.interner.resolve(ik);
-            // Get type tag from the column
-            if let Some(col) = store.columns_ref().get(slot as usize) {
-                cols.insert(prop_name.to_string(), col.type_tag().to_string());
-            }
-        }
-        column_schemas.insert(type_name.clone(), cols);
-        row_counts.insert(type_name.clone(), store.row_count());
-    }
-
-    // 2. Save topology (graph structure)
-    // PropertyStorage::Columnar has a custom Serialize impl that materializes
-    // properties from the column store on-the-fly, so no clone/conversion needed.
-    let topology_raw = {
-        let _guard = SerdeSerializeGuard::new(&graph.interner);
-        bincode_options()
-            .serialize(&graph.graph)
-            .map_err(io::Error::other)?
-    };
-    let topology_compressed = zstd_compress(&topology_raw)?;
-    std::fs::write(dir_path.join("topology.zst"), &topology_compressed)?;
-
-    // 3. Serialize embeddings if any
-    if !graph.embeddings.is_empty() {
-        let emb_raw = bincode_options()
-            .serialize(&graph.embeddings)
-            .map_err(io::Error::other)?;
-        let emb_compressed = zstd_compress(&emb_raw)?;
-        std::fs::write(dir_path.join("embeddings.zst"), &emb_compressed)?;
-    }
-
-    // 4. Write manifest
-    let manifest = MmapManifest {
-        column_schemas,
-        row_counts,
-        file_meta: build_file_metadata(graph),
-    };
-    let manifest_json = serde_json::to_string_pretty(&manifest).map_err(io::Error::other)?;
-    std::fs::write(dir_path.join("manifest.json"), manifest_json)?;
-
-    Ok(())
-}
-
-/// Load graph from mmap directory format.
-pub fn load_graph_mmap(dir: &str) -> io::Result<KnowledgeGraph> {
-    use crate::graph::column_store::ColumnStore;
-
-    let dir_path = Path::new(dir);
-
-    // 1. Read manifest
-    let manifest_str = std::fs::read_to_string(dir_path.join("manifest.json"))?;
-    let manifest: MmapManifest = serde_json::from_str(&manifest_str).map_err(io::Error::other)?;
-
-    // 2. Load topology
-    let topology_compressed = std::fs::read(dir_path.join("topology.zst"))?;
-    let topology_raw = zstd::decode_all(std::io::Cursor::new(&topology_compressed))?;
-
-    let mut interner = StringInterner::new();
-    let graph = {
-        let _guard = SerdeDeserializeGuard::new(&mut interner);
-        bincode_options()
-            .deserialize(&topology_raw)
-            .map_err(io::Error::other)?
-    };
-
-    // 3. Load embeddings if present
-    let embeddings = if dir_path.join("embeddings.zst").exists() {
-        let emb_compressed = std::fs::read(dir_path.join("embeddings.zst"))?;
-        let emb_raw = zstd::decode_all(std::io::Cursor::new(&emb_compressed))?;
-        bincode_options()
-            .deserialize(&emb_raw)
-            .map_err(io::Error::other)?
-    } else {
-        HashMap::new()
-    };
-
-    // 4. Build DirGraph from metadata (reuse from_graph for field defaults)
-    let meta = &manifest.file_meta;
-    let mut dir_graph = DirGraph::from_graph(graph);
-    dir_graph.interner = interner;
-    dir_graph.schema_definition = meta.schema_definition.clone();
-    dir_graph.property_index_keys = meta.property_index_keys.clone();
-    dir_graph.composite_index_keys = meta.composite_index_keys.clone();
-    dir_graph.range_index_keys = meta.range_index_keys.clone();
-    dir_graph.node_type_metadata = meta.node_type_metadata.clone();
-    dir_graph.connection_type_metadata = meta.connection_type_metadata.clone();
-    dir_graph.id_field_aliases = meta.id_field_aliases.clone();
-    dir_graph.title_field_aliases = meta.title_field_aliases.clone();
-    dir_graph.auto_vacuum_threshold = meta.auto_vacuum_threshold;
-    dir_graph.spatial_configs = meta.spatial_configs.clone();
-    dir_graph.timeseries_configs = meta.timeseries_configs.clone();
-    dir_graph.temporal_node_configs = meta.temporal_node_configs.clone();
-    dir_graph.temporal_edge_configs = meta.temporal_edge_configs.clone();
-    dir_graph.embeddings = embeddings;
-
-    // 5. Rebuild type indices and compact properties
-    dir_graph.rebuild_type_indices_and_compact();
-    dir_graph.build_connection_types_cache();
-    dir_graph.rebuild_indices_from_keys();
-
-    // 6. Enable columnar storage from the saved column files
-    for (type_name, col_schema) in &manifest.column_schemas {
-        if let Some(type_schema) = dir_graph.type_schemas.get(type_name) {
-            let type_meta = dir_graph
-                .node_type_metadata
-                .get(type_name)
-                .cloned()
-                .unwrap_or_default();
-            let mut store =
-                ColumnStore::new(Arc::clone(type_schema), &type_meta, &dir_graph.interner);
-
-            // Load column data from files
-            let type_dir = dir_path.join(type_name);
-            if type_dir.exists() {
-                let row_count = manifest.row_counts.get(type_name).copied().unwrap_or(0);
-                store.load_from_dir(&type_dir, col_schema, &dir_graph.interner, row_count)?;
-            }
-
-            dir_graph
-                .column_stores
-                .insert(type_name.clone(), Arc::new(store));
-        }
-    }
-
-    // 7. Convert nodes to use columnar storage if column stores were loaded
-    if !dir_graph.column_stores.is_empty() {
-        // Re-point nodes to their columnar stores
-        for (type_name, store) in &dir_graph.column_stores {
-            if let Some(indices) = dir_graph.type_indices.get(type_name) {
-                for (row_id, &node_idx) in indices.iter().enumerate() {
-                    if let Some(node) = dir_graph.graph.node_weight_mut(node_idx) {
-                        node.properties = crate::graph::schema::PropertyStorage::Columnar {
-                            store: Arc::clone(store),
-                            row_id: row_id as u32,
-                        };
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(KnowledgeGraph {
-        inner: Arc::new(dir_graph),
-        selection: CowSelection::new(),
-        reports: OperationReports::new(),
-        last_mutation_stats: None,
-        embedder: None,
-        temporal_context: TemporalContext::default(),
-    })
-}
-
-/// Build FileMetadata from a DirGraph (shared between .kgl and mmap formats).
-fn build_file_metadata(graph: &DirGraph) -> FileMetadata {
-    FileMetadata {
-        core_data_version: CURRENT_CORE_DATA_VERSION,
-        library_version: graph.save_metadata.library_version.clone(),
-        schema_definition: graph.schema_definition.clone(),
-        property_index_keys: graph.property_index_keys.clone(),
-        composite_index_keys: graph.composite_index_keys.clone(),
-        range_index_keys: graph.range_index_keys.clone(),
-        node_type_metadata: graph.node_type_metadata.clone(),
-        connection_type_metadata: graph.connection_type_metadata.clone(),
-        id_field_aliases: graph.id_field_aliases.clone(),
-        title_field_aliases: graph.title_field_aliases.clone(),
-        auto_vacuum_threshold: graph.auto_vacuum_threshold,
-        spatial_configs: graph.spatial_configs.clone(),
-        timeseries_configs: graph.timeseries_configs.clone(),
-        temporal_node_configs: graph.temporal_node_configs.clone(),
-        temporal_edge_configs: graph.temporal_edge_configs.clone(),
-        graph_compressed_size: None,
-        timeseries_data_version: 2,
-        embedding_compressed_size: None,
-        compression: "zstd".to_string(),
-    }
 }

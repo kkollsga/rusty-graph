@@ -123,7 +123,7 @@ def test_bench_unspill_5k(benchmark, graph_5k_spilled):
 
 
 # ---------------------------------------------------------------------------
-# Query performance: heap vs mmap
+# Query performance: heap vs spilled
 # ---------------------------------------------------------------------------
 
 
@@ -138,7 +138,7 @@ def test_bench_query_where_heap_5k(benchmark, graph_5k_columnar):
 
 @pytest.mark.benchmark
 def test_bench_query_where_spilled_5k(benchmark, graph_5k_spilled):
-    """Filtered query on spilled (mmap-backed) columnar (5000 nodes)."""
+    """Filtered query on spilled columnar (5000 nodes)."""
     benchmark(
         graph_5k_spilled.cypher,
         "MATCH (n:Item) WHERE n.value > 4000 RETURN n.title, n.value",
@@ -156,7 +156,7 @@ def test_bench_query_match_heap_5k(benchmark, graph_5k_columnar):
 
 @pytest.mark.benchmark
 def test_bench_query_match_spilled_5k(benchmark, graph_5k_spilled):
-    """Simple MATCH on spilled (mmap-backed) columnar (5000 nodes)."""
+    """Simple MATCH on spilled columnar (5000 nodes)."""
     benchmark(
         graph_5k_spilled.cypher,
         "MATCH (n:Item) RETURN n.title, n.value LIMIT 100",
@@ -174,7 +174,7 @@ def test_bench_query_aggregation_heap_5k(benchmark, graph_5k_columnar):
 
 @pytest.mark.benchmark
 def test_bench_query_aggregation_spilled_5k(benchmark, graph_5k_spilled):
-    """Aggregation on spilled (mmap-backed) columnar."""
+    """Aggregation on spilled columnar."""
     benchmark(
         graph_5k_spilled.cypher,
         "MATCH (n:Item) RETURN count(n) AS cnt, avg(n.value) AS avg_val",
@@ -219,31 +219,24 @@ def test_bench_vacuum_no_columnar_5k(benchmark):
 
 
 @pytest.mark.benchmark
-def test_bench_save_mmap_heap_5k(benchmark, graph_5k_columnar, tmp_path):
-    """Save mmap from heap-backed columnar."""
+def test_bench_save_v3_heap_5k(benchmark, graph_5k_columnar, tmp_path):
+    """Save v3 .kgl from heap-backed columnar."""
     counter = [0]
 
     def save():
-        graph_5k_columnar.save_mmap(str(tmp_path / f"mmap_{counter[0]}"))
+        graph_5k_columnar.save(str(tmp_path / f"v3_{counter[0]}.kgl"))
         counter[0] += 1
 
     benchmark(save)
 
 
 @pytest.mark.benchmark
-def test_bench_save_mmap_spilled_5k(benchmark, graph_5k_spilled, tmp_path):
-    """Save mmap from spilled (mmap-backed) columnar."""
+def test_bench_save_v3_spilled_5k(benchmark, graph_5k_spilled, tmp_path):
+    """Save v3 .kgl from spilled columnar."""
     counter = [0]
 
     def save():
-        graph_5k_spilled.save_mmap(str(tmp_path / f"mmap_{counter[0]}"))
+        graph_5k_spilled.save(str(tmp_path / f"v3_{counter[0]}.kgl"))
         counter[0] += 1
 
     benchmark(save)
-
-
-@pytest.mark.benchmark
-def test_bench_save_kgl_heap_5k(benchmark, graph_5k_columnar, tmp_path):
-    """Save .kgl from heap-backed columnar."""
-    path = str(tmp_path / "bench.kgl")
-    benchmark(graph_5k_columnar.save, path)

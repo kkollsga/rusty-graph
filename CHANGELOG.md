@@ -5,6 +5,34 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.6.6] - 2026-03-18
+
+### Breaking
+
+- **`.kgl` format upgraded to v3** — files saved with older versions (v1/v2) cannot be loaded; rebuild the graph from source data and re-save.
+- **`save_mmap()` and `kglite.load_mmap()` removed** — the v3 `.kgl` format replaces the mmap directory format with a single shareable file that supports larger-than-RAM loading.
+- `save()` now leaves the graph in columnar mode after saving (previously restored non-columnar state). This avoids an expensive O(N×P) disable step.
+
+### Added
+
+- **v3 unified columnar file format** — `save()` now writes a single `.kgl` file with separated topology and per-type columnar sections (zstd-compressed). On load, column sections are decompressed to temp files and memory-mapped, keeping peak memory to topology + one type's data at a time.
+- `save()` automatically enables columnar storage if not already active — no need to call `enable_columnar()` before saving.
+- Loaded v3 files are always columnar (`is_columnar` returns `True`).
+
+### Fixed
+
+- **Temp directory leak** — `/tmp/kglite_v3_*` and `/tmp/kglite_spill_*` directories created during `load()` and `enable_columnar()` are now automatically cleaned up when the graph is dropped.
+- Reduced save-side memory usage by eliminating double buffering in column packing.
+
+### Removed
+
+- `save_mmap(path)` method — use `save(path)` instead.
+- `kglite.load_mmap(path)` function — use `kglite.load(path)` instead.
+- v1 and v2 `.kgl` format support (load and save).
+- Dead code: `StringInterner::len()`.
+
 ## [0.6.5] - 2026-03-18
 
 ### Added

@@ -359,29 +359,31 @@ class TestEdgeCases:
         assert info["columnar_total_rows"] == 0
         assert info["columnar_live_rows"] == 0
 
-    def test_save_mmap_spilled_graph(self, tmp_path):
-        """save_mmap works on a graph with spilled columns."""
+    def test_save_load_spilled_graph(self, tmp_path):
+        """save/load works on a graph with spilled columns."""
         g = make_graph(500)
         g.set_memory_limit(1024)
         g.enable_columnar()
 
-        mmap_dir = str(tmp_path / "spilled_mmap")
-        g.save_mmap(mmap_dir)
+        fp = str(tmp_path / "spilled.kgl")
+        g.save(fp)
 
-        g2 = kglite.load_mmap(mmap_dir)
+        g2 = kglite.load(fp)
+        assert g2.is_columnar
         count = g2.cypher("MATCH (n:Item) RETURN count(n) AS c").to_list()[0]["c"]
         assert count == 500
 
-    def test_unspill_then_save_mmap(self, tmp_path):
-        """Unspill followed by save_mmap works correctly."""
+    def test_unspill_then_save_load(self, tmp_path):
+        """Unspill followed by save/load works correctly."""
         g = make_graph(500)
         g.set_memory_limit(1024)
         g.enable_columnar()
         g.unspill()
 
-        mmap_dir = str(tmp_path / "unspilled_mmap")
-        g.save_mmap(mmap_dir)
+        fp = str(tmp_path / "unspilled.kgl")
+        g.save(fp)
 
-        g2 = kglite.load_mmap(mmap_dir)
+        g2 = kglite.load(fp)
+        assert g2.is_columnar
         count = g2.cypher("MATCH (n:Item) RETURN count(n) AS c").to_list()[0]["c"]
         assert count == 500

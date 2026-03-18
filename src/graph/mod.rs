@@ -5112,32 +5112,18 @@ impl KnowledgeGraph {
     fn save(&mut self, py: Python<'_>, path: &str) -> PyResult<()> {
         // Prep phase (quick): stamp metadata, snapshot index keys
         io_operations::prepare_save(&mut self.inner);
+
+        // Auto-enable columnar if not already active (v3 requires columnar).
+        // The graph stays columnar after save — no disable step needed.
+        if !self.inner.is_columnar() {
+            let graph = Arc::make_mut(&mut self.inner);
+            graph.enable_columnar();
+        }
+
         // Heavy phase: serialize, compress, write — release GIL for other Python threads
         let inner = self.inner.clone();
         let path_owned = path.to_string();
-        py.detach(move || io_operations::write_graph_to_file(&inner, &path_owned))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))
-    }
-
-    /// Save graph in mmap directory format.
-    ///
-    /// Creates a directory with memory-mapped column files for each node type.
-    /// This format enables instant loading of large graphs via mmap, and
-    /// supports out-of-core (larger-than-RAM) workloads.
-    ///
-    /// Args:
-    ///     path: Directory path to create. Will be created if it doesn't exist.
-    ///
-    /// Example:
-    ///     ```python
-    ///     graph.enable_columnar()
-    ///     graph.save_mmap("/tmp/my_graph")
-    ///     ```
-    fn save_mmap(&mut self, py: Python<'_>, path: &str) -> PyResult<()> {
-        io_operations::prepare_save(&mut self.inner);
-        let inner = self.inner.clone();
-        let path_owned = path.to_string();
-        py.detach(move || io_operations::write_graph_mmap(&inner, &path_owned))
+        py.detach(move || io_operations::write_graph_v3(&inner, &path_owned))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))
     }
 

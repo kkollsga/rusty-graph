@@ -2521,12 +2521,8 @@ fn write_fluent_overview(xml: &mut String) {
     xml.push_str("  <group name=\"export\">\n");
     xml.push_str("    <method sig=\"export(path, format='graphml')\">Export as GraphML, GEXF, JSON (D3), or CSV.</method>\n");
     xml.push_str("    <method sig=\"export_csv(directory)\">CSV tree + blueprint.json (round-trips with from_blueprint).</method>\n");
-    xml.push_str("    <method sig=\"save(path)\">Binary .kgl file.</method>\n");
+    xml.push_str("    <method sig=\"save(path)\">Binary .kgl v3 file (auto-columnar, supports larger-than-RAM loading).</method>\n");
     xml.push_str("    <method sig=\"kglite.load(path)\">Restore from .kgl file.</method>\n");
-    xml.push_str("    <method sig=\"save_mmap(path)\">Mmap directory format for large/out-of-core graphs.</method>\n");
-    xml.push_str(
-        "    <method sig=\"kglite.load_mmap(path)\">Restore from mmap directory.</method>\n",
-    );
     xml.push_str("  </group>\n");
 
     // Columnar storage
@@ -2871,12 +2867,8 @@ fn write_fluent_topic_export(xml: &mut String) {
         "      <m sig=\"export_string(format='graphml')\">Export to string (no file).</m>\n",
     );
     xml.push_str("      <m sig=\"export_csv(directory)\">CSV directory tree + blueprint.json (round-trips with from_blueprint).</m>\n");
-    xml.push_str(
-        "      <m sig=\"save(path)\">Binary .kgl file (fast, complete graph state).</m>\n",
-    );
+    xml.push_str("      <m sig=\"save(path)\">Binary .kgl v3 file (auto-columnar, supports larger-than-RAM loading).</m>\n");
     xml.push_str("      <m sig=\"kglite.load(path)\">Restore from .kgl file.</m>\n");
-    xml.push_str("      <m sig=\"save_mmap(path)\">Mmap directory format for large/out-of-core graphs. Requires enable_columnar() first.</m>\n");
-    xml.push_str("      <m sig=\"kglite.load_mmap(path)\">Restore from mmap directory (instant startup via mmap).</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str(
@@ -2886,7 +2878,6 @@ fn write_fluent_topic_export(xml: &mut String) {
     xml.push_str(
         "      <ex desc=\"binary\">graph.save('graph.kgl'); g2 = kglite.load('graph.kgl')</ex>\n",
     );
-    xml.push_str("      <ex desc=\"mmap\">graph.enable_columnar(); graph.save_mmap('/tmp/g'); g2 = kglite.load_mmap('/tmp/g')</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </export>\n");
 }

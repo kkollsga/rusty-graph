@@ -191,20 +191,6 @@ def load(path: str) -> KnowledgeGraph:
     """
     ...
 
-def load_mmap(path: str) -> KnowledgeGraph:
-    """Load a graph from a memory-mapped directory previously saved with ``save_mmap()``.
-
-    The directory format stores column files per node type, enabling
-    instant startup via mmap and out-of-core (larger-than-RAM) workloads.
-
-    Args:
-        path: Path to the mmap directory.
-
-    Returns:
-        A new KnowledgeGraph with memory-mapped columnar storage.
-    """
-    ...
-
 def from_blueprint(
     blueprint_path: Union[str, Path],
     *,
@@ -275,7 +261,7 @@ class KnowledgeGraph:
         """Whether node properties are stored in columnar format.
 
         Returns ``True`` if ``enable_columnar()`` has been called (or the graph
-        was loaded from an mmap directory via ``load_mmap()``).
+        was loaded from a v3 ``.kgl`` file).
         """
         ...
 
@@ -1733,33 +1719,17 @@ class KnowledgeGraph:
     # ====================================================================
 
     def save(self, path: str) -> None:
-        """Serialise the graph to a binary file.
+        """Serialise the graph to a v3 binary file.
+
+        Uses columnar storage internally for efficient compression and
+        larger-than-RAM loading. If the graph is not already in columnar
+        mode, ``save()`` enables it automatically (the graph stays columnar
+        after the call).
 
         Load it back with :func:`kglite.load`.
 
         Args:
             path: Output file path (typically ``*.kgl``).
-        """
-        ...
-
-    def save_mmap(self, path: str) -> None:
-        """Save graph in memory-mapped directory format.
-
-        Creates a directory with column files for each node type, enabling
-        instant loading via :func:`kglite.load_mmap` and out-of-core
-        (larger-than-RAM) workloads.
-
-        The graph should have columnar storage enabled first via
-        :meth:`enable_columnar`; otherwise only topology is saved.
-
-        Args:
-            path: Directory path to create. Will be created if it doesn't exist.
-
-        Example::
-
-            graph.enable_columnar()
-            graph.save_mmap("/tmp/my_graph")
-            g2 = kglite.load_mmap("/tmp/my_graph")
         """
         ...
 

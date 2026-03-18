@@ -170,12 +170,12 @@ def test_bench_columnar_save_kgl(benchmark, bench_graph_columnar, tmp_path):
 
 
 @pytest.mark.benchmark
-def test_bench_save_mmap(benchmark, bench_graph_columnar, tmp_path):
-    """Save columnar graph in mmap directory format."""
+def test_bench_save_v3(benchmark, bench_graph_columnar, tmp_path):
+    """Save columnar graph as v3 .kgl file."""
     counter = [0]
 
     def save():
-        bench_graph_columnar.save_mmap(str(tmp_path / f"mmap_{counter[0]}"))
+        bench_graph_columnar.save(str(tmp_path / f"v3_{counter[0]}.kgl"))
         counter[0] += 1
 
     benchmark(save)

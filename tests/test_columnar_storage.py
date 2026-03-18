@@ -190,8 +190,8 @@ class TestColumnarSaveLoad:
             person_graph.save(fp)
             kg2 = kglite.load(fp)
 
-        # Loaded graph should NOT be columnar (backward compat)
-        assert not kg2.is_columnar
+        # v3 files always load as columnar
+        assert kg2.is_columnar
 
         after = kg2.cypher("MATCH (n:Person) RETURN n.full_name, n.age, n.score ORDER BY n.age").to_list()
         assert before == after
@@ -265,90 +265,117 @@ class TestColumnarStats:
         assert info["node_count"] == 5
 
 
-# ── Mmap directory format ────────────────────────────────────────────────────
+# ── V3 save/load roundtrip ──────────────────────────────────────────────────
 
 
-class TestMmapStorage:
-    def test_save_load_mmap_basic(self, person_graph, tmp_path):
-        person_graph.enable_columnar()
+class TestV3Roundtrip:
+    def test_save_load_v3_basic(self, person_graph, tmp_path):
+        """v3 save/load roundtrip preserves all data and loads as columnar."""
         before = person_graph.cypher("MATCH (n:Person) RETURN n.full_name, n.age, n.score ORDER BY n.age").to_list()
 
-        mmap_dir = str(tmp_path / "graph_mmap")
-        person_graph.save_mmap(mmap_dir)
+        fp = str(tmp_path / "test.kgl")
+        person_graph.save(fp)
 
-        kg2 = kglite.load_mmap(mmap_dir)
+        kg2 = kglite.load(fp)
         assert kg2.is_columnar
         after = kg2.cypher("MATCH (n:Person) RETURN n.full_name, n.age, n.score ORDER BY n.age").to_list()
         assert before == after
 
-    def test_save_load_mmap_multi_type(self, multi_type_graph, tmp_path):
-        kg = multi_type_graph
-        kg.enable_columnar()
+    def test_save_load_v3_multi_type(self, multi_type_graph, tmp_path):
+        """v3 roundtrip with multiple node types."""
+        fp = str(tmp_path / "multi.kgl")
+        multi_type_graph.save(fp)
 
-        mmap_dir = str(tmp_path / "multi_mmap")
-        kg.save_mmap(mmap_dir)
-
-        kg2 = kglite.load_mmap(mmap_dir)
+        kg2 = kglite.load(fp)
+        assert kg2.is_columnar
         persons = kg2.cypher("MATCH (n:Person) RETURN n.full_name ORDER BY n.full_name").to_list()
         companies = kg2.cypher("MATCH (n:Company) RETURN n.company_name ORDER BY n.company_name").to_list()
         assert [r["n.full_name"] for r in persons] == ["Alice", "Bob", "Charlie"]
         assert [r["n.company_name"] for r in companies] == ["Acme", "Globex"]
 
-    def test_save_load_mmap_preserves_edges(self, multi_type_graph, tmp_path):
-        kg = multi_type_graph
-        kg.enable_columnar()
+    def test_save_load_v3_preserves_edges(self, multi_type_graph, tmp_path):
+        """v3 roundtrip preserves edges between node types."""
+        fp = str(tmp_path / "edges.kgl")
+        multi_type_graph.save(fp)
 
-        mmap_dir = str(tmp_path / "edges_mmap")
-        kg.save_mmap(mmap_dir)
-
-        kg2 = kglite.load_mmap(mmap_dir)
+        kg2 = kglite.load(fp)
         result = kg2.cypher(
             "MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN p.full_name, c.company_name ORDER BY p.full_name"
         ).to_list()
         assert len(result) == 2
         assert result[0]["p.full_name"] == "Alice"
 
-    def test_mmap_query_after_load(self, person_graph, tmp_path):
-        person_graph.enable_columnar()
-        mmap_dir = str(tmp_path / "query_mmap")
-        person_graph.save_mmap(mmap_dir)
+    def test_v3_query_after_load(self, person_graph, tmp_path):
+        """Queries work on v3-loaded graphs."""
+        fp = str(tmp_path / "query.kgl")
+        person_graph.save(fp)
 
-        kg2 = kglite.load_mmap(mmap_dir)
+        kg2 = kglite.load(fp)
         result = kg2.cypher("MATCH (n:Person) WHERE n.age > 30 RETURN n.full_name ORDER BY n.full_name").to_list()
         names = [r["n.full_name"] for r in result]
         assert names == ["Charlie", "Eve"]
 
-    def test_mmap_directory_structure(self, person_graph, tmp_path):
-        person_graph.enable_columnar()
-        mmap_dir = str(tmp_path / "structure_mmap")
-        person_graph.save_mmap(mmap_dir)
-
-        mmap_path = tmp_path / "structure_mmap"
-        assert (mmap_path / "manifest.json").exists()
-        assert (mmap_path / "topology.zst").exists()
-        assert (mmap_path / "Person").is_dir()
-        # Should have column files for each property
-        person_files = list((mmap_path / "Person").iterdir())
-        assert len(person_files) > 0
-
-    def test_mmap_save_non_columnar_graph(self, person_graph, tmp_path):
-        """save_mmap on a non-columnar graph saves topology only (no column dirs)."""
-        mmap_dir = str(tmp_path / "non_col_mmap")
-        person_graph.save_mmap(mmap_dir)
-
-        kg2 = kglite.load_mmap(mmap_dir)
-        # No column stores were saved, so it loads as non-columnar
-        assert not kg2.is_columnar
-        result = kg2.cypher("MATCH (n:Person) RETURN n.full_name ORDER BY n.full_name").to_list()
-        names = [r["n.full_name"] for r in result]
-        assert names == ["Alice", "Bob", "Charlie", "Diana", "Eve"]
-
-    def test_load_enable_columnar_on_loaded_graph(self, person_graph, tmp_path):
-        """Standard .kgl load followed by enable_columnar should work."""
-        fp = str(tmp_path / "test.kgl")
+    def test_v3_magic_bytes(self, person_graph, tmp_path):
+        """v3 file starts with magic bytes RGF\\x03."""
+        fp = str(tmp_path / "magic.kgl")
         person_graph.save(fp)
+
+        with open(fp, "rb") as f:
+            header = f.read(4)
+        assert header == b"RGF\x03"
+
+    def test_save_auto_columnar(self, person_graph, tmp_path):
+        """save() auto-enables columnar for non-columnar graphs (stays columnar)."""
+        assert not person_graph.is_columnar
+        fp = str(tmp_path / "auto.kgl")
+        person_graph.save(fp)
+        # Graph is now columnar after save (no disable step)
+        assert person_graph.is_columnar
+        # Loaded graph is also columnar
         kg2 = kglite.load(fp)
-        kg2.enable_columnar()
-        result = kg2.cypher("MATCH (n:Person) RETURN n.full_name ORDER BY n.full_name").to_list()
-        names = [r["n.full_name"] for r in result]
-        assert names == ["Alice", "Bob", "Charlie", "Diana", "Eve"]
+        assert kg2.is_columnar
+
+
+# ── Temp directory cleanup ────────────────────────────────────────────────────
+
+
+class TestTempDirCleanup:
+    def test_load_cleans_temp_dir_on_drop(self, person_graph, tmp_path):
+        """Temp dirs created during v3 load are cleaned up when graph is dropped."""
+        import glob
+
+        fp = str(tmp_path / "cleanup.kgl")
+        person_graph.save(fp)
+
+        # Load creates temp dirs in /tmp/kglite_v3_*
+        kg2 = kglite.load(fp)
+        assert kg2.is_columnar
+
+        # Find the temp dirs for this process
+        pid = os.getpid()
+        pattern = os.path.join(tempfile.gettempdir(), f"kglite_v3_{pid}_*")
+        dirs_before = glob.glob(pattern)
+        assert len(dirs_before) >= 1, f"Expected temp dir matching {pattern}"
+
+        # Drop the graph — temp dirs should be cleaned up
+        del kg2
+        dirs_after = glob.glob(pattern)
+        assert len(dirs_after) == 0, f"Temp dirs leaked: {dirs_after}"
+
+    def test_multiple_loads_no_leak(self, person_graph, tmp_path):
+        """Multiple load/drop cycles don't accumulate temp dirs."""
+        import glob
+
+        fp = str(tmp_path / "multi.kgl")
+        person_graph.save(fp)
+
+        pid = os.getpid()
+        pattern = os.path.join(tempfile.gettempdir(), f"kglite_v3_{pid}_*")
+
+        for _ in range(5):
+            kg = kglite.load(fp)
+            assert kg.is_columnar
+            del kg
+
+        dirs_remaining = glob.glob(pattern)
+        assert len(dirs_remaining) == 0, f"Temp dirs leaked after 5 cycles: {dirs_remaining}"

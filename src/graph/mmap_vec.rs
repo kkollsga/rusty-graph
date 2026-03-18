@@ -7,7 +7,7 @@
 
 use memmap2::{MmapMut, MmapOptions};
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 // ─── MmapOrVec ──────────────────────────────────────────────────────────────
@@ -273,6 +273,24 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         }
     }
 
+    /// Return the raw bytes of the data (without copying for heap).
+    pub fn as_raw_bytes(&self) -> &[u8] {
+        match self {
+            MmapOrVec::Heap { data } => unsafe {
+                std::slice::from_raw_parts(
+                    data.as_ptr() as *const u8,
+                    data.len() * std::mem::size_of::<T>(),
+                )
+            },
+            MmapOrVec::Mapped { mmap, len, .. } => &mmap[..*len * std::mem::size_of::<T>()],
+        }
+    }
+
+    /// Write raw bytes to a writer (for v3 packed column format).
+    pub fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
+        writer.write_all(self.as_raw_bytes())
+    }
+
     /// Write the data to a file (for save_mmap). For heap, writes Vec contents.
     /// For mapped, flushes then copies the file.
     pub fn save_to_file(&self, path: &Path) -> io::Result<()> {
@@ -513,6 +531,19 @@ impl MmapBytes {
             MmapBytes::Heap { .. } => Ok(()),
             MmapBytes::Mapped { mmap, .. } => mmap.flush(),
         }
+    }
+
+    /// Return the raw bytes.
+    pub fn as_raw_bytes(&self) -> &[u8] {
+        match self {
+            MmapBytes::Heap { data } => data,
+            MmapBytes::Mapped { mmap, len, .. } => &mmap[..*len],
+        }
+    }
+
+    /// Write raw bytes to a writer (for v3 packed column format).
+    pub fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
+        writer.write_all(self.as_raw_bytes())
     }
 
     pub fn save_to_file(&self, path: &Path) -> io::Result<()> {

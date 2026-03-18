@@ -141,12 +141,6 @@ impl StringInterner {
     pub fn try_resolve(&self, key: InternedKey) -> Option<&str> {
         self.strings.get(&key).map(|s| s.as_str())
     }
-
-    /// Number of interned strings.
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.strings.len()
-    }
 }
 
 // ─── Thread-local serde support ───────────────────────────────────────────────
@@ -154,6 +148,8 @@ impl StringInterner {
 thread_local! {
     static SERIALIZE_INTERNER: Cell<Option<*const StringInterner>> = const { Cell::new(None) };
     static DESERIALIZE_INTERNER: Cell<Option<*mut StringInterner>> = const { Cell::new(None) };
+    /// When true, PropertyStorage::Serialize emits an empty map (v3 topology mode).
+    static STRIP_PROPERTIES: Cell<bool> = const { Cell::new(false) };
 }
 
 /// RAII guard that sets the thread-local interner for serialization.
@@ -194,6 +190,23 @@ impl<'a> SerdeDeserializeGuard<'a> {
 impl Drop for SerdeDeserializeGuard<'_> {
     fn drop(&mut self) {
         DESERIALIZE_INTERNER.with(|cell| cell.set(None));
+    }
+}
+
+/// RAII guard that enables property stripping during serialization.
+/// While active, PropertyStorage::Serialize emits empty maps (v3 topology mode).
+pub(crate) struct StripPropertiesGuard;
+
+impl StripPropertiesGuard {
+    pub fn new() -> Self {
+        STRIP_PROPERTIES.with(|cell| cell.set(true));
+        StripPropertiesGuard
+    }
+}
+
+impl Drop for StripPropertiesGuard {
+    fn drop(&mut self) {
+        STRIP_PROPERTIES.with(|cell| cell.set(false));
     }
 }
 
@@ -543,7 +556,6 @@ impl PropertyStorage {
 
     /// Iterate over (key_string, Value) pairs for Columnar storage.
     /// Returns owned values. Works for all variants.
-    #[allow(dead_code)]
     pub fn iter_owned<'a>(&'a self, interner: &'a StringInterner) -> Vec<(String, Value)> {
         match self {
             PropertyStorage::Map(map) => map
@@ -663,6 +675,10 @@ impl PartialEq for PropertyStorage {
 impl Serialize for PropertyStorage {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
+        // v3 topology mode: serialize empty map to strip node properties
+        if STRIP_PROPERTIES.with(|cell| cell.get()) {
+            return serializer.serialize_map(Some(0))?.end();
+        }
         match self {
             PropertyStorage::Map(map) => map.serialize(serializer),
             PropertyStorage::Compact { schema, values } => {
@@ -1224,6 +1240,10 @@ pub struct DirGraph {
     /// Directory for spill files. Defaults to std::env::temp_dir()/kglite_spill_<pid>.
     #[serde(skip)]
     pub(crate) spill_dir: Option<std::path::PathBuf>,
+    /// Temp directories created during load or spill that should be cleaned up on drop.
+    /// Uses Arc so clones share ownership — only the last clone cleans up.
+    #[serde(skip)]
+    pub(crate) temp_dirs: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
     /// If true, Cypher mutations (CREATE, SET, DELETE, REMOVE, MERGE) are rejected
     /// and describe() omits mutation documentation.
     #[serde(skip)]
@@ -1245,6 +1265,21 @@ pub struct DirGraph {
 
 fn default_auto_vacuum_threshold() -> Option<f64> {
     Some(0.3)
+}
+
+impl Drop for DirGraph {
+    fn drop(&mut self) {
+        // Clean up temp directories created during load or columnar spill.
+        // Only the last Arc holder actually removes the dirs.
+        if let Ok(dirs) = self.temp_dirs.lock() {
+            // Only clean up if we're the sole owner (no other clones alive)
+            if Arc::strong_count(&self.temp_dirs) <= 1 {
+                for dir in dirs.iter() {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+            }
+        }
+    }
 }
 
 impl DirGraph {
@@ -1279,6 +1314,7 @@ impl DirGraph {
             column_stores: HashMap::new(),
             memory_limit: None,
             spill_dir: None,
+            temp_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
             read_only: false,
             version: 0,
             interner: StringInterner::new(),
@@ -1286,7 +1322,7 @@ impl DirGraph {
         }
     }
 
-    /// Create a DirGraph from a pre-existing graph (used by v2 loader).
+    /// Create a DirGraph from a pre-existing graph (used by v3 loader).
     /// All metadata fields start empty and are populated by the caller.
     pub fn from_graph(graph: Graph) -> Self {
         DirGraph {
@@ -1319,6 +1355,7 @@ impl DirGraph {
             column_stores: HashMap::new(),
             memory_limit: None,
             spill_dir: None,
+            temp_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
             read_only: false,
             version: 0,
             interner: StringInterner::new(),
@@ -2376,8 +2413,19 @@ impl DirGraph {
             let total: usize = stores.values().map(|s| s.heap_bytes()).sum();
             if total > limit {
                 let spill_dir = self.spill_dir.clone().unwrap_or_else(|| {
-                    std::env::temp_dir().join(format!("kglite_spill_{}", std::process::id()))
+                    std::env::temp_dir().join(format!(
+                        "kglite_spill_{}_{:x}",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos()
+                    ))
                 });
+                // Register spill dir for cleanup on drop
+                if let Ok(mut dirs) = self.temp_dirs.lock() {
+                    dirs.push(spill_dir.clone());
+                }
                 // Spill stores from largest to smallest until under limit
                 let mut by_size: Vec<_> = stores
                     .iter()
@@ -2820,10 +2868,16 @@ impl NodeData {
     /// Requires interner to resolve InternedKey → String.
     #[inline]
     pub fn properties_cloned(&self, interner: &StringInterner) -> HashMap<String, Value> {
-        self.properties
-            .iter(interner)
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect()
+        match &self.properties {
+            PropertyStorage::Columnar { .. } => {
+                self.properties.iter_owned(interner).into_iter().collect()
+            }
+            _ => self
+                .properties
+                .iter(interner)
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        }
     }
 
     /// Returns the node type as a string reference without allocation.
