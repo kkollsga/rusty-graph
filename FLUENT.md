@@ -547,7 +547,7 @@ graph.select('Structure').compare('Well',
 # With filter and limit
 graph.select('Platform').compare('Well',
     {'type': 'distance', 'max_m': 10000},
-    where={'status': 'active'}, limit=20)
+    filter={'status': 'active'}, limit=20)
 ```
 
 #### Semantic Similarity

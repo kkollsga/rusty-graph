@@ -2425,7 +2425,7 @@ fn write_fluent_overview(xml: &mut String) {
     // Traversal
     xml.push_str("  <group name=\"traversal\">\n");
     xml.push_str("    <method sig=\"traverse(conn_type, direction=None, target_type=None, where=None, where_connection=None, sort=None, limit=None)\">Follow graph edges. Returns target nodes as new selection level.</method>\n");
-    xml.push_str("    <method sig=\"compare(target_type, method, where=None, sort=None, limit=None)\">Spatial, semantic, or clustering comparison against a target type.</method>\n");
+    xml.push_str("    <method sig=\"compare(target_type, method, filter=None, sort=None, limit=None)\">Spatial, semantic, or clustering comparison against a target type.</method>\n");
     xml.push_str("    <method sig=\"add_properties({Type: [props]})\">Enrich leaf nodes with properties from ancestor levels (copy, rename, aggregate, spatial).</method>\n");
     xml.push_str("    <method sig=\"create_connections(conn_type)\">Materialise direct edges from traversal chain.</method>\n");
     xml.push_str("  </group>\n");

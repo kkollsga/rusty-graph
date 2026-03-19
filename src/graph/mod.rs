@@ -4258,18 +4258,19 @@ impl KnowledgeGraph {
     ///     g.select('Well').compare('Well', {'type': 'distance', 'max_m': 5000})
     ///     g.select('Well').compare('Well', {'type': 'text_score', 'property': 'name'})
     ///     g.select('Well').compare('Well', {'type': 'cluster', 'k': 5})
-    #[pyo3(signature = (target_type, method, *, r#where=None, sort=None, limit=None, level_index=None, new_level=None))]
+    #[pyo3(signature = (target_type, method, *, filter=None, sort=None, limit=None, level_index=None, new_level=None))]
     #[allow(clippy::too_many_arguments)]
     fn compare(
         &mut self,
         target_type: &Bound<'_, PyAny>,
         method: &Bound<'_, PyAny>,
-        r#where: Option<&Bound<'_, PyDict>>,
+        filter: Option<&Bound<'_, PyDict>>,
         sort: Option<&Bound<'_, PyAny>>,
         limit: Option<usize>,
         level_index: Option<usize>,
         new_level: Option<bool>,
     ) -> PyResult<Self> {
+        let _ = (level_index, new_level); // accepted but not yet used
         let mut new_kg = self.clone();
 
         let estimated = new_kg
@@ -4291,7 +4292,7 @@ impl KnowledgeGraph {
 
         let config = parse_method_param(method)?;
 
-        let conditions = if let Some(cond) = r#where {
+        let conditions = if let Some(cond) = filter {
             Some(py_in::pydict_to_filter_conditions(cond)?)
         } else {
             None
@@ -4302,18 +4303,6 @@ impl KnowledgeGraph {
         } else {
             None
         };
-
-        // Handle level_index if specified
-        if let Some(_li) = level_index {
-            // level_index is handled inside make_comparison_traversal via selection
-        }
-
-        if let Some(nl) = new_level {
-            if !nl {
-                // new_level=False means replace the current level
-                // This is handled by the selection system
-            }
-        }
 
         compare_inner(
             &self.inner,

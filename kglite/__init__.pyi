@@ -1336,7 +1336,7 @@ class KnowledgeGraph:
         target_type: Union[str, list[str]],
         method: Union[str, dict[str, Any]],
         *,
-        where: Optional[dict[str, Any]] = None,
+        filter: Optional[dict[str, Any]] = None,
         sort: Optional[Union[str, list[tuple[str, bool]]]] = None,
         limit: Optional[int] = None,
         level_index: Optional[int] = None,
@@ -1373,7 +1373,7 @@ class KnowledgeGraph:
                 - ``threshold``: Minimum similarity score (semantic methods)
                 - ``k``: Number of clusters (K-means)
                 - ``features``: Properties to cluster on
-            where: Property conditions for target nodes.
+            filter: Property conditions for target nodes.
             sort: Sort results. Field name or ``[(field, ascending)]`` list.
             limit: Max target nodes per source.
             level_index: Source level in the hierarchy (advanced).
