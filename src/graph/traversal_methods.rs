@@ -787,7 +787,7 @@ fn insert_matches_into_selection(
     let level = selection.get_level_mut(target_level_idx).unwrap();
 
     level.operations = vec![SelectionOperation::Custom(format!(
-        "traverse(method='{}')",
+        "compare(method='{}')",
         method
     ))];
 
@@ -1457,7 +1457,7 @@ fn cluster_traversal(
     let target_level_idx = selection.get_level_count() - 1;
     let level = selection.get_level_mut(target_level_idx).unwrap();
     level.operations = vec![SelectionOperation::Custom(format!(
-        "traverse(method='cluster', algorithm='{}')",
+        "compare(method='cluster', algorithm='{}')",
         algorithm
     ))];
 

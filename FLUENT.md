@@ -486,10 +486,10 @@ graph.select('Field').traverse('OF_FIELD', direction='incoming',
 > **Note:** `filter_target` and `filter_connection` still work as aliases for
 > `where` and `where_connection` respectively.
 
-### Comparison-Based Traversal (Traverse Plugins)
+### Comparison Operations (`compare()`)
 
-When `method=` is specified, `traverse()` switches from edge-based to comparison-based mode.
-The first argument becomes **target node type** (not connection type).
+`compare()` finds related nodes by spatial proximity, semantic similarity, or
+clustering — without needing explicit graph edges.
 
 `method` accepts a **string** for simple cases or a **dict** with method-specific settings:
 
@@ -503,85 +503,85 @@ method={'type': 'contains', 'resolve': 'geometry'}       # dict with settings
 ```python
 # Find all wells within each structural element's geometry
 # Default: target resolved via location fields → geometry centroid fallback
-graph.select('Structure').traverse('Well', method='contains')
+graph.select('Structure').compare('Well', 'contains')
 
 # Force polygon-in-polygon containment (target as full geometry)
-graph.select('Structure').traverse('Field',
-    method={'type': 'contains', 'resolve': 'geometry'})
+graph.select('Structure').compare('Field',
+    {'type': 'contains', 'resolve': 'geometry'})
 
 # Force geometry centroid (even if target has location fields)
-graph.select('Structure').traverse('Well',
-    method={'type': 'contains', 'resolve': 'centroid'})
+graph.select('Structure').compare('Well',
+    {'type': 'contains', 'resolve': 'centroid'})
 
 # Override geometry field name
-graph.select('Zone').traverse('Well',
-    method={'type': 'contains', 'geometry': 'wkt_geometry'})
+graph.select('Zone').compare('Well',
+    {'type': 'contains', 'geometry': 'wkt_geometry'})
 ```
 
 #### Spatial Intersection
 
 ```python
 # Find licences whose geometry overlaps each field (always geometry-to-geometry)
-graph.select('Field').traverse('Licence', method='intersects')
+graph.select('Field').compare('Licence', 'intersects')
 
 # With custom geometry field
-graph.select('Field').traverse('Licence',
-    method={'type': 'intersects', 'geometry': 'wkt_field'})
+graph.select('Field').compare('Licence',
+    {'type': 'intersects', 'geometry': 'wkt_field'})
 ```
 
 #### Distance
 
 ```python
 # Find wells within 5 km of each platform (point-to-point, default resolution)
-graph.select('Platform').traverse('Well',
-    method={'type': 'distance', 'max_m': 5000})
+graph.select('Platform').compare('Well',
+    {'type': 'distance', 'max_m': 5000})
 
 # Force geometry centroid (even if nodes have location fields)
-graph.select('Structure').traverse('Well',
-    method={'type': 'distance', 'max_m': 5000, 'resolve': 'centroid'})
+graph.select('Structure').compare('Well',
+    {'type': 'distance', 'max_m': 5000, 'resolve': 'centroid'})
 
 # Closest boundary point (min edge-to-edge distance)
-graph.select('Structure').traverse('Well',
-    method={'type': 'distance', 'max_m': 5000, 'resolve': 'closest'})
+graph.select('Structure').compare('Well',
+    {'type': 'distance', 'max_m': 5000, 'resolve': 'closest'})
 
 # With filter and limit
-graph.select('Platform').traverse('Well',
-    method={'type': 'distance', 'max_m': 10000},
-    filter_target={'status': 'active'}, limit=20)
+graph.select('Platform').compare('Well',
+    {'type': 'distance', 'max_m': 10000},
+    where={'status': 'active'}, limit=20)
 ```
 
 #### Semantic Similarity
 
 ```python
 # Find articles with similar abstracts (cosine > 0.85)
-graph.select('Article').traverse('Article',
-    method={'type': 'text_score', 'property': 'abstract', 'threshold': 0.85},
+graph.select('Article').compare('Article',
+    {'type': 'text_score', 'property': 'abstract', 'threshold': 0.85},
     limit=5)
 
 # Different similarity metric
-graph.select('Doc').traverse('Doc',
-    method={'type': 'text_score', 'property': 'summary',
-            'threshold': 0.7, 'metric': 'dot_product'})
+graph.select('Doc').compare('Doc',
+    {'type': 'text_score', 'property': 'summary',
+     'threshold': 0.7, 'metric': 'dot_product'})
 ```
 
 #### Clustering
 
 ```python
 # Group wells into clusters by location
-graph.select('Well').traverse(
-    method={'type': 'cluster', 'algorithm': 'kmeans', 'k': 5,
-            'features': ['latitude', 'longitude']})
+graph.select('Well').compare('Well',
+    {'type': 'cluster', 'algorithm': 'kmeans', 'k': 5,
+     'features': ['latitude', 'longitude']})
 
 # DBSCAN with distance threshold
-graph.select('Well').traverse(
-    method={'type': 'cluster', 'algorithm': 'dbscan',
-            'eps': 5000, 'min_samples': 3,
-            'features': ['latitude', 'longitude']})
+graph.select('Well').compare('Well',
+    {'type': 'cluster', 'algorithm': 'dbscan',
+     'eps': 5000, 'min_samples': 3,
+     'features': ['latitude', 'longitude']})
 
 # Chain: per-cluster statistics
-graph.select('Well').traverse(
-    method={'type': 'cluster', 'algorithm': 'kmeans', 'k': 10,
-            'features': ['latitude', 'longitude', 'depth']}) \
+graph.select('Well').compare('Well',
+    {'type': 'cluster', 'algorithm': 'kmeans', 'k': 10,
+     'features': ['latitude', 'longitude', 'depth']}) \
     .statistics('production')
 ```
 
@@ -602,43 +602,49 @@ When omitted, the default is: **location fields → geometry centroid fallback**
 After any traversal (edge-based or comparison-based), `add_properties()` enriches
 the selected (leaf) nodes with properties from ancestor nodes in the hierarchy.
 
+Use the `Agg` and `Spatial` helper classes for discoverable autocomplete:
+
+```python
+from kglite import Agg, Spatial
+```
+
 ```python
 # Copy properties from parent type
-graph.select('Structure').traverse('Well', method='contains') \
+graph.select('Structure').compare('Well', 'contains') \
     .add_properties({'Structure': ['name', 'status']})
 
 # Copy all properties
-graph.select('Structure').traverse('Well', method='contains') \
+graph.select('Structure').compare('Well', 'contains') \
     .add_properties({'Structure': []})
 
 # Rename properties
-graph.select('Structure').traverse('Well', method='contains') \
+graph.select('Structure').compare('Well', 'contains') \
     .add_properties({'Structure': {'struct_name': 'name', 'struct_status': 'status'}})
 
-# Aggregate: count and stats from leaf nodes onto ancestors
-graph.select('Well').traverse('Structure', method='contains') \
+# Aggregate with Agg helpers
+graph.select('Structure').compare('Well', 'contains') \
     .add_properties({'Well': {
-        'well_count': 'count(*)',
-        'avg_depth': 'mean(depth)',
-        'max_depth': 'max(depth)',
-        'total_prod': 'sum(production)',
+        'well_count': Agg.count(),
+        'avg_depth': Agg.mean('depth'),
+        'max_depth': Agg.max('depth'),
+        'total_prod': Agg.sum('production'),
     }})
 
-# Spatial computed properties
-graph.select('Structure').traverse('Well', method='contains') \
+# Spatial compute with Spatial helpers
+graph.select('Structure').compare('Well', 'contains') \
     .add_properties({'Structure': {
-        'dist_to_center': 'distance',     # geodesic distance to parent centroid
-        'parent_area': 'area',            # parent geometry area in m²
-        'parent_perimeter': 'perimeter',  # parent geometry perimeter in m
+        'dist_to_center': Spatial.distance(),
+        'parent_area': Spatial.area(),
+        'parent_perimeter': Spatial.perimeter(),
     }})
 
 # Combined: rename + spatial in one call
-graph.select('Structure').traverse('Well', method='contains') \
+graph.select('Structure').compare('Well', 'contains') \
     .add_properties({
         'Structure': {
             'struct_name': 'name',
-            'struct_area': 'area',
-            'dist_to_center': 'distance',
+            'struct_area': Spatial.area(),
+            'dist_to_center': Spatial.distance(),
         },
     })
 
@@ -647,9 +653,11 @@ graph.select('A').traverse('REL_AB').traverse('REL_BC') \
     .add_properties({'B': ['score']})
 ```
 
-**Aggregate functions:** `count(*)`, `sum(prop)`, `mean(prop)`, `min(prop)`, `max(prop)`, `std(prop)`, `collect(prop)`
+**Aggregate helpers (`Agg`):** `count()`, `sum(prop)`, `mean(prop)`, `min(prop)`, `max(prop)`, `std(prop)`, `collect(prop)`
 
-**Spatial compute functions:** `distance`, `area`, `perimeter`, `centroid_lat`, `centroid_lon`
+**Spatial helpers (`Spatial`):** `distance()`, `area()`, `perimeter()`, `centroid_lat()`, `centroid_lon()`
+
+> **Note:** The raw string forms (`'count(*)'`, `'mean(depth)'`, `'distance'`, etc.) still work — the helpers simply return those strings.
 
 ### Breadth-First Expansion
 
@@ -693,7 +701,7 @@ graph.select('A').traverse('REL_AB').traverse('REL_BC') \
 ### Nodes
 
 ```python
-# Full node data — returns ResultView (lazy)
+# Flat ResultView (lazy) — always returns ResultView
 result = graph.select('Person').where({'age': {'>': 25}}).collect()
 for node in result:
     print(node['title'], node['age'])
@@ -705,11 +713,17 @@ print(result[0])
 # As list of dicts (full materialisation)
 nodes = result.to_list()
 
+# Grouped by parent type — always returns dict
+grouped = graph.select('Field').traverse('HAS_WELL') \
+    .collect_grouped('Field')
+# → {'TROLL': [...], 'EKOFISK': [...]}
+
+# Include parent metadata in grouped output
+grouped = graph.select('Field').traverse('HAS_WELL') \
+    .collect_grouped('Field', parent_info=True)
+
 # Lightweight: id + title + type only
 ids = graph.select('Person').ids()
-
-# Flat ID list (lightest)
-id_list = graph.select('Person').ids()
 
 # O(1) lookup by type + ID
 person = graph.node('Person', 'alice')
@@ -1252,7 +1266,7 @@ graph.report_history()    # all reports
 | **Path finding** | `shortest_path`, `all_paths` + 3 variants | `shortestPath()` in MATCH |
 | **Centrality** | `betweenness_centrality`, `pagerank`, `degree_centrality`, `closeness_centrality` | `CALL pagerank() YIELD ...` etc. |
 | **Community** | `louvain_communities`, `label_propagation` | `CALL louvain() YIELD ...` etc. |
-| **Pattern matching** | `match_pattern()`, `traverse()`, `expand()` | Full MATCH with patterns |
+| **Pattern matching** | `match_pattern()`, `traverse()`, `compare()`, `expand()` | Full MATCH with patterns |
 | **Filtering** | `where`, `where_any`, `where_connected`, etc. | WHERE clause |
 | **Aggregation** | `statistics()`, `count()`, `calculate()` | `count()`, `sum()`, `avg()` in RETURN |
 | **Mutations** | `update()` (batch property update) | CREATE, SET, DELETE, REMOVE, MERGE |

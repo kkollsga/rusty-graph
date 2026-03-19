@@ -48,12 +48,12 @@ graph.select('Person').sort('name').offset(20).limit(10)  # page 3 of 10
 
 ```python
 alice = graph.select('User').where({'title': 'Alice'})
-alice_products = alice.traverse(connection_type='PURCHASED', direction='outgoing')
+alice_products = alice.traverse('PURCHASED', direction='outgoing')
 
 # Filter and sort traversal targets
 expensive = alice.traverse(
-    connection_type='PURCHASED',
-    filter_target={'price': {'>=': 500.0}},
+    'PURCHASED',
+    where={'price': {'>=': 500.0}},
     sort_target='price',
     limit=10
 )
@@ -61,6 +61,53 @@ expensive = alice.traverse(
 # Get connection information
 alice.connections(include_node_properties=True)
 ```
+
+### Comparison Operations
+
+For spatial, semantic, or clustering operations — where nodes are related
+by proximity rather than explicit edges — use `compare()`:
+
+```python
+# Spatial: find wells inside structure polygons
+graph.select('Structure').compare('Well', 'contains')
+
+# Distance: wells within 5km of each platform
+graph.select('Platform').compare('Well', {'type': 'distance', 'max_m': 5000})
+
+# Semantic: similar documents by embedding
+graph.select('Doc').compare('Doc',
+    {'type': 'text_score', 'property': 'summary', 'threshold': 0.7})
+```
+
+See the [Traversal Hierarchy](traversal-hierarchy.md) guide for details
+on multi-level chains, property enrichment, and grouped collection.
+
+### Grouped Results
+
+After traversal, `collect_grouped()` groups leaf nodes by a parent type:
+
+```python
+grouped = graph.select('Field').traverse('HAS_WELL') \
+    .collect_grouped('Field')
+# → {'TROLL': [{...}, ...], 'EKOFISK': [{...}, ...]}
+```
+
+### Enriching with `add_properties()`
+
+Copy or aggregate properties from ancestor levels onto leaf nodes:
+
+```python
+from kglite import Agg, Spatial
+
+graph.select('Structure').compare('Well', 'contains') \
+    .add_properties({
+        'Structure': {'struct_name': 'name'},     # copy + rename
+        'Well': {'n_wells': Agg.count()},         # aggregate
+    })
+```
+
+See the [Traversal Hierarchy](traversal-hierarchy.md) guide for the full
+enrichment API.
 
 ## Set Operations
 

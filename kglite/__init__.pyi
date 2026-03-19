@@ -82,6 +82,111 @@ class EmbeddingModel(Protocol):
         """
         ...
 
+class Agg:
+    """Aggregation expression builders for ``add_properties()``.
+
+    Each method returns the string expression that ``add_properties()``
+    already understands, making the DSL discoverable via autocomplete
+    instead of requiring users to know the string syntax.
+
+    Example::
+
+        from kglite import Agg
+
+        graph.select('Well').traverse('HAS_BLOCK').add_properties({
+            'Block': {'well_count': Agg.count(), 'avg_depth': Agg.mean('depth')}
+        })
+
+    Equivalent to the raw string form::
+
+        graph.select('Well').traverse('HAS_BLOCK').add_properties({
+            'Block': {'well_count': 'count(*)', 'avg_depth': 'mean(depth)'}
+        })
+    """
+
+    @staticmethod
+    def count() -> str:
+        """Count leaf nodes per ancestor — returns ``'count(*)'``."""
+        ...
+
+    @staticmethod
+    def sum(prop: str) -> str:
+        """Sum a numeric property across leaves — returns ``'sum(prop)'``."""
+        ...
+
+    @staticmethod
+    def mean(prop: str) -> str:
+        """Arithmetic mean of a numeric property — returns ``'mean(prop)'``."""
+        ...
+
+    @staticmethod
+    def min(prop: str) -> str:
+        """Minimum value of a numeric property — returns ``'min(prop)'``."""
+        ...
+
+    @staticmethod
+    def max(prop: str) -> str:
+        """Maximum value of a numeric property — returns ``'max(prop)'``."""
+        ...
+
+    @staticmethod
+    def std(prop: str) -> str:
+        """Sample standard deviation — returns ``'std(prop)'``."""
+        ...
+
+    @staticmethod
+    def collect(prop: str) -> str:
+        """Comma-separated string of values — returns ``'collect(prop)'``."""
+        ...
+
+class Spatial:
+    """Spatial compute expression builders for ``add_properties()``.
+
+    Each method returns the string keyword that ``add_properties()``
+    understands for spatial computations between leaf and ancestor nodes.
+
+    Example::
+
+        from kglite import Spatial
+
+        graph.select('Well').compare('Structure', 'contains') \\
+            .add_properties({
+                'Well': {'dist': Spatial.distance(), 'a': Spatial.area()}
+            })
+
+    Equivalent to::
+
+        graph.select('Well').compare('Structure', 'contains') \\
+            .add_properties({
+                'Well': {'dist': 'distance', 'a': 'area'}
+            })
+    """
+
+    @staticmethod
+    def distance() -> str:
+        """Geodesic distance between leaf and ancestor (meters) — returns ``'distance'``."""
+        ...
+
+    @staticmethod
+    def area() -> str:
+        """Area of ancestor geometry (square meters) — returns ``'area'``."""
+        ...
+
+    @staticmethod
+    def perimeter() -> str:
+        """Perimeter of ancestor geometry (meters) — returns ``'perimeter'``."""
+        ...
+
+    @staticmethod
+    def centroid_lat() -> str:
+        """Latitude of ancestor geometry centroid — returns ``'centroid_lat'``."""
+        ...
+
+    @staticmethod
+    def centroid_lon() -> str:
+        """Longitude of ancestor geometry centroid — returns ``'centroid_lon'``."""
+        ...
+
 class ResultIter:
     """Iterator for ResultView. Converts one row per step."""
 
@@ -681,23 +786,56 @@ class KnowledgeGraph:
     def collect(
         self,
         limit: Optional[int] = None,
-        indices: Optional[list[int]] = None,
-        parent_type: Optional[str] = None,
-        parent_info: Optional[bool] = None,
-        flatten_single_parent: bool = True,
-    ) -> Union[ResultView, dict[str, Any]]:
-        """Materialise selected nodes as a ResultView (flat) or grouped dict.
+    ) -> ResultView:
+        """Materialise selected nodes as a flat ``ResultView``.
+
+        For grouped output by parent type, use ``collect_grouped()`` instead.
 
         Args:
             limit: Maximum number of nodes to return.
-            indices: Specific node indices to return.
-            parent_type: Group results by parent of this type.
-            parent_info: Include parent info in grouped output.
-            flatten_single_parent: Flatten when there is only one parent group. Default ``True``.
 
         Returns:
-            List of node dicts, each containing ``id``, ``title``, ``type``,
-            and all stored properties.
+            A ``ResultView`` containing ``id``, ``title``, ``type``,
+            and all stored properties for each selected node.
+        """
+        ...
+
+    def collect_grouped(
+        self,
+        group_by: str,
+        *,
+        parent_info: bool = False,
+        flatten_single_parent: bool = True,
+        limit: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Materialise selected nodes grouped by a parent type in the
+        traversal hierarchy.
+
+        Args:
+            group_by: Parent node type to group by (must exist in the
+                traversal chain).
+            parent_info: Include parent metadata (``type``, ``id``,
+                ``title``) in each group. Default ``False``.
+            flatten_single_parent: If only one parent group exists,
+                return a flat list instead of a single-key dict.
+                Default ``True``.
+            limit: Maximum number of nodes to return.
+
+        Returns:
+            Dict mapping parent title → list of node dicts. If
+            ``flatten_single_parent`` is ``True`` and there is only one
+            parent, returns a flat list.
+
+        Examples::
+
+            # Group wells by their parent field
+            graph.select('Field').traverse('HAS_WELL') \\
+                .collect_grouped('Field')
+            # → {'TROLL': [...], 'EKOFISK': [...]}
+
+            # Include parent metadata
+            graph.select('Field').traverse('HAS_WELL') \\
+                .collect_grouped('Field', parent_info=True)
         """
         ...
 
@@ -1123,7 +1261,7 @@ class KnowledgeGraph:
 
     def traverse(
         self,
-        connection_type: Optional[str] = None,
+        connection_type: str,
         level_index: Optional[int] = None,
         direction: Optional[str] = None,
         filter_target: Optional[dict[str, Any]] = None,
@@ -1131,7 +1269,6 @@ class KnowledgeGraph:
         sort_target: Optional[Union[str, list[tuple[str, bool]]]] = None,
         limit: Optional[int] = None,
         new_level: Optional[bool] = None,
-        method: Optional[Union[str, dict[str, Any]]] = None,
         at: Optional[str] = None,
         during: Optional[tuple[str, str]] = None,
         temporal: Optional[bool] = None,
@@ -1139,15 +1276,12 @@ class KnowledgeGraph:
         where: Optional[dict[str, Any]] = None,
         where_connection: Optional[dict[str, Any]] = None,
     ) -> KnowledgeGraph:
-        """Traverse connections to discover related nodes.
+        """Traverse connections to discover related nodes by following graph edges.
 
-        **Edge-based mode** (default): follow graph edges of a given type.
-
-        **Comparison mode** (``method=``): spatial, semantic, or clustering.
+        For spatial, semantic, or clustering operations, use ``compare()`` instead.
 
         Args:
             connection_type: Edge type to follow (e.g. ``'HAS_LICENSEE'``).
-                In comparison mode, this becomes the target node type.
             direction: ``'outgoing'``, ``'incoming'``, or ``None`` (both).
             target_type: Filter targets to specific node type(s). Accepts a
                 string or list of strings. Useful when a connection type
@@ -1161,12 +1295,10 @@ class KnowledgeGraph:
             at: Temporal point-in-time filter (e.g. ``'2005'``).
             during: Temporal range filter (e.g. ``('2000', '2010')``).
             temporal: Override temporal filtering. ``False`` = disable.
-            method: Comparison method — string or dict with settings.
-                See ``FLUENT.md`` for spatial, semantic, and clustering options.
             level_index: Source level in the hierarchy (advanced).
             new_level: Add targets as new hierarchy level. Default ``True``.
-            filter_target: Deprecated alias for ``where``.
-            filter_connection: Deprecated alias for ``where_connection``.
+            filter_target: Alias for ``where``.
+            filter_connection: Alias for ``where_connection``.
 
         Returns:
             A new KnowledgeGraph with traversal results selected.
@@ -1196,9 +1328,76 @@ class KnowledgeGraph:
             graph.select('Field').traverse('HAS_LICENSEE', at='2005')
             graph.select('Field').traverse('HAS_LICENSEE',
                 during=('2000', '2010'))
+        """
+        ...
 
-            # Comparison-based (spatial containment)
-            graph.select('Structure').traverse('Well', method='contains')
+    def compare(
+        self,
+        target_type: Union[str, list[str]],
+        method: Union[str, dict[str, Any]],
+        *,
+        where: Optional[dict[str, Any]] = None,
+        sort: Optional[Union[str, list[tuple[str, bool]]]] = None,
+        limit: Optional[int] = None,
+        level_index: Optional[int] = None,
+        new_level: Optional[bool] = None,
+    ) -> KnowledgeGraph:
+        """Compare selected nodes against a target type using spatial, semantic,
+        or clustering methods.
+
+        Args:
+            target_type: Node type to compare against (e.g. ``'Well'``).
+            method: Comparison method — a string shorthand or a dict with
+                settings:
+
+                **Spatial methods:**
+
+                - ``'contains'`` — point-in-polygon or polygon containment
+                - ``'intersects'`` — polygon-polygon intersection
+                - ``{'type': 'distance', 'max_m': 5000}`` — geodesic distance
+
+                **Semantic methods:**
+
+                - ``{'type': 'text_score', 'property': 'name'}`` — embedding similarity
+                - ``{'type': 'text_score', 'threshold': 0.7}`` — with threshold
+
+                **Clustering methods:**
+
+                - ``{'type': 'cluster', 'k': 5}`` — K-means clustering
+                - ``{'type': 'cluster', 'algorithm': 'dbscan', 'eps': 0.5}`` — DBSCAN
+
+                **Common dict keys:**
+
+                - ``resolve``: ``'centroid'``, ``'closest'``, or ``'geometry'``
+                - ``max_m``: Maximum distance in meters (distance method)
+                - ``threshold``: Minimum similarity score (semantic methods)
+                - ``k``: Number of clusters (K-means)
+                - ``features``: Properties to cluster on
+            where: Property conditions for target nodes.
+            sort: Sort results. Field name or ``[(field, ascending)]`` list.
+            limit: Max target nodes per source.
+            level_index: Source level in the hierarchy (advanced).
+            new_level: Add targets as new hierarchy level. Default ``True``.
+
+        Returns:
+            A new KnowledgeGraph with comparison results selected.
+
+        Examples::
+
+            # Spatial containment: find wells inside structures
+            graph.select('Structure').compare('Well', 'contains')
+
+            # Distance: wells within 5km
+            graph.select('Well').compare('Well',
+                {'type': 'distance', 'max_m': 5000})
+
+            # Semantic similarity
+            graph.select('Document').compare('Document',
+                {'type': 'text_score', 'property': 'summary', 'threshold': 0.7})
+
+            # Clustering
+            graph.select('Well').compare('Well',
+                {'type': 'cluster', 'k': 5, 'features': ['latitude', 'longitude']})
         """
         ...
 
@@ -1274,25 +1473,26 @@ class KnowledgeGraph:
         Examples::
 
             # Copy structure name onto wells
-            graph.select('Structure').traverse('Well', method='contains') \\
+            graph.select('Structure').compare('Well', 'contains') \\
                 .add_properties({'Structure': ['name', 'status']})
 
             # Rename properties
-            graph.select('Structure').traverse('Well', method='contains') \\
+            graph.select('Structure').compare('Well', 'contains') \\
                 .add_properties({'Structure': {'struct_name': 'name'}})
 
-            # Aggregate: count wells per structure
-            graph.select('Well').traverse('Structure', method='contains') \\
+            # Aggregate with Agg helpers (discoverable via autocomplete)
+            from kglite import Agg, Spatial
+            graph.select('Structure').compare('Well', 'contains') \\
                 .add_properties({'Well': {
-                    'well_count': 'count(*)',
-                    'avg_depth': 'mean(depth)',
+                    'well_count': Agg.count(),
+                    'avg_depth': Agg.mean('depth'),
                 }})
 
-            # Spatial compute
-            graph.select('Structure').traverse('Well', method='contains') \\
+            # Spatial compute with Spatial helpers
+            graph.select('Structure').compare('Well', 'contains') \\
                 .add_properties({'Structure': {
-                    'dist_to_center': 'distance',
-                    'parent_area': 'area',
+                    'dist_to_center': Spatial.distance(),
+                    'parent_area': Spatial.area(),
                 }})
         """
         ...

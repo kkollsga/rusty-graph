@@ -202,7 +202,7 @@ class TestBug3DescribeParameterName:
 
 class TestBug4TraverseContainsTargetType:
     def test_target_type_kwarg_with_contains_method(self):
-        """When method='contains' is used, target_type= should be respected."""
+        """When compare() is used, target_type should be respected."""
         g = KnowledgeGraph()
         g.add_nodes(
             pd.DataFrame(
@@ -228,10 +228,6 @@ class TestBug4TraverseContainsTargetType:
         )
         g.set_spatial("Site", location=("lat", "lon"))
 
-        # This should work: first arg = target node type (current behavior)
-        result = g.select("Region").traverse("Site", method="contains")
+        # compare() takes target_type as first positional arg
+        result = g.select("Region").compare("Site", "contains")
         assert len(result.collect()) == 1
-
-        # Also works with target_type= explicitly
-        result2 = g.select("Region").traverse(target_type="Site", method="contains")
-        assert len(result2.collect()) == 1

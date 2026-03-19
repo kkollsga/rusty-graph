@@ -2398,7 +2398,7 @@ fn build_focused_detail(graph: &DirGraph, types: &[String]) -> Result<String, St
 
 // ── Fluent API reference ──────────────────────────────────────────────────
 
-const FLUENT_TOPIC_LIST: &str = "select, where, traverse, spatial, temporal, \
+const FLUENT_TOPIC_LIST: &str = "select, where, traverse, compare, spatial, temporal, \
     retrieval, statistics, algorithms, vectors, timeseries, mutation, \
     loading, export, indexes, set_operations, subgraph, schema, transactions";
 
@@ -2424,12 +2424,9 @@ fn write_fluent_overview(xml: &mut String) {
 
     // Traversal
     xml.push_str("  <group name=\"traversal\">\n");
-    xml.push_str("    <method sig=\"traverse(conn_type, direction='outgoing', target_type=None, where=None, where_connection=None, sort=None, limit=None)\">Follow edges. Returns target nodes as new selection.</method>\n");
-    xml.push_str("    <method sig=\"traverse(conn_type, method='contains')\">Spatial containment traversal (point-in-polygon).</method>\n");
-    xml.push_str("    <method sig=\"traverse(conn_type, method='distance', max_m=N)\">Distance-based traversal within meters.</method>\n");
-    xml.push_str("    <method sig=\"traverse(conn_type, method='text_score', query='...', min_score=0.5)\">Semantic similarity traversal.</method>\n");
-    xml.push_str("    <method sig=\"traverse(conn_type, method='cluster', features=[...], algorithm='kmeans', n_clusters=N)\">Cluster-based grouping.</method>\n");
-    xml.push_str("    <method sig=\"add_properties(conn_type, properties={alias: source_prop}, direction='outgoing')\">Copy properties from connected nodes onto current selection.</method>\n");
+    xml.push_str("    <method sig=\"traverse(conn_type, direction=None, target_type=None, where=None, where_connection=None, sort=None, limit=None)\">Follow graph edges. Returns target nodes as new selection level.</method>\n");
+    xml.push_str("    <method sig=\"compare(target_type, method, where=None, sort=None, limit=None)\">Spatial, semantic, or clustering comparison against a target type.</method>\n");
+    xml.push_str("    <method sig=\"add_properties({Type: [props]})\">Enrich leaf nodes with properties from ancestor levels (copy, rename, aggregate, spatial).</method>\n");
     xml.push_str("    <method sig=\"create_connections(conn_type)\">Materialise direct edges from traversal chain.</method>\n");
     xml.push_str("  </group>\n");
 
@@ -2453,7 +2450,8 @@ fn write_fluent_overview(xml: &mut String) {
 
     // Retrieval
     xml.push_str("  <group name=\"retrieval\">\n");
-    xml.push_str("    <method sig=\"collect()\">Materialise full node data as ResultView (iterable, indexable).</method>\n");
+    xml.push_str("    <method sig=\"collect(limit=None)\">Materialise selected nodes as a flat ResultView.</method>\n");
+    xml.push_str("    <method sig=\"collect_grouped(group_by, parent_info=False)\">Materialise nodes grouped by parent type as dict.</method>\n");
     xml.push_str("    <method sig=\"to_df()\">Export selection as pandas DataFrame.</method>\n");
     xml.push_str(
         "    <method sig=\"to_gdf()\">Export as GeoDataFrame (requires WKT geometry).</method>\n",
@@ -2573,6 +2571,7 @@ fn write_fluent_topics(xml: &mut String, topics: &[String]) -> Result<(), String
         match key.as_str() {
             "select" | "selection" | "where" | "filtering" => write_fluent_topic_selection(xml),
             "traverse" | "traversal" => write_fluent_topic_traversal(xml),
+            "compare" | "comparison" => write_fluent_topic_compare(xml),
             "spatial" => write_fluent_topic_spatial(xml),
             "temporal" => write_fluent_topic_temporal(xml),
             "retrieval" | "collect" => write_fluent_topic_retrieval(xml),
@@ -2635,14 +2634,10 @@ fn write_fluent_topic_selection(xml: &mut String) {
 
 fn write_fluent_topic_traversal(xml: &mut String) {
     xml.push_str("  <traversal>\n");
-    xml.push_str("    <desc>Follow edges to navigate the graph. traverse() returns target nodes as a new selection that can be further chained.</desc>\n");
+    xml.push_str("    <desc>Follow graph edges to navigate the graph. traverse() adds target nodes as a new hierarchy level. For spatial/semantic/clustering operations, use compare() instead.</desc>\n");
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"traverse(conn_type, direction='outgoing', target_type=None, where=None, where_connection=None, sort=None, limit=None)\">Follow edges. direction: 'outgoing', 'incoming', 'any'.</m>\n");
-    xml.push_str("      <m sig=\"traverse(conn_type, method='contains')\">Spatial: keep targets whose geometry contains the source point.</m>\n");
-    xml.push_str("      <m sig=\"traverse(conn_type, method='distance', max_m=5000)\">Spatial: keep targets within distance (meters).</m>\n");
-    xml.push_str("      <m sig=\"traverse(conn_type, method='text_score', query='...', column='desc', min_score=0.5)\">Semantic: rank by text similarity.</m>\n");
-    xml.push_str("      <m sig=\"traverse(conn_type, method='cluster', features=['x','y'], algorithm='kmeans', n_clusters=5)\">Cluster targets by features.</m>\n");
-    xml.push_str("      <m sig=\"add_properties(conn_type, properties={alias: source_prop}, direction='outgoing', aggregate=None)\">Copy/aggregate properties from connected nodes.</m>\n");
+    xml.push_str("      <m sig=\"traverse(conn_type, direction=None, target_type=None, where=None, where_connection=None, sort=None, limit=None)\">Follow edges. direction: 'outgoing', 'incoming', or None (both).</m>\n");
+    xml.push_str("      <m sig=\"add_properties({Type: [props]})\">Enrich leaf nodes with properties from ancestor levels. Supports copy, rename, Agg helpers (count, sum, mean, min, max, std, collect), and Spatial helpers (distance, area, perimeter, centroid_lat, centroid_lon).</m>\n");
     xml.push_str("      <m sig=\"create_connections(conn_type)\">Materialise direct edges from a traversal chain.</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
@@ -2650,11 +2645,27 @@ fn write_fluent_topic_traversal(xml: &mut String) {
     xml.push_str("      <ex desc=\"incoming with filter\">graph.select('Company').traverse('WORKS_AT', direction='incoming', where={'age': {'&gt;': 30}})</ex>\n");
     xml.push_str("      <ex desc=\"target type filter\">graph.select('Well').traverse('OF_FIELD', direction='incoming', target_type='ProductionProfile')</ex>\n");
     xml.push_str("      <ex desc=\"multi-hop chain\">graph.select('Person').traverse('WORKS_AT').traverse('LOCATED_IN').collect()</ex>\n");
-    xml.push_str("      <ex desc=\"spatial containment\">graph.select('Well').traverse('IN_BLOCK', method='contains')</ex>\n");
-    xml.push_str("      <ex desc=\"distance traversal\">graph.select('Platform').traverse('NEAR_FIELD', method='distance', max_m=10000)</ex>\n");
-    xml.push_str("      <ex desc=\"copy properties\">graph.select('Well').add_properties('OF_FIELD', properties={'field_name': 'title'})</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </traversal>\n");
+}
+
+fn write_fluent_topic_compare(xml: &mut String) {
+    xml.push_str("  <compare>\n");
+    xml.push_str("    <desc>Compare selected nodes against a target type using spatial, semantic, or clustering methods. Results are added as a new hierarchy level.</desc>\n");
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"compare(target_type, 'contains')\">Spatial: keep targets whose geometry contains the source point.</m>\n");
+    xml.push_str("      <m sig=\"compare(target_type, 'intersects')\">Spatial: keep targets whose geometry intersects the source.</m>\n");
+    xml.push_str("      <m sig=\"compare(target_type, {'type': 'distance', 'max_m': N})\">Spatial: keep targets within N meters.</m>\n");
+    xml.push_str("      <m sig=\"compare(target_type, {'type': 'text_score', 'property': 'col'})\">Semantic: rank by embedding similarity.</m>\n");
+    xml.push_str("      <m sig=\"compare(target_type, {'type': 'cluster', 'k': N})\">Cluster targets by features (K-means or DBSCAN).</m>\n");
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"spatial containment\">graph.select('Structure').compare('Well', 'contains').collect()</ex>\n");
+    xml.push_str("      <ex desc=\"distance\">graph.select('Well').compare('Well', {'type': 'distance', 'max_m': 5000})</ex>\n");
+    xml.push_str("      <ex desc=\"semantic\">graph.select('Doc').compare('Doc', {'type': 'text_score', 'property': 'summary', 'threshold': 0.7})</ex>\n");
+    xml.push_str("      <ex desc=\"clustering\">graph.select('Well').compare('Well', {'type': 'cluster', 'k': 5, 'features': ['lat', 'lon']})</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </compare>\n");
 }
 
 fn write_fluent_topic_spatial(xml: &mut String) {
@@ -2703,7 +2714,8 @@ fn write_fluent_topic_retrieval(xml: &mut String) {
     xml.push_str("  <retrieval>\n");
     xml.push_str("    <desc>Materialise selected nodes. Most selectors are lazy — these methods trigger data retrieval.</desc>\n");
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"collect()\">Full node data as ResultView (iterable, indexable, .to_list(), .to_df()).</m>\n");
+    xml.push_str("      <m sig=\"collect(limit=None)\">Flat ResultView (iterable, indexable, .to_list(), .to_df()).</m>\n");
+    xml.push_str("      <m sig=\"collect_grouped(group_by, parent_info=False)\">Nodes grouped by parent type as dict.</m>\n");
     xml.push_str("      <m sig=\"to_df()\">Pandas DataFrame with all properties as columns.</m>\n");
     xml.push_str("      <m sig=\"to_gdf()\">GeoDataFrame with geometry column (requires spatial config).</m>\n");
     xml.push_str("      <m sig=\"ids()\">Lightweight: id + type + title only.</m>\n");

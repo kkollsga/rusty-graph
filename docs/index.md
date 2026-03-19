@@ -36,6 +36,7 @@ guides/cypher
 guides/data-loading
 guides/blueprints
 guides/querying
+guides/traversal-hierarchy
 guides/semantic-search
 guides/spatial
 guides/timeseries

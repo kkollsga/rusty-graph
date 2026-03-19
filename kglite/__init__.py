@@ -11,6 +11,100 @@ from .kglite import (  # explicit re-exports for type checkers
     load,
 )
 
+
+class Agg:
+    """Aggregation expression builders for ``add_properties()``.
+
+    Each method returns the string expression that ``add_properties()``
+    already understands, making the DSL discoverable via autocomplete.
+
+    Example::
+
+        from kglite import Agg
+
+        graph.select('Well').traverse('HAS_BLOCK').add_properties({
+            'Block': {'well_count': Agg.count(), 'avg_depth': Agg.mean('depth')}
+        })
+    """
+
+    @staticmethod
+    def count() -> str:
+        """Count leaf nodes per ancestor — ``count(*)``."""
+        return "count(*)"
+
+    @staticmethod
+    def sum(prop: str) -> str:
+        """Sum a numeric property across leaves — ``sum(prop)``."""
+        return f"sum({prop})"
+
+    @staticmethod
+    def mean(prop: str) -> str:
+        """Arithmetic mean of a numeric property — ``mean(prop)``."""
+        return f"mean({prop})"
+
+    @staticmethod
+    def min(prop: str) -> str:
+        """Minimum value of a numeric property — ``min(prop)``."""
+        return f"min({prop})"
+
+    @staticmethod
+    def max(prop: str) -> str:
+        """Maximum value of a numeric property — ``max(prop)``."""
+        return f"max({prop})"
+
+    @staticmethod
+    def std(prop: str) -> str:
+        """Sample standard deviation of a numeric property — ``std(prop)``."""
+        return f"std({prop})"
+
+    @staticmethod
+    def collect(prop: str) -> str:
+        """Comma-separated string of property values — ``collect(prop)``."""
+        return f"collect({prop})"
+
+
+class Spatial:
+    """Spatial compute expression builders for ``add_properties()``.
+
+    Each method returns the string keyword that ``add_properties()``
+    already understands for spatial computations.
+
+    Example::
+
+        from kglite import Spatial
+
+        graph.select('Well').compare('Structure', 'contains') \\
+            .add_properties({
+                'Well': {'dist': Spatial.distance(), 'a': Spatial.area()}
+            })
+    """
+
+    @staticmethod
+    def distance() -> str:
+        """Geodesic distance between leaf and ancestor (meters)."""
+        return "distance"
+
+    @staticmethod
+    def area() -> str:
+        """Area of ancestor geometry (square meters)."""
+        return "area"
+
+    @staticmethod
+    def perimeter() -> str:
+        """Perimeter of ancestor geometry (meters)."""
+        return "perimeter"
+
+    @staticmethod
+    def centroid_lat() -> str:
+        """Latitude of ancestor geometry centroid."""
+        return "centroid_lat"
+
+    @staticmethod
+    def centroid_lon() -> str:
+        """Longitude of ancestor geometry centroid."""
+        return "centroid_lon"
+
+
 __all__ = [
     "__version__",
     "KnowledgeGraph",
@@ -19,4 +113,6 @@ __all__ = [
     "ResultIter",
     "load",
     "from_blueprint",
+    "Agg",
+    "Spatial",
 ]
