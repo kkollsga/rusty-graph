@@ -26,12 +26,14 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     dict: {'embeddings_stored': int, 'dimension': int, 'skipped': int}
+    #[pyo3(signature = (node_type, text_column, embeddings, metric=None))]
     fn set_embeddings(
         &mut self,
         py: Python<'_>,
         node_type: &str,
         text_column: &str,
         embeddings: &Bound<'_, PyDict>,
+        metric: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let g = Arc::make_mut(&mut self.inner);
         let embedding_property = format!("{}_emb", text_column);
@@ -123,7 +125,10 @@ impl KnowledgeGraph {
         };
 
         // Create or replace the EmbeddingStore
-        let mut store = schema::EmbeddingStore::new(dim);
+        let mut store = match metric {
+            Some(m) => schema::EmbeddingStore::with_metric(dim, m),
+            None => schema::EmbeddingStore::new(dim),
+        };
         store.data.reserve(entries.len() * dim);
         for (node_idx, vec) in &entries {
             store.set_embedding(node_idx.index(), vec);
@@ -146,7 +151,8 @@ impl KnowledgeGraph {
     ///     text_column: Source column name (e.g. 'summary'). Resolves to '{text_column}_emb'.
     ///     query_vector: The query embedding vector (list of floats)
     ///     top_k: Number of results to return (default 10)
-    ///     metric: Distance metric - 'cosine' (default), 'dot_product', or 'euclidean'
+    ///     metric: Distance metric - 'cosine' (default), 'dot_product', 'euclidean', or 'poincare'.
+    ///            If omitted, uses the metric stored with set_embeddings(), or 'cosine'.
     ///     to_df: If True, return a pandas DataFrame instead of list of dicts
     #[pyo3(signature = (text_column, query_vector, top_k=None, metric=None, to_df=None))]
     fn vector_search(
@@ -159,19 +165,33 @@ impl KnowledgeGraph {
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let top_k = top_k.unwrap_or(10);
-        let metric = match metric.unwrap_or("cosine") {
+        let embedding_property = format!("{}_emb", text_column);
+
+        // Resolve metric: explicit arg > stored metric > cosine default
+        let effective_metric = match metric {
+            Some(m) => m.to_string(),
+            None => {
+                // Look up stored metric from any embedding store matching this property
+                self.inner
+                    .embeddings
+                    .iter()
+                    .find(|((_, pn), _)| pn == &embedding_property)
+                    .and_then(|(_, store)| store.metric.clone())
+                    .unwrap_or_else(|| "cosine".to_string())
+            }
+        };
+        let metric = match effective_metric.as_str() {
             "cosine" => vector_search::DistanceMetric::Cosine,
             "dot_product" => vector_search::DistanceMetric::DotProduct,
             "euclidean" => vector_search::DistanceMetric::Euclidean,
+            "poincare" => vector_search::DistanceMetric::Poincare,
             other => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Unknown metric '{}'. Use 'cosine', 'dot_product', or 'euclidean'.",
+                    "Unknown metric '{}'. Use 'cosine', 'dot_product', 'euclidean', or 'poincare'.",
                     other
                 )));
             }
         };
-
-        let embedding_property = format!("{}_emb", text_column);
         // Release GIL during heavy vector similarity computation
         let inner = self.inner.clone();
         let selection = self.selection.clone();
@@ -234,7 +254,7 @@ impl KnowledgeGraph {
     /// List all embedding stores in the graph.
     ///
     /// Returns:
-    ///     List of dicts with 'node_type', 'text_column', 'dimension', 'count'.
+    ///     List of dicts with 'node_type', 'text_column', 'dimension', 'count', 'metric'.
     fn list_embeddings(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let py_list = PyList::empty(py);
         for ((node_type, store_name), store) in &self.inner.embeddings {
@@ -246,6 +266,7 @@ impl KnowledgeGraph {
             dict.set_item("text_column", text_column)?;
             dict.set_item("dimension", store.dimension)?;
             dict.set_item("count", store.len())?;
+            dict.set_item("metric", store.metric.as_deref().unwrap_or("cosine"))?;
             py_list.append(dict)?;
         }
         py_list.into_py_any(py)

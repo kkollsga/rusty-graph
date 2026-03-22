@@ -372,6 +372,9 @@ graph.set_embeddings('Article', 'summary', {
     'article_1': [0.1, 0.2, ...],
     'article_2': [0.3, 0.4, ...],
 })
+
+# Store embeddings with an intended metric (becomes the default at query time)
+graph.set_embeddings('Concept', 'title', poincare_vectors, metric='poincare')
 ```
 
 ### Text Search (auto-embeds query)
@@ -381,7 +384,7 @@ graph.set_embeddings('Article', 'summary', {
 results = graph.select('Article').search_text(
     'summary', 'machine learning advances', top_k=10)
 
-# With explicit metric
+# With explicit metric: 'cosine', 'dot_product', 'euclidean', 'poincare'
 results = graph.select('Article').search_text(
     'summary', 'climate change', top_k=5, metric='dot_product')
 
@@ -402,6 +405,9 @@ results = (graph
     .select('Article')
     .where({'category': 'politics'})
     .vector_search('summary', query_vec, top_k=10, metric='cosine'))
+
+# Metrics: 'cosine' (default), 'dot_product', 'euclidean', 'poincare'
+# If a stored metric was set via set_embeddings(..., metric=), it is used as default
 ```
 
 ### Semantic Search via Cypher
@@ -420,6 +426,13 @@ graph.cypher("""
     WHERE text_score(n, 'summary', $query) > 0.8
     RETURN n.title
 """, params={'query': 'artificial intelligence'})
+
+# embedding_norm() — L2 norm (hierarchy depth in Poincaré space)
+graph.cypher("""
+    MATCH (n:Concept)
+    RETURN n.name, embedding_norm(n, 'title') AS depth
+    ORDER BY depth ASC LIMIT 10
+""")
 ```
 
 ### Embedding Management
@@ -427,7 +440,7 @@ graph.cypher("""
 ```python
 # List all embedding stores
 graph.list_embeddings()
-# [{'node_type': 'Article', 'text_column': 'summary', 'dimension': 384, 'count': 1000}]
+# [{'node_type': 'Article', 'text_column': 'summary', 'dimension': 384, 'count': 1000, 'metric': None}]
 
 # Retrieve all embeddings
 vecs = graph.embeddings('Article', 'summary')       # by type

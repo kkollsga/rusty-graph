@@ -1147,3 +1147,241 @@ class TestCypherTextScore:
             to_df=True,
         )
         assert len(result) == 3
+
+
+# ── Poincaré metric tests ────────────────────────────────────────────────
+
+
+@pytest.fixture
+def graph_with_poincare_embeddings():
+    """Create a graph with embeddings inside the Poincaré ball (norms < 1)."""
+    graph = kglite.KnowledgeGraph()
+
+    df = pd.DataFrame(
+        {
+            "id": ["root", "mid_a", "mid_b", "leaf_a", "leaf_b"],
+            "title": ["Root", "MidA", "MidB", "LeafA", "LeafB"],
+        }
+    )
+    graph.add_nodes(df, "Concept", "id", "title")
+
+    # Embeddings inside the unit ball — norm encodes hierarchy depth
+    embeddings = {
+        "root": [0.0, 0.0, 0.0],  # origin = root (norm 0)
+        "mid_a": [0.3, 0.2, 0.1],  # moderate depth (norm ~0.374)
+        "mid_b": [0.2, 0.3, 0.1],  # moderate depth, similar to mid_a
+        "leaf_a": [0.8, 0.3, 0.1],  # near boundary (norm ~0.860)
+        "leaf_b": [0.7, 0.5, 0.2],  # near boundary (norm ~0.894)
+    }
+    graph.set_embeddings("Concept", "title", embeddings)
+    return graph
+
+
+class TestPoincareMetric:
+    def test_vector_search_poincare(self, graph_with_poincare_embeddings):
+        """Poincaré vector search returns results ordered by hyperbolic distance."""
+        graph = graph_with_poincare_embeddings
+        results = graph.select("Concept").vector_search(
+            "title",
+            [0.3, 0.2, 0.1],  # query = mid_a's embedding
+            top_k=5,
+            metric="poincare",
+        )
+        assert len(results) == 5
+        # mid_a should be closest to itself (distance 0, score 0.0)
+        assert results[0]["id"] == "mid_a"
+        assert results[0]["score"] == pytest.approx(0.0, abs=1e-4)
+
+    def test_poincare_identical_vectors_zero_distance(self, graph_with_poincare_embeddings):
+        """Identical vectors have Poincaré distance 0 (score 0.0)."""
+        graph = graph_with_poincare_embeddings
+        results = graph.select("Concept").vector_search(
+            "title",
+            [0.0, 0.0, 0.0],  # root's embedding
+            top_k=1,
+            metric="poincare",
+        )
+        assert results[0]["id"] == "root"
+        assert results[0]["score"] == pytest.approx(0.0, abs=1e-5)
+
+    def test_poincare_boundary_larger_distance(self, graph_with_poincare_embeddings):
+        """Vectors near the boundary have larger Poincaré distances from origin."""
+        graph = graph_with_poincare_embeddings
+        results = graph.select("Concept").vector_search(
+            "title",
+            [0.0, 0.0, 0.0],
+            top_k=5,
+            metric="poincare",
+        )
+        scores = {r["id"]: r["score"] for r in results}
+        # Root is closest (score 0), leaves are farthest (most negative scores)
+        assert scores["root"] > scores["mid_a"]
+        assert scores["mid_a"] > scores["leaf_a"]
+
+    def test_cypher_vector_score_poincare(self, graph_with_poincare_embeddings):
+        """vector_score() with 'poincare' metric works in Cypher."""
+        graph = graph_with_poincare_embeddings
+        result = graph.cypher(
+            "MATCH (n:Concept) "
+            "RETURN n.id AS id, "
+            "vector_score(n, 'title_emb', [0.3, 0.2, 0.1], 'poincare') AS score "
+            "ORDER BY score DESC LIMIT 1",
+            to_df=True,
+        )
+        assert result.iloc[0]["id"] == "mid_a"
+        assert result.iloc[0]["score"] == pytest.approx(0.0, abs=1e-4)
+
+
+class TestEmbeddingNorm:
+    def test_embedding_norm_basic(self, graph_with_poincare_embeddings):
+        """embedding_norm() returns L2 norm of embedding vector."""
+        graph = graph_with_poincare_embeddings
+        result = graph.cypher(
+            "MATCH (n:Concept) RETURN n.id AS id, embedding_norm(n, 'title_emb') AS norm ORDER BY norm ASC",
+            to_df=True,
+        )
+        # Root has norm 0 (at origin), leaves have highest norms
+        assert result.iloc[0]["id"] == "root"
+        assert result.iloc[0]["norm"] == pytest.approx(0.0, abs=1e-5)
+
+    def test_embedding_norm_hierarchy_order(self, graph_with_poincare_embeddings):
+        """Norms reflect hierarchy depth: root < mid < leaf."""
+        graph = graph_with_poincare_embeddings
+        result = graph.cypher(
+            "MATCH (n:Concept) RETURN n.id AS id, embedding_norm(n, 'title_emb') AS norm",
+            to_df=True,
+        )
+        norms = dict(zip(result["id"], result["norm"]))
+        assert norms["root"] < norms["mid_a"]
+        assert norms["mid_a"] < norms["leaf_a"]
+
+    def test_embedding_norm_values(self, graph_with_poincare_embeddings):
+        """embedding_norm() computes correct L2 norms."""
+        graph = graph_with_poincare_embeddings
+        result = graph.cypher(
+            "MATCH (n:Concept {id: 'mid_a'}) RETURN embedding_norm(n, 'title_emb') AS norm",
+            to_df=True,
+        )
+        expected = math.sqrt(0.3**2 + 0.2**2 + 0.1**2)
+        assert result.iloc[0]["norm"] == pytest.approx(expected, abs=1e-5)
+
+    def test_embedding_norm_missing_property_error(self, graph_with_poincare_embeddings):
+        """embedding_norm() with wrong property raises error."""
+        graph = graph_with_poincare_embeddings
+        with pytest.raises(RuntimeError, match="no embedding"):
+            graph.cypher("MATCH (n:Concept) RETURN embedding_norm(n, 'nonexistent') AS norm")
+
+    def test_embedding_norm_wrong_arg_count(self, graph_with_poincare_embeddings):
+        """embedding_norm() with wrong number of args raises error."""
+        graph = graph_with_poincare_embeddings
+        with pytest.raises(RuntimeError, match="requires 2 arguments"):
+            graph.cypher("MATCH (n:Concept) RETURN embedding_norm(n) AS norm")
+
+    def test_embedding_norm_in_where(self, graph_with_poincare_embeddings):
+        """embedding_norm() can be used in WHERE for filtering."""
+        graph = graph_with_poincare_embeddings
+        result = graph.cypher(
+            "MATCH (n:Concept) WHERE embedding_norm(n, 'title_emb') < 0.5 RETURN n.id AS id",
+            to_df=True,
+        )
+        ids = result["id"].tolist()
+        assert "root" in ids
+        assert "mid_a" in ids  # norm ~0.374
+        assert "leaf_a" not in ids  # norm ~0.860
+
+
+class TestStoredMetric:
+    def test_set_embeddings_with_metric(self):
+        """set_embeddings(metric=...) stores the metric and list_embeddings shows it."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1, 2], "title": ["A", "B"]})
+        graph.add_nodes(df, "Node", "id", "title")
+        graph.set_embeddings("Node", "title", {1: [0.1, 0.2], 2: [0.3, 0.4]}, metric="poincare")
+
+        stores = graph.list_embeddings()
+        assert len(stores) == 1
+        assert stores[0]["metric"] == "poincare"
+
+    def test_stored_metric_used_as_default(self):
+        """vector_search() uses the stored metric when none is explicitly provided."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": ["a", "b", "c"], "title": ["A", "B", "C"]})
+        graph.add_nodes(df, "Node", "id", "title")
+
+        # Embeddings inside unit ball
+        graph.set_embeddings(
+            "Node",
+            "title",
+            {"a": [0.0, 0.0], "b": [0.3, 0.3], "c": [0.8, 0.4]},
+            metric="poincare",
+        )
+
+        # No explicit metric — should use stored "poincare"
+        results_default = graph.select("Node").vector_search("title", [0.0, 0.0], top_k=3)
+        # Explicit poincare — should give same results
+        results_explicit = graph.select("Node").vector_search("title", [0.0, 0.0], top_k=3, metric="poincare")
+
+        assert [r["id"] for r in results_default] == [r["id"] for r in results_explicit]
+        assert [r["score"] for r in results_default] == pytest.approx([r["score"] for r in results_explicit], abs=1e-6)
+
+    def test_explicit_metric_overrides_stored(self):
+        """Explicit metric= arg overrides the stored metric."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": ["a", "b"], "title": ["A", "B"]})
+        graph.add_nodes(df, "Node", "id", "title")
+
+        graph.set_embeddings("Node", "title", {"a": [0.1, 0.2], "b": [0.3, 0.4]}, metric="poincare")
+
+        # Override with cosine
+        results = graph.select("Node").vector_search("title", [0.1, 0.2], top_k=2, metric="cosine")
+        # Should work and return cosine-based scores
+        assert len(results) == 2
+        # Cosine of identical vectors is 1.0
+        assert results[0]["score"] == pytest.approx(1.0, abs=1e-4)
+
+    def test_no_stored_metric_defaults_to_cosine(self):
+        """Without stored metric, vector_search() defaults to cosine."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1, 2], "title": ["A", "B"]})
+        graph.add_nodes(df, "Node", "id", "title")
+
+        # No metric= arg
+        graph.set_embeddings("Node", "title", {1: [1.0, 0.0], 2: [0.0, 1.0]})
+
+        stores = graph.list_embeddings()
+        assert stores[0]["metric"] == "cosine"
+
+        results = graph.select("Node").vector_search("title", [1.0, 0.0], top_k=2)
+        # Cosine: identical to [1,0] → score 1.0
+        assert results[0]["id"] == 1
+        assert results[0]["score"] == pytest.approx(1.0, abs=1e-5)
+
+    def test_stored_metric_in_cypher_vector_score(self):
+        """vector_score() in Cypher uses stored metric when no explicit metric given."""
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": ["a", "b", "c"], "title": ["A", "B", "C"]})
+        graph.add_nodes(df, "Node", "id", "title")
+
+        graph.set_embeddings(
+            "Node",
+            "title",
+            {"a": [0.0, 0.0], "b": [0.3, 0.3], "c": [0.8, 0.4]},
+            metric="poincare",
+        )
+
+        # No metric arg in vector_score — should use stored poincare
+        result_default = graph.cypher(
+            "MATCH (n:Node) "
+            "RETURN n.id AS id, vector_score(n, 'title_emb', [0.0, 0.0]) AS score "
+            "ORDER BY score DESC LIMIT 1",
+            to_df=True,
+        )
+        result_explicit = graph.cypher(
+            "MATCH (n:Node) "
+            "RETURN n.id AS id, vector_score(n, 'title_emb', [0.0, 0.0], 'poincare') AS score "
+            "ORDER BY score DESC LIMIT 1",
+            to_df=True,
+        )
+
+        assert result_default.iloc[0]["id"] == result_explicit.iloc[0]["id"]
+        assert result_default.iloc[0]["score"] == pytest.approx(result_explicit.iloc[0]["score"], abs=1e-6)

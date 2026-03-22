@@ -185,7 +185,8 @@ graph.cypher("""
 | `valid_at(e, date, 'from', 'to')` | Temporal point-in-time filter (nodes or edges) |
 | `valid_during(e, start, end, 'from', 'to')` | Temporal range overlap filter |
 | `text_score(n, prop, query)` | Semantic similarity (auto-embeds query text; requires `set_embedder()`) |
-| `text_score(n, prop, query, metric)` | With explicit metric (`'cosine'`, `'dot_product'`, `'euclidean'`) |
+| `text_score(n, prop, query, metric)` | With explicit metric (`'cosine'`, `'dot_product'`, `'euclidean'`, `'poincare'`) |
+| `embedding_norm(n, prop)` | L2 norm of embedding vector (hierarchy depth in Poincaré space: 0=root, ~1=leaf) |
 | `ts_sum(n.ch [, 'start'] [, 'end'])` | Sum of timeseries values (date-string range) |
 | `ts_avg(n.ch [, 'start'] [, 'end'])` | Average of timeseries values |
 | `ts_min(n.ch [, 'start'] [, 'end'])` | Minimum timeseries value |
@@ -842,7 +843,7 @@ graph.cypher("MATCH (f:Field) RETURN ts_at(f.oil, '2020')")
 | **Math** | `abs`, `ceil`/`ceiling`, `floor`, `round`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand` |
 | **Spatial** | `point(lat, lon)`, `distance(a, b)`, `contains(a, b)`, `intersects(a, b)`, `centroid(n)`, `area(n)`, `perimeter(n)`, `latitude(point)`, `longitude(point)` |
 | **Temporal** | `date(str)`/`datetime(str)`, `date_diff(d1, d2)`, `date ± N` (days), `date - date` → int, `d.year`/`d.month`/`d.day`, `valid_at(...)`, `valid_during(...)` |
-| **Semantic** | `text_score(n, prop, query [, metric])` — auto-embeds query via `set_embedder()`, cosine/dot_product/euclidean |
+| **Semantic** | `text_score(n, prop, query [, metric])` — auto-embeds query via `set_embedder()`, cosine/dot_product/euclidean/poincare; `embedding_norm(n, prop)` — L2 norm (hierarchy depth) |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
 | **Procedures** | `CALL pagerank/betweenness/degree/closeness() YIELD node, score`, `CALL louvain/label_propagation() YIELD node, community`, `CALL connected_components() YIELD node, component`, `CALL cluster({method, ...}) YIELD node, cluster`, `CALL list_procedures()` |

@@ -112,10 +112,44 @@ results = (graph
 # DataFrame output
 df = graph.select('Article').vector_search('summary', query_vec, top_k=10, to_df=True)
 
-# Distance metrics: 'cosine' (default), 'dot_product', 'euclidean'
+# Distance metrics: 'cosine' (default), 'dot_product', 'euclidean', 'poincare'
 results = graph.select('Article').vector_search(
     'summary', query_vec, top_k=10, metric='dot_product')
 ```
+
+### Choosing a Distance Metric
+
+| Metric | Best for | Why |
+|--------|----------|-----|
+| `cosine` | General-purpose text/semantic embeddings (OpenAI, Sentence-Transformers, Cohere) | Compares direction, ignores magnitude. Works well when embeddings are normalized or you only care about semantic similarity. |
+| `dot_product` | Embeddings where magnitude encodes relevance (MIPS) | Like cosine but magnitude matters — a longer vector scores higher. Useful when the model encodes "importance" in the norm. |
+| `euclidean` | Spatial/geometric data, clustering, k-means style lookups | Raw geometric distance. Best when absolute position in the space matters, not just angle. |
+| `poincare` | Hierarchical/taxonomic data (ontologies, org charts, category trees) | Hyperbolic geometry naturally encodes tree structure. Nodes near the origin are roots; nodes near the boundary are leaves. 5D Poincaré can outperform 200D Euclidean on hierarchy tasks. |
+
+**Rule of thumb:** If you're using off-the-shelf text embeddings, use `cosine`. If your data has inherent hierarchy and you've trained Poincaré embeddings, use `poincare`.
+
+### Stored Metric
+
+When embeddings are trained for a specific geometry, store the intended metric alongside them so it becomes the default at query time:
+
+```python
+# Store Poincaré embeddings with their intended metric
+graph.set_embeddings('Concept', 'title', poincare_vectors, metric='poincare')
+
+# Queries now default to poincaré distance — no need to pass metric= each time
+results = graph.select('Concept').vector_search('title', query_vec, top_k=10)
+
+# You can still override explicitly
+results = graph.select('Concept').vector_search(
+    'title', query_vec, top_k=10, metric='cosine')
+
+# list_embeddings() shows the stored metric
+graph.list_embeddings()
+# [{'node_type': 'Concept', 'text_column': 'title', 'dimension': 5,
+#   'count': 500, 'metric': 'poincare'}]
+```
+
+Metric resolution order: explicit `metric=` argument > stored metric > `cosine` default.
 
 ### Semantic Search in Cypher
 
@@ -136,6 +170,13 @@ graph.cypher("""
     RETURN n.title
 """, params={'query': 'artificial intelligence'})
 
+# With explicit metric
+graph.cypher("""
+    MATCH (n:Article)
+    RETURN n.title, text_score(n, 'summary', 'machine learning', 'poincare') AS score
+    ORDER BY score DESC LIMIT 10
+""")
+
 # Combine with graph filters
 graph.cypher("""
     MATCH (n:Article)-[:CITED_BY]->(m:Article)
@@ -145,11 +186,31 @@ graph.cypher("""
 """)
 ```
 
+### Embedding Norm in Cypher
+
+`embedding_norm()` returns the L2 norm of a node's embedding vector. In Poincaré space, norm indicates hierarchy depth: values near 0 are roots, values near 1 are leaves.
+
+```python
+# Find the most "root-like" concepts (lowest norm = highest in hierarchy)
+graph.cypher("""
+    MATCH (n:Concept)
+    RETURN n.name, embedding_norm(n, 'title') AS depth
+    ORDER BY depth ASC LIMIT 10
+""")
+
+# Find leaf nodes (high norm = deep in hierarchy)
+graph.cypher("""
+    MATCH (n:Concept)
+    WHERE embedding_norm(n, 'title') > 0.8
+    RETURN n.name, embedding_norm(n, 'title') AS depth
+""")
+```
+
 ## Embedding Utilities
 
 ```python
 graph.list_embeddings()
-# [{'node_type': 'Article', 'text_column': 'summary', 'dimension': 384, 'count': 1000}]
+# [{'node_type': 'Article', 'text_column': 'summary', 'dimension': 384, 'count': 1000, 'metric': None}]
 
 graph.remove_embeddings('Article', 'summary')
 

@@ -611,6 +611,7 @@ pub fn make_comparison_traversal(
             let dist_metric = match config.metric.as_deref() {
                 Some("dot_product") => vector_search::DistanceMetric::DotProduct,
                 Some("euclidean") => vector_search::DistanceMetric::Euclidean,
+                Some("poincare") => vector_search::DistanceMetric::Poincare,
                 _ => vector_search::DistanceMetric::Cosine,
             };
             semantic_score_traversal(
@@ -1282,6 +1283,7 @@ fn semantic_score_traversal(
         vector_search::DistanceMetric::Cosine => vector_search::cosine_similarity,
         vector_search::DistanceMetric::DotProduct => vector_search::dot_product,
         vector_search::DistanceMetric::Euclidean => vector_search::neg_euclidean_distance,
+        vector_search::DistanceMetric::Poincare => vector_search::neg_poincare_distance,
     };
     let threshold_f32 = threshold as f32;
 

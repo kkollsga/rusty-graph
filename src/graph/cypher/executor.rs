@@ -4880,23 +4880,32 @@ impl<'a> CypherExecutor<'a> {
                             ),
                         };
                         let query_vec = self.extract_float_list(&args[2], row)?;
-                        let similarity_fn = if args.len() > 3 {
+                        // Resolve metric: explicit arg > stored metric > cosine default
+                        let metric_name = if args.len() > 3 {
                             match self.evaluate_expression(&args[3], row)? {
-                                Value::String(s) => match s.as_str() {
-                                    "cosine" => vs::cosine_similarity as fn(&[f32], &[f32]) -> f32,
-                                    "dot_product" => vs::dot_product,
-                                    "euclidean" => vs::neg_euclidean_distance,
-                                    other => {
-                                        return Err(format!(
-                                            "vector_score(): unknown metric '{}'. Use 'cosine', 'dot_product', or 'euclidean'.",
-                                            other
-                                        ))
-                                    }
-                                },
-                                _ => vs::cosine_similarity,
+                                Value::String(s) => s,
+                                _ => "cosine".to_string(),
                             }
                         } else {
-                            vs::cosine_similarity
+                            // Look up stored metric from the embedding store
+                            self.graph
+                                .embeddings
+                                .iter()
+                                .find(|((_, pn), _)| pn == &prop_name)
+                                .and_then(|(_, store)| store.metric.clone())
+                                .unwrap_or_else(|| "cosine".to_string())
+                        };
+                        let similarity_fn = match metric_name.as_str() {
+                            "cosine" => vs::cosine_similarity as fn(&[f32], &[f32]) -> f32,
+                            "dot_product" => vs::dot_product,
+                            "euclidean" => vs::neg_euclidean_distance,
+                            "poincare" => vs::neg_poincare_distance,
+                            other => {
+                                return Err(format!(
+                                    "vector_score(): unknown metric '{}'. Use 'cosine', 'dot_product', 'euclidean', or 'poincare'.",
+                                    other
+                                ))
+                            }
                         };
                         let _ = self.vs_cache.set(VectorScoreCache {
                             prop_name,
@@ -5333,6 +5342,55 @@ impl<'a> CypherExecutor<'a> {
                 "Aggregate function '{}' cannot be used outside of RETURN/WITH",
                 name
             )),
+            // embedding_norm(node, property) → Float64
+            // Returns the L2 norm of the node's embedding vector.
+            // Useful for inferring hierarchy depth in Poincaré embeddings
+            // (norm close to 0 = root/general, norm close to 1 = leaf/specific).
+            "embedding_norm" => {
+                if args.len() != 2 {
+                    return Err("embedding_norm() requires 2 arguments: (node, property)".into());
+                }
+                let node_idx = match &args[0] {
+                    Expression::Variable(var) => match row.node_bindings.get(var) {
+                        Some(&idx) => idx,
+                        None => return Ok(Value::Null),
+                    },
+                    _ => {
+                        return Err(
+                            "embedding_norm(): first argument must be a node variable".into()
+                        )
+                    }
+                };
+                let prop_name = match self.evaluate_expression(&args[1], row)? {
+                    Value::String(s) => s,
+                    _ => {
+                        return Err(
+                            "embedding_norm(): second argument must be a string property name"
+                                .into(),
+                        )
+                    }
+                };
+                let node_type = match self.graph.graph.node_weight(node_idx) {
+                    Some(n) => &n.node_type,
+                    None => return Ok(Value::Null),
+                };
+                let store = match self.graph.embedding_store(node_type, &prop_name) {
+                    Some(s) => s,
+                    None => {
+                        return Err(format!(
+                            "embedding_norm(): no embedding '{}' found for node type '{}'",
+                            prop_name, node_type
+                        ))
+                    }
+                };
+                match store.get_embedding(node_idx.index()) {
+                    Some(emb) => {
+                        let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        Ok(Value::Float64(norm as f64))
+                    }
+                    None => Ok(Value::Null),
+                }
+            }
             "text_score" => Err(
                 "text_score() requires set_embedder(). Call g.set_embedder(model) first."
                     .to_string(),

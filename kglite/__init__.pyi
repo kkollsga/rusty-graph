@@ -1360,6 +1360,7 @@ class KnowledgeGraph:
 
                 - ``{'type': 'text_score', 'property': 'name'}`` — embedding similarity
                 - ``{'type': 'text_score', 'threshold': 0.7}`` — with threshold
+                - ``{'type': 'text_score', 'metric': 'poincare'}`` — Poincaré distance (hierarchical data)
 
                 **Clustering methods:**
 
@@ -3094,6 +3095,7 @@ class KnowledgeGraph:
         node_type: str,
         text_column: str,
         embeddings: dict[Any, list[float]],
+        metric: Optional[str] = None,
     ) -> dict[str, int]:
         """Store embeddings for nodes of the given type.
 
@@ -3108,6 +3110,9 @@ class KnowledgeGraph:
             node_type: The node type (e.g. ``'Article'``).
             text_column: Source text column name (e.g. ``'summary'``).
             embeddings: Dict mapping node IDs to embedding vectors.
+            metric: Default distance metric for this store. Used when no metric
+                is specified at query time. ``'cosine'`` (default), ``'dot_product'``,
+                ``'euclidean'``, or ``'poincare'``. Persisted with ``save()``.
 
         Returns:
             Dict with ``embeddings_stored``, ``dimension``, and ``skipped``.
@@ -3131,7 +3136,9 @@ class KnowledgeGraph:
             text_column: Source text column name (e.g. ``'summary'``).
             query_vector: The query embedding vector.
             top_k: Number of results to return (default 10).
-            metric: ``'cosine'`` (default), ``'dot_product'``, or ``'euclidean'``.
+            metric: ``'cosine'``, ``'dot_product'``, ``'euclidean'``, or ``'poincare'``.
+                If omitted, uses the metric stored via ``set_embeddings(metric=...)``,
+                or falls back to ``'cosine'``.
             to_df: If ``True``, return a pandas DataFrame instead of list of dicts.
 
         Returns:
@@ -3284,7 +3291,7 @@ class KnowledgeGraph:
             text_column: Text column whose embeddings to search (e.g. ``'summary'``).
             query: The text query to search for.
             top_k: Number of results (default 10).
-            metric: ``'cosine'`` (default), ``'dot_product'``, or ``'euclidean'``.
+            metric: ``'cosine'`` (default), ``'dot_product'``, ``'euclidean'``, or ``'poincare'``.
             to_df: If True, return a pandas DataFrame.
 
         Returns:

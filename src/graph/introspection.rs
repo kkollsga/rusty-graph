@@ -1321,7 +1321,7 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
     }
     if has_embeddings {
         xml.push_str(
-            "    <semantic hint=\"text_score(n, 'col', 'query text') — similarity 0..1\"/>\n",
+            "    <semantic hint=\"text_score(n, 'col', 'query', metric) — similarity (metric: 'cosine'|'poincare'|'dot_product'|'euclidean'); embedding_norm(n, 'col') — L2 norm (hierarchy depth in Poincaré space)\"/>\n",
         );
     }
     xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/label_propagation), component (connected_components), cluster (cluster)\"/>\n");
@@ -1757,6 +1757,7 @@ fn write_topic_functions(xml: &mut String) {
     xml.push_str("    </examples>\n");
     xml.push_str("    <group name=\"temporal\">date(str)/datetime(str), date_diff(d1,d2), date ± N (add/sub days), date - date → days (int), d.year/d.month/d.day</group>\n");
     xml.push_str("    <group name=\"window\">row_number() OVER (...), rank() OVER (...), dense_rank() OVER (...). Syntax: func() OVER (PARTITION BY expr ORDER BY expr [DESC]). PARTITION BY optional.</group>\n");
+    xml.push_str("    <group name=\"semantic\">text_score(n, 'col', 'query' [, metric]) — similarity score (metrics: 'cosine', 'poincare', 'dot_product', 'euclidean'); embedding_norm(n, 'col') — L2 norm of embedding vector (hierarchy depth in Poincaré space, 0=root, ~1=leaf)</group>\n");
     xml.push_str("  </functions>\n");
 }
 
@@ -2656,7 +2657,7 @@ fn write_fluent_topic_compare(xml: &mut String) {
     xml.push_str("      <m sig=\"compare(target_type, 'contains')\">Spatial: keep targets whose geometry contains the source point.</m>\n");
     xml.push_str("      <m sig=\"compare(target_type, 'intersects')\">Spatial: keep targets whose geometry intersects the source.</m>\n");
     xml.push_str("      <m sig=\"compare(target_type, {'type': 'distance', 'max_m': N})\">Spatial: keep targets within N meters.</m>\n");
-    xml.push_str("      <m sig=\"compare(target_type, {'type': 'text_score', 'property': 'col'})\">Semantic: rank by embedding similarity.</m>\n");
+    xml.push_str("      <m sig=\"compare(target_type, {'type': 'text_score', 'property': 'col', 'metric': 'cosine'|'poincare'})\">Semantic: rank by embedding similarity (default cosine; use 'poincare' for hierarchical data).</m>\n");
     xml.push_str("      <m sig=\"compare(target_type, {'type': 'cluster', 'k': N})\">Cluster targets by features (K-means or DBSCAN).</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");

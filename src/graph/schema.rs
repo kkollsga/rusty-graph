@@ -1086,6 +1086,10 @@ pub struct EmbeddingStore {
     pub node_to_slot: HashMap<usize, usize>,
     /// Reverse map: slot -> NodeIndex.index(), needed for returning results
     pub slot_to_node: Vec<usize>,
+    /// Default distance metric for this embedding store (e.g. "cosine", "poincare").
+    /// Used when no explicit metric is provided at query time.
+    #[serde(default)]
+    pub metric: Option<String>,
 }
 
 impl EmbeddingStore {
@@ -1095,6 +1099,17 @@ impl EmbeddingStore {
             data: Vec::new(),
             node_to_slot: HashMap::new(),
             slot_to_node: Vec::new(),
+            metric: None,
+        }
+    }
+
+    pub fn with_metric(dimension: usize, metric: &str) -> Self {
+        EmbeddingStore {
+            dimension,
+            data: Vec::new(),
+            node_to_slot: HashMap::new(),
+            slot_to_node: Vec::new(),
+            metric: Some(metric.to_string()),
         }
     }
 
