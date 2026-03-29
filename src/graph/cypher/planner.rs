@@ -2949,10 +2949,10 @@ mod tests {
         let params = HashMap::new();
         optimize(&mut query, &graph, &params);
 
-        // WHERE should be removed (fully consumed)
-        assert_eq!(query.clauses.len(), 2); // MATCH + RETURN
+        // WHERE is kept as a safety net even when all predicates are pushed
+        assert_eq!(query.clauses.len(), 3); // MATCH + WHERE + RETURN
         assert!(matches!(&query.clauses[0], Clause::Match(_)));
-        assert!(matches!(&query.clauses[1], Clause::Return(_)));
+        assert!(matches!(&query.clauses[2], Clause::Return(_)));
 
         // The MATCH pattern should now have {age: 30} as a property
         if let Clause::Match(m) = &query.clauses[0] {
@@ -2976,7 +2976,8 @@ mod tests {
         optimize(&mut query, &graph, &params);
 
         // Both n.age = 30 and n.score > 100 should be pushed into MATCH
-        assert_eq!(query.clauses.len(), 2); // MATCH + RETURN (WHERE fully consumed)
+        // WHERE is kept as a safety net
+        assert_eq!(query.clauses.len(), 3); // MATCH + WHERE + RETURN
 
         if let Clause::Match(m) = &query.clauses[0] {
             if let PatternElement::Node(np) = &m.patterns[0].elements[0] {
@@ -3001,8 +3002,8 @@ mod tests {
         let params = HashMap::new();
         optimize(&mut query, &graph, &params);
 
-        // Comparison should be pushed into MATCH, WHERE removed
-        assert_eq!(query.clauses.len(), 2); // MATCH + RETURN
+        // Comparison should be pushed into MATCH, WHERE kept as safety net
+        assert_eq!(query.clauses.len(), 3); // MATCH + WHERE + RETURN
 
         if let Clause::Match(m) = &query.clauses[0] {
             if let PatternElement::Node(np) = &m.patterns[0].elements[0] {
@@ -3036,8 +3037,8 @@ mod tests {
         params.insert("name".to_string(), Value::String("Alice".to_string()));
         optimize(&mut query, &graph, &params);
 
-        // WHERE should be removed (parameter resolved and pushed)
-        assert_eq!(query.clauses.len(), 2); // MATCH + RETURN
+        // Parameter resolved and pushed; WHERE kept as safety net
+        assert_eq!(query.clauses.len(), 3); // MATCH + WHERE + RETURN
 
         // The MATCH pattern should now have {name: 'Alice'} as a property
         if let Clause::Match(m) = &query.clauses[0] {
@@ -3068,7 +3069,8 @@ mod tests {
         optimize(&mut query, &graph, &params);
 
         // Both should be pushed: n.name = $name (equality) and n.age > $min_age (comparison)
-        assert_eq!(query.clauses.len(), 2); // MATCH + RETURN (WHERE fully consumed)
+        // WHERE kept as safety net
+        assert_eq!(query.clauses.len(), 3); // MATCH + WHERE + RETURN
 
         if let Clause::Match(m) = &query.clauses[0] {
             if let PatternElement::Node(np) = &m.patterns[0].elements[0] {
@@ -3095,8 +3097,8 @@ mod tests {
         let params = HashMap::new();
         optimize(&mut query, &graph, &params);
 
-        // Both comparisons should be merged into a Range matcher
-        assert_eq!(query.clauses.len(), 2); // MATCH + RETURN
+        // Both comparisons should be merged into a Range matcher; WHERE kept
+        assert_eq!(query.clauses.len(), 3); // MATCH + WHERE + RETURN
 
         if let Clause::Match(m) = &query.clauses[0] {
             if let PatternElement::Node(np) = &m.patterns[0].elements[0] {
