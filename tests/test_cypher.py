@@ -1155,3 +1155,36 @@ class TestMapLiterals:
             m = json.loads(m)
         assert m["status"] == "active"
         assert m["role"] == "admin"
+
+
+class TestMultiMatchEmptyPropagation:
+    """Regression: second MATCH must return 0 rows when first MATCH is empty."""
+
+    def test_empty_first_match(self, cypher_graph):
+        result = cypher_graph.cypher("MATCH (n:NonExistent) MATCH (m:Person) RETURN count(m) AS cnt")
+        assert result[0]["cnt"] == 0
+
+    def test_where_false_then_match(self, cypher_graph):
+        result = cypher_graph.cypher("MATCH (n:Person) WHERE false MATCH (m:Person) RETURN count(m) AS cnt")
+        assert result[0]["cnt"] == 0
+
+    def test_empty_match_then_optional_match(self, cypher_graph):
+        result = cypher_graph.cypher("MATCH (n:NonExistent) OPTIONAL MATCH (n)-[r]->(m) RETURN m")
+        assert len(result) == 0
+
+    def test_unwind_empty_then_match(self, cypher_graph):
+        result = cypher_graph.cypher("UNWIND [] AS x MATCH (m:Person) RETURN count(m) AS cnt")
+        assert result[0]["cnt"] == 0
+
+    def test_normal_multi_match_still_works(self, cypher_graph):
+        result = cypher_graph.cypher("MATCH (a:Person) MATCH (b:Person) RETURN count(*) AS cnt")
+        assert result[0]["cnt"] == 25  # 5 persons x 5 persons
+
+    def test_bound_variable_reuse_after_empty(self, cypher_graph):
+        result = cypher_graph.cypher("""
+            MATCH (a:Person)-[:BOUGHT]->(p:Product)
+            WHERE p.name = 'NonExistentProduct'
+            MATCH (a)-[:BOUGHT]->(p2:Product)
+            RETURN count(*) AS cnt
+        """)
+        assert result[0]["cnt"] == 0

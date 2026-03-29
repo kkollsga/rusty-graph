@@ -928,6 +928,8 @@ fn push_distinct_into_match(query: &mut CypherQuery) {
 fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
     let mut i = 0;
     while i + 1 < query.clauses.len() {
+        // Note: unlike fuse_match_*_aggregate, this fused executor correctly
+        // iterates over existing rows from prior clauses, so no i > 0 guard needed.
         let can_fuse = matches!(
             (&query.clauses[i], &query.clauses[i + 1]),
             (Clause::OptionalMatch(_), Clause::With(_))
@@ -1107,6 +1109,13 @@ fn fuse_match_return_aggregate(query: &mut CypherQuery) {
 
     let mut i = 0;
     while i + 1 < query.clauses.len() {
+        // Only fuse when the MATCH is the first clause — a non-first MATCH
+        // depends on the pipeline state from prior clauses, which the fused
+        // path would ignore.
+        if i > 0 {
+            i += 1;
+            continue;
+        }
         let can_fuse = matches!(
             (&query.clauses[i], &query.clauses[i + 1]),
             (Clause::Match(_), Clause::Return(_))
@@ -1429,6 +1438,13 @@ fn fuse_node_scan_aggregate(query: &mut CypherQuery) {
 
     let mut i = 0;
     while i + 1 < query.clauses.len() {
+        // Only fuse when the MATCH is the first clause — a non-first MATCH
+        // depends on the pipeline state from prior clauses, which the fused
+        // path would ignore.
+        if i > 0 {
+            i += 1;
+            continue;
+        }
         // Find MATCH + [WHERE] + RETURN pattern
         let match_idx = i;
         if !matches!(&query.clauses[match_idx], Clause::Match(_)) {
@@ -1555,6 +1571,13 @@ fn fuse_match_with_aggregate(query: &mut CypherQuery) {
 
     let mut i = 0;
     while i + 1 < query.clauses.len() {
+        // Only fuse when the MATCH is the first clause — a non-first MATCH
+        // depends on the pipeline state from prior clauses, which the fused
+        // path would ignore.
+        if i > 0 {
+            i += 1;
+            continue;
+        }
         let can_fuse = matches!(
             (&query.clauses[i], &query.clauses[i + 1]),
             (Clause::Match(_), Clause::With(_))

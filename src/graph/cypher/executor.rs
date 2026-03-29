@@ -303,6 +303,23 @@ impl<'a> CypherExecutor<'a> {
                 result_set.rows.push(ResultRow::new());
             }
 
+            // If a prior clause produced 0 rows, MATCH/OPTIONAL MATCH cannot
+            // extend an empty pipeline — short-circuit to 0 rows.
+            if i > 0
+                && result_set.rows.is_empty()
+                && matches!(clause, Clause::Match(_) | Clause::OptionalMatch(_))
+            {
+                if profiling {
+                    profile_stats.push(ClauseStats {
+                        clause_name: clause_display_name(clause),
+                        rows_in: 0,
+                        rows_out: 0,
+                        elapsed_us: 0,
+                    });
+                }
+                continue;
+            }
+
             if profiling {
                 let rows_in = result_set.rows.len();
                 let start = std::time::Instant::now();
@@ -7659,6 +7676,23 @@ pub fn execute_mutable(
         } else {
             None
         };
+
+        // If a prior clause produced 0 rows, MATCH/OPTIONAL MATCH cannot
+        // extend an empty pipeline — short-circuit to 0 rows.
+        if i > 0
+            && result_set.rows.is_empty()
+            && matches!(clause, Clause::Match(_) | Clause::OptionalMatch(_))
+        {
+            if let Some(s) = start {
+                profile_stats.push(ClauseStats {
+                    clause_name: clause_display_name(clause),
+                    rows_in,
+                    rows_out: 0,
+                    elapsed_us: s.elapsed().as_micros() as u64,
+                });
+            }
+            continue;
+        }
 
         match clause {
             // Write clauses: mutate graph directly
