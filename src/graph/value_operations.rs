@@ -99,6 +99,17 @@ pub fn arithmetic_div(a: &Value, b: &Value) -> Value {
     }
 }
 
+/// Modulo of two Values. Preserves Int64 when both operands are integers.
+pub fn arithmetic_mod(a: &Value, b: &Value) -> Value {
+    match (a, b) {
+        (Value::Int64(x), Value::Int64(y)) if *y != 0 => Value::Int64(x % y),
+        _ => match (value_to_f64(a), value_to_f64(b)) {
+            (Some(x), Some(y)) if y != 0.0 => Value::Float64(x % y),
+            _ => Value::Null,
+        },
+    }
+}
+
 /// Negate a Value. Returns Null for non-numeric types.
 pub fn arithmetic_negate(a: &Value) -> Value {
     match a {

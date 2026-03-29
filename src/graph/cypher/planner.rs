@@ -598,15 +598,14 @@ fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<String, Value
                 apply_comparison_to_patterns(patterns, &var_name, &property, op, value);
             }
 
-            // Update or remove WHERE clause
-            match remaining {
-                Some(pred) => {
-                    query.clauses[i + 1] = Clause::Where(WhereClause { predicate: pred });
-                }
-                None => {
-                    query.clauses.remove(i + 1);
-                    continue; // Don't increment, check the new i+1
-                }
+            // Update WHERE clause with remaining predicates.
+            // When all predicates are pushed into the pattern, keep the WHERE
+            // clause as-is so it acts as a safety-net filter. The pushed
+            // predicates provide fast-path filtering in the pattern matcher,
+            // but the WHERE clause must survive for correctness (e.g. when
+            // fuse_match_return_aggregate rejects patterns with properties).
+            if let Some(pred) = remaining {
+                query.clauses[i + 1] = Clause::Where(WhereClause { predicate: pred });
             }
         }
 
@@ -1014,7 +1013,7 @@ fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
             Clause::Return(r) => WithClause {
                 items: r.items,
                 distinct: r.distinct,
-                where_clause: None,
+                where_clause: r.having.map(|pred| WhereClause { predicate: pred }),
             },
             _ => unreachable!(),
         };
@@ -2453,6 +2452,11 @@ fn reorder_predicate(pred: Predicate) -> Predicate {
                 Predicate::Or(Box::new(left), Box::new(right))
             }
         }
+        Predicate::Xor(left, right) => {
+            let left = reorder_predicate(*left);
+            let right = reorder_predicate(*right);
+            Predicate::Xor(Box::new(left), Box::new(right))
+        }
         Predicate::Not(inner) => Predicate::Not(Box::new(reorder_predicate(*inner))),
         other => other,
     }
@@ -2464,7 +2468,7 @@ fn estimate_predicate_cost(pred: &Predicate) -> u32 {
         Predicate::Comparison { left, right, .. } => {
             estimate_expression_cost(left) + estimate_expression_cost(right) + 1
         }
-        Predicate::And(l, r) | Predicate::Or(l, r) => {
+        Predicate::And(l, r) | Predicate::Or(l, r) | Predicate::Xor(l, r) => {
             estimate_predicate_cost(l) + estimate_predicate_cost(r)
         }
         Predicate::Not(inner) => estimate_predicate_cost(inner) + 1,
@@ -2473,6 +2477,7 @@ fn estimate_predicate_cost(pred: &Predicate) -> u32 {
         Predicate::InLiteralSet { values, .. } => 2 + (values.len() > 16) as u32, // HashSet is O(1)
         Predicate::StartsWith { .. } | Predicate::EndsWith { .. } | Predicate::Contains { .. } => 5,
         Predicate::Exists { .. } => 100, // Pattern existence checks are expensive
+        Predicate::InExpression { .. } => 10,
     }
 }
 
@@ -2509,7 +2514,8 @@ fn estimate_expression_cost(expr: &Expression) -> u32 {
         Expression::Add(l, r)
         | Expression::Subtract(l, r)
         | Expression::Multiply(l, r)
-        | Expression::Divide(l, r) => estimate_expression_cost(l) + estimate_expression_cost(r) + 1,
+        | Expression::Divide(l, r)
+        | Expression::Modulo(l, r) => estimate_expression_cost(l) + estimate_expression_cost(r) + 1,
         Expression::Negate(inner) => estimate_expression_cost(inner) + 1,
         Expression::ListLiteral(items) => {
             items.iter().map(estimate_expression_cost).sum::<u32>() + 1
@@ -2537,6 +2543,8 @@ fn estimate_expression_cost(expr: &Expression) -> u32 {
                 + end.as_ref().map_or(0, |e| estimate_expression_cost(e))
                 + 1
         }
+        Expression::PredicateExpr(_) => 3,
+        Expression::ExprPropertyAccess { expr, .. } => estimate_expression_cost(expr) + 1,
         _ => 5, // ListComprehension, MapProjection
     }
 }
@@ -2769,6 +2777,7 @@ impl TextScoreCollector {
             | Expression::Subtract(l, r)
             | Expression::Multiply(l, r)
             | Expression::Divide(l, r)
+            | Expression::Modulo(l, r)
             | Expression::Concat(l, r) => {
                 self.rewrite_expr(l, params)?;
                 self.rewrite_expr(r, params)?;
@@ -2874,6 +2883,8 @@ impl TextScoreCollector {
                 }
                 Ok(())
             }
+            Expression::PredicateExpr(pred) => self.rewrite_pred(pred, params),
+            Expression::ExprPropertyAccess { expr, .. } => self.rewrite_expr(expr, params),
         }
     }
 
@@ -2889,7 +2900,7 @@ impl TextScoreCollector {
                 self.rewrite_expr(right, params)?;
                 Ok(())
             }
-            Predicate::And(l, r) | Predicate::Or(l, r) => {
+            Predicate::And(l, r) | Predicate::Or(l, r) | Predicate::Xor(l, r) => {
                 self.rewrite_pred(l, params)?;
                 self.rewrite_pred(r, params)?;
                 Ok(())
@@ -2912,6 +2923,11 @@ impl TextScoreCollector {
                 Ok(())
             }
             Predicate::Exists { .. } => Ok(()),
+            Predicate::InExpression { expr, list_expr } => {
+                self.rewrite_expr(expr, params)?;
+                self.rewrite_expr(list_expr, params)?;
+                Ok(())
+            }
         }
     }
 }

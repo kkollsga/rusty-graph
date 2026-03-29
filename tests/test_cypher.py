@@ -1181,10 +1181,484 @@ class TestMultiMatchEmptyPropagation:
         assert result[0]["cnt"] == 25  # 5 persons x 5 persons
 
     def test_bound_variable_reuse_after_empty(self, cypher_graph):
+        """WHERE equality filters to 0 → second MATCH must propagate empty."""
         result = cypher_graph.cypher("""
-            MATCH (a:Person)-[:BOUGHT]->(p:Product)
-            WHERE p.name = 'NonExistentProduct'
-            MATCH (a)-[:BOUGHT]->(p2:Product)
+            MATCH (a:Person)-[:PURCHASED]->(p:Product)
+            WHERE p.title = 'NonExistentProduct'
+            MATCH (a)-[:PURCHASED]->(p2:Product)
             RETURN count(*) AS cnt
         """)
         assert result[0]["cnt"] == 0
+
+    def test_non_pushable_where_then_second_match(self, cypher_graph):
+        """STARTS WITH is not pushable — WHERE filters to 0, second MATCH must propagate empty."""
+        result = cypher_graph.cypher("""
+            MATCH (a:Person)-[:PURCHASED]->(p:Product)
+            WHERE a.title STARTS WITH 'ZZZ'
+            MATCH (a)-[:KNOWS]->(b:Person)
+            RETURN count(*) AS cnt
+        """)
+        assert result[0]["cnt"] == 0
+
+    def test_mixed_pushable_and_non_pushable_where(self, cypher_graph):
+        """Pushable equality + non-pushable STARTS WITH → 0 rows, second MATCH empty."""
+        result = cypher_graph.cypher("""
+            MATCH (a:Person)-[:PURCHASED]->(p:Product)
+            WHERE p.title = 'Laptop' AND a.title STARTS WITH 'ZZZ'
+            MATCH (a)-[:KNOWS]->(b:Person)
+            RETURN count(*) AS cnt
+        """)
+        assert result[0]["cnt"] == 0
+
+    def test_where_to_zero_with_reused_variable(self, cypher_graph):
+        """Second MATCH reuses variable from first — must not match globally on empty."""
+        # Alice purchased Laptop+Phone (2 rows), WHERE filters to 0,
+        # second MATCH (a)-[:KNOWS]->(b) would give 10 rows if run globally.
+        result = cypher_graph.cypher("""
+            MATCH (a:Person)-[:PURCHASED]->(p:Product)
+            WHERE a.title = 'Alice' AND p.title = 'NonExistent'
+            MATCH (a)-[:KNOWS]->(b:Person)
+            RETURN count(*) AS cnt
+        """)
+        assert result[0]["cnt"] == 0
+
+
+# ============================================================================
+# Bug regression tests — currently xfail, will pass once fixed
+# ============================================================================
+
+
+class TestBugDatetimeFunction:
+    """BUG: datetime() parses as date and crashes on the time portion."""
+
+    def test_datetime_literal(self, cypher_graph):
+        rows = cypher_graph.cypher("RETURN datetime('2024-03-15T10:30:00') AS dt")
+        assert len(rows) == 1
+        assert "2024-03-15" in str(rows[0]["dt"])
+
+    def test_datetime_with_timezone(self, cypher_graph):
+        rows = cypher_graph.cypher("RETURN datetime('2024-03-15T10:30:00Z') AS dt")
+        assert len(rows) == 1
+
+
+class TestBugDateInvalidInput:
+    """BUG: date() crashes on invalid input instead of returning null."""
+
+    def test_date_empty_string_returns_null(self, cypher_graph):
+        rows = cypher_graph.cypher("RETURN date('') AS d")
+        assert rows[0]["d"] is None
+
+    def test_date_zero_month_returns_null(self, cypher_graph):
+        rows = cypher_graph.cypher("RETURN date('2016-00-00') AS d")
+        assert rows[0]["d"] is None
+
+    def test_date_partial_month_returns_null(self, cypher_graph):
+        """date('2025-03') should return null or '2025-03-01', not crash."""
+        rows = cypher_graph.cypher("RETURN date('2016-13-01') AS d")
+        assert rows[0]["d"] is None
+
+
+class TestBugDatePropertyAccessor:
+    """BUG: date('...').year syntax not supported on function results."""
+
+    def test_date_literal_dot_year(self, cypher_graph):
+        rows = cypher_graph.cypher("RETURN date('2024-06-15').year AS yr")
+        assert rows[0]["yr"] == 2024
+
+    def test_date_literal_dot_month(self, cypher_graph):
+        rows = cypher_graph.cypher("RETURN date('2024-06-15').month AS mo")
+        assert rows[0]["mo"] == 6
+
+    def test_date_literal_dot_day(self, cypher_graph):
+        rows = cypher_graph.cypher("RETURN date('2024-06-15').day AS dy")
+        assert rows[0]["dy"] == 15
+
+
+class TestBugRelationshipTypePipe:
+    """BUG: Pipe | in relationship types not parsed."""
+
+    def test_pipe_two_types(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (a:Person)-[:KNOWS|PURCHASED]->(b)
+            WHERE a.name = 'Alice'
+            RETURN b.title
+        """)
+        # Alice KNOWS Bob+Charlie, PURCHASED Laptop+Phone → 4 results
+        assert len(rows) == 4
+
+    def test_pipe_three_types(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (a)-[:KNOWS|PURCHASED|SOLD]->(b)
+            RETURN a.title, b.title LIMIT 1
+        """)
+        assert len(rows) >= 1
+
+
+class TestBugXorOperator:
+    """BUG: XOR logical operator not implemented."""
+
+    def test_xor_basic(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person)
+            WHERE n.city = 'Oslo' XOR n.age > 35
+            RETURN n.name
+        """)
+        # Oslo: Alice(30), Charlie(35), Eve(40) — age > 35: Eve
+        # XOR: Oslo-only (Alice, Charlie) + age>35-not-Oslo (none) = Alice, Charlie
+        names = {r["n.name"] for r in rows}
+        assert names == {"Alice", "Charlie"}
+
+
+class TestBugModuloOperator:
+    """BUG: Modulo % operator not implemented."""
+
+    def test_modulo_basic(self, cypher_graph):
+        rows = cypher_graph.cypher("RETURN 10 % 3 AS result")
+        assert rows[0]["result"] == 1
+
+    def test_modulo_with_property(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person)
+            WHERE n.age % 10 = 0
+            RETURN n.name
+        """)
+        # age 30, 40 are divisible by 10 → Alice, Eve
+        names = {r["n.name"] for r in rows}
+        assert names == {"Alice", "Eve"}
+
+
+class TestBugHeadLastFunctions:
+    """BUG: head() and last() functions not implemented."""
+
+    def test_head_basic(self, cypher_graph):
+        rows = cypher_graph.cypher("RETURN head([1, 2, 3]) AS h")
+        assert rows[0]["h"] == 1
+
+    def test_last_basic(self, cypher_graph):
+        rows = cypher_graph.cypher("RETURN last([1, 2, 3]) AS l")
+        assert rows[0]["l"] == 3
+
+    def test_head_empty_list(self, cypher_graph):
+        rows = cypher_graph.cypher("RETURN head([]) AS h")
+        assert rows[0]["h"] is None
+
+    def test_last_empty_list(self, cypher_graph):
+        rows = cypher_graph.cypher("RETURN last([]) AS l")
+        assert rows[0]["l"] is None
+
+    def test_head_with_collect(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person)
+            WITH collect(n.name) AS names
+            RETURN head(names) AS first_name
+        """)
+        assert rows[0]["first_name"] is not None
+
+
+class TestBugInWithVariable:
+    """BUG: IN operator with variable reference fails (only literal lists work)."""
+
+    def test_in_with_with_variable(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            WITH ['Oslo', 'Bergen'] AS cities
+            MATCH (n:Person)
+            WHERE n.city IN cities
+            RETURN n.name
+        """)
+        assert len(rows) == 5  # all people are in Oslo or Bergen
+
+    def test_in_with_collect_result(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (a:Person)-[:KNOWS]->(b:Person)
+            WHERE a.name = 'Alice'
+            WITH collect(b.name) AS friends
+            MATCH (n:Person)
+            WHERE n.name IN friends
+            RETURN n.name
+        """)
+        names = {r["n.name"] for r in rows}
+        assert names == {"Bob", "Charlie"}
+
+    def test_in_with_unwind_source(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            WITH ['Alice', 'Bob'] AS target_names
+            MATCH (n:Person)
+            WHERE n.name IN target_names
+            RETURN n.name ORDER BY n.name
+        """)
+        assert [r["n.name"] for r in rows] == ["Alice", "Bob"]
+
+
+class TestBugBooleanExpressionsInReturn:
+    """BUG: Boolean/comparison expressions in RETURN clause fail."""
+
+    def test_starts_with_in_return(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person)
+            WHERE n.name = 'Alice'
+            RETURN n.name, n.name STARTS WITH 'A' AS starts_a
+        """)
+        assert rows[0]["starts_a"] is True
+
+    def test_comparison_in_return(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person)
+            WHERE n.name = 'Alice'
+            RETURN n.name, n.age > 25 AS over_25
+        """)
+        assert rows[0]["over_25"] is True
+
+    def test_contains_in_return(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person)
+            WHERE n.name = 'Charlie'
+            RETURN n.name CONTAINS 'arli' AS has_arli
+        """)
+        assert rows[0]["has_arli"] is True
+
+    def test_regex_in_return(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person)
+            WHERE n.name = 'Alice'
+            RETURN n.name =~ 'A.*' AS matches
+        """)
+        assert rows[0]["matches"] is True
+
+
+class TestBugMapAllProperties:
+    """BUG: Map all-properties {.*} projection not supported."""
+
+    def test_map_all_properties(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person)
+            WHERE n.name = 'Alice'
+            RETURN n {.*} AS props
+        """)
+        assert rows[0]["props"]["title"] == "Alice"
+        assert rows[0]["props"]["age"] == 30
+
+
+class TestBugStDevFunction:
+    """BUG: stDev() aggregate function not recognized."""
+
+    def test_stdev_on_property(self, cypher_graph):
+        rows = cypher_graph.cypher("MATCH (n:Person) RETURN stDev(n.age) AS sd")
+        assert rows[0]["sd"] is not None
+        assert isinstance(rows[0]["sd"], float)
+        assert rows[0]["sd"] > 0
+
+    def test_stdev_on_unwind(self, cypher_graph):
+        rows = cypher_graph.cypher("UNWIND [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] AS x RETURN stDev(x) AS sd")
+        # sample stdev of 1..10 ≈ 3.0277
+        assert abs(rows[0]["sd"] - 3.0277) < 0.01
+
+    def test_stdev_single_value_returns_zero_or_null(self, cypher_graph):
+        rows = cypher_graph.cypher("UNWIND [42] AS x RETURN stDev(x) AS sd")
+        # sample stdev of single value: 0 or null (N-1 = 0)
+        assert rows[0]["sd"] is None or rows[0]["sd"] == 0
+
+    def test_stdev_with_grouping(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person)
+            RETURN n.city AS city, stDev(n.age) AS sd
+            ORDER BY city
+        """)
+        assert len(rows) == 2  # Bergen, Oslo
+
+
+class TestBugNullComparison:
+    """BUG: null = null and null <> null fail with syntax error."""
+
+    def test_null_equals_null(self, cypher_graph):
+        rows = cypher_graph.cypher("RETURN null = null AS result")
+        # Neo4j: null = null → null (not true, not false)
+        assert rows[0]["result"] is None
+
+    def test_null_not_equals_null(self, cypher_graph):
+        rows = cypher_graph.cypher("RETURN null <> null AS result")
+        assert rows[0]["result"] is None
+
+
+class TestBugOrderByIntToFloat:
+    """BUG: ORDER BY + LIMIT on aggregated columns converts int to float."""
+
+    def test_count_stays_int_with_order_by(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (a:Person)-[:KNOWS]->(b:Person)
+            WITH a, count(b) AS friends
+            RETURN a.title, friends
+            ORDER BY friends DESC LIMIT 3
+        """)
+        # friends must be int, not float
+        assert rows[0]["friends"] == 2
+        assert isinstance(rows[0]["friends"], int)
+
+    def test_count_star_through_with_stays_int(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person)
+            WITH n.city AS city, count(*) AS cnt
+            RETURN city, cnt
+            ORDER BY cnt DESC LIMIT 2
+        """)
+        assert isinstance(rows[0]["cnt"], int)
+
+    def test_size_collect_stays_int_with_order_by(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (a:Person)-[:KNOWS]->(b:Person)
+            WITH a, collect(b.title) AS friends
+            RETURN a.title, size(friends) AS num_friends
+            ORDER BY num_friends DESC LIMIT 3
+        """)
+        assert isinstance(rows[0]["num_friends"], int)
+
+    def test_sum_stays_int_with_order_by(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person)
+            WITH n.city AS city, sum(n.age) AS total_age
+            RETURN city, total_age
+            ORDER BY total_age DESC LIMIT 2
+        """)
+        # sum of ages should be int
+        assert isinstance(rows[0]["total_age"], int)
+
+
+class TestBugReturnStar:
+    """BUG: RETURN * returns {'*': 1} instead of expanding bound variables."""
+
+    def test_return_star_single_node(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Alice' RETURN *
+        """)
+        assert len(rows) == 1
+        row = rows[0]
+        # Should have node data, not {'*': 1}
+        assert "*" not in row
+        assert "n" in row or "n.name" in row or "n.title" in row
+
+    def test_return_star_with_relationship(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (a:Person)-[r:KNOWS]->(b:Person)
+            WHERE a.name = 'Alice'
+            RETURN *
+        """)
+        assert len(rows) == 2
+        row = rows[0]
+        assert "*" not in row
+        # Should contain info about a, r, b
+
+    def test_return_star_after_with(self, cypher_graph):
+        """RETURN * after WITH should return WITH-scoped variables."""
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person)
+            WITH n.name AS name, n.age AS age
+            WHERE age > 30
+            RETURN *
+        """)
+        # Charlie(35), Eve(40)
+        assert len(rows) == 2
+        assert "name" in rows[0]
+        assert "age" in rows[0]
+
+
+class TestBugMultiHopPath:
+    """BUG: Path variable on explicit multi-hop only captures first hop."""
+
+    def test_two_hop_path_length(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH p = (a:Person)-[:KNOWS]->(b:Person)-[:PURCHASED]->(pr:Product)
+            WHERE a.name = 'Alice'
+            RETURN length(p) AS hops
+            LIMIT 1
+        """)
+        assert rows[0]["hops"] == 2  # two relationships
+
+    def test_two_hop_path_nodes_count(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH p = (a:Person)-[:KNOWS]->(b:Person)-[:PURCHASED]->(pr:Product)
+            WHERE a.name = 'Alice'
+            RETURN [n IN nodes(p) | n.title] AS chain
+            LIMIT 1
+        """)
+        assert len(rows[0]["chain"]) == 3  # a, b, pr
+
+    def test_two_hop_path_relationships(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH p = (a:Person)-[:KNOWS]->(b:Person)-[:PURCHASED]->(pr:Product)
+            WHERE a.name = 'Alice'
+            RETURN relationships(p) AS rels
+            LIMIT 1
+        """)
+        assert len(rows[0]["rels"]) == 2
+        assert "KNOWS" in rows[0]["rels"]
+        assert "PURCHASED" in rows[0]["rels"]
+
+    def test_two_hop_path_intermediate_node(self, cypher_graph):
+        """The intermediate node must appear in nodes(p)."""
+        rows = cypher_graph.cypher("""
+            MATCH p = (a:Person)-[:KNOWS]->(b:Person)-[:PURCHASED]->(pr:Product)
+            WHERE a.name = 'Alice' AND b.name = 'Bob'
+            RETURN [n IN nodes(p) | n.title] AS chain
+        """)
+        # Alice → Bob → Tablet
+        assert len(rows) == 1
+        chain = rows[0]["chain"]
+        assert chain[0] == "Alice"
+        assert chain[1] == "Bob"
+        assert chain[2] == "Tablet"
+
+    def test_three_hop_path(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH p = (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)-[:PURCHASED]->(pr:Product)
+            WHERE a.name = 'Alice'
+            RETURN length(p) AS hops, [n IN nodes(p) | n.title] AS chain
+            LIMIT 1
+        """)
+        assert rows[0]["hops"] == 3
+        assert len(rows[0]["chain"]) == 4
+
+
+class TestBugUnlabeledMatchTypeFilter:
+    """BUG: MATCH (n) WHERE n.type = 'X' returns 0 even though nodes exist."""
+
+    def test_unlabeled_type_equality(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n) WHERE n.type = 'Person' RETURN count(n) AS cnt
+        """)
+        assert rows[0]["cnt"] == 5
+
+    def test_unlabeled_type_equality_product(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n) WHERE n.type = 'Product' RETURN count(n) AS cnt
+        """)
+        assert rows[0]["cnt"] == 3
+
+    def test_unlabeled_type_equality_returns_data(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n) WHERE n.type = 'Person' RETURN n.title ORDER BY n.title LIMIT 2
+        """)
+        assert len(rows) == 2
+
+
+class TestBugLabelsInconsistency:
+    """BUG: labels(n) returns list in RETURN but string in GROUP BY."""
+
+    def test_labels_always_returns_list(self, cypher_graph):
+        """GROUP BY context should return list, same as plain RETURN."""
+        rows = cypher_graph.cypher("""
+            MATCH (n) RETURN labels(n) AS lbl, count(n) AS cnt
+            ORDER BY cnt DESC
+        """)
+        # In plain RETURN, labels() → ['Person']. In GROUP BY, → 'Person'.
+        # They should be consistent: always list.
+        for row in rows:
+            assert isinstance(row["lbl"], list), (
+                f"labels() returned {type(row['lbl']).__name__} '{row['lbl']}', expected list"
+            )
+
+    def test_labels_filter_equality(self, cypher_graph):
+        """Should be able to filter by labels(n) in WHERE."""
+        # labels(n) returns ['Person'], so compare to list or string should work
+        rows = cypher_graph.cypher("""
+            MATCH (n) WHERE labels(n) = 'Person' RETURN count(n) AS cnt
+        """)
+        assert rows[0]["cnt"] == 5

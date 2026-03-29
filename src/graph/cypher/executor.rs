@@ -423,7 +423,14 @@ impl<'a> CypherExecutor<'a> {
                 let mut result_rows = Vec::with_capacity(self.graph.type_indices.len());
                 for (node_type, indices) in &self.graph.type_indices {
                     let mut projected = Bindings::with_capacity(2);
-                    projected.insert(type_alias.clone(), Value::String(node_type.clone()));
+                    // Return as JSON list string to match labels() output format
+                    projected.insert(
+                        type_alias.clone(),
+                        Value::String(format!(
+                            "[\"{}\"]",
+                            node_type.replace('\\', "\\\\").replace('"', "\\\"")
+                        )),
+                    );
                     projected.insert(count_alias.clone(), Value::Int64(indices.len() as i64));
                     result_rows.push(ResultRow::from_projected(projected));
                 }
@@ -1047,16 +1054,15 @@ impl<'a> CypherExecutor<'a> {
         }
     }
 
-    /// Synthesize a PathBinding for a single-hop anonymous-edge pattern.
-    /// Looks at the pattern's node variables to find source and target in the row,
-    /// then finds the connecting edge.
+    /// Synthesize a PathBinding from a multi-hop pattern.
+    /// Iterates ALL pattern elements to capture every hop, not just the first.
     fn synthesize_path_from_pattern(
         &self,
         pattern: &crate::graph::pattern_matching::Pattern,
         row: &ResultRow,
     ) -> Option<PathBinding> {
         let mut node_vars: Vec<&str> = Vec::new();
-        let mut edge_type: Option<&str> = None;
+        let mut edge_types: Vec<&str> = Vec::new();
         for elem in &pattern.elements {
             match elem {
                 PatternElement::Node(np) => {
@@ -1065,21 +1071,28 @@ impl<'a> CypherExecutor<'a> {
                     }
                 }
                 PatternElement::Edge(ep) => {
-                    edge_type = ep.connection_type.as_deref();
+                    edge_types.push(ep.connection_type.as_deref().unwrap_or(""));
                 }
             }
         }
-        if node_vars.len() < 2 {
+        if node_vars.len() < 2 || edge_types.is_empty() {
             return None;
         }
         let source_idx = row.node_bindings.get(node_vars[0])?;
         let target_idx = row.node_bindings.get(node_vars[node_vars.len() - 1])?;
-        let conn_type = edge_type.unwrap_or("").to_string();
+
+        // Build full path: for each edge, record the target node and edge type
+        let mut path = Vec::with_capacity(edge_types.len());
+        for (i, edge_type) in edge_types.iter().enumerate() {
+            let node_idx = row.node_bindings.get(node_vars[i + 1])?;
+            path.push((*node_idx, edge_type.to_string()));
+        }
+
         Some(PathBinding {
             source: *source_idx,
             target: *target_idx,
-            hops: 1,
-            path: vec![(*target_idx, conn_type)],
+            hops: edge_types.len(),
+            path,
         })
     }
 
@@ -2810,6 +2823,11 @@ impl<'a> CypherExecutor<'a> {
                 }
                 self.evaluate_predicate(right, row)
             }
+            Predicate::Xor(left, right) => {
+                let l = self.evaluate_predicate(left, row)?;
+                let r = self.evaluate_predicate(right, row)?;
+                Ok(l ^ r)
+            }
             Predicate::Not(inner) => Ok(!self.evaluate_predicate(inner, row)?),
             Predicate::IsNull(expr) => {
                 let val = self.evaluate_expression(expr, row)?;
@@ -2911,6 +2929,17 @@ impl<'a> CypherExecutor<'a> {
                     }
                 }
                 Ok(true)
+            }
+            Predicate::InExpression { expr, list_expr } => {
+                let val = self.evaluate_expression(expr, row)?;
+                let list_val = self.evaluate_expression(list_expr, row)?;
+                let items = parse_list_value(&list_val);
+                for item in &items {
+                    if filtering_methods::values_equal(&val, item) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
             }
         }
     }
@@ -3310,6 +3339,7 @@ impl<'a> CypherExecutor<'a> {
             | Expression::Subtract(l, r)
             | Expression::Multiply(l, r)
             | Expression::Divide(l, r)
+            | Expression::Modulo(l, r)
             | Expression::Concat(l, r) => {
                 Self::is_row_independent(l) && Self::is_row_independent(r)
             }
@@ -3325,7 +3355,9 @@ impl<'a> CypherExecutor<'a> {
             | Expression::IsNull(_)
             | Expression::IsNotNull(_)
             | Expression::QuantifiedList { .. }
-            | Expression::WindowFunction { .. } => false,
+            | Expression::WindowFunction { .. }
+            | Expression::PredicateExpr(_)
+            | Expression::ExprPropertyAccess { .. } => false,
         }
     }
 
@@ -3372,6 +3404,10 @@ impl<'a> CypherExecutor<'a> {
                 Box::new(self.fold_constants_expr(l)),
                 Box::new(self.fold_constants_expr(r)),
             ),
+            Expression::Modulo(l, r) => Expression::Modulo(
+                Box::new(self.fold_constants_expr(l)),
+                Box::new(self.fold_constants_expr(r)),
+            ),
             Expression::Concat(l, r) => Expression::Concat(
                 Box::new(self.fold_constants_expr(l)),
                 Box::new(self.fold_constants_expr(r)),
@@ -3399,6 +3435,13 @@ impl<'a> CypherExecutor<'a> {
             Expression::IsNotNull(inner) => {
                 Expression::IsNotNull(Box::new(self.fold_constants_expr(inner)))
             }
+            Expression::PredicateExpr(pred) => {
+                Expression::PredicateExpr(Box::new(self.fold_constants_pred(pred)))
+            }
+            Expression::ExprPropertyAccess { expr, property } => Expression::ExprPropertyAccess {
+                expr: Box::new(self.fold_constants_expr(expr)),
+                property: property.clone(),
+            },
             _ => expr.clone(),
         }
     }
@@ -3420,6 +3463,10 @@ impl<'a> CypherExecutor<'a> {
                 Box::new(self.fold_constants_pred(r)),
             ),
             Predicate::Or(l, r) => Predicate::Or(
+                Box::new(self.fold_constants_pred(l)),
+                Box::new(self.fold_constants_pred(r)),
+            ),
+            Predicate::Xor(l, r) => Predicate::Xor(
                 Box::new(self.fold_constants_pred(l)),
                 Box::new(self.fold_constants_pred(r)),
             ),
@@ -3467,6 +3514,10 @@ impl<'a> CypherExecutor<'a> {
                 pattern: self.fold_constants_expr(pattern),
             },
             Predicate::Exists { .. } => pred.clone(),
+            Predicate::InExpression { expr, list_expr } => Predicate::InExpression {
+                expr: self.fold_constants_expr(expr),
+                list_expr: self.fold_constants_expr(list_expr),
+            },
         }
     }
 
@@ -3532,6 +3583,11 @@ impl<'a> CypherExecutor<'a> {
                 let l = self.evaluate_expression(left, row)?;
                 let r = self.evaluate_expression(right, row)?;
                 Ok(arithmetic_div(&l, &r))
+            }
+            Expression::Modulo(left, right) => {
+                let l = self.evaluate_expression(left, row)?;
+                let r = self.evaluate_expression(right, row)?;
+                Ok(arithmetic_mod(&l, &r))
             }
             Expression::Concat(left, right) => {
                 let l = self.evaluate_expression(left, row)?;
@@ -3638,6 +3694,30 @@ impl<'a> CypherExecutor<'a> {
                                         format_value_json(&Value::String(prop.clone())),
                                         format_value_json(&val)
                                     ));
+                                }
+                                MapProjectionItem::AllProperties => {
+                                    // Include standard fields first
+                                    for &builtin in &["title", "id", "type"] {
+                                        let val = resolve_node_property(node, builtin, self.graph);
+                                        if !matches!(val, Value::Null) {
+                                            props.push(format!(
+                                                "{}: {}",
+                                                format_value_json(&Value::String(
+                                                    builtin.to_string()
+                                                )),
+                                                format_value_json(&val)
+                                            ));
+                                        }
+                                    }
+                                    // Then all user-defined properties
+                                    for key in node.property_keys(&self.graph.interner) {
+                                        let val = resolve_node_property(node, key, self.graph);
+                                        props.push(format!(
+                                            "{}: {}",
+                                            format_value_json(&Value::String(key.to_string())),
+                                            format_value_json(&val)
+                                        ));
+                                    }
                                 }
                                 MapProjectionItem::Alias { key, expr } => {
                                     let val = self.evaluate_expression(expr, row)?;
@@ -3837,6 +3917,78 @@ impl<'a> CypherExecutor<'a> {
                 // Window functions are evaluated in a separate pass (apply_window_functions),
                 // not per-row. If we reach here, the value should already be in projected bindings.
                 Err("Window function must appear in RETURN/WITH clause".into())
+            }
+            Expression::PredicateExpr(pred) => {
+                // Evaluate predicate as an expression (e.g. RETURN n.name STARTS WITH 'A').
+                // For comparisons, implement three-valued logic: if either operand
+                // is null, return Null instead of false.
+                match pred.as_ref() {
+                    Predicate::Comparison {
+                        left,
+                        operator,
+                        right,
+                    } => {
+                        let left_val = self.evaluate_expression(left, row)?;
+                        let right_val = self.evaluate_expression(right, row)?;
+                        if matches!(left_val, Value::Null) || matches!(right_val, Value::Null) {
+                            Ok(Value::Null)
+                        } else {
+                            match evaluate_comparison(
+                                &left_val,
+                                operator,
+                                &right_val,
+                                Some(&self.regex_cache),
+                            ) {
+                                Ok(b) => Ok(Value::Boolean(b)),
+                                Err(_) => Ok(Value::Null),
+                            }
+                        }
+                    }
+                    _ => match self.evaluate_predicate(pred, row) {
+                        Ok(b) => Ok(Value::Boolean(b)),
+                        Err(_) => Ok(Value::Null),
+                    },
+                }
+            }
+            Expression::ExprPropertyAccess { expr, property } => {
+                let val = self.evaluate_expression(expr, row)?;
+                match &val {
+                    Value::String(s) => {
+                        // Try to parse as date string (YYYY-MM-DD) for .year/.month/.day
+                        if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                            use chrono::Datelike;
+                            match property.as_str() {
+                                "year" => return Ok(Value::Int64(date.year() as i64)),
+                                "month" => return Ok(Value::Int64(date.month() as i64)),
+                                "day" => return Ok(Value::Int64(date.day() as i64)),
+                                _ => {}
+                            }
+                        }
+                        // Try ISO datetime format
+                        if let Ok(dt) =
+                            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+                        {
+                            use chrono::Datelike;
+                            match property.as_str() {
+                                "year" => return Ok(Value::Int64(dt.year() as i64)),
+                                "month" => return Ok(Value::Int64(dt.month() as i64)),
+                                "day" => return Ok(Value::Int64(dt.day() as i64)),
+                                _ => {}
+                            }
+                        }
+                        Ok(Value::Null)
+                    }
+                    Value::DateTime(date) => {
+                        use chrono::Datelike;
+                        match property.as_str() {
+                            "year" => Ok(Value::Int64(date.year() as i64)),
+                            "month" => Ok(Value::Int64(date.month() as i64)),
+                            "day" => Ok(Value::Int64(date.day() as i64)),
+                            _ => Ok(Value::Null),
+                        }
+                    }
+                    _ => Ok(Value::Null),
+                }
             }
         }
     }
@@ -4283,19 +4435,54 @@ impl<'a> CypherExecutor<'a> {
                 let val = self.evaluate_expression(&args[0], row)?;
                 Ok(to_float(&val))
             }
-            "date" | "datetime" => {
+            "date" => {
                 if args.len() != 1 {
                     return Err("date() requires 1 argument: date('2020-01-15')".into());
                 }
                 let val = self.evaluate_expression(&args[0], row)?;
                 match val {
                     Value::String(s) => {
-                        let (d, _) = timeseries::parse_date_query(&s)?;
-                        Ok(Value::DateTime(d))
+                        // Return Null on invalid input instead of crashing (BUG-09)
+                        match timeseries::parse_date_query(&s) {
+                            Ok((d, _)) => Ok(Value::DateTime(d)),
+                            Err(_) => Ok(Value::Null),
+                        }
                     }
                     Value::DateTime(_) => Ok(val),
                     Value::Null => Ok(Value::Null),
                     _ => Err(format!("date() argument must be a string, got {:?}", val)),
+                }
+            }
+            "datetime" => {
+                if args.len() != 1 {
+                    return Err(
+                        "datetime() requires 1 argument: datetime('2024-03-15T10:30:00')".into(),
+                    );
+                }
+                let val = self.evaluate_expression(&args[0], row)?;
+                match val {
+                    Value::String(s) => {
+                        // Try parsing as ISO datetime with T separator
+                        if s.contains('T') {
+                            let date_part = s.split('T').next().unwrap_or("");
+                            match timeseries::parse_date_query(date_part) {
+                                Ok((d, _)) => Ok(Value::DateTime(d)),
+                                Err(_) => Ok(Value::Null),
+                            }
+                        } else {
+                            // Fallback: try as plain date
+                            match timeseries::parse_date_query(&s) {
+                                Ok((d, _)) => Ok(Value::DateTime(d)),
+                                Err(_) => Ok(Value::Null),
+                            }
+                        }
+                    }
+                    Value::DateTime(_) => Ok(val),
+                    Value::Null => Ok(Value::Null),
+                    _ => Err(format!(
+                        "datetime() argument must be a string, got {:?}",
+                        val
+                    )),
                 }
             }
             "date_diff" | "datediff" => {
@@ -4608,6 +4795,23 @@ impl<'a> CypherExecutor<'a> {
                     Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
                     _ => Ok(Value::Null),
                 }
+            }
+            // ── List functions ────────────────────────────────────
+            "head" => {
+                if args.len() != 1 {
+                    return Err("head() requires 1 argument".into());
+                }
+                let val = self.evaluate_expression(&args[0], row)?;
+                let items = parse_list_value(&val);
+                Ok(items.into_iter().next().unwrap_or(Value::Null))
+            }
+            "last" => {
+                if args.len() != 1 {
+                    return Err("last() requires 1 argument".into());
+                }
+                let val = self.evaluate_expression(&args[0], row)?;
+                let items = parse_list_value(&val);
+                Ok(items.into_iter().last().unwrap_or(Value::Null))
             }
             // ── Spatial functions ─────────────────────────────────
             "point" => {
@@ -5355,10 +5559,12 @@ impl<'a> CypherExecutor<'a> {
             }
 
             // Aggregate functions should not be evaluated per-row
-            "count" | "sum" | "avg" | "min" | "max" | "collect" | "mean" | "std" => Err(format!(
-                "Aggregate function '{}' cannot be used outside of RETURN/WITH",
-                name
-            )),
+            "count" | "sum" | "avg" | "min" | "max" | "collect" | "mean" | "std" | "stdev" => {
+                Err(format!(
+                    "Aggregate function '{}' cannot be used outside of RETURN/WITH",
+                    name
+                ))
+            }
             // embedding_norm(node, property) → Float64
             // Returns the L2 norm of the node's embedding vector.
             // Useful for inferring hierarchy depth in Poincaré embeddings
@@ -5569,6 +5775,50 @@ impl<'a> CypherExecutor<'a> {
         clause: &ReturnClause,
         result_set: ResultSet,
     ) -> Result<ResultSet, String> {
+        // Expand RETURN * to individual items for each bound variable (BUG-05)
+        let expanded;
+        let clause = if clause.items.len() == 1
+            && matches!(clause.items[0].expression, Expression::Star)
+            && clause.items[0].alias.is_none()
+        {
+            if let Some(first_row) = result_set.rows.first() {
+                let mut items = Vec::new();
+                // Add projected bindings (from WITH)
+                for key in first_row.projected.keys() {
+                    items.push(ReturnItem {
+                        expression: Expression::Variable(key.clone()),
+                        alias: Some(key.clone()),
+                    });
+                }
+                // Add node bindings
+                for key in first_row.node_bindings.keys() {
+                    if !first_row.projected.contains_key(key) {
+                        items.push(ReturnItem {
+                            expression: Expression::Variable(key.clone()),
+                            alias: Some(key.clone()),
+                        });
+                    }
+                }
+                // Add edge bindings
+                for key in first_row.edge_bindings.keys() {
+                    items.push(ReturnItem {
+                        expression: Expression::Variable(key.clone()),
+                        alias: Some(key.clone()),
+                    });
+                }
+                expanded = ReturnClause {
+                    items,
+                    distinct: clause.distinct,
+                    having: clause.having.clone(),
+                };
+                &expanded
+            } else {
+                clause
+            }
+        } else {
+            clause
+        };
+
         let has_aggregation = clause
             .items
             .iter()
@@ -6087,7 +6337,14 @@ impl<'a> CypherExecutor<'a> {
                     if values.is_empty() {
                         Ok(Value::Int64(0))
                     } else {
-                        Ok(Value::Float64(values.iter().sum()))
+                        let total: f64 = values.iter().sum();
+                        // Preserve Int64 when all source values are integers
+                        let is_int = self.probe_source_type_is_int(&args[0], rows);
+                        if is_int && total.fract() == 0.0 {
+                            Ok(Value::Int64(total as i64))
+                        } else {
+                            Ok(Value::Float64(total))
+                        }
                     }
                 }
                 "avg" | "mean" | "average" => {
@@ -6161,7 +6418,7 @@ impl<'a> CypherExecutor<'a> {
                     }
                     Ok(Value::String(format!("[{}]", values.join(", "))))
                 }
-                "std" => {
+                "std" | "stdev" => {
                     let values = self.collect_numeric_values(&args[0], rows, *distinct)?;
                     if values.len() < 2 {
                         Ok(Value::Null)
@@ -6288,6 +6545,11 @@ impl<'a> CypherExecutor<'a> {
                 let r = self.evaluate_aggregate_with_rows(right, rows)?;
                 Ok(value_operations::arithmetic_div(&l, &r))
             }
+            Expression::Modulo(left, right) => {
+                let l = self.evaluate_aggregate_with_rows(left, rows)?;
+                let r = self.evaluate_aggregate_with_rows(right, rows)?;
+                Ok(value_operations::arithmetic_mod(&l, &r))
+            }
             Expression::Concat(left, right) => {
                 let l = self.evaluate_aggregate_with_rows(left, rows)?;
                 let r = self.evaluate_aggregate_with_rows(right, rows)?;
@@ -6328,6 +6590,15 @@ impl<'a> CypherExecutor<'a> {
         }
 
         Ok(values)
+    }
+
+    /// Check if the first evaluated value of an expression is Int64.
+    fn probe_source_type_is_int(&self, expr: &Expression, rows: &[&ResultRow]) -> bool {
+        if let Some(row) = rows.first() {
+            matches!(self.evaluate_expression(expr, row), Ok(Value::Int64(_)))
+        } else {
+            false
+        }
     }
 
     /// Single-pass multi-aggregate: when all aggregates in a group are simple
@@ -6503,7 +6774,18 @@ impl<'a> CypherExecutor<'a> {
                     if counts[si] == 0 {
                         Value::Int64(0)
                     } else {
-                        Value::Float64(sums[si])
+                        // Probe first value to determine if input was integer
+                        let is_int = group_rows.first().is_some_and(|row| {
+                            matches!(
+                                self.evaluate_expression(spec.expr, row),
+                                Ok(Value::Int64(_))
+                            )
+                        });
+                        if is_int && sums[si].fract() == 0.0 {
+                            Value::Int64(sums[si] as i64)
+                        } else {
+                            Value::Float64(sums[si])
+                        }
                     }
                 }
                 AggKind::Avg => {
@@ -6895,14 +7177,17 @@ impl<'a> CypherExecutor<'a> {
             })
             .collect();
 
-        // Check whether the score column's original type is Float64/Int64
-        // so we know whether to emit the raw float or re-evaluate.
-        let score_is_native_float = {
+        // Check whether the score column's original type is numeric
+        // and whether it's specifically Int64 (to preserve integer type).
+        let (score_is_numeric, score_is_int) = {
             let probe = self.evaluate_expression(
                 &score_expr,
                 &result_set.rows[winners.first().map(|w| w.index).unwrap_or(0)],
             )?;
-            matches!(probe, Value::Float64(_) | Value::Int64(_))
+            (
+                matches!(probe, Value::Float64(_) | Value::Int64(_)),
+                matches!(probe, Value::Int64(_)),
+            )
         };
 
         let mut rows = Vec::with_capacity(winners.len());
@@ -6911,14 +7196,18 @@ impl<'a> CypherExecutor<'a> {
             let mut projected = Bindings::with_capacity(return_clause.items.len());
             for (j, item) in return_clause.items.iter().enumerate() {
                 let key = return_item_column_name(item);
-                let val = if j == score_item_index && score_is_native_float && !has_external_sort {
+                let val = if j == score_item_index && score_is_numeric && !has_external_sort {
                     // Recover actual score (undo negation for ASC)
                     let actual = if descending {
                         winner.score
                     } else {
                         -winner.score
                     };
-                    Value::Float64(actual)
+                    if score_is_int {
+                        Value::Int64(actual as i64)
+                    } else {
+                        Value::Float64(actual)
+                    }
                 } else {
                     self.evaluate_expression(&folded_exprs[j], row)?
                 };
@@ -8621,7 +8910,16 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
             let lower = name.to_lowercase();
             if matches!(
                 lower.as_str(),
-                "count" | "sum" | "avg" | "mean" | "average" | "min" | "max" | "collect" | "std"
+                "count"
+                    | "sum"
+                    | "avg"
+                    | "mean"
+                    | "average"
+                    | "min"
+                    | "max"
+                    | "collect"
+                    | "std"
+                    | "stdev"
             ) {
                 return true;
             }
@@ -8632,6 +8930,7 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
         | Expression::Subtract(l, r)
         | Expression::Multiply(l, r)
         | Expression::Divide(l, r)
+        | Expression::Modulo(l, r)
         | Expression::Concat(l, r) => is_aggregate_expression(l) || is_aggregate_expression(r),
         Expression::Negate(inner) => is_aggregate_expression(inner),
         Expression::Case {
@@ -8674,6 +8973,24 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
         Expression::MapLiteral(entries) => entries
             .iter()
             .any(|(_, expr)| is_aggregate_expression(expr)),
+        Expression::PredicateExpr(pred) => match pred.as_ref() {
+            Predicate::Comparison { left, right, .. } => {
+                is_aggregate_expression(left) || is_aggregate_expression(right)
+            }
+            Predicate::StartsWith { expr, pattern }
+            | Predicate::EndsWith { expr, pattern }
+            | Predicate::Contains { expr, pattern } => {
+                is_aggregate_expression(expr) || is_aggregate_expression(pattern)
+            }
+            Predicate::In { expr, list } => {
+                is_aggregate_expression(expr) || list.iter().any(is_aggregate_expression)
+            }
+            Predicate::InExpression { expr, list_expr } => {
+                is_aggregate_expression(expr) || is_aggregate_expression(list_expr)
+            }
+            _ => false,
+        },
+        Expression::ExprPropertyAccess { expr, .. } => is_aggregate_expression(expr),
         _ => false,
     }
 }
@@ -8723,6 +9040,9 @@ fn expression_to_string(expr: &Expression) -> String {
         Expression::Divide(l, r) => {
             format!("{} / {}", expression_to_string(l), expression_to_string(r))
         }
+        Expression::Modulo(l, r) => {
+            format!("{} % {}", expression_to_string(l), expression_to_string(r))
+        }
         Expression::Concat(l, r) => {
             format!("{} || {}", expression_to_string(l), expression_to_string(r))
         }
@@ -8770,6 +9090,7 @@ fn expression_to_string(expr: &Expression) -> String {
                 .iter()
                 .map(|item| match item {
                     MapProjectionItem::Property(prop) => format!(".{}", prop),
+                    MapProjectionItem::AllProperties => ".*".to_string(),
                     MapProjectionItem::Alias { key, expr } => {
                         format!("{}: {}", key, expression_to_string(expr))
                     }
@@ -8833,6 +9154,59 @@ fn expression_to_string(expr: &Expression) -> String {
             s.push(')');
             s
         }
+        Expression::PredicateExpr(pred) => predicate_to_string(pred),
+        Expression::ExprPropertyAccess { expr, property } => {
+            format!("{}.{}", expression_to_string(expr), property)
+        }
+    }
+}
+
+/// Convert a predicate to its string representation (for column naming)
+fn predicate_to_string(pred: &Predicate) -> String {
+    match pred {
+        Predicate::Comparison {
+            left,
+            operator,
+            right,
+        } => {
+            let op_str = match operator {
+                ComparisonOp::Equals => "=",
+                ComparisonOp::NotEquals => "<>",
+                ComparisonOp::LessThan => "<",
+                ComparisonOp::LessThanEq => "<=",
+                ComparisonOp::GreaterThan => ">",
+                ComparisonOp::GreaterThanEq => ">=",
+                ComparisonOp::RegexMatch => "=~",
+            };
+            format!(
+                "{} {} {}",
+                expression_to_string(left),
+                op_str,
+                expression_to_string(right)
+            )
+        }
+        Predicate::StartsWith { expr, pattern } => {
+            format!(
+                "{} STARTS WITH {}",
+                expression_to_string(expr),
+                expression_to_string(pattern)
+            )
+        }
+        Predicate::EndsWith { expr, pattern } => {
+            format!(
+                "{} ENDS WITH {}",
+                expression_to_string(expr),
+                expression_to_string(pattern)
+            )
+        }
+        Predicate::Contains { expr, pattern } => {
+            format!(
+                "{} CONTAINS {}",
+                expression_to_string(expr),
+                expression_to_string(pattern)
+            )
+        }
+        _ => "predicate(...)".to_string(),
     }
 }
 
@@ -9108,6 +9482,9 @@ fn arithmetic_mul(a: &Value, b: &Value) -> Value {
 }
 fn arithmetic_div(a: &Value, b: &Value) -> Value {
     value_operations::arithmetic_div(a, b)
+}
+fn arithmetic_mod(a: &Value, b: &Value) -> Value {
+    value_operations::arithmetic_mod(a, b)
 }
 fn arithmetic_negate(a: &Value) -> Value {
     value_operations::arithmetic_negate(a)
