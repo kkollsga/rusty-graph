@@ -55,6 +55,7 @@ pub enum CypherToken {
     Over,
     Partition,
     Having,
+    Xor,
 
     // Parameters
     Parameter(String), // $param_name
@@ -88,6 +89,7 @@ pub enum CypherToken {
     // Arithmetic
     Plus,       // +
     Slash,      // /
+    Percent,    // %
     Pipe,       // |
     DoublePipe, // ||
 
@@ -172,6 +174,10 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
             }
             '/' => {
                 tokens.push(CypherToken::Slash);
+                i += 1;
+            }
+            '%' => {
+                tokens.push(CypherToken::Percent);
                 i += 1;
             }
             '|' => {
@@ -436,6 +442,7 @@ fn identifier_to_token(ident: String) -> CypherToken {
         "OVER" => CypherToken::Over,
         "PARTITION" => CypherToken::Partition,
         "HAVING" => CypherToken::Having,
+        "XOR" => CypherToken::Xor,
         _ => CypherToken::Identifier(ident),
     }
 }
@@ -491,6 +498,7 @@ pub fn token_to_keyword_name(token: &CypherToken) -> Option<String> {
         CypherToken::Over => "over",
         CypherToken::Partition => "partition",
         CypherToken::Having => "having",
+        CypherToken::Xor => "xor",
         _ => return None,
     };
     Some(name.to_string())

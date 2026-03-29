@@ -127,8 +127,8 @@ class TestProfile:
         match_step = profile[0]
         assert match_step["clause"].startswith("Match")
         assert match_step["rows_out"] == 1
-        # No WHERE step — predicate was pushed into MATCH
-        assert len(profile) == 2  # Match + Return
+        # WHERE is kept as safety net (predicate also pushed into MATCH)
+        assert len(profile) == 3  # Match + Where + Return
 
     def test_profile_row_counts_not_equals(self, graph):
         """NotEquals stays in WHERE (not pushed), showing MATCH 2 → WHERE 1."""

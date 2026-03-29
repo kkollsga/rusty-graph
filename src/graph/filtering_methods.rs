@@ -127,6 +127,19 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         // UniqueId <-> Float64 (for completeness)
         (Value::UniqueId(u), Value::Float64(f)) => f.fract() == 0.0 && *u as f64 == *f,
         (Value::Float64(f), Value::UniqueId(u)) => f.fract() == 0.0 && *f == *u as f64,
+        // Single-element JSON list compared to plain string (e.g. labels(n) = 'Person')
+        (Value::String(list_str), Value::String(plain))
+            if list_str.starts_with("[\"") && list_str.ends_with("\"]") =>
+        {
+            let inner = &list_str[2..list_str.len() - 2];
+            inner == plain
+        }
+        (Value::String(plain), Value::String(list_str))
+            if list_str.starts_with("[\"") && list_str.ends_with("\"]") =>
+        {
+            let inner = &list_str[2..list_str.len() - 2];
+            inner == plain
+        }
         _ => false,
     }
 }

@@ -33,6 +33,10 @@ bench-save:
 bench-compare:
 	$(ACTIVATE) && pytest tests/benchmarks/test_bench_core.py -m benchmark --benchmark-compare
 
+## Run bug-path performance benchmarks (pre/post bugfix baseline)
+bench-bugs:
+	$(ACTIVATE) && python bench/benchmark_bugs.py
+
 ## Fast compilation check (no codegen)
 check:
 	cargo check

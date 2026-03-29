@@ -177,6 +177,7 @@ pub enum Predicate {
     },
     And(Box<Predicate>, Box<Predicate>),
     Or(Box<Predicate>, Box<Predicate>),
+    Xor(Box<Predicate>, Box<Predicate>),
     Not(Box<Predicate>),
     IsNull(Expression),
     IsNotNull(Expression),
@@ -205,6 +206,13 @@ pub enum Predicate {
     Exists {
         patterns: Vec<Pattern>,
         where_clause: Option<Box<Predicate>>,
+    },
+    /// IN with a general expression (variable, parameter, function call) as the list.
+    /// Unlike `In` which takes a literal list of expressions, this evaluates the
+    /// list_expr at runtime and checks membership.
+    InExpression {
+        expr: Expression,
+        list_expr: Expression,
     },
 }
 
@@ -247,6 +255,7 @@ pub enum Expression {
     Subtract(Box<Expression>, Box<Expression>),
     Multiply(Box<Expression>, Box<Expression>),
     Divide(Box<Expression>, Box<Expression>),
+    Modulo(Box<Expression>, Box<Expression>),
     /// String concatenation: expr || expr
     Concat(Box<Expression>, Box<Expression>),
     /// Unary negation: -n.value
@@ -303,6 +312,14 @@ pub enum Expression {
         list_expr: Box<Expression>,
         filter: Box<Predicate>,
     },
+    /// A predicate used in expression position (e.g. `RETURN n.name STARTS WITH 'A'`).
+    /// Evaluates to Boolean(true/false) or Null for three-valued logic.
+    PredicateExpr(Box<Predicate>),
+    /// Property access on an arbitrary expression: `date().year`, `func().prop`
+    ExprPropertyAccess {
+        expr: Box<Expression>,
+        property: String,
+    },
     /// Window function: func() OVER (PARTITION BY ... ORDER BY ...)
     WindowFunction {
         name: String,
@@ -325,6 +342,8 @@ pub enum ListQuantifier {
 pub enum MapProjectionItem {
     /// Shorthand property: .prop — projects node.prop as "prop"
     Property(String),
+    /// All properties: .* — projects all node properties
+    AllProperties,
     /// Computed/aliased: key: expr
     Alias { key: String, expr: Expression },
 }

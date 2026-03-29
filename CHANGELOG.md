@@ -5,6 +5,48 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.11] - 2026-03-29
+
+### Fixed
+
+- **19 Cypher engine bugs resolved** — systematic fix of all bugs discovered via legal knowledge graph testing (BUG-01 through BUG-20, except BUG-04 which requires large-graph validation).
+
+#### Critical — Silent wrong results
+- **BUG-01**: Equality filter + GROUP BY no longer returns empty results. WHERE clause is now preserved after predicate pushdown to guarantee correctness when fusion fails.
+- **BUG-02**: ORDER BY + LIMIT preserves integer types. `count()`, `size()`, `sum()` on integers no longer convert to float through the top-K heap path.
+- **BUG-03**: HAVING clause is now propagated when the planner converts RETURN to WITH in fused optional-match aggregation.
+- **BUG-05**: `RETURN *` expands to all bound variables (nodes, edges, paths, projected) instead of returning `{'*': 1}`.
+- **BUG-06**: Path variable on explicit multi-hop patterns (`p = (a)-[]->(b)-[]->(c)`) now captures all intermediate nodes and relationships. `length(p)`, `nodes(p)`, `relationships(p)` return correct results.
+- **BUG-17**: `MATCH (n) WHERE n.type = 'X'` on unlabeled nodes now works. Pattern matcher recognizes `type`/`node_type`/`label` as virtual properties.
+- **BUG-18**: `labels()` returns consistent list format in both plain RETURN and GROUP BY contexts. Single-element list comparison (`labels(n) = 'Person'`) now works.
+
+#### High — Errors on valid syntax
+- **BUG-07**: `stDev()` / `stdev()` recognized as alias for `std()` aggregate function.
+- **BUG-08**: `datetime('2024-03-15T10:30:00')` parses correctly instead of crashing on the time portion.
+- **BUG-09**: `date()` returns null on invalid input (`''`, `'2016-00-00'`, `'2016-13-01'`) instead of crashing.
+- **BUG-10**: `date('...').year`, `.month`, `.day` property access on function results now works.
+- **BUG-11**: `[:TYPE1|TYPE2|TYPE3]` pipe syntax for multiple relationship types in MATCH patterns.
+- **BUG-12**: `XOR` logical operator implemented with correct precedence (between OR and AND).
+- **BUG-13**: `%` modulo operator implemented for both integer and float operands.
+- **BUG-14**: `head()` and `last()` list functions implemented.
+- **BUG-15**: `IN` operator accepts variable references, parameters, and function results — not just literal `[...]` lists.
+
+#### Medium — Less common patterns
+- **BUG-16**: Boolean/comparison expressions (`STARTS WITH`, `CONTAINS`, `>`, `=~`, etc.) work in RETURN/WITH clauses, evaluating to boolean values.
+- **BUG-19**: `null = null` and `null <> null` return null (Cypher three-valued logic) instead of syntax error.
+- **BUG-20**: Map all-properties projection `n {.*}` supported.
+
+### Added
+
+- **`Expression::PredicateExpr`** — AST variant bridging the expression/predicate boundary, enabling boolean predicates in RETURN/WITH items.
+- **`Expression::ExprPropertyAccess`** — property access on arbitrary expression results (e.g. `date().year`).
+- **`Expression::Modulo`** — modulo arithmetic operator.
+- **`Predicate::Xor`** — exclusive-or logical operator.
+- **`Predicate::InExpression`** — IN with runtime-evaluated list expressions.
+- **`MapProjectionItem::AllProperties`** — wildcard map projection.
+- **`EdgePattern.connection_types`** — multi-type edge matching for pipe syntax.
+- **Performance benchmark suite** (`bench/benchmark_bugs.py`) — 70 targeted benchmarks covering all affected code paths, with CSV output for version-to-version comparison.
+
 ## [0.6.10] - 2026-03-29
 
 ### Fixed
