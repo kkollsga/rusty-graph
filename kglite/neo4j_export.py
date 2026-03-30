@@ -7,6 +7,8 @@ import json
 import time
 from typing import Any, Optional
 
+__all__ = ["to_neo4j"]
+
 
 def to_neo4j(
     graph,

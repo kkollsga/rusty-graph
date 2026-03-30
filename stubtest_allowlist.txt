@@ -26,6 +26,3 @@ kglite.KnowledgeGraph.traverse
 # The overloads are correct for type-checking but structurally differ from runtime.
 kglite.KnowledgeGraph.sample
 kglite.KnowledgeGraph.embeddings
-
-# typing.Any re-exported through neo4j_export module — not a real API surface.
-kglite.neo4j_export.Any
