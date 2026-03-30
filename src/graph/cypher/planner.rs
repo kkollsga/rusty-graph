@@ -757,35 +757,21 @@ fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) {
             continue;
         }
 
-        // Safety check: RETURN must have no aggregation and no DISTINCT
+        // Safety check: RETURN must have no aggregation, no DISTINCT, no window functions
         let safe = if let Clause::Return(r) = &query.clauses[i + 1] {
             !r.distinct
                 && !r
                     .items
                     .iter()
                     .any(|item| super::executor::is_aggregate_expression(&item.expression))
+                && !r
+                    .items
+                    .iter()
+                    .any(|item| super::ast::is_window_expression(&item.expression))
         } else {
             false
         };
         if !safe {
-            i += 1;
-            continue;
-        }
-
-        // Safety check: patterns must be node-only (no edges).
-        // When a pattern has edges, N source nodes ≠ N result rows,
-        // so pushing LIMIT into the pattern executor would truncate
-        // source nodes before edge expansion, producing wrong results.
-        let has_edges = if let Clause::Match(ref m) = query.clauses[i] {
-            m.patterns.iter().any(|p| {
-                p.elements
-                    .iter()
-                    .any(|e| matches!(e, PatternElement::Edge(_)))
-            })
-        } else {
-            false
-        };
-        if has_edges {
             i += 1;
             continue;
         }

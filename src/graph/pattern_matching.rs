@@ -954,9 +954,9 @@ impl<'a> PatternExecutor<'a> {
         // Process edge-node pairs
         let mut i = 1;
         while i < pattern.elements.len() {
-            if self.max_matches.is_some_and(|max| matches.len() >= max) {
-                break;
-            }
+            // max_matches is enforced DURING expansion (inner-loop checks below),
+            // not between hops, to avoid breaking before edges are expanded.
+            let is_last_hop = i + 2 >= pattern.elements.len();
             if let Some(dl) = self.deadline {
                 if Instant::now() > dl {
                     return Err("Query timed out".to_string());
@@ -1083,11 +1083,17 @@ impl<'a> PatternExecutor<'a> {
                 let mut new_matches_seq = Vec::new();
                 let mut new_indices_seq = Vec::new();
                 let mut expand_count: usize = 0;
+                // At the last hop, enforce exact max_matches.
+                // At intermediate hops, use a generous overcommit (50x) to avoid
+                // expanding far more intermediates than needed while ensuring
+                // enough survive to produce max_matches final results.
+                let hop_limit = if is_last_hop {
+                    self.max_matches
+                } else {
+                    self.max_matches.map(|m| m.saturating_mul(50).max(1000))
+                };
                 for (current_match, &source_idx) in matches.iter().zip(current_indices.iter()) {
-                    if self
-                        .max_matches
-                        .is_some_and(|max| new_matches_seq.len() >= max)
-                    {
+                    if hop_limit.is_some_and(|max| new_matches_seq.len() >= max) {
                         break;
                     }
                     let expansions =
@@ -1101,10 +1107,7 @@ impl<'a> PatternExecutor<'a> {
                                 }
                             }
                         }
-                        if self
-                            .max_matches
-                            .is_some_and(|max| new_matches_seq.len() >= max)
-                        {
+                        if hop_limit.is_some_and(|max| new_matches_seq.len() >= max) {
                             break;
                         }
                         if let Some(ref var) = node_pattern.variable {
@@ -1173,8 +1176,13 @@ impl<'a> PatternExecutor<'a> {
                 }
             }
 
-            // Apply max_matches truncation (for parallel path which can't early-exit)
-            if let Some(max) = self.max_matches {
+            // Apply hop limit truncation (for parallel path which can't early-exit)
+            let truncate_limit = if is_last_hop {
+                self.max_matches
+            } else {
+                self.max_matches.map(|m| m.saturating_mul(50).max(1000))
+            };
+            if let Some(max) = truncate_limit {
                 new_matches.truncate(max);
                 new_indices.truncate(max);
             }

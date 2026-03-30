@@ -579,6 +579,8 @@ impl<'a> CypherExecutor<'a> {
             for pattern in &clause.patterns {
                 if all_rows.is_empty() {
                     // First pattern - create initial rows
+                    // limit_hint is safe for edge patterns: PatternExecutor
+                    // only enforces max_matches at the last hop.
                     let executor = PatternExecutor::new_lightweight_with_params(
                         self.graph,
                         limit_hint,
@@ -616,6 +618,12 @@ impl<'a> CypherExecutor<'a> {
                         for m in matches {
                             all_rows.push(self.pattern_match_to_row(m));
                         }
+                    }
+                    // Post-match truncation: for edge patterns, limit_hint wasn't
+                    // passed to the PatternExecutor, so truncate here instead.
+                    // For node-only patterns this is a no-op (already limited).
+                    if let Some(limit) = limit_hint {
+                        all_rows.truncate(limit);
                     }
                 } else {
                     // Subsequent patterns: use shared-variable join
