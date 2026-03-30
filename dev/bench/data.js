@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774904654629,
+  "lastUpdate": 1774905911399,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -2455,6 +2455,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.000015308946400441396",
             "extra": "mean: 830.8380210616638 usec\nrounds: 1092"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "0878fe4c1d55bfa7d63f4bb644d12207a8685a10",
+          "message": "fix: 16x faster multi-hop LIMIT via pattern matcher pushdown (0.6.18)\n\n- Planner: push LIMIT into MATCH for edge patterns (was node-only)\n- Executor: post-match row truncation before Return projection\n- Pattern matcher: last-hop early termination + intermediate overcommit\n- Added window function safety check to LIMIT fusion guard\n\nBenchmarks (2-hop LIMIT 20): 16,538μs → 1,008μs (16x speedup)\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-30T23:23:03+02:00",
+          "tree_id": "de7593e0913d32dfc780e56b00ab73ef5cd3ffe9",
+          "url": "https://github.com/kkollsga/kglite/commit/0878fe4c1d55bfa7d63f4bb644d12207a8685a10"
+        },
+        "date": 1774905911077,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1064.4237781900197,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00003269804322286199",
+            "extra": "mean: 939.4754424787767 usec\nrounds: 452"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 793.6301331469443,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000029798043661746004",
+            "extra": "mean: 1.2600328014698066 msec\nrounds: 680"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 13721.891589307643,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000004936578035801336",
+            "extra": "mean: 72.87624985896397 usec\nrounds: 7100"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1568.446780555645,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000022708795419567574",
+            "extra": "mean: 637.5734340477497 usec\nrounds: 887"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 683390.2672806695,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000003330053022149996",
+            "extra": "mean: 1.4632927155652604 usec\nrounds: 115795"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 133380.91240339272,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00000122946601674673",
+            "extra": "mean: 7.497324631995572 usec\nrounds: 22142"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2898.0827164103266,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000011241312453995104",
+            "extra": "mean: 345.055713674949 usec\nrounds: 4680"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1585.3669776759043,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002210899011623874",
+            "extra": "mean: 630.7687835569573 usec\nrounds: 1192"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 14769.891216865066,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000004684405262368587",
+            "extra": "mean: 67.7053057004337 usec\nrounds: 11894"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 1285.216975548991,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0003403565875763628",
+            "extra": "mean: 778.0787361393525 usec\nrounds: 974"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 1324.9361274112125,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002522273985705722",
+            "extra": "mean: 754.753364567012 usec\nrounds: 1270"
           }
         ]
       }
