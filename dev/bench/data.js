@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774894521422,
+  "lastUpdate": 1774894949607,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -2051,6 +2051,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.000014627176496021253",
             "extra": "mean: 818.456989427527 usec\nrounds: 1135"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "617668216b6c70d2b4ba11442d16e30f351c66a9",
+          "message": "feat: kglite.repo_tree() + fix code_tree edge skip warnings (0.6.15)\n\n- Re-export repo_tree at top-level: kglite.repo_tree(\"org/repo\")\n- Auto-create stub nodes for external base classes, enums, and traits\n  in EXTENDS/IMPLEMENTS/HAS_METHOD edges\n- Include enums in type routing maps and name resolution\n- Register external traits in name_to_qname for owner resolution\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-30T20:20:13+02:00",
+          "tree_id": "ff68b9d915c754d6269f276525b0769eb1d41a4d",
+          "url": "https://github.com/kkollsga/kglite/commit/617668216b6c70d2b4ba11442d16e30f351c66a9"
+        },
+        "date": 1774894946344,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1002.0431788887435,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0002302608479807765",
+            "extra": "mean: 997.960987179206 usec\nrounds: 468"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 798.7569603222541,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000033173659401894804",
+            "extra": "mean: 1.2519452720594202 msec\nrounds: 680"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 13524.389858809769,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000057436265184674065",
+            "extra": "mean: 73.94048903053482 usec\nrounds: 7065"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1567.3540357597187,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00013083989628510776",
+            "extra": "mean: 638.0179443729098 usec\nrounds: 773"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 708483.8422024025,
+            "unit": "iter/sec",
+            "range": "stddev: 4.71085073892595e-7",
+            "extra": "mean: 1.411464793454409 usec\nrounds: 113033"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 132414.46398543313,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000013325200890313447",
+            "extra": "mean: 7.552045070469111 usec\nrounds: 20834"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2873.7208800316293,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000040344218244943986",
+            "extra": "mean: 347.9809075921784 usec\nrounds: 4913"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1577.817720936519,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00004744191416303301",
+            "extra": "mean: 633.786771900652 usec\nrounds: 1210"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 14516.57072291324,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000004572159117219362",
+            "extra": "mean: 68.88679283059466 usec\nrounds: 11884"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 1346.0794562702988,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00005557386090739877",
+            "extra": "mean: 742.8981961962248 usec\nrounds: 999"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 1350.1297414278129,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000015675168242886973",
+            "extra": "mean: 740.6695588695517 usec\nrounds: 1274"
           }
         ]
       }
