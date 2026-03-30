@@ -18,5 +18,6 @@ except ImportError:
 
 from .builder import build
 from .parsers.manifest import read_manifest
+from .repo import repo_tree
 
-__all__ = ["build", "read_manifest"]
+__all__ = ["build", "read_manifest", "repo_tree"]
