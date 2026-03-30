@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774891175866,
+  "lastUpdate": 1774891233248,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -1647,6 +1647,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.00001677111512169054",
             "extra": "mean: 755.2362210617229 usec\nrounds: 1244"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "0c25547b95cf81e4c6f5ecf8c4975dd1925793d5",
+          "message": "chore: bump version to 0.6.14\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-30T19:18:22+02:00",
+          "tree_id": "f02ec507d3a693db2f45a4275c5d064a1e571c16",
+          "url": "https://github.com/kkollsga/kglite/commit/0c25547b95cf81e4c6f5ecf8c4975dd1925793d5"
+        },
+        "date": 1774891232231,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1157.8534727465199,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000023441999479983797",
+            "extra": "mean: 863.6671422921253 usec\nrounds: 506"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 903.9898724952739,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002265316844331026",
+            "extra": "mean: 1.1062070830945376 msec\nrounds: 698"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 14278.181811944964,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000002617316562226083",
+            "extra": "mean: 70.0369285929257 usec\nrounds: 6680"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1568.712737502933,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002040396712871574",
+            "extra": "mean: 637.4653409086188 usec\nrounds: 924"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 642655.1672799299,
+            "unit": "iter/sec",
+            "range": "stddev: 2.687573933471931e-7",
+            "extra": "mean: 1.5560444401817386 usec\nrounds: 114851"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 134265.92517550194,
+            "unit": "iter/sec",
+            "range": "stddev: 7.444701092994882e-7",
+            "extra": "mean: 7.447906076637674 usec\nrounds: 20719"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2896.0902721430657,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000007751560005424424",
+            "extra": "mean: 345.29310416143005 usec\nrounds: 3965"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1559.5612341381266,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000032969290461607276",
+            "extra": "mean: 641.2059867291061 usec\nrounds: 1281"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 14339.18518884262,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000028932598900884365",
+            "extra": "mean: 69.73896960185047 usec\nrounds: 9573"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 1498.0798068666325,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00014165789694726757",
+            "extra": "mean: 667.5211797237887 usec\nrounds: 1085"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 1490.5186493698081,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00006987680759111222",
+            "extra": "mean: 670.9074055683908 usec\nrounds: 1329"
           }
         ]
       }
