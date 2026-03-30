@@ -15,6 +15,7 @@ pub mod py_convert;
 pub mod result;
 pub mod result_view;
 pub mod tokenizer;
+mod window;
 
 // Re-exports for convenience
 pub use ast::OutputFormat;

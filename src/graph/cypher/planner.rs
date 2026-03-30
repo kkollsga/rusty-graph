@@ -2334,6 +2334,17 @@ fn fuse_order_by_top_k(query: &mut CypherQuery) {
                 i += 1;
                 continue;
             }
+            // Don't fuse if any RETURN item has window functions —
+            // window functions need the full result set to compute
+            // partitions/ranks, which is incompatible with the per-row
+            // scoring in FusedOrderByTopK.
+            if r.items
+                .iter()
+                .any(|item| matches!(item.expression, Expression::WindowFunction { .. }))
+            {
+                i += 1;
+                continue;
+            }
             // Find which RETURN item the ORDER BY references
             let order_info = if let Clause::OrderBy(o) = &query.clauses[i + 1] {
                 if o.items.len() != 1 {

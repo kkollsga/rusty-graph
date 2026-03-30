@@ -5,6 +5,15 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.12] - 2026-03-30
+
+### Fixed
+- **BUG-21**: Window functions (`row_number`, `rank`, `dense_rank`) crash with "Window function must appear in RETURN/WITH clause" when query has `WITH` aggregation + `ORDER BY` + `LIMIT`. The planner's `fuse_order_by_top_k` optimization now skips fusion when RETURN contains window functions.
+
+### Changed
+- Extracted window function execution into `window.rs` module (~240 lines out of executor.rs)
+- Moved `is_aggregate_expression` / `is_window_expression` from executor.rs to ast.rs for cross-module reuse
+
 ## [0.6.11] - 2026-03-29
 
 ### Fixed

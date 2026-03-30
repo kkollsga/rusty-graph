@@ -548,3 +548,104 @@ pub struct YieldItem {
     pub name: String,
     pub alias: Option<String>,
 }
+
+// ============================================================================
+// Expression classification helpers
+// ============================================================================
+
+/// Check if an expression contains an aggregate function call
+pub fn is_aggregate_expression(expr: &Expression) -> bool {
+    match expr {
+        Expression::FunctionCall { name, args, .. } => {
+            let lower = name.to_lowercase();
+            if matches!(
+                lower.as_str(),
+                "count"
+                    | "sum"
+                    | "avg"
+                    | "mean"
+                    | "average"
+                    | "min"
+                    | "max"
+                    | "collect"
+                    | "std"
+                    | "stdev"
+            ) {
+                return true;
+            }
+            // Non-aggregate function wrapping aggregate args (e.g. size(collect(...)))
+            args.iter().any(is_aggregate_expression)
+        }
+        Expression::Add(l, r)
+        | Expression::Subtract(l, r)
+        | Expression::Multiply(l, r)
+        | Expression::Divide(l, r)
+        | Expression::Modulo(l, r)
+        | Expression::Concat(l, r) => is_aggregate_expression(l) || is_aggregate_expression(r),
+        Expression::Negate(inner) => is_aggregate_expression(inner),
+        Expression::Case {
+            when_clauses,
+            else_expr,
+            ..
+        } => {
+            when_clauses
+                .iter()
+                .any(|(_, result)| is_aggregate_expression(result))
+                || else_expr
+                    .as_ref()
+                    .is_some_and(|e| is_aggregate_expression(e))
+        }
+        Expression::ListComprehension {
+            list_expr,
+            map_expr,
+            ..
+        } => {
+            is_aggregate_expression(list_expr)
+                || map_expr
+                    .as_ref()
+                    .is_some_and(|e| is_aggregate_expression(e))
+        }
+        Expression::IndexAccess { expr, index } => {
+            is_aggregate_expression(expr) || is_aggregate_expression(index)
+        }
+        Expression::ListSlice { expr, start, end } => {
+            is_aggregate_expression(expr)
+                || start.as_ref().is_some_and(|s| is_aggregate_expression(s))
+                || end.as_ref().is_some_and(|e| is_aggregate_expression(e))
+        }
+        Expression::MapProjection { items, .. } => items.iter().any(|item| {
+            if let MapProjectionItem::Alias { expr, .. } = item {
+                is_aggregate_expression(expr)
+            } else {
+                false
+            }
+        }),
+        Expression::MapLiteral(entries) => entries
+            .iter()
+            .any(|(_, expr)| is_aggregate_expression(expr)),
+        Expression::PredicateExpr(pred) => match pred.as_ref() {
+            Predicate::Comparison { left, right, .. } => {
+                is_aggregate_expression(left) || is_aggregate_expression(right)
+            }
+            Predicate::StartsWith { expr, pattern }
+            | Predicate::EndsWith { expr, pattern }
+            | Predicate::Contains { expr, pattern } => {
+                is_aggregate_expression(expr) || is_aggregate_expression(pattern)
+            }
+            Predicate::In { expr, list } => {
+                is_aggregate_expression(expr) || list.iter().any(is_aggregate_expression)
+            }
+            Predicate::InExpression { expr, list_expr } => {
+                is_aggregate_expression(expr) || is_aggregate_expression(list_expr)
+            }
+            _ => false,
+        },
+        Expression::ExprPropertyAccess { expr, .. } => is_aggregate_expression(expr),
+        _ => false,
+    }
+}
+
+/// Check if an expression is a window function
+pub fn is_window_expression(expr: &Expression) -> bool {
+    matches!(expr, Expression::WindowFunction { .. })
+}
