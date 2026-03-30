@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774894949607,
+  "lastUpdate": 1774896528149,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -2152,6 +2152,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.000015675168242886973",
             "extra": "mean: 740.6695588695517 usec\nrounds: 1274"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "085bef9a702a4e90d589fe5d9be150ff473c4e48",
+          "message": "fix: gate code_tree parse output on verbose flag\n\nThe \"Found N files\" message printed unconditionally during parsing.\nNow respects verbose=False for silent operation.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-03-30T20:46:36+02:00",
+          "tree_id": "5b0beb801d6f81d1a01c149dadc686c6a8f98d38",
+          "url": "https://github.com/kkollsga/kglite/commit/085bef9a702a4e90d589fe5d9be150ff473c4e48"
+        },
+        "date": 1774896527461,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1043.7302480702335,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000017267075396675678",
+            "extra": "mean: 958.1019634612613 usec\nrounds: 520"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 798.1781259937568,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000027345518666022596",
+            "extra": "mean: 1.2528531757932713 msec\nrounds: 694"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 13838.980130346863,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000004252977066170525",
+            "extra": "mean: 72.25966007474395 usec\nrounds: 7484"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1541.4316323819494,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000024129405966496763",
+            "extra": "mean: 648.7475532435494 usec\nrounds: 817"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 703312.0373497012,
+            "unit": "iter/sec",
+            "range": "stddev: 4.2699095977918013e-7",
+            "extra": "mean: 1.421843999383704 usec\nrounds: 126679"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 130630.02323765085,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000012475192488110388",
+            "extra": "mean: 7.65520800819834 usec\nrounds: 30619"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2709.7770008539255,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000012025786751771944",
+            "extra": "mean: 369.0340569297298 usec\nrounds: 5094"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1554.5086025453293,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002464909508915204",
+            "extra": "mean: 643.2901036138461 usec\nrounds: 1245"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 13729.651537572812,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000013540859331805396",
+            "extra": "mean: 72.8350604721017 usec\nrounds: 10418"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 1333.2230365975738,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00017848004384651034",
+            "extra": "mean: 750.0620470465548 usec\nrounds: 999"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 1342.1243698699416,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00001621730029986069",
+            "extra": "mean: 745.0874318725804 usec\nrounds: 1255"
           }
         ]
       }
