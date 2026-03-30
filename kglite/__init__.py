@@ -119,6 +119,21 @@ def repo_tree(
     return _repo_tree(repo, **kwargs)
 
 
+def to_neo4j(
+    graph: "KnowledgeGraph",
+    uri: str,
+    **kwargs,
+) -> dict:
+    """Push graph data to a Neo4j database.
+
+    Convenience re-export of :func:`kglite.neo4j_export.to_neo4j`.
+    Requires the ``neo4j`` package: ``pip install neo4j``.
+    """
+    from .neo4j_export import to_neo4j as _to_neo4j
+
+    return _to_neo4j(graph, uri, **kwargs)
+
+
 __all__ = [
     "__version__",
     "KnowledgeGraph",
@@ -128,6 +143,7 @@ __all__ = [
     "load",
     "from_blueprint",
     "repo_tree",
+    "to_neo4j",
     "Agg",
     "Spatial",
 ]

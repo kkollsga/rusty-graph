@@ -48,6 +48,7 @@ code-tree = [
     "tree-sitter-cpp",
     "tree-sitter-c-sharp",
 ]
+neo4j = ["neo4j>=5.0"]
 
 [project.urls]
 Homepage = "https://github.com/kkollsga/kglite"

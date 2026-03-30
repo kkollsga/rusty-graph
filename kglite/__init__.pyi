@@ -329,6 +329,50 @@ def from_blueprint(
     """
     ...
 
+def to_neo4j(
+    graph: KnowledgeGraph,
+    uri: str,
+    *,
+    auth: Optional[tuple[str, str]] = None,
+    database: str = "neo4j",
+    batch_size: int = 5000,
+    clear: bool = False,
+    merge: bool = False,
+    selection_only: Optional[bool] = None,
+    verbose: bool = False,
+) -> dict[str, Any]:
+    """Push graph data to a Neo4j database.
+
+    Extracts all nodes and edges (or the current selection) and writes
+    them to Neo4j using batched ``UNWIND`` operations for performance.
+
+    Requires the ``neo4j`` package: ``pip install neo4j``.
+
+    Args:
+        graph: The KnowledgeGraph to export.
+        uri: Neo4j connection URI (e.g. ``"bolt://localhost:7687"``).
+        auth: Tuple of ``(username, password)``. ``None`` for no auth.
+        database: Neo4j database name (default ``"neo4j"``).
+        batch_size: Nodes/relationships per UNWIND batch (default 5000).
+        clear: If ``True``, delete all existing data before import.
+        merge: If ``True``, use MERGE instead of CREATE (upsert semantics).
+        selection_only: If ``True``, export only selected nodes.
+            Default: auto-detect from active selection.
+        verbose: Print progress information.
+
+    Returns:
+        Summary dict with ``nodes_created``, ``relationships_created``,
+        ``constraints_created``, ``elapsed``, ``database``.
+
+    Example::
+
+        import kglite
+
+        g = kglite.load("graph.kgl")
+        kglite.to_neo4j(g, "bolt://localhost:7687", auth=("neo4j", "password"))
+    """
+    ...
+
 class KnowledgeGraph:
     """A high-performance knowledge graph with typed nodes, connections, and
     a fluent query API backed by Rust.

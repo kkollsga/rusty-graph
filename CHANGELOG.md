@@ -5,6 +5,16 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.17] - 2026-03-30
+
+### Added
+- `kglite.to_neo4j(graph, uri, ...)` — push graph data directly to a Neo4j database using batched UNWIND operations. Supports `clear`/`merge` modes, selection export, and verbose progress. Requires the `neo4j` package (`pip install neo4j` or `pip install kglite[neo4j]`).
+- **ResultView**: Polars-style table display — `repr()` and `print()` now show a bordered table with column headers. Large results show first 10 + last 5 rows with `…` separator.
+- **ResultView**: Improved `help(ResultView)` with quick-reference cheat sheet and examples on all methods.
+
+### Fixed
+- **code_tree**: Parse output (`Found N files`) now respects `verbose=False` — silent by default.
+
 ## [0.6.16] - 2026-03-30
 
 ### Changed
