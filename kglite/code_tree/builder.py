@@ -407,18 +407,22 @@ def _build_type_relationship_edges(
     def resolve(name: str) -> str:
         return name_to_qname.get(name, name)
 
+    def resolve_owner(qualified_name: str) -> str:
+        """Extract owner from a qualified method name and resolve to canonical qname."""
+        for sep in ("::", "."):
+            if sep in qualified_name:
+                owner = qualified_name.rsplit(sep, 1)[0]
+                # Extract simple name and resolve to canonical qualified_name
+                simple = owner.rsplit(sep, 1)[-1] if sep in owner else owner
+                return name_to_qname.get(simple, owner)
+        return qualified_name
+
     for tr in type_rels:
         if tr.relationship == "inherent":
             for method in tr.methods:
-                for sep in ("::", "."):
-                    if sep in method.qualified_name:
-                        owner = method.qualified_name.rsplit(sep, 1)[0]
-                        break
-                else:
-                    owner = method.qualified_name
                 has_method_edges.append(
                     {
-                        "owner": owner,
+                        "owner": resolve_owner(method.qualified_name),
                         "method": method.qualified_name,
                     }
                 )
@@ -441,16 +445,12 @@ def _build_type_relationship_edges(
                             "name": tr.target_type,
                             "is_external": True,
                         }
+                        # Register so resolve_owner() can map methods
+                        name_to_qname[tr.target_type] = resolved_target
             for method in tr.methods:
-                for sep in ("::", "."):
-                    if sep in method.qualified_name:
-                        owner = method.qualified_name.rsplit(sep, 1)[0]
-                        break
-                else:
-                    owner = method.qualified_name
                 has_method_edges.append(
                     {
-                        "owner": owner,
+                        "owner": resolve_owner(method.qualified_name),
                         "method": method.qualified_name,
                     }
                 )
@@ -817,19 +817,58 @@ def _load_graph(
             columns=["call_lines", "call_count"],
         )
 
+    # Build shared type maps for routing connections to correct node types
+    src_type_map = _build_entity_type_map(result.classes, enums=result.enums)
+    tgt_type_map = _build_entity_type_map(
+        result.classes,
+        interfaces=result.interfaces,
+    )
+    all_type_map = _build_entity_type_map(
+        result.classes,
+        interfaces=result.interfaces,
+        enums=result.enums,
+    )
+    # Include auto-created external stubs in type maps
+    if external_traits:
+        for t in external_traits:
+            all_type_map[t["name"]] = "Trait"
+            all_type_map[t["qualified_name"]] = "Trait"
+    if external_classes:
+        for c in external_classes:
+            src_type_map[c["name"]] = "Class"
+            src_type_map[c["qualified_name"]] = "Class"
+            all_type_map[c["name"]] = "Class"
+            all_type_map[c["qualified_name"]] = "Class"
+
     if implements_edges:
         df = pd.DataFrame(implements_edges)
         _add_typed_connections(
-            graph, df, "IMPLEMENTS", "type_name", "interface_name", result.classes, result.interfaces
+            graph,
+            df,
+            "IMPLEMENTS",
+            "type_name",
+            "interface_name",
+            src_type_map,
+            tgt_type_map,
         )
 
     if extends_edges:
         df = pd.DataFrame(extends_edges)
-        _add_typed_connections_same(graph, df, "EXTENDS", "child_name", "parent_name", result.classes)
+        _add_typed_connections(
+            graph,
+            df,
+            "EXTENDS",
+            "child_name",
+            "parent_name",
+            src_type_map,
+            src_type_map,
+            src_default="Class",
+            tgt_default="Class",
+        )
 
     if has_method_edges:
         df = pd.DataFrame(has_method_edges)
-        _add_has_method_connections(graph, df, result.classes, result.interfaces)
+        _add_has_method_connections(graph, df, all_type_map)
 
     if import_edges:
         df = pd.DataFrame(import_edges)
@@ -918,64 +957,9 @@ def _load_graph(
     return graph
 
 
-def _add_typed_connections(graph, df, conn_type, source_field, target_field, classes, interfaces):
-    """Add connections where source/target types depend on the entity kind."""
-    src_type_map = {}
-    for c in classes:
-        src_type_map[c.name] = NODE_TYPE_MAP[c.kind]
-        src_type_map[c.qualified_name] = NODE_TYPE_MAP[c.kind]
-
-    tgt_type_map = {}
-    for i in interfaces:
-        tgt_type_map[i.name] = NODE_TYPE_MAP[i.kind]
-        tgt_type_map[i.qualified_name] = NODE_TYPE_MAP[i.kind]
-
-    groups: dict[tuple[str, str], list] = defaultdict(list)
-    for _, row in df.iterrows():
-        src_nt = src_type_map.get(row[source_field], "Struct")
-        tgt_nt = tgt_type_map.get(row[target_field], "Trait")
-        groups[(src_nt, tgt_nt)].append(row.to_dict())
-
-    for (src_nt, tgt_nt), rows in groups.items():
-        sub_df = pd.DataFrame(rows)
-        graph.add_connections(
-            data=sub_df,
-            connection_type=conn_type,
-            source_type=src_nt,
-            source_id_field=source_field,
-            target_type=tgt_nt,
-            target_id_field=target_field,
-        )
-
-
-def _add_typed_connections_same(graph, df, conn_type, source_field, target_field, classes):
-    """Add connections between same-type entities (e.g. Class EXTENDS Class)."""
-    type_map = {}
-    for c in classes:
-        type_map[c.name] = NODE_TYPE_MAP[c.kind]
-        type_map[c.qualified_name] = NODE_TYPE_MAP[c.kind]
-
-    groups: dict[tuple[str, str], list] = defaultdict(list)
-    for _, row in df.iterrows():
-        src_nt = type_map.get(row[source_field], "Class")
-        tgt_nt = type_map.get(row[target_field], "Class")
-        groups[(src_nt, tgt_nt)].append(row.to_dict())
-
-    for (src_nt, tgt_nt), rows in groups.items():
-        sub_df = pd.DataFrame(rows)
-        graph.add_connections(
-            data=sub_df,
-            connection_type=conn_type,
-            source_type=src_nt,
-            source_id_field=source_field,
-            target_type=tgt_nt,
-            target_id_field=target_field,
-        )
-
-
-def _add_has_method_connections(graph, df, classes, interfaces=None):
-    """Add HAS_METHOD connections, routing through correct source node type."""
-    type_map = {}
+def _build_entity_type_map(classes, interfaces=None, enums=None):
+    """Build a name/qualified_name → graph node type map from all entity types."""
+    type_map: dict[str, str] = {}
     for c in classes:
         type_map[c.name] = NODE_TYPE_MAP[c.kind]
         type_map[c.qualified_name] = NODE_TYPE_MAP[c.kind]
@@ -983,7 +967,45 @@ def _add_has_method_connections(graph, df, classes, interfaces=None):
         for i in interfaces:
             type_map[i.name] = NODE_TYPE_MAP[i.kind]
             type_map[i.qualified_name] = NODE_TYPE_MAP[i.kind]
+    if enums:
+        for e in enums:
+            type_map[e.name] = "Enum"
+            type_map[e.qualified_name] = "Enum"
+    return type_map
 
+
+def _add_typed_connections(
+    graph,
+    df,
+    conn_type,
+    source_field,
+    target_field,
+    src_type_map,
+    tgt_type_map,
+    src_default="Struct",
+    tgt_default="Trait",
+):
+    """Add connections where source/target types depend on the entity kind."""
+    groups: dict[tuple[str, str], list] = defaultdict(list)
+    for _, row in df.iterrows():
+        src_nt = src_type_map.get(row[source_field], src_default)
+        tgt_nt = tgt_type_map.get(row[target_field], tgt_default)
+        groups[(src_nt, tgt_nt)].append(row.to_dict())
+
+    for (src_nt, tgt_nt), rows in groups.items():
+        sub_df = pd.DataFrame(rows)
+        graph.add_connections(
+            data=sub_df,
+            connection_type=conn_type,
+            source_type=src_nt,
+            source_id_field=source_field,
+            target_type=tgt_nt,
+            target_id_field=target_field,
+        )
+
+
+def _add_has_method_connections(graph, df, type_map):
+    """Add HAS_METHOD connections, routing through correct source node type."""
     schema = graph.schema()
     # Pick a default type from what's available
     default_type = None
@@ -1245,6 +1267,8 @@ def build(
         name_to_qname[c.name] = c.qualified_name
     for i in result.interfaces:
         name_to_qname[i.name] = i.qualified_name
+    for e in result.enums:
+        name_to_qname[e.name] = e.qualified_name
 
     contains_edges = _build_contains_edges(result.files)
     call_edges_df = _build_call_edges(result.functions, excluded_names=noise_names)

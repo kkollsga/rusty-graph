@@ -105,6 +105,20 @@ class Spatial:
         return "centroid_lon"
 
 
+def repo_tree(
+    repo: str,
+    **kwargs,
+) -> "KnowledgeGraph":
+    """Clone a GitHub repository and build a knowledge graph from its source code.
+
+    Convenience re-export of :func:`kglite.code_tree.repo_tree`.
+    Requires the ``[code-tree]`` extra: ``pip install kglite[code-tree]``.
+    """
+    from .code_tree import repo_tree as _repo_tree
+
+    return _repo_tree(repo, **kwargs)
+
+
 __all__ = [
     "__version__",
     "KnowledgeGraph",
@@ -113,6 +127,7 @@ __all__ = [
     "ResultIter",
     "load",
     "from_blueprint",
+    "repo_tree",
     "Agg",
     "Spatial",
 ]
