@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -18,6 +19,7 @@ def repo_tree(
     save_to: str | Path | None = None,
     clone_to: str | Path | None = None,
     branch: str | None = None,
+    token: str | None = None,
     verbose: bool = False,
     include_tests: bool = True,
 ) -> kglite.KnowledgeGraph:
@@ -37,6 +39,8 @@ def repo_tree(
             after the graph is built.
         branch: Branch, tag, or commit to clone. Defaults to the repo's
             default branch.
+        token: GitHub personal access token for private repositories.
+            Can also be set via the ``GITHUB_TOKEN`` environment variable.
         verbose: Print progress messages.
         include_tests: Include test files in the graph (default *True*).
 
@@ -64,8 +68,10 @@ def repo_tree(
             f"repo must be in 'org/repo' format, got: {repo!r}"
         )
 
+    token = token or os.environ.get("GITHUB_TOKEN")
+
     if clone_to is not None:
-        repo_path = _clone(repo, Path(clone_to), branch=branch, verbose=verbose)
+        repo_path = _clone(repo, Path(clone_to), branch=branch, token=token, verbose=verbose)
         return build(
             str(repo_path),
             save_to=save_to,
@@ -76,7 +82,7 @@ def repo_tree(
     # Clone to a tempdir and clean up afterwards
     tmp = tempfile.mkdtemp(prefix="kglite_repo_")
     try:
-        repo_path = _clone(repo, Path(tmp), branch=branch, verbose=verbose)
+        repo_path = _clone(repo, Path(tmp), branch=branch, token=token, verbose=verbose)
         return build(
             str(repo_path),
             save_to=save_to,
@@ -88,7 +94,12 @@ def repo_tree(
 
 
 def _clone(
-    repo: str, parent: Path, *, branch: str | None = None, verbose: bool = False
+    repo: str,
+    parent: Path,
+    *,
+    branch: str | None = None,
+    token: str | None = None,
+    verbose: bool = False,
 ) -> Path:
     """Shallow-clone a GitHub repo into *parent/org/name*."""
     org, name = repo.split("/", 1)
@@ -100,7 +111,11 @@ def _clone(
         return repo_path
 
     repo_path.parent.mkdir(parents=True, exist_ok=True)
-    url = f"https://github.com/{repo}.git"
+
+    if token:
+        url = f"https://x-access-token:{token}@github.com/{repo}.git"
+    else:
+        url = f"https://github.com/{repo}.git"
 
     cmd = ["git", "clone", "--depth", "1"]
     if branch:
@@ -108,11 +123,16 @@ def _clone(
     cmd += [url, str(repo_path)]
 
     if verbose:
-        print(f"Cloning {url} ...")
+        # Don't print the token
+        print(f"Cloning https://github.com/{repo}.git ...")
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if result.returncode != 0:
-        raise RuntimeError(f"git clone failed: {result.stderr.strip()}")
+        # Strip token from error messages
+        stderr = result.stderr.strip()
+        if token:
+            stderr = stderr.replace(token, "***")
+        raise RuntimeError(f"git clone failed: {stderr}")
 
     if verbose:
         print(f"Cloned to {repo_path}")
