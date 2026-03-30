@@ -388,12 +388,13 @@ def _build_call_edges(
 def _build_type_relationship_edges(
     type_rels: list[TypeRelationship],
     known_interfaces: set[str],
+    known_classes: set[str],
     name_to_qname: dict[str, str],
-) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict]]:
     """Build implements, extends, and has_method edges from TypeRelationships.
 
-    Returns (implements_edges, extends_edges, has_method_edges, external_traits).
-    External traits are those referenced in impl blocks but not defined locally.
+    Returns (implements_edges, extends_edges, has_method_edges, external_traits, external_classes).
+    External traits/classes are those referenced but not defined locally.
     """
     implements_edges = []
     extends_edges = []
@@ -401,6 +402,7 @@ def _build_type_relationship_edges(
     seen_impl = set()
     seen_ext = set()
     external_traits: dict[str, dict] = {}  # name -> node dict
+    external_classes: dict[str, dict] = {}  # name -> node dict
 
     def resolve(name: str) -> str:
         return name_to_qname.get(name, name)
@@ -456,14 +458,37 @@ def _build_type_relationship_edges(
             key = (tr.source_type, tr.target_type)
             if key not in seen_ext:
                 seen_ext.add(key)
+                resolved_source = resolve(tr.source_type)
+                resolved_target = resolve(tr.target_type)
                 extends_edges.append(
                     {
-                        "child_name": resolve(tr.source_type),
-                        "parent_name": resolve(tr.target_type),
+                        "child_name": resolved_source,
+                        "parent_name": resolved_target,
                     }
                 )
+                # Track external classes (source or target not locally defined)
+                if tr.source_type not in known_classes:
+                    if resolved_source not in external_classes:
+                        external_classes[resolved_source] = {
+                            "qualified_name": resolved_source,
+                            "name": tr.source_type,
+                            "is_external": True,
+                        }
+                if tr.target_type not in known_classes:
+                    if resolved_target not in external_classes:
+                        external_classes[resolved_target] = {
+                            "qualified_name": resolved_target,
+                            "name": tr.target_type,
+                            "is_external": True,
+                        }
 
-    return implements_edges, extends_edges, has_method_edges, list(external_traits.values())
+    return (
+        implements_edges,
+        extends_edges,
+        has_method_edges,
+        list(external_traits.values()),
+        list(external_classes.values()),
+    )
 
 
 def _build_import_edges(files: list[FileInfo], known_modules: set[str]) -> list[dict]:
@@ -548,6 +573,7 @@ def _load_graph(
     defines_edges,
     uses_type_edges,
     external_traits=None,
+    external_classes=None,
     ffi_exposes_edges=None,
     project_info: ProjectInfo | None = None,
 ) -> kglite.KnowledgeGraph:
@@ -718,6 +744,17 @@ def _load_graph(
         graph.add_nodes(
             data=df,
             node_type="Trait",
+            unique_id_field="qualified_name",
+            node_title_field="name",
+            conflict_handling="skip",
+        )
+
+    # Auto-create Class nodes for external base classes referenced in extends
+    if external_classes:
+        df = pd.DataFrame(external_classes)
+        graph.add_nodes(
+            data=df,
+            node_type="Class",
             unique_id_field="qualified_name",
             node_title_field="name",
             conflict_handling="skip",
@@ -1211,9 +1248,17 @@ def build(
 
     contains_edges = _build_contains_edges(result.files)
     call_edges_df = _build_call_edges(result.functions, excluded_names=noise_names)
-    implements_edges, extends_edges, has_method_edges, external_traits = _build_type_relationship_edges(
+    known_classes = {c.name for c in result.classes}
+    (
+        implements_edges,
+        extends_edges,
+        has_method_edges,
+        external_traits,
+        external_classes,
+    ) = _build_type_relationship_edges(
         result.type_relationships,
         known_interfaces,
+        known_classes,
         name_to_qname,
     )
     import_edges = _build_import_edges(result.files, known_modules)
@@ -1239,6 +1284,7 @@ def build(
         defines_edges,
         uses_type_edges,
         external_traits,
+        external_classes,
         ffi_exposes_edges,
         project_info=project_info,
     )
