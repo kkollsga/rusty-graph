@@ -54,7 +54,7 @@ def _parse_all(src_root: Path, verbose: bool = False) -> tuple[ParseResult, froz
     for parser in parsers:
         if verbose:
             print(f"Parsing {parser.language_name} files...")
-        result = parser.parse_directory(src_root)
+        result = parser.parse_directory(src_root, verbose=verbose)
         combined.merge(result)
         noise_names.update(parser.noise_names)
     return combined, frozenset(noise_names)
@@ -121,7 +121,7 @@ def _parse_all_roots(
             label = root.path.relative_to(project_root)
             if verbose:
                 print(f"Parsing {parser.language_name} files in {label}/...")
-            result = parser.parse_directory(root.path)
+            result = parser.parse_directory(root.path, verbose=verbose)
 
             # Adjust all file paths to be relative to project_root
             # (parsers produce paths relative to the source root)

@@ -35,13 +35,14 @@ class LanguageParser(ABC):
         """Parse a single source file and return extracted entities."""
         ...
 
-    def parse_directory(self, src_root: Path) -> ParseResult:
+    def parse_directory(self, src_root: Path, *, verbose: bool = False) -> ParseResult:
         """Parse all matching files under src_root."""
         combined = ParseResult()
         source_files = []
         for ext in self.file_extensions:
             source_files.extend(sorted(src_root.rglob(f"*{ext}")))
-        print(f"  Found {len(source_files)} {self.language_name} files")
+        if verbose:
+            print(f"  Found {len(source_files)} {self.language_name} files")
         for filepath in source_files:
             result = self.parse_file(filepath, src_root)
             combined.merge(result)
