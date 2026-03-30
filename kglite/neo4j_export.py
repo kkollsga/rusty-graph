@@ -5,23 +5,21 @@ from __future__ import annotations
 from collections import defaultdict
 import json
 import time
-from typing import Any, Optional
-
-__all__ = ["to_neo4j"]
+import typing
 
 
 def to_neo4j(
     graph,
     uri: str,
     *,
-    auth: Optional[tuple[str, str]] = None,
+    auth: tuple[str, str] | None = None,
     database: str = "neo4j",
     batch_size: int = 5000,
     clear: bool = False,
     merge: bool = False,
-    selection_only: Optional[bool] = None,
+    selection_only: bool | None = None,
     verbose: bool = False,
-) -> dict[str, Any]:
+) -> dict[str, typing.Any]:
     """Push graph data to a Neo4j database.
 
     Extracts all nodes and edges (or the current selection) and writes
@@ -114,7 +112,7 @@ def _push(
     clear: bool,
     merge: bool,
     verbose: bool,
-) -> dict[str, Any]:
+) -> dict[str, typing.Any]:
     """Push extracted data to Neo4j."""
     nodes_created = 0
     rels_created = 0
@@ -237,7 +235,7 @@ def _sanitize_props(raw: dict, exclude: set[str] | None = None, id_key: str | No
     - Converts dict values to JSON strings (Neo4j can't store dicts)
     - Drops None values
     """
-    out: dict[str, Any] = {}
+    out: dict[str, typing.Any] = {}
     for k, v in raw.items():
         if exclude and k in exclude:
             continue

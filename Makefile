@@ -57,11 +57,12 @@ clippy:
 lint-py:
 	$(ACTIVATE) && ruff format --check . && ruff check .
 
-## Run all lint checks (Rust + Python) — use before pushing
+## Run all lint checks (Rust + Python + stubs) — use before pushing
 lint:
 	cargo fmt -- --check
 	cargo clippy -- -D warnings
 	$(ACTIVATE) && ruff format --check . && ruff check .
+	$(ACTIVATE) && python -m mypy.stubtest kglite --ignore-missing-stub --mypy-config-file mypy_stubtest.ini --allowlist stubtest_allowlist.txt
 
 ## Run tests with coverage report
 cov:
