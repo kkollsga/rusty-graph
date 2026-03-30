@@ -20,6 +20,7 @@ use std::collections::HashSet;
 
 /// A single connection summary for display: connection type, target type, id, title.
 #[derive(Clone)]
+#[allow(dead_code)]
 struct ConnectionSummary {
     connection_type: String,
     target_type: String,
@@ -30,14 +31,41 @@ struct ConnectionSummary {
 
 /// Connection summaries for a single node.
 #[derive(Clone, Default)]
+#[allow(dead_code)]
 struct NodeConnections {
     connections: Vec<ConnectionSummary>,
 }
 
-/// Lazy result view — data stays in Rust until accessed from Python.
+/// Lazy result container — data stays in Rust until you access it.
 ///
-/// Returned by `cypher()`, centrality methods, `collect()`, and `sample()`.
-/// Supports `len()`, indexing, iteration, `to_list()`, and `to_df()`.
+/// Returned by ``cypher()``, centrality methods, ``collect()`` (flat),
+/// and ``sample()``.
+///
+/// Data is only converted to Python objects when you actually access rows
+/// (via iteration, indexing, ``to_list()``, or ``to_df()``).  This makes
+/// ``cypher()`` calls fast even for large result sets — the cost is
+/// deferred to when you consume the data.
+///
+/// Quick reference::
+///
+///     r = g.cypher("MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age")
+///
+///     len(r)           # row count (O(1), no conversion)
+///     bool(r)          # True if non-empty
+///     r[0]             # single row as dict  {'n.name': 'Alice', 'n.age': 30}
+///     r[-1]            # last row
+///     r[1:3]           # slice → new ResultView
+///     r.columns        # column names
+///     r.head(5)        # first 5 rows → new ResultView
+///     r.tail(5)        # last 5 rows → new ResultView
+///     r.to_list()      # all rows as list[dict]
+///     r.to_df()        # pandas DataFrame
+///     r.to_gdf()       # GeoDataFrame (requires geopandas)
+///     r.stats          # mutation stats (CREATE/SET/DELETE only)
+///     r.profile        # PROFILE stats (only with "PROFILE MATCH ...")
+///
+///     for row in r:    # iterate rows as dicts (one at a time)
+///         print(row)
 #[pyclass(name = "ResultView")]
 pub struct ResultView {
     columns: Vec<String>,
@@ -386,29 +414,28 @@ impl ResultView {
     }
 
     fn __repr__(&self) -> String {
-        let cols: Vec<&str> = self.columns.iter().map(|s| s.as_str()).collect();
-        format!("ResultView({} rows, columns={:?})", self.rows.len(), cols)
+        format_table(&self.columns, &self.rows)
     }
 
     fn __str__(&self) -> String {
-        if self.rows.len() <= 3 {
-            format_result_view_multiline(
-                &self.columns,
-                &self.rows,
-                self.node_connections.as_deref(),
-            )
-        } else {
-            self.__repr__()
-        }
+        self.__repr__()
     }
 
     /// Column names as a list of strings.
+    ///
+    /// Example::
+    ///
+    ///     r = g.cypher("MATCH (n) RETURN n.name, n.age")
+    ///     r.columns   # ['n.name', 'n.age']
     #[getter]
     fn columns(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.columns.clone().into_py_any(py)
     }
 
-    /// Mutation statistics, or None for read queries.
+    /// Mutation statistics (CREATE/SET/DELETE queries), or None for reads.
+    ///
+    /// Returns a dict with keys like ``nodes_created``, ``properties_set``,
+    /// ``relationships_created``, etc.
     #[getter]
     fn stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match &self.stats {
@@ -438,7 +465,11 @@ impl ResultView {
         }
     }
 
-    /// Convert all rows to a Python list of dicts (full materialization).
+    /// Materialize all rows as a list of dicts.
+    ///
+    /// Example::
+    ///
+    ///     r.to_list()  # [{'name': 'Alice', 'age': 30}, ...]
     fn to_list(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let list = pyo3::types::PyList::empty(py);
         for i in 0..self.rows.len() {
@@ -447,7 +478,12 @@ impl ResultView {
         Ok(list.into_any().unbind())
     }
 
-    /// Return a new ResultView with the first n rows (default 5).
+    /// First *n* rows as a new ResultView (default 5). Data stays lazy.
+    ///
+    /// Example::
+    ///
+    ///     r.head()     # first 5 rows
+    ///     r.head(10)   # first 10 rows
     #[pyo3(signature = (n=5))]
     fn head(&self, n: usize) -> Self {
         let take = n.min(self.rows.len());
@@ -460,7 +496,12 @@ impl ResultView {
         }
     }
 
-    /// Return a new ResultView with the last n rows (default 5).
+    /// Last *n* rows as a new ResultView (default 5). Data stays lazy.
+    ///
+    /// Example::
+    ///
+    ///     r.tail()     # last 5 rows
+    ///     r.tail(10)   # last 10 rows
     #[pyo3(signature = (n=5))]
     fn tail(&self, n: usize) -> Self {
         let len = self.rows.len();
@@ -477,7 +518,12 @@ impl ResultView {
         }
     }
 
-    /// Convert to a pandas DataFrame.
+    /// Materialize as a pandas DataFrame.
+    ///
+    /// Example::
+    ///
+    ///     df = r.to_df()
+    ///     df.plot(x='year', y='count')
     fn to_df(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         preprocessed_result_to_dataframe(py, &self.columns, &self.rows)
     }
@@ -571,6 +617,154 @@ fn format_preprocessed_value(pv: &PreProcessedValue) -> String {
     }
 }
 
+/// Format a ResultView as a Polars-style table.
+///
+/// Shows `shape: (rows, cols)` header, a bordered table with column names,
+/// and for large results shows the first and last rows with `…` in between.
+fn format_table(columns: &[String], rows: &[Vec<PreProcessedValue>]) -> String {
+    if rows.is_empty() {
+        return format!("shape: (0, {})\n(empty)", columns.len());
+    }
+
+    let n = rows.len();
+    let max_col_width = 30;
+    let max_display_rows = 20;
+
+    // Decide which rows to show
+    let (show_head, show_tail, truncated) = if n <= max_display_rows {
+        (n, 0, false)
+    } else {
+        (10, 5, true)
+    };
+
+    // Format all visible cell values
+    let mut formatted: Vec<Vec<String>> = Vec::new();
+    for row in rows.iter().take(show_head) {
+        formatted.push(
+            row.iter()
+                .map(|v| truncate_middle(&format_preprocessed_value(v), max_col_width))
+                .collect(),
+        );
+    }
+    if truncated {
+        for row in rows.iter().skip(n - show_tail) {
+            formatted.push(
+                row.iter()
+                    .map(|v| truncate_middle(&format_preprocessed_value(v), max_col_width))
+                    .collect(),
+            );
+        }
+    }
+
+    // Compute column widths (header vs data)
+    let num_cols = columns.len();
+    let mut widths: Vec<usize> = columns.iter().map(|c| c.len()).collect();
+    for row in &formatted {
+        for (j, cell) in row.iter().enumerate() {
+            if j < num_cols {
+                widths[j] = widths[j].max(cell.len());
+            }
+        }
+    }
+    if truncated {
+        // Ensure columns are wide enough for "…"
+        for w in &mut widths {
+            *w = (*w).max(1);
+        }
+    }
+
+    let mut buf = String::with_capacity(n * 100);
+
+    // Shape header
+    buf.push_str(&format!("shape: ({}, {})\n", n, num_cols));
+
+    // Top border: ┌──────┬──────┐
+    buf.push('┌');
+    for (j, w) in widths.iter().enumerate() {
+        if j > 0 {
+            buf.push('┬');
+        }
+        for _ in 0..(w + 2) {
+            buf.push('─');
+        }
+    }
+    buf.push_str("┐\n");
+
+    // Header row: │ col1 ┆ col2 │
+    buf.push('│');
+    for (j, col) in columns.iter().enumerate() {
+        if j > 0 {
+            buf.push_str(" ┆");
+        }
+        buf.push_str(&format!(" {:width$}", col, width = widths[j]));
+    }
+    buf.push_str(" │\n");
+
+    // Separator: ╞══════╪══════╡
+    buf.push('╞');
+    for (j, w) in widths.iter().enumerate() {
+        if j > 0 {
+            buf.push('╪');
+        }
+        for _ in 0..(w + 2) {
+            buf.push('═');
+        }
+    }
+    buf.push_str("╡\n");
+
+    // Data rows (head)
+    for row in &formatted[..show_head] {
+        buf.push('│');
+        for (j, w) in widths.iter().enumerate() {
+            if j > 0 {
+                buf.push_str(" ┆");
+            }
+            let cell = row.get(j).map(|s| s.as_str()).unwrap_or("");
+            buf.push_str(&format!(" {:width$}", cell, width = *w));
+        }
+        buf.push_str(" │\n");
+    }
+
+    // Truncation row: │ …    ┆ …    │
+    if truncated {
+        buf.push('│');
+        for (j, w) in widths.iter().enumerate() {
+            if j > 0 {
+                buf.push_str(" ┆");
+            }
+            buf.push_str(&format!(" {:width$}", "…", width = *w));
+        }
+        buf.push_str(" │\n");
+
+        // Tail rows
+        for row in &formatted[show_head..] {
+            buf.push('│');
+            for (j, w) in widths.iter().enumerate() {
+                if j > 0 {
+                    buf.push_str(" ┆");
+                }
+                let cell = row.get(j).map(|s| s.as_str()).unwrap_or("");
+                buf.push_str(&format!(" {:width$}", cell, width = *w));
+            }
+            buf.push_str(" │\n");
+        }
+    }
+
+    // Bottom border: └──────┴──────┘
+    buf.push('└');
+    for (j, w) in widths.iter().enumerate() {
+        if j > 0 {
+            buf.push('┴');
+        }
+        for _ in 0..(w + 2) {
+            buf.push('─');
+        }
+    }
+    buf.push_str("┘\n");
+
+    buf
+}
+
 /// Truncate a string in the middle if it exceeds `max_len`, keeping both ends visible.
 fn truncate_middle(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
@@ -580,6 +774,7 @@ fn truncate_middle(s: &str, max_len: usize) -> String {
     format!("{} ... {}", &s[..keep], &s[s.len() - keep..])
 }
 
+#[allow(dead_code)]
 fn format_result_view_multiline(
     columns: &[String],
     rows: &[Vec<PreProcessedValue>],

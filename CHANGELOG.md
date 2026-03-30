@@ -5,6 +5,13 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.16] - 2026-03-30
+
+### Changed
+- **ResultView**: Polars-style table display — `repr()` and `print()` now show a bordered table with column headers instead of `ResultView(N rows, columns=[...])`. Large results show first 10 + last 5 rows with `…` separator.
+- **ResultView**: Improved `help(ResultView)` with quick-reference cheat sheet and examples on all methods.
+- **code_tree**: Parse output (`Found N files`) now respects `verbose=False` — silent by default.
+
 ## [0.6.15] - 2026-03-30
 
 ### Added
