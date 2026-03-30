@@ -64,9 +64,7 @@ def repo_tree(
         g = repo_tree("pydata/xarray", clone_to="./repos", save_to="xarray.kgl")
     """
     if "/" not in repo or repo.count("/") != 1:
-        raise ValueError(
-            f"repo must be in 'org/repo' format, got: {repo!r}"
-        )
+        raise ValueError(f"repo must be in 'org/repo' format, got: {repo!r}")
 
     token = token or os.environ.get("GITHUB_TOKEN")
 
