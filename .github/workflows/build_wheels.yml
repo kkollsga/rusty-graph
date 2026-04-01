@@ -36,28 +36,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Wait for CI workflow
-        uses: lewagon/wait-on-check-action@v1.5.0
+        uses: lewagon/wait-on-check-action@v1.6.0
         with:
           ref: ${{ github.sha }}
           check-name: 'Rust checks'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 15
       - name: Wait for Python tests (3.10)
-        uses: lewagon/wait-on-check-action@v1.5.0
+        uses: lewagon/wait-on-check-action@v1.6.0
         with:
           ref: ${{ github.sha }}
           check-name: 'Python tests (py3.10)'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 15
       - name: Wait for Python tests (3.12)
-        uses: lewagon/wait-on-check-action@v1.5.0
+        uses: lewagon/wait-on-check-action@v1.6.0
         with:
           ref: ${{ github.sha }}
           check-name: 'Python tests (py3.12)'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 15
       - name: Wait for Python lint
-        uses: lewagon/wait-on-check-action@v1.5.0
+        uses: lewagon/wait-on-check-action@v1.6.0
         with:
           ref: ${{ github.sha }}
           check-name: 'Python lint'
