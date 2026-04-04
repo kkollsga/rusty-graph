@@ -2,7 +2,7 @@
 use crate::datatypes::values::{FilterCondition, Value};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
-use petgraph::visit::NodeIndexable;
+use petgraph::visit::{IntoEdgeReferences, NodeIndexable};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -28,6 +28,18 @@ impl InternedKey {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         s.hash(&mut hasher);
         InternedKey(hasher.finish())
+    }
+
+    /// Get the raw u64 hash value. Used for disk storage.
+    #[inline]
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+
+    /// Reconstruct from a raw u64 hash value. Used when loading from disk.
+    #[inline]
+    pub fn from_u64(v: u64) -> Self {
+        InternedKey(v)
     }
 }
 
@@ -134,6 +146,11 @@ impl StringInterner {
             .get(&key)
             .map(|s| s.as_str())
             .expect("BUG: InternedKey not found in StringInterner")
+    }
+
+    /// Iterate over all (key, string) pairs in the interner.
+    pub fn iter(&self) -> impl Iterator<Item = (InternedKey, &str)> {
+        self.strings.iter().map(|(&k, v)| (k, v.as_str()))
     }
 
     /// Resolve an InternedKey back to its string, returning None if unknown.
@@ -511,6 +528,29 @@ impl PropertyStorage {
     }
 
     /// Iterate over property keys as strings. Requires interner for resolution.
+    /// Drain all property (InternedKey, Value) pairs out of this storage.
+    /// Used by mapped mode to push properties into a ColumnStore.
+    /// After this call, self is left as an empty Map.
+    pub fn drain_to_interned_pairs(
+        &mut self,
+        _interner: &StringInterner,
+    ) -> Vec<(InternedKey, Value)> {
+        match std::mem::replace(self, PropertyStorage::Map(HashMap::new())) {
+            PropertyStorage::Map(map) => map.into_iter().collect(),
+            PropertyStorage::Compact { schema, values } => schema
+                .slots
+                .iter()
+                .zip(values)
+                .filter(|(_, v)| !matches!(v, Value::Null))
+                .map(|(ik, v)| (*ik, v))
+                .collect(),
+            PropertyStorage::Columnar { .. } => {
+                // Already columnar — nothing to drain
+                Vec::new()
+            }
+        }
+    }
+
     pub fn keys<'a>(
         &'a self,
         interner: &'a StringInterner,
@@ -761,6 +801,127 @@ pub struct TemporalConfig {
     pub valid_to: String,
 }
 
+/// Per-type ID index. Uses compact u32 keys when all IDs are UniqueId,
+/// falling back to general Value keys otherwise.
+#[derive(Clone, Debug)]
+pub enum TypeIdIndex {
+    /// All IDs are UniqueId(u32) — compact, ~8 bytes per entry.
+    Integer(HashMap<u32, NodeIndex>),
+    /// Mixed ID types — general, ~60 bytes per entry.
+    General(HashMap<Value, NodeIndex>),
+}
+
+impl TypeIdIndex {
+    /// Look up a node by ID value, with type coercion.
+    pub fn get(&self, id: &Value) -> Option<NodeIndex> {
+        match self {
+            TypeIdIndex::Integer(map) => match id {
+                Value::UniqueId(u) => map.get(u).copied(),
+                Value::Int64(i) => {
+                    if *i >= 0 && *i <= u32::MAX as i64 {
+                        map.get(&(*i as u32)).copied()
+                    } else {
+                        None
+                    }
+                }
+                Value::Float64(f) => {
+                    if f.fract() == 0.0 {
+                        let i = *f as i64;
+                        if i >= 0 && i <= u32::MAX as i64 {
+                            map.get(&(i as u32)).copied()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+            TypeIdIndex::General(map) => {
+                if let Some(&idx) = map.get(id) {
+                    return Some(idx);
+                }
+                // Type coercion fallback
+                match id {
+                    Value::Int64(i) => {
+                        if *i >= 0 && *i <= u32::MAX as i64 {
+                            map.get(&Value::UniqueId(*i as u32)).copied()
+                        } else {
+                            None
+                        }
+                    }
+                    Value::UniqueId(u) => map.get(&Value::Int64(*u as i64)).copied(),
+                    Value::Float64(f) => {
+                        if f.fract() == 0.0 {
+                            let i = *f as i64;
+                            if let Some(&idx) = map.get(&Value::Int64(i)) {
+                                return Some(idx);
+                            }
+                            if i >= 0 && i <= u32::MAX as i64 {
+                                return map.get(&Value::UniqueId(i as u32)).copied();
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// Insert an ID → NodeIndex mapping.
+    pub fn insert(&mut self, id: Value, idx: NodeIndex) {
+        match self {
+            TypeIdIndex::Integer(map) => {
+                if let Value::UniqueId(u) = id {
+                    map.insert(u, idx);
+                } else {
+                    // Demote to General
+                    let mut general: HashMap<Value, NodeIndex> =
+                        map.drain().map(|(k, v)| (Value::UniqueId(k), v)).collect();
+                    general.insert(id, idx);
+                    *self = TypeIdIndex::General(general);
+                }
+            }
+            TypeIdIndex::General(map) => {
+                map.insert(id, idx);
+            }
+        }
+    }
+
+    /// Check if the index contains a given ID.
+    #[allow(dead_code)]
+    pub fn contains_key(&self, id: &Value) -> bool {
+        self.get(id).is_some()
+    }
+
+    /// Number of entries.
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        match self {
+            TypeIdIndex::Integer(map) => map.len(),
+            TypeIdIndex::General(map) => map.len(),
+        }
+    }
+
+    /// Iterate over all (Value, NodeIndex) pairs.
+    pub fn iter(&self) -> Box<dyn Iterator<Item = (Value, NodeIndex)> + '_> {
+        match self {
+            TypeIdIndex::Integer(map) => {
+                Box::new(map.iter().map(|(&k, &v)| (Value::UniqueId(k), v)))
+            }
+            TypeIdIndex::General(map) => Box::new(map.iter().map(|(k, &v)| (k.clone(), v))),
+        }
+    }
+}
+
+impl Default for TypeIdIndex {
+    fn default() -> Self {
+        TypeIdIndex::General(HashMap::new())
+    }
+}
+
 /// Lightweight snapshot of a node's data: id, title, type, and properties.
 /// Used as the return type for node queries and traversals.
 #[derive(Clone, Debug)]
@@ -949,7 +1110,7 @@ impl CurrentSelection {
         self.current_node_indices()
             .next()
             .and_then(|idx| graph.graph.node_weight(idx))
-            .map(|node| node.node_type.clone())
+            .map(|node| node.node_type_str(&graph.interner).to_string())
     }
 }
 
@@ -1147,6 +1308,21 @@ impl EmbeddingStore {
 }
 
 /// Core graph storage: a directed graph (petgraph `StableDiGraph`) with fast
+/// Storage mode for the graph. Controls memory layout and spill behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum StorageMode {
+    /// Heap-resident storage. Default for small-to-medium graphs.
+    #[default]
+    Default,
+    /// Memory-mapped columnar storage from the start. Designed for large graphs
+    /// that may approach or exceed available RAM. Properties are stored in
+    /// mmap-backed columns, enabling OS-managed paging.
+    Mapped,
+    /// Fully disk-backed storage. Not yet implemented.
+    /// Designed for very large graphs (100M+ nodes) that exceed available RAM.
+    Disk,
+}
+
 /// type-based indexing and optional property/composite/range/spatial indexes.
 ///
 /// Fields include `type_indices` for O(1) node-type lookup, `property_indices`
@@ -1183,10 +1359,11 @@ pub struct DirGraph {
     /// Persisted list of range index keys so indexes can be rebuilt on load
     #[serde(default)]
     pub(crate) range_index_keys: Vec<IndexKey>,
-    /// Fast O(1) lookup by node ID: node_type -> (id_value -> NodeIndex)
-    /// Lazily built on first use for each node type, skipped during serialization
+    /// Fast O(1) lookup by node ID: node_type -> TypeIdIndex
+    /// Lazily built on first use for each node type, skipped during serialization.
+    /// Uses compact u32 HashMap when all IDs are UniqueId (e.g., Wikidata mapped mode).
     #[serde(skip)]
-    pub(crate) id_indices: HashMap<String, HashMap<Value, NodeIndex>>,
+    pub(crate) id_indices: HashMap<String, TypeIdIndex>,
     /// Fast O(1) lookup for connection types (interned). Populated on first edge access.
     #[serde(skip)]
     pub(crate) connection_types: std::collections::HashSet<InternedKey>,
@@ -1275,6 +1452,9 @@ pub struct DirGraph {
     /// Uses Arc so clones share ownership — only the last clone cleans up.
     #[serde(skip)]
     pub(crate) temp_dirs: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
+    /// Storage mode: Default (heap) or Mapped (mmap-backed columnar from start).
+    #[serde(default)]
+    pub(crate) storage_mode: StorageMode,
     /// If true, Cypher mutations (CREATE, SET, DELETE, REMOVE, MERGE) are rejected
     /// and describe() omits mutation documentation.
     #[serde(skip)]
@@ -1346,6 +1526,7 @@ impl DirGraph {
             memory_limit: None,
             spill_dir: None,
             temp_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
+            storage_mode: StorageMode::Default,
             read_only: false,
             version: 0,
             interner: StringInterner::new(),
@@ -1387,6 +1568,7 @@ impl DirGraph {
             memory_limit: None,
             spill_dir: None,
             temp_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
+            storage_mode: StorageMode::Default,
             read_only: false,
             version: 0,
             interner: StringInterner::new(),
@@ -1425,15 +1607,40 @@ impl DirGraph {
             return; // Already built
         }
 
-        let mut index = HashMap::new();
+        // First pass: check if all IDs are UniqueId
+        let mut all_unique_id = true;
+        let mut entries: Vec<(Value, NodeIndex)> = Vec::new();
 
         if let Some(node_indices) = self.type_indices.get(node_type) {
+            entries.reserve(node_indices.len());
             for &node_idx in node_indices {
                 if let Some(node) = self.graph.node_weight(node_idx) {
-                    index.insert(node.id.clone(), node_idx);
+                    let node_id = node.id().into_owned();
+                    if !matches!(node_id, Value::UniqueId(_)) {
+                        all_unique_id = false;
+                    }
+                    entries.push((node_id, node_idx));
                 }
             }
         }
+
+        let index = if all_unique_id && !entries.is_empty() {
+            // Compact: u32 keys only (~8 bytes per entry vs ~60)
+            let map = entries
+                .into_iter()
+                .filter_map(|(id, idx)| {
+                    if let Value::UniqueId(u) = id {
+                        Some((u, idx))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            TypeIdIndex::Integer(map)
+        } else {
+            // General: mixed ID types
+            TypeIdIndex::General(entries.into_iter().collect())
+        };
 
         self.id_indices.insert(node_type.to_string(), index);
     }
@@ -1466,37 +1673,8 @@ impl DirGraph {
     /// built yet (e.g., after DELETE invalidates id_indices).
     pub fn lookup_by_id_normalized(&self, node_type: &str, id: &Value) -> Option<NodeIndex> {
         if let Some(type_index) = self.id_indices.get(node_type) {
-            // Try direct lookup first
-            if let Some(&idx) = type_index.get(id) {
+            if let Some(idx) = type_index.get(id) {
                 return Some(idx);
-            }
-
-            // If direct lookup fails, try alternative integer representations
-            let result = match id {
-                Value::Int64(i) => {
-                    if *i >= 0 && *i <= u32::MAX as i64 {
-                        type_index.get(&Value::UniqueId(*i as u32)).copied()
-                    } else {
-                        None
-                    }
-                }
-                Value::UniqueId(u) => type_index.get(&Value::Int64(*u as i64)).copied(),
-                Value::Float64(f) => {
-                    if f.fract() == 0.0 {
-                        let i = *f as i64;
-                        if let Some(&idx) = type_index.get(&Value::Int64(i)) {
-                            return Some(idx);
-                        }
-                        if i >= 0 && i <= u32::MAX as i64 {
-                            return type_index.get(&Value::UniqueId(i as u32)).copied();
-                        }
-                    }
-                    None
-                }
-                _ => None,
-            };
-            if result.is_some() {
-                return result;
             }
         }
 
@@ -1505,12 +1683,12 @@ impl DirGraph {
         if let Some(node_indices) = self.type_indices.get(node_type) {
             for &node_idx in node_indices {
                 if let Some(node) = self.graph.node_weight(node_idx) {
-                    let node_id = &node.id;
-                    if node_id == id {
+                    let node_id = node.id();
+                    if &*node_id == id {
                         return Some(node_idx);
                     }
                     // Normalize: check Int64 ↔ UniqueId
-                    match (id, node_id) {
+                    match (id, &*node_id) {
                         (Value::Int64(i), Value::UniqueId(u)) => {
                             if *i >= 0 && *i as u32 == *u {
                                 return Some(node_idx);
@@ -2243,8 +2421,9 @@ impl DirGraph {
             HashMap::with_capacity(type_count);
         for node_idx in self.graph.node_indices() {
             if let Some(node) = self.graph.node_weight(node_idx) {
+                let type_str = node.node_type_str(&self.interner).to_string();
                 new_type_indices
-                    .entry(node.node_type.clone())
+                    .entry(type_str)
                     .or_insert_with(|| Vec::with_capacity(avg_per_type))
                     .push(node_idx);
             }
@@ -2268,9 +2447,8 @@ impl DirGraph {
         if schemas.is_empty() {
             for node_idx in self.graph.node_indices() {
                 if let Some(node) = self.graph.node_weight(node_idx) {
-                    let schema = schemas
-                        .entry(node.node_type.clone())
-                        .or_insert_with(TypeSchema::new);
+                    let type_str = node.node_type_str(&self.interner).to_string();
+                    let schema = schemas.entry(type_str).or_insert_with(TypeSchema::new);
                     if let PropertyStorage::Map(map) = &node.properties {
                         for &key in map.keys() {
                             schema.add_key(key);
@@ -2290,7 +2468,8 @@ impl DirGraph {
         for node_idx in node_indices {
             let node = self.graph.node_weight_mut(node_idx).unwrap();
             if let PropertyStorage::Map(_) = &node.properties {
-                if let Some(schema) = arc_schemas.get(&node.node_type) {
+                let type_str = node.node_type_str(&self.interner);
+                if let Some(schema) = arc_schemas.get(type_str) {
                     let old = std::mem::replace(
                         &mut node.properties,
                         PropertyStorage::Compact {
@@ -2322,9 +2501,8 @@ impl DirGraph {
         if schemas.is_empty() {
             for node_idx in self.graph.node_indices() {
                 if let Some(node) = self.graph.node_weight(node_idx) {
-                    let schema = schemas
-                        .entry(node.node_type.clone())
-                        .or_insert_with(TypeSchema::new);
+                    let type_str = node.node_type_str(&self.interner).to_string();
+                    let schema = schemas.entry(type_str).or_insert_with(TypeSchema::new);
                     if let PropertyStorage::Map(map) = &node.properties {
                         for &key in map.keys() {
                             schema.add_key(key);
@@ -2348,14 +2526,16 @@ impl DirGraph {
             let node = self.graph.node_weight_mut(node_idx).unwrap();
 
             // Rebuild type_indices
+            let type_str = node.node_type_str(&self.interner).to_string();
             new_type_indices
-                .entry(node.node_type.clone())
+                .entry(type_str)
                 .or_insert_with(|| Vec::with_capacity(avg_per_type))
                 .push(node_idx);
 
             // Convert Map → Compact
             if let PropertyStorage::Map(_) = &node.properties {
-                if let Some(schema) = arc_schemas.get(&node.node_type) {
+                let type_str = node.node_type_str(&self.interner);
+                if let Some(schema) = arc_schemas.get(type_str) {
                     let old = std::mem::replace(
                         &mut node.properties,
                         PropertyStorage::Compact {
@@ -2372,6 +2552,154 @@ impl DirGraph {
 
         self.type_indices = new_type_indices;
         self.type_schemas = arc_schemas;
+    }
+
+    /// Convert the graph to disk-backed storage mode.
+    /// Enables columnar storage first, then builds CSR edge arrays on disk.
+    /// Nodes stay in memory (~40 bytes each), edges are mmap'd.
+    pub fn enable_disk_mode(&mut self) -> Result<(), String> {
+        // Ensure columnar storage for compact node representation
+        if !self.is_columnar() {
+            self.enable_columnar();
+        }
+
+        // Create a temp directory for CSR files
+        let data_dir = std::env::temp_dir().join(format!(
+            "kglite_disk_{}_{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+
+        // Extract the StableDiGraph and build DiskGraph
+        let inner = match &mut self.graph {
+            GraphBackend::InMemory(g) => g,
+            GraphBackend::Disk(_) => return Err("Already in disk mode".to_string()),
+        };
+
+        let disk_graph = crate::graph::disk_graph::DiskGraph::from_stable_digraph(inner, &data_dir)
+            .map_err(|e| format!("Failed to create DiskGraph: {}", e))?;
+
+        // Register temp dir for cleanup
+        if let Ok(mut dirs) = self.temp_dirs.lock() {
+            dirs.push(data_dir);
+        }
+
+        self.graph = GraphBackend::Disk(Box::new(disk_graph));
+        self.storage_mode = StorageMode::Disk;
+        Ok(())
+    }
+
+    /// Sync column store references from DirGraph to DiskGraph.
+    /// Called after enable_columnar(), add_nodes(), and load.
+    pub fn sync_disk_column_stores(&mut self) {
+        if let GraphBackend::Disk(ref mut dg) = self.graph {
+            let mut stores = HashMap::new();
+            for (type_name, store) in &self.column_stores {
+                let key = InternedKey::from_str(type_name);
+                stores.insert(key, Arc::clone(store));
+            }
+            dg.set_column_stores(stores);
+        }
+    }
+
+    /// Build CSR from pending edges if in disk mode. No-op otherwise.
+    /// Called after add_connections, before queries, and before save.
+    pub fn ensure_disk_edges_built(&mut self) {
+        if let GraphBackend::Disk(ref mut dg) = self.graph {
+            dg.build_csr_from_pending();
+        }
+    }
+
+    /// Save a disk-mode graph to a directory. The directory IS the graph.
+    /// Persists CSR files, node data, edge properties, column stores, and metadata.
+    pub fn save_disk(&self, path: &str) -> Result<(), String> {
+        let dir = std::path::Path::new(path);
+        let dg = match &self.graph {
+            GraphBackend::Disk(dg) => dg,
+            _ => return Err("save_disk requires disk mode".to_string()),
+        };
+
+        // Save DiskGraph files (CSR, nodes, edge properties, metadata)
+        dg.save_to_dir(dir, &self.interner)
+            .map_err(|e| format!("DiskGraph save failed: {}", e))?;
+
+        // Save DirGraph metadata as JSON
+        let meta = crate::graph::io_operations::build_disk_metadata(self);
+        let meta_json = serde_json::to_string_pretty(&meta)
+            .map_err(|e| format!("Metadata serialization failed: {}", e))?;
+        std::fs::write(dir.join("metadata.json"), meta_json)
+            .map_err(|e| format!("Failed to write metadata: {}", e))?;
+
+        // Save interner as JSON map { hash_u64_string: original_string }
+        let interner_map: HashMap<String, String> = self
+            .interner
+            .iter()
+            .map(|(k, v)| (k.as_u64().to_string(), v.to_string()))
+            .collect();
+        let interner_json = serde_json::to_string(&interner_map)
+            .map_err(|e| format!("Interner serialization failed: {}", e))?;
+        std::fs::write(dir.join("interner.json"), interner_json)
+            .map_err(|e| format!("Failed to write interner: {}", e))?;
+
+        // Save column stores (per type)
+        let columns_dir = dir.join("columns");
+        std::fs::create_dir_all(&columns_dir)
+            .map_err(|e| format!("Failed to create columns dir: {}", e))?;
+        for (type_name, store) in &self.column_stores {
+            let type_dir = columns_dir.join(type_name);
+            std::fs::create_dir_all(&type_dir)
+                .map_err(|e| format!("Failed to create type dir: {}", e))?;
+            let packed = store
+                .write_packed(&self.interner)
+                .map_err(|e| format!("Column pack failed: {}", e))?;
+            let compressed = zstd::encode_all(packed.as_slice(), 3)
+                .map_err(|e| format!("Column compression failed: {}", e))?;
+            std::fs::write(type_dir.join("columns.zst"), compressed)
+                .map_err(|e| format!("Failed to write columns: {}", e))?;
+        }
+
+        Ok(())
+    }
+
+    /// Temporarily convert Disk backend to InMemory for serialization.
+    /// Rebuilds a StableDiGraph from the DiskGraph's nodes and CSR edges.
+    #[allow(dead_code)]
+    pub fn rebuild_for_save(&mut self) -> Result<(), String> {
+        let node_bound = self.graph.node_bound();
+        let edge_count = self.graph.edge_count();
+        let node_count = self.graph.node_count();
+
+        let mut g = StableDiGraph::with_capacity(node_count, edge_count);
+
+        // Re-add nodes in index order, preserving NodeIndex values
+        let mut index_map = HashMap::with_capacity(node_count);
+        for i in 0..node_bound {
+            let idx = NodeIndex::new(i);
+            if let Some(node) = self.graph.node_weight(idx) {
+                let new_idx = g.add_node(node.clone());
+                index_map.insert(idx, new_idx);
+            }
+        }
+
+        // Re-add edges with remapped indices
+        for edge_ref in self.graph.edge_references() {
+            if let (Some(&new_src), Some(&new_tgt)) = (
+                index_map.get(&edge_ref.source()),
+                index_map.get(&edge_ref.target()),
+            ) {
+                let edge_data = EdgeData {
+                    connection_type: edge_ref.weight().connection_type,
+                    properties: edge_ref.weight().properties.clone(),
+                };
+                g.add_edge(new_src, new_tgt, edge_data);
+            }
+        }
+
+        self.graph = GraphBackend::InMemory(g);
+        Ok(())
     }
 
     /// Convert all node properties from Compact to Columnar storage.
@@ -2510,7 +2838,8 @@ impl DirGraph {
             let node = self.graph.node_weight_mut(node_idx).unwrap();
             if let PropertyStorage::Columnar { store, row_id } = &node.properties {
                 let pairs = store.row_properties(*row_id);
-                if let Some(schema) = self.type_schemas.get(&node.node_type) {
+                let type_str = node.node_type_str(&self.interner);
+                if let Some(schema) = self.type_schemas.get(type_str) {
                     node.properties = PropertyStorage::from_compact(pairs.into_iter(), schema);
                 } else {
                     // Fallback to Map
@@ -2525,6 +2854,132 @@ impl DirGraph {
     /// Returns true if any nodes are using columnar storage.
     pub fn is_columnar(&self) -> bool {
         !self.column_stores.is_empty()
+    }
+
+    /// Ensure a ColumnStore exists for `node_type` with a schema covering all
+    /// the keys in `type_schemas[node_type]`. If the schema has grown since the
+    /// store was created, the store is rebuilt (existing data migrated).
+    /// Call `ensure_type_schema_keys()` first to register new keys.
+    pub fn ensure_column_store_for_push(
+        &mut self,
+        node_type: &str,
+    ) -> &mut crate::graph::column_store::ColumnStore {
+        use crate::graph::column_store::ColumnStore;
+
+        let current_schema = self
+            .type_schemas
+            .get(node_type)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(TypeSchema::new()));
+
+        let need_create = if let Some(existing) = self.column_stores.get(node_type) {
+            // Rebuild if the TypeSchema has more keys than the store's schema
+            existing.schema().len() < current_schema.len()
+        } else {
+            true
+        };
+
+        if need_create {
+            let meta = self
+                .node_type_metadata
+                .get(node_type)
+                .cloned()
+                .unwrap_or_default();
+
+            if let Some(old_arc) = self.column_stores.remove(node_type) {
+                // Migrate existing data to new store with extended schema
+                let old_store = Arc::try_unwrap(old_arc).unwrap_or_else(|a| (*a).clone());
+                let mut new_store = ColumnStore::new(current_schema, &meta, &self.interner);
+                // Re-push all existing rows (including id/title columns)
+                for row_id in 0..old_store.row_count() {
+                    if let Some(id_val) = old_store.get_id(row_id) {
+                        new_store.push_id(&id_val);
+                    }
+                    if let Some(title_val) = old_store.get_title(row_id) {
+                        new_store.push_title(&title_val);
+                    }
+                    let props = old_store.row_properties(row_id);
+                    new_store.push_row(&props);
+                }
+                self.column_stores
+                    .insert(node_type.to_string(), Arc::new(new_store));
+            } else {
+                let store = ColumnStore::new(current_schema, &meta, &self.interner);
+                self.column_stores
+                    .insert(node_type.to_string(), Arc::new(store));
+            }
+        }
+
+        Arc::make_mut(self.column_stores.get_mut(node_type).unwrap())
+    }
+
+    /// Ensure the TypeSchema for `node_type` contains all the given keys.
+    /// Creates the schema if it doesn't exist, extends it if it does.
+    pub fn ensure_type_schema_keys(&mut self, node_type: &str, keys: &[InternedKey]) {
+        let schema = self
+            .type_schemas
+            .entry(node_type.to_string())
+            .or_insert_with(|| Arc::new(TypeSchema::new()));
+        let s = Arc::make_mut(schema);
+        for &key in keys {
+            s.add_key(key);
+        }
+    }
+
+    /// Check heap usage of column stores and spill largest to disk if over limit.
+    /// No-op if memory_limit is None or storage_mode is Default.
+    pub fn maybe_spill_columns(&mut self) {
+        let limit = match self.memory_limit {
+            Some(l) => l,
+            None => return,
+        };
+        let total: usize = self.column_stores.values().map(|s| s.heap_bytes()).sum();
+        if total <= limit {
+            return;
+        }
+
+        let spill_dir = self.spill_dir.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(format!(
+                "kglite_spill_{}_{:x}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ))
+        });
+        // Cache spill_dir for future calls
+        if self.spill_dir.is_none() {
+            self.spill_dir = Some(spill_dir.clone());
+        }
+        // Register for cleanup on drop
+        if let Ok(mut dirs) = self.temp_dirs.lock() {
+            if !dirs.contains(&spill_dir) {
+                dirs.push(spill_dir.clone());
+            }
+        }
+
+        // Spill largest stores first until under limit
+        let mut by_size: Vec<_> = self
+            .column_stores
+            .iter()
+            .map(|(t, s)| (t.clone(), s.heap_bytes()))
+            .collect();
+        by_size.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut remaining = total;
+        for (type_name, bytes) in by_size {
+            if remaining <= limit {
+                break;
+            }
+            let type_dir = spill_dir.join(&type_name);
+            let store = Arc::make_mut(self.column_stores.get_mut(&type_name).unwrap());
+            if store
+                .materialize_to_files(&type_dir, &self.interner)
+                .is_ok()
+            {
+                remaining -= bytes;
+            }
+        }
     }
 
     pub fn reindex(&mut self) {
@@ -2608,7 +3063,7 @@ impl DirGraph {
         }
 
         // Replace graph storage
-        self.graph = new_graph;
+        self.graph = GraphBackend::InMemory(new_graph);
 
         // Remap embedding stores to use new node indices
         for store in self.embeddings.values_mut() {
@@ -2757,12 +3212,12 @@ pub struct GraphInfo {
 pub struct NodeData {
     pub id: Value,
     pub title: Value,
-    pub node_type: String,
+    pub node_type: InternedKey,
     pub(crate) properties: PropertyStorage,
 }
 
 impl NodeData {
-    /// Create a new NodeData, interning all property keys.
+    /// Create a new NodeData, interning all property keys and the node type.
     /// Builds PropertyStorage::Map — call compact_properties() later to convert to Compact.
     pub fn new(
         id: Value,
@@ -2771,6 +3226,7 @@ impl NodeData {
         properties: HashMap<String, Value>,
         interner: &mut StringInterner,
     ) -> Self {
+        let type_key = interner.get_or_intern(&node_type);
         let interned_props = properties
             .into_iter()
             .map(|(k, v)| {
@@ -2781,7 +3237,7 @@ impl NodeData {
         NodeData {
             id,
             title,
-            node_type,
+            node_type: type_key,
             properties: PropertyStorage::Map(interned_props),
         }
     }
@@ -2795,6 +3251,7 @@ impl NodeData {
         interner: &mut StringInterner,
         schema: &Arc<TypeSchema>,
     ) -> Self {
+        let type_key = interner.get_or_intern(&node_type);
         let pairs = properties.into_iter().map(|(k, v)| {
             let key = interner.get_or_intern(&k);
             (key, v)
@@ -2802,7 +3259,7 @@ impl NodeData {
         NodeData {
             id,
             title,
-            node_type,
+            node_type: type_key,
             properties: PropertyStorage::from_compact(pairs, schema),
         }
     }
@@ -2811,7 +3268,7 @@ impl NodeData {
     pub fn new_compact_preinterned(
         id: Value,
         title: Value,
-        node_type: String,
+        node_type: InternedKey,
         properties: Vec<(InternedKey, Value)>,
         schema: &Arc<TypeSchema>,
     ) -> Self {
@@ -2827,7 +3284,7 @@ impl NodeData {
     pub fn new_preinterned(
         id: Value,
         title: Value,
-        node_type: String,
+        node_type: InternedKey,
         properties: Vec<(InternedKey, Value)>,
     ) -> Self {
         let map: HashMap<InternedKey, Value> = properties.into_iter().collect();
@@ -2839,6 +3296,38 @@ impl NodeData {
         }
     }
 
+    /// Get the node's ID. In mapped mode (Null sentinel), reads from ColumnStore.
+    #[inline]
+    pub fn id(&self) -> Cow<'_, Value> {
+        if matches!(self.id, Value::Null) {
+            if let PropertyStorage::Columnar { store, row_id } = &self.properties {
+                if let Some(v) = store.get_id(*row_id) {
+                    return Cow::Owned(v);
+                }
+            }
+        }
+        Cow::Borrowed(&self.id)
+    }
+
+    /// Get the node's title. In mapped mode (Null sentinel), reads from ColumnStore.
+    #[inline]
+    pub fn title(&self) -> Cow<'_, Value> {
+        if matches!(self.title, Value::Null) {
+            if let PropertyStorage::Columnar { store, row_id } = &self.properties {
+                if let Some(v) = store.get_title(*row_id) {
+                    return Cow::Owned(v);
+                }
+            }
+        }
+        Cow::Borrowed(&self.title)
+    }
+
+    /// Resolve the node type to a string. Requires the interner.
+    #[inline]
+    pub fn node_type_str<'a>(&self, interner: &'a StringInterner) -> &'a str {
+        interner.resolve(self.node_type)
+    }
+
     /// Returns a reference to the field value without cloning.
     /// Uses hash-based lookup — no interner needed.
     ///
@@ -2846,8 +3335,8 @@ impl NodeData {
     #[inline]
     pub fn get_field_ref(&self, field: &str) -> Option<Cow<'_, Value>> {
         match field {
-            "id" => Some(Cow::Borrowed(&self.id)),
-            "title" => Some(Cow::Borrowed(&self.title)),
+            "id" => Some(self.id()),
+            "title" => Some(self.title()),
             _ => self.properties.get(InternedKey::from_str(field)),
         }
     }
@@ -2919,18 +3408,19 @@ impl NodeData {
     }
 
     /// Returns the node type as a string reference without allocation.
+    /// Requires interner to resolve the InternedKey.
     #[inline]
-    pub fn get_node_type_ref(&self) -> &str {
-        self.node_type.as_str()
+    pub fn get_node_type_ref<'a>(&self, interner: &'a StringInterner) -> &'a str {
+        interner.resolve(self.node_type)
     }
 
     /// Convert to a NodeInfo snapshot (for Python API / export).
     /// Requires interner to resolve property keys to strings.
     pub fn to_node_info(&self, interner: &StringInterner) -> NodeInfo {
         NodeInfo {
-            id: self.id.clone(),
-            title: self.title.clone(),
-            node_type: self.node_type.clone(),
+            id: self.id().into_owned(),
+            title: self.title().into_owned(),
+            node_type: self.node_type_str(interner).to_string(),
             properties: self.properties_cloned(interner),
         }
     }
@@ -3108,7 +3598,361 @@ impl EdgeData {
     }
 }
 
-pub type Graph = StableDiGraph<NodeData, EdgeData>;
+// ============================================================================
+// Graph Backend Abstraction
+// ============================================================================
+
+pub use crate::graph::disk_graph::DiskGraph;
+
+/// Graph storage backend: in-memory (petgraph) or disk-backed.
+///
+/// All methods delegate to the inner `StableDiGraph` for `InMemory`.
+/// The `Disk` variant is a placeholder that panics at runtime.
+#[allow(clippy::large_enum_variant)]
+pub enum GraphBackend {
+    InMemory(StableDiGraph<NodeData, EdgeData>),
+    Disk(Box<DiskGraph>),
+}
+
+// -- Constructors --
+
+impl GraphBackend {
+    #[inline]
+    pub fn new() -> Self {
+        GraphBackend::InMemory(StableDiGraph::new())
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub fn with_capacity(nodes: usize, edges: usize) -> Self {
+        GraphBackend::InMemory(StableDiGraph::with_capacity(nodes, edges))
+    }
+
+    /// Access the inner `StableDiGraph` directly. Used for petgraph algorithms
+    /// (e.g. `kosaraju_scc`) that require petgraph trait bounds.
+    #[inline]
+    pub fn as_stable_digraph(&self) -> &StableDiGraph<NodeData, EdgeData> {
+        match self {
+            GraphBackend::InMemory(g) => g,
+            GraphBackend::Disk(_) => unimplemented!("Disk backend: as_stable_digraph"),
+        }
+    }
+}
+
+// -- Node methods --
+
+impl GraphBackend {
+    #[inline]
+    pub fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
+        match self {
+            GraphBackend::InMemory(g) => g.node_weight(idx),
+            GraphBackend::Disk(dg) => dg.node_weight(idx),
+        }
+    }
+
+    #[inline]
+    pub fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
+        match self {
+            GraphBackend::InMemory(g) => g.node_weight_mut(idx),
+            GraphBackend::Disk(dg) => dg.node_weight_mut(idx),
+        }
+    }
+
+    #[inline]
+    pub fn node_indices(&self) -> crate::graph::graph_iterators::GraphNodeIndices<'_> {
+        match self {
+            GraphBackend::InMemory(g) => {
+                crate::graph::graph_iterators::GraphNodeIndices::InMemory(g.node_indices())
+            }
+            GraphBackend::Disk(dg) => {
+                crate::graph::graph_iterators::GraphNodeIndices::Disk(dg.node_indices_iter())
+            }
+        }
+    }
+
+    #[inline]
+    pub fn node_count(&self) -> usize {
+        match self {
+            GraphBackend::InMemory(g) => g.node_count(),
+            GraphBackend::Disk(dg) => dg.node_count(),
+        }
+    }
+
+    #[inline]
+    pub fn node_bound(&self) -> usize {
+        match self {
+            GraphBackend::InMemory(g) => g.node_bound(),
+            GraphBackend::Disk(dg) => dg.node_bound(),
+        }
+    }
+
+    #[inline]
+    pub fn add_node(&mut self, data: NodeData) -> NodeIndex {
+        match self {
+            GraphBackend::InMemory(g) => g.add_node(data),
+            GraphBackend::Disk(dg) => dg.add_node(data),
+        }
+    }
+
+    #[inline]
+    pub fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData> {
+        match self {
+            GraphBackend::InMemory(g) => g.remove_node(idx),
+            GraphBackend::Disk(dg) => dg.remove_node(idx),
+        }
+    }
+}
+
+// -- Edge methods --
+
+impl GraphBackend {
+    #[inline]
+    pub fn edges_directed(
+        &self,
+        a: NodeIndex,
+        dir: petgraph::Direction,
+    ) -> crate::graph::graph_iterators::GraphEdges<'_> {
+        match self {
+            GraphBackend::InMemory(g) => {
+                crate::graph::graph_iterators::GraphEdges::InMemory(g.edges_directed(a, dir))
+            }
+            GraphBackend::Disk(dg) => {
+                crate::graph::graph_iterators::GraphEdges::Disk(dg.edges_directed_iter(a, dir))
+            }
+        }
+    }
+
+    #[inline]
+    pub fn edges(&self, a: NodeIndex) -> crate::graph::graph_iterators::GraphEdges<'_> {
+        match self {
+            GraphBackend::InMemory(g) => {
+                crate::graph::graph_iterators::GraphEdges::InMemory(g.edges(a))
+            }
+            GraphBackend::Disk(dg) => crate::graph::graph_iterators::GraphEdges::Disk(
+                dg.edges_directed_iter(a, petgraph::Direction::Outgoing),
+            ),
+        }
+    }
+
+    #[inline]
+    pub fn edge_references(&self) -> crate::graph::graph_iterators::GraphEdgeReferences<'_> {
+        match self {
+            GraphBackend::InMemory(g) => {
+                crate::graph::graph_iterators::GraphEdgeReferences::InMemory(g.edge_references())
+            }
+            GraphBackend::Disk(dg) => {
+                crate::graph::graph_iterators::GraphEdgeReferences::Disk(dg.edge_references_iter())
+            }
+        }
+    }
+
+    #[inline]
+    pub fn edge_count(&self) -> usize {
+        match self {
+            GraphBackend::InMemory(g) => g.edge_count(),
+            GraphBackend::Disk(dg) => dg.edge_count(),
+        }
+    }
+
+    #[inline]
+    pub fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData> {
+        match self {
+            GraphBackend::InMemory(g) => g.edge_weight(idx),
+            GraphBackend::Disk(dg) => dg.edge_weight(idx),
+        }
+    }
+
+    #[inline]
+    pub fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
+        match self {
+            GraphBackend::InMemory(g) => g.edge_weight_mut(idx),
+            GraphBackend::Disk(dg) => dg.edge_weight_mut(idx),
+        }
+    }
+
+    /// Iterate all edge weights. Returns a boxed iterator because petgraph's
+    /// `edge_weights()` returns an opaque `impl Iterator` type.
+    #[inline]
+    pub fn edge_weights(&self) -> Box<dyn Iterator<Item = &EdgeData> + '_> {
+        match self {
+            GraphBackend::InMemory(g) => Box::new(g.edge_weights()),
+            GraphBackend::Disk(dg) => dg.edge_weights_iter(),
+        }
+    }
+
+    #[inline]
+    pub fn edge_indices(&self) -> crate::graph::graph_iterators::GraphEdgeIndices<'_> {
+        match self {
+            GraphBackend::InMemory(g) => {
+                crate::graph::graph_iterators::GraphEdgeIndices::InMemory(g.edge_indices())
+            }
+            GraphBackend::Disk(dg) => {
+                crate::graph::graph_iterators::GraphEdgeIndices::Disk(dg.edge_indices_iter())
+            }
+        }
+    }
+
+    #[inline]
+    pub fn edge_endpoints(&self, idx: EdgeIndex) -> Option<(NodeIndex, NodeIndex)> {
+        match self {
+            GraphBackend::InMemory(g) => g.edge_endpoints(idx),
+            GraphBackend::Disk(dg) => dg.edge_endpoints_fn(idx),
+        }
+    }
+
+    #[inline]
+    pub fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
+        match self {
+            GraphBackend::InMemory(g) => g.add_edge(a, b, data),
+            GraphBackend::Disk(dg) => dg.add_edge(a, b, data),
+        }
+    }
+
+    #[inline]
+    pub fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData> {
+        match self {
+            GraphBackend::InMemory(g) => g.remove_edge(idx),
+            GraphBackend::Disk(dg) => dg.remove_edge(idx),
+        }
+    }
+
+    #[inline]
+    pub fn find_edge(&self, a: NodeIndex, b: NodeIndex) -> Option<EdgeIndex> {
+        match self {
+            GraphBackend::InMemory(g) => g.find_edge(a, b),
+            GraphBackend::Disk(dg) => dg.find_edge(a, b),
+        }
+    }
+
+    #[inline]
+    pub fn edges_connecting(
+        &self,
+        a: NodeIndex,
+        b: NodeIndex,
+    ) -> crate::graph::graph_iterators::GraphEdgesConnecting<'_> {
+        match self {
+            GraphBackend::InMemory(g) => {
+                crate::graph::graph_iterators::GraphEdgesConnecting::InMemory(
+                    g.edges_connecting(a, b),
+                )
+            }
+            GraphBackend::Disk(dg) => crate::graph::graph_iterators::GraphEdgesConnecting::Disk(
+                dg.edges_connecting_iter(a, b),
+            ),
+        }
+    }
+}
+
+// -- Neighbor methods --
+
+impl GraphBackend {
+    #[inline]
+    pub fn neighbors_undirected(
+        &self,
+        a: NodeIndex,
+    ) -> crate::graph::graph_iterators::GraphNeighbors<'_> {
+        match self {
+            GraphBackend::InMemory(g) => {
+                crate::graph::graph_iterators::GraphNeighbors::InMemory(g.neighbors_undirected(a))
+            }
+            GraphBackend::Disk(dg) => {
+                crate::graph::graph_iterators::GraphNeighbors::Disk(dg.neighbors_undirected_iter(a))
+            }
+        }
+    }
+
+    #[inline]
+    pub fn neighbors_directed(
+        &self,
+        a: NodeIndex,
+        dir: petgraph::Direction,
+    ) -> crate::graph::graph_iterators::GraphNeighbors<'_> {
+        match self {
+            GraphBackend::InMemory(g) => crate::graph::graph_iterators::GraphNeighbors::InMemory(
+                g.neighbors_directed(a, dir),
+            ),
+            GraphBackend::Disk(dg) => crate::graph::graph_iterators::GraphNeighbors::Disk(
+                dg.neighbors_directed_iter(a, dir),
+            ),
+        }
+    }
+}
+
+// -- Index traits --
+
+impl std::ops::Index<NodeIndex> for GraphBackend {
+    type Output = NodeData;
+    #[inline]
+    fn index(&self, index: NodeIndex) -> &NodeData {
+        match self {
+            GraphBackend::InMemory(g) => &g[index],
+            GraphBackend::Disk(dg) => &dg[index],
+        }
+    }
+}
+
+impl std::ops::Index<EdgeIndex> for GraphBackend {
+    type Output = EdgeData;
+    #[inline]
+    fn index(&self, index: EdgeIndex) -> &EdgeData {
+        match self {
+            GraphBackend::InMemory(g) => &g[index],
+            GraphBackend::Disk(dg) => &dg[index],
+        }
+    }
+}
+
+// -- Clone --
+
+impl Clone for GraphBackend {
+    fn clone(&self) -> Self {
+        match self {
+            GraphBackend::InMemory(g) => GraphBackend::InMemory(g.clone()),
+            GraphBackend::Disk(dg) => GraphBackend::Disk(dg.clone()),
+        }
+    }
+}
+
+// -- Serialize / Deserialize --
+// Delegates to StableDiGraph so the binary format is identical to before.
+
+impl Serialize for GraphBackend {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            GraphBackend::InMemory(g) => g.serialize(serializer),
+            GraphBackend::Disk(_) => Err(serde::ser::Error::custom(
+                "Disk backend does not support serialization",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GraphBackend {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let g = StableDiGraph::<NodeData, EdgeData>::deserialize(deserializer)?;
+        Ok(GraphBackend::InMemory(g))
+    }
+}
+
+// -- Debug --
+
+impl std::fmt::Debug for GraphBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GraphBackend::InMemory(g) => {
+                write!(
+                    f,
+                    "InMemory({} nodes, {} edges)",
+                    g.node_count(),
+                    g.edge_count()
+                )
+            }
+            GraphBackend::Disk(_) => write!(f, "Disk(placeholder)"),
+        }
+    }
+}
+
+pub type Graph = GraphBackend;
 
 // ============================================================================
 // Schema Definition & Validation Types
@@ -3473,7 +4317,7 @@ mod maintenance_tests {
         let mut titles: Vec<String> = Vec::new();
         for idx in g.graph.node_indices() {
             if let Some(node) = g.graph.node_weight(idx) {
-                if let Value::String(s) = &node.title {
+                if let Value::String(s) = &*node.title() {
                     titles.push(s.clone());
                 }
             }
@@ -3758,7 +4602,7 @@ mod maintenance_tests {
                         _ => panic!("expected Int64"),
                     })
                     .unwrap();
-                (n.id.clone(), n.title.clone(), age)
+                (n.id().into_owned(), n.title().into_owned(), age)
             })
             .collect();
 
@@ -3780,7 +4624,7 @@ mod maintenance_tests {
                         _ => panic!("expected Int64"),
                     })
                     .unwrap();
-                (n.id.clone(), n.title.clone(), age)
+                (n.id().into_owned(), n.title().into_owned(), age)
             })
             .collect();
 

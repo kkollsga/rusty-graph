@@ -12,7 +12,6 @@ use crate::graph::vector_search;
 use chrono::NaiveDate;
 use geo::geometry::Geometry;
 use petgraph::graph::NodeIndex;
-use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 use std::collections::{HashMap, HashSet};
 
@@ -246,8 +245,8 @@ fn make_traversal_fast(
             match target_type {
                 None => true,
                 Some(types) => {
-                    let nt = &graph.graph[idx].node_type;
-                    types.iter().any(|t| t == nt)
+                    let nt = graph.graph[idx].node_type;
+                    types.iter().any(|t| InternedKey::from_str(t) == nt)
                 }
             }
         };
@@ -425,8 +424,8 @@ fn make_traversal_full(
             match target_type {
                 None => true,
                 Some(types) => {
-                    let nt = &graph.graph[idx].node_type;
-                    types.iter().any(|t| t == nt)
+                    let nt = graph.graph[idx].node_type;
+                    types.iter().any(|t| InternedKey::from_str(t) == nt)
                 }
             }
         };
@@ -757,7 +756,7 @@ fn get_source_info(
     }
     let source_type = graph
         .get_node(source_nodes[0])
-        .map(|n| n.node_type.clone())
+        .map(|n| n.node_type_str(&graph.interner).to_string())
         .ok_or("Cannot determine source node type")?;
     Ok((source_nodes, source_type))
 }
@@ -1358,7 +1357,7 @@ fn cluster_traversal(
             .filter(|&idx| {
                 graph
                     .get_node(idx)
-                    .map(|n| n.node_type == tt)
+                    .map(|n| n.node_type == InternedKey::from_str(tt))
                     .unwrap_or(false)
             })
             .collect()
@@ -1373,7 +1372,7 @@ fn cluster_traversal(
     // Check if features are spatial (latitude, longitude) — use haversine distance matrix
     let source_type = graph
         .get_node(nodes[0])
-        .map(|n| n.node_type.clone())
+        .map(|n| n.node_type_str(&graph.interner).to_string())
         .unwrap_or_default();
     let spatial_cfg = graph.get_spatial_config(&source_type);
     let is_spatial = features.len() >= 2 && {

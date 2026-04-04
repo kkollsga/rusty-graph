@@ -1,6 +1,6 @@
 [package]
 name = "kglite"
-version = "0.6.18"
+version = "0.7.0"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 description = "A high-performance graph database with Python bindings written in Rust."
@@ -26,6 +26,7 @@ rayon = "1.10"
 flate2 = "1"
 zstd = "0.13"
 memmap2 = "0.9"
+bzip2 = "0.5"
 
 [dev-dependencies]
 tempfile = "3"

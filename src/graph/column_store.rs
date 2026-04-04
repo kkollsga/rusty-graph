@@ -619,6 +619,10 @@ pub struct ColumnStore {
     row_count: u32,
     /// Tombstone bitmap: true = row deleted
     tombstones: Vec<bool>,
+    /// Node ID column (mapped mode only). When present, NodeData.id is Value::Null sentinel.
+    id_column: Option<TypedColumn>,
+    /// Node title column (mapped mode only). When present, NodeData.title is Value::Null sentinel.
+    title_column: Option<TypedColumn>,
 }
 
 #[allow(dead_code)]
@@ -644,6 +648,8 @@ impl ColumnStore {
             columns,
             row_count: 0,
             tombstones: Vec::new(),
+            id_column: None,
+            title_column: None,
         }
     }
 
@@ -657,7 +663,67 @@ impl ColumnStore {
             columns,
             row_count: 0,
             tombstones: Vec::new(),
+            id_column: None,
+            title_column: None,
         }
+    }
+
+    // ─── Id/Title column methods (mapped mode only) ──────────────────────
+
+    /// Push a node ID value into the id column. Creates a Mixed column if None.
+    pub fn push_id(&mut self, value: &Value) {
+        let col = self
+            .id_column
+            .get_or_insert_with(|| TypedColumn::Mixed { data: Vec::new() });
+        if col.push(value).is_err() {
+            // Type mismatch — demote to Mixed
+            let mut mixed = Vec::with_capacity(col.len() + 1);
+            for i in 0..col.len() {
+                mixed.push(col.get(i as u32).unwrap_or(Value::Null));
+            }
+            mixed.push(value.clone());
+            *col = TypedColumn::Mixed { data: mixed };
+        }
+    }
+
+    /// Push a node title value into the title column. Creates a Str column if None.
+    pub fn push_title(&mut self, value: &Value) {
+        let col = self.title_column.get_or_insert_with(|| TypedColumn::Str {
+            offsets: {
+                let mut o = MmapOrVec::new();
+                o.push(0u64);
+                o
+            },
+            data: MmapBytes::new(),
+            nulls: MmapOrVec::new(),
+        });
+        if col.push(value).is_err() {
+            // Type mismatch — demote to Mixed
+            let mut mixed = Vec::with_capacity(col.len() + 1);
+            for i in 0..col.len() {
+                mixed.push(col.get(i as u32).unwrap_or(Value::Null));
+            }
+            mixed.push(value.clone());
+            *col = TypedColumn::Mixed { data: mixed };
+        }
+    }
+
+    /// Get the node ID from the id column at the given row.
+    #[inline]
+    pub fn get_id(&self, row_id: u32) -> Option<Value> {
+        self.id_column.as_ref()?.get(row_id)
+    }
+
+    /// Get the node title from the title column at the given row.
+    #[inline]
+    pub fn get_title(&self, row_id: u32) -> Option<Value> {
+        self.title_column.as_ref()?.get(row_id)
+    }
+
+    /// Whether this store has id/title columns (mapped mode).
+    #[inline]
+    pub fn has_id_title_columns(&self) -> bool {
+        self.id_column.is_some() || self.title_column.is_some()
     }
 
     /// Number of rows (including tombstoned).
@@ -697,6 +763,18 @@ impl ColumnStore {
                     let _ = self.columns[slot].push(value);
                 }
             } else {
+                col.push_null();
+            }
+        }
+
+        // Keep id/title columns in sync (push null placeholders for property-only rows)
+        if let Some(ref mut col) = self.id_column {
+            if col.len() < self.row_count as usize + 1 {
+                col.push_null();
+            }
+        }
+        if let Some(ref mut col) = self.title_column {
+            if col.len() < self.row_count as usize + 1 {
                 col.push_null();
             }
         }
@@ -854,12 +932,25 @@ impl ColumnStore {
                 col.materialize_to_file(dir, col_name)?;
             }
         }
+        // Spill id/title columns too
+        if let Some(ref mut col) = self.id_column {
+            col.materialize_to_file(dir, "__id__")?;
+        }
+        if let Some(ref mut col) = self.title_column {
+            col.materialize_to_file(dir, "__title__")?;
+        }
         Ok(())
     }
 
     /// Convert all columns back to heap-backed storage.
     pub fn materialize_to_heap(&mut self) {
         for col in &mut self.columns {
+            col.materialize_to_heap();
+        }
+        if let Some(ref mut col) = self.id_column {
+            col.materialize_to_heap();
+        }
+        if let Some(ref mut col) = self.title_column {
             col.materialize_to_heap();
         }
     }
@@ -872,7 +963,9 @@ impl ColumnStore {
     /// Heap-resident bytes across all columns (0 if fully mmap'd).
     pub fn heap_bytes(&self) -> usize {
         let col_bytes: usize = self.columns.iter().map(|c| c.heap_bytes()).sum();
-        col_bytes + self.tombstones.len()
+        let id_bytes = self.id_column.as_ref().map_or(0, |c| c.heap_bytes());
+        let title_bytes = self.title_column.as_ref().map_or(0, |c| c.heap_bytes());
+        col_bytes + id_bytes + title_bytes + self.tombstones.len()
     }
 
     /// Access columns for introspection (e.g., getting type tags).
@@ -891,34 +984,49 @@ impl ColumnStore {
     pub fn write_packed(&self, interner: &StringInterner) -> io::Result<Vec<u8>> {
         let mut buf: Vec<u8> = Vec::new();
 
-        // Number of columns
-        let num_cols = self.columns.len() as u32;
+        // Count total columns: schema columns + id/title if present
+        let extra = self.id_column.is_some() as u32 + self.title_column.is_some() as u32;
+        let num_cols = self.columns.len() as u32 + extra;
         buf.extend_from_slice(&num_cols.to_le_bytes());
 
         for (slot, ik) in self.schema.iter() {
             let col_name = interner.resolve(ik);
             let col = &self.columns[slot as usize];
-            let type_tag = col.type_tag();
+            Self::write_packed_column(&mut buf, col_name, col)?;
+        }
 
-            // Column name
-            let name_bytes = col_name.as_bytes();
-            buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
-            buf.extend_from_slice(name_bytes);
-
-            // Type tag
-            let tag_bytes = type_tag.as_bytes();
-            buf.extend_from_slice(&(tag_bytes.len() as u16).to_le_bytes());
-            buf.extend_from_slice(tag_bytes);
-
-            // Column data — write length placeholder, then data directly, then patch length
-            let len_offset = buf.len();
-            buf.extend_from_slice(&0u64.to_le_bytes()); // placeholder
-            col.write_to(&mut buf)?;
-            let data_len = (buf.len() - len_offset - 8) as u64;
-            buf[len_offset..len_offset + 8].copy_from_slice(&data_len.to_le_bytes());
+        // Write id/title columns with reserved names
+        if let Some(ref col) = self.id_column {
+            Self::write_packed_column(&mut buf, "__id__", col)?;
+        }
+        if let Some(ref col) = self.title_column {
+            Self::write_packed_column(&mut buf, "__title__", col)?;
         }
 
         Ok(buf)
+    }
+
+    /// Write a single column entry to a packed buffer.
+    fn write_packed_column(buf: &mut Vec<u8>, col_name: &str, col: &TypedColumn) -> io::Result<()> {
+        let type_tag = col.type_tag();
+
+        // Column name
+        let name_bytes = col_name.as_bytes();
+        buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+        buf.extend_from_slice(name_bytes);
+
+        // Type tag
+        let tag_bytes = type_tag.as_bytes();
+        buf.extend_from_slice(&(tag_bytes.len() as u16).to_le_bytes());
+        buf.extend_from_slice(tag_bytes);
+
+        // Column data — write length placeholder, then data directly, then patch length
+        let len_offset = buf.len();
+        buf.extend_from_slice(&0u64.to_le_bytes()); // placeholder
+        col.write_to(buf)?;
+        let data_len = (buf.len() - len_offset - 8) as u64;
+        buf[len_offset..len_offset + 8].copy_from_slice(&data_len.to_le_bytes());
+        Ok(())
     }
 
     /// Load columns from a packed byte buffer (v3 format).
@@ -970,6 +1078,20 @@ impl ColumnStore {
             let data_len = u64::from_le_bytes(u64_buf) as usize;
             let mut data_blob = vec![0u8; data_len];
             cursor.read_exact(&mut data_blob)?;
+
+            // Check for special id/title columns first
+            if col_name == "__id__" {
+                let col =
+                    Self::unpack_column(&type_tag, &data_blob, row_count, temp_dir, &col_name)?;
+                store.id_column = Some(col);
+                continue;
+            }
+            if col_name == "__title__" {
+                let col =
+                    Self::unpack_column(&type_tag, &data_blob, row_count, temp_dir, &col_name)?;
+                store.title_column = Some(col);
+                continue;
+            }
 
             // Find the slot for this column
             let ik = InternedKey::from_str(&col_name);

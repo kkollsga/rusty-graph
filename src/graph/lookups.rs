@@ -1,5 +1,5 @@
 // src/graph/lookups.rs
-use super::schema::Graph;
+use super::schema::{Graph, InternedKey};
 use crate::datatypes::Value;
 use petgraph::graph::NodeIndex;
 use serde::{Deserialize, Serialize};
@@ -24,9 +24,9 @@ impl TypeLookup {
         // Single pass through the graph
         for i in graph.node_indices() {
             if let Some(node_data) = graph.node_weight(i) {
-                if node_data.node_type == node_type {
-                    uid_to_index.insert(node_data.id.clone(), i);
-                    title_to_index.insert(node_data.title.clone(), i);
+                if node_data.node_type == InternedKey::from_str(&node_type) {
+                    uid_to_index.insert(node_data.id().into_owned(), i);
+                    title_to_index.insert(node_data.title().into_owned(), i);
                 }
             }
         }
@@ -42,16 +42,17 @@ impl TypeLookup {
     /// Falls back to graph scan if id_indices has been invalidated (e.g., after node deletion).
     /// Does not build title_to_index since it's unused in the add_nodes hot path.
     pub fn from_id_indices(
-        id_indices: &HashMap<String, HashMap<Value, NodeIndex>>,
+        id_indices: &HashMap<String, super::schema::TypeIdIndex>,
         graph: &Graph,
         node_type: String,
     ) -> Result<Self, String> {
         if node_type.is_empty() {
             return Err("Node type cannot be empty".to_string());
         }
-        if let Some(uid_map) = id_indices.get(&node_type) {
+        if let Some(type_index) = id_indices.get(&node_type) {
+            let uid_map: HashMap<Value, NodeIndex> = type_index.iter().collect();
             Ok(TypeLookup {
-                uid_to_index: uid_map.clone(),
+                uid_to_index: uid_map,
                 title_to_index: HashMap::new(),
                 node_type,
             })
@@ -97,13 +98,13 @@ impl CombinedTypeLookup {
         // Single pass through graph - collect both source and target if different types
         for idx in graph.node_indices() {
             if let Some(node_data) = graph.node_weight(idx) {
-                if node_data.node_type == source_type {
-                    source_uid_to_index.insert(node_data.id.clone(), idx);
+                if node_data.node_type == InternedKey::from_str(&source_type) {
+                    source_uid_to_index.insert(node_data.id().into_owned(), idx);
                 }
                 // Also collect target type in same pass (if different from source)
                 if let Some(ref mut target_map) = target_uid_to_index_map {
-                    if node_data.node_type == target_type {
-                        target_map.insert(node_data.id.clone(), idx);
+                    if node_data.node_type == InternedKey::from_str(&target_type) {
+                        target_map.insert(node_data.id().into_owned(), idx);
                     }
                 }
             }
@@ -121,7 +122,7 @@ impl CombinedTypeLookup {
     /// Fast constructor using pre-built id_indices from DirGraph (avoids full-graph scan).
     /// Falls back to graph scan if id_indices has been invalidated for either type.
     pub fn from_id_indices(
-        id_indices: &HashMap<String, HashMap<Value, NodeIndex>>,
+        id_indices: &HashMap<String, super::schema::TypeIdIndex>,
         graph: &Graph,
         source_type: String,
         target_type: String,
@@ -134,11 +135,19 @@ impl CombinedTypeLookup {
         let has_target = same_type || id_indices.contains_key(&target_type);
 
         if has_source && has_target {
-            let source_uid = id_indices.get(&source_type).cloned().unwrap_or_default();
+            let source_uid = id_indices
+                .get(&source_type)
+                .map(|idx| idx.iter().collect())
+                .unwrap_or_default();
             let target_uid = if same_type {
                 None
             } else {
-                Some(id_indices.get(&target_type).cloned().unwrap_or_default())
+                Some(
+                    id_indices
+                        .get(&target_type)
+                        .map(|idx| idx.iter().collect())
+                        .unwrap_or_default(),
+                )
             };
             Ok(CombinedTypeLookup {
                 source_uid_to_index: source_uid,

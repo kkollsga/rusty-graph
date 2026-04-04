@@ -6,7 +6,6 @@ use crate::graph::cypher::result::Bindings;
 use crate::graph::filtering_methods::{compare_values, values_equal};
 use crate::graph::schema::{DirGraph, InternedKey};
 use petgraph::graph::{EdgeIndex, NodeIndex};
-use petgraph::visit::{EdgeRef, NodeIndexable};
 use petgraph::Direction;
 use rayon::prelude::*;
 use std::borrow::Cow;
@@ -1227,7 +1226,7 @@ impl<'a> PatternExecutor<'a> {
             if let Some(&idx) = self.pre_bindings.get(var) {
                 if let Some(node) = self.graph.graph.node_weight(idx) {
                     if let Some(ref node_type) = pattern.node_type {
-                        if &node.node_type != node_type {
+                        if node.node_type != InternedKey::from_str(node_type) {
                             return Ok(vec![]);
                         }
                     }
@@ -1467,16 +1466,20 @@ impl<'a> PatternExecutor<'a> {
         if let Some(node) = self.graph.graph.node_weight(idx) {
             for (key, matcher) in props {
                 // Resolve alias: original column name → canonical field
-                let resolved = self.graph.resolve_alias(&node.node_type, key);
+                let resolved = self
+                    .graph
+                    .resolve_alias(node.node_type_str(&self.graph.interner), key);
                 // Check special fields first: name/title maps to title, id maps to id,
                 // type/node_type/label maps to the node's type string.
                 // Use Cow to avoid cloning when possible
                 let value: Option<Cow<'_, Value>> = if resolved == "name" || resolved == "title" {
-                    Some(Cow::Borrowed(&node.title))
+                    Some(node.title())
                 } else if resolved == "id" {
-                    Some(Cow::Borrowed(&node.id))
+                    Some(node.id())
                 } else if resolved == "type" || resolved == "node_type" || resolved == "label" {
-                    Some(Cow::Owned(Value::String(node.node_type.clone())))
+                    Some(Cow::Owned(Value::String(
+                        node.node_type_str(&self.graph.interner).to_string(),
+                    )))
                 } else {
                     node.get_property(resolved)
                 };
@@ -1641,7 +1644,7 @@ impl<'a> PatternExecutor<'a> {
                 if !edge_pattern.skip_target_type_check {
                     if let Some(ref node_type) = node_pattern.node_type {
                         if let Some(node) = self.graph.graph.node_weight(target) {
-                            if &node.node_type != node_type {
+                            if node.node_type != InternedKey::from_str(node_type) {
                                 continue;
                             }
                         } else {
@@ -1736,7 +1739,7 @@ impl<'a> PatternExecutor<'a> {
                 self.graph
                     .graph
                     .node_weight(source)
-                    .map(|n| &n.node_type == node_type)
+                    .map(|n| n.node_type == InternedKey::from_str(node_type))
                     .unwrap_or(false)
             } else {
                 true
@@ -1826,7 +1829,7 @@ impl<'a> PatternExecutor<'a> {
                             self.graph
                                 .graph
                                 .node_weight(target)
-                                .map(|n| &n.node_type == node_type)
+                                .map(|n| n.node_type == InternedKey::from_str(node_type))
                                 .unwrap_or(false)
                         } else {
                             true
@@ -1919,7 +1922,7 @@ impl<'a> PatternExecutor<'a> {
         if min_hops == 0 {
             let node_matches = if let Some(ref node_type) = node_pattern.node_type {
                 if let Some(node) = self.graph.graph.node_weight(source) {
-                    &node.node_type == node_type
+                    node.node_type == InternedKey::from_str(node_type)
                 } else {
                     false
                 }
@@ -2024,7 +2027,7 @@ impl<'a> PatternExecutor<'a> {
                         true
                     } else if let Some(ref node_type) = node_pattern.node_type {
                         if let Some(node) = self.graph.graph.node_weight(target) {
-                            &node.node_type == node_type
+                            node.node_type == InternedKey::from_str(node_type)
                         } else {
                             false
                         }
@@ -2073,18 +2076,19 @@ impl<'a> PatternExecutor<'a> {
             return MatchBinding::NodeRef(idx);
         }
         if let Some(node) = self.graph.graph.node_weight(idx) {
-            let title_str = match &node.title {
+            let node_title = node.title();
+            let title_str = match &*node_title {
                 Value::String(s) => s.clone(),
                 Value::Int64(i) => i.to_string(),
                 Value::Float64(f) => f.to_string(),
                 Value::UniqueId(u) => u.to_string(),
-                _ => format!("{:?}", node.title),
+                _ => format!("{:?}", &*node_title),
             };
             MatchBinding::Node {
                 index: idx,
-                node_type: node.node_type.clone(),
+                node_type: node.node_type_str(&self.graph.interner).to_string(),
                 title: title_str,
-                id: node.id.clone(),
+                id: node.id().into_owned(),
                 properties: node.properties_cloned(&self.graph.interner),
             }
         } else {

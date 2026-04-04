@@ -3,7 +3,6 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{CurrentSelection, DirGraph};
-use petgraph::visit::EdgeRef;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
@@ -60,15 +59,15 @@ pub fn to_graphml(
             xml.push_str(&format!("    <node id=\"n{}\">\n", idx.index()));
             xml.push_str(&format!(
                 "      <data key=\"node_type\">{}</data>\n",
-                escape_xml(&node.node_type)
+                escape_xml(node.node_type_str(&graph.interner))
             ));
             xml.push_str(&format!(
                 "      <data key=\"node_title\">{}</data>\n",
-                escape_xml(&value_to_string(&node.title))
+                escape_xml(&value_to_string(&node.title()))
             ));
             xml.push_str(&format!(
                 "      <data key=\"node_id\">{}</data>\n",
-                escape_xml(&value_to_string(&node.id))
+                escape_xml(&value_to_string(&node.id()))
             ));
 
             // Serialize properties as JSON
@@ -157,9 +156,12 @@ pub fn to_d3_json(
     for &idx in &node_indices {
         if let Some(node) = graph.graph.node_weight(idx) {
             let mut obj = String::from("{");
-            obj.push_str(&format!("\"id\":{},", json_value(&node.id)));
-            obj.push_str(&format!("\"type\":{},", json_string(&node.node_type)));
-            obj.push_str(&format!("\"title\":{}", json_value(&node.title)));
+            obj.push_str(&format!("\"id\":{},", json_value(&node.id())));
+            obj.push_str(&format!(
+                "\"type\":{},",
+                json_string(node.node_type_str(&graph.interner))
+            ));
+            obj.push_str(&format!("\"title\":{}", json_value(&node.title())));
 
             // Add select properties (not all to keep output clean)
             for (key, value) in node.property_iter(&graph.interner) {
@@ -263,7 +265,7 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
     xml.push_str("    <nodes>\n");
     for &idx in &node_indices {
         if let Some(node) = graph.graph.node_weight(idx) {
-            let title_str = value_to_string(&node.title);
+            let title_str = value_to_string(&node.title());
             xml.push_str(&format!(
                 "      <node id=\"{}\" label=\"{}\">\n",
                 idx.index(),
@@ -272,7 +274,7 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
             xml.push_str("        <attvalues>\n");
             xml.push_str(&format!(
                 "          <attvalue for=\"0\" value=\"{}\"/>\n",
-                escape_xml(&node.node_type)
+                escape_xml(node.node_type_str(&graph.interner))
             ));
             xml.push_str(&format!(
                 "          <attvalue for=\"1\" value=\"{}\"/>\n",
@@ -345,8 +347,8 @@ pub fn to_csv(
             nodes_csv.push_str(&format!(
                 "{},{},{}\n",
                 idx.index(),
-                escape_csv(&node.node_type),
-                escape_csv(&value_to_string(&node.title))
+                escape_csv(node.node_type_str(&graph.interner)),
+                escape_csv(&value_to_string(&node.title()))
             ));
         }
     }
@@ -415,7 +417,7 @@ pub fn to_csv_dir(
     for &idx in &node_indices {
         if let Some(node) = graph.graph.node_weight(idx) {
             nodes_by_type
-                .entry(node.node_type.clone())
+                .entry(node.node_type_str(&graph.interner).to_string())
                 .or_default()
                 .push(idx);
         }
@@ -518,9 +520,9 @@ pub fn to_csv_dir(
         // Rows
         for &idx in indices {
             if let Some(node) = graph.graph.node_weight(idx) {
-                csv.push_str(&escape_csv(&value_to_string(&node.id)));
+                csv.push_str(&escape_csv(&value_to_string(&node.id())));
                 csv.push(',');
-                csv.push_str(&escape_csv(&value_to_string(&node.title)));
+                csv.push_str(&escape_csv(&value_to_string(&node.title())));
                 for col in &prop_cols {
                     csv.push(',');
                     if let Some(val) = node.get_property(col) {
@@ -591,12 +593,12 @@ pub fn to_csv_dir(
         let source_type = edges
             .first()
             .and_then(|e| graph.graph.node_weight(e.source_idx))
-            .map(|n| n.node_type.clone())
+            .map(|n| n.node_type_str(&graph.interner).to_string())
             .unwrap_or_default();
         let target_type = edges
             .first()
             .and_then(|e| graph.graph.node_weight(e.target_idx))
-            .map(|n| n.node_type.clone())
+            .map(|n| n.node_type_str(&graph.interner).to_string())
             .unwrap_or_default();
 
         // Build CSV
@@ -612,22 +614,22 @@ pub fn to_csv_dir(
             let source_id = graph
                 .graph
                 .node_weight(edge.source_idx)
-                .map(|n| value_to_string(&n.id))
+                .map(|n| value_to_string(&n.id()))
                 .unwrap_or_default();
             let src_type = graph
                 .graph
                 .node_weight(edge.source_idx)
-                .map(|n| n.node_type.clone())
+                .map(|n| n.node_type_str(&graph.interner).to_string())
                 .unwrap_or_default();
             let target_id = graph
                 .graph
                 .node_weight(edge.target_idx)
-                .map(|n| value_to_string(&n.id))
+                .map(|n| value_to_string(&n.id()))
                 .unwrap_or_default();
             let tgt_type = graph
                 .graph
                 .node_weight(edge.target_idx)
-                .map(|n| n.node_type.clone())
+                .map(|n| n.node_type_str(&graph.interner).to_string())
                 .unwrap_or_default();
 
             csv.push_str(&escape_csv(&source_id));

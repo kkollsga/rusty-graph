@@ -3,7 +3,6 @@
 
 use crate::graph::schema::{CurrentSelection, DirGraph, EdgeData};
 use petgraph::graph::NodeIndex;
-use petgraph::visit::EdgeRef;
 use std::collections::{HashMap, HashSet};
 
 /// Expand the current selection by N hops using BFS.
@@ -95,7 +94,7 @@ pub fn extract_subgraph(
             // Update type indices
             new_graph
                 .type_indices
-                .entry(node_data.node_type.clone())
+                .entry(node_data.node_type_str(&source.interner).to_string())
                 .or_default()
                 .push(new_idx);
         }
@@ -154,7 +153,9 @@ pub fn get_subgraph_stats(
     // Count node types
     for &node_idx in &nodes {
         if let Some(node) = source.graph.node_weight(node_idx) {
-            *node_types.entry(node.node_type.clone()).or_insert(0) += 1;
+            *node_types
+                .entry(node.node_type_str(&source.interner).to_string())
+                .or_insert(0) += 1;
         }
     }
 

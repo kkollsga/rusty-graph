@@ -216,9 +216,9 @@ impl KnowledgeGraph {
                 .filter_map(|r| {
                     self.inner.graph.node_weight(r.node_idx).map(|node| {
                         let dict = PyDict::new(py);
-                        let _ = dict.set_item("id", py_out::value_to_py(py, &node.id).ok());
-                        let _ = dict.set_item("title", py_out::value_to_py(py, &node.title).ok());
-                        let _ = dict.set_item("type", &node.node_type);
+                        let _ = dict.set_item("id", py_out::value_to_py(py, &node.id()).ok());
+                        let _ = dict.set_item("title", py_out::value_to_py(py, &node.title()).ok());
+                        let _ = dict.set_item("type", node.node_type_str(&self.inner.interner));
                         let _ = dict.set_item("score", r.score);
                         for (k, v) in node.property_iter(&self.inner.interner) {
                             let _ = dict.set_item(k, py_out::value_to_py(py, v).ok());
@@ -237,9 +237,9 @@ impl KnowledgeGraph {
         for r in &results {
             if let Some(node) = self.inner.graph.node_weight(r.node_idx) {
                 let dict = PyDict::new(py);
-                dict.set_item("id", py_out::value_to_py(py, &node.id)?)?;
-                dict.set_item("title", py_out::value_to_py(py, &node.title)?)?;
-                dict.set_item("type", &node.node_type)?;
+                dict.set_item("id", py_out::value_to_py(py, &node.id())?)?;
+                dict.set_item("title", py_out::value_to_py(py, &node.title())?)?;
+                dict.set_item("type", node.node_type_str(&self.inner.interner))?;
                 dict.set_item("score", r.score)?;
                 for (k, v) in node.property_iter(&self.inner.interner) {
                     dict.set_item(k, py_out::value_to_py(py, v)?)?;
@@ -394,7 +394,7 @@ impl KnowledgeGraph {
             for (&node_index, &_slot) in &store.node_to_slot {
                 if let Some(embedding) = store.get_embedding(node_index) {
                     if let Some(node) = self.inner.graph.node_weight(NodeIndex::new(node_index)) {
-                        let py_id = py_out::value_to_py(py, &node.id)?;
+                        let py_id = py_out::value_to_py(py, &node.id())?;
                         let py_vec = PyList::new(py, embedding)?;
                         result.set_item(py_id, py_vec)?;
                     }
@@ -424,14 +424,17 @@ impl KnowledgeGraph {
                 None => continue,
             };
 
-            let key = (node.node_type.clone(), format!("{}_emb", col));
+            let key = (
+                node.node_type_str(&self.inner.interner).to_string(),
+                format!("{}_emb", col),
+            );
             let store = match self.inner.embeddings.get(&key) {
                 Some(s) => s,
                 None => continue,
             };
 
             if let Some(embedding) = store.get_embedding(node_idx.index()) {
-                let py_id = py_out::value_to_py(py, &node.id)?;
+                let py_id = py_out::value_to_py(py, &node.id())?;
                 let py_vec = PyList::new(py, embedding)?;
                 result.set_item(py_id, py_vec)?;
             }

@@ -6,7 +6,6 @@ use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::value_operations;
 use petgraph::algo::kosaraju_scc;
 use petgraph::graph::NodeIndex;
-use petgraph::visit::{EdgeRef, IntoEdgeReferences, NodeIndexable};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
@@ -78,7 +77,7 @@ fn node_passes_via_filter(
         None => true,
         Some(types) => {
             if let Some(node_data) = graph.graph.node_weight(node) {
-                types.contains(node_data.node_type.as_str())
+                types.contains(node_data.node_type_str(&graph.interner))
             } else {
                 false
             }
@@ -564,7 +563,12 @@ fn find_all_paths_recursive(
 /// Find all strongly connected components in the graph.
 /// Returns a vector of components, each component is a vector of node indices.
 pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
-    kosaraju_scc(&graph.graph)
+    // For disk mode, fall back to weakly_connected_components since
+    // kosaraju_scc requires petgraph trait bounds.
+    if graph.storage_mode == crate::graph::schema::StorageMode::Disk {
+        return weakly_connected_components(graph);
+    }
+    kosaraju_scc(graph.graph.as_stable_digraph())
 }
 
 /// Find weakly connected components (treating graph as undirected).
@@ -644,14 +648,15 @@ pub fn weakly_connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
 /// Get node info for building Python-friendly path output
 pub fn get_node_info(graph: &DirGraph, node_idx: NodeIndex) -> Option<PathNodeInfo> {
     let node = graph.get_node(node_idx)?;
-    let title_str = match &node.title {
+    let node_title = node.title();
+    let title_str = match &*node_title {
         Value::String(s) => s.clone(),
-        _ => format!("{:?}", node.title),
+        _ => format!("{:?}", &*node_title),
     };
     Some(PathNodeInfo {
-        node_type: node.node_type.clone(),
+        node_type: node.node_type_str(&graph.interner).to_string(),
         title: title_str,
-        id: node.id.clone(),
+        id: node.id().into_owned(),
     })
 }
 

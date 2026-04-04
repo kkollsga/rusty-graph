@@ -522,7 +522,8 @@ impl KnowledgeGraph {
                 let comp_list = PyList::empty(py);
                 for &node_idx in &component {
                     if let Some(node) = self.inner.get_node(node_idx) {
-                        let title_str = match &node.title {
+                        let node_title = node.title();
+                        let title_str = match &*node_title {
                             Value::String(s) => s.as_str(),
                             _ => "",
                         };
@@ -544,13 +545,14 @@ impl KnowledgeGraph {
                 for &node_idx in &component {
                     if let Some(node) = self.inner.get_node(node_idx) {
                         let node_dict = PyDict::new(py);
-                        node_dict.set_item(key_type, &node.node_type)?;
-                        let title_str = match &node.title {
+                        node_dict.set_item(key_type, node.node_type_str(&self.inner.interner))?;
+                        let node_title = node.title();
+                        let title_str = match &*node_title {
                             Value::String(s) => s.as_str(),
                             _ => "",
                         };
                         node_dict.set_item(key_title, title_str)?;
-                        node_dict.set_item(key_id, py_out::value_to_py(py, &node.id)?)?;
+                        node_dict.set_item(key_id, py_out::value_to_py(py, &node.id())?)?;
                         comp_list.append(node_dict)?;
                     }
                 }

@@ -52,10 +52,10 @@ pub fn vector_search(
     }
 
     // Fast path: check if first candidate's type has an embedding store (common after type_filter)
-    let first_type = graph
+    let first_type: Option<&str> = graph
         .graph
         .node_weight(candidates[0])
-        .map(|n| n.node_type.as_str());
+        .map(|n| n.node_type_str(&graph.interner));
 
     let single_type = first_type.and_then(|ft| {
         let key = (ft.to_string(), embedding_property.to_string());
@@ -88,11 +88,11 @@ pub fn vector_search(
 
         for &node_idx in &candidates {
             let node_type = match graph.graph.node_weight(node_idx) {
-                Some(n) => &n.node_type,
+                Some(n) => n.node_type_str(&graph.interner),
                 None => continue,
             };
 
-            let key = (node_type.clone(), embedding_property.to_string());
+            let key = (node_type.to_string(), embedding_property.to_string());
             let store = match graph.embeddings.get(&key) {
                 Some(s) => s,
                 None => continue,

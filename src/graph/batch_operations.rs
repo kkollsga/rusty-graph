@@ -1,8 +1,9 @@
 // src/graph/batch_operations.rs
 use crate::datatypes::Value;
-use crate::graph::schema::{DirGraph, EdgeData, InternedKey, NodeData};
+use crate::graph::schema::{
+    DirGraph, EdgeData, InternedKey, NodeData, PropertyStorage, StorageMode,
+};
 use petgraph::graph::NodeIndex;
-use petgraph::visit::EdgeRef;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
@@ -197,24 +198,58 @@ impl BatchProcessor {
     fn flush_chunk(&mut self, graph: &mut DirGraph) -> Result<BatchStats, String> {
         let start = Instant::now();
         let mut stats = BatchStats::default();
+        let mapped =
+            graph.storage_mode == StorageMode::Mapped || graph.storage_mode == StorageMode::Disk;
+
+        // In mapped mode, we use a two-pass approach to avoid O(n²) Arc cloning:
+        // Pass 1: detach existing nodes' Arc refs, push all rows into owned ColumnStores
+        // Pass 2: wrap stores back in Arc, assign refs to all nodes (old + new)
+        //
+        // This avoids Arc::make_mut cloning the entire store when existing nodes
+        // hold shared references.
+        let mut deferred_columnar: Vec<(NodeIndex, String, u32)> = Vec::new();
+        // Owned mutable column stores, extracted from Arc to avoid clone-on-write
+        let mut owned_stores: HashMap<String, crate::graph::column_store::ColumnStore> =
+            HashMap::new();
+
+        if mapped {
+            // Collect affected node types from both create queues
+            let affected_types: HashSet<String> = self
+                .creates
+                .iter()
+                .map(|c| c.node_type.clone())
+                .chain(self.creates_interned.iter().map(|c| c.node_type.clone()))
+                .collect();
+
+            // For each affected type: detach existing nodes and extract the store
+            for node_type in &affected_types {
+                // Detach existing nodes — record their (NodeIndex, row_id) for pass 2
+                if let Some(indices) = graph.type_indices.get(node_type) {
+                    for &idx in indices {
+                        if let Some(node) = graph.graph.node_weight_mut(idx) {
+                            if let PropertyStorage::Columnar { row_id, .. } = &node.properties {
+                                let rid = *row_id;
+                                node.properties = PropertyStorage::Map(HashMap::new());
+                                deferred_columnar.push((idx, node_type.clone(), rid));
+                            }
+                        }
+                    }
+                }
+                // Extract the store from Arc (now refcount=1, so try_unwrap succeeds)
+                if let Some(arc_store) = graph.column_stores.remove(node_type) {
+                    let store = Arc::try_unwrap(arc_store).unwrap_or_else(|a| (*a).clone());
+                    owned_stores.insert(node_type.clone(), store);
+                }
+            }
+        }
 
         // Process creates in current chunk
         for creation in self.creates.drain(..) {
             let id_for_index = creation.id.clone();
             let node_type_for_index = creation.node_type.clone();
 
-            // Use compact storage if a TypeSchema exists for this node type
-            let schema: Option<Arc<_>> = graph.type_schemas.get(&creation.node_type).cloned();
-            let node_data = if let Some(ref ts) = schema {
-                NodeData::new_compact(
-                    creation.id,
-                    creation.title,
-                    creation.node_type.clone(),
-                    creation.properties,
-                    &mut graph.interner,
-                    ts,
-                )
-            } else {
+            let mut node_data = if mapped {
+                // Mapped mode: create node with Map properties, then push to ColumnStore
                 NodeData::new(
                     creation.id,
                     creation.title,
@@ -222,15 +257,104 @@ impl BatchProcessor {
                     creation.properties,
                     &mut graph.interner,
                 )
+            } else {
+                // Default mode: use compact storage if a TypeSchema exists
+                let schema: Option<Arc<_>> = graph.type_schemas.get(&creation.node_type).cloned();
+                if let Some(ref ts) = schema {
+                    NodeData::new_compact(
+                        creation.id,
+                        creation.title,
+                        creation.node_type.clone(),
+                        creation.properties,
+                        &mut graph.interner,
+                        ts,
+                    )
+                } else {
+                    NodeData::new(
+                        creation.id,
+                        creation.title,
+                        creation.node_type.clone(),
+                        creation.properties,
+                        &mut graph.interner,
+                    )
+                }
             };
+
+            // Mapped mode: push properties into owned ColumnStore (pass 1)
+            let mapped_row_id = if mapped {
+                let interned_props = node_data
+                    .properties
+                    .drain_to_interned_pairs(&graph.interner);
+                let keys: Vec<_> = interned_props.iter().map(|(k, _)| *k).collect();
+                graph.ensure_type_schema_keys(&creation.node_type, &keys);
+                // Get or create owned store (not behind Arc)
+                let store = owned_stores
+                    .entry(creation.node_type.clone())
+                    .or_insert_with(|| {
+                        let schema = graph
+                            .type_schemas
+                            .get(&creation.node_type)
+                            .cloned()
+                            .unwrap_or_else(|| Arc::new(crate::graph::schema::TypeSchema::new()));
+                        let meta = graph
+                            .node_type_metadata
+                            .get(&creation.node_type)
+                            .cloned()
+                            .unwrap_or_default();
+                        crate::graph::column_store::ColumnStore::new(schema, &meta, &graph.interner)
+                    });
+                // Extend columns if schema grew
+                let current_schema = graph.type_schemas.get(&creation.node_type).cloned();
+                if let Some(ref cs) = current_schema {
+                    if store.schema().len() < cs.len() {
+                        // Schema grew — need to rebuild store with new schema
+                        let meta = graph
+                            .node_type_metadata
+                            .get(&creation.node_type)
+                            .cloned()
+                            .unwrap_or_default();
+                        let old_store = std::mem::replace(
+                            store,
+                            crate::graph::column_store::ColumnStore::new(
+                                cs.clone(),
+                                &meta,
+                                &graph.interner,
+                            ),
+                        );
+                        for rid in 0..old_store.row_count() {
+                            if let Some(id_val) = old_store.get_id(rid) {
+                                store.push_id(&id_val);
+                            }
+                            if let Some(title_val) = old_store.get_title(rid) {
+                                store.push_title(&title_val);
+                            }
+                            let props = old_store.row_properties(rid);
+                            store.push_row(&props);
+                        }
+                    }
+                }
+                store.push_id(&node_data.id);
+                store.push_title(&node_data.title);
+                let row_id = store.push_row(&interned_props);
+                node_data.id = Value::Null;
+                node_data.title = Value::Null;
+                node_data.properties = PropertyStorage::Map(HashMap::new());
+                Some(row_id)
+            } else {
+                None
+            };
+
             let node_idx = graph.graph.add_node(node_data);
-            // Add to type index
+
+            if let Some(row_id) = mapped_row_id {
+                deferred_columnar.push((node_idx, creation.node_type.clone(), row_id));
+            }
+
             graph
                 .type_indices
                 .entry(creation.node_type)
                 .or_default()
                 .push(node_idx);
-            // Add to ID index for O(1) lookups
             graph
                 .id_indices
                 .entry(node_type_for_index)
@@ -243,25 +367,101 @@ impl BatchProcessor {
         for creation in self.creates_interned.drain(..) {
             let id_for_index = creation.id.clone();
             let node_type_for_index = creation.node_type.clone();
+            let type_key = graph.interner.get_or_intern(&creation.node_type);
 
-            let schema: Option<Arc<_>> = graph.type_schemas.get(&creation.node_type).cloned();
-            let node_data = if let Some(ref ts) = schema {
-                NodeData::new_compact_preinterned(
-                    creation.id,
-                    creation.title,
-                    creation.node_type.clone(),
-                    creation.properties,
-                    ts,
-                )
-            } else {
+            let mut node_data = if mapped {
                 NodeData::new_preinterned(
                     creation.id,
                     creation.title,
-                    creation.node_type.clone(),
+                    type_key,
                     creation.properties,
                 )
+            } else {
+                let schema: Option<Arc<_>> = graph.type_schemas.get(&creation.node_type).cloned();
+                if let Some(ref ts) = schema {
+                    NodeData::new_compact_preinterned(
+                        creation.id,
+                        creation.title,
+                        type_key,
+                        creation.properties,
+                        ts,
+                    )
+                } else {
+                    NodeData::new_preinterned(
+                        creation.id,
+                        creation.title,
+                        type_key,
+                        creation.properties,
+                    )
+                }
             };
+
+            // Mapped mode: push into owned ColumnStore (pass 1)
+            let mapped_row_id = if mapped {
+                let interned_props = node_data
+                    .properties
+                    .drain_to_interned_pairs(&graph.interner);
+                let store = owned_stores
+                    .entry(creation.node_type.clone())
+                    .or_insert_with(|| {
+                        let schema = graph
+                            .type_schemas
+                            .get(&creation.node_type)
+                            .cloned()
+                            .unwrap_or_else(|| Arc::new(crate::graph::schema::TypeSchema::new()));
+                        let meta = graph
+                            .node_type_metadata
+                            .get(&creation.node_type)
+                            .cloned()
+                            .unwrap_or_default();
+                        crate::graph::column_store::ColumnStore::new(schema, &meta, &graph.interner)
+                    });
+                // Extend columns if schema grew (new columns in this batch)
+                let current_schema = graph.type_schemas.get(&creation.node_type).cloned();
+                if let Some(ref cs) = current_schema {
+                    if store.schema().len() < cs.len() {
+                        let meta = graph
+                            .node_type_metadata
+                            .get(&creation.node_type)
+                            .cloned()
+                            .unwrap_or_default();
+                        let old_store = std::mem::replace(
+                            store,
+                            crate::graph::column_store::ColumnStore::new(
+                                cs.clone(),
+                                &meta,
+                                &graph.interner,
+                            ),
+                        );
+                        for rid in 0..old_store.row_count() {
+                            if let Some(id_val) = old_store.get_id(rid) {
+                                store.push_id(&id_val);
+                            }
+                            if let Some(title_val) = old_store.get_title(rid) {
+                                store.push_title(&title_val);
+                            }
+                            let props = old_store.row_properties(rid);
+                            store.push_row(&props);
+                        }
+                    }
+                }
+                store.push_id(&node_data.id);
+                store.push_title(&node_data.title);
+                let row_id = store.push_row(&interned_props);
+                node_data.id = Value::Null;
+                node_data.title = Value::Null;
+                node_data.properties = PropertyStorage::Map(HashMap::new());
+                Some(row_id)
+            } else {
+                None
+            };
+
             let node_idx = graph.graph.add_node(node_data);
+
+            if let Some(row_id) = mapped_row_id {
+                deferred_columnar.push((node_idx, creation.node_type.clone(), row_id));
+            }
+
             graph
                 .type_indices
                 .entry(creation.node_type)
@@ -273,6 +473,24 @@ impl BatchProcessor {
                 .or_default()
                 .insert(id_for_index, node_idx);
             stats.creates += 1;
+        }
+
+        // Mapped mode pass 2: wrap owned stores in Arc, assign refs to all nodes.
+        if !deferred_columnar.is_empty() {
+            // Put owned stores back into graph.column_stores as Arcs
+            for (node_type, store) in owned_stores {
+                graph.column_stores.insert(node_type, Arc::new(store));
+            }
+            // Assign Arc refs to all nodes (existing + newly created)
+            for (node_idx, node_type, row_id) in deferred_columnar {
+                let arc_store = graph.column_stores.get(&node_type).unwrap().clone();
+                if let Some(node) = graph.graph.node_weight_mut(node_idx) {
+                    node.properties = PropertyStorage::Columnar {
+                        store: arc_store,
+                        row_id,
+                    };
+                }
+            }
         }
 
         // Process updates in current chunk
@@ -314,7 +532,7 @@ impl BatchProcessor {
                     ConflictHandling::Preserve => {
                         // Update only if provided, but preserve existing values
                         if let Some(new_title) = update.title {
-                            if node.title == Value::Null {
+                            if *node.title() == Value::Null {
                                 node.title = new_title;
                             }
                         }

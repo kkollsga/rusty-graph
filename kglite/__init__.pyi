@@ -382,8 +382,26 @@ class KnowledgeGraph:
     # Constructor
     # ====================================================================
 
-    def __init__(self) -> None:
-        """Create an empty KnowledgeGraph."""
+    def __new__(
+        cls,
+        *,
+        storage: str | None = None,
+        path: str | None = None,
+    ) -> "KnowledgeGraph":
+        """Create an empty KnowledgeGraph.
+
+        Args:
+            storage: Storage mode. ``None`` (default) uses heap-resident
+                storage, optimal for small-to-medium graphs. ``"mapped"``
+                uses mmap-backed columnar storage from the start, designed
+                for large graphs that may approach or exceed available RAM.
+                ``"disk"`` uses fully disk-backed storage for very large
+                graphs (100M+ nodes). Requires ``path``.
+            path: Directory path for disk-mode storage. Required when
+                ``storage="disk"``. The directory IS the graph — data is
+                written directly to disk via mmap. Load with
+                ``kglite.load(path)``.
+        """
         ...
 
     # ====================================================================
@@ -1898,6 +1916,25 @@ class KnowledgeGraph:
     # Columnar Storage
     # ====================================================================
 
+    def enable_disk_mode(self) -> None:
+        """Convert the graph to disk-backed storage mode.
+
+        Enables columnar storage first (if not already), then builds
+        CSR (Compressed Sparse Row) edge arrays on disk. Nodes stay
+        in memory (~40 bytes each), edges are mmap'd from disk.
+
+        This reduces memory usage to ~10% of the in-memory graph for
+        edge-heavy graphs. Best called after all data is loaded.
+
+        All query methods (Cypher, fluent API, algorithms) work
+        identically in disk mode.
+
+        Example::
+
+            graph.enable_disk_mode()
+        """
+        ...
+
     def enable_columnar(self) -> None:
         """Convert node properties to columnar storage.
 
@@ -1960,18 +1997,92 @@ class KnowledgeGraph:
         ...
 
     # ====================================================================
+    # Import
+    # ====================================================================
+
+    def load_ntriples(
+        self,
+        path: str,
+        *,
+        predicates: list[str] | None = None,
+        languages: list[str] | None = None,
+        node_types: dict[str, str] | None = None,
+        predicate_labels: dict[str, str] | None = None,
+        max_entities: int | None = None,
+        verbose: bool = False,
+    ) -> dict:
+        """Load an N-Triples file into the graph.
+
+        Streams the file (supports ``.bz2``, ``.gz``, or plain ``.nt``)
+        and converts RDF triples into a property graph. Designed for
+        Wikidata truthy dumps but works with any N-Triples file.
+
+        **RDF → property graph mapping:**
+
+        - Each unique ``Q``-entity subject becomes a **node**.
+        - ``rdfs:label`` (language-filtered) → **node title**.
+        - ``schema:description`` → ``description`` property.
+        - ``prop/direct/P*`` with a ``Q``-entity object → **edge**.
+        - ``prop/direct/P*`` with a literal object → **node property**.
+        - ``P31`` (instance of) determines the **node type** via *node_types*.
+
+        Args:
+            path: Path to the N-Triples file (``.nt``, ``.nt.bz2``, ``.nt.gz``).
+            predicates: Wikidata P-codes to import (e.g. ``["P31", "P279"]``).
+                ``None`` imports all predicates. Labels and descriptions are
+                always imported regardless of this filter.
+            languages: Language codes for label/description literals
+                (e.g. ``["en"]``). ``None`` keeps all languages.
+            node_types: Maps a P31 target Q-code to a human-readable node type
+                name (e.g. ``{"Q5": "Person", "Q6256": "Country"}``).
+                Entities whose P31 value is not in this map use the raw Q-code
+                as their type. Entities without P31 get type ``"Entity"``.
+            predicate_labels: Maps P-codes to human-readable edge/property
+                names (e.g. ``{"P31": "instance_of", "P17": "country"}``).
+                Unmapped predicates use the raw P-code.
+            max_entities: Stop after creating this many nodes. Useful for
+                exploratory loading of large dumps.
+            verbose: Print progress to stderr every 5M triples.
+
+        Returns:
+            A dict with load statistics::
+
+                {"entities": int, "edges": int, "edges_skipped": int,
+                 "triples_scanned": int, "seconds": float}
+
+        Example::
+
+            graph = KnowledgeGraph()
+            stats = graph.load_ntriples(
+                "latest-truthy.nt.bz2",
+                predicates=["P31", "P279", "P17", "P106"],
+                languages=["en"],
+                node_types={"Q5": "Person", "Q6256": "Country"},
+                predicate_labels={"P31": "instance_of", "P17": "country"},
+                max_entities=1_000_000,
+                verbose=True,
+            )
+        """
+        ...
+
+    # ====================================================================
     # Persistence
     # ====================================================================
 
     def save(self, path: str) -> None:
-        """Serialise the graph to a v3 binary file.
+        """Serialise the graph to disk.
+
+        For default/mapped modes: saves to a ``.kgl`` v3 binary file.
+        For disk mode: saves to a directory containing CSR files and
+        compressed node/edge data. The directory IS the saved graph.
 
         Uses columnar storage internally for efficient compression and
         larger-than-RAM loading. If the graph is not already in columnar
         mode, ``save()`` enables it automatically (the graph stays columnar
         after the call).
 
-        Load it back with :func:`kglite.load`.
+        Load it back with :func:`kglite.load` (accepts both files and
+        directories).
 
         Args:
             path: Output file path (typically ``*.kgl``).

@@ -131,7 +131,7 @@ impl KnowledgeGraph {
 
         // Update config channels list
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            let nt = node.node_type.clone();
+            let nt = node.node_type_str(&graph.interner).to_string();
             if let Some(config) = graph.timeseries_configs.get_mut(&nt) {
                 if !config.channels.contains(&channel_name) {
                     config.channels.push(channel_name.clone());

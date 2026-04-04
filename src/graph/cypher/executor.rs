@@ -19,7 +19,6 @@ use crate::graph::vector_search as vs;
 use chrono::Datelike;
 use geo::BoundingRect;
 use petgraph::graph::NodeIndex;
-use petgraph::visit::{EdgeRef, NodeIndexable};
 use petgraph::Direction;
 use rayon::prelude::*;
 use std::borrow::Cow;
@@ -1292,7 +1291,7 @@ impl<'a> CypherExecutor<'a> {
             // Check target node type
             if let Some(ref req_type) = other_node.node_type {
                 if let Some(nd) = self.graph.graph.node_weight(other_idx) {
-                    if nd.get_node_type_ref() != req_type {
+                    if nd.get_node_type_ref(&self.graph.interner) != req_type {
                         continue;
                     }
                 } else {
@@ -1438,7 +1437,7 @@ impl<'a> CypherExecutor<'a> {
             // Check the other node's type
             if let Some(ref required_type) = other_type {
                 if let Some(node) = self.graph.graph.node_weight(other_idx) {
-                    if &node.node_type != required_type {
+                    if node.node_type != InternedKey::from_str(required_type) {
                         continue;
                     }
                 } else {
@@ -1511,7 +1510,7 @@ impl<'a> CypherExecutor<'a> {
             // Check middle node type
             if let Some(ref mid_type) = mid_node.node_type {
                 if let Some(nd) = self.graph.graph.node_weight(mid_idx) {
-                    if nd.get_node_type_ref() != mid_type {
+                    if nd.get_node_type_ref(&self.graph.interner) != mid_type {
                         continue;
                     }
                 } else {
@@ -1534,7 +1533,7 @@ impl<'a> CypherExecutor<'a> {
                 // Check last node type
                 if let Some(ref last_type) = last_node.node_type {
                     if let Some(nd) = self.graph.graph.node_weight(last_idx) {
-                        if nd.get_node_type_ref() != last_type {
+                        if nd.get_node_type_ref(&self.graph.interner) != last_type {
                             continue;
                         }
                     } else {
@@ -1609,7 +1608,7 @@ impl<'a> CypherExecutor<'a> {
             // Check middle node type
             if let Some(ref mid_type) = mid_node.node_type {
                 if let Some(nd) = self.graph.graph.node_weight(mid_idx) {
-                    if nd.get_node_type_ref() != mid_type {
+                    if nd.get_node_type_ref(&self.graph.interner) != mid_type {
                         continue;
                     }
                 } else {
@@ -1632,7 +1631,7 @@ impl<'a> CypherExecutor<'a> {
                 // Check first node type
                 if let Some(ref first_type) = first_node.node_type {
                     if let Some(nd) = self.graph.graph.node_weight(first_idx) {
-                        if nd.get_node_type_ref() != first_type {
+                        if nd.get_node_type_ref(&self.graph.interner) != first_type {
                             continue;
                         }
                     } else {
@@ -2656,7 +2655,7 @@ impl<'a> CypherExecutor<'a> {
                     None => return false,
                 };
                 let node_type = match graph.graph.node_weight(idx) {
-                    Some(n) => &n.node_type,
+                    Some(n) => n.node_type_str(&graph.interner),
                     None => return false,
                 };
                 let store = match graph.embedding_store(node_type, &spec.prop_name) {
@@ -2802,7 +2801,7 @@ impl<'a> CypherExecutor<'a> {
             row.node_bindings
                 .get(variable)
                 .and_then(|&idx| self.graph.graph.node_weight(idx))
-                .map(|node| node.node_type.clone())
+                .map(|node| node.node_type_str(&self.graph.interner).to_string())
         })
     }
 
@@ -3766,7 +3765,8 @@ impl<'a> CypherExecutor<'a> {
                                     if let Some(&node_idx) = row.node_bindings.get(var.as_str()) {
                                         if let Some(node) = self.graph.graph.node_weight(node_idx) {
                                             return Ok(Value::String(
-                                                node.get_node_type_ref().to_string(),
+                                                node.get_node_type_ref(&self.graph.interner)
+                                                    .to_string(),
                                             ));
                                         }
                                     }
@@ -4035,12 +4035,15 @@ impl<'a> CypherExecutor<'a> {
                 // No map expression — serialize node as JSON dict (backward compatible)
                 if let Some(node) = self.graph.graph.node_weight(node_idx) {
                     let mut props = Vec::new();
-                    props.push(format!("\"id\": {}", format_value_compact(&node.id)));
+                    props.push(format!("\"id\": {}", format_value_compact(&node.id())));
                     props.push(format!(
                         "\"title\": \"{}\"",
-                        format_value_compact(&node.title).replace('"', "\\\"")
+                        format_value_compact(&node.title()).replace('"', "\\\"")
                     ));
-                    props.push(format!("\"type\": \"{}\"", node.node_type));
+                    props.push(format!(
+                        "\"type\": \"{}\"",
+                        node.node_type_str(&self.graph.interner)
+                    ));
                     Value::String(format!("{{{}}}", props.join(", ")))
                 } else {
                     Value::Null
@@ -4199,7 +4202,9 @@ impl<'a> CypherExecutor<'a> {
     /// Returns None if the node has no spatial config.
     fn build_node_spatial_data(&self, idx: NodeIndex) -> Option<NodeSpatialData> {
         let node = self.graph.graph.node_weight(idx)?;
-        let config = self.graph.get_spatial_config(&node.node_type)?;
+        let config = self
+            .graph
+            .get_spatial_config(node.node_type_str(&self.graph.interner))?;
 
         // Primary geometry + bounding box
         let geometry = config.geometry.as_ref().and_then(|geom_f| {
@@ -4555,12 +4560,15 @@ impl<'a> CypherExecutor<'a> {
                         for node_idx in &node_indices {
                             if let Some(node) = self.graph.graph.node_weight(*node_idx) {
                                 let mut props = Vec::new();
-                                props.push(format!("\"id\": {}", format_value_compact(&node.id)));
+                                props.push(format!("\"id\": {}", format_value_compact(&node.id())));
                                 props.push(format!(
                                     "\"title\": \"{}\"",
-                                    format_value_compact(&node.title).replace('"', "\\\"")
+                                    format_value_compact(&node.title()).replace('"', "\\\"")
                                 ));
-                                props.push(format!("\"type\": \"{}\"", node.node_type));
+                                props.push(format!(
+                                    "\"type\": \"{}\"",
+                                    node.node_type_str(&self.graph.interner)
+                                ));
                                 entries.push(format!("{{{}}}", props.join(", ")));
                             }
                         }
@@ -4615,7 +4623,7 @@ impl<'a> CypherExecutor<'a> {
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(&idx) = row.node_bindings.get(var) {
                         if let Some(node) = self.graph.graph.node_weight(idx) {
-                            let node_type = node.get_node_type_ref();
+                            let node_type = node.get_node_type_ref(&self.graph.interner);
                             return Ok(Value::String(format!(
                                 "[\"{}\"]",
                                 node_type.replace('\\', "\\\\").replace('"', "\\\"")
@@ -5147,7 +5155,7 @@ impl<'a> CypherExecutor<'a> {
 
                 // Per-row: look up node type → embedding store → compute similarity
                 let node_type = match self.graph.graph.node_weight(node_idx) {
-                    Some(n) => &n.node_type,
+                    Some(n) => n.node_type_str(&self.graph.interner),
                     None => return Ok(Value::Null),
                 };
 
@@ -5602,7 +5610,7 @@ impl<'a> CypherExecutor<'a> {
                     }
                 };
                 let node_type = match self.graph.graph.node_weight(node_idx) {
-                    Some(n) => &n.node_type,
+                    Some(n) => n.node_type_str(&self.graph.interner),
                     None => return Ok(Value::Null),
                 };
                 let store = match self.graph.embedding_store(node_type, &prop_name) {
@@ -5676,14 +5684,15 @@ impl<'a> CypherExecutor<'a> {
             .graph
             .node_weight(*node_idx)
             .ok_or("ts_*(): node not found in graph")?;
+        let node_type_str = node.node_type_str(&self.graph.interner);
         let config = self
             .graph
             .timeseries_configs
-            .get(&node.node_type)
+            .get(node_type_str)
             .ok_or_else(|| {
                 format!(
                     "ts_*(): no timeseries config for node type '{}'",
-                    node.node_type
+                    node_type_str
                 )
             })?;
         Ok((ts, channel, config))
@@ -7413,7 +7422,10 @@ impl<'a> CypherExecutor<'a> {
             for (i, &idx) in node_indices.iter().enumerate() {
                 if let Some(node) = self.graph.graph.node_weight(idx) {
                     // Try spatial config for this node type
-                    if let Some(config) = self.graph.get_spatial_config(&node.node_type) {
+                    if let Some(config) = self
+                        .graph
+                        .get_spatial_config(node.node_type_str(&self.graph.interner))
+                    {
                         let (lat_f, lon_f) = config
                             .location
                             .as_ref()
@@ -8104,7 +8116,7 @@ fn execute_set(
                     // Capture old value + node_type before mutable borrow (for index update)
                     let (old_value, node_type_str) = match graph.get_node(*node_idx) {
                         Some(node) => {
-                            let nt = node.get_node_type_ref().to_string();
+                            let nt = node.get_node_type_ref(&graph.interner).to_string();
                             let old = match property.as_str() {
                                 "name" => node.get_field_ref("name").map(Cow::into_owned),
                                 _ => node.get_field_ref(property).map(Cow::into_owned),
@@ -8184,7 +8196,6 @@ fn execute_delete(
     result_set: &ResultSet,
     stats: &mut MutationStats,
 ) -> Result<(), String> {
-    use petgraph::visit::EdgeRef;
     use std::collections::HashSet;
 
     let mut nodes_to_delete: HashSet<petgraph::graph::NodeIndex> = HashSet::new();
@@ -8285,7 +8296,7 @@ fn execute_delete(
     let mut affected_types: HashSet<String> = HashSet::new();
     for &node_idx in &nodes_to_delete {
         if let Some(node) = graph.graph.node_weight(node_idx) {
-            affected_types.insert(node.get_node_type_ref().to_string());
+            affected_types.insert(node.get_node_type_ref(&graph.interner).to_string());
         }
     }
 
@@ -8363,7 +8374,7 @@ fn execute_remove(
                     // Read node_type before mutable borrow (for index update)
                     let node_type_str = graph
                         .get_node(*node_idx)
-                        .map(|n| n.get_node_type_ref().to_string())
+                        .map(|n| n.get_node_type_ref(&graph.interner).to_string())
                         .unwrap_or_default();
 
                     // Remove property (mutable borrow, returns old value)
@@ -8488,8 +8499,6 @@ fn try_match_merge_pattern(
     row: &ResultRow,
     params: &HashMap<String, Value>,
 ) -> Result<Option<ResultRow>, String> {
-    use petgraph::visit::EdgeRef;
-
     let executor = CypherExecutor::with_params(graph, params, None);
 
     match pattern.elements.len() {
@@ -8944,17 +8953,18 @@ fn evaluate_comparison(
 /// Resolve a node property, returning an owned Value directly.
 /// Uses `get_property_value()` to avoid Cow wrapping/unwrapping overhead.
 fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> Value {
-    let resolved = graph.resolve_alias(&node.node_type, property);
+    let node_type_str = node.node_type_str(&graph.interner);
+    let resolved = graph.resolve_alias(node_type_str, property);
     match resolved {
-        "id" => node.id.clone(),
-        "title" | "name" => node.title.clone(),
-        "type" | "node_type" | "label" => Value::String(node.node_type.clone()),
+        "id" => node.id().into_owned(),
+        "title" | "name" => node.title().into_owned(),
+        "type" | "node_type" | "label" => Value::String(node_type_str.to_string()),
         _ => {
             if let Some(val) = node.get_property_value(resolved) {
                 return val;
             }
             // Fall through to spatial virtual properties only if not found
-            if let Some(config) = graph.get_spatial_config(&node.node_type) {
+            if let Some(config) = graph.get_spatial_config(node_type_str) {
                 if resolved == "location" {
                     if let Some((lat_f, lon_f)) = &config.location {
                         let lat = value_operations::value_to_f64(
@@ -9016,7 +9026,7 @@ fn resolve_edge_property(graph: &DirGraph, edge: &EdgeBinding, property: &str) -
 
 /// Convert a NodeData to a representative Value (title string)
 fn node_to_map_value(node: &NodeData) -> Value {
-    node.title.clone()
+    node.title().into_owned()
 }
 
 /// Parse a list value from string format "[a, b, c]".
@@ -9901,7 +9911,7 @@ mod tests {
             node.get_field_ref("price").as_deref(),
             Some(&Value::Int64(999))
         );
-        assert_eq!(node.get_node_type_ref(), "Product");
+        assert_eq!(node.get_node_type_ref(&graph.interner), "Product");
     }
 
     #[test]

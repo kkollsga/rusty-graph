@@ -86,9 +86,9 @@ impl PropertyStats {
             .and_then(|idx| graph.get_node(idx))
             .map(|node| {
                 (
-                    Some(node.node_type.clone()),
-                    Some(node.title.clone()),
-                    Some(node.id.clone()),
+                    Some(node.node_type_str(&graph.interner).to_string()),
+                    Some(node.title().into_owned()),
+                    Some(node.id().into_owned()),
                 )
             })
             .unwrap_or((None, None, None));

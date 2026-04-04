@@ -215,7 +215,11 @@ fn filter_nodes_by_conditions(
     // Find nodes by their node_type first, then check for indexed properties
     let node_types: HashSet<String> = nodes
         .iter()
-        .filter_map(|&idx| graph.get_node(idx).map(|n| n.node_type.clone()))
+        .filter_map(|&idx| {
+            graph
+                .get_node(idx)
+                .map(|n| n.node_type_str(&graph.interner).to_string())
+        })
         .collect();
 
     // Collect equality conditions that could use a composite index
@@ -394,7 +398,8 @@ fn filter_nodes_by_conditions(
                 conditions.iter().all(|(key, condition)| {
                     let value = field_cache.entry((idx, key.as_str())).or_insert_with(|| {
                         // Resolve alias: original column name → canonical field
-                        let resolved = graph.resolve_alias(&node.node_type, key);
+                        let resolved =
+                            graph.resolve_alias(node.node_type_str(&graph.interner), key);
                         node.get_field_ref(resolved).map(Cow::into_owned)
                     });
 
@@ -675,7 +680,7 @@ pub fn filter_nodes_any(
         if let Some(node) = graph.get_node(idx) {
             condition_sets.iter().any(|conditions| {
                 conditions.iter().all(|(key, condition)| {
-                    let resolved = graph.resolve_alias(&node.node_type, key);
+                    let resolved = graph.resolve_alias(node.node_type_str(&graph.interner), key);
                     match node.get_field_ref(resolved) {
                         Some(v) => matches_condition_cached(&v, condition, &regex_cache),
                         None => matches!(condition, FilterCondition::IsNull),

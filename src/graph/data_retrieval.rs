@@ -2,7 +2,6 @@
 use crate::datatypes::values::{format_value, Value};
 use crate::graph::schema::{CurrentSelection, DirGraph, NodeInfo};
 use petgraph::graph::NodeIndex;
-use petgraph::visit::EdgeRef;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -133,7 +132,7 @@ pub fn get_nodes(
                                 })
                                 .unwrap_or_else(|| "Unknown".to_string()),
                             node.get_field_ref("id").map(Cow::into_owned),
-                            Some(node.get_node_type_ref().to_string()),
+                            Some(node.get_node_type_ref(&graph.interner).to_string()),
                         )
                     } else {
                         ("Unknown".to_string(), None, None)
@@ -437,7 +436,8 @@ pub fn get_connections(
 
             for node_idx in children {
                 if let Some(node) = graph.get_node(node_idx) {
-                    let title_str = match &node.title {
+                    let node_title = node.title();
+                    let title_str = match &*node_title {
                         Value::String(s) => s.clone(),
                         _ => "Unknown".to_string(),
                     };
@@ -503,9 +503,9 @@ pub fn get_connections(
 
                     if !incoming.is_empty() || !outgoing.is_empty() {
                         level_connections.push(ConnectionInfo {
-                            node_id: node.id.clone(),
+                            node_id: node.id().into_owned(),
                             node_title: title_str,
-                            node_type: node.node_type.clone(),
+                            node_type: node.node_type_str(&graph.interner).to_string(),
                             incoming,
                             outgoing,
                         });
@@ -529,7 +529,7 @@ pub fn get_connections(
                                     })
                                     .unwrap_or_else(|| "Unknown".to_string()),
                                 node.get_field_ref("id").map(Cow::into_owned),
-                                Some(node.get_node_type_ref().to_string()),
+                                Some(node.get_node_type_ref(&graph.interner).to_string()),
                             )
                         } else {
                             ("Unknown".to_string(), None, None)

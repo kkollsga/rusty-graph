@@ -5,7 +5,6 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{DirGraph, NodeData};
-use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use petgraph::Direction;
 use std::collections::{HashMap, HashSet};
 
@@ -293,10 +292,14 @@ pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStat
         entry.count += 1;
 
         if let Some(source_node) = graph.get_node(edge_ref.source()) {
-            entry.sources.insert(source_node.node_type.clone());
+            entry
+                .sources
+                .insert(source_node.node_type_str(&graph.interner).to_string());
         }
         if let Some(target_node) = graph.get_node(edge_ref.target()) {
-            entry.targets.insert(target_node.node_type.clone());
+            entry
+                .targets
+                .insert(target_node.node_type_str(&graph.interner).to_string());
         }
         for key in edge_data.property_keys(&graph.interner) {
             entry.props.insert(key.to_string());
@@ -684,11 +687,11 @@ pub fn compute_property_stats(
             accum
                 .entry("id".to_string())
                 .or_insert_with(|| PropAccum::new(value_cap))
-                .add(&node.id);
+                .add(&node.id());
             accum
                 .entry("title".to_string())
                 .or_insert_with(|| PropAccum::new(value_cap))
-                .add(&node.title);
+                .add(&node.title());
             for (key, value) in node.property_iter(&graph.interner) {
                 accum
                     .entry(key.to_string())
@@ -785,7 +788,7 @@ pub fn compute_neighbors_schema(
                         .weight()
                         .connection_type_str(&graph.interner)
                         .to_string(),
-                    target_node.node_type.clone(),
+                    target_node.node_type_str(&graph.interner).to_string(),
                 );
                 *outgoing.entry(key).or_insert(0) += 1;
             }
@@ -797,7 +800,7 @@ pub fn compute_neighbors_schema(
                         .weight()
                         .connection_type_str(&graph.interner)
                         .to_string(),
-                    source_node.node_type.clone(),
+                    source_node.node_type_str(&graph.interner).to_string(),
                 );
                 *incoming.entry(key).or_insert(0) += 1;
             }
@@ -850,9 +853,9 @@ pub fn compute_all_neighbors_schemas(graph: &DirGraph) -> HashMap<String, Neighb
                 .connection_type_str(&graph.interner)
                 .to_string();
             let key = (
-                source.node_type.clone(),
+                source.node_type_str(&graph.interner).to_string(),
                 conn_type,
-                target.node_type.clone(),
+                target.node_type_str(&graph.interner).to_string(),
             );
             *edge_counts.entry(key).or_insert(0) += 1;
         }
@@ -1196,11 +1199,11 @@ fn write_connections_detail(
             }
             let src_type = graph
                 .get_node(edge_ref.source())
-                .map(|n| n.node_type.clone())
+                .map(|n| n.node_type_str(&graph.interner).to_string())
                 .unwrap_or_default();
             let tgt_type = graph
                 .get_node(edge_ref.target())
-                .map(|n| n.node_type.clone())
+                .map(|n| n.node_type_str(&graph.interner).to_string())
                 .unwrap_or_default();
             *pair_counts.entry((src_type, tgt_type)).or_insert(0) += 1;
         }
@@ -1259,11 +1262,23 @@ fn write_connections_detail(
             }
             let src_label = graph
                 .get_node(edge_ref.source())
-                .map(|n| format!("{}:{}", n.node_type, value_display_compact(&n.title)))
+                .map(|n| {
+                    format!(
+                        "{}:{}",
+                        n.node_type_str(&graph.interner),
+                        value_display_compact(&n.title())
+                    )
+                })
                 .unwrap_or_default();
             let tgt_label = graph
                 .get_node(edge_ref.target())
-                .map(|n| format!("{}:{}", n.node_type, value_display_compact(&n.title)))
+                .map(|n| {
+                    format!(
+                        "{}:{}",
+                        n.node_type_str(&graph.interner),
+                        value_display_compact(&n.title())
+                    )
+                })
                 .unwrap_or_default();
 
             let mut attrs = format!(
@@ -2202,8 +2217,8 @@ fn write_type_detail(
             for node in samples {
                 let mut attrs = format!(
                     "id=\"{}\" title=\"{}\"",
-                    xml_escape(&value_display_compact(&node.id)),
-                    xml_escape(&value_display_compact(&node.title))
+                    xml_escape(&value_display_compact(&node.id())),
+                    xml_escape(&value_display_compact(&node.title()))
                 );
                 // Include up to 4 non-null custom properties
                 let mut prop_count = 0;

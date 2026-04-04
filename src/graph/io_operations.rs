@@ -72,7 +72,7 @@ struct V3ColumnSection {
 /// Metadata serialized as JSON in v3 files. All fields use `#[serde(default)]`
 /// so that adding/removing fields never breaks existing files.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct FileMetadata {
+pub(crate) struct FileMetadata {
     /// Core data version at save time — must match or be migratable.
     #[serde(default)]
     core_data_version: u32,
@@ -148,7 +148,7 @@ fn default_ts_data_version() -> u32 {
 impl FileMetadata {
     /// Build metadata from a DirGraph, leaving v3 section sizes at zero
     /// (caller fills them in after compression).
-    fn from_graph(graph: &DirGraph) -> Self {
+    pub(crate) fn from_graph(graph: &DirGraph) -> Self {
         FileMetadata {
             core_data_version: CURRENT_CORE_DATA_VERSION,
             library_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -175,7 +175,7 @@ impl FileMetadata {
     }
 
     /// Apply metadata fields to a DirGraph during load.
-    fn apply_to(self, graph: &mut DirGraph) {
+    pub(crate) fn apply_to(self, graph: &mut DirGraph) {
         graph.schema_definition = self.schema_definition;
         graph.property_index_keys = self.property_index_keys;
         graph.composite_index_keys = self.composite_index_keys;
@@ -194,6 +194,11 @@ impl FileMetadata {
             library_version: self.library_version,
         };
     }
+}
+
+/// Build metadata for disk-mode save (reuses the same FileMetadata structure).
+pub(crate) fn build_disk_metadata(graph: &DirGraph) -> FileMetadata {
+    FileMetadata::from_graph(graph)
 }
 
 // ─── Save ────────────────────────────────────────────────────────────────────
@@ -338,6 +343,12 @@ pub fn write_graph_v3(graph: &DirGraph, path: &str) -> io::Result<()> {
 const FILE_MMAP_THRESHOLD: u64 = 65_536; // 64 KB
 
 pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
+    // If path is a directory, load as disk graph
+    let p = std::path::Path::new(path);
+    if p.is_dir() {
+        return load_disk_dir(p);
+    }
+
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();
 
@@ -373,6 +384,138 @@ pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
              Please rebuild the graph with the current version and save again.",
         ))
     }
+}
+
+/// Load a disk-mode graph from a directory.
+fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
+    use crate::graph::schema::{GraphBackend, StorageMode};
+
+    // Verify this is a disk graph directory
+    if !dir.join("disk_graph_meta.json").exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Directory does not contain a valid disk graph (missing disk_graph_meta.json)",
+        ));
+    }
+
+    let mut graph = DirGraph::new();
+
+    // Load DirGraph metadata
+    if dir.join("metadata.json").exists() {
+        let meta_str = std::fs::read_to_string(dir.join("metadata.json"))?;
+        let meta: FileMetadata = serde_json::from_str(&meta_str)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        meta.apply_to(&mut graph);
+    }
+
+    // Load interner from JSON map { hash_string: original_string }
+    if dir.join("interner.json").exists() {
+        let interner_str = std::fs::read_to_string(dir.join("interner.json"))?;
+        let interner_map: std::collections::HashMap<String, String> =
+            serde_json::from_str(&interner_str)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        for original in interner_map.values() {
+            graph.interner.get_or_intern(original);
+        }
+    }
+
+    // Load DiskGraph — compressed files decompressed to temp dir, then mmap'd
+    let (disk_graph, temp_dir) = crate::graph::disk_graph::DiskGraph::load_from_dir(dir)?;
+    graph.graph = GraphBackend::Disk(Box::new(disk_graph));
+    graph.storage_mode = StorageMode::Disk;
+
+    // Register temp dir for cleanup on drop
+    if let Ok(mut dirs) = graph.temp_dirs.lock() {
+        dirs.push(temp_dir);
+    }
+
+    // Rebuild type indices directly from node_slots (no column stores needed)
+    if let GraphBackend::Disk(ref dg) = graph.graph {
+        let mut new_type_indices: std::collections::HashMap<
+            String,
+            Vec<petgraph::graph::NodeIndex>,
+        > = std::collections::HashMap::new();
+        for i in 0..dg.node_slots.len() {
+            let slot = dg.node_slots.get(i);
+            if slot.is_alive() {
+                let key = crate::graph::schema::InternedKey::from_u64(slot.node_type);
+                if let Some(type_name) = graph.interner.try_resolve(key) {
+                    new_type_indices
+                        .entry(type_name.to_string())
+                        .or_default()
+                        .push(petgraph::graph::NodeIndex::new(i));
+                }
+            }
+        }
+        graph.type_indices = new_type_indices;
+    }
+
+    // Build type_schemas from node_type_metadata (needed for column loading)
+    for (node_type, props) in &graph.node_type_metadata {
+        let mut schema = crate::graph::schema::TypeSchema::new();
+        for prop_name in props.keys() {
+            let key = graph.interner.get_or_intern(prop_name);
+            schema.add_key(key);
+        }
+        graph
+            .type_schemas
+            .insert(node_type.clone(), std::sync::Arc::new(schema));
+    }
+
+    // Load column stores
+    let columns_dir = dir.join("columns");
+    if columns_dir.exists() {
+        for entry in std::fs::read_dir(&columns_dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                let type_name = entry.file_name().to_string_lossy().to_string();
+                let col_file = entry.path().join("columns.zst");
+                if col_file.exists() {
+                    let compressed = std::fs::read(&col_file)?;
+                    let packed =
+                        zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+                    let schema = graph
+                        .type_schemas
+                        .get(&type_name)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            std::sync::Arc::new(crate::graph::schema::TypeSchema::new())
+                        });
+                    let type_meta = graph
+                        .node_type_metadata
+                        .get(&type_name)
+                        .cloned()
+                        .unwrap_or_default();
+                    let row_count = graph
+                        .type_indices
+                        .get(&type_name)
+                        .map(|v| v.len() as u32)
+                        .unwrap_or(0);
+                    let store = crate::graph::column_store::ColumnStore::load_packed(
+                        schema,
+                        &type_meta,
+                        &graph.interner,
+                        &packed,
+                        row_count,
+                        None, // Load into heap (could mmap later)
+                    )?;
+                    graph.column_stores.insert(type_name, Arc::new(store));
+                }
+            }
+        }
+    }
+
+    // Sync column stores to DiskGraph
+    graph.sync_disk_column_stores();
+
+    Ok(KnowledgeGraph {
+        inner: Arc::new(graph),
+        selection: CowSelection::new(),
+        reports: OperationReports::new(),
+        last_mutation_stats: None,
+        embedder: None,
+        temporal_context: TemporalContext::default(),
+    })
 }
 
 /// Load v3 columnar format.
@@ -498,6 +641,7 @@ fn load_v3(buf: &[u8]) -> io::Result<KnowledgeGraph> {
 
     // Re-point nodes to columnar storage
     for (type_name, store) in &dir_graph.column_stores {
+        let has_id_title = store.has_id_title_columns();
         if let Some(indices) = dir_graph.type_indices.get(type_name) {
             for (row_id, &node_idx) in indices.iter().enumerate() {
                 if let Some(node) = dir_graph.graph.node_weight_mut(node_idx) {
@@ -505,6 +649,11 @@ fn load_v3(buf: &[u8]) -> io::Result<KnowledgeGraph> {
                         store: Arc::clone(store),
                         row_id: row_id as u32,
                     };
+                    // Set sentinel values if store has id/title columns (mapped mode)
+                    if has_id_title {
+                        node.id = Value::Null;
+                        node.title = Value::Null;
+                    }
                 }
             }
         }
@@ -627,7 +776,7 @@ pub fn export_embeddings_to_file(
                 .node_weight(petgraph::graph::NodeIndex::new(node_index))
             {
                 if let Some(embedding) = store.get_embedding(node_index) {
-                    entries.push((node.id.clone(), embedding.to_vec()));
+                    entries.push((node.id().into_owned(), embedding.to_vec()));
                 }
             }
         }

@@ -3,7 +3,6 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{DirGraph, NodeSchemaDefinition, SchemaDefinition, ValidationError};
-use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use std::collections::HashMap;
 
 /// Validate the graph against the provided schema definition
@@ -65,9 +64,10 @@ fn validate_single_node(
 ) -> Vec<ValidationError> {
     let mut errors = Vec::new();
 
-    let title = match &node.title {
+    let node_title = node.title();
+    let title = match &*node_title {
         Value::String(s) => s.clone(),
-        _ => format!("{:?}", node.title),
+        _ => format!("{:?}", &*node_title),
     };
     // Check required fields
     for required_field in &schema.required_fields {
@@ -185,11 +185,12 @@ fn validate_connections(
 fn get_node_info(graph: &DirGraph, node_idx: petgraph::graph::NodeIndex) -> (String, String) {
     match graph.get_node(node_idx) {
         Some(node) => {
-            let title_str = match &node.title {
+            let node_title = node.title();
+            let title_str = match &*node_title {
                 Value::String(s) => s.clone(),
-                _ => format!("{:?}", node.title),
+                _ => format!("{:?}", &*node_title),
             };
-            (node.node_type.clone(), title_str)
+            (node.node_type_str(&graph.interner).to_string(), title_str)
         }
         None => ("Unknown".to_string(), "Unknown".to_string()),
     }

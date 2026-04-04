@@ -4,7 +4,6 @@ use crate::datatypes::{py_in, py_out};
 use crate::graph::calculations::StatResult;
 use crate::graph::reporting::{OperationReport, OperationReports};
 use petgraph::graph::NodeIndex;
-use petgraph::visit::{EdgeRef, NodeIndexable};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::{Bound, IntoPyObjectExt};
@@ -19,15 +18,20 @@ pub mod column_store;
 pub mod cypher;
 pub mod data_retrieval;
 pub mod debugging;
+#[allow(dead_code)]
+pub mod disk_graph;
 pub mod equation_parser;
 pub mod export;
 pub mod filtering_methods;
 pub mod graph_algorithms;
+#[allow(dead_code)]
+pub mod graph_iterators;
 pub mod introspection;
 pub mod io_operations;
 pub mod lookups;
 pub mod maintain_graph;
 pub mod mmap_vec;
+pub mod ntriples;
 pub mod pattern_matching;
 pub mod reporting;
 pub mod schema;
@@ -137,16 +141,13 @@ fn extract_fluent_param(obj: Option<&Bound<'_, PyAny>>) -> PyResult<introspectio
 /// Called just before Python conversion so that NodeRef (an internal
 /// representation used to preserve node identity through collect/WITH)
 /// is never exposed to Python.
-fn resolve_noderefs(
-    graph: &petgraph::stable_graph::StableDiGraph<schema::NodeData, schema::EdgeData>,
-    rows: &mut [Vec<Value>],
-) {
+fn resolve_noderefs(graph: &schema::Graph, rows: &mut [Vec<Value>]) {
     for row in rows.iter_mut() {
         for val in row.iter_mut() {
             if let Value::NodeRef(idx) = val {
                 let node_idx = petgraph::graph::NodeIndex::new(*idx as usize);
                 if let Some(node) = graph.node_weight(node_idx) {
-                    *val = node.title.clone();
+                    *val = node.title().into_owned();
                 } else {
                     *val = Value::Null;
                 }
@@ -326,12 +327,12 @@ impl KnowledgeGraph {
 
     /// Discover property keys by scanning node data (fallback for to_df).
     fn discover_property_keys_from_data(
-        nodes: &[(&str, &Value, &Value, &schema::NodeData)],
+        nodes: &[(&str, &schema::NodeData)],
         interner: &schema::StringInterner,
     ) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         let mut keys = Vec::new();
-        for (_, _, _, node) in nodes {
+        for (_, node) in nodes {
             for key in node.property_keys(interner) {
                 if seen.insert(key.to_string()) {
                     keys.push(key.to_string());
@@ -351,7 +352,7 @@ impl KnowledgeGraph {
         self.inner
             .graph
             .node_weight(first_idx)
-            .map(|n| n.node_type.clone())
+            .map(|n| n.node_type_str(&self.inner.interner).to_string())
     }
 
     /// Get the registered embedder or return a helpful error with a skeleton.
@@ -415,7 +416,7 @@ impl KnowledgeGraph {
             if let Some(indices) = self.inner.type_indices.get(*nt) {
                 for &idx in indices {
                     if let Some(node) = self.inner.get_node(idx) {
-                        if node.id == name_val {
+                        if *node.id() == name_val {
                             return (Some(idx), Vec::new());
                         }
                     }
@@ -432,7 +433,7 @@ impl KnowledgeGraph {
                 if let Some(indices) = self.inner.type_indices.get(*nt) {
                     for &idx in indices {
                         if let Some(node) = self.inner.get_node(idx) {
-                            if let Value::String(qn) = &node.id {
+                            if let Value::String(qn) = &*node.id() {
                                 if qn.ends_with(&suffix) {
                                     matches.push((idx, node.to_node_info(&self.inner.interner)));
                                 }
@@ -507,9 +508,9 @@ impl KnowledgeGraph {
             .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Node disappeared"))?;
 
         let dict = PyDict::new(py);
-        dict.set_item("type", node.get_node_type_ref())?;
-        dict.set_item("name", py_out::value_to_py(py, &node.title)?)?;
-        dict.set_item("qualified_name", py_out::value_to_py(py, &node.id)?)?;
+        dict.set_item("type", node.get_node_type_ref(&self.inner.interner))?;
+        dict.set_item("name", py_out::value_to_py(py, &node.title())?)?;
+        dict.set_item("qualified_name", py_out::value_to_py(py, &node.id())?)?;
 
         if let Some(v) = node.get_field_ref("file_path") {
             dict.set_item("file_path", py_out::value_to_py(py, &v)?)?;
@@ -885,7 +886,7 @@ pub(super) fn centrality_results_to_py_dict(
 
     for result in results.into_iter().take(limit) {
         if let Some(node) = graph.get_node(result.node_idx) {
-            let id_py = py_out::value_to_py(py, &node.id)?;
+            let id_py = py_out::value_to_py(py, &node.id())?;
             scores_dict.set_item(id_py, result.score)?;
         }
     }
@@ -910,13 +911,14 @@ pub(super) fn centrality_results_to_dataframe(
 
     for result in results.into_iter().take(limit) {
         if let Some(node) = graph.get_node(result.node_idx) {
-            types.push(&node.node_type);
-            let title_str = match &node.title {
+            types.push(node.node_type_str(&graph.interner));
+            let node_title = node.title();
+            let title_str = match &*node_title {
                 Value::String(s) => s.clone(),
                 _ => String::new(),
             };
             titles.push(title_str);
-            ids.push(py_out::value_to_py(py, &node.id)?);
+            ids.push(py_out::value_to_py(py, &node.id())?);
             scores.push(result.score);
         }
     }
@@ -958,13 +960,14 @@ pub(super) fn community_results_to_py(
         for &node_idx in members {
             if let Some(node) = graph.get_node(node_idx) {
                 let node_dict = PyDict::new(py);
-                node_dict.set_item(key_type, &node.node_type)?;
-                let title_str = match &node.title {
+                node_dict.set_item(key_type, node.node_type_str(&graph.interner))?;
+                let node_title = node.title();
+                let title_str = match &*node_title {
                     Value::String(s) => s.as_str(),
                     _ => "",
                 };
                 node_dict.set_item(key_title, title_str)?;
-                node_dict.set_item(key_id, py_out::value_to_py(py, &node.id)?)?;
+                node_dict.set_item(key_id, py_out::value_to_py(py, &node.id())?)?;
                 member_list.append(node_dict)?;
             }
         }
@@ -1108,15 +1111,53 @@ fn compare_inner(
 #[pymethods]
 impl KnowledgeGraph {
     #[new]
-    fn new() -> Self {
-        KnowledgeGraph {
-            inner: Arc::new(DirGraph::new()),
+    #[pyo3(signature = (*, storage=None, path=None))]
+    fn new(storage: Option<&str>, path: Option<&str>) -> PyResult<Self> {
+        let mut graph = DirGraph::new();
+
+        if let Some(mode) = storage {
+            match mode {
+                "mapped" => {
+                    graph.storage_mode = schema::StorageMode::Mapped;
+                    // Set memory limit to 0 so columnar stores spill to disk immediately
+                    graph.memory_limit = Some(0);
+                }
+                "disk" => {
+                    let dir = path.ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "storage='disk' requires a path parameter, e.g. \
+                             KnowledgeGraph(storage='disk', path='./my_graph')",
+                        )
+                    })?;
+                    let data_dir = std::path::Path::new(dir);
+                    graph.storage_mode = schema::StorageMode::Disk;
+                    let dg = crate::graph::disk_graph::DiskGraph::new_at_path(data_dir).map_err(
+                        |e| {
+                            PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
+                                "Failed to create disk graph at '{}': {}",
+                                dir, e
+                            ))
+                        },
+                    )?;
+                    graph.graph = schema::GraphBackend::Disk(Box::new(dg));
+                }
+                other => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Unknown storage mode '{}'. Expected 'mapped', 'disk', or None.",
+                        other
+                    )));
+                }
+            }
+        }
+
+        Ok(KnowledgeGraph {
+            inner: Arc::new(graph),
             selection: CowSelection::new(),
             reports: OperationReports::new(),
             last_mutation_stats: None,
             embedder: None,
             temporal_context: TemporalContext::default(),
-        }
+        })
     }
 
     /// Add nodes from a pandas DataFrame.
@@ -1480,6 +1521,11 @@ impl KnowledgeGraph {
 
         self.selection.clear();
 
+        // Disk mode: sync column stores to DiskGraph after batch processing
+        if graph.storage_mode == schema::StorageMode::Disk {
+            graph.sync_disk_column_stores();
+        }
+
         // Store the report
         self.add_report(OperationReport::NodeOperation(result.clone()));
 
@@ -1794,6 +1840,11 @@ impl KnowledgeGraph {
         }
 
         self.selection.clear();
+
+        // Disk mode: build CSR from pending edges so queries work immediately
+        let graph = get_graph_mut(&mut self.inner);
+        graph.ensure_disk_edges_built();
+
         self.add_report(OperationReport::ConnectionOperation(result.clone()));
 
         Self::connection_report_to_py(&result, &connection_type)
@@ -2735,17 +2786,17 @@ impl KnowledgeGraph {
     #[pyo3(signature = (*, include_type=true, include_id=true))]
     fn to_df(&self, py: Python<'_>, include_type: bool, include_id: bool) -> PyResult<Py<PyAny>> {
         // Collect nodes from the current selection
-        let mut nodes_data: Vec<(&str, &Value, &Value, &schema::NodeData)> = Vec::new();
+        let mut nodes_data: Vec<(&str, &schema::NodeData)> = Vec::new();
         for node_idx in self.selection.current_node_indices() {
             if let Some(node) = self.inner.get_node(node_idx) {
-                nodes_data.push((&node.node_type, &node.id, &node.title, node));
+                nodes_data.push((node.node_type_str(&self.inner.interner), node));
             }
         }
 
         // Fast path: use TypeSchema for key discovery when all nodes share a type
         let prop_keys: Vec<String> = if nodes_data.len() > 50 {
             let first_type = nodes_data[0].0;
-            let all_same = nodes_data.iter().all(|(nt, _, _, _)| *nt == first_type);
+            let all_same = nodes_data.iter().all(|(nt, _)| *nt == first_type);
             if all_same {
                 if let Some(schema) = self.inner.type_schemas.get(first_type) {
                     let mut keys: Vec<String> = schema
@@ -2784,13 +2835,13 @@ impl KnowledgeGraph {
         let prop_cols: Vec<pyo3::Bound<'_, PyList>> =
             prop_keys.iter().map(|_| PyList::empty(py)).collect();
 
-        for (node_type, id, title, node) in &nodes_data {
-            title_col.append(py_out::value_to_py(py, title)?)?;
+        for (node_type, node) in &nodes_data {
+            title_col.append(py_out::value_to_py(py, &node.title())?)?;
             if let Some(ref tc) = type_col {
                 tc.append(*node_type)?;
             }
             if let Some(ref ic) = id_col {
-                ic.append(py_out::value_to_py(py, id)?)?;
+                ic.append(py_out::value_to_py(py, &node.id())?)?;
             }
             for (j, key) in prop_keys.iter().enumerate() {
                 let val = node.get_property(key);
@@ -2856,9 +2907,9 @@ impl KnowledgeGraph {
                 }
                 buf.push_str(&format!(
                     "[{}] {} (id: {})\n",
-                    node.node_type,
-                    format_value(&node.title),
-                    format_value(&node.id),
+                    node.node_type_str(&self.inner.interner),
+                    format_value(&node.title()),
+                    format_value(&node.id()),
                 ));
                 // Sort property keys for deterministic output
                 let mut keys: Vec<&str> = node.property_keys(&self.inner.interner).collect();
@@ -2921,11 +2972,12 @@ impl KnowledgeGraph {
                 None => return "?".to_string(),
             };
             let mut s = String::with_capacity(64);
-            s.push_str(&node.node_type);
+            let node_type_str = node.node_type_str(&self.inner.interner);
+            s.push_str(node_type_str);
             s.push('(');
             let mut first = true;
             for col in &columns {
-                let resolved = self.inner.resolve_alias(&node.node_type, col);
+                let resolved = self.inner.resolve_alias(node_type_str, col);
                 if let Some(val) = node.get_field_ref(resolved) {
                     if matches!(&*val, Value::Null) {
                         continue;
@@ -3093,7 +3145,7 @@ impl KnowledgeGraph {
 
             for node_idx in self.selection.current_node_indices() {
                 if let Some(node) = self.inner.get_node(node_idx) {
-                    result.append(py_out::value_to_py(py, &node.id)?)?;
+                    result.append(py_out::value_to_py(py, &node.id())?)?;
                 }
             }
 
@@ -3519,7 +3571,7 @@ impl KnowledgeGraph {
                 .find(|&&idx| {
                     self.inner
                         .get_node(idx)
-                        .map(|n| n.id == file_id)
+                        .map(|n| *n.id() == file_id)
                         .unwrap_or(false)
                 })
                 .copied()
@@ -3551,12 +3603,12 @@ impl KnowledgeGraph {
                 continue;
             }
             if let Some(node) = self.inner.get_node(edge.target()) {
-                let node_type = node.get_node_type_ref().to_string();
-                let name = match &node.title {
+                let node_type = node.get_node_type_ref(&self.inner.interner).to_string();
+                let name = match &*node.title() {
                     Value::String(s) => s.clone(),
                     _ => String::new(),
                 };
-                let qname = match &node.id {
+                let qname = match &*node.id() {
                     Value::String(s) => s.clone(),
                     _ => String::new(),
                 };
@@ -3680,6 +3732,21 @@ impl KnowledgeGraph {
     fn enable_columnar(&mut self) {
         let graph = Arc::make_mut(&mut self.inner);
         graph.enable_columnar();
+    }
+
+    /// Convert the graph to disk-backed storage mode.
+    ///
+    /// Enables columnar storage first (if not already), then builds
+    /// CSR (Compressed Sparse Row) edge arrays on disk. Nodes stay
+    /// in memory (~40 bytes each), edges are mmap'd from disk.
+    ///
+    /// This reduces memory usage to ~10% of the in-memory graph for
+    /// edge-heavy graphs. Best called after all data is loaded.
+    fn enable_disk_mode(&mut self) -> PyResult<()> {
+        let graph = Arc::make_mut(&mut self.inner);
+        graph
+            .enable_disk_mode()
+            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
     }
 
     /// Convert columnar properties back to compact per-node storage.
@@ -4554,14 +4621,15 @@ impl KnowledgeGraph {
             let mut groups: HashMap<String, Vec<f64>> = HashMap::new();
             for idx in nodes {
                 if let Some(node) = self.inner.get_node(idx) {
-                    let resolved_group = self.inner.resolve_alias(&node.node_type, group_prop);
+                    let nt = node.node_type_str(&self.inner.interner);
+                    let resolved_group = self.inner.resolve_alias(nt, group_prop);
                     let key = match node.get_field_ref(resolved_group).as_deref() {
                         Some(Value::String(s)) => s.clone(),
                         Some(Value::Int64(i)) => i.to_string(),
                         Some(v) => format!("{:?}", v),
                         None => "null".to_string(),
                     };
-                    let resolved_prop = self.inner.resolve_alias(&node.node_type, property);
+                    let resolved_prop = self.inner.resolve_alias(nt, property);
                     if let Some(val) = node.get_field_ref(resolved_prop) {
                         let num = match &*val {
                             Value::Int64(i) => Some(*i as f64),
@@ -4733,7 +4801,9 @@ impl KnowledgeGraph {
             let mut groups: HashMap<String, usize> = HashMap::new();
             for idx in nodes {
                 if let Some(node) = self.inner.get_node(idx) {
-                    let resolved = self.inner.resolve_alias(&node.node_type, property);
+                    let resolved = self
+                        .inner
+                        .resolve_alias(node.node_type_str(&self.inner.interner), property);
                     let key = match node.get_field_ref(resolved).as_deref() {
                         Some(Value::String(s)) => s.clone(),
                         Some(Value::Int64(i)) => i.to_string(),
@@ -5153,7 +5223,71 @@ impl KnowledgeGraph {
         Ok(())
     }
 
+    /// Load an N-Triples file (supports .bz2, .gz, plain) into the graph.
+    /// Designed for Wikidata truthy dumps but works with any N-Triples file.
+    #[pyo3(signature = (path, *, predicates=None, languages=None, node_types=None, predicate_labels=None, max_entities=None, verbose=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn load_ntriples(
+        &mut self,
+        path: &str,
+        predicates: Option<Vec<String>>,
+        languages: Option<Vec<String>>,
+        node_types: Option<&Bound<'_, PyDict>>,
+        predicate_labels: Option<&Bound<'_, PyDict>>,
+        max_entities: Option<usize>,
+        verbose: bool,
+    ) -> PyResult<Py<PyAny>> {
+        use std::collections::HashSet;
+
+        let config = ntriples::NTriplesConfig {
+            predicates: predicates.map(|v| v.into_iter().collect::<HashSet<_>>()),
+            languages: languages.map(|v| v.into_iter().collect::<HashSet<_>>()),
+            node_types: node_types
+                .map(|d| {
+                    d.iter()
+                        .filter_map(|(k, v)| {
+                            Some((k.extract::<String>().ok()?, v.extract::<String>().ok()?))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            predicate_labels: predicate_labels
+                .map(|d| {
+                    d.iter()
+                        .filter_map(|(k, v)| {
+                            Some((k.extract::<String>().ok()?, v.extract::<String>().ok()?))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            max_entities,
+            verbose,
+        };
+
+        let graph = Arc::make_mut(&mut self.inner);
+        let stats = ntriples::load_ntriples(graph, path, &config)
+            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
+
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            dict.set_item("entities", stats.entities_created)?;
+            dict.set_item("edges", stats.edges_created)?;
+            dict.set_item("edges_skipped", stats.edges_skipped)?;
+            dict.set_item("triples_scanned", stats.triples_scanned)?;
+            dict.set_item("seconds", stats.seconds)?;
+            Ok(dict.into())
+        })
+    }
+
     fn save(&mut self, py: Python<'_>, path: &str) -> PyResult<()> {
+        // Disk mode: save as directory (the folder IS the graph)
+        if self.inner.storage_mode == schema::StorageMode::Disk {
+            let graph = Arc::make_mut(&mut self.inner);
+            return graph
+                .save_disk(path)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()));
+        }
+
         // Prep phase (quick): stamp metadata, snapshot index keys
         io_operations::prepare_save(&mut self.inner);
 

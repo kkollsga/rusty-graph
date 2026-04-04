@@ -5,6 +5,25 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-04-05
+
+### Added
+- **Disk storage mode**: `KnowledgeGraph(storage="disk", path="./my_graph")` — fully disk-backed graph for very large datasets (100M+ nodes, 1B+ edges). Data lives on disk via mmap, using ~10% of equivalent in-memory RAM. The directory IS the graph — no separate save step needed.
+- **GraphBackend abstraction**: Unified API across InMemory (petgraph), Mapped, and Disk backends. All Cypher queries, fluent API, and graph algorithms work identically across all three storage modes.
+- **CSR edge storage**: Disk mode uses cache-friendly Compressed Sparse Row format. 3-4x faster than default on WHERE filters, SELECT, and SET operations at 100k scale.
+- **zstd N-Triples support**: `load_ntriples()` now accepts `.nt.zst` files — 30x faster decompression than bz2.
+- **`enable_disk_mode()`** method: Convert existing in-memory graph to disk-backed CSR.
+- **`path` parameter** on constructor: Required for `storage="disk"`.
+
+### Changed
+- **Mapped mode**: Fixed O(n²) Arc clone bug — 50-300x faster `add_nodes` in mapped mode.
+- **N-Triples loader**: 81x faster via bulk columnar conversion, pipeline parallelism, zero-copy parsing, byte-level filtering, and dense Vec edge lookup.
+- **Disk graph save**: zstd-compressed files (81% size reduction vs raw binary).
+
+### Fixed
+- Schema extension bug in mapped mode incremental `add_nodes`.
+- `add_connections()` in disk mode auto-builds CSR so queries work immediately.
+
 ## [0.6.18] - 2026-03-30
 
 ### Fixed

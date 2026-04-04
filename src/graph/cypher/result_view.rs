@@ -10,7 +10,6 @@ use super::result::{ClauseStats, CypherResult, MutationStats};
 use crate::datatypes::values::Value;
 use crate::graph::graph_algorithms::CentralityResult;
 use crate::graph::schema::{DirGraph, NodeData};
-use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySlice};
@@ -126,9 +125,11 @@ impl ResultView {
             .filter_map(|r| {
                 graph.get_node(r.node_idx).map(|node| {
                     vec![
-                        PreProcessedValue::Plain(Value::String(node.node_type.clone())),
-                        PreProcessedValue::Plain(node.title.clone()),
-                        PreProcessedValue::Plain(node.id.clone()),
+                        PreProcessedValue::Plain(Value::String(
+                            node.node_type_str(&graph.interner).to_string(),
+                        )),
+                        PreProcessedValue::Plain(node.title().into_owned()),
+                        PreProcessedValue::Plain(node.id().into_owned()),
                         PreProcessedValue::Plain(Value::Float64(r.score)),
                     ]
                 })
@@ -179,10 +180,11 @@ impl ResultView {
         // Compute union of property keys.
         // Fast path: if all nodes share a type, use TypeSchema (O(1) key discovery).
         let prop_keys: Vec<String> = if nodes_vec.len() > 50 {
-            let first_type = &nodes_vec[0].node_type;
-            let all_same_type = nodes_vec.iter().all(|n| n.node_type == *first_type);
+            let first_type = nodes_vec[0].node_type;
+            let all_same_type = nodes_vec.iter().all(|n| n.node_type == first_type);
             if all_same_type {
-                if let Some(schema) = graph.type_schemas.get(first_type) {
+                let first_type_str = graph.interner.resolve(first_type);
+                if let Some(schema) = graph.type_schemas.get(first_type_str) {
                     let mut keys: Vec<String> = schema
                         .iter()
                         .filter_map(|(_, ik)| graph.interner.try_resolve(ik).map(|s| s.to_string()))
@@ -206,9 +208,11 @@ impl ResultView {
             .iter()
             .map(|node| {
                 let mut row = vec![
-                    PreProcessedValue::Plain(Value::String(node.node_type.clone())),
-                    PreProcessedValue::Plain(node.title.clone()),
-                    PreProcessedValue::Plain(node.id.clone()),
+                    PreProcessedValue::Plain(Value::String(
+                        node.node_type_str(&graph.interner).to_string(),
+                    )),
+                    PreProcessedValue::Plain(node.title().into_owned()),
+                    PreProcessedValue::Plain(node.id().into_owned()),
                 ];
                 for key in &prop_keys {
                     row.push(PreProcessedValue::Plain(
@@ -275,7 +279,7 @@ impl ResultView {
                                 .weight()
                                 .connection_type_str(&graph.interner)
                                 .to_string(),
-                            target_type: target.node_type.clone(),
+                            target_type: target.node_type_str(&graph.interner).to_string(),
                             target_id: format_value(&target.id),
                             target_title: format_value(&target.title),
                             outgoing: true,
@@ -298,7 +302,7 @@ impl ResultView {
                                 .weight()
                                 .connection_type_str(&graph.interner)
                                 .to_string(),
-                            target_type: source.node_type.clone(),
+                            target_type: source.node_type_str(&graph.interner).to_string(),
                             target_id: format_value(&source.id),
                             target_title: format_value(&source.title),
                             outgoing: false,

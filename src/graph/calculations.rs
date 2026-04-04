@@ -129,7 +129,7 @@ pub fn process_equation(
                 // Get a sample node to determine node type
                 if let Some(sample_node_idx) = level.iter_node_indices().next() {
                     if let Some(sample_node) = graph.get_node(sample_node_idx) {
-                        let node_type = &sample_node.node_type;
+                        let node_type = sample_node.node_type_str(&graph.interner);
 
                         // Check if schema node exists for this type
                         let schema_lookup =
@@ -140,7 +140,7 @@ pub fn process_equation(
                                 }
                             };
 
-                        let schema_title = Value::String(node_type.clone());
+                        let schema_title = Value::String(node_type.to_string());
 
                         if let Some(schema_idx) = schema_lookup.check_title(&schema_title) {
                             if let Some(schema_node) = graph.get_node(schema_idx) {

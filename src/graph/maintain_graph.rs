@@ -601,7 +601,7 @@ pub fn create_connections(
             for node_idx in level.iter_node_indices() {
                 if let Some(node) = graph.get_node(node_idx) {
                     type_to_level
-                        .entry(node.node_type.clone())
+                        .entry(node.node_type_str(&graph.interner).to_string())
                         .or_insert(lvl_idx);
                 }
             }
@@ -733,14 +733,15 @@ pub fn create_connections(
         for &target_idx in targets {
             if detected_target_type.is_none() {
                 if let Some(node) = graph.get_node(target_idx) {
-                    detected_target_type = Some(node.node_type.clone());
+                    detected_target_type = Some(node.node_type_str(&graph.interner).to_string());
                 }
             }
 
             for &source_idx in &source_nodes {
                 if detected_source_type.is_none() {
                     if let Some(node) = graph.get_node(source_idx) {
-                        detected_source_type = Some(node.node_type.clone());
+                        detected_source_type =
+                            Some(node.node_type_str(&graph.interner).to_string());
                     }
                 }
 
@@ -750,7 +751,8 @@ pub fn create_connections(
                     // Add source and target node properties
                     for &node_idx in &[source_idx, target_idx] {
                         if let Some(node) = graph.graph.node_weight(node_idx) {
-                            if let Some(requested_props) = prop_spec.get(&node.node_type) {
+                            let nt = node.node_type_str(&graph.interner);
+                            if let Some(requested_props) = prop_spec.get(nt) {
                                 if requested_props.is_empty() {
                                     for (k, v) in node.property_iter(&graph.interner) {
                                         props.insert(k.to_string(), v.clone());
@@ -839,7 +841,9 @@ pub fn update_node_properties(
         if let Some(node_idx) = node_idx_opt {
             if let Some(node) = graph.get_node(*node_idx) {
                 // Track node type and count for each node
-                *node_types.entry(node.node_type.clone()).or_insert(0) += 1;
+                *node_types
+                    .entry(node.node_type_str(&graph.interner).to_string())
+                    .or_insert(0) += 1;
 
                 // Capture type of first value for schema
                 if first_value_type.is_none() {
@@ -991,7 +995,7 @@ pub fn add_properties(
             for node_idx in level.iter_node_indices() {
                 if let Some(node) = graph.get_node(node_idx) {
                     type_to_level
-                        .entry(node.node_type.clone())
+                        .entry(node.node_type_str(&graph.interner).to_string())
                         .or_insert(lvl_idx);
                 }
             }
@@ -1202,8 +1206,8 @@ fn compute_spatial_property(
 ) -> Option<Value> {
     let leaf_node = graph.get_node(leaf_idx)?;
     let ancestor_node = graph.get_node(ancestor_idx)?;
-    let leaf_spatial = graph.get_spatial_config(&leaf_node.node_type);
-    let ancestor_spatial = graph.get_spatial_config(&ancestor_node.node_type);
+    let leaf_spatial = graph.get_spatial_config(leaf_node.node_type_str(&graph.interner));
+    let ancestor_spatial = graph.get_spatial_config(ancestor_node.node_type_str(&graph.interner));
 
     match spatial_fn.trim() {
         "distance" => {
