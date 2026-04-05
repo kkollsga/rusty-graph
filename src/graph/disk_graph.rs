@@ -893,9 +893,57 @@ impl DiskGraph {
         // Sort pending_edges by key, then push() sequentially — no random access,
         // no page faults, no mmap thrashing. ~100x faster than random set().
 
-        // 2a: Build edge_endpoints from original order (sequential push)
-        // Then DROP pending_edges to free ~10 GB before sorting.
-        let mut edge_endpoints_vec = MmapOrVec::with_capacity(edge_count);
+        // 2a: Sort + build CSR arrays.
+        // Memory: pending = 12 bytes/edge (10 GB), sort_indices = 4 bytes/edge (3.4 GB)
+        // Total: ~13.4 GB. Tight on 16 GB but no swap since no extra copies.
+
+        // Use temp dir for mmap files — sequential push is fast on any storage
+        let csr_dir = std::env::temp_dir().join(format!(
+            "kglite_csr_{}_{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&csr_dir);
+
+        // Sort indices by source, referencing pending directly.
+        // Memory: pending (10 GB) + sort_indices (3.4 GB) = 13.4 GB peak.
+        let mut sort_indices: Vec<u32> = (0..edge_count as u32).collect();
+        sort_indices.sort_unstable_by_key(|&i| pending[i as usize].0);
+
+        // Build out_edges on disk via mmap — sequential push (no random writes)
+        let mut out_edges = MmapOrVec::mapped(&csr_dir.join("out_edges.bin"), edge_count)
+            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        for &i in &sort_indices {
+            let (_, tgt, conn_type) = pending[i as usize];
+            out_edges.push(CsrEdge {
+                peer: tgt,
+                edge_idx: i,
+                conn_type,
+            });
+        }
+
+        // Re-sort by target, build in_edges on disk
+        sort_indices.sort_unstable_by_key(|&i| pending[i as usize].1);
+
+        let mut in_edges = MmapOrVec::mapped(&csr_dir.join("in_edges.bin"), edge_count)
+            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        for &i in &sort_indices {
+            let (src, _, conn_type) = pending[i as usize];
+            in_edges.push(CsrEdge {
+                peer: src,
+                edge_idx: i,
+                conn_type,
+            });
+        }
+        drop(sort_indices);
+
+        // Build edge_endpoints on disk — sequential push from pending
+        let mut edge_endpoints_vec =
+            MmapOrVec::mapped(&csr_dir.join("edge_endpoints.bin"), edge_count)
+                .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
         for &(src, tgt, conn_type) in pending.iter() {
             edge_endpoints_vec.push(EdgeEndpoints {
                 source: src,
@@ -903,38 +951,8 @@ impl DiskGraph {
                 connection_type: conn_type,
             });
         }
-        // Free pending_edges (~10 GB) — we'll use edge_endpoints for lookups
         pending.clear();
         pending.shrink_to_fit();
-
-        // 2b: Sort indices by source using edge_endpoints for lookups.
-        // sort_indices = 4 bytes/edge (3.4 GB). With pending freed, total ~3.4 GB.
-        let mut sort_indices: Vec<u32> = (0..edge_count as u32).collect();
-        sort_indices.sort_unstable_by_key(|&i| edge_endpoints_vec.get(i as usize).source);
-
-        let mut out_edges = MmapOrVec::with_capacity(edge_count);
-        for &i in &sort_indices {
-            let ep = edge_endpoints_vec.get(i as usize);
-            out_edges.push(CsrEdge {
-                peer: ep.target,
-                edge_idx: i,
-                conn_type: ep.connection_type,
-            });
-        }
-
-        // 2c: Re-sort by target → build in_edges
-        sort_indices.sort_unstable_by_key(|&i| edge_endpoints_vec.get(i as usize).target);
-
-        let mut in_edges = MmapOrVec::with_capacity(edge_count);
-        for &i in &sort_indices {
-            let ep = edge_endpoints_vec.get(i as usize);
-            in_edges.push(CsrEdge {
-                peer: ep.source,
-                edge_idx: i,
-                conn_type: ep.connection_type,
-            });
-        }
-        drop(sort_indices);
 
         self.out_offsets = out_offsets;
         self.out_edges = out_edges;
