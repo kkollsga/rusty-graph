@@ -889,72 +889,48 @@ impl DiskGraph {
         drop(out_counts);
         drop(in_counts);
 
-        // Pass 2: Build CSR arrays in heap, then write to disk sequentially.
-        // Build one array at a time to limit peak memory.
+        // Pass 2: Build CSR arrays with SEQUENTIAL writes only.
+        // Sort pending_edges by key, then push() sequentially — no random access,
+        // no page faults, no mmap thrashing. ~100x faster than random set().
 
-        // Build CSR arrays using mmap on LOCAL temp dir (fast SSD), not the
-        // external data_dir which may be on slow USB storage.
-        // Files are moved to data_dir on save.
-        let csr_dir = std::env::temp_dir().join(format!(
-            "kglite_csr_{}_{:x}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&csr_dir);
-
-        // Use mmap_prefilled on local SSD — NO pre-fill I/O.
-        // OS lazy-zeros pages on first access. set() works immediately.
-        let mut out_edges = MmapOrVec::mapped_prefilled(&csr_dir.join("out_edges.bin"), edge_count)
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        let mut in_edges = MmapOrVec::mapped_prefilled(&csr_dir.join("in_edges.bin"), edge_count)
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        // edge_endpoints is filled sequentially — use regular mapped + push
-        let mut edge_endpoints_vec =
-            MmapOrVec::mapped(&csr_dir.join("edge_endpoints.bin"), edge_count)
-                .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-
-        // Fill with cursor-based random writes (fast on SSD mmap)
-        let mut out_cursors = vec![0u64; node_bound];
-        let mut in_cursors = vec![0u64; node_bound];
-
-        for (edge_idx, &(src, tgt, conn_type)) in pending.iter().enumerate() {
-            let ei = edge_idx as u32;
-
-            if (src as usize) < node_bound {
-                let pos = out_offsets.get(src as usize) + out_cursors[src as usize];
-                out_edges.set(
-                    pos as usize,
-                    CsrEdge {
-                        peer: tgt,
-                        edge_idx: ei,
-                        conn_type,
-                    },
-                );
-                out_cursors[src as usize] += 1;
-            }
-
-            if (tgt as usize) < node_bound {
-                let pos = in_offsets.get(tgt as usize) + in_cursors[tgt as usize];
-                in_edges.set(
-                    pos as usize,
-                    CsrEdge {
-                        peer: src,
-                        edge_idx: ei,
-                        conn_type,
-                    },
-                );
-                in_cursors[tgt as usize] += 1;
-            }
-
+        // 2a: Build edge_endpoints from original order (sequential push)
+        let mut edge_endpoints_vec = MmapOrVec::with_capacity(edge_count);
+        for &(src, tgt, conn_type) in pending.iter() {
             edge_endpoints_vec.push(EdgeEndpoints {
                 source: src,
                 target: tgt,
                 connection_type: conn_type,
             });
         }
+
+        // 2b: Create sort_indices (4 bytes/edge = 3.4 GB for 862M edges — fits in 16 GB)
+        // Sort by source → build out_edges with sequential push (no random writes)
+        let mut sort_indices: Vec<u32> = (0..edge_count as u32).collect();
+        sort_indices.sort_unstable_by_key(|&i| pending[i as usize].0);
+
+        let mut out_edges = MmapOrVec::with_capacity(edge_count);
+        for &i in &sort_indices {
+            let (_, tgt, conn_type) = pending[i as usize];
+            out_edges.push(CsrEdge {
+                peer: tgt,
+                edge_idx: i,
+                conn_type,
+            });
+        }
+
+        // 2c: Re-sort by target → build in_edges with sequential push
+        sort_indices.sort_unstable_by_key(|&i| pending[i as usize].1);
+
+        let mut in_edges = MmapOrVec::with_capacity(edge_count);
+        for &i in &sort_indices {
+            let (src, _, conn_type) = pending[i as usize];
+            in_edges.push(CsrEdge {
+                peer: src,
+                edge_idx: i,
+                conn_type,
+            });
+        }
+        drop(sort_indices);
 
         self.out_offsets = out_offsets;
         self.out_edges = out_edges;
