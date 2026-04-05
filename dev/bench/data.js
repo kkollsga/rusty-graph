@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775345671564,
+  "lastUpdate": 1775363477118,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -3162,6 +3162,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.000011757007432890435",
             "extra": "mean: 718.5335730586082 usec\nrounds: 1314"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "4d19705517d3f014d661f66d7138e1edf2aa7398",
+          "message": "fix: CSR build uses mmap files to avoid OOM on large graphs\n\nbuild_csr_from_pending() was allocating CSR arrays on heap (~45 GB\nfor 862M edges). Now writes directly to mmap'd files in data_dir.\nOS manages paging — only hot pages in RAM.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-05T06:29:06+02:00",
+          "tree_id": "e8b364d691d862230633123db407b12d4acc547b",
+          "url": "https://github.com/kkollsga/kglite/commit/4d19705517d3f014d661f66d7138e1edf2aa7398"
+        },
+        "date": 1775363476601,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1035.5650500696584,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000247830415891579",
+            "extra": "mean: 965.6563824095203 usec\nrounds: 523"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 722.917592239774,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000029695832973396865",
+            "extra": "mean: 1.3832835315319378 msec\nrounds: 666"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 13221.124334718344,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000015955887116351724",
+            "extra": "mean: 75.63653246751677 usec\nrounds: 7084"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1567.017541629651,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000020465368294505558",
+            "extra": "mean: 638.1549494079243 usec\nrounds: 929"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 696107.1761590721,
+            "unit": "iter/sec",
+            "range": "stddev: 4.0022920271305716e-7",
+            "extra": "mean: 1.4365603950784203 usec\nrounds: 78475"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 128672.37603406457,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00000131856538223938",
+            "extra": "mean: 7.771675870314707 usec\nrounds: 34443"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2537.287623657894,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00005635167908968739",
+            "extra": "mean: 394.12165600616646 usec\nrounds: 3971"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1553.1816081997763,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002215174871907801",
+            "extra": "mean: 643.8397124461546 usec\nrounds: 1165"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 13887.608239547695,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000005174032196598496",
+            "extra": "mean: 72.00663949839132 usec\nrounds: 11165"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 1283.0663280299098,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00011276892168841242",
+            "extra": "mean: 779.3829345794264 usec\nrounds: 963"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 1306.1352592346157,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000013283431227368041",
+            "extra": "mean: 765.617490937341 usec\nrounds: 1269"
           }
         ]
       }
