@@ -860,7 +860,6 @@ impl DiskGraph {
 
         let node_bound = self.node_slots.len();
         let edge_count = pending.len();
-        let use_mmap = !self.data_dir.as_os_str().is_empty();
 
         // Pass 1: count degrees
         let mut out_counts = vec![0u64; node_bound];
@@ -874,20 +873,9 @@ impl DiskGraph {
             }
         }
 
-        // Build offset arrays — mmap'd to disk for large graphs
-        let (mut out_offsets, mut in_offsets) = if use_mmap {
-            (
-                MmapOrVec::mapped(&self.data_dir.join("out_offsets.bin"), node_bound + 1)
-                    .unwrap_or_else(|_| MmapOrVec::with_capacity(node_bound + 1)),
-                MmapOrVec::mapped(&self.data_dir.join("in_offsets.bin"), node_bound + 1)
-                    .unwrap_or_else(|_| MmapOrVec::with_capacity(node_bound + 1)),
-            )
-        } else {
-            (
-                MmapOrVec::with_capacity(node_bound + 1),
-                MmapOrVec::with_capacity(node_bound + 1),
-            )
-        };
+        // Build offset arrays in heap (small: ~2 GB for 124M nodes)
+        let mut out_offsets = MmapOrVec::with_capacity(node_bound + 1);
+        let mut in_offsets = MmapOrVec::with_capacity(node_bound + 1);
         let mut out_acc = 0u64;
         let mut in_acc = 0u64;
         for i in 0..node_bound {
@@ -898,30 +886,42 @@ impl DiskGraph {
         }
         out_offsets.push(out_acc);
         in_offsets.push(in_acc);
+        drop(out_counts);
+        drop(in_counts);
 
-        // Pass 2: fill CSR edge arrays + endpoints — mmap'd for large graphs
-        let (mut out_edges, mut in_edges, mut edge_endpoints_vec) = if use_mmap {
-            (
-                MmapOrVec::mapped(&self.data_dir.join("out_edges.bin"), edge_count)
-                    .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count)),
-                MmapOrVec::mapped(&self.data_dir.join("in_edges.bin"), edge_count)
-                    .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count)),
-                MmapOrVec::mapped(&self.data_dir.join("edge_endpoints.bin"), edge_count)
-                    .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count)),
-            )
-        } else {
-            (
-                MmapOrVec::with_capacity(edge_count),
-                MmapOrVec::with_capacity(edge_count),
-                MmapOrVec::with_capacity(edge_count),
-            )
-        };
+        // Pass 2: Build CSR arrays in heap, then write to disk sequentially.
+        // Build one array at a time to limit peak memory.
+
+        // Build CSR arrays using mmap on LOCAL temp dir (fast SSD), not the
+        // external data_dir which may be on slow USB storage.
+        // Files are moved to data_dir on save.
+        let csr_dir = std::env::temp_dir().join(format!(
+            "kglite_csr_{}_{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&csr_dir);
+
+        // Use mmap on local SSD for fast random writes
+        let mut out_edges = MmapOrVec::mapped(&csr_dir.join("out_edges.bin"), edge_count)
+            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        let mut in_edges = MmapOrVec::mapped(&csr_dir.join("in_edges.bin"), edge_count)
+            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        let mut edge_endpoints_vec =
+            MmapOrVec::mapped(&csr_dir.join("edge_endpoints.bin"), edge_count)
+                .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+
+        // Pre-fill with defaults
         for _ in 0..edge_count {
             out_edges.push(CsrEdge::default());
             in_edges.push(CsrEdge::default());
             edge_endpoints_vec.push(EdgeEndpoints::default());
         }
 
+        // Fill with cursor-based random writes (fast on SSD mmap)
         let mut out_cursors = vec![0u64; node_bound];
         let mut in_cursors = vec![0u64; node_bound];
 
