@@ -894,6 +894,7 @@ impl DiskGraph {
         // no page faults, no mmap thrashing. ~100x faster than random set().
 
         // 2a: Build edge_endpoints from original order (sequential push)
+        // Then DROP pending_edges to free ~10 GB before sorting.
         let mut edge_endpoints_vec = MmapOrVec::with_capacity(edge_count);
         for &(src, tgt, conn_type) in pending.iter() {
             edge_endpoints_vec.push(EdgeEndpoints {
@@ -902,32 +903,35 @@ impl DiskGraph {
                 connection_type: conn_type,
             });
         }
+        // Free pending_edges (~10 GB) — we'll use edge_endpoints for lookups
+        pending.clear();
+        pending.shrink_to_fit();
 
-        // 2b: Create sort_indices (4 bytes/edge = 3.4 GB for 862M edges — fits in 16 GB)
-        // Sort by source → build out_edges with sequential push (no random writes)
+        // 2b: Sort indices by source using edge_endpoints for lookups.
+        // sort_indices = 4 bytes/edge (3.4 GB). With pending freed, total ~3.4 GB.
         let mut sort_indices: Vec<u32> = (0..edge_count as u32).collect();
-        sort_indices.sort_unstable_by_key(|&i| pending[i as usize].0);
+        sort_indices.sort_unstable_by_key(|&i| edge_endpoints_vec.get(i as usize).source);
 
         let mut out_edges = MmapOrVec::with_capacity(edge_count);
         for &i in &sort_indices {
-            let (_, tgt, conn_type) = pending[i as usize];
+            let ep = edge_endpoints_vec.get(i as usize);
             out_edges.push(CsrEdge {
-                peer: tgt,
+                peer: ep.target,
                 edge_idx: i,
-                conn_type,
+                conn_type: ep.connection_type,
             });
         }
 
-        // 2c: Re-sort by target → build in_edges with sequential push
-        sort_indices.sort_unstable_by_key(|&i| pending[i as usize].1);
+        // 2c: Re-sort by target → build in_edges
+        sort_indices.sort_unstable_by_key(|&i| edge_endpoints_vec.get(i as usize).target);
 
         let mut in_edges = MmapOrVec::with_capacity(edge_count);
         for &i in &sort_indices {
-            let (src, _, conn_type) = pending[i as usize];
+            let ep = edge_endpoints_vec.get(i as usize);
             in_edges.push(CsrEdge {
-                peer: src,
+                peer: ep.source,
                 edge_idx: i,
-                conn_type,
+                conn_type: ep.connection_type,
             });
         }
         drop(sort_indices);
@@ -937,8 +941,6 @@ impl DiskGraph {
         self.in_offsets = in_offsets;
         self.in_edges = in_edges;
         self.edge_endpoints = edge_endpoints_vec;
-        pending.clear();
-        pending.shrink_to_fit();
     }
 
     // ====================================================================
