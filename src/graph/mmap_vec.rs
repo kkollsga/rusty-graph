@@ -52,6 +52,7 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
 
     /// Create a file-backed buffer at the given path.
     /// The file is created/truncated with initial capacity for `initial_cap` elements.
+    /// `len` starts at 0 — use `push()` to add elements.
     pub fn mapped(path: &Path, initial_cap: usize) -> io::Result<Self> {
         let cap = initial_cap.max(64); // minimum 64 elements
         let byte_len = cap * std::mem::size_of::<T>();
@@ -69,6 +70,34 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         Ok(MmapOrVec::Mapped {
             mmap,
             len: 0,
+            capacity: cap,
+            file,
+            path: path.to_path_buf(),
+            _phantom: std::marker::PhantomData,
+        })
+    }
+
+    /// Create a file-backed buffer pre-sized to `count` elements.
+    /// Elements are zero-initialized by the OS (lazy page-fault zero-fill).
+    /// Allows immediate `set(index, value)` without prior `push()`.
+    /// No pre-fill I/O — pages are only allocated when first written.
+    pub fn mapped_prefilled(path: &Path, count: usize) -> io::Result<Self> {
+        let cap = count.max(64);
+        let byte_len = cap * std::mem::size_of::<T>();
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+        file.set_len(byte_len as u64)?;
+
+        let mmap = unsafe { MmapOptions::new().len(byte_len).map_mut(&file)? };
+
+        Ok(MmapOrVec::Mapped {
+            mmap,
+            len: count, // pre-sized — set() works immediately
             capacity: cap,
             file,
             path: path.to_path_buf(),

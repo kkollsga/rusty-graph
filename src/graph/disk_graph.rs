@@ -905,21 +905,16 @@ impl DiskGraph {
         ));
         let _ = std::fs::create_dir_all(&csr_dir);
 
-        // Use mmap on local SSD for fast random writes
-        let mut out_edges = MmapOrVec::mapped(&csr_dir.join("out_edges.bin"), edge_count)
+        // Use mmap_prefilled on local SSD — NO pre-fill I/O.
+        // OS lazy-zeros pages on first access. set() works immediately.
+        let mut out_edges = MmapOrVec::mapped_prefilled(&csr_dir.join("out_edges.bin"), edge_count)
             .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        let mut in_edges = MmapOrVec::mapped(&csr_dir.join("in_edges.bin"), edge_count)
+        let mut in_edges = MmapOrVec::mapped_prefilled(&csr_dir.join("in_edges.bin"), edge_count)
             .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        // edge_endpoints is filled sequentially — use regular mapped + push
         let mut edge_endpoints_vec =
             MmapOrVec::mapped(&csr_dir.join("edge_endpoints.bin"), edge_count)
                 .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-
-        // Pre-fill with defaults
-        for _ in 0..edge_count {
-            out_edges.push(CsrEdge::default());
-            in_edges.push(CsrEdge::default());
-            edge_endpoints_vec.push(EdgeEndpoints::default());
-        }
 
         // Fill with cursor-based random writes (fast on SSD mmap)
         let mut out_cursors = vec![0u64; node_bound];
@@ -954,14 +949,11 @@ impl DiskGraph {
                 in_cursors[tgt as usize] += 1;
             }
 
-            edge_endpoints_vec.set(
-                edge_idx,
-                EdgeEndpoints {
-                    source: src,
-                    target: tgt,
-                    connection_type: conn_type,
-                },
-            );
+            edge_endpoints_vec.push(EdgeEndpoints {
+                source: src,
+                target: tgt,
+                connection_type: conn_type,
+            });
         }
 
         self.out_offsets = out_offsets;
