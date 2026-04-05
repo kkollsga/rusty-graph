@@ -125,7 +125,10 @@ pub struct DiskGraph {
     free_edge_slots: Vec<u32>,
 
     // ── Storage directory (the graph lives here) ──
-    data_dir: PathBuf,
+    pub(crate) data_dir: PathBuf,
+
+    // ── Temp dir for CSR mmap files (cleaned up on Drop) ──
+    csr_temp_dir: Option<PathBuf>,
 }
 
 use std::sync::Arc;
@@ -178,6 +181,7 @@ impl DiskGraph {
             overflow_in: HashMap::new(),
             free_edge_slots: Vec::new(),
             data_dir: data_dir.to_path_buf(),
+            csr_temp_dir: None,
         })
     }
 
@@ -318,6 +322,7 @@ impl DiskGraph {
             overflow_in: HashMap::new(),
             free_edge_slots: Vec::new(),
             data_dir: data_dir.to_path_buf(),
+            csr_temp_dir: None,
         })
     }
 
@@ -860,11 +865,32 @@ impl DiskGraph {
 
         let node_bound = self.node_slots.len();
         let edge_count = pending.len();
+        let verbose = std::env::var("KGLITE_CSR_VERBOSE").is_ok();
 
-        // Pass 1: count degrees
+        let phase3_start = std::time::Instant::now();
+
+        // Temp dir on local SSD for mmap files.
+        let csr_dir = std::env::temp_dir().join(format!(
+            "kglite_csr_{}_{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&csr_dir);
+
+        // ── Step 1+2: Materialize pending to mmap AND count degrees in one pass ──
+        // Reads from heap Vec (fast), writes to mmap (sequential), counts degrees.
+        // Then frees the heap Vec (~13.8 GB at Wikidata scale).
+        let step = std::time::Instant::now();
+        let mut pending_mmap: MmapOrVec<(u32, u32, u64)> =
+            MmapOrVec::mapped(&csr_dir.join("pending.bin"), edge_count)
+                .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
         let mut out_counts = vec![0u64; node_bound];
         let mut in_counts = vec![0u64; node_bound];
-        for &(src, tgt, _) in pending.iter() {
+        for &(src, tgt, conn_type) in pending.iter() {
+            pending_mmap.push((src, tgt, conn_type));
             if (src as usize) < node_bound {
                 out_counts[src as usize] += 1;
             }
@@ -872,8 +898,230 @@ impl DiskGraph {
                 in_counts[tgt as usize] += 1;
             }
         }
+        pending.clear();
+        pending.shrink_to_fit();
+        if verbose {
+            eprintln!(
+                "    CSR step 1/5: materialize + count degrees ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
 
-        // Build offset arrays in heap (small: ~2 GB for 124M nodes)
+        // ── Step 1b: Build edge_endpoints NOW while pending_mmap pages are hot ──
+        let step = std::time::Instant::now();
+        let mut edge_endpoints_vec =
+            MmapOrVec::mapped(&csr_dir.join("edge_endpoints.bin"), edge_count)
+                .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        for i in 0..edge_count {
+            let (src, tgt, conn_type) = pending_mmap.get(i);
+            edge_endpoints_vec.push(EdgeEndpoints {
+                source: src,
+                target: tgt,
+                connection_type: conn_type,
+            });
+        }
+        if verbose {
+            eprintln!(
+                "    CSR step 1b: edge_endpoints (pages hot) ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        // ── Step 2: Build offset prefix sums ──
+        let step = std::time::Instant::now();
+        let mut out_offsets = MmapOrVec::with_capacity(node_bound + 1);
+        let mut in_offsets = MmapOrVec::with_capacity(node_bound + 1);
+        let mut out_acc = 0u64;
+        let mut in_acc = 0u64;
+        for i in 0..node_bound {
+            out_offsets.push(out_acc);
+            in_offsets.push(in_acc);
+            out_acc += out_counts[i];
+            in_acc += in_counts[i];
+        }
+        out_offsets.push(out_acc);
+        in_offsets.push(in_acc);
+        if verbose {
+            eprintln!(
+                "    CSR step 2/5: build offsets ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        // ── Step 3: Sort by source → sequential push out_edges ──
+        // In-memory sort: extract source keys (4 bytes/edge) + sort_indices (4 bytes/edge)
+        // Peak heap: 6.8 GB + 2 GB offsets = 8.8 GB at Wikidata scale — fits in 16 GB.
+        // ALL writes to mmap are sequential push() — zero random I/O, zero disk thrashing.
+        drop(out_counts);
+        drop(in_counts);
+
+        let step = std::time::Instant::now();
+        let mut sort_keys: Vec<u32> = Vec::with_capacity(edge_count);
+        for i in 0..edge_count {
+            sort_keys.push(pending_mmap.get(i).0); // source
+        }
+        if verbose {
+            eprintln!(
+                "      extract source keys: {:.1}s",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        let sort_start = std::time::Instant::now();
+        let mut sort_indices: Vec<u32> = (0..edge_count as u32).collect();
+        sort_indices.sort_unstable_by_key(|&i| sort_keys[i as usize]);
+        drop(sort_keys);
+        if verbose {
+            eprintln!(
+                "      sort by source: {:.1}s",
+                sort_start.elapsed().as_secs_f64()
+            );
+        }
+
+        let push_start = std::time::Instant::now();
+        let mut out_edges = MmapOrVec::mapped(&csr_dir.join("out_edges.bin"), edge_count)
+            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        for &i in &sort_indices {
+            let (_, tgt, conn_type) = pending_mmap.get(i as usize);
+            out_edges.push(CsrEdge {
+                peer: tgt,
+                edge_idx: i,
+                conn_type,
+            });
+        }
+        if verbose {
+            eprintln!(
+                "      push out_edges: {:.1}s",
+                push_start.elapsed().as_secs_f64()
+            );
+            eprintln!(
+                "    CSR step 3/5: out_edges total ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        // ── Step 4: Sort by target → sequential push in_edges ──
+        let step = std::time::Instant::now();
+        let mut sort_keys: Vec<u32> = Vec::with_capacity(edge_count);
+        for i in 0..edge_count {
+            sort_keys.push(pending_mmap.get(i).1); // target
+        }
+        if verbose {
+            eprintln!(
+                "      extract target keys: {:.1}s",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        let sort_start = std::time::Instant::now();
+        sort_indices.sort_unstable_by_key(|&i| sort_keys[i as usize]);
+        drop(sort_keys);
+        if verbose {
+            eprintln!(
+                "      sort by target: {:.1}s",
+                sort_start.elapsed().as_secs_f64()
+            );
+        }
+
+        let push_start = std::time::Instant::now();
+        let mut in_edges = MmapOrVec::mapped(&csr_dir.join("in_edges.bin"), edge_count)
+            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        for &i in &sort_indices {
+            let (src, _, conn_type) = pending_mmap.get(i as usize);
+            in_edges.push(CsrEdge {
+                peer: src,
+                edge_idx: i,
+                conn_type,
+            });
+        }
+        drop(sort_indices);
+        if verbose {
+            eprintln!(
+                "      push in_edges: {:.1}s",
+                push_start.elapsed().as_secs_f64()
+            );
+            eprintln!(
+                "    CSR step 4/5: in_edges total ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        // Delete pending temp file — no longer needed.
+        drop(pending_mmap);
+        let _ = std::fs::remove_file(csr_dir.join("pending.bin"));
+        if verbose {
+            eprintln!(
+                "    CSR total: {:.1}s ({} edges, {} nodes)",
+                phase3_start.elapsed().as_secs_f64(),
+                edge_count,
+                node_bound
+            );
+        }
+
+        self.out_offsets = out_offsets;
+        self.out_edges = out_edges;
+        self.in_offsets = in_offsets;
+        self.in_edges = in_edges;
+        self.edge_endpoints = edge_endpoints_vec;
+        self.csr_temp_dir = Some(csr_dir);
+    }
+
+    /// [DEV] Experimental variant — kept for benchmarking. Use KGLITE_CSR_ALGO=optimized.
+    #[allow(dead_code)]
+    fn build_csr_optimized(&mut self, node_bound: usize, edge_count: usize, verbose: bool) {
+        let pending = self.pending_edges.get_mut();
+        let phase3_start = std::time::Instant::now();
+
+        let csr_dir = std::env::temp_dir().join(format!(
+            "kglite_csr_{}_{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&csr_dir);
+
+        // ── Step 1: Materialize + count degrees + build edge_endpoints (all from heap) ──
+        // Three sequential mmap writes interleaved, reading from heap Vec.
+        // Zero mmap reads — everything comes from the hot heap Vec.
+        let step = std::time::Instant::now();
+        let mut pending_mmap: MmapOrVec<(u32, u32, u64)> =
+            MmapOrVec::mapped(&csr_dir.join("pending.bin"), edge_count)
+                .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        let mut edge_endpoints_vec =
+            MmapOrVec::mapped(&csr_dir.join("edge_endpoints.bin"), edge_count)
+                .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        let mut out_counts = vec![0u64; node_bound];
+        let mut in_counts = vec![0u64; node_bound];
+
+        for &(src, tgt, ct) in pending.iter() {
+            pending_mmap.push((src, tgt, ct));
+            edge_endpoints_vec.push(EdgeEndpoints {
+                source: src,
+                target: tgt,
+                connection_type: ct,
+            });
+            if (src as usize) < node_bound {
+                out_counts[src as usize] += 1;
+            }
+            if (tgt as usize) < node_bound {
+                in_counts[tgt as usize] += 1;
+            }
+        }
+        pending.clear();
+        pending.shrink_to_fit();
+        if verbose {
+            eprintln!(
+                "    CSR step 1/4: materialize + endpoints + degrees ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        // ── Step 2: Build offsets + extract src/tgt to heap Vecs ──
+        // One sequential pass over pending_mmap to extract both columns.
+        // These Vecs serve as both sort keys AND peer data during push.
+        let step = std::time::Instant::now();
         let mut out_offsets = MmapOrVec::with_capacity(node_bound + 1);
         let mut in_offsets = MmapOrVec::with_capacity(node_bound + 1);
         let mut out_acc = 0u64;
@@ -889,15 +1137,110 @@ impl DiskGraph {
         drop(out_counts);
         drop(in_counts);
 
-        // Pass 2: Build CSR arrays with SEQUENTIAL writes only.
-        // Sort pending_edges by key, then push() sequentially — no random access,
-        // no page faults, no mmap thrashing. ~100x faster than random set().
+        let mut src_vec: Vec<u32> = Vec::with_capacity(edge_count);
+        let mut tgt_vec: Vec<u32> = Vec::with_capacity(edge_count);
+        for i in 0..edge_count {
+            let (s, t, _) = pending_mmap.get(i);
+            src_vec.push(s);
+            tgt_vec.push(t);
+        }
+        if verbose {
+            eprintln!(
+                "    CSR step 2/4: offsets + extract src/tgt vecs ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
 
-        // 2a: Sort + build CSR arrays.
-        // Memory: pending = 12 bytes/edge (10 GB), sort_indices = 4 bytes/edge (3.4 GB)
-        // Total: ~13.4 GB. Tight on 16 GB but no swap since no extra copies.
+        // ── Step 3: Sort by source → push out_edges ──
+        // Sort key = src_vec (already in heap). Peer = tgt_vec (heap). Only ct from mmap.
+        let step = std::time::Instant::now();
+        let mut sort_indices: Vec<u32> = (0..edge_count as u32).collect();
+        sort_indices.sort_unstable_by_key(|&i| src_vec[i as usize]);
+        if verbose {
+            eprintln!("      sort by source: {:.1}s", step.elapsed().as_secs_f64());
+        }
 
-        // Use temp dir for mmap files — sequential push is fast on any storage
+        let push_start = std::time::Instant::now();
+        let mut out_edges = MmapOrVec::mapped(&csr_dir.join("out_edges.bin"), edge_count)
+            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        for &i in &sort_indices {
+            let tgt = tgt_vec[i as usize]; // heap → instant
+            let ct = pending_mmap.get(i as usize).2; // mmap → only 8 bytes needed
+            out_edges.push(CsrEdge {
+                peer: tgt,
+                edge_idx: i,
+                conn_type: ct,
+            });
+        }
+        if verbose {
+            eprintln!(
+                "      push out_edges: {:.1}s",
+                push_start.elapsed().as_secs_f64()
+            );
+            eprintln!(
+                "    CSR step 3/4: out_edges total ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        // ── Step 4: Sort by target → push in_edges ──
+        let step = std::time::Instant::now();
+        sort_indices.sort_unstable_by_key(|&i| tgt_vec[i as usize]);
+        if verbose {
+            eprintln!("      sort by target: {:.1}s", step.elapsed().as_secs_f64());
+        }
+
+        let push_start = std::time::Instant::now();
+        let mut in_edges = MmapOrVec::mapped(&csr_dir.join("in_edges.bin"), edge_count)
+            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        for &i in &sort_indices {
+            let src = src_vec[i as usize]; // heap → instant
+            let ct = pending_mmap.get(i as usize).2; // mmap
+            in_edges.push(CsrEdge {
+                peer: src,
+                edge_idx: i,
+                conn_type: ct,
+            });
+        }
+        drop(sort_indices);
+        drop(src_vec);
+        drop(tgt_vec);
+        if verbose {
+            eprintln!(
+                "      push in_edges: {:.1}s",
+                push_start.elapsed().as_secs_f64()
+            );
+            eprintln!(
+                "    CSR step 4/4: in_edges total ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        drop(pending_mmap);
+        let _ = std::fs::remove_file(csr_dir.join("pending.bin"));
+        if verbose {
+            eprintln!(
+                "    CSR total: {:.1}s ({} edges, {} nodes) [optimized]",
+                phase3_start.elapsed().as_secs_f64(),
+                edge_count,
+                node_bound
+            );
+        }
+
+        self.out_offsets = out_offsets;
+        self.out_edges = out_edges;
+        self.in_offsets = in_offsets;
+        self.in_edges = in_edges;
+        self.edge_endpoints = edge_endpoints_vec;
+        self.csr_temp_dir = Some(csr_dir);
+    }
+
+    /// [DEV] Experimental variant — kept for benchmarking. Use KGLITE_CSR_ALGO=column_split.
+    #[allow(dead_code)]
+    fn build_csr_column_split(&mut self, node_bound: usize, edge_count: usize, verbose: bool) {
+        let pending = self.pending_edges.get_mut();
+        let phase3_start = std::time::Instant::now();
+
         let csr_dir = std::env::temp_dir().join(format!(
             "kglite_csr_{}_{:x}",
             std::process::id(),
@@ -908,57 +1251,209 @@ impl DiskGraph {
         ));
         let _ = std::fs::create_dir_all(&csr_dir);
 
-        // Sort indices by source, referencing pending directly.
-        // Memory: pending (10 GB) + sort_indices (3.4 GB) = 13.4 GB peak.
-        let mut sort_indices: Vec<u32> = (0..edge_count as u32).collect();
-        sort_indices.sort_unstable_by_key(|&i| pending[i as usize].0);
-
-        // Build out_edges on disk via mmap — sequential push (no random writes)
-        let mut out_edges = MmapOrVec::mapped(&csr_dir.join("out_edges.bin"), edge_count)
+        // ── Step 1: Materialize pending into 3 column mmap files + count degrees ──
+        let step = std::time::Instant::now();
+        let mut src_col: MmapOrVec<u32> = MmapOrVec::mapped(&csr_dir.join("src.bin"), edge_count)
             .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        for &i in &sort_indices {
-            let (_, tgt, conn_type) = pending[i as usize];
-            out_edges.push(CsrEdge {
-                peer: tgt,
-                edge_idx: i,
-                conn_type,
-            });
-        }
-
-        // Re-sort by target, build in_edges on disk
-        sort_indices.sort_unstable_by_key(|&i| pending[i as usize].1);
-
-        let mut in_edges = MmapOrVec::mapped(&csr_dir.join("in_edges.bin"), edge_count)
+        let mut tgt_col: MmapOrVec<u32> = MmapOrVec::mapped(&csr_dir.join("tgt.bin"), edge_count)
             .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        for &i in &sort_indices {
-            let (src, _, conn_type) = pending[i as usize];
-            in_edges.push(CsrEdge {
-                peer: src,
-                edge_idx: i,
-                conn_type,
-            });
-        }
-        drop(sort_indices);
+        let mut ct_col: MmapOrVec<u64> = MmapOrVec::mapped(&csr_dir.join("ct.bin"), edge_count)
+            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
 
-        // Build edge_endpoints on disk — sequential push from pending
-        let mut edge_endpoints_vec =
-            MmapOrVec::mapped(&csr_dir.join("edge_endpoints.bin"), edge_count)
-                .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        for &(src, tgt, conn_type) in pending.iter() {
-            edge_endpoints_vec.push(EdgeEndpoints {
-                source: src,
-                target: tgt,
-                connection_type: conn_type,
-            });
+        let mut out_counts = vec![0u64; node_bound];
+        let mut in_counts = vec![0u64; node_bound];
+        for &(src, tgt, ct) in pending.iter() {
+            src_col.push(src);
+            tgt_col.push(tgt);
+            ct_col.push(ct);
+            if (src as usize) < node_bound {
+                out_counts[src as usize] += 1;
+            }
+            if (tgt as usize) < node_bound {
+                in_counts[tgt as usize] += 1;
+            }
         }
         pending.clear();
         pending.shrink_to_fit();
+        if verbose {
+            eprintln!(
+                "    CSR step 1/5: materialize 3 columns + count degrees ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        // ── Step 1b: Build edge_endpoints while column pages are hot ──
+        let step = std::time::Instant::now();
+        let mut edge_endpoints_vec =
+            MmapOrVec::mapped(&csr_dir.join("edge_endpoints.bin"), edge_count)
+                .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        for i in 0..edge_count {
+            edge_endpoints_vec.push(EdgeEndpoints {
+                source: src_col.get(i),
+                target: tgt_col.get(i),
+                connection_type: ct_col.get(i),
+            });
+        }
+        if verbose {
+            eprintln!(
+                "    CSR step 1b: edge_endpoints (pages hot) ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        // ── Step 2: Build offset prefix sums ──
+        let step = std::time::Instant::now();
+        let mut out_offsets = MmapOrVec::with_capacity(node_bound + 1);
+        let mut in_offsets = MmapOrVec::with_capacity(node_bound + 1);
+        let mut out_acc = 0u64;
+        let mut in_acc = 0u64;
+        for i in 0..node_bound {
+            out_offsets.push(out_acc);
+            in_offsets.push(in_acc);
+            out_acc += out_counts[i];
+            in_acc += in_counts[i];
+        }
+        out_offsets.push(out_acc);
+        in_offsets.push(in_acc);
+        drop(out_counts);
+        drop(in_counts);
+        if verbose {
+            eprintln!(
+                "    CSR step 2/5: build offsets ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        // ── Step 3: Sort by source + push out_edges ──
+        // Extract source keys + target peers in one sequential pass over column mmaps.
+        // Peers in heap → zero page faults during push.
+        // conn_type from ct_col mmap → at Wikidata scale, 6.9 GB fits in 7.2 GB page cache.
+        let step = std::time::Instant::now();
+        let mut sort_keys: Vec<u32> = Vec::with_capacity(edge_count);
+        let mut peer_data: Vec<u32> = Vec::with_capacity(edge_count);
+        for i in 0..edge_count {
+            sort_keys.push(src_col.get(i));
+            peer_data.push(tgt_col.get(i));
+        }
+        if verbose {
+            eprintln!(
+                "      extract src keys + tgt peers: {:.1}s",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        let sort_start = std::time::Instant::now();
+        let mut sort_indices: Vec<u32> = (0..edge_count as u32).collect();
+        sort_indices.sort_unstable_by_key(|&i| sort_keys[i as usize]);
+        drop(sort_keys);
+        if verbose {
+            eprintln!(
+                "      sort by source: {:.1}s",
+                sort_start.elapsed().as_secs_f64()
+            );
+        }
+
+        let push_start = std::time::Instant::now();
+        let mut out_edges = MmapOrVec::mapped(&csr_dir.join("out_edges.bin"), edge_count)
+            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        for &i in &sort_indices {
+            let tgt = peer_data[i as usize]; // heap → instant
+            let ct = ct_col.get(i as usize); // mmap → fits in page cache
+            out_edges.push(CsrEdge {
+                peer: tgt,
+                edge_idx: i,
+                conn_type: ct,
+            });
+        }
+        drop(peer_data);
+        if verbose {
+            eprintln!(
+                "      push out_edges: {:.1}s",
+                push_start.elapsed().as_secs_f64()
+            );
+            eprintln!(
+                "    CSR step 3/5: out_edges total ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        // ── Step 4: Sort by target + push in_edges ──
+        let step = std::time::Instant::now();
+        let mut sort_keys: Vec<u32> = Vec::with_capacity(edge_count);
+        let mut peer_data: Vec<u32> = Vec::with_capacity(edge_count);
+        for i in 0..edge_count {
+            sort_keys.push(tgt_col.get(i));
+            peer_data.push(src_col.get(i));
+        }
+        if verbose {
+            eprintln!(
+                "      extract tgt keys + src peers: {:.1}s",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        let sort_start = std::time::Instant::now();
+        sort_indices.sort_unstable_by_key(|&i| sort_keys[i as usize]);
+        drop(sort_keys);
+        if verbose {
+            eprintln!(
+                "      sort by target: {:.1}s",
+                sort_start.elapsed().as_secs_f64()
+            );
+        }
+
+        let push_start = std::time::Instant::now();
+        let mut in_edges = MmapOrVec::mapped(&csr_dir.join("in_edges.bin"), edge_count)
+            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        for &i in &sort_indices {
+            let src = peer_data[i as usize]; // heap → instant
+            let ct = ct_col.get(i as usize); // mmap → fits in page cache
+            in_edges.push(CsrEdge {
+                peer: src,
+                edge_idx: i,
+                conn_type: ct,
+            });
+        }
+        drop(peer_data);
+        drop(sort_indices);
+        if verbose {
+            eprintln!(
+                "      push in_edges: {:.1}s",
+                push_start.elapsed().as_secs_f64()
+            );
+            eprintln!(
+                "    CSR step 4/5: in_edges total ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        // Clean up column files — no longer needed
+        drop(src_col);
+        drop(tgt_col);
+        drop(ct_col);
+        let _ = std::fs::remove_file(csr_dir.join("src.bin"));
+        let _ = std::fs::remove_file(csr_dir.join("tgt.bin"));
+        let _ = std::fs::remove_file(csr_dir.join("ct.bin"));
+        if verbose {
+            eprintln!(
+                "    CSR total: {:.1}s ({} edges, {} nodes) [column_split]",
+                phase3_start.elapsed().as_secs_f64(),
+                edge_count,
+                node_bound
+            );
+        }
 
         self.out_offsets = out_offsets;
         self.out_edges = out_edges;
         self.in_offsets = in_offsets;
         self.in_edges = in_edges;
         self.edge_endpoints = edge_endpoints_vec;
+        self.csr_temp_dir = Some(csr_dir);
+    }
+
+    /// [DEV] Return (out_edges.len(), in_edges.len()) for benchmark verification.
+    pub(crate) fn csr_edge_count(&self) -> (usize, usize) {
+        (self.out_edges.len(), self.in_edges.len())
     }
 
     // ====================================================================
@@ -1189,6 +1684,15 @@ impl Clone for DiskGraph {
             overflow_in: self.overflow_in.clone(),
             free_edge_slots: self.free_edge_slots.clone(),
             data_dir: self.data_dir.clone(),
+            csr_temp_dir: None, // clone doesn't share temp dir
+        }
+    }
+}
+
+impl Drop for DiskGraph {
+    fn drop(&mut self) {
+        if let Some(ref dir) = self.csr_temp_dir {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 }
@@ -1392,6 +1896,7 @@ impl DiskGraph {
                 overflow_in,
                 free_edge_slots: meta.free_edge_slots,
                 data_dir: dir.to_path_buf(),
+                csr_temp_dir: None,
             },
             temp_dir,
         ))

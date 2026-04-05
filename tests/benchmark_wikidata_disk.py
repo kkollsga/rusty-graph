@@ -164,9 +164,75 @@ def run_benchmarks(g):
 
     fl("select(Entity).len()", lambda: g.select("Entity").len())
     fl("graph_info()", lambda: len(str(g.graph_info())))
-    fl("select(Entity).to_df() rows", lambda: len(g.select("Entity").to_df()))
     fl("node_types", lambda: g.node_types)
     fl("is_columnar", lambda: g.is_columnar)
+
+    # Traversal via fluent
+    fl("select(Entity).traverse(P31).len()", lambda: g.select("Entity").traverse("P31", limit=100).len())
+    fl(
+        "select(Entity).traverse(P31,out).to_df LIMIT 20",
+        lambda: len(g.select("Entity").traverse("P31", direction="outgoing", limit=20).to_df()),
+    )
+    fl(
+        "select(Entity).traverse(P31,in).len()",
+        lambda: g.select("Entity").traverse("P31", direction="incoming", limit=50).len(),
+    )
+
+    # Where filters via fluent
+    fl(
+        "select.where(label contains 'Berlin')",
+        lambda: g.select("Entity").where({"label": ("contains", "Berlin")}, limit=20).len(),
+    )
+    fl(
+        "select.where(label starts 'United')",
+        lambda: g.select("Entity").where({"label": ("starts_with", "United")}, limit=20).len(),
+    )
+    fl("select.where(P31 = 'Q5')", lambda: g.select("Entity").where({"P31": "Q5"}, limit=20).len())
+    fl("select.where(P31 = 'Q515')", lambda: g.select("Entity").where({"P31": "Q515"}, limit=20).len())
+    fl("select.where(P31 = 'Q6256')", lambda: g.select("Entity").where({"P31": "Q6256"}, limit=20).len())
+
+    # Sorting
+    fl(
+        "select.where(P31='Q5', limit=50).to_df()",
+        lambda: len(g.select("Entity").where({"P31": "Q5"}, limit=50).to_df()),
+    )
+
+    # Multiple traversals
+    fl(
+        "traverse P31 then P17 LIMIT 10",
+        lambda: g.select("Entity").traverse("P31", limit=10).traverse("P17", limit=10).len(),
+    )
+    fl(
+        "traverse P31 then P30 LIMIT 10",
+        lambda: g.select("Entity").traverse("P31", limit=10).traverse("P30", limit=10).len(),
+    )
+
+    # Selection length
+    fl("select all .len()", lambda: g.select("Entity").len())
+
+    # Edge info
+    fl("edge_types (via graph_info)", lambda: len(g.graph_info().get("edge_types", [])))
+
+    # Describe
+    fl("describe() length", lambda: len(g.describe()))
+
+    # Node count via select
+    fl(
+        "select(Entity).where(is_not_null label).len()",
+        lambda: g.select("Entity").where({"label": "is_not_null"}, limit=100).len(),
+    )
+    fl(
+        "select(Entity).where(is_null description).len()",
+        lambda: g.select("Entity").where({"description": "is_null"}, limit=100).len(),
+    )
+
+    # Export
+    fl("select.to_list() LIMIT 10", lambda: len(g.select("Entity").where({"P31": "Q5"}, limit=10).to_list()))
+    fl("select.to_df() LIMIT 20", lambda: len(g.select("Entity").where({"P31": "Q515"}, limit=20).to_df()))
+
+    # Count connected
+    fl("select.where_connected(P31).len()", lambda: g.select("Entity").where_connected("P31").len())
+    fl("select.where_connected(P17).len()", lambda: g.select("Entity").where_connected("P17").len())
 
     # --- Summary ---
     print("\n" + "=" * 70)

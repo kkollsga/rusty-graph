@@ -1,0 +1,14 @@
+<http://www.wikidata.org/entity/Q42> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://wikiba.se/ontology#Item> .
+<http://www.wikidata.org/entity/Q42> <http://www.w3.org/2000/01/rdf-schema#label> "Douglas Adams"@en .
+<http://www.wikidata.org/entity/Q42> <http://www.w3.org/2000/01/rdf-schema#label> "Douglas Adams"@de .
+<http://www.wikidata.org/entity/Q42> <http://schema.org/description> "English author and humourist"@en .
+<http://www.wikidata.org/entity/Q42> <http://www.wikidata.org/prop/direct/P31> <http://www.wikidata.org/entity/Q5> .
+<http://www.wikidata.org/entity/Q42> <http://www.wikidata.org/prop/direct/P27> <http://www.wikidata.org/entity/Q145> .
+<http://www.wikidata.org/entity/Q42> <http://www.wikidata.org/prop/direct/P106> <http://www.wikidata.org/entity/Q36180> .
+<http://www.wikidata.org/entity/Q42> <http://www.wikidata.org/prop/direct/P1082> "+42"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+<http://www.wikidata.org/entity/Q145> <http://www.w3.org/2000/01/rdf-schema#label> "United Kingdom"@en .
+<http://www.wikidata.org/entity/Q145> <http://www.wikidata.org/prop/direct/P31> <http://www.wikidata.org/entity/Q6256> .
+<http://www.wikidata.org/entity/Q5> <http://www.w3.org/2000/01/rdf-schema#label> "human"@en .
+<http://www.wikidata.org/entity/Q5> <http://www.wikidata.org/prop/direct/P31> <http://www.wikidata.org/entity/Q35120> .
+<http://www.wikidata.org/entity/Q36180> <http://www.w3.org/2000/01/rdf-schema#label> "writer"@en .
+<http://www.wikidata.org/entity/Q36180> <http://www.wikidata.org/prop/direct/P31> <http://www.wikidata.org/entity/Q28640> .

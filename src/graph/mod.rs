@@ -5305,6 +5305,77 @@ impl KnowledgeGraph {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))
     }
 
+    /// [DEV] Benchmark Phase 3 CSR build with synthetic data.
+    /// Bypasses N-Triples — directly populates pending_edges with deterministic
+    /// edges, then runs build_csr_from_pending(). Returns timing dict.
+    /// Set KGLITE_CSR_VERBOSE=1 for sub-step timings on stderr.
+    #[pyo3(signature = (edge_count, node_count, path))]
+    fn _bench_phase3(
+        &mut self,
+        py: Python<'_>,
+        edge_count: usize,
+        node_count: usize,
+        path: &str,
+    ) -> PyResult<Py<PyAny>> {
+        use crate::graph::disk_graph::DiskGraph;
+
+        // Set up disk graph at path
+        let graph_path = std::path::Path::new(path);
+        let mut dg = DiskGraph::new_at_path(graph_path)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+
+        // Allocate node slots (all alive, type 1)
+        for _ in 0..node_count {
+            let slot = crate::graph::disk_graph::DiskNodeSlot {
+                node_type: 1,
+                row_id: 0,
+                flags: 1,
+            };
+            dg.node_slots.push(slot);
+        }
+
+        // Generate deterministic edges (mimics Wikidata: source-grouped)
+        let pending = dg.pending_edges.get_mut();
+        pending.reserve(edge_count);
+        let edges_per_node = edge_count / node_count;
+        let mut count = 0usize;
+        for src in 0..node_count as u32 {
+            for j in 0..edges_per_node {
+                let tgt = ((src as usize * 7 + j * 13 + 1) % node_count) as u32;
+                let conn_type = (j % 50) as u64 + 1;
+                pending.push((src, tgt, conn_type));
+                count += 1;
+                if count >= edge_count {
+                    break;
+                }
+            }
+            if count >= edge_count {
+                break;
+            }
+        }
+        dg.edge_count = count;
+        dg.next_edge_idx = count as u32;
+
+        // Run Phase 3
+        let t0 = std::time::Instant::now();
+        dg.build_csr_from_pending();
+        let elapsed = t0.elapsed().as_secs_f64();
+
+        // Basic correctness check
+        let out_ok = dg.csr_edge_count().0 == count;
+        let in_ok = dg.csr_edge_count().1 == count;
+        let ep_ok = dg.edge_endpoints.len() == count;
+
+        let result = PyDict::new(py);
+        result.set_item("elapsed", elapsed)?;
+        result.set_item("edges", count)?;
+        result.set_item("nodes", node_count)?;
+        result.set_item("out_edges_ok", out_ok)?;
+        result.set_item("in_edges_ok", in_ok)?;
+        result.set_item("endpoints_ok", ep_ok)?;
+        Ok(result.into())
+    }
+
     /// Get the most recent operation report as a Python dictionary
     fn last_report(&self) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {

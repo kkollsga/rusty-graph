@@ -19,10 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Mapped mode**: Fixed O(n²) Arc clone bug — 50-300x faster `add_nodes` in mapped mode.
 - **N-Triples loader**: 81x faster via bulk columnar conversion, pipeline parallelism, zero-copy parsing, byte-level filtering, and dense Vec edge lookup.
 - **Disk graph save**: zstd-compressed files (81% size reduction vs raw binary).
+- **CSR build optimized for low-memory machines**: Rewrote `build_csr_from_pending()` for Wikidata-scale graphs (862M edges) on 16 GB RAM. Key changes: (1) mmap-backed edge buffer during N-Triples loading eliminates 13.8 GB heap allocation, (2) edges materialized to mmap before sort to free heap for page cache, (3) in-memory sort + sequential mmap push (zero random I/O, SSD-safe), (4) edge_endpoints built while pages are hot. Phase 3 improved from 90+ min (swap thrashing) to ~5-10 min. Phase 2 improved from 5 min (swap) to ~3 min. CSR temp files cleaned up on Drop.
 
 ### Fixed
 - Schema extension bug in mapped mode incremental `add_nodes`.
 - `add_connections()` in disk mode auto-builds CSR so queries work immediately.
+- **Memory leak in N-Triples loader**: `edge_buffer` (13.8 GB at Wikidata scale) was kept alive during Phase 3 CSR build, doubling peak memory. Now dropped immediately after Phase 2.
 
 ## [0.6.18] - 2026-03-30
 

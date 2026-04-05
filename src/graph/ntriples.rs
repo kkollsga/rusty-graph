@@ -86,6 +86,8 @@ enum EdgeBuffer {
     Strings(Vec<(String, String, String)>),
     /// Mapped mode: (source_qnum, target_qnum, interned_predicate) — 16 bytes each
     Compact(Vec<(u32, u32, InternedKey)>),
+    /// [DEV] Disk-backed: edges on mmap, 0 heap. Use KGLITE_EDGE_STREAM=mmap.
+    CompactMmap(crate::graph::mmap_vec::MmapOrVec<(u32, u32, u64)>),
 }
 
 impl EdgeBuffer {
@@ -93,6 +95,7 @@ impl EdgeBuffer {
         match self {
             Self::Strings(v) => v.len(),
             Self::Compact(v) => v.len(),
+            Self::CompactMmap(v) => v.len(),
         }
     }
 }
@@ -397,7 +400,24 @@ pub fn load_ntriples(
     let mapped = false;
     let mut current: Option<EntityAccumulator> = None;
     let use_compact = final_mode == StorageMode::Mapped || final_mode == StorageMode::Disk;
-    let mut edge_buffer = if use_compact {
+    let use_mmap_edges = use_compact && final_mode == StorageMode::Disk;
+    let mut edge_buffer = if use_mmap_edges {
+        // Disk-backed edge buffer: 0 heap for edges during Phase 1.
+        // At Wikidata scale this avoids 13.8 GB EdgeBuffer heap allocation.
+        let edge_dir = std::env::temp_dir().join(format!(
+            "kglite_edges_{}_{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&edge_dir);
+        EdgeBuffer::CompactMmap(
+            crate::graph::mmap_vec::MmapOrVec::mapped(&edge_dir.join("edges.bin"), 1024 * 1024)
+                .unwrap_or_else(|_| crate::graph::mmap_vec::MmapOrVec::with_capacity(1024 * 1024)),
+        )
+    } else if use_compact {
         EdgeBuffer::Compact(Vec::new())
     } else {
         EdgeBuffer::Strings(Vec::new())
@@ -576,6 +596,64 @@ pub fn load_ntriples(
         );
     }
 
+    // Free edge_buffer before Phase 3 — at Wikidata scale this is ~13.8 GB.
+    drop(edge_buffer);
+
+    // [DEV] KGLITE_CHECKPOINT: save pending_edges to disk after Phase 2.
+    // Allows Phase 3 to be re-run without repeating Phase 1+2 (~50 min).
+    // To use: set KGLITE_CHECKPOINT=1, run build, kill after checkpoint saved.
+    // Then set KGLITE_CHECKPOINT=load, run build — Phase 3 starts from file.
+    if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
+        let ckpt_mode = std::env::var("KGLITE_CHECKPOINT").unwrap_or_default();
+        let ckpt_path = dg.data_dir.join("pending_checkpoint.bin");
+
+        if ckpt_mode == "load" && ckpt_path.exists() {
+            // Load pending_edges from checkpoint, skip Phase 1+2 work
+            if config.verbose {
+                eprintln!("  Loading Phase 2 checkpoint from {:?}...", ckpt_path);
+            }
+            let ckpt_start = Instant::now();
+            let data = std::fs::read(&ckpt_path).expect("Failed to read checkpoint");
+            let pending = dg.pending_edges.get_mut();
+            pending.clear();
+            let edge_count = data.len() / 16;
+            pending.reserve(edge_count);
+            let mut off = 0;
+            for _ in 0..edge_count {
+                let src = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+                let tgt = u32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap());
+                let ct = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap());
+                pending.push((src, tgt, ct));
+                off += 16;
+            }
+            dg.edge_count = edge_count;
+            dg.next_edge_idx = edge_count as u32;
+            if config.verbose {
+                eprintln!(
+                    "  Checkpoint loaded: {} edges ({:.1}s)",
+                    edge_count,
+                    ckpt_start.elapsed().as_secs_f64()
+                );
+            }
+        } else if !ckpt_mode.is_empty() && ckpt_mode != "load" {
+            // Save pending_edges checkpoint
+            let pending = dg.pending_edges.get_mut();
+            if config.verbose {
+                eprintln!("  Saving Phase 2 checkpoint ({} edges)...", pending.len());
+            }
+            let mut buf = Vec::with_capacity(pending.len() * 16);
+            for &(src, tgt, ct) in pending.iter() {
+                buf.extend_from_slice(&src.to_le_bytes());
+                buf.extend_from_slice(&tgt.to_le_bytes());
+                buf.extend_from_slice(&ct.to_le_bytes());
+            }
+            std::fs::write(&ckpt_path, &buf).expect("Failed to write checkpoint");
+            if config.verbose {
+                eprintln!("  Checkpoint saved to {:?}", ckpt_path);
+            }
+        }
+    }
+
     // Phase 3: Build CSR from pending edges (disk mode)
     if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
         if config.verbose {
@@ -722,6 +800,16 @@ fn flush_entity(
                 }
             }
         }
+        EdgeBuffer::CompactMmap(buf) => {
+            if let Some(src_num) = parse_qcode_number(&acc.id) {
+                for (pred_label, target_qcode) in acc.outgoing_edges {
+                    if let Some(tgt_num) = parse_qcode_number(&target_qcode) {
+                        let pred_key = graph.interner.get_or_intern(&pred_label);
+                        buf.push((src_num, tgt_num, pred_key.as_u64()));
+                    }
+                }
+            }
+        }
         EdgeBuffer::Strings(buf) => {
             for (pred_label, target_qcode) in acc.outgoing_edges {
                 buf.push((acc.id.clone(), target_qcode, pred_label));
@@ -738,6 +826,7 @@ fn create_edges_from_buffer(
 ) {
     match edge_buffer {
         EdgeBuffer::Compact(buf) => create_edges_compact(graph, buf, stats),
+        EdgeBuffer::CompactMmap(buf) => create_edges_compact_mmap(graph, buf, stats),
         EdgeBuffer::Strings(buf) => create_edges_strings(graph, buf, stats),
     }
 }
@@ -845,6 +934,97 @@ fn create_edges_compact(
     }
 
     // Register connection type metadata once (not per edge)
+    let node_types: Vec<String> = graph.type_indices.keys().cloned().collect();
+    for conn_key in &conn_types_seen {
+        let conn_name = graph.interner.resolve(*conn_key).to_string();
+        for src_type in &node_types {
+            for tgt_type in &node_types {
+                graph.upsert_connection_type_metadata(
+                    &conn_name,
+                    src_type,
+                    tgt_type,
+                    HashMap::new(),
+                );
+            }
+        }
+    }
+
+    graph.invalidate_edge_type_counts_cache();
+}
+
+/// [DEV] Mmap-backed variant of create_edges_compact.
+/// Reads edges from mmap (sequential), resolves Q-numbers, pushes to pending_edges.
+fn create_edges_compact_mmap(
+    graph: &mut DirGraph,
+    buf: &crate::graph::mmap_vec::MmapOrVec<(u32, u32, u64)>,
+    stats: &mut NTriplesStats,
+) {
+    // Build dense Vec lookup (same as create_edges_compact)
+    let mut max_qnum: u32 = 0;
+    for id_map in graph.id_indices.values() {
+        for (id_val, _) in id_map.iter() {
+            let n = match id_val {
+                Value::UniqueId(n) => n,
+                Value::String(s) => {
+                    if let Some(n) = parse_qcode_number(s.as_str()) {
+                        n
+                    } else {
+                        continue;
+                    }
+                }
+                _ => continue,
+            };
+            if n > max_qnum {
+                max_qnum = n;
+            }
+        }
+    }
+
+    const EMPTY: u32 = u32::MAX;
+    let mut qnum_to_idx: Vec<u32> = vec![EMPTY; max_qnum as usize + 1];
+    for id_map in graph.id_indices.values() {
+        for (id_val, node_idx) in id_map.iter() {
+            let n = match id_val {
+                Value::UniqueId(n) => n,
+                Value::String(s) => {
+                    if let Some(n) = parse_qcode_number(s.as_str()) {
+                        n
+                    } else {
+                        continue;
+                    }
+                }
+                _ => continue,
+            };
+            qnum_to_idx[n as usize] = node_idx.index() as u32;
+        }
+    }
+
+    let mut conn_types_seen: HashSet<InternedKey> = HashSet::new();
+    let qnum_len = qnum_to_idx.len();
+    let edge_count = buf.len();
+
+    if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
+        dg.pending_edges.get_mut().reserve(edge_count);
+        for i in 0..edge_count {
+            let (src_num, tgt_num, pred_u64) = buf.get(i);
+            let src_ok = (src_num as usize) < qnum_len && qnum_to_idx[src_num as usize] != EMPTY;
+            let tgt_ok = (tgt_num as usize) < qnum_len && qnum_to_idx[tgt_num as usize] != EMPTY;
+            if src_ok && tgt_ok {
+                let src_idx = qnum_to_idx[src_num as usize];
+                let tgt_idx = qnum_to_idx[tgt_num as usize];
+                dg.pending_edges
+                    .get_mut()
+                    .push((src_idx, tgt_idx, pred_u64));
+                dg.edge_count += 1;
+                dg.next_edge_idx += 1;
+                conn_types_seen.insert(InternedKey::from_u64(pred_u64));
+                stats.edges_created += 1;
+            } else {
+                stats.edges_skipped += 1;
+            }
+        }
+    }
+
     let node_types: Vec<String> = graph.type_indices.keys().cloned().collect();
     for conn_key in &conn_types_seen {
         let conn_name = graph.interner.resolve(*conn_key).to_string();
