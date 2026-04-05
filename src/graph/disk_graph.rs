@@ -39,6 +39,19 @@ pub struct CsrEdge {
 // SAFETY: CsrEdge is repr(C), Copy, Default, and contains only fixed-size integers.
 // No padding issues on any platform since fields are naturally aligned (4+4+8=16).
 
+/// [DEV] Entry for external merge sort. Carries all fields needed for CsrEdge
+/// output plus the sort key, so the merge never needs to seek back to pending_mmap.
+/// 24 bytes (8-byte aligned due to conn_type u64).
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct MergeSortEntry {
+    key: u32,       // sort key (source or target node index)
+    peer: u32,      // the other endpoint
+    orig_idx: u32,  // original edge index (for CsrEdge.edge_idx)
+    _pad: u32,      // alignment padding
+    conn_type: u64, // connection type
+}
+
 /// Edge endpoint metadata — stored in a dense array indexed by edge_idx.
 /// 16 bytes per edge. Includes connection_type for O(1) lookup (avoids CSR scan).
 #[repr(C)]
@@ -126,9 +139,9 @@ pub struct DiskGraph {
 
     // ── Storage directory (the graph lives here) ──
     pub(crate) data_dir: PathBuf,
-
+    // ── Dirty flag: flushed on Drop or next query ──
+    metadata_dirty: bool,
     // ── Temp dir for CSR mmap files (cleaned up on Drop) ──
-    csr_temp_dir: Option<PathBuf>,
 }
 
 use std::sync::Arc;
@@ -181,7 +194,7 @@ impl DiskGraph {
             overflow_in: HashMap::new(),
             free_edge_slots: Vec::new(),
             data_dir: data_dir.to_path_buf(),
-            csr_temp_dir: None,
+            metadata_dirty: false,
         })
     }
 
@@ -322,7 +335,7 @@ impl DiskGraph {
             overflow_in: HashMap::new(),
             free_edge_slots: Vec::new(),
             data_dir: data_dir.to_path_buf(),
-            csr_temp_dir: None,
+            metadata_dirty: false,
         })
     }
 
@@ -449,6 +462,7 @@ impl DiskGraph {
 
     pub fn add_node(&mut self, data: NodeData) -> NodeIndex {
         self.clear_arenas();
+        self.metadata_dirty = true;
 
         // Extract row_id from property storage if columnar, else use slot index
         let row_id = match &data.properties {
@@ -489,6 +503,7 @@ impl DiskGraph {
     }
 
     pub fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData> {
+        self.metadata_dirty = true;
         self.clear_arenas();
         let i = idx.index();
         if i >= self.node_slots.len() {
@@ -658,6 +673,7 @@ impl DiskGraph {
 
     pub fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
         self.clear_arenas();
+        self.metadata_dirty = true;
         let edge_idx = self.next_edge_idx;
         self.next_edge_idx += 1;
 
@@ -678,6 +694,7 @@ impl DiskGraph {
 
     pub fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData> {
         self.clear_arenas();
+        self.metadata_dirty = true;
         let ei = idx.index();
         if ei >= self.next_edge_idx as usize {
             return None;
@@ -854,9 +871,8 @@ impl DiskGraph {
     // ====================================================================
 
     /// Build CSR arrays from the pending edges log. Called lazily on first
-    /// query, or explicitly on save. Two-pass algorithm:
-    /// Pass 1: count outgoing/incoming degree per node
-    /// Pass 2: fill CSR arrays
+    /// query, or explicitly on save. Uses external merge sort — all I/O is
+    /// sequential, designed for larger-than-RAM graphs.
     pub fn build_csr_from_pending(&mut self) {
         let pending = self.pending_edges.get_mut();
         if pending.is_empty() {
@@ -866,235 +882,38 @@ impl DiskGraph {
         let node_bound = self.node_slots.len();
         let edge_count = pending.len();
         let verbose = std::env::var("KGLITE_CSR_VERBOSE").is_ok();
-
-        let phase3_start = std::time::Instant::now();
-
-        // Temp dir on local SSD for mmap files.
-        let csr_dir = std::env::temp_dir().join(format!(
-            "kglite_csr_{}_{:x}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&csr_dir);
-
-        // ── Step 1+2: Materialize pending to mmap AND count degrees in one pass ──
-        // Reads from heap Vec (fast), writes to mmap (sequential), counts degrees.
-        // Then frees the heap Vec (~13.8 GB at Wikidata scale).
-        let step = std::time::Instant::now();
-        let mut pending_mmap: MmapOrVec<(u32, u32, u64)> =
-            MmapOrVec::mapped(&csr_dir.join("pending.bin"), edge_count)
-                .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        let mut out_counts = vec![0u64; node_bound];
-        let mut in_counts = vec![0u64; node_bound];
-        for &(src, tgt, conn_type) in pending.iter() {
-            pending_mmap.push((src, tgt, conn_type));
-            if (src as usize) < node_bound {
-                out_counts[src as usize] += 1;
-            }
-            if (tgt as usize) < node_bound {
-                in_counts[tgt as usize] += 1;
-            }
-        }
-        pending.clear();
-        pending.shrink_to_fit();
-        if verbose {
-            eprintln!(
-                "    CSR step 1/5: materialize + count degrees ({:.1}s)",
-                step.elapsed().as_secs_f64()
-            );
-        }
-
-        // ── Step 1b: Build edge_endpoints NOW while pending_mmap pages are hot ──
-        let step = std::time::Instant::now();
-        let mut edge_endpoints_vec =
-            MmapOrVec::mapped(&csr_dir.join("edge_endpoints.bin"), edge_count)
-                .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        for i in 0..edge_count {
-            let (src, tgt, conn_type) = pending_mmap.get(i);
-            edge_endpoints_vec.push(EdgeEndpoints {
-                source: src,
-                target: tgt,
-                connection_type: conn_type,
-            });
-        }
-        if verbose {
-            eprintln!(
-                "    CSR step 1b: edge_endpoints (pages hot) ({:.1}s)",
-                step.elapsed().as_secs_f64()
-            );
-        }
-
-        // ── Step 2: Build offset prefix sums ──
-        let step = std::time::Instant::now();
-        let mut out_offsets = MmapOrVec::with_capacity(node_bound + 1);
-        let mut in_offsets = MmapOrVec::with_capacity(node_bound + 1);
-        let mut out_acc = 0u64;
-        let mut in_acc = 0u64;
-        for i in 0..node_bound {
-            out_offsets.push(out_acc);
-            in_offsets.push(in_acc);
-            out_acc += out_counts[i];
-            in_acc += in_counts[i];
-        }
-        out_offsets.push(out_acc);
-        in_offsets.push(in_acc);
-        if verbose {
-            eprintln!(
-                "    CSR step 2/5: build offsets ({:.1}s)",
-                step.elapsed().as_secs_f64()
-            );
-        }
-
-        // ── Step 3: Sort by source → sequential push out_edges ──
-        // In-memory sort: extract source keys (4 bytes/edge) + sort_indices (4 bytes/edge)
-        // Peak heap: 6.8 GB + 2 GB offsets = 8.8 GB at Wikidata scale — fits in 16 GB.
-        // ALL writes to mmap are sequential push() — zero random I/O, zero disk thrashing.
-        drop(out_counts);
-        drop(in_counts);
-
-        let step = std::time::Instant::now();
-        let mut sort_keys: Vec<u32> = Vec::with_capacity(edge_count);
-        for i in 0..edge_count {
-            sort_keys.push(pending_mmap.get(i).0); // source
-        }
-        if verbose {
-            eprintln!(
-                "      extract source keys: {:.1}s",
-                step.elapsed().as_secs_f64()
-            );
-        }
-
-        let sort_start = std::time::Instant::now();
-        let mut sort_indices: Vec<u32> = (0..edge_count as u32).collect();
-        sort_indices.sort_unstable_by_key(|&i| sort_keys[i as usize]);
-        drop(sort_keys);
-        if verbose {
-            eprintln!(
-                "      sort by source: {:.1}s",
-                sort_start.elapsed().as_secs_f64()
-            );
-        }
-
-        let push_start = std::time::Instant::now();
-        let mut out_edges = MmapOrVec::mapped(&csr_dir.join("out_edges.bin"), edge_count)
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        for &i in &sort_indices {
-            let (_, tgt, conn_type) = pending_mmap.get(i as usize);
-            out_edges.push(CsrEdge {
-                peer: tgt,
-                edge_idx: i,
-                conn_type,
-            });
-        }
-        if verbose {
-            eprintln!(
-                "      push out_edges: {:.1}s",
-                push_start.elapsed().as_secs_f64()
-            );
-            eprintln!(
-                "    CSR step 3/5: out_edges total ({:.1}s)",
-                step.elapsed().as_secs_f64()
-            );
-        }
-
-        // ── Step 4: Sort by target → sequential push in_edges ──
-        let step = std::time::Instant::now();
-        let mut sort_keys: Vec<u32> = Vec::with_capacity(edge_count);
-        for i in 0..edge_count {
-            sort_keys.push(pending_mmap.get(i).1); // target
-        }
-        if verbose {
-            eprintln!(
-                "      extract target keys: {:.1}s",
-                step.elapsed().as_secs_f64()
-            );
-        }
-
-        let sort_start = std::time::Instant::now();
-        sort_indices.sort_unstable_by_key(|&i| sort_keys[i as usize]);
-        drop(sort_keys);
-        if verbose {
-            eprintln!(
-                "      sort by target: {:.1}s",
-                sort_start.elapsed().as_secs_f64()
-            );
-        }
-
-        let push_start = std::time::Instant::now();
-        let mut in_edges = MmapOrVec::mapped(&csr_dir.join("in_edges.bin"), edge_count)
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        for &i in &sort_indices {
-            let (src, _, conn_type) = pending_mmap.get(i as usize);
-            in_edges.push(CsrEdge {
-                peer: src,
-                edge_idx: i,
-                conn_type,
-            });
-        }
-        drop(sort_indices);
-        if verbose {
-            eprintln!(
-                "      push in_edges: {:.1}s",
-                push_start.elapsed().as_secs_f64()
-            );
-            eprintln!(
-                "    CSR step 4/5: in_edges total ({:.1}s)",
-                step.elapsed().as_secs_f64()
-            );
-        }
-
-        // Delete pending temp file — no longer needed.
-        drop(pending_mmap);
-        let _ = std::fs::remove_file(csr_dir.join("pending.bin"));
-        if verbose {
-            eprintln!(
-                "    CSR total: {:.1}s ({} edges, {} nodes)",
-                phase3_start.elapsed().as_secs_f64(),
-                edge_count,
-                node_bound
-            );
-        }
-
-        self.out_offsets = out_offsets;
-        self.out_edges = out_edges;
-        self.in_offsets = in_offsets;
-        self.in_edges = in_edges;
-        self.edge_endpoints = edge_endpoints_vec;
-        self.csr_temp_dir = Some(csr_dir);
+        self.build_csr_merge_sort(node_bound, edge_count, verbose);
     }
 
-    /// [DEV] Experimental variant — kept for benchmarking. Use KGLITE_CSR_ALGO=optimized.
-    #[allow(dead_code)]
-    fn build_csr_optimized(&mut self, node_bound: usize, edge_count: usize, verbose: bool) {
+    /// [DEV] External merge sort variant — zero random reads.
+    /// Sorts pending data into chunks, merges sequentially. All I/O is sequential.
+    /// Use `KGLITE_CSR_ALGO=merge_sort` to select.
+    fn build_csr_merge_sort(&mut self, node_bound: usize, edge_count: usize, verbose: bool) {
         let pending = self.pending_edges.get_mut();
         let phase3_start = std::time::Instant::now();
 
-        let csr_dir = std::env::temp_dir().join(format!(
-            "kglite_csr_{}_{:x}",
-            std::process::id(),
+        // All files (temp + permanent) go in the graph directory.
+        // Temp files (pending.bin, chunk_*.bin) are deleted after merge.
+        let tmp_dir = self.data_dir.join(format!(
+            "_csr_build_{:x}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos()
         ));
-        let _ = std::fs::create_dir_all(&csr_dir);
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let out_dir = &self.data_dir;
 
-        // ── Step 1: Materialize + count degrees + build edge_endpoints (all from heap) ──
-        // Three sequential mmap writes interleaved, reading from heap Vec.
-        // Zero mmap reads — everything comes from the hot heap Vec.
+        // ── Step 1: Materialize + count degrees + build edge_endpoints (from heap) ──
         let step = std::time::Instant::now();
         let mut pending_mmap: MmapOrVec<(u32, u32, u64)> =
-            MmapOrVec::mapped(&csr_dir.join("pending.bin"), edge_count)
+            MmapOrVec::mapped(&tmp_dir.join("pending.bin"), edge_count)
                 .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
         let mut edge_endpoints_vec =
-            MmapOrVec::mapped(&csr_dir.join("edge_endpoints.bin"), edge_count)
+            MmapOrVec::mapped(&out_dir.join("edge_endpoints.bin"), edge_count)
                 .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
         let mut out_counts = vec![0u64; node_bound];
         let mut in_counts = vec![0u64; node_bound];
-
         for &(src, tgt, ct) in pending.iter() {
             pending_mmap.push((src, tgt, ct));
             edge_endpoints_vec.push(EdgeEndpoints {
@@ -1118,9 +937,7 @@ impl DiskGraph {
             );
         }
 
-        // ── Step 2: Build offsets + extract src/tgt to heap Vecs ──
-        // One sequential pass over pending_mmap to extract both columns.
-        // These Vecs serve as both sort keys AND peer data during push.
+        // ── Step 2: Build offsets ──
         let step = std::time::Instant::now();
         let mut out_offsets = MmapOrVec::with_capacity(node_bound + 1);
         let mut in_offsets = MmapOrVec::with_capacity(node_bound + 1);
@@ -1136,324 +953,197 @@ impl DiskGraph {
         in_offsets.push(in_acc);
         drop(out_counts);
         drop(in_counts);
-
-        let mut src_vec: Vec<u32> = Vec::with_capacity(edge_count);
-        let mut tgt_vec: Vec<u32> = Vec::with_capacity(edge_count);
-        for i in 0..edge_count {
-            let (s, t, _) = pending_mmap.get(i);
-            src_vec.push(s);
-            tgt_vec.push(t);
-        }
         if verbose {
             eprintln!(
-                "    CSR step 2/4: offsets + extract src/tgt vecs ({:.1}s)",
+                "    CSR step 2/4: build offsets ({:.1}s)",
                 step.elapsed().as_secs_f64()
             );
         }
 
-        // ── Step 3: Sort by source → push out_edges ──
-        // Sort key = src_vec (already in heap). Peer = tgt_vec (heap). Only ct from mmap.
-        let step = std::time::Instant::now();
-        let mut sort_indices: Vec<u32> = (0..edge_count as u32).collect();
-        sort_indices.sort_unstable_by_key(|&i| src_vec[i as usize]);
-        if verbose {
-            eprintln!("      sort by source: {:.1}s", step.elapsed().as_secs_f64());
-        }
+        // ── Helper: external merge sort into a CSR edge array ──
+        // Reads pending_mmap in chunks (sequential), sorts each chunk,
+        // then k-way merges all chunks (sequential) into output (sequential).
+        // Zero random reads.
+        let merge_sort_build = |pending: &MmapOrVec<(u32, u32, u64)>,
+                                edge_count: usize,
+                                by_source: bool,
+                                chunk_dir: &std::path::Path,
+                                output_dir: &std::path::Path,
+                                label: &str,
+                                verbose: bool|
+         -> MmapOrVec<CsrEdge> {
+            // Chunk size: fill ~75% of available heap (DuckDB pattern).
+            // MergeSortEntry is 24 bytes. With ~12 GB usable heap → ~500M entries/chunk.
+            // KGLITE_CSR_FORCE_CHUNKS overrides for testing the merge path at small scale.
+            let force_chunks: usize = std::env::var("KGLITE_CSR_FORCE_CHUNKS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let (chunk_size, num_chunks) = if force_chunks > 0 {
+                let cs = edge_count.div_ceil(force_chunks);
+                (cs, force_chunks.min(edge_count.div_ceil(cs)))
+            } else {
+                let max_entries = 500_000_000usize; // ~12 GB at 24 bytes each
+                let cs = max_entries.min(edge_count);
+                (cs, edge_count.div_ceil(cs))
+            };
 
-        let push_start = std::time::Instant::now();
-        let mut out_edges = MmapOrVec::mapped(&csr_dir.join("out_edges.bin"), edge_count)
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        for &i in &sort_indices {
-            let tgt = tgt_vec[i as usize]; // heap → instant
-            let ct = pending_mmap.get(i as usize).2; // mmap → only 8 bytes needed
-            out_edges.push(CsrEdge {
-                peer: tgt,
-                edge_idx: i,
-                conn_type: ct,
-            });
-        }
+            // Phase A: Create sorted chunks (sequential read + sort + sequential write)
+            let step = std::time::Instant::now();
+            let mut chunk_mmaps: Vec<MmapOrVec<MergeSortEntry>> = Vec::new();
+            let mut chunk_lens: Vec<usize> = Vec::new();
+
+            for c in 0..num_chunks {
+                let start = c * chunk_size;
+                let end = (start + chunk_size).min(edge_count);
+                let len = end - start;
+
+                // Load chunk from pending_mmap (sequential read)
+                let mut chunk: Vec<MergeSortEntry> = Vec::with_capacity(len);
+                for i in start..end {
+                    let (src, tgt, ct) = pending.get(i);
+                    let (key, peer) = if by_source { (src, tgt) } else { (tgt, src) };
+                    chunk.push(MergeSortEntry {
+                        key,
+                        peer,
+                        orig_idx: i as u32,
+                        _pad: 0,
+                        conn_type: ct,
+                    });
+                }
+
+                // Sort in memory
+                chunk.sort_unstable_by_key(|e| e.key);
+
+                // Write to mmap file (sequential)
+                let path = chunk_dir.join(format!("chunk_{}_{}.bin", label, c));
+                let mut mmap: MmapOrVec<MergeSortEntry> =
+                    MmapOrVec::mapped(&path, len).unwrap_or_else(|_| MmapOrVec::with_capacity(len));
+                for entry in &chunk {
+                    mmap.push(*entry);
+                }
+                chunk_mmaps.push(mmap);
+                chunk_lens.push(len);
+                drop(chunk); // free heap before next chunk
+            }
+            if verbose {
+                eprintln!(
+                    "      {label} sort {num_chunks} chunks: {:.1}s",
+                    step.elapsed().as_secs_f64()
+                );
+            }
+
+            // Phase B: K-way merge (sequential reads from all chunks, sequential write)
+            let merge_start = std::time::Instant::now();
+            let mut positions: Vec<usize> = vec![0; num_chunks];
+            let mut output =
+                MmapOrVec::mapped(&output_dir.join(format!("{}_edges.bin", label)), edge_count)
+                    .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+
+            for _ in 0..edge_count {
+                // Find chunk with smallest key (K is small, linear scan is fine)
+                let mut best_chunk = usize::MAX;
+                let mut best_key = u32::MAX;
+                for c in 0..num_chunks {
+                    if positions[c] < chunk_lens[c] {
+                        let entry = chunk_mmaps[c].get(positions[c]);
+                        if entry.key < best_key {
+                            best_key = entry.key;
+                            best_chunk = c;
+                        }
+                    }
+                }
+                let entry = chunk_mmaps[best_chunk].get(positions[best_chunk]);
+                positions[best_chunk] += 1;
+                output.push(CsrEdge {
+                    peer: entry.peer,
+                    edge_idx: entry.orig_idx,
+                    conn_type: entry.conn_type,
+                });
+            }
+
+            // Cleanup chunk files
+            for c in 0..num_chunks {
+                let path = chunk_dir.join(format!("chunk_{}_{}.bin", label, c));
+                let _ = std::fs::remove_file(path);
+            }
+            drop(chunk_mmaps);
+
+            if verbose {
+                eprintln!(
+                    "      {label} merge: {:.1}s",
+                    merge_start.elapsed().as_secs_f64()
+                );
+            }
+            output
+        };
+
+        // ── Step 3: Build out_edges via merge sort (by source) ──
+        let step = std::time::Instant::now();
+        let out_edges = merge_sort_build(
+            &pending_mmap,
+            edge_count,
+            true,
+            &tmp_dir,
+            out_dir,
+            "out",
+            verbose,
+        );
         if verbose {
             eprintln!(
-                "      push out_edges: {:.1}s",
-                push_start.elapsed().as_secs_f64()
-            );
-            eprintln!(
-                "    CSR step 3/4: out_edges total ({:.1}s)",
+                "    CSR step 3/4: out_edges merge sort ({:.1}s)",
                 step.elapsed().as_secs_f64()
             );
         }
 
-        // ── Step 4: Sort by target → push in_edges ──
+        // ── Step 4: Build in_edges via merge sort (by target) ──
         let step = std::time::Instant::now();
-        sort_indices.sort_unstable_by_key(|&i| tgt_vec[i as usize]);
-        if verbose {
-            eprintln!("      sort by target: {:.1}s", step.elapsed().as_secs_f64());
-        }
-
-        let push_start = std::time::Instant::now();
-        let mut in_edges = MmapOrVec::mapped(&csr_dir.join("in_edges.bin"), edge_count)
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        for &i in &sort_indices {
-            let src = src_vec[i as usize]; // heap → instant
-            let ct = pending_mmap.get(i as usize).2; // mmap
-            in_edges.push(CsrEdge {
-                peer: src,
-                edge_idx: i,
-                conn_type: ct,
-            });
-        }
-        drop(sort_indices);
-        drop(src_vec);
-        drop(tgt_vec);
+        let in_edges = merge_sort_build(
+            &pending_mmap,
+            edge_count,
+            false,
+            &tmp_dir,
+            out_dir,
+            "in",
+            verbose,
+        );
         if verbose {
             eprintln!(
-                "      push in_edges: {:.1}s",
-                push_start.elapsed().as_secs_f64()
-            );
-            eprintln!(
-                "    CSR step 4/4: in_edges total ({:.1}s)",
+                "    CSR step 4/4: in_edges merge sort ({:.1}s)",
                 step.elapsed().as_secs_f64()
             );
         }
 
         drop(pending_mmap);
-        let _ = std::fs::remove_file(csr_dir.join("pending.bin"));
-        if verbose {
-            eprintln!(
-                "    CSR total: {:.1}s ({} edges, {} nodes) [optimized]",
-                phase3_start.elapsed().as_secs_f64(),
-                edge_count,
-                node_bound
-            );
-        }
+        // Clean up temp dir (sort chunks + pending.bin)
+        let _ = std::fs::remove_dir_all(&tmp_dir);
 
         self.out_offsets = out_offsets;
         self.out_edges = out_edges;
         self.in_offsets = in_offsets;
         self.in_edges = in_edges;
         self.edge_endpoints = edge_endpoints_vec;
-        self.csr_temp_dir = Some(csr_dir);
-    }
 
-    /// [DEV] Experimental variant — kept for benchmarking. Use KGLITE_CSR_ALGO=column_split.
-    #[allow(dead_code)]
-    fn build_csr_column_split(&mut self, node_bound: usize, edge_count: usize, verbose: bool) {
-        let pending = self.pending_edges.get_mut();
-        let phase3_start = std::time::Instant::now();
+        // Write offsets to graph dir (they were built in heap, need to persist)
+        let _ = self
+            .out_offsets
+            .save_to_file(&out_dir.join("out_offsets.bin"));
+        let _ = self
+            .in_offsets
+            .save_to_file(&out_dir.join("in_offsets.bin"));
 
-        let csr_dir = std::env::temp_dir().join(format!(
-            "kglite_csr_{}_{:x}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        let _ = std::fs::create_dir_all(&csr_dir);
+        // Auto-persist metadata — graph is fully on disk after this
+        let _ = self.write_metadata();
+        self.metadata_dirty = false;
 
-        // ── Step 1: Materialize pending into 3 column mmap files + count degrees ──
-        let step = std::time::Instant::now();
-        let mut src_col: MmapOrVec<u32> = MmapOrVec::mapped(&csr_dir.join("src.bin"), edge_count)
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        let mut tgt_col: MmapOrVec<u32> = MmapOrVec::mapped(&csr_dir.join("tgt.bin"), edge_count)
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        let mut ct_col: MmapOrVec<u64> = MmapOrVec::mapped(&csr_dir.join("ct.bin"), edge_count)
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-
-        let mut out_counts = vec![0u64; node_bound];
-        let mut in_counts = vec![0u64; node_bound];
-        for &(src, tgt, ct) in pending.iter() {
-            src_col.push(src);
-            tgt_col.push(tgt);
-            ct_col.push(ct);
-            if (src as usize) < node_bound {
-                out_counts[src as usize] += 1;
-            }
-            if (tgt as usize) < node_bound {
-                in_counts[tgt as usize] += 1;
-            }
-        }
-        pending.clear();
-        pending.shrink_to_fit();
         if verbose {
             eprintln!(
-                "    CSR step 1/5: materialize 3 columns + count degrees ({:.1}s)",
-                step.elapsed().as_secs_f64()
-            );
-        }
-
-        // ── Step 1b: Build edge_endpoints while column pages are hot ──
-        let step = std::time::Instant::now();
-        let mut edge_endpoints_vec =
-            MmapOrVec::mapped(&csr_dir.join("edge_endpoints.bin"), edge_count)
-                .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        for i in 0..edge_count {
-            edge_endpoints_vec.push(EdgeEndpoints {
-                source: src_col.get(i),
-                target: tgt_col.get(i),
-                connection_type: ct_col.get(i),
-            });
-        }
-        if verbose {
-            eprintln!(
-                "    CSR step 1b: edge_endpoints (pages hot) ({:.1}s)",
-                step.elapsed().as_secs_f64()
-            );
-        }
-
-        // ── Step 2: Build offset prefix sums ──
-        let step = std::time::Instant::now();
-        let mut out_offsets = MmapOrVec::with_capacity(node_bound + 1);
-        let mut in_offsets = MmapOrVec::with_capacity(node_bound + 1);
-        let mut out_acc = 0u64;
-        let mut in_acc = 0u64;
-        for i in 0..node_bound {
-            out_offsets.push(out_acc);
-            in_offsets.push(in_acc);
-            out_acc += out_counts[i];
-            in_acc += in_counts[i];
-        }
-        out_offsets.push(out_acc);
-        in_offsets.push(in_acc);
-        drop(out_counts);
-        drop(in_counts);
-        if verbose {
-            eprintln!(
-                "    CSR step 2/5: build offsets ({:.1}s)",
-                step.elapsed().as_secs_f64()
-            );
-        }
-
-        // ── Step 3: Sort by source + push out_edges ──
-        // Extract source keys + target peers in one sequential pass over column mmaps.
-        // Peers in heap → zero page faults during push.
-        // conn_type from ct_col mmap → at Wikidata scale, 6.9 GB fits in 7.2 GB page cache.
-        let step = std::time::Instant::now();
-        let mut sort_keys: Vec<u32> = Vec::with_capacity(edge_count);
-        let mut peer_data: Vec<u32> = Vec::with_capacity(edge_count);
-        for i in 0..edge_count {
-            sort_keys.push(src_col.get(i));
-            peer_data.push(tgt_col.get(i));
-        }
-        if verbose {
-            eprintln!(
-                "      extract src keys + tgt peers: {:.1}s",
-                step.elapsed().as_secs_f64()
-            );
-        }
-
-        let sort_start = std::time::Instant::now();
-        let mut sort_indices: Vec<u32> = (0..edge_count as u32).collect();
-        sort_indices.sort_unstable_by_key(|&i| sort_keys[i as usize]);
-        drop(sort_keys);
-        if verbose {
-            eprintln!(
-                "      sort by source: {:.1}s",
-                sort_start.elapsed().as_secs_f64()
-            );
-        }
-
-        let push_start = std::time::Instant::now();
-        let mut out_edges = MmapOrVec::mapped(&csr_dir.join("out_edges.bin"), edge_count)
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        for &i in &sort_indices {
-            let tgt = peer_data[i as usize]; // heap → instant
-            let ct = ct_col.get(i as usize); // mmap → fits in page cache
-            out_edges.push(CsrEdge {
-                peer: tgt,
-                edge_idx: i,
-                conn_type: ct,
-            });
-        }
-        drop(peer_data);
-        if verbose {
-            eprintln!(
-                "      push out_edges: {:.1}s",
-                push_start.elapsed().as_secs_f64()
-            );
-            eprintln!(
-                "    CSR step 3/5: out_edges total ({:.1}s)",
-                step.elapsed().as_secs_f64()
-            );
-        }
-
-        // ── Step 4: Sort by target + push in_edges ──
-        let step = std::time::Instant::now();
-        let mut sort_keys: Vec<u32> = Vec::with_capacity(edge_count);
-        let mut peer_data: Vec<u32> = Vec::with_capacity(edge_count);
-        for i in 0..edge_count {
-            sort_keys.push(tgt_col.get(i));
-            peer_data.push(src_col.get(i));
-        }
-        if verbose {
-            eprintln!(
-                "      extract tgt keys + src peers: {:.1}s",
-                step.elapsed().as_secs_f64()
-            );
-        }
-
-        let sort_start = std::time::Instant::now();
-        sort_indices.sort_unstable_by_key(|&i| sort_keys[i as usize]);
-        drop(sort_keys);
-        if verbose {
-            eprintln!(
-                "      sort by target: {:.1}s",
-                sort_start.elapsed().as_secs_f64()
-            );
-        }
-
-        let push_start = std::time::Instant::now();
-        let mut in_edges = MmapOrVec::mapped(&csr_dir.join("in_edges.bin"), edge_count)
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
-        for &i in &sort_indices {
-            let src = peer_data[i as usize]; // heap → instant
-            let ct = ct_col.get(i as usize); // mmap → fits in page cache
-            in_edges.push(CsrEdge {
-                peer: src,
-                edge_idx: i,
-                conn_type: ct,
-            });
-        }
-        drop(peer_data);
-        drop(sort_indices);
-        if verbose {
-            eprintln!(
-                "      push in_edges: {:.1}s",
-                push_start.elapsed().as_secs_f64()
-            );
-            eprintln!(
-                "    CSR step 4/5: in_edges total ({:.1}s)",
-                step.elapsed().as_secs_f64()
-            );
-        }
-
-        // Clean up column files — no longer needed
-        drop(src_col);
-        drop(tgt_col);
-        drop(ct_col);
-        let _ = std::fs::remove_file(csr_dir.join("src.bin"));
-        let _ = std::fs::remove_file(csr_dir.join("tgt.bin"));
-        let _ = std::fs::remove_file(csr_dir.join("ct.bin"));
-        if verbose {
-            eprintln!(
-                "    CSR total: {:.1}s ({} edges, {} nodes) [column_split]",
+                "    CSR total: {:.1}s ({} edges, {} nodes) [merge_sort]",
                 phase3_start.elapsed().as_secs_f64(),
                 edge_count,
                 node_bound
             );
         }
-
-        self.out_offsets = out_offsets;
-        self.out_edges = out_edges;
-        self.in_offsets = in_offsets;
-        self.in_edges = in_edges;
-        self.edge_endpoints = edge_endpoints_vec;
-        self.csr_temp_dir = Some(csr_dir);
-    }
-
-    /// [DEV] Return (out_edges.len(), in_edges.len()) for benchmark verification.
-    pub(crate) fn csr_edge_count(&self) -> (usize, usize) {
-        (self.out_edges.len(), self.in_edges.len())
     }
 
     // ====================================================================
@@ -1684,15 +1374,16 @@ impl Clone for DiskGraph {
             overflow_in: self.overflow_in.clone(),
             free_edge_slots: self.free_edge_slots.clone(),
             data_dir: self.data_dir.clone(),
-            csr_temp_dir: None, // clone doesn't share temp dir
+            metadata_dirty: false,
         }
     }
 }
 
 impl Drop for DiskGraph {
     fn drop(&mut self) {
-        if let Some(ref dir) = self.csr_temp_dir {
-            let _ = std::fs::remove_dir_all(dir);
+        // Flush metadata only if mutations happened since last write
+        if self.metadata_dirty {
+            let _ = self.write_metadata();
         }
     }
 }
@@ -1735,8 +1426,28 @@ struct DiskGraphMeta {
 }
 
 impl DiskGraph {
-    /// Save the disk graph to a directory. All binary arrays are zstd-compressed.
-    /// On load, they're decompressed to temp files and mmap'd for zero-cost queries.
+    /// Write metadata JSON to the graph directory.
+    /// Called automatically after CSR build and after mutations.
+    pub(crate) fn write_metadata(&self) -> std::io::Result<()> {
+        let meta = DiskGraphMeta {
+            node_count: self.node_count,
+            node_slots_len: self.node_slots.len(),
+            edge_count: self.edge_count,
+            next_edge_idx: self.next_edge_idx,
+            out_offsets_len: self.out_offsets.len(),
+            out_edges_len: self.out_edges.len(),
+            in_offsets_len: self.in_offsets.len(),
+            in_edges_len: self.in_edges.len(),
+            edge_endpoints_len: self.edge_endpoints.len(),
+            free_node_slots: self.free_node_slots.clone(),
+            free_edge_slots: self.free_edge_slots.clone(),
+        };
+        let json = serde_json::to_string_pretty(&meta).map_err(std::io::Error::other)?;
+        std::fs::write(self.data_dir.join("disk_graph_meta.json"), json)
+    }
+
+    /// Save disk graph state. For disk mode, binary arrays are already on disk
+    /// via mmap — this only flushes metadata + any in-memory overflow/properties.
     pub fn save_to_dir(
         &self,
         target_dir: &Path,
@@ -1744,31 +1455,21 @@ impl DiskGraph {
     ) -> std::io::Result<()> {
         std::fs::create_dir_all(target_dir)?;
 
-        // Build CSR from pending edges before saving
-        // (can't call &mut self here, but pending_edges should be empty
-        //  if build_csr_from_pending was called earlier)
-
-        // Write all binary arrays as compressed .zst files
-        write_compressed(&self.node_slots, &target_dir.join("node_slots.bin.zst"))?;
-        write_compressed(&self.out_offsets, &target_dir.join("out_offsets.bin.zst"))?;
-        write_compressed(&self.out_edges, &target_dir.join("out_edges.bin.zst"))?;
-        write_compressed(&self.in_offsets, &target_dir.join("in_offsets.bin.zst"))?;
-        write_compressed(&self.in_edges, &target_dir.join("in_edges.bin.zst"))?;
-        write_compressed(
-            &self.edge_endpoints,
-            &target_dir.join("edge_endpoints.bin.zst"),
-        )?;
-
-        // Clean up any raw .bin files left from new_at_path()
-        for name in &[
-            "node_slots.bin",
-            "out_offsets.bin",
-            "out_edges.bin",
-            "in_offsets.bin",
-            "in_edges.bin",
-            "edge_endpoints.bin",
-        ] {
-            let _ = std::fs::remove_file(target_dir.join(name));
+        // Flush any mmap arrays that aren't already in the graph dir
+        // (e.g. node_slots from new_at_path, or if target_dir differs from data_dir)
+        if target_dir != self.data_dir {
+            self.node_slots
+                .save_to_file(&target_dir.join("node_slots.bin"))?;
+            self.out_offsets
+                .save_to_file(&target_dir.join("out_offsets.bin"))?;
+            self.out_edges
+                .save_to_file(&target_dir.join("out_edges.bin"))?;
+            self.in_offsets
+                .save_to_file(&target_dir.join("in_offsets.bin"))?;
+            self.in_edges
+                .save_to_file(&target_dir.join("in_edges.bin"))?;
+            self.edge_endpoints
+                .save_to_file(&target_dir.join("edge_endpoints.bin"))?;
         }
 
         // Save overflow edges (bincode + zstd)
@@ -1791,68 +1492,33 @@ impl DiskGraph {
         }
 
         // Save metadata
-        let meta = DiskGraphMeta {
-            node_count: self.node_count,
-            node_slots_len: self.node_slots.len(),
-            edge_count: self.edge_count,
-            next_edge_idx: self.next_edge_idx,
-            out_offsets_len: self.out_offsets.len(),
-            out_edges_len: self.out_edges.len(),
-            in_offsets_len: self.in_offsets.len(),
-            in_edges_len: self.in_edges.len(),
-            edge_endpoints_len: self.edge_endpoints.len(),
-            free_node_slots: self.free_node_slots.clone(),
-            free_edge_slots: self.free_edge_slots.clone(),
-        };
-        let meta_json = serde_json::to_string_pretty(&meta).map_err(std::io::Error::other)?;
-        std::fs::write(target_dir.join("disk_graph_meta.json"), meta_json)?;
+        self.write_metadata()?;
 
         Ok(())
     }
 
     /// Load a disk graph from a directory.
-    /// Compressed files are decompressed to temp dir and mmap'd.
-    /// Returns `(DiskGraph, temp_dir)` — caller registers temp_dir for cleanup.
+    /// Load a disk graph from a directory.
+    /// Raw .bin files are mmap'd directly from the graph dir (no temp dir needed).
+    /// Also supports legacy .bin.zst files (decompressed to temp dir).
+    /// Returns `(DiskGraph, temp_dir)` — temp_dir may be empty if no decompression needed.
     pub fn load_from_dir(dir: &Path) -> std::io::Result<(Self, PathBuf)> {
         let meta_str = std::fs::read_to_string(dir.join("disk_graph_meta.json"))?;
         let meta: DiskGraphMeta = serde_json::from_str(&meta_str).map_err(std::io::Error::other)?;
 
-        // Create temp dir for decompressed mmap files
-        let temp_dir = std::env::temp_dir().join(format!(
-            "kglite_disk_{}_{:x}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&temp_dir)?;
+        // Temp dir for legacy .zst decompression (only created if needed).
+        // Lives inside graph dir so no external temp space required.
+        let temp_dir = dir.join("_zst_cache");
 
-        // Decompress each array to temp file, then mmap
-        let node_slots = load_compressed(
-            &dir.join("node_slots.bin.zst"),
-            meta.node_slots_len,
-            &temp_dir,
-        )?;
-        let out_offsets = load_compressed(
-            &dir.join("out_offsets.bin.zst"),
-            meta.out_offsets_len,
-            &temp_dir,
-        )?;
-        let out_edges = load_compressed(
-            &dir.join("out_edges.bin.zst"),
-            meta.out_edges_len,
-            &temp_dir,
-        )?;
-        let in_offsets = load_compressed(
-            &dir.join("in_offsets.bin.zst"),
-            meta.in_offsets_len,
-            &temp_dir,
-        )?;
-        let in_edges =
-            load_compressed(&dir.join("in_edges.bin.zst"), meta.in_edges_len, &temp_dir)?;
-        let edge_endpoints = load_compressed(
-            &dir.join("edge_endpoints.bin.zst"),
+        // Load raw .bin directly from graph dir; fall back to .bin.zst if missing
+        let node_slots = load_raw_or_zst(&dir.join("node_slots"), meta.node_slots_len, &temp_dir)?;
+        let out_offsets =
+            load_raw_or_zst(&dir.join("out_offsets"), meta.out_offsets_len, &temp_dir)?;
+        let out_edges = load_raw_or_zst(&dir.join("out_edges"), meta.out_edges_len, &temp_dir)?;
+        let in_offsets = load_raw_or_zst(&dir.join("in_offsets"), meta.in_offsets_len, &temp_dir)?;
+        let in_edges = load_raw_or_zst(&dir.join("in_edges"), meta.in_edges_len, &temp_dir)?;
+        let edge_endpoints = load_raw_or_zst(
+            &dir.join("edge_endpoints"),
             meta.edge_endpoints_len,
             &temp_dir,
         )?;
@@ -1896,7 +1562,7 @@ impl DiskGraph {
                 overflow_in,
                 free_edge_slots: meta.free_edge_slots,
                 data_dir: dir.to_path_buf(),
-                csr_temp_dir: None,
+                metadata_dirty: false,
             },
             temp_dir,
         ))
@@ -1908,32 +1574,27 @@ impl DiskGraph {
 // ============================================================================
 
 /// Write a MmapOrVec as a zstd-compressed file.
-fn write_compressed<T: Copy + Default + 'static>(
-    data: &MmapOrVec<T>,
-    path: &Path,
-) -> std::io::Result<()> {
-    let elem_size = std::mem::size_of::<T>();
-    let total_bytes = data.len() * elem_size;
-
-    let mut raw = Vec::with_capacity(total_bytes);
-    if let Some(slice) = data.as_slice() {
-        let byte_slice =
-            unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, total_bytes) };
-        raw.extend_from_slice(byte_slice);
-    } else {
-        for i in 0..data.len() {
-            let val = data.get(i);
-            let bytes =
-                unsafe { std::slice::from_raw_parts(&val as *const T as *const u8, elem_size) };
-            raw.extend_from_slice(bytes);
-        }
+/// Load a binary array: try raw `.bin` first (direct mmap, no temp dir),
+/// fall back to `.bin.zst` (decompress to temp dir, then mmap).
+fn load_raw_or_zst<T: Copy + Default + 'static>(
+    base_path: &Path,
+    len: usize,
+    temp_dir: &Path,
+) -> std::io::Result<MmapOrVec<T>> {
+    let raw_path = base_path.with_extension("bin");
+    if raw_path.exists() && len > 0 {
+        return MmapOrVec::load_mapped(&raw_path, len);
     }
-
-    let compressed = zstd::encode_all(raw.as_slice(), 3)?;
-    std::fs::write(path, compressed)
+    let zst_path = base_path.with_extension("bin.zst");
+    if zst_path.exists() && len > 0 {
+        std::fs::create_dir_all(temp_dir)?;
+        return load_compressed(&zst_path, len, temp_dir);
+    }
+    Ok(MmapOrVec::new())
 }
 
 /// Load a zstd-compressed file, decompress to temp file, and mmap it.
+/// Used only for loading legacy .bin.zst files from older graph format.
 fn load_compressed<T: Copy + Default + 'static>(
     path: &Path,
     len: usize,

@@ -1,6 +1,6 @@
 """
 Wikidata full-scale benchmark: disk graph mode.
-Loads full Wikidata, runs 30 Cypher + 20 Fluent queries, tests save/load.
+Builds or loads full Wikidata, runs 30 Cypher + 20 Fluent queries.
 """
 
 import os
@@ -51,8 +51,6 @@ def build_graph():
     print(f"  Nodes: {info.get('node_count', 'N/A'):,}")
     print(f"  Edges: {info.get('edge_count', 'N/A'):,}")
 
-    _, t_save = timed("Save", lambda: g.save(GRAPH_DIR))
-
     t_total = time.perf_counter() - t_total
     print(f"\n  TOTAL BUILD: {t_total:.1f}s ({t_total / 60:.1f} min)")
 
@@ -65,7 +63,7 @@ def load_graph():
     print("\n" + "=" * 70)
     print("PHASE 2: LOAD DISK GRAPH")
     print("=" * 70)
-    g, t = timed("Load from disk", lambda: load(GRAPH_DIR))
+    g, _ = timed("Load from disk", lambda: load(GRAPH_DIR))
     info = g.graph_info()
     print(f"  Nodes: {info.get('node_count', 'N/A'):,}")
     print(f"  Edges: {info.get('edge_count', 'N/A'):,}")
@@ -98,8 +96,6 @@ def run_benchmarks(g):
 
     # --- Counts ---
     q("COUNT all nodes", "MATCH (n) RETURN count(n) AS c")
-    q("COUNT all edges", "MATCH ()-[r]->() RETURN count(r) AS c")
-    q("COUNT edge types (top 20)", "MATCH ()-[r]->() RETURN type(r) AS t, count(r) AS c ORDER BY c DESC LIMIT 20")
 
     # --- ID lookups ---
     q("Q1 Universe", "MATCH (n {nid: 'Q1'}) RETURN n.label, n.description")
@@ -111,9 +107,18 @@ def run_benchmarks(g):
     q("Q515 city (concept)", "MATCH (n {nid: 'Q515'}) RETURN n.label, n.description")
 
     # --- Property filters ---
-    q("WHERE label CONTAINS 'Einstein'", "MATCH (n) WHERE n.label CONTAINS 'Einstein' RETURN n.nid, n.label LIMIT 20")
-    q("WHERE label STARTS WITH 'Albert'", "MATCH (n) WHERE n.label STARTS WITH 'Albert' RETURN n.nid, n.label LIMIT 20")
-    q("WHERE label CONTAINS 'Norway'", "MATCH (n) WHERE n.label CONTAINS 'Norway' RETURN n.nid, n.label LIMIT 20")
+    q(
+        "WHERE label CONTAINS 'Einstein'",
+        "MATCH (n) WHERE n.label CONTAINS 'Einstein' RETURN n.nid, n.label LIMIT 20",
+    )
+    q(
+        "WHERE label STARTS WITH 'Albert'",
+        "MATCH (n) WHERE n.label STARTS WITH 'Albert' RETURN n.nid, n.label LIMIT 20",
+    )
+    q(
+        "WHERE label CONTAINS 'Norway'",
+        "MATCH (n) WHERE n.label CONTAINS 'Norway' RETURN n.nid, n.label LIMIT 20",
+    )
 
     # --- 1-hop traversals ---
     q("Q42 outgoing LIMIT 20", "MATCH ({nid:'Q42'})-[r]->(m) RETURN type(r), m.label LIMIT 20")
@@ -121,25 +126,46 @@ def run_benchmarks(g):
     q("Q64 outgoing LIMIT 20", "MATCH ({nid:'Q64'})-[r]->(m) RETURN type(r), m.label LIMIT 20")
     q("Q76 outgoing LIMIT 20", "MATCH ({nid:'Q76'})-[r]->(m) RETURN type(r), m.label LIMIT 20")
     q("Q183 outgoing LIMIT 20", "MATCH ({nid:'Q183'})-[r]->(m) RETURN type(r), m.label LIMIT 20")
-    q("Instances of Human LIMIT 50", "MATCH (n)-[:P31]->({nid:'Q5'}) RETURN n.label LIMIT 50")
-    q("Instances of City LIMIT 50", "MATCH (n)-[:P31]->({nid:'Q515'}) RETURN n.label LIMIT 50")
-    q("Instances of Country LIMIT 50", "MATCH (n)-[:P31]->({nid:'Q6256'}) RETURN n.label LIMIT 50")
+    q(
+        "Instances of Human LIMIT 50",
+        "MATCH (n)-[:P31]->({nid:'Q5'}) RETURN n.label LIMIT 50",
+    )
+    q(
+        "Instances of City LIMIT 50",
+        "MATCH (n)-[:P31]->({nid:'Q515'}) RETURN n.label LIMIT 50",
+    )
+    q(
+        "Instances of Country LIMIT 50",
+        "MATCH (n)-[:P31]->({nid:'Q6256'}) RETURN n.label LIMIT 50",
+    )
 
     # --- 2-hop ---
-    q("Q42 2-hop LIMIT 20", "MATCH ({nid:'Q42'})-[]->(b)-[]->(c) RETURN b.label, c.label LIMIT 20")
+    q(
+        "Q42 2-hop LIMIT 20",
+        "MATCH ({nid:'Q42'})-[]->(b)-[]->(c) RETURN b.label, c.label LIMIT 20",
+    )
     q("Born in Berlin LIMIT 20", "MATCH (p)-[:P19]->({nid:'Q64'}) RETURN p.label LIMIT 20")
     q("Died in London LIMIT 20", "MATCH (p)-[:P20]->({nid:'Q84'}) RETURN p.label LIMIT 20")
 
     # --- Aggregation ---
-    q("Top 20 most linked entities", "MATCH (n)-[r]->() RETURN n.nid, n.label, count(r) AS d ORDER BY d DESC LIMIT 20")
-    q("Edge type distribution", "MATCH ()-[r]->() RETURN type(r), count(r) AS c ORDER BY c DESC LIMIT 20")
+    q(
+        "Top 20 most linked entities",
+        "MATCH (n)-[r]->() RETURN n.nid, n.label, count(r) AS d ORDER BY d DESC LIMIT 20",
+    )
+    q(
+        "Edge type distribution",
+        "MATCH ()-[r]->() RETURN type(r), count(r) AS c ORDER BY c DESC LIMIT 20",
+    )
 
     # --- Path / connection ---
     q("Q42->Q5 direct?", "MATCH ({nid:'Q42'})-[r]->({nid:'Q5'}) RETURN type(r)")
     q("Q76->Q30 direct?", "MATCH ({nid:'Q76'})-[r]->({nid:'Q30'}) RETURN type(r)")
 
     # --- OPTIONAL MATCH ---
-    q("Q42 optional edges", "MATCH (n {nid:'Q42'}) OPTIONAL MATCH (n)-[r]->(m) RETURN type(r), m.label LIMIT 30")
+    q(
+        "Q42 optional edges",
+        "MATCH (n {nid:'Q42'}) OPTIONAL MATCH (n)-[r]->(m) RETURN type(r), m.label LIMIT 30",
+    )
 
     # --- Fluent API ---
     print("\n" + "=" * 70)
@@ -168,7 +194,10 @@ def run_benchmarks(g):
     fl("is_columnar", lambda: g.is_columnar)
 
     # Traversal via fluent
-    fl("select(Entity).traverse(P31).len()", lambda: g.select("Entity").traverse("P31", limit=100).len())
+    fl(
+        "select(Entity).traverse(P31).len()",
+        lambda: g.select("Entity").traverse("P31", limit=100).len(),
+    )
     fl(
         "select(Entity).traverse(P31,out).to_df LIMIT 20",
         lambda: len(g.select("Entity").traverse("P31", direction="outgoing", limit=20).to_df()),
@@ -187,9 +216,18 @@ def run_benchmarks(g):
         "select.where(label starts 'United')",
         lambda: g.select("Entity").where({"label": ("starts_with", "United")}, limit=20).len(),
     )
-    fl("select.where(P31 = 'Q5')", lambda: g.select("Entity").where({"P31": "Q5"}, limit=20).len())
-    fl("select.where(P31 = 'Q515')", lambda: g.select("Entity").where({"P31": "Q515"}, limit=20).len())
-    fl("select.where(P31 = 'Q6256')", lambda: g.select("Entity").where({"P31": "Q6256"}, limit=20).len())
+    fl(
+        "select.where(P31 = 'Q5')",
+        lambda: g.select("Entity").where({"P31": "Q5"}, limit=20).len(),
+    )
+    fl(
+        "select.where(P31 = 'Q515')",
+        lambda: g.select("Entity").where({"P31": "Q515"}, limit=20).len(),
+    )
+    fl(
+        "select.where(P31 = 'Q6256')",
+        lambda: g.select("Entity").where({"P31": "Q6256"}, limit=20).len(),
+    )
 
     # Sorting
     fl(
@@ -227,12 +265,24 @@ def run_benchmarks(g):
     )
 
     # Export
-    fl("select.to_list() LIMIT 10", lambda: len(g.select("Entity").where({"P31": "Q5"}, limit=10).to_list()))
-    fl("select.to_df() LIMIT 20", lambda: len(g.select("Entity").where({"P31": "Q515"}, limit=20).to_df()))
+    fl(
+        "select.to_list() LIMIT 10",
+        lambda: len(g.select("Entity").where({"P31": "Q5"}, limit=10).to_list()),
+    )
+    fl(
+        "select.to_df() LIMIT 20",
+        lambda: len(g.select("Entity").where({"P31": "Q515"}, limit=20).to_df()),
+    )
 
     # Count connected
-    fl("select.where_connected(P31).len()", lambda: g.select("Entity").where_connected("P31").len())
-    fl("select.where_connected(P17).len()", lambda: g.select("Entity").where_connected("P17").len())
+    fl(
+        "select.where_connected(P31).len()",
+        lambda: g.select("Entity").where_connected("P31").len(),
+    )
+    fl(
+        "select.where_connected(P17).len()",
+        lambda: g.select("Entity").where_connected("P17").len(),
+    )
 
     # --- Summary ---
     print("\n" + "=" * 70)
@@ -240,7 +290,9 @@ def run_benchmarks(g):
     print("=" * 70)
     total_cypher = sum(r[1] for r in results)
     total_fluent = sum(r[1] for r in fluent_results)
-    print(f"  Cypher: {total_cypher:.2f}s across {len(results)} queries (avg {total_cypher / len(results):.3f}s)")
+    print(
+        f"  Cypher: {total_cypher:.2f}s across {len(results)} queries (avg {total_cypher / max(len(results), 1):.3f}s)"
+    )
     print(f"  Fluent: {total_fluent:.2f}s across {len(fluent_results)} queries")
     if results:
         fastest = min(results, key=lambda r: r[1])
@@ -263,10 +315,10 @@ def main():
         print("\nBuilding from N-Triples...")
         g = build_graph()
 
-    # Reload test
+    # Reload test (if graph was built or loaded)
     if os.path.exists(os.path.join(GRAPH_DIR, "disk_graph_meta.json")):
         print("\n  Reload benchmark:")
-        _, t_reload = timed("Reload", lambda: load(GRAPH_DIR))
+        timed("Reload", lambda: load(GRAPH_DIR))
 
     run_benchmarks(g)
 

@@ -5,6 +5,19 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-04-06
+
+### Changed
+- **CSR build: external merge sort** (DuckDB-inspired). Replaced random-I/O scatter with external merge sort — sort chunks in memory, merge sequentially. All disk I/O is sequential. Phase 3 at Wikidata scale (862M edges, 16 GB RAM): ~16 min vs 90+ min previously.
+- **Disk graph auto-persistence**: CSR arrays and metadata written directly to graph dir during build. No separate `save()` step needed. Mutations (`add_node`, `add_edge`, etc.) auto-flush metadata.
+- **Disk graph raw storage**: Save/load uses raw `.bin` files (direct mmap) instead of zstd compression. Load is near-instant (mmap, no decompression). Legacy `.bin.zst` files still supported for loading.
+- **Mmap-backed edge buffer**: N-Triples loader streams edges to mmap during Phase 1 (0 heap for edge buffer). Eliminates 13.8 GB heap allocation at Wikidata scale.
+
+### Fixed
+- **Memory leak in N-Triples loader**: `edge_buffer` (13.8 GB at Wikidata scale) was kept alive during Phase 3 CSR build, doubling peak memory. Now dropped immediately after Phase 2.
+- **Disk thrashing during CSR build**: Random writes to mmap caused SSD thrashing. All writes are now sequential.
+- **Temp file cleanup**: CSR build temp files cleaned up immediately after merge. Drop impl flushes metadata as safety net.
+
 ## [0.7.0] - 2026-04-05
 
 ### Added
@@ -18,13 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Mapped mode**: Fixed O(n²) Arc clone bug — 50-300x faster `add_nodes` in mapped mode.
 - **N-Triples loader**: 81x faster via bulk columnar conversion, pipeline parallelism, zero-copy parsing, byte-level filtering, and dense Vec edge lookup.
-- **Disk graph save**: zstd-compressed files (81% size reduction vs raw binary).
-- **CSR build optimized for low-memory machines**: Rewrote `build_csr_from_pending()` for Wikidata-scale graphs (862M edges) on 16 GB RAM. Key changes: (1) mmap-backed edge buffer during N-Triples loading eliminates 13.8 GB heap allocation, (2) edges materialized to mmap before sort to free heap for page cache, (3) in-memory sort + sequential mmap push (zero random I/O, SSD-safe), (4) edge_endpoints built while pages are hot. Phase 3 improved from 90+ min (swap thrashing) to ~5-10 min. Phase 2 improved from 5 min (swap) to ~3 min. CSR temp files cleaned up on Drop.
 
 ### Fixed
 - Schema extension bug in mapped mode incremental `add_nodes`.
 - `add_connections()` in disk mode auto-builds CSR so queries work immediately.
-- **Memory leak in N-Triples loader**: `edge_buffer` (13.8 GB at Wikidata scale) was kept alive during Phase 3 CSR build, doubling peak memory. Now dropped immediately after Phase 2.
 
 ## [0.6.18] - 2026-03-30
 
