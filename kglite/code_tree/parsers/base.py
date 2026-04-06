@@ -122,14 +122,19 @@ def extract_comment_annotations(
     source: bytes,
     comment_types: tuple[str, ...] = ("line_comment", "block_comment", "comment"),
 ) -> list[dict] | None:
-    """Recursively scan all comment nodes for TODO/FIXME/etc annotations.
+    """Scan all comment nodes for TODO/FIXME/etc annotations.
+
+    Uses an iterative stack traversal to avoid hitting Python's recursion
+    limit on deeply nested ASTs (e.g. large generated C++ files).
 
     Returns a list of dicts with keys: kind, text, line.
     Returns None if no annotations found.
     """
     annotations: list[dict] = []
+    stack = [root_node]
 
-    def walk(node):
+    while stack:
+        node = stack.pop()
         if node.type in comment_types:
             text = source[node.start_byte : node.end_byte].decode("utf8")
             for match in _ANNOTATION_PATTERN.finditer(text):
@@ -140,8 +145,7 @@ def extract_comment_annotations(
                         "line": node.start_point[0] + 1,
                     }
                 )
-        for child in node.children:
-            walk(child)
+        # Reverse so we process children in original order
+        stack.extend(reversed(node.children))
 
-    walk(root_node)
     return annotations if annotations else None
