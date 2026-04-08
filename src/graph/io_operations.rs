@@ -537,7 +537,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
     // Sync column stores to DiskGraph
     graph.sync_disk_column_stores();
 
-    // Load id_indices from disk if available, otherwise rebuild from column stores.
+    // Load id_indices from disk (saved during build as bincode + zstd).
     if matches!(graph.graph, GraphBackend::Disk(_)) {
         let id_indices_path = dir.join("id_indices.bin.zst");
         if id_indices_path.exists() {
@@ -547,13 +547,6 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
                         graph.id_indices = indices;
                     }
                 }
-            }
-        }
-        // Fallback: rebuild from column stores if file missing or corrupt
-        if graph.id_indices.is_empty() {
-            let type_names: Vec<String> = graph.type_indices.keys().cloned().collect();
-            for type_name in &type_names {
-                graph.build_id_index_from_columns(type_name);
             }
         }
     }
