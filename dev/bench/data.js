@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775677757847,
+  "lastUpdate": 1775678063357,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -4475,6 +4475,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.00006666979318316893",
             "extra": "mean: 778.5618694582178 usec\nrounds: 1218"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "cb4ce3af9650dc1b371581bcabc165c45692a54e",
+          "message": "feat: persist id_indices to disk, load without rebuild\n\n- TypeIdIndex now derives Serialize/Deserialize\n- ntriples build saves id_indices to id_indices.bin.zst (bincode + zstd)\n- load() reads from file instead of rebuilding from column stores\n- Fallback: rebuilds from columns if file missing or corrupt\n- Expected to restore load time from ~27s back to ~8s\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-08T21:51:55+02:00",
+          "tree_id": "ca602a2b7528ab33636954cc32506e41c858609a",
+          "url": "https://github.com/kkollsga/kglite/commit/cb4ce3af9650dc1b371581bcabc165c45692a54e"
+        },
+        "date": 1775678062444,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1090.1780488300283,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000019244609587590814",
+            "extra": "mean: 917.2813569977797 usec\nrounds: 493"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 749.9878258746742,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000030559907320090665",
+            "extra": "mean: 1.3333549765741182 msec\nrounds: 683"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 13347.811341898429,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000004906296997508925",
+            "extra": "mean: 74.91864953627464 usec\nrounds: 7005"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1641.5207597166134,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000021880935466242914",
+            "extra": "mean: 609.19119912479 usec\nrounds: 914"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 696307.8605844894,
+            "unit": "iter/sec",
+            "range": "stddev: 4.1312218573560547e-7",
+            "extra": "mean: 1.4361463608361216 usec\nrounds: 87093"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 126602.65692289358,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000013977527743462844",
+            "extra": "mean: 7.89872838615893 usec\nrounds: 22451"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2525.4084920745613,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000012039236206097255",
+            "extra": "mean: 395.97554341734417 usec\nrounds: 3927"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1613.5542460166268,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000021631994314666037",
+            "extra": "mean: 619.7498488003703 usec\nrounds: 1250"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 13342.422012728464,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000005114810381751633",
+            "extra": "mean: 74.94891100326579 usec\nrounds: 10933"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 1176.7625057620116,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00003348165420344539",
+            "extra": "mean: 849.7891419071436 usec\nrounds: 902"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 1112.1364289460973,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00015044661847216654",
+            "extra": "mean: 899.170258227795 usec\nrounds: 1185"
           }
         ]
       }
