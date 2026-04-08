@@ -130,7 +130,8 @@ pub struct DiskGraph {
     edge_arena: UnsafeCell<Vec<EdgeData>>,
 
     // ── Pending edges (UnsafeCell for auto-CSR-build from &self queries) ──
-    pub(crate) pending_edges: UnsafeCell<Vec<(u32, u32, u64)>>,
+    // File-backed (MmapOrVec) to avoid ~14 GB heap allocation at Wikidata scale.
+    pub(crate) pending_edges: UnsafeCell<MmapOrVec<(u32, u32, u64)>>,
 
     // ── Mutation overflow (for incremental edges after CSR) ──
     overflow_out: HashMap<u32, Vec<CsrEdge>>,
@@ -189,7 +190,10 @@ impl DiskGraph {
             next_edge_idx: 0,
             edge_properties: HashMap::new(),
             edge_arena: UnsafeCell::new(Vec::with_capacity(256)),
-            pending_edges: UnsafeCell::new(Vec::new()),
+            pending_edges: UnsafeCell::new(
+                MmapOrVec::mapped(&data_dir.join("_pending_edges.bin"), 1 << 20)
+                    .unwrap_or_else(|_| MmapOrVec::new()),
+            ),
             overflow_out: HashMap::new(),
             overflow_in: HashMap::new(),
             free_edge_slots: Vec::new(),
@@ -330,7 +334,7 @@ impl DiskGraph {
             next_edge_idx: edge_idx,
             edge_properties,
             edge_arena: UnsafeCell::new(Vec::with_capacity(1024)),
-            pending_edges: UnsafeCell::new(Vec::new()),
+            pending_edges: UnsafeCell::new(MmapOrVec::new()),
             overflow_out: HashMap::new(),
             overflow_in: HashMap::new(),
             free_edge_slots: Vec::new(),
@@ -384,9 +388,11 @@ impl DiskGraph {
         let store = self.column_stores.get(&node_type_key);
 
         let node_data = if let Some(store) = store {
+            let id = store.get_id(slot.row_id).unwrap_or(Value::Null);
+            let title = store.get_title(slot.row_id).unwrap_or(Value::Null);
             NodeData {
-                id: Value::Null,
-                title: Value::Null,
+                id,
+                title,
                 node_type: node_type_key,
                 properties: crate::graph::schema::PropertyStorage::Columnar {
                     store: Arc::clone(store),
@@ -550,6 +556,17 @@ impl DiskGraph {
         self.tombstone_edges_for_node(i);
 
         Some(data)
+    }
+
+    /// Update the row_id in a node's DiskNodeSlot.
+    /// Used after BuildColumnStore conversion to fix per-type row_id mapping.
+    pub fn update_row_id(&mut self, node_idx: NodeIndex, row_id: u32) {
+        let i = node_idx.index();
+        if i < self.node_slots.len() {
+            let mut slot = self.node_slots.get(i);
+            slot.row_id = row_id;
+            self.node_slots.set(i, slot);
+        }
     }
 
     pub fn node_indices_iter(&self) -> DiskNodeIndices<'_> {
@@ -882,7 +899,12 @@ impl DiskGraph {
         let node_bound = self.node_slots.len();
         let edge_count = pending.len();
         let verbose = std::env::var("KGLITE_CSR_VERBOSE").is_ok();
-        self.build_csr_merge_sort(node_bound, edge_count, verbose);
+        let use_merge_sort = std::env::var("KGLITE_CSR_ALGO").is_ok_and(|v| v == "merge_sort");
+        if use_merge_sort {
+            self.build_csr_merge_sort(node_bound, edge_count, verbose);
+        } else {
+            self.build_csr_partitioned(node_bound, edge_count, verbose);
+        }
     }
 
     /// [DEV] External merge sort variant — zero random reads.
@@ -914,7 +936,8 @@ impl DiskGraph {
                 .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
         let mut out_counts = vec![0u64; node_bound];
         let mut in_counts = vec![0u64; node_bound];
-        for &(src, tgt, ct) in pending.iter() {
+        for i in 0..pending.len() {
+            let (src, tgt, ct) = pending.get(i);
             pending_mmap.push((src, tgt, ct));
             edge_endpoints_vec.push(EdgeEndpoints {
                 source: src,
@@ -928,8 +951,8 @@ impl DiskGraph {
                 in_counts[tgt as usize] += 1;
             }
         }
-        pending.clear();
-        pending.shrink_to_fit();
+        // Free pending_edges (file-backed mmap)
+        *pending = MmapOrVec::new();
         if verbose {
             eprintln!(
                 "    CSR step 1/4: materialize + endpoints + degrees ({:.1}s)",
@@ -937,10 +960,14 @@ impl DiskGraph {
             );
         }
 
-        // ── Step 2: Build offsets ──
+        // ── Step 2: Build offsets (mmap-backed to save ~2 GB heap) ──
         let step = std::time::Instant::now();
-        let mut out_offsets = MmapOrVec::with_capacity(node_bound + 1);
-        let mut in_offsets = MmapOrVec::with_capacity(node_bound + 1);
+        let mut out_offsets: MmapOrVec<u64> =
+            MmapOrVec::mapped(&out_dir.join("out_offsets.bin"), node_bound + 1)
+                .unwrap_or_else(|_| MmapOrVec::with_capacity(node_bound + 1));
+        let mut in_offsets: MmapOrVec<u64> =
+            MmapOrVec::mapped(&out_dir.join("in_offsets.bin"), node_bound + 1)
+                .unwrap_or_else(|_| MmapOrVec::with_capacity(node_bound + 1));
         let mut out_acc = 0u64;
         let mut in_acc = 0u64;
         for i in 0..node_bound {
@@ -972,10 +999,14 @@ impl DiskGraph {
                                 label: &str,
                                 verbose: bool|
          -> MmapOrVec<CsrEdge> {
-            // Chunk size: fill ~75% of available heap (DuckDB pattern).
-            // MergeSortEntry is 24 bytes. With ~12 GB usable heap → ~500M entries/chunk.
-            // KGLITE_CSR_FORCE_CHUNKS overrides for testing the merge path at small scale.
+            // Chunk size: fill available heap. MergeSortEntry is 24 bytes.
+            // KGLITE_CSR_CHUNK_MB overrides (in MB) for testing; KGLITE_CSR_FORCE_CHUNKS
+            // forces a specific number of chunks.
             let force_chunks: usize = std::env::var("KGLITE_CSR_FORCE_CHUNKS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let chunk_mb: usize = std::env::var("KGLITE_CSR_CHUNK_MB")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
@@ -983,11 +1014,56 @@ impl DiskGraph {
                 let cs = edge_count.div_ceil(force_chunks);
                 (cs, force_chunks.min(edge_count.div_ceil(cs)))
             } else {
-                let max_entries = 500_000_000usize; // ~12 GB at 24 bytes each
+                // Default: 12 GB or custom. After BlockPool frees column memory,
+                // more heap is available → larger chunks → fewer merge passes.
+                let max_bytes = if chunk_mb > 0 {
+                    chunk_mb << 20
+                } else {
+                    12 << 30 // 12 GB default
+                };
+                let max_entries = max_bytes / std::mem::size_of::<MergeSortEntry>();
                 let cs = max_entries.min(edge_count);
                 (cs, edge_count.div_ceil(cs))
             };
 
+            // ── Single-chunk fast path: sort in memory, write directly to output ──
+            if num_chunks == 1 {
+                let step = std::time::Instant::now();
+                let mut entries: Vec<MergeSortEntry> = Vec::with_capacity(edge_count);
+                for i in 0..edge_count {
+                    let (src, tgt, ct) = pending.get(i);
+                    let (key, peer) = if by_source { (src, tgt) } else { (tgt, src) };
+                    entries.push(MergeSortEntry {
+                        key,
+                        peer,
+                        orig_idx: i as u32,
+                        _pad: 0,
+                        conn_type: ct,
+                    });
+                }
+                entries.sort_unstable_by_key(|e| e.key);
+
+                let mut output =
+                    MmapOrVec::mapped(&output_dir.join(format!("{}_edges.bin", label)), edge_count)
+                        .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+                for entry in &entries {
+                    output.push(CsrEdge {
+                        peer: entry.peer,
+                        edge_idx: entry.orig_idx,
+                        conn_type: entry.conn_type,
+                    });
+                }
+                drop(entries);
+                if verbose {
+                    eprintln!(
+                        "      {label} single-chunk sort+write: {:.1}s",
+                        step.elapsed().as_secs_f64()
+                    );
+                }
+                return output;
+            }
+
+            // ── Multi-chunk path: external merge sort ──
             // Phase A: Create sorted chunks (sequential read + sort + sequential write)
             let step = std::time::Instant::now();
             let mut chunk_mmaps: Vec<MmapOrVec<MergeSortEntry>> = Vec::new();
@@ -1124,14 +1200,7 @@ impl DiskGraph {
         self.in_edges = in_edges;
         self.edge_endpoints = edge_endpoints_vec;
 
-        // Write offsets to graph dir (they were built in heap, need to persist)
-        let _ = self
-            .out_offsets
-            .save_to_file(&out_dir.join("out_offsets.bin"));
-        let _ = self
-            .in_offsets
-            .save_to_file(&out_dir.join("in_offsets.bin"));
-
+        // Offsets already mmap-backed to out_offsets.bin / in_offsets.bin.
         // Auto-persist metadata — graph is fully on disk after this
         let _ = self.write_metadata();
         self.metadata_dirty = false;
@@ -1139,6 +1208,253 @@ impl DiskGraph {
         if verbose {
             eprintln!(
                 "    CSR total: {:.1}s ({} edges, {} nodes) [merge_sort]",
+                phase3_start.elapsed().as_secs_f64(),
+                edge_count,
+                node_bound
+            );
+        }
+    }
+
+    /// Hash-partitioned CSR build (Kuzu pattern).
+    /// Partitions edges by node group, then local counting sort per partition.
+    /// O(n) total — no global sort, no intermediate files, cache-friendly.
+    fn build_csr_partitioned(&mut self, node_bound: usize, edge_count: usize, verbose: bool) {
+        let pending = self.pending_edges.get_mut();
+        let phase3_start = std::time::Instant::now();
+        let out_dir = &self.data_dir;
+
+        // ── Step 1: Build edge_endpoints + count degrees ──
+        let step = std::time::Instant::now();
+        let mut edge_endpoints_vec =
+            MmapOrVec::mapped(&out_dir.join("edge_endpoints.bin"), edge_count)
+                .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        let mut out_counts = vec![0u64; node_bound];
+        let mut in_counts = vec![0u64; node_bound];
+        for i in 0..pending.len() {
+            let (src, tgt, ct) = pending.get(i);
+            edge_endpoints_vec.push(EdgeEndpoints {
+                source: src,
+                target: tgt,
+                connection_type: ct,
+            });
+            if (src as usize) < node_bound {
+                out_counts[src as usize] += 1;
+            }
+            if (tgt as usize) < node_bound {
+                in_counts[tgt as usize] += 1;
+            }
+        }
+        if verbose {
+            eprintln!(
+                "    CSR step 1/4: endpoints + degrees ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        // ── Step 2: Build offset arrays (prefix sum) — mmap-backed to save ~2 GB heap ──
+        let step = std::time::Instant::now();
+        let mut out_offsets: MmapOrVec<u64> =
+            MmapOrVec::mapped(&out_dir.join("out_offsets.bin"), node_bound + 1)
+                .unwrap_or_else(|_| MmapOrVec::with_capacity(node_bound + 1));
+        let mut in_offsets: MmapOrVec<u64> =
+            MmapOrVec::mapped(&out_dir.join("in_offsets.bin"), node_bound + 1)
+                .unwrap_or_else(|_| MmapOrVec::with_capacity(node_bound + 1));
+        let mut out_acc = 0u64;
+        let mut in_acc = 0u64;
+        for i in 0..node_bound {
+            out_offsets.push(out_acc);
+            in_offsets.push(in_acc);
+            out_acc += out_counts[i];
+            in_acc += in_counts[i];
+        }
+        out_offsets.push(out_acc);
+        in_offsets.push(in_acc);
+        // in_counts no longer needed — offsets are computed. Free 1 GB.
+        drop(in_counts);
+        if verbose {
+            eprintln!(
+                "    CSR step 2/4: offsets ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        // ── Step 3: Buffered scatter for out_edges (by source) ──
+        // Single pass over pending_edges, buffer edges by source chunk, flush when full.
+        // Each flush writes sequentially to a contiguous mmap region.
+        let step = std::time::Instant::now();
+        let mut out_edges = MmapOrVec::mapped(&out_dir.join("out_edges.bin"), edge_count)
+            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        for _ in 0..edge_count {
+            out_edges.push(CsrEdge::default());
+        }
+
+        let chunk_size: usize = std::env::var("KGLITE_CSR_CHUNK")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1_000_000);
+        let num_chunks = node_bound.div_ceil(chunk_size);
+        let mut out_cursor: Vec<u64> = (0..node_bound).map(|i| out_offsets.get(i)).collect();
+
+        // Buffer: per-chunk Vec of (edge_idx, src, tgt, ct)
+        let mut chunk_bufs: Vec<Vec<(u32, u32, u32, u64)>> =
+            (0..num_chunks).map(|_| Vec::new()).collect();
+        let mut buf_bytes: usize = 0;
+        let flush_threshold: usize = 512 * 1024 * 1024; // 512 MB
+
+        for edge_idx in 0..pending.len() {
+            let (src, tgt, ct) = pending.get(edge_idx);
+            let s = src as usize;
+            if s < node_bound {
+                let ci = s / chunk_size;
+                chunk_bufs[ci].push((edge_idx as u32, src, tgt, ct));
+                buf_bytes += 20;
+            }
+            // Flush all chunks when buffer exceeds threshold
+            if buf_bytes >= flush_threshold {
+                for buf in chunk_bufs.iter_mut() {
+                    for &(eidx, src2, tgt2, ct2) in buf.iter() {
+                        let pos = out_cursor[src2 as usize] as usize;
+                        out_edges.set(
+                            pos,
+                            CsrEdge {
+                                peer: tgt2,
+                                edge_idx: eidx,
+                                conn_type: ct2,
+                            },
+                        );
+                        out_cursor[src2 as usize] += 1;
+                    }
+                    buf.clear();
+                }
+                buf_bytes = 0;
+            }
+        }
+        // Flush remaining
+        for buf in chunk_bufs.iter_mut() {
+            for &(eidx, src2, tgt2, ct2) in buf.iter() {
+                let pos = out_cursor[src2 as usize] as usize;
+                out_edges.set(
+                    pos,
+                    CsrEdge {
+                        peer: tgt2,
+                        edge_idx: eidx,
+                        conn_type: ct2,
+                    },
+                );
+                out_cursor[src2 as usize] += 1;
+            }
+            buf.clear();
+        }
+        drop(out_cursor);
+        drop(chunk_bufs);
+        if verbose {
+            eprintln!(
+                "    CSR step 3/4: out_edges buffered scatter ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        // Free mmaps no longer needed — release RAM for step 4.
+        // out_edges and edge_endpoints are fully written; drop them now and reload after step 4.
+        let out_edges_path = out_dir.join("out_edges.bin");
+        let edge_endpoints_path = out_dir.join("edge_endpoints.bin");
+        drop(out_edges);
+        drop(edge_endpoints_vec);
+        drop(out_counts);
+        if verbose {
+            eprintln!("    CSR: freed out_edges + edge_endpoints mmaps for step 4");
+        }
+
+        // ── Step 4: Buffered scatter for in_edges (by target) ──
+        let step = std::time::Instant::now();
+        let mut in_edges = MmapOrVec::mapped(&out_dir.join("in_edges.bin"), edge_count)
+            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        for _ in 0..edge_count {
+            in_edges.push(CsrEdge::default());
+        }
+        let mut in_cursor: Vec<u64> = (0..node_bound).map(|i| in_offsets.get(i)).collect();
+
+        let mut chunk_bufs: Vec<Vec<(u32, u32, u32, u64)>> =
+            (0..num_chunks).map(|_| Vec::new()).collect();
+        let mut buf_bytes: usize = 0;
+
+        for edge_idx in 0..pending.len() {
+            let (src, tgt, ct) = pending.get(edge_idx);
+            let t = tgt as usize;
+            if t < node_bound {
+                let ci = t / chunk_size;
+                chunk_bufs[ci].push((edge_idx as u32, src, tgt, ct));
+                buf_bytes += 20;
+            }
+            if buf_bytes >= flush_threshold {
+                for buf in chunk_bufs.iter_mut() {
+                    for &(eidx, src2, tgt2, ct2) in buf.iter() {
+                        let pos = in_cursor[tgt2 as usize] as usize;
+                        in_edges.set(
+                            pos,
+                            CsrEdge {
+                                peer: src2,
+                                edge_idx: eidx,
+                                conn_type: ct2,
+                            },
+                        );
+                        in_cursor[tgt2 as usize] += 1;
+                    }
+                    buf.clear();
+                }
+                buf_bytes = 0;
+            }
+        }
+        for buf in chunk_bufs.iter_mut() {
+            for &(eidx, src2, tgt2, ct2) in buf.iter() {
+                let pos = in_cursor[tgt2 as usize] as usize;
+                in_edges.set(
+                    pos,
+                    CsrEdge {
+                        peer: src2,
+                        edge_idx: eidx,
+                        conn_type: ct2,
+                    },
+                );
+                in_cursor[tgt2 as usize] += 1;
+            }
+        }
+        drop(in_cursor);
+        drop(chunk_bufs);
+        if verbose {
+            eprintln!(
+                "    CSR step 4/4: in_edges buffered scatter ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        // Free pending edges and clean up temp file
+        let pending_path = pending.file_path().map(|p| p.to_path_buf());
+        *pending = MmapOrVec::new();
+        if let Some(path) = pending_path {
+            let _ = std::fs::remove_file(path);
+        }
+
+        // Reload out_edges and edge_endpoints (dropped before step 4 to free RAM)
+        let out_edges: MmapOrVec<CsrEdge> = MmapOrVec::load_mapped(&out_edges_path, edge_count)
+            .unwrap_or_else(|_| MmapOrVec::new());
+        let edge_endpoints_vec: MmapOrVec<EdgeEndpoints> =
+            MmapOrVec::load_mapped(&edge_endpoints_path, edge_count)
+                .unwrap_or_else(|_| MmapOrVec::new());
+
+        self.out_offsets = out_offsets;
+        self.out_edges = out_edges;
+        self.in_offsets = in_offsets;
+        self.in_edges = in_edges;
+        self.edge_endpoints = edge_endpoints_vec;
+
+        // Offsets are already mmap-backed to out_offsets.bin / in_offsets.bin — no save needed.
+        let _ = self.write_metadata();
+        self.metadata_dirty = false;
+
+        if verbose {
+            eprintln!(
+                "    CSR total: {:.1}s ({} edges, {} nodes) [partitioned]",
                 phase3_start.elapsed().as_secs_f64(),
                 edge_count,
                 node_bound
@@ -1369,7 +1685,7 @@ impl Clone for DiskGraph {
             next_edge_idx: self.next_edge_idx,
             edge_properties: self.edge_properties.clone(),
             edge_arena: UnsafeCell::new(Vec::new()),
-            pending_edges: UnsafeCell::new(unsafe { &*self.pending_edges.get() }.clone()),
+            pending_edges: UnsafeCell::new(MmapOrVec::new()),
             overflow_out: self.overflow_out.clone(),
             overflow_in: self.overflow_in.clone(),
             free_edge_slots: self.free_edge_slots.clone(),
@@ -1557,7 +1873,7 @@ impl DiskGraph {
                 next_edge_idx: meta.next_edge_idx,
                 edge_properties,
                 edge_arena: UnsafeCell::new(Vec::with_capacity(1024)),
-                pending_edges: UnsafeCell::new(Vec::new()),
+                pending_edges: UnsafeCell::new(MmapOrVec::new()),
                 overflow_out,
                 overflow_in,
                 free_edge_slots: meta.free_edge_slots,

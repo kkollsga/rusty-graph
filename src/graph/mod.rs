@@ -11,7 +11,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub mod batch_operations;
+pub mod block_column;
+pub mod block_pool;
 pub mod bug_report;
+pub mod build_column_store;
 pub mod calculations;
 pub mod clustering;
 pub mod column_store;
@@ -30,9 +33,12 @@ pub mod introspection;
 pub mod io_operations;
 pub mod lookups;
 pub mod maintain_graph;
+#[allow(dead_code)]
+pub mod mmap_column_store;
 pub mod mmap_vec;
 pub mod ntriples;
 pub mod pattern_matching;
+pub mod property_log;
 pub mod reporting;
 pub mod schema;
 pub mod schema_validation;
@@ -43,6 +49,7 @@ pub mod subgraph;
 pub mod temporal;
 pub mod timeseries;
 pub mod traversal_methods;
+pub mod type_build_meta;
 pub mod value_operations;
 pub mod vector_search;
 
@@ -5262,6 +5269,7 @@ impl KnowledgeGraph {
                 .unwrap_or_default(),
             max_entities,
             verbose,
+            auto_type: true,
         };
 
         let graph = Arc::make_mut(&mut self.inner);

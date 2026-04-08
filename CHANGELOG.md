@@ -5,6 +5,35 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] - 2026-04-08
+
+### Changed
+- **Single-file mmap column storage**: Column stores written to a single `columns.bin` file with mmap-backed reads. Replaces per-type `columns/<type>/columns.zst` layout. Near-instant load via mmap (no decompression).
+- **Property log (disk mode)**: Phase 1 serializes properties to a zstd-compressed log file instead of building ColumnStores in-memory. Phase 1b replays the log to build columns in bulk — avoids O(n²) column rebuilds.
+- **Partitioned CSR build**: Default CSR algorithm switched to hash-partitioned (Kuzu pattern). Merge-sort still available via `KGLITE_CSR_ALGO=merge_sort`.
+- **File-backed pending edges**: `pending_edges` buffer uses mmap-backed `MmapOrVec` instead of heap `Vec`, avoiding ~14 GB heap allocation at Wikidata scale.
+- **Auto-typing from P31**: N-Triples loader automatically derives node types from `P31` (instance-of) values, resolving Q-codes to labels. Entities without P31 default to "Entity".
+- **Sparse property overflow**: Properties with <5% fill rate stored in a compact overflow bag instead of dense columns, reducing file size for wide schemas.
+
+### Added
+- `MmapColumnStore` — mmap-backed column reader for disk mode.
+- `BuildColumnStore` — direct column writer that streams to the mmap file.
+- `PropertyLogWriter`/`PropertyLogReader` — zstd-compressed property spill log for disk builds.
+- `BlockPool`/`BlockColumn` — block-allocated typed column storage.
+- `TypeBuildMeta` — per-type metadata for build-time column schema discovery.
+- `MmapOrVec::load_mapped_region()`, `from_vec()`, `as_mut_bytes()` — new helpers for region-mapped and bulk byte access.
+- `DiskGraph::update_row_id()` — fix per-type row_id mapping after column conversion.
+- `ColumnStore::from_mmap_store()`, `from_raw_columns()` — constructors for mmap-backed and direct-built stores.
+- `ColumnStore` id/title column accessors now work in disk mode.
+
+### Fixed
+- **code_tree stack overflow**: `extract_comment_annotations` switched from recursive to iterative traversal, fixing crashes on deeply nested ASTs.
+
+## [0.7.2] - 2026-04-07
+
+### Fixed
+- **code_tree stack overflow**: `extract_comment_annotations` switched from recursive to iterative traversal, fixing crashes on deeply nested ASTs.
+
 ## [0.7.1] - 2026-04-06
 
 ### Changed

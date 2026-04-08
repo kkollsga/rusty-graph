@@ -17,6 +17,8 @@ GRAPH_DIR = "/Volumes/EksternalHome/Data/Wikidata/wikidata_disk_graph"
 
 # Enable sub-step timing for CSR build
 os.environ["KGLITE_CSR_VERBOSE"] = "1"
+# Use merge sort CSR algorithm — all sequential I/O, no random scatter
+os.environ["KGLITE_CSR_ALGO"] = "merge_sort"
 
 
 def build():

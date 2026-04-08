@@ -462,44 +462,73 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
             .insert(node_type.clone(), std::sync::Arc::new(schema));
     }
 
-    // Load column stores
-    let columns_dir = dir.join("columns");
-    if columns_dir.exists() {
-        for entry in std::fs::read_dir(&columns_dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                let type_name = entry.file_name().to_string_lossy().to_string();
-                let col_file = entry.path().join("columns.zst");
-                if col_file.exists() {
-                    let compressed = std::fs::read(&col_file)?;
-                    let packed =
-                        zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
-                    let schema = graph
-                        .type_schemas
-                        .get(&type_name)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            std::sync::Arc::new(crate::graph::schema::TypeSchema::new())
-                        });
-                    let type_meta = graph
-                        .node_type_metadata
-                        .get(&type_name)
-                        .cloned()
-                        .unwrap_or_default();
-                    let row_count = graph
-                        .type_indices
-                        .get(&type_name)
-                        .map(|v| v.len() as u32)
-                        .unwrap_or(0);
-                    let store = crate::graph::column_store::ColumnStore::load_packed(
-                        schema,
-                        &type_meta,
-                        &graph.interner,
-                        &packed,
-                        row_count,
-                        None, // Load into heap (could mmap later)
-                    )?;
-                    graph.column_stores.insert(type_name, Arc::new(store));
+    // Load column stores — prefer mmap-backed (columns.bin + columns_meta.json)
+    let mmap_path = dir.join("columns.bin");
+    let meta_path = dir.join("columns_meta.json");
+    if mmap_path.exists() && meta_path.exists() {
+        // New mmap-backed path: open columns.bin, read metadata, create MmapColumnStores
+        use crate::graph::ntriples::ColumnTypeMeta;
+        use memmap2::MmapMut;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&mmap_path)?;
+        let mmap = unsafe { MmapMut::map_mut(&file)? };
+        let mmap_arc = std::sync::Arc::new(mmap);
+
+        let meta_json = std::fs::read_to_string(&meta_path)?;
+        let type_metas: Vec<ColumnTypeMeta> =
+            serde_json::from_str(&meta_json).map_err(io::Error::other)?;
+
+        for tm in type_metas {
+            let store = tm.to_mmap_store(std::sync::Arc::clone(&mmap_arc));
+            let cs = crate::graph::column_store::ColumnStore::from_mmap_store(std::sync::Arc::new(
+                store,
+            ));
+            graph.column_stores.insert(tm.type_name, Arc::new(cs));
+        }
+    } else {
+        // Legacy path: load from columns/<type>/columns.zst files
+        let columns_dir = dir.join("columns");
+        if columns_dir.exists() {
+            for entry in std::fs::read_dir(&columns_dir)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    let type_name = entry.file_name().to_string_lossy().to_string();
+                    let col_file = entry.path().join("columns.zst");
+                    if col_file.exists() {
+                        let compressed = std::fs::read(&col_file)?;
+                        let packed =
+                            zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+                        let schema =
+                            graph
+                                .type_schemas
+                                .get(&type_name)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    std::sync::Arc::new(crate::graph::schema::TypeSchema::new())
+                                });
+                        let type_meta = graph
+                            .node_type_metadata
+                            .get(&type_name)
+                            .cloned()
+                            .unwrap_or_default();
+                        let row_count = graph
+                            .type_indices
+                            .get(&type_name)
+                            .map(|v| v.len() as u32)
+                            .unwrap_or(0);
+                        let store = crate::graph::column_store::ColumnStore::load_packed(
+                            schema,
+                            &type_meta,
+                            &graph.interner,
+                            &packed,
+                            row_count,
+                            None,
+                        )?;
+                        graph.column_stores.insert(type_name, Arc::new(store));
+                    }
                 }
             }
         }

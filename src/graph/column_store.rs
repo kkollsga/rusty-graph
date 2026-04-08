@@ -609,7 +609,7 @@ impl TypedColumn {
 
 /// Per-node-type columnar store. Holds one TypedColumn per property key.
 /// All columns have the same number of rows.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ColumnStore {
     /// Schema mapping property keys to slot indices (shared with Compact storage)
     schema: Arc<TypeSchema>,
@@ -623,6 +623,28 @@ pub struct ColumnStore {
     id_column: Option<TypedColumn>,
     /// Node title column (mapped mode only). When present, NodeData.title is Value::Null sentinel.
     title_column: Option<TypedColumn>,
+    /// Overflow bag for sparse properties: offset array + data blob.
+    overflow_offsets: Option<MmapOrVec<u64>>,
+    overflow_data: Option<MmapBytes>,
+    /// Optional mmap-backed store for disk mode. When present, get/get_id/get_title
+    /// delegate to this instead of the TypedColumn arrays above.
+    mmap_store: Option<Arc<crate::graph::mmap_column_store::MmapColumnStore>>,
+}
+
+impl Clone for ColumnStore {
+    fn clone(&self) -> Self {
+        ColumnStore {
+            schema: self.schema.clone(),
+            columns: self.columns.clone(),
+            row_count: self.row_count,
+            tombstones: self.tombstones.clone(),
+            mmap_store: self.mmap_store.clone(),
+            id_column: self.id_column.clone(),
+            title_column: self.title_column.clone(),
+            overflow_offsets: self.overflow_offsets.clone(),
+            overflow_data: self.overflow_data.clone(),
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -650,6 +672,47 @@ impl ColumnStore {
             tombstones: Vec::new(),
             id_column: None,
             title_column: None,
+            overflow_offsets: None,
+            overflow_data: None,
+            mmap_store: None,
+        }
+    }
+
+    /// Create a ColumnStore from pre-built columns (for direct-write Phase 1b).
+    pub fn from_raw_columns(
+        schema: Arc<TypeSchema>,
+        columns: Vec<TypedColumn>,
+        row_count: u32,
+    ) -> Self {
+        ColumnStore {
+            schema,
+            columns,
+            row_count,
+            tombstones: vec![false; row_count as usize],
+            id_column: None,
+            title_column: None,
+            overflow_offsets: None,
+            overflow_data: None,
+            mmap_store: None,
+        }
+    }
+
+    /// Create a ColumnStore backed by a shared mmap (disk mode).
+    /// All get/get_id/get_title calls delegate to the MmapColumnStore.
+    pub fn from_mmap_store(
+        mmap_store: Arc<crate::graph::mmap_column_store::MmapColumnStore>,
+    ) -> Self {
+        let rc = mmap_store.row_count();
+        ColumnStore {
+            schema: Arc::new(TypeSchema::new()),
+            columns: Vec::new(),
+            row_count: rc,
+            tombstones: Vec::new(),
+            id_column: None,
+            title_column: None,
+            overflow_offsets: None,
+            overflow_data: None,
+            mmap_store: Some(mmap_store),
         }
     }
 
@@ -665,7 +728,260 @@ impl ColumnStore {
             tombstones: Vec::new(),
             id_column: None,
             title_column: None,
+            overflow_offsets: None,
+            overflow_data: None,
+            mmap_store: None,
         }
+    }
+
+    // ─── Setters for BuildColumnStore conversion ─────────────────────────
+
+    /// Replace the id column with a pre-built TypedColumn.
+    pub fn set_id_column(&mut self, col: TypedColumn) {
+        self.id_column = Some(col);
+    }
+
+    /// Replace the title column with a pre-built TypedColumn.
+    pub fn set_title_column(&mut self, col: TypedColumn) {
+        self.title_column = Some(col);
+    }
+
+    /// Set the overflow bag for sparse properties.
+    pub fn set_overflow(&mut self, offsets: MmapOrVec<u64>, data: MmapBytes) {
+        self.overflow_offsets = Some(offsets);
+        self.overflow_data = Some(data);
+    }
+
+    /// Look up a property in the overflow bag for a given row.
+    /// Scans the bag entries for the matching key.
+    pub fn get_overflow_property(&self, row_id: u32, key: InternedKey) -> Option<Value> {
+        let offsets = self.overflow_offsets.as_ref()?;
+        let data = self.overflow_data.as_ref()?;
+        let idx = row_id as usize;
+        if idx + 1 >= offsets.len() {
+            return None;
+        }
+        let start = offsets.get(idx) as usize;
+        let end = offsets.get(idx + 1) as usize;
+        if start >= end || end > data.len() {
+            return None;
+        }
+        let blob = data.slice(start, end);
+        Self::scan_overflow_blob(blob, key)
+    }
+
+    /// Decode all properties from an overflow blob for a given row.
+    fn overflow_row_properties(&self, row_id: u32) -> Vec<(InternedKey, Value)> {
+        let offsets = match self.overflow_offsets.as_ref() {
+            Some(o) => o,
+            None => return Vec::new(),
+        };
+        let data = match self.overflow_data.as_ref() {
+            Some(d) => d,
+            None => return Vec::new(),
+        };
+        let idx = row_id as usize;
+        if idx + 1 >= offsets.len() {
+            return Vec::new();
+        }
+        let start = offsets.get(idx) as usize;
+        let end = offsets.get(idx + 1) as usize;
+        if start >= end || end > data.len() {
+            return Vec::new();
+        }
+        let blob = data.slice(start, end);
+        Self::decode_overflow_blob(blob)
+    }
+
+    /// Scan an overflow blob for a specific key. Returns the value if found.
+    fn scan_overflow_blob(blob: &[u8], key: InternedKey) -> Option<Value> {
+        let target = key.as_u64();
+        if blob.len() < 2 {
+            return None;
+        }
+        let num_entries = u16::from_le_bytes([blob[0], blob[1]]) as usize;
+        let mut pos = 2;
+        for _ in 0..num_entries {
+            if pos + 9 > blob.len() {
+                break;
+            }
+            let entry_key = u64::from_le_bytes(blob[pos..pos + 8].try_into().ok()?);
+            let type_tag = blob[pos + 8];
+            pos += 9;
+            if entry_key == target {
+                return Self::read_overflow_value(blob, &mut pos, type_tag);
+            }
+            // Skip value
+            Self::skip_overflow_value(blob, &mut pos, type_tag);
+        }
+        None
+    }
+
+    /// Decode all entries from an overflow blob.
+    fn decode_overflow_blob(blob: &[u8]) -> Vec<(InternedKey, Value)> {
+        if blob.len() < 2 {
+            return Vec::new();
+        }
+        let num_entries = u16::from_le_bytes([blob[0], blob[1]]) as usize;
+        let mut result = Vec::with_capacity(num_entries);
+        let mut pos = 2;
+        for _ in 0..num_entries {
+            if pos + 9 > blob.len() {
+                break;
+            }
+            let entry_key = u64::from_le_bytes(blob[pos..pos + 8].try_into().unwrap_or([0; 8]));
+            let type_tag = blob[pos + 8];
+            pos += 9;
+            let key = InternedKey::from_u64(entry_key);
+            if let Some(val) = Self::read_overflow_value(blob, &mut pos, type_tag) {
+                result.push((key, val));
+            }
+        }
+        result
+    }
+
+    /// Read a single value from the overflow blob at the given position.
+    fn read_overflow_value(blob: &[u8], pos: &mut usize, type_tag: u8) -> Option<Value> {
+        match type_tag {
+            0 => Some(Value::Null),
+            1 => {
+                // Int64: 8 bytes
+                if *pos + 8 > blob.len() {
+                    return None;
+                }
+                let v = i64::from_le_bytes(blob[*pos..*pos + 8].try_into().ok()?);
+                *pos += 8;
+                Some(Value::Int64(v))
+            }
+            2 => {
+                // Float64: 8 bytes
+                if *pos + 8 > blob.len() {
+                    return None;
+                }
+                let v = f64::from_le_bytes(blob[*pos..*pos + 8].try_into().ok()?);
+                *pos += 8;
+                Some(Value::Float64(v))
+            }
+            3 => {
+                // UniqueId: 4 bytes
+                if *pos + 4 > blob.len() {
+                    return None;
+                }
+                let v = u32::from_le_bytes(blob[*pos..*pos + 4].try_into().ok()?);
+                *pos += 4;
+                Some(Value::UniqueId(v))
+            }
+            4 => {
+                // Bool: 1 byte
+                if *pos + 1 > blob.len() {
+                    return None;
+                }
+                let v = blob[*pos] != 0;
+                *pos += 1;
+                Some(Value::Boolean(v))
+            }
+            5 => {
+                // Date: 4 bytes as i32 days since epoch
+                if *pos + 4 > blob.len() {
+                    return None;
+                }
+                let days = i32::from_le_bytes(blob[*pos..*pos + 4].try_into().ok()?);
+                *pos += 4;
+                let date = UNIX_EPOCH_DATE + chrono::Duration::days(days as i64);
+                Some(Value::DateTime(date))
+            }
+            6 => {
+                // String: u32 length prefix + bytes
+                if *pos + 4 > blob.len() {
+                    return None;
+                }
+                let slen = u32::from_le_bytes(blob[*pos..*pos + 4].try_into().ok()?) as usize;
+                *pos += 4;
+                if *pos + slen > blob.len() {
+                    return None;
+                }
+                let s = String::from_utf8_lossy(&blob[*pos..*pos + slen]).into_owned();
+                *pos += slen;
+                Some(Value::String(s))
+            }
+            _ => None,
+        }
+    }
+
+    /// Skip over a value in the overflow blob without decoding it.
+    fn skip_overflow_value(blob: &[u8], pos: &mut usize, type_tag: u8) {
+        match type_tag {
+            0 => {}             // Null: no data
+            1 | 2 => *pos += 8, // Int64 or Float64
+            3 | 5 => *pos += 4, // UniqueId or Date
+            4 => *pos += 1,     // Bool
+            6 => {
+                // String: u32 length prefix + bytes
+                if *pos + 4 <= blob.len() {
+                    let slen = u32::from_le_bytes(blob[*pos..*pos + 4].try_into().unwrap_or([0; 4]))
+                        as usize;
+                    *pos += 4 + slen;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Serialize a Value into overflow bag format, appending to the buffer.
+    pub fn serialize_overflow_value(buf: &mut Vec<u8>, key: InternedKey, value: &Value) {
+        buf.extend_from_slice(&key.as_u64().to_le_bytes());
+        match value {
+            Value::Null => buf.push(0),
+            Value::Int64(v) => {
+                buf.push(1);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Value::Float64(v) => {
+                buf.push(2);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Value::UniqueId(v) => {
+                buf.push(3);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Value::Boolean(v) => {
+                buf.push(4);
+                buf.push(*v as u8);
+            }
+            Value::DateTime(d) => {
+                buf.push(5);
+                let days = (*d - UNIX_EPOCH_DATE).num_days() as i32;
+                buf.extend_from_slice(&days.to_le_bytes());
+            }
+            Value::String(s) => {
+                buf.push(6);
+                buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
+                buf.extend_from_slice(s.as_bytes());
+            }
+            Value::Point { lat, lon } => {
+                // Serialize Point as a string "lat,lon"
+                let s = format!("{},{}", lat, lon);
+                buf.push(6);
+                buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
+                buf.extend_from_slice(s.as_bytes());
+            }
+            Value::NodeRef(_) => {
+                // NodeRef is transient — skip (write as null)
+                buf.push(0);
+            }
+        }
+    }
+
+    /// Replace a property column at the given slot index.
+    pub fn set_column(&mut self, slot: usize, col: TypedColumn) {
+        if slot < self.columns.len() {
+            self.columns[slot] = col;
+        }
+    }
+
+    /// Set the row count (used after bulk column construction).
+    pub fn set_row_count(&mut self, count: u32) {
+        self.row_count = count;
     }
 
     // ─── Id/Title column methods (mapped mode only) ──────────────────────
@@ -711,19 +1027,31 @@ impl ColumnStore {
     /// Get the node ID from the id column at the given row.
     #[inline]
     pub fn get_id(&self, row_id: u32) -> Option<Value> {
+        if let Some(ref ms) = self.mmap_store {
+            return ms.get_id(row_id);
+        }
         self.id_column.as_ref()?.get(row_id)
     }
 
     /// Get the node title from the title column at the given row.
     #[inline]
     pub fn get_title(&self, row_id: u32) -> Option<Value> {
+        if let Some(ref ms) = self.mmap_store {
+            return ms.get_title(row_id);
+        }
         self.title_column.as_ref()?.get(row_id)
     }
 
     /// Whether this store has id/title columns (mapped mode).
     #[inline]
     pub fn has_id_title_columns(&self) -> bool {
-        self.id_column.is_some() || self.title_column.is_some()
+        self.id_column.is_some() || self.title_column.is_some() || self.mmap_store.is_some()
+    }
+
+    /// Whether this store is backed by a shared mmap (disk mode direct-write).
+    #[inline]
+    pub fn has_mmap_store(&self) -> bool {
+        self.mmap_store.is_some()
     }
 
     /// Number of rows (including tombstoned).
@@ -785,7 +1113,12 @@ impl ColumnStore {
     }
 
     /// Get a property value by (row_id, interned key).
+    /// Falls back to the overflow bag when the key isn't in the schema or the
+    /// dense column value is null.
     pub fn get(&self, row_id: u32, key: InternedKey) -> Option<Value> {
+        if let Some(ref ms) = self.mmap_store {
+            return ms.get(row_id, key);
+        }
         if row_id >= self.row_count {
             return None;
         }
@@ -797,8 +1130,13 @@ impl ColumnStore {
         {
             return None;
         }
-        let slot = self.schema.slot(key)?;
-        self.columns.get(slot as usize)?.get(row_id)
+        if let Some(slot) = self.schema.slot(key) {
+            if let Some(val) = self.columns.get(slot as usize).and_then(|c| c.get(row_id)) {
+                return Some(val);
+            }
+        }
+        // Fall back to overflow bag
+        self.get_overflow_property(row_id, key)
     }
 
     /// Resolve a property name to a column slot index.
@@ -877,8 +1215,11 @@ impl ColumnStore {
     }
 
     /// Iterate over all non-null properties for a row.
-    /// Returns (InternedKey, Value) pairs.
+    /// Returns (InternedKey, Value) pairs from both dense columns and overflow bag.
     pub fn row_properties(&self, row_id: u32) -> Vec<(InternedKey, Value)> {
+        if let Some(ref ms) = self.mmap_store {
+            return ms.row_properties(row_id);
+        }
         if row_id >= self.row_count
             || self
                 .tombstones
@@ -894,6 +1235,9 @@ impl ColumnStore {
                 result.push((ik, val));
             }
         }
+        // Append overflow bag properties
+        let overflow = self.overflow_row_properties(row_id);
+        result.extend(overflow);
         result
     }
 
@@ -965,7 +1309,9 @@ impl ColumnStore {
         let col_bytes: usize = self.columns.iter().map(|c| c.heap_bytes()).sum();
         let id_bytes = self.id_column.as_ref().map_or(0, |c| c.heap_bytes());
         let title_bytes = self.title_column.as_ref().map_or(0, |c| c.heap_bytes());
-        col_bytes + id_bytes + title_bytes + self.tombstones.len()
+        let overflow_bytes = self.overflow_offsets.as_ref().map_or(0, |o| o.heap_bytes())
+            + self.overflow_data.as_ref().map_or(0, |d| d.heap_bytes());
+        col_bytes + id_bytes + title_bytes + overflow_bytes + self.tombstones.len()
     }
 
     /// Access columns for introspection (e.g., getting type tags).
@@ -984,8 +1330,14 @@ impl ColumnStore {
     pub fn write_packed(&self, interner: &StringInterner) -> io::Result<Vec<u8>> {
         let mut buf: Vec<u8> = Vec::new();
 
-        // Count total columns: schema columns + id/title if present
-        let extra = self.id_column.is_some() as u32 + self.title_column.is_some() as u32;
+        // Count total columns: schema columns + id/title + overflow entries if present
+        let extra = self.id_column.is_some() as u32
+            + self.title_column.is_some() as u32
+            + if self.overflow_offsets.is_some() {
+                2
+            } else {
+                0
+            };
         let num_cols = self.columns.len() as u32 + extra;
         buf.extend_from_slice(&num_cols.to_le_bytes());
 
@@ -1001,6 +1353,34 @@ impl ColumnStore {
         }
         if let Some(ref col) = self.title_column {
             Self::write_packed_column(&mut buf, "__title__", col)?;
+        }
+
+        // Write overflow bag as two pseudo-columns
+        if let (Some(ref offsets), Some(ref data)) = (&self.overflow_offsets, &self.overflow_data) {
+            // __overflow_offsets__: raw bytes of the u64 offset array
+            {
+                let name = b"__overflow_offsets__";
+                buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+                buf.extend_from_slice(name);
+                let tag = b"raw";
+                buf.extend_from_slice(&(tag.len() as u16).to_le_bytes());
+                buf.extend_from_slice(tag);
+                let raw = offsets.as_raw_bytes();
+                buf.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+                buf.extend_from_slice(raw);
+            }
+            // __overflow_data__: raw bytes blob
+            {
+                let name = b"__overflow_data__";
+                buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+                buf.extend_from_slice(name);
+                let tag = b"raw";
+                buf.extend_from_slice(&(tag.len() as u16).to_le_bytes());
+                buf.extend_from_slice(tag);
+                let raw = data.as_raw_bytes();
+                buf.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+                buf.extend_from_slice(raw);
+            }
         }
 
         Ok(buf)
@@ -1090,6 +1470,25 @@ impl ColumnStore {
                 let col =
                     Self::unpack_column(&type_tag, &data_blob, row_count, temp_dir, &col_name)?;
                 store.title_column = Some(col);
+                continue;
+            }
+
+            // Check for overflow pseudo-columns
+            if col_name == "__overflow_offsets__" {
+                let num_offsets = data_blob.len() / std::mem::size_of::<u64>();
+                let offsets = Self::load_typed_vec::<u64>(
+                    &data_blob,
+                    num_offsets,
+                    temp_dir,
+                    &col_name,
+                    "off",
+                )?;
+                store.overflow_offsets = Some(offsets);
+                continue;
+            }
+            if col_name == "__overflow_data__" {
+                let data = Self::load_bytes(&data_blob, temp_dir, &col_name, "dat")?;
+                store.overflow_data = Some(data);
                 continue;
             }
 
