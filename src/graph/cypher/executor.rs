@@ -1275,7 +1275,11 @@ impl<'a> CypherExecutor<'a> {
             (false, ResultRow::new()) // unused placeholder
         };
 
-        for edge_ref in self.graph.graph.edges_directed(bound_idx, direction) {
+        for edge_ref in
+            self.graph
+                .graph
+                .edges_directed_filtered(bound_idx, direction, interned_conn)
+        {
             if let Some(ik) = interned_conn {
                 if edge_ref.weight().connection_type != ik {
                     continue;
@@ -1419,7 +1423,11 @@ impl<'a> CypherExecutor<'a> {
         let interned_conn = conn_type.map(InternedKey::from_str);
         let mut count: i64 = 0;
 
-        for edge_ref in self.graph.graph.edges_directed(bound_idx, traverse_dir) {
+        for edge_ref in
+            self.graph
+                .graph
+                .edges_directed_filtered(bound_idx, traverse_dir, interned_conn)
+        {
             // Check connection type
             if let Some(ik) = interned_conn {
                 if edge_ref.weight().connection_type != ik {
@@ -1496,7 +1504,11 @@ impl<'a> CypherExecutor<'a> {
         let mut total: i64 = 0;
 
         // First hop: first_idx --e1--> middle nodes
-        for e1_ref in self.graph.graph.edges_directed(first_idx, dir1) {
+        for e1_ref in self
+            .graph
+            .graph
+            .edges_directed_filtered(first_idx, dir1, interned_conn1)
+        {
             if let Some(ik) = interned_conn1 {
                 if e1_ref.weight().connection_type != ik {
                     continue;
@@ -1519,7 +1531,11 @@ impl<'a> CypherExecutor<'a> {
             }
 
             // Second hop: mid_idx --e2--> last nodes (just count)
-            for e2_ref in self.graph.graph.edges_directed(mid_idx, dir2) {
+            for e2_ref in self
+                .graph
+                .graph
+                .edges_directed_filtered(mid_idx, dir2, interned_conn2)
+            {
                 if let Some(ik) = interned_conn2 {
                     if e2_ref.weight().connection_type != ik {
                         continue;
@@ -1594,7 +1610,11 @@ impl<'a> CypherExecutor<'a> {
         let mut total: i64 = 0;
 
         // First hop: last_idx --reverse(e2)--> middle nodes
-        for e2_ref in self.graph.graph.edges_directed(last_idx, dir2) {
+        for e2_ref in self
+            .graph
+            .graph
+            .edges_directed_filtered(last_idx, dir2, interned_conn2)
+        {
             if let Some(ik) = interned_conn2 {
                 if e2_ref.weight().connection_type != ik {
                     continue;
@@ -1617,7 +1637,11 @@ impl<'a> CypherExecutor<'a> {
             }
 
             // Second hop: mid_idx --reverse(e1)--> first nodes (just count)
-            for e1_ref in self.graph.graph.edges_directed(mid_idx, dir1) {
+            for e1_ref in self
+                .graph
+                .graph
+                .edges_directed_filtered(mid_idx, dir1, interned_conn1)
+            {
                 if let Some(ik) = interned_conn1 {
                     if e1_ref.weight().connection_type != ik {
                         continue;

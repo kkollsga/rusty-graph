@@ -3722,6 +3722,27 @@ impl GraphBackend {
         }
     }
 
+    /// Like `edges_directed`, but pre-filters by connection type in the DiskGraph
+    /// path (skipping materialization of non-matching edges). For InMemory graphs,
+    /// falls back to the same iterator with post-filtering by callers.
+    #[inline]
+    pub fn edges_directed_filtered(
+        &self,
+        a: NodeIndex,
+        dir: petgraph::Direction,
+        conn_type_filter: Option<crate::graph::schema::InternedKey>,
+    ) -> crate::graph::graph_iterators::GraphEdges<'_> {
+        match self {
+            GraphBackend::InMemory(g) => {
+                // InMemory: no pre-filter, callers still post-filter
+                crate::graph::graph_iterators::GraphEdges::InMemory(g.edges_directed(a, dir))
+            }
+            GraphBackend::Disk(dg) => crate::graph::graph_iterators::GraphEdges::Disk(
+                dg.edges_directed_filtered_iter(a, dir, conn_type_filter.map(|k| k.as_u64())),
+            ),
+        }
+    }
+
     #[inline]
     pub fn edges(&self, a: NodeIndex) -> crate::graph::graph_iterators::GraphEdges<'_> {
         match self {

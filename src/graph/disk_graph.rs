@@ -2,7 +2,7 @@
 //
 // Disk-backed graph storage using CSR (Compressed Sparse Row) format.
 // Nodes are stored in memory (~40 bytes each in Columnar mode).
-// Edges are stored in mmap'd CSR arrays (16 bytes per edge per direction).
+// Edges are stored in mmap'd CSR arrays (8 bytes per edge per direction).
 // Edge properties are stored sparsely (only for edges that have them).
 //
 // Memory budget: ~10% of equivalent petgraph InMemory graph.
@@ -22,34 +22,31 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 // ============================================================================
-// CSR edge record — 16 bytes, stored in mmap'd arrays
+// CSR edge record — 8 bytes, stored in mmap'd arrays
 // ============================================================================
 
 /// A single edge record in the CSR adjacency list.
 /// `peer` is the target (in out_edges) or source (in in_edges).
-/// `conn_type` is inlined for hot-path filtering without materializing EdgeData.
+/// Connection type is stored only in `EdgeEndpoints` (not duplicated here).
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CsrEdge {
     pub peer: u32,
     pub edge_idx: u32,
-    pub conn_type: u64,
 }
 
 // SAFETY: CsrEdge is repr(C), Copy, Default, and contains only fixed-size integers.
-// No padding issues on any platform since fields are naturally aligned (4+4+8=16).
+// No padding issues on any platform since fields are naturally aligned (4+4=8).
 
 /// [DEV] Entry for external merge sort. Carries all fields needed for CsrEdge
 /// output plus the sort key, so the merge never needs to seek back to pending_mmap.
-/// 24 bytes (8-byte aligned due to conn_type u64).
+/// 12 bytes.
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 struct MergeSortEntry {
-    key: u32,       // sort key (source or target node index)
-    peer: u32,      // the other endpoint
-    orig_idx: u32,  // original edge index (for CsrEdge.edge_idx)
-    _pad: u32,      // alignment padding
-    conn_type: u64, // connection type
+    key: u32,      // sort key (source or target node index)
+    peer: u32,     // the other endpoint
+    orig_idx: u32, // original edge index (for CsrEdge.edge_idx)
 }
 
 /// Edge endpoint metadata — stored in a dense array indexed by edge_idx.
@@ -288,7 +285,6 @@ impl DiskGraph {
             let csr_out = CsrEdge {
                 peer: t as u32,
                 edge_idx,
-                conn_type: ct.as_u64(),
             };
             let out_pos = out_offsets.get(s) + out_cursors[s];
             out_edges.set(out_pos as usize, csr_out);
@@ -297,7 +293,6 @@ impl DiskGraph {
             let csr_in = CsrEdge {
                 peer: s as u32,
                 edge_idx,
-                conn_type: ct.as_u64(),
             };
             let in_pos = in_offsets.get(t) + in_cursors[t];
             in_edges.set(in_pos as usize, csr_in);
@@ -577,12 +572,9 @@ impl DiskGraph {
     // Edge methods
     // ====================================================================
 
-    /// Materialize an EdgeData into the arena and return a reference to it.
-    /// `conn_type` is passed by the caller (from CsrEdge.conn_type) since
-    /// EdgeEndpoints no longer stores connection_type.
-    #[inline]
     /// Materialize an EdgeData into the arena. Reads conn_type from EdgeEndpoints
     /// (O(1) lookup) and properties from edge_properties HashMap.
+    #[inline]
     pub(crate) fn materialize_edge(&self, edge_idx: u32) -> &EdgeData {
         let arena = unsafe { &mut *self.edge_arena.get() };
         let idx = arena.len();
@@ -619,6 +611,15 @@ impl DiskGraph {
     }
 
     pub fn edges_directed_iter(&self, a: NodeIndex, dir: Direction) -> DiskEdges<'_> {
+        self.edges_directed_filtered_iter(a, dir, None)
+    }
+
+    pub fn edges_directed_filtered_iter(
+        &self,
+        a: NodeIndex,
+        dir: Direction,
+        conn_type_filter: Option<u64>,
+    ) -> DiskEdges<'_> {
         self.ensure_csr();
         let node = a.index();
         let (offsets, edges) = match dir {
@@ -633,7 +634,12 @@ impl DiskGraph {
         let start = offsets.get(node) as usize;
         let end = offsets.get(node + 1) as usize;
 
-        DiskEdges::new(self, dir, a, edges, start, end, None)
+        let iter = DiskEdges::new(self, dir, a, edges, start, end, None);
+        if let Some(ct) = conn_type_filter {
+            iter.with_conn_type_filter(ct)
+        } else {
+            iter
+        }
     }
 
     pub fn edge_references_iter(&self) -> DiskEdgeReferences<'_> {
@@ -661,7 +667,6 @@ impl DiskGraph {
         if ep.source == TOMBSTONE_EDGE {
             return None;
         }
-        // Find conn_type from the source node's CSR outgoing edges
 
         Some(self.materialize_edge(ei as u32))
     }
@@ -1031,14 +1036,12 @@ impl DiskGraph {
                 let step = std::time::Instant::now();
                 let mut entries: Vec<MergeSortEntry> = Vec::with_capacity(edge_count);
                 for i in 0..edge_count {
-                    let (src, tgt, ct) = pending.get(i);
+                    let (src, tgt, _ct) = pending.get(i);
                     let (key, peer) = if by_source { (src, tgt) } else { (tgt, src) };
                     entries.push(MergeSortEntry {
                         key,
                         peer,
                         orig_idx: i as u32,
-                        _pad: 0,
-                        conn_type: ct,
                     });
                 }
                 entries.sort_unstable_by_key(|e| e.key);
@@ -1050,7 +1053,6 @@ impl DiskGraph {
                     output.push(CsrEdge {
                         peer: entry.peer,
                         edge_idx: entry.orig_idx,
-                        conn_type: entry.conn_type,
                     });
                 }
                 drop(entries);
@@ -1077,14 +1079,12 @@ impl DiskGraph {
                 // Load chunk from pending_mmap (sequential read)
                 let mut chunk: Vec<MergeSortEntry> = Vec::with_capacity(len);
                 for i in start..end {
-                    let (src, tgt, ct) = pending.get(i);
+                    let (src, tgt, _ct) = pending.get(i);
                     let (key, peer) = if by_source { (src, tgt) } else { (tgt, src) };
                     chunk.push(MergeSortEntry {
                         key,
                         peer,
                         orig_idx: i as u32,
-                        _pad: 0,
-                        conn_type: ct,
                     });
                 }
 
@@ -1134,7 +1134,6 @@ impl DiskGraph {
                 output.push(CsrEdge {
                     peer: entry.peer,
                     edge_idx: entry.orig_idx,
-                    conn_type: entry.conn_type,
                 });
             }
 
@@ -1295,31 +1294,30 @@ impl DiskGraph {
         let num_chunks = node_bound.div_ceil(chunk_size);
         let mut out_cursor: Vec<u64> = (0..node_bound).map(|i| out_offsets.get(i)).collect();
 
-        // Buffer: per-chunk Vec of (edge_idx, src, tgt, ct)
-        let mut chunk_bufs: Vec<Vec<(u32, u32, u32, u64)>> =
+        // Buffer: per-chunk Vec of (edge_idx, src, tgt)
+        let mut chunk_bufs: Vec<Vec<(u32, u32, u32)>> =
             (0..num_chunks).map(|_| Vec::new()).collect();
         let mut buf_bytes: usize = 0;
         let flush_threshold: usize = 512 * 1024 * 1024; // 512 MB
 
         for edge_idx in 0..pending.len() {
-            let (src, tgt, ct) = pending.get(edge_idx);
+            let (src, tgt, _ct) = pending.get(edge_idx);
             let s = src as usize;
             if s < node_bound {
                 let ci = s / chunk_size;
-                chunk_bufs[ci].push((edge_idx as u32, src, tgt, ct));
-                buf_bytes += 20;
+                chunk_bufs[ci].push((edge_idx as u32, src, tgt));
+                buf_bytes += 12;
             }
             // Flush all chunks when buffer exceeds threshold
             if buf_bytes >= flush_threshold {
                 for buf in chunk_bufs.iter_mut() {
-                    for &(eidx, src2, tgt2, ct2) in buf.iter() {
+                    for &(eidx, src2, tgt2) in buf.iter() {
                         let pos = out_cursor[src2 as usize] as usize;
                         out_edges.set(
                             pos,
                             CsrEdge {
                                 peer: tgt2,
                                 edge_idx: eidx,
-                                conn_type: ct2,
                             },
                         );
                         out_cursor[src2 as usize] += 1;
@@ -1331,14 +1329,13 @@ impl DiskGraph {
         }
         // Flush remaining
         for buf in chunk_bufs.iter_mut() {
-            for &(eidx, src2, tgt2, ct2) in buf.iter() {
+            for &(eidx, src2, tgt2) in buf.iter() {
                 let pos = out_cursor[src2 as usize] as usize;
                 out_edges.set(
                     pos,
                     CsrEdge {
                         peer: tgt2,
                         edge_idx: eidx,
-                        conn_type: ct2,
                     },
                 );
                 out_cursor[src2 as usize] += 1;
@@ -1374,28 +1371,27 @@ impl DiskGraph {
         }
         let mut in_cursor: Vec<u64> = (0..node_bound).map(|i| in_offsets.get(i)).collect();
 
-        let mut chunk_bufs: Vec<Vec<(u32, u32, u32, u64)>> =
+        let mut chunk_bufs: Vec<Vec<(u32, u32, u32)>> =
             (0..num_chunks).map(|_| Vec::new()).collect();
         let mut buf_bytes: usize = 0;
 
         for edge_idx in 0..pending.len() {
-            let (src, tgt, ct) = pending.get(edge_idx);
+            let (src, tgt, _ct) = pending.get(edge_idx);
             let t = tgt as usize;
             if t < node_bound {
                 let ci = t / chunk_size;
-                chunk_bufs[ci].push((edge_idx as u32, src, tgt, ct));
-                buf_bytes += 20;
+                chunk_bufs[ci].push((edge_idx as u32, src, tgt));
+                buf_bytes += 12;
             }
             if buf_bytes >= flush_threshold {
                 for buf in chunk_bufs.iter_mut() {
-                    for &(eidx, src2, tgt2, ct2) in buf.iter() {
+                    for &(eidx, src2, tgt2) in buf.iter() {
                         let pos = in_cursor[tgt2 as usize] as usize;
                         in_edges.set(
                             pos,
                             CsrEdge {
                                 peer: src2,
                                 edge_idx: eidx,
-                                conn_type: ct2,
                             },
                         );
                         in_cursor[tgt2 as usize] += 1;
@@ -1406,14 +1402,13 @@ impl DiskGraph {
             }
         }
         for buf in chunk_bufs.iter_mut() {
-            for &(eidx, src2, tgt2, ct2) in buf.iter() {
+            for &(eidx, src2, tgt2) in buf.iter() {
                 let pos = in_cursor[tgt2 as usize] as usize;
                 in_edges.set(
                     pos,
                     CsrEdge {
                         peer: src2,
                         edge_idx: eidx,
-                        conn_type: ct2,
                     },
                 );
                 in_cursor[tgt2 as usize] += 1;
@@ -1465,31 +1460,6 @@ impl DiskGraph {
     // ====================================================================
     // Internal helpers
     // ====================================================================
-
-    /// Find the connection type for an edge by scanning the source node's CSR range.
-    /// Returns 0 if not found (edge may be in overflow or deleted).
-    pub(crate) fn find_conn_type_for_edge(&self, source_node: usize, edge_idx: u32) -> u64 {
-        // Search CSR outgoing edges from source_node
-        if source_node < self.out_offsets.len().saturating_sub(1) {
-            let start = self.out_offsets.get(source_node) as usize;
-            let end = self.out_offsets.get(source_node + 1) as usize;
-            for i in start..end {
-                let e = self.out_edges.get(i);
-                if e.edge_idx == edge_idx {
-                    return e.conn_type;
-                }
-            }
-        }
-        // Search overflow
-        if let Some(list) = self.overflow_out.get(&(source_node as u32)) {
-            for e in list {
-                if e.edge_idx == edge_idx {
-                    return e.conn_type;
-                }
-            }
-        }
-        0 // not found
-    }
 
     fn tombstone_edges_for_node(&mut self, node: usize) {
         // Tombstone outgoing CSR edges

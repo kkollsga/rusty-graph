@@ -1605,12 +1605,18 @@ impl<'a> PatternExecutor<'a> {
         };
 
         for &direction in directions {
-            let edges = self.graph.graph.edges_directed(source, direction);
+            // Pre-filter by single connection type in DiskGraph (skips materialization)
+            let edges = self
+                .graph
+                .graph
+                .edges_directed_filtered(source, direction, conn_key);
 
             for edge in edges {
                 let edge_data = edge.weight();
 
                 // Check connection type if specified (u64 == u64)
+                // For single conn_key, DiskGraph already pre-filtered; this is a no-op.
+                // For multi-type conn_keys, post-filter is still needed.
                 if let Some(ref keys) = conn_keys {
                     if !keys.contains(&edge_data.connection_type) {
                         continue;
@@ -1778,7 +1784,10 @@ impl<'a> PatternExecutor<'a> {
             }
 
             for &direction in directions {
-                let edges = self.graph.graph.edges_directed(current, direction);
+                let edges = self
+                    .graph
+                    .graph
+                    .edges_directed_filtered(current, direction, conn_key);
 
                 for edge in edges {
                     let edge_data = edge.weight();
@@ -1966,7 +1975,10 @@ impl<'a> PatternExecutor<'a> {
             let mut valid_targets: Vec<(NodeIndex, InternedKey)> = Vec::new();
 
             for &direction in directions {
-                let edges = self.graph.graph.edges_directed(current, direction);
+                let edges = self
+                    .graph
+                    .graph
+                    .edges_directed_filtered(current, direction, conn_key);
 
                 for edge in edges {
                     let edge_data = edge.weight();

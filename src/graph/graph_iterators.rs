@@ -169,6 +169,8 @@ pub enum GraphEdges<'a> {
 }
 
 /// Iterates CSR edges for a specific node, materializing EdgeData on the fly.
+/// When `conn_type_filter` is set, edges with non-matching connection types
+/// are skipped before materialization (avoids arena alloc + property lookup).
 pub struct DiskEdges<'a> {
     graph: &'a DiskGraph,
     direction: Direction,
@@ -179,6 +181,8 @@ pub struct DiskEdges<'a> {
     // Overflow edges (appended after CSR construction)
     overflow: Option<&'a [CsrEdge]>,
     overflow_pos: usize,
+    // Optional connection type pre-filter (u64 for O(1) comparison)
+    conn_type_filter: Option<u64>,
 }
 
 impl<'a> DiskEdges<'a> {
@@ -204,6 +208,7 @@ impl<'a> DiskEdges<'a> {
             csr_pos: 0,
             overflow: overflow.map(|v| v.as_slice()),
             overflow_pos: 0,
+            conn_type_filter: None,
         }
     }
 
@@ -216,7 +221,15 @@ impl<'a> DiskEdges<'a> {
             csr_pos: 0,
             overflow: None,
             overflow_pos: 0,
+            conn_type_filter: None,
         }
+    }
+
+    /// Set a connection type pre-filter. Edges whose connection type doesn't
+    /// match are skipped before materialization.
+    pub fn with_conn_type_filter(mut self, ct: u64) -> Self {
+        self.conn_type_filter = Some(ct);
+        self
     }
 
     #[inline]
@@ -239,6 +252,18 @@ impl<'a> Iterator for DiskEdges<'a> {
             let e = self.csr_edges[self.csr_pos];
             self.csr_pos += 1;
             if e.edge_idx != TOMBSTONE_EDGE {
+                // Pre-filter by connection type before materializing
+                if let Some(ct) = self.conn_type_filter {
+                    if self
+                        .graph
+                        .edge_endpoints
+                        .get(e.edge_idx as usize)
+                        .connection_type
+                        != ct
+                    {
+                        continue;
+                    }
+                }
                 return Some(self.make_edge_ref(&e));
             }
         }
@@ -248,6 +273,17 @@ impl<'a> Iterator for DiskEdges<'a> {
                 let e = &overflow[self.overflow_pos];
                 self.overflow_pos += 1;
                 if e.edge_idx != TOMBSTONE_EDGE {
+                    if let Some(ct) = self.conn_type_filter {
+                        if self
+                            .graph
+                            .edge_endpoints
+                            .get(e.edge_idx as usize)
+                            .connection_type
+                            != ct
+                        {
+                            continue;
+                        }
+                    }
                     return Some(self.make_edge_ref(e));
                 }
             }
