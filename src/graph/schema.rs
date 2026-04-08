@@ -803,7 +803,7 @@ pub struct TemporalConfig {
 
 /// Per-type ID index. Uses compact u32 keys when all IDs are UniqueId,
 /// falling back to general Value keys otherwise.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum TypeIdIndex {
     /// All IDs are UniqueId(u32) — compact, ~8 bytes per entry.
     Integer(HashMap<u32, NodeIndex>),

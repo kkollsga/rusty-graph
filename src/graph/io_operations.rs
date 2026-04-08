@@ -537,12 +537,24 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
     // Sync column stores to DiskGraph
     graph.sync_disk_column_stores();
 
-    // Build id_indices from column stores (no node materialization, no arena).
-    // Enables O(1) lookup for WHERE id(n) = X queries.
+    // Load id_indices from disk if available, otherwise rebuild from column stores.
     if matches!(graph.graph, GraphBackend::Disk(_)) {
-        let type_names: Vec<String> = graph.type_indices.keys().cloned().collect();
-        for type_name in &type_names {
-            graph.build_id_index_from_columns(type_name);
+        let id_indices_path = dir.join("id_indices.bin.zst");
+        if id_indices_path.exists() {
+            if let Ok(compressed) = std::fs::read(&id_indices_path) {
+                if let Ok(bytes) = zstd::decode_all(compressed.as_slice()) {
+                    if let Ok(indices) = bincode::deserialize(&bytes) {
+                        graph.id_indices = indices;
+                    }
+                }
+            }
+        }
+        // Fallback: rebuild from column stores if file missing or corrupt
+        if graph.id_indices.is_empty() {
+            let type_names: Vec<String> = graph.type_indices.keys().cloned().collect();
+            for type_name in &type_names {
+                graph.build_id_index_from_columns(type_name);
+            }
         }
     }
 

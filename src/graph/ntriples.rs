@@ -907,6 +907,15 @@ pub fn load_ntriples(
                 let _ = std::fs::write(data_dir.join("metadata.json"), json);
             }
 
+            // Save id_indices (bincode + zstd) so load() doesn't rebuild them
+            if !graph.id_indices.is_empty() {
+                if let Ok(bytes) = bincode::serialize(&graph.id_indices) {
+                    if let Ok(compressed) = zstd::encode_all(bytes.as_slice(), 3) {
+                        let _ = std::fs::write(data_dir.join("id_indices.bin.zst"), compressed);
+                    }
+                }
+            }
+
             if config.verbose {
                 eprintln!("  Saved interner + metadata");
             }
