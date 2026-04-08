@@ -916,13 +916,26 @@ impl<'a> PatternExecutor<'a> {
             }
         };
 
-        // Find all nodes matching the first pattern
+        // Find all nodes matching the first pattern.
+        // For multi-hop patterns with max_matches, cap the source candidates to avoid
+        // O(N) allocation when only a small number of results are needed (e.g. LIMIT 10
+        // on an 11M-node type). The expansion loop enforces the exact max_matches.
+        let has_edges = pattern.elements.len() > 1;
+        let source_cap = if has_edges {
+            // Multi-hop with LIMIT: cap sources to avoid O(N) allocation + PatternMatch
+            // construction for millions of nodes. The expansion loop enforces exact
+            // max_matches via early-exit. Cap is generous to avoid missing results
+            // when matches are sparse.
+            self.max_matches
+                .map(|m| m.saturating_mul(10_000).max(100_000))
+        } else {
+            // Single-node pattern: exact truncation
+            self.max_matches
+        };
         let mut initial_nodes = self.find_matching_nodes(first_node)?;
-
-        // Apply max_matches limit to initial nodes if this is a single-node pattern
-        if pattern.elements.len() == 1 {
-            if let Some(max) = self.max_matches {
-                initial_nodes.truncate(max);
+        if let Some(cap) = source_cap {
+            if initial_nodes.len() > cap {
+                initial_nodes.truncate(cap);
             }
         }
 
@@ -990,16 +1003,20 @@ impl<'a> PatternExecutor<'a> {
                     .par_iter()
                     .zip(current_indices.par_iter())
                     .flat_map(|(current_match, &source_idx)| {
-                        let expansions =
-                            match self.expand_from_node(source_idx, edge_pattern, node_pattern) {
-                                Ok(exp) => exp,
-                                Err(e) => {
-                                    if !had_error.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                                        *first_error.lock().unwrap() = Some(e);
-                                    }
-                                    return Vec::new();
+                        let expansions = match self.expand_from_node(
+                            source_idx,
+                            edge_pattern,
+                            node_pattern,
+                            None,
+                        ) {
+                            Ok(exp) => exp,
+                            Err(e) => {
+                                if !had_error.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                    *first_error.lock().unwrap() = Some(e);
                                 }
-                            };
+                                return Vec::new();
+                            }
+                        };
                         expansions
                             .into_iter()
                             .filter_map(|(target_idx, edge_binding)| {
@@ -1095,8 +1112,9 @@ impl<'a> PatternExecutor<'a> {
                     if hop_limit.is_some_and(|max| new_matches_seq.len() >= max) {
                         break;
                     }
+                    let remaining = hop_limit.map(|max| max.saturating_sub(new_matches_seq.len()));
                     let expansions =
-                        self.expand_from_node(source_idx, edge_pattern, node_pattern)?;
+                        self.expand_from_node(source_idx, edge_pattern, node_pattern, remaining)?;
                     for (target_idx, edge_binding) in expansions {
                         expand_count += 1;
                         if expand_count.is_multiple_of(1024) {
@@ -1248,7 +1266,7 @@ impl<'a> PatternExecutor<'a> {
                     return Ok(indexed);
                 }
             }
-            // Use type index — iterate by reference to avoid cloning the Vec
+            // Use type index
             let type_nodes = match self.graph.type_indices.get(node_type) {
                 Some(indices) => indices.as_slice(),
                 None => return Ok(vec![]),
@@ -1262,17 +1280,30 @@ impl<'a> PatternExecutor<'a> {
             } else {
                 Ok(type_nodes.to_vec())
             }
-        } else {
-            // No type specified - check all nodes
-            let all_nodes: Vec<NodeIndex> = self.graph.graph.node_indices().collect();
-            if let Some(ref props) = pattern.properties {
-                Ok(all_nodes
-                    .into_iter()
-                    .filter(|&idx| self.node_matches_properties(idx, props))
-                    .collect())
-            } else {
-                Ok(all_nodes)
+        } else if let Some(ref props) = pattern.properties {
+            // Fast path: untyped node with {id: X} — cross-type id lookup.
+            // Tries lookup_by_id_readonly on each type. When id_indices are built,
+            // each lookup is O(1). Total: O(types) which is fast even for 132K types.
+            if let Some(PropertyMatcher::Equals(ref id_val)) = props.get("id") {
+                for node_type in self.graph.type_indices.keys() {
+                    if let Some(idx) = self.graph.lookup_by_id_readonly(node_type, id_val) {
+                        if props.len() == 1 || self.node_matches_properties(idx, props) {
+                            return Ok(vec![idx]);
+                        }
+                    }
+                }
+                return Ok(vec![]);
             }
+            // No id property — scan all nodes with property filter.
+            Ok(self
+                .graph
+                .graph
+                .node_indices()
+                .filter(|&idx| self.node_matches_properties(idx, props))
+                .collect())
+        } else {
+            // No type, no properties — all nodes
+            Ok(self.graph.graph.node_indices().collect())
         }
     }
 
@@ -1563,6 +1594,7 @@ impl<'a> PatternExecutor<'a> {
         source: NodeIndex,
         edge_pattern: &EdgePattern,
         node_pattern: &NodePattern,
+        max_results: Option<usize>,
     ) -> Result<Vec<(NodeIndex, MatchBinding)>, String> {
         // Early exit: if the specified connection type doesn't exist in the graph, skip all iteration
         if let Some(ref types) = edge_pattern.connection_types {
@@ -1647,10 +1679,11 @@ impl<'a> PatternExecutor<'a> {
                 };
 
                 // Check if target matches node pattern (skip when edge type guarantees it)
+                // Uses O(1) node_type_of() to avoid full materialization
                 if !edge_pattern.skip_target_type_check {
                     if let Some(ref node_type) = node_pattern.node_type {
-                        if let Some(node) = self.graph.graph.node_weight(target) {
-                            if node.node_type != InternedKey::from_str(node_type) {
+                        if let Some(nt) = self.graph.graph.node_type_of(target) {
+                            if nt != InternedKey::from_str(node_type) {
                                 continue;
                             }
                         } else {
@@ -1688,6 +1721,9 @@ impl<'a> PatternExecutor<'a> {
                 };
 
                 results.push((target, edge_binding));
+                if max_results.is_some_and(|max| results.len() >= max) {
+                    return Ok(results);
+                }
             }
         }
 
@@ -1744,8 +1780,8 @@ impl<'a> PatternExecutor<'a> {
             let node_matches = if let Some(ref node_type) = node_pattern.node_type {
                 self.graph
                     .graph
-                    .node_weight(source)
-                    .map(|n| n.node_type == InternedKey::from_str(node_type))
+                    .node_type_of(source)
+                    .map(|nt| nt == InternedKey::from_str(node_type))
                     .unwrap_or(false)
             } else {
                 true
@@ -1837,8 +1873,8 @@ impl<'a> PatternExecutor<'a> {
                         } else if let Some(ref node_type) = node_pattern.node_type {
                             self.graph
                                 .graph
-                                .node_weight(target)
-                                .map(|n| n.node_type == InternedKey::from_str(node_type))
+                                .node_type_of(target)
+                                .map(|nt| nt == InternedKey::from_str(node_type))
                                 .unwrap_or(false)
                         } else {
                             true
@@ -1930,11 +1966,11 @@ impl<'a> PatternExecutor<'a> {
         // (matching "zero hops" means the source IS the target).
         if min_hops == 0 {
             let node_matches = if let Some(ref node_type) = node_pattern.node_type {
-                if let Some(node) = self.graph.graph.node_weight(source) {
-                    node.node_type == InternedKey::from_str(node_type)
-                } else {
-                    false
-                }
+                self.graph
+                    .graph
+                    .node_type_of(source)
+                    .map(|nt| nt == InternedKey::from_str(node_type))
+                    .unwrap_or(false)
             } else {
                 true
             };
@@ -2038,11 +2074,11 @@ impl<'a> PatternExecutor<'a> {
                     let node_matches = if edge_pattern.skip_target_type_check {
                         true
                     } else if let Some(ref node_type) = node_pattern.node_type {
-                        if let Some(node) = self.graph.graph.node_weight(target) {
-                            node.node_type == InternedKey::from_str(node_type)
-                        } else {
-                            false
-                        }
+                        self.graph
+                            .graph
+                            .node_type_of(target)
+                            .map(|nt| nt == InternedKey::from_str(node_type))
+                            .unwrap_or(false)
                     } else {
                         true
                     };

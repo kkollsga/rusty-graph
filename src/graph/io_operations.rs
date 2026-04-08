@@ -537,6 +537,15 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
     // Sync column stores to DiskGraph
     graph.sync_disk_column_stores();
 
+    // Build id_indices from column stores (no node materialization, no arena).
+    // Enables O(1) lookup for WHERE id(n) = X queries.
+    if matches!(graph.graph, GraphBackend::Disk(_)) {
+        let type_names: Vec<String> = graph.type_indices.keys().cloned().collect();
+        for type_name in &type_names {
+            graph.build_id_index_from_columns(type_name);
+        }
+    }
+
     Ok(KnowledgeGraph {
         inner: Arc::new(graph),
         selection: CowSelection::new(),

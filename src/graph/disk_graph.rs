@@ -350,6 +350,21 @@ impl DiskGraph {
         self.column_stores = stores;
     }
 
+    /// O(1) node type lookup from mmap'd node_slots — no materialization.
+    /// Returns None if the node is dead or out of bounds.
+    #[inline]
+    pub fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey> {
+        let i = idx.index();
+        if i >= self.node_slots.len() {
+            return None;
+        }
+        let slot = self.node_slots.get(i);
+        if !slot.is_alive() {
+            return None;
+        }
+        Some(InternedKey::from_u64(slot.node_type))
+    }
+
     /// Get a DiskNodeSlot by index (for rebuild_type_indices without arena).
     #[inline]
     pub fn node_slot(&self, i: usize) -> DiskNodeSlot {
@@ -580,11 +595,15 @@ impl DiskGraph {
         let idx = arena.len();
         let ep = self.edge_endpoints.get(edge_idx as usize);
         let ct = InternedKey::from_u64(ep.connection_type);
-        let props = self
-            .edge_properties
-            .get(&edge_idx)
-            .cloned()
-            .unwrap_or_default();
+        // Fast path: skip HashMap lookup when no edges have properties (common)
+        let props = if self.edge_properties.is_empty() {
+            Vec::new()
+        } else {
+            self.edge_properties
+                .get(&edge_idx)
+                .cloned()
+                .unwrap_or_default()
+        };
         arena.push(EdgeData {
             connection_type: ct,
             properties: props,
@@ -608,6 +627,16 @@ impl DiskGraph {
     fn clear_arenas(&mut self) {
         self.node_arena.get_mut().clear();
         self.edge_arena.get_mut().clear();
+    }
+
+    /// Reset materialization arenas between queries to prevent unbounded growth.
+    /// SAFETY: Only call when no references from prior `node_weight()` /
+    /// `materialize_edge()` calls are alive — i.e. between top-level queries.
+    pub fn reset_arenas(&self) {
+        let node_arena = unsafe { &mut *self.node_arena.get() };
+        let edge_arena = unsafe { &mut *self.edge_arena.get() };
+        node_arena.clear();
+        edge_arena.clear();
     }
 
     pub fn edges_directed_iter(&self, a: NodeIndex, dir: Direction) -> DiskEdges<'_> {

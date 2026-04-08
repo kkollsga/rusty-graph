@@ -1645,6 +1645,67 @@ impl DirGraph {
         self.id_indices.insert(node_type.to_string(), index);
     }
 
+    /// Build id_index for a type using column stores directly (no node materialization).
+    /// For DiskGraph, reads ids from mmap'd column stores via row_id from node_slots.
+    /// Much faster and uses no arena memory.
+    pub fn build_id_index_from_columns(&mut self, node_type: &str) {
+        if self.id_indices.contains_key(node_type) {
+            return;
+        }
+        let store = match self.column_stores.get(node_type) {
+            Some(s) => s.clone(),
+            None => {
+                // No column store — fall back to standard build
+                self.build_id_index(node_type);
+                return;
+            }
+        };
+        let node_indices = match self.type_indices.get(node_type) {
+            Some(indices) => indices,
+            None => return,
+        };
+
+        let mut all_unique_id = true;
+        let mut entries: Vec<(Value, NodeIndex)> = Vec::with_capacity(node_indices.len());
+
+        // Read ids directly from column store using row_id from node_slots
+        if let GraphBackend::Disk(ref dg) = self.graph {
+            for &node_idx in node_indices {
+                let slot = dg.node_slot(node_idx.index());
+                if slot.is_alive() {
+                    if let Some(id_val) = store.get_id(slot.row_id) {
+                        if !matches!(id_val, Value::UniqueId(_)) {
+                            all_unique_id = false;
+                        }
+                        entries.push((id_val, node_idx));
+                    }
+                }
+            }
+        } else {
+            // InMemory: fall back to standard build
+            self.build_id_index(node_type);
+            return;
+        }
+
+        let index = if all_unique_id && !entries.is_empty() {
+            let map = entries
+                .into_iter()
+                .filter_map(|(id, idx)| {
+                    if let Value::UniqueId(u) = id {
+                        Some((u, idx))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            TypeIdIndex::Integer(map)
+        } else {
+            TypeIdIndex::General(entries.into_iter().collect())
+        };
+
+        self.id_indices.insert(node_type.to_string(), index);
+    }
+
     /// Look up a node by type and ID value. O(1) after index is built.
     /// Builds the index lazily if not already built.
     /// Handles type normalization: Python int may come as Int64 but be stored as UniqueId.
@@ -1673,9 +1734,9 @@ impl DirGraph {
     /// built yet (e.g., after DELETE invalidates id_indices).
     pub fn lookup_by_id_normalized(&self, node_type: &str, id: &Value) -> Option<NodeIndex> {
         if let Some(type_index) = self.id_indices.get(node_type) {
-            if let Some(idx) = type_index.get(id) {
-                return Some(idx);
-            }
+            // Index exists for this type — trust it (O(1) with normalization).
+            // Don't fall through to linear scan.
+            return type_index.get(id);
         }
 
         // Fallback: linear scan through type_indices when id_index is missing
@@ -1741,8 +1802,21 @@ impl DirGraph {
                 .connection_types
                 .contains(&InternedKey::from_str(connection_type));
         }
-        // Fallback: check metadata
-        self.connection_type_metadata.contains_key(connection_type)
+        // Check metadata
+        if self.connection_type_metadata.contains_key(connection_type) {
+            return true;
+        }
+        // If metadata is empty (e.g. disk graph without full metadata),
+        // check the interner — if the string was interned, it likely exists as
+        // a connection type. This avoids false negatives that would cause
+        // edge-type-filtered queries to return 0 results.
+        if self.connection_type_metadata.is_empty() {
+            return self
+                .interner
+                .try_resolve(InternedKey::from_str(connection_type))
+                .is_some();
+        }
+        false
     }
 
     /// Register a connection type (interned) for O(1) lookups.
@@ -3650,6 +3724,17 @@ impl GraphBackend {
         }
     }
 
+    /// O(1) node type lookup without materializing the full NodeData.
+    /// For DiskGraph, reads directly from mmap'd node_slots (no arena allocation,
+    /// no id/title string copies). For InMemory, reads from the petgraph node.
+    #[inline]
+    pub fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey> {
+        match self {
+            GraphBackend::InMemory(g) => g.node_weight(idx).map(|nd| nd.node_type),
+            GraphBackend::Disk(dg) => dg.node_type_of(idx),
+        }
+    }
+
     #[inline]
     pub fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
         match self {
@@ -3699,6 +3784,18 @@ impl GraphBackend {
         match self {
             GraphBackend::InMemory(g) => g.remove_node(idx),
             GraphBackend::Disk(dg) => dg.remove_node(idx),
+        }
+    }
+}
+
+impl GraphBackend {
+    /// Reset materialization arenas between queries to prevent unbounded memory
+    /// growth. No-op for InMemory graphs. For DiskGraph, frees all NodeData and
+    /// EdgeData allocated during the previous query.
+    #[inline]
+    pub fn reset_arenas(&self) {
+        if let GraphBackend::Disk(dg) = self {
+            dg.reset_arenas();
         }
     }
 }

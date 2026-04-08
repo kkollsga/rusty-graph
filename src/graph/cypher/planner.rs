@@ -700,24 +700,26 @@ fn estimate_node_selectivity(
         None => type_count,
         Some(props) if props.is_empty() => type_count,
         Some(props) => {
+            // {id: X} is always selectivity 1 regardless of type
+            for (prop, matcher) in props {
+                if prop == "id" {
+                    match matcher {
+                        PropertyMatcher::Equals(_) | PropertyMatcher::EqualsParam(_) => return 1,
+                        PropertyMatcher::In(vals) => return vals.len(),
+                        _ => {}
+                    }
+                }
+            }
             // Check if any property has equality on an indexed field
             if let Some(ref nt) = np.node_type {
                 for (prop, matcher) in props {
                     match matcher {
                         PropertyMatcher::Equals(val) => {
-                            if prop == "id" {
-                                return 1;
-                            }
                             let key = (nt.clone(), prop.clone());
                             if graph.property_indices.contains_key(&key) {
                                 if let Some(results) = graph.lookup_by_index(nt, prop, val) {
                                     return results.len().max(1);
                                 }
-                                return 1;
-                            }
-                        }
-                        PropertyMatcher::EqualsParam(_) => {
-                            if prop == "id" {
                                 return 1;
                             }
                         }
@@ -1929,6 +1931,28 @@ fn try_extract_equality(
         if let Some(val) = params.get(name.as_str()) {
             if match_vars.iter().any(|(v, _)| v == variable) {
                 return Some((variable.clone(), property.clone(), val.clone()));
+            }
+        }
+    }
+
+    // id(variable) = literal → treat as variable.id = literal
+    // This enables O(1) lookup via lookup_by_id instead of full scan.
+    if let (Expression::FunctionCall { name, args, .. }, Expression::Literal(val)) = (left, right) {
+        if name == "id" {
+            if let Some(Expression::Variable(var)) = args.first() {
+                if match_vars.iter().any(|(v, _)| v == var) {
+                    return Some((var.clone(), "id".to_string(), val.clone()));
+                }
+            }
+        }
+    }
+    // Commutative: literal = id(variable)
+    if let (Expression::Literal(val), Expression::FunctionCall { name, args, .. }) = (left, right) {
+        if name == "id" {
+            if let Some(Expression::Variable(var)) = args.first() {
+                if match_vars.iter().any(|(v, _)| v == var) {
+                    return Some((var.clone(), "id".to_string(), val.clone()));
+                }
             }
         }
     }

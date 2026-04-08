@@ -282,6 +282,10 @@ impl<'a> CypherExecutor<'a> {
 
     /// Execute a parsed Cypher query (read-only)
     pub fn execute(&self, query: &CypherQuery) -> Result<CypherResult, String> {
+        // Reset DiskGraph materialization arenas to prevent unbounded growth
+        // across queries. No-op for InMemory graphs.
+        self.graph.graph.reset_arenas();
+
         let mut result_set = ResultSet::new();
         let profiling = query.profile;
         let mut profile_stats: Vec<ClauseStats> = Vec::new();
@@ -1292,10 +1296,10 @@ impl<'a> CypherExecutor<'a> {
                 edge_ref.source()
             };
 
-            // Check target node type
+            // Check target node type (O(1) mmap read, no materialization)
             if let Some(ref req_type) = other_node.node_type {
-                if let Some(nd) = self.graph.graph.node_weight(other_idx) {
-                    if nd.get_node_type_ref(&self.graph.interner) != req_type {
+                if let Some(nt) = self.graph.graph.node_type_of(other_idx) {
+                    if self.graph.interner.resolve(nt) != req_type {
                         continue;
                     }
                 } else {
@@ -1442,10 +1446,10 @@ impl<'a> CypherExecutor<'a> {
                 edge_ref.source()
             };
 
-            // Check the other node's type
+            // Check the other node's type (O(1) mmap read, no materialization)
             if let Some(ref required_type) = other_type {
-                if let Some(node) = self.graph.graph.node_weight(other_idx) {
-                    if node.node_type != InternedKey::from_str(required_type) {
+                if let Some(nt) = self.graph.graph.node_type_of(other_idx) {
+                    if nt != InternedKey::from_str(required_type) {
                         continue;
                     }
                 } else {
@@ -1519,10 +1523,10 @@ impl<'a> CypherExecutor<'a> {
             } else {
                 e1_ref.source()
             };
-            // Check middle node type
+            // Check middle node type (O(1) mmap read, no materialization)
             if let Some(ref mid_type) = mid_node.node_type {
-                if let Some(nd) = self.graph.graph.node_weight(mid_idx) {
-                    if nd.get_node_type_ref(&self.graph.interner) != mid_type {
+                if let Some(nt) = self.graph.graph.node_type_of(mid_idx) {
+                    if self.graph.interner.resolve(nt) != mid_type {
                         continue;
                     }
                 } else {
@@ -1546,10 +1550,10 @@ impl<'a> CypherExecutor<'a> {
                 } else {
                     e2_ref.source()
                 };
-                // Check last node type
+                // Check last node type (O(1) mmap read, no materialization)
                 if let Some(ref last_type) = last_node.node_type {
-                    if let Some(nd) = self.graph.graph.node_weight(last_idx) {
-                        if nd.get_node_type_ref(&self.graph.interner) != last_type {
+                    if let Some(nt) = self.graph.graph.node_type_of(last_idx) {
+                        if self.graph.interner.resolve(nt) != last_type {
                             continue;
                         }
                     } else {
@@ -1625,10 +1629,10 @@ impl<'a> CypherExecutor<'a> {
             } else {
                 e2_ref.source()
             };
-            // Check middle node type
+            // Check middle node type (O(1) mmap read, no materialization)
             if let Some(ref mid_type) = mid_node.node_type {
-                if let Some(nd) = self.graph.graph.node_weight(mid_idx) {
-                    if nd.get_node_type_ref(&self.graph.interner) != mid_type {
+                if let Some(nt) = self.graph.graph.node_type_of(mid_idx) {
+                    if self.graph.interner.resolve(nt) != mid_type {
                         continue;
                     }
                 } else {
@@ -1652,10 +1656,10 @@ impl<'a> CypherExecutor<'a> {
                 } else {
                     e1_ref.source()
                 };
-                // Check first node type
+                // Check first node type (O(1) mmap read, no materialization)
                 if let Some(ref first_type) = first_node.node_type {
-                    if let Some(nd) = self.graph.graph.node_weight(first_idx) {
-                        if nd.get_node_type_ref(&self.graph.interner) != first_type {
+                    if let Some(nt) = self.graph.graph.node_type_of(first_idx) {
+                        if self.graph.interner.resolve(nt) != first_type {
                             continue;
                         }
                     } else {
@@ -7746,6 +7750,8 @@ pub fn execute_mutable(
     params: HashMap<String, Value>,
     deadline: Option<Instant>,
 ) -> Result<CypherResult, String> {
+    graph.graph.reset_arenas();
+
     let mut result_set = ResultSet::new();
     let mut stats = MutationStats::default();
     let profiling = query.profile;

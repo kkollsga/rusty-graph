@@ -865,6 +865,27 @@ pub fn load_ntriples(
         graph.sync_disk_column_stores();
     }
 
+    // Build id_indices for all types so WHERE id(n) = X is O(1).
+    // Uses column stores directly — no node materialization, no arena growth.
+    if final_mode == StorageMode::Disk {
+        if config.verbose {
+            eprintln!("  Building id indices from column stores...");
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+        }
+        let id_start = Instant::now();
+        let type_names: Vec<String> = graph.type_indices.keys().cloned().collect();
+        for type_name in &type_names {
+            graph.build_id_index_from_columns(type_name);
+        }
+        if config.verbose {
+            eprintln!(
+                "  Built {} id indices ({:.1}s)",
+                type_names.len(),
+                id_start.elapsed().as_secs_f64(),
+            );
+        }
+    }
+
     // Save interner + metadata to disk so load() works.
     if final_mode == StorageMode::Disk {
         if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
@@ -2333,6 +2354,11 @@ fn create_edges_with_qnum_map(
 
     // Skip connection type metadata for disk mode with auto-typing —
     // the O(types²) loop would be 20K² = 400M iterations, catastrophic.
+    // But we DO register the connection type names so has_connection_type() works.
+    for conn_key in &conn_types_seen {
+        let conn_name = graph.interner.resolve(*conn_key).to_string();
+        graph.connection_type_metadata.entry(conn_name).or_default();
+    }
     graph.invalidate_edge_type_counts_cache();
 
     // Clean up qnum_to_idx temp file is handled by caller
