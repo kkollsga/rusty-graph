@@ -916,6 +916,15 @@ pub fn load_ntriples(
                 }
             }
 
+            // Save type_indices (bincode + zstd) so load() doesn't rebuild from node_slots
+            if !graph.type_indices.is_empty() {
+                if let Ok(bytes) = bincode::serialize(&graph.type_indices) {
+                    if let Ok(compressed) = zstd::encode_all(bytes.as_slice(), 3) {
+                        let _ = std::fs::write(data_dir.join("type_indices.bin.zst"), compressed);
+                    }
+                }
+            }
+
             if config.verbose {
                 eprintln!("  Saved interner + metadata");
             }
@@ -2119,6 +2128,12 @@ fn build_columns_direct(
     if !columns_meta.is_empty() {
         if let Ok(json) = serde_json::to_string(&columns_meta) {
             let _ = std::fs::write(&meta_path, json);
+        }
+        // Also save as bincode+zstd for fast loading (~10x faster than JSON parse)
+        if let Ok(bytes) = bincode::serialize(&columns_meta) {
+            if let Ok(compressed) = zstd::encode_all(bytes.as_slice(), 3) {
+                let _ = std::fs::write(data_dir.join("columns_meta.bin.zst"), compressed);
+            }
         }
     }
 

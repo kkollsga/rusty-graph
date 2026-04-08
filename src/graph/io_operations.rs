@@ -429,25 +429,40 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
         dirs.push(temp_dir);
     }
 
-    // Rebuild type indices directly from node_slots (no column stores needed)
+    // Load type_indices from disk, or rebuild from node_slots if file missing
     if let GraphBackend::Disk(ref dg) = graph.graph {
-        let mut new_type_indices: std::collections::HashMap<
-            String,
-            Vec<petgraph::graph::NodeIndex>,
-        > = std::collections::HashMap::new();
-        for i in 0..dg.node_slots.len() {
-            let slot = dg.node_slots.get(i);
-            if slot.is_alive() {
-                let key = crate::graph::schema::InternedKey::from_u64(slot.node_type);
-                if let Some(type_name) = graph.interner.try_resolve(key) {
-                    new_type_indices
-                        .entry(type_name.to_string())
-                        .or_default()
-                        .push(petgraph::graph::NodeIndex::new(i));
+        let ti_path = dir.join("type_indices.bin.zst");
+        let mut loaded = false;
+        if ti_path.exists() {
+            if let Ok(compressed) = std::fs::read(&ti_path) {
+                if let Ok(bytes) = zstd::decode_all(compressed.as_slice()) {
+                    if let Ok(indices) = bincode::deserialize(&bytes) {
+                        graph.type_indices = indices;
+                        loaded = true;
+                    }
                 }
             }
         }
-        graph.type_indices = new_type_indices;
+        if !loaded {
+            // Fallback: rebuild from node_slots scan
+            let mut new_type_indices: std::collections::HashMap<
+                String,
+                Vec<petgraph::graph::NodeIndex>,
+            > = std::collections::HashMap::new();
+            for i in 0..dg.node_slots.len() {
+                let slot = dg.node_slots.get(i);
+                if slot.is_alive() {
+                    let key = crate::graph::schema::InternedKey::from_u64(slot.node_type);
+                    if let Some(type_name) = graph.interner.try_resolve(key) {
+                        new_type_indices
+                            .entry(type_name.to_string())
+                            .or_default()
+                            .push(petgraph::graph::NodeIndex::new(i));
+                    }
+                }
+            }
+            graph.type_indices = new_type_indices;
+        }
     }
 
     // Build type_schemas from node_type_metadata (needed for column loading)
@@ -462,11 +477,12 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
             .insert(node_type.clone(), std::sync::Arc::new(schema));
     }
 
-    // Load column stores — prefer mmap-backed (columns.bin + columns_meta.json)
+    // Load column stores — prefer mmap-backed (columns.bin + columns_meta)
     let mmap_path = dir.join("columns.bin");
-    let meta_path = dir.join("columns_meta.json");
-    if mmap_path.exists() && meta_path.exists() {
-        // New mmap-backed path: open columns.bin, read metadata, create MmapColumnStores
+    let meta_bin_path = dir.join("columns_meta.bin.zst");
+    let meta_json_path = dir.join("columns_meta.json");
+    let has_mmap = mmap_path.exists() && (meta_bin_path.exists() || meta_json_path.exists());
+    if has_mmap {
         use crate::graph::ntriples::ColumnTypeMeta;
         use memmap2::MmapMut;
 
@@ -477,9 +493,15 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
         let mmap = unsafe { MmapMut::map_mut(&file)? };
         let mmap_arc = std::sync::Arc::new(mmap);
 
-        let meta_json = std::fs::read_to_string(&meta_path)?;
-        let type_metas: Vec<ColumnTypeMeta> =
-            serde_json::from_str(&meta_json).map_err(io::Error::other)?;
+        // Prefer bincode (fast) over JSON (slow for 295 MB)
+        let type_metas: Vec<ColumnTypeMeta> = if meta_bin_path.exists() {
+            let compressed = std::fs::read(&meta_bin_path)?;
+            let bytes = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+            bincode::deserialize(&bytes).map_err(io::Error::other)?
+        } else {
+            let meta_json = std::fs::read_to_string(&meta_json_path)?;
+            serde_json::from_str(&meta_json).map_err(io::Error::other)?
+        };
 
         for tm in type_metas {
             let store = tm.to_mmap_store(std::sync::Arc::clone(&mmap_arc));
