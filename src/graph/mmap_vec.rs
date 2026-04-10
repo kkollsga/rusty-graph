@@ -55,6 +55,31 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         MmapOrVec::Heap { data }
     }
 
+    /// Create a file-backed buffer pre-sized to `count` elements.
+    /// The file is created at full size but NO data is written — the OS zero-fills
+    /// mmap pages lazily. Use `set(index, value)` to write individual positions.
+    /// This avoids the O(N) push loop needed to pre-fill with defaults.
+    pub fn mapped_zeroed(path: &Path, count: usize) -> io::Result<Self> {
+        let cap = count.max(64);
+        let byte_len = cap * std::mem::size_of::<T>();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+        file.set_len(byte_len as u64)?;
+        let mmap = unsafe { MmapOptions::new().len(byte_len).map_mut(&file)? };
+        Ok(MmapOrVec::Mapped {
+            mmap,
+            len: cap, // all positions addressable via set()
+            capacity: cap,
+            file,
+            path: path.to_path_buf(),
+            _phantom: std::marker::PhantomData,
+        })
+    }
+
     /// Create a file-backed buffer at the given path.
     /// The file is created/truncated with initial capacity for `initial_cap` elements.
     /// `len` starts at 0 — use `push()` to add elements.

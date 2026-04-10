@@ -373,6 +373,21 @@ impl CypherParser {
     }
 
     /// Extract tokens forming a pattern inside EXISTS { ... }, stopping at RBrace or comma.
+    /// Re-serialize an identifier, adding backticks if it contains spaces or special chars.
+    fn quote_identifier(s: &str) -> String {
+        if s.contains(' ')
+            || s.contains('-')
+            || s.contains('/')
+            || s.contains('.')
+            || s.contains('(')
+            || s.contains(')')
+        {
+            format!("`{}`", s)
+        } else {
+            s.to_string()
+        }
+    }
+
     fn extract_exists_pattern_string(&mut self) -> Result<String, String> {
         // Skip optional MATCH keyword — standard Cypher allows EXISTS { MATCH (pattern) }
         if self.check(&CypherToken::Match) {
@@ -428,7 +443,7 @@ impl CypherParser {
                 CypherToken::Star => parts.push("*".to_string()),
                 CypherToken::DotDot => parts.push("..".to_string()),
                 CypherToken::Dot => parts.push(".".to_string()),
-                CypherToken::Identifier(s) => parts.push(s.clone()),
+                CypherToken::Identifier(s) => parts.push(Self::quote_identifier(s)),
                 CypherToken::StringLit(s) => {
                     // Re-escape quotes so the pattern parser can re-tokenize correctly
                     let escaped = s.replace('\\', "\\\\").replace('\'', "\\'");
@@ -509,7 +524,7 @@ impl CypherParser {
                 CypherToken::DotDot => parts.push("..".to_string()),
                 CypherToken::Dot => parts.push(".".to_string()),
                 CypherToken::Pipe => parts.push("|".to_string()),
-                CypherToken::Identifier(s) => parts.push(s.clone()),
+                CypherToken::Identifier(s) => parts.push(Self::quote_identifier(s)),
                 CypherToken::StringLit(s) => {
                     let escaped = s.replace('\\', "\\\\").replace('\'', "\\'");
                     parts.push(format!("'{}'", escaped));

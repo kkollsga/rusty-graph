@@ -15,9 +15,10 @@
 use crate::graph::column_store::ColumnStore;
 use crate::graph::reporting::OperationReports;
 use crate::graph::schema::{
-    CompositeIndexKey, ConnectionTypeInfo, CowSelection, DirGraph, EmbeddingStore, IndexKey,
-    PropertyStorage, SaveMetadata, SchemaDefinition, SerdeDeserializeGuard, SerdeSerializeGuard,
-    SpatialConfig, StringInterner, StripPropertiesGuard, TemporalConfig,
+    CompositeIndexKey, ConnectionTypeInfo, ConnectivityTriple, CowSelection, DirGraph,
+    EmbeddingStore, IndexKey, PropertyStorage, SaveMetadata, SchemaDefinition,
+    SerdeDeserializeGuard, SerdeSerializeGuard, SpatialConfig, StringInterner,
+    StripPropertiesGuard, TemporalConfig,
 };
 use crate::graph::timeseries::{NodeTimeseries, TimeseriesConfig};
 use crate::graph::{KnowledgeGraph, TemporalContext};
@@ -133,6 +134,14 @@ pub(crate) struct FileMetadata {
     /// v3: compressed size of timeseries section (0 if none).
     #[serde(default)]
     timeseries_compressed_size: u64,
+    /// Cached edge type counts (connection_type → count).
+    /// Persisted from warm cache on save, restored to cache on load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    edge_type_counts: Option<HashMap<String, usize>>,
+    /// Type connectivity triples: (src_type, conn_type, tgt_type, count).
+    /// Pre-computed type-level graph for instant describe() at any scale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    type_connectivity: Option<Vec<ConnectivityTriple>>,
 }
 
 fn default_auto_vacuum_threshold() -> Option<f64> {
@@ -171,6 +180,14 @@ impl FileMetadata {
             column_sections: Vec::new(),
             embeddings_compressed_size: 0,
             timeseries_compressed_size: 0,
+            // Persist edge type counts if cache is warm (no O(E) scan if cold)
+            edge_type_counts: if graph.has_edge_type_counts_cache() {
+                Some(graph.get_edge_type_counts())
+            } else {
+                None
+            },
+            // Persist type connectivity if computed
+            type_connectivity: graph.get_type_connectivity(),
         }
     }
 
@@ -193,6 +210,14 @@ impl FileMetadata {
             format_version: 3,
             library_version: self.library_version,
         };
+        // Restore edge type counts cache if persisted
+        if let Some(counts) = self.edge_type_counts {
+            *graph.edge_type_counts_cache.write().unwrap() = Some(counts);
+        }
+        // Restore type connectivity cache if persisted
+        if let Some(triples) = self.type_connectivity {
+            *graph.type_connectivity_cache.write().unwrap() = Some(triples);
+        }
     }
 }
 

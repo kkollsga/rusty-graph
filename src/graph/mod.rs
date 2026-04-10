@@ -4913,17 +4913,19 @@ impl KnowledgeGraph {
 
     /// Return an XML description of this graph for AI agents (progressive disclosure).
     ///
-    /// Four independent axes:
+    /// Five independent axes:
     /// - `types` → Node type detail (None=inventory, list=focused)
+    /// - `type_search` → Search types by name with neighborhood fan-out
     /// - `connections` → Connection type docs (True=overview, list=deep-dive)
     /// - `cypher` → Cypher language reference (True=compact, list=detailed topics)
     /// - `fluent` → Fluent API reference (True=compact, list=detailed topics)
     ///
-    /// When `connections`, `cypher`, or `fluent` is set, only those tracks are returned.
-    #[pyo3(signature = (types=None, connections=None, cypher=None, fluent=None))]
+    /// When `type_search`, `connections`, `cypher`, or `fluent` is set, only those tracks are returned.
+    #[pyo3(signature = (types=None, type_search=None, connections=None, cypher=None, fluent=None))]
     fn describe(
         &self,
         types: Option<Vec<String>>,
+        type_search: Option<String>,
         connections: Option<&Bound<'_, PyAny>>,
         cypher: Option<&Bound<'_, PyAny>>,
         fluent: Option<&Bound<'_, PyAny>>,
@@ -4937,6 +4939,7 @@ impl KnowledgeGraph {
             &conn_detail,
             &cypher_detail,
             &fluent_detail,
+            type_search.as_deref(),
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }
@@ -5011,6 +5014,44 @@ impl KnowledgeGraph {
     // ================================================================
     // Schema Introspection
     // ================================================================
+
+    /// Force recomputation of internal caches (edge type counts,
+    /// type connectivity, connection endpoint types).
+    ///
+    /// Performs a single O(E) pass to compute type connectivity triples,
+    /// then derives edge type counts and connection endpoint types from
+    /// the triples (no additional edge scans).
+    ///
+    /// Call once after bulk mutations to warm the cache before ``save()``
+    /// or ``describe()``. The caches are persisted by ``save()`` and
+    /// restored by ``load()``, so this only needs to be called once
+    /// after building or mutating a graph.
+    fn rebuild_caches(&mut self) {
+        // Single O(E) pass: compute type connectivity triples
+        // Uses edge_endpoint_keys() — mmap reads only, no heap allocation per edge.
+        let triples = introspection::compute_type_connectivity(&self.inner);
+
+        // Derive edge type counts + endpoint types from triples (no extra scan)
+        let derived = introspection::derive_edge_counts_from_triples(&triples);
+
+        // Populate edge type counts cache
+        *self.inner.edge_type_counts_cache.write().unwrap() = Some(derived.counts);
+
+        // Backfill connection_type_metadata with discovered endpoint types
+        let graph = get_graph_mut(&mut self.inner);
+        for (conn_type, (src_types, tgt_types)) in derived.endpoints {
+            let info = graph.connection_type_metadata.entry(conn_type).or_default();
+            if info.source_types.is_empty() {
+                info.source_types = src_types;
+            }
+            if info.target_types.is_empty() {
+                info.target_types = tgt_types;
+            }
+        }
+
+        // Store type connectivity triples
+        self.inner.set_type_connectivity(triples);
+    }
 
     /// Return a full schema overview of the graph.
     fn schema(&self) -> PyResult<Py<PyAny>> {

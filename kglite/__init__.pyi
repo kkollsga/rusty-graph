@@ -1690,20 +1690,31 @@ class KnowledgeGraph:
     def describe(
         self,
         types: list[str] | None = None,
+        type_search: str | None = None,
         connections: bool | list[str] | None = None,
         cypher: bool | list[str] | None = None,
         fluent: bool | list[str] | None = None,
     ) -> str:
         """Return an XML description of this graph for AI agents.
 
-        Four independent axes for progressive disclosure:
+        Five independent axes for progressive disclosure:
 
         **Node types** (``types`` parameter):
 
         - ``describe()`` — Inventory overview with compact type descriptors
-          and connections with edge property names.
+          and connections with edge property names. Adapts to graph scale:
+          small graphs get full inline detail, extreme-scale graphs get
+          a statistical summary with search hints.
         - ``describe(types=['Field', 'Well'])`` — Focused detail for
           specific types with properties, connections, and samples.
+
+        **Type search** (``type_search`` parameter):
+
+        - ``describe(type_search='software')`` — Find types by name
+          (case-insensitive substring match) with neighborhood fan-out.
+          Returns matching types with their connections, plus one layer
+          of connected types. Ideal for exploring large/extreme-scale
+          graphs where listing all types is impractical.
 
         **Connections** (``connections`` parameter):
 
@@ -1727,11 +1738,14 @@ class KnowledgeGraph:
         - ``describe(fluent=['traverse', 'where', 'spatial'])`` — Detailed
           docs with parameters and examples for specific topics.
 
-        When ``connections``, ``cypher``, or ``fluent`` is set, only those
-        tracks are returned (no node inventory).
+        When ``type_search``, ``connections``, ``cypher``, or ``fluent``
+        is set, only those tracks are returned (no node inventory).
 
         Args:
             types: Node type names for focused detail.
+            type_search: Case-insensitive substring pattern to search type
+                names. Returns matching types with connections + 1 layer
+                of connected types for neighborhood discovery.
             connections: True for overview, list for deep-dive into specific types.
             cypher: True for compact reference, list for detailed topic docs.
             fluent: True for compact reference, list for detailed topic docs.
@@ -1812,6 +1826,24 @@ class KnowledgeGraph:
     # ====================================================================
     # Schema Introspection
     # ====================================================================
+
+    def rebuild_caches(self) -> None:
+        """Force recomputation of internal caches (edge type counts, etc.).
+
+        Call once after bulk mutations to warm the cache before
+        ``save()`` or ``describe()``. The cache is persisted by
+        ``save()`` and restored by ``load()``, so this only needs
+        to be called once after building or mutating a graph.
+
+        Example::
+
+            g = KnowledgeGraph()
+            g.add_nodes(...)
+            g.add_connections(...)
+            g.rebuild_caches()   # one-time O(E) pass
+            g.save("graph.kgl")  # persists warm cache
+        """
+        ...
 
     def schema(self) -> dict[str, Any]:
         """Return a full schema overview of the graph.

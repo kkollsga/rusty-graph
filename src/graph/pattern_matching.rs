@@ -329,6 +329,23 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     ));
                 }
             }
+            '`' => {
+                // Backtick-quoted identifier: `programming language`
+                chars.next(); // consume opening backtick
+                let mut ident = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == '`' {
+                        chars.next(); // consume closing backtick
+                        break;
+                    }
+                    ident.push(c);
+                    chars.next();
+                }
+                if ident.is_empty() {
+                    return Err("Empty backtick identifier".to_string());
+                }
+                tokens.push(Token::Identifier(ident));
+            }
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let mut ident = String::new();
                 while let Some(&c) = chars.peek() {

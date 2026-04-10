@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 import pytest
 
+import kglite
 from kglite import KnowledgeGraph
 
 # ── schema() ────────────────────────────────────────────────────────────────
@@ -801,3 +802,345 @@ class TestExplorationHints:
                 for c in jc.findall("candidate"):
                     pair = {c.get("left").split(".")[0], c.get("right").split(".")[0]}
                     assert pair != {"TypeA", "TypeB"}
+
+
+# ── Scale tier tests ────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def large_graph():
+    """Graph with 300 types for Large-tier testing."""
+    g = KnowledgeGraph()
+    for i in range(300):
+        df = pd.DataFrame({"nid": [j for j in range(10 + i)], "name": [f"item_{j}" for j in range(10 + i)]})
+        g.add_nodes(df, f"Type{i:03d}", "nid", "name")
+    # Add some connections
+    edges = pd.DataFrame({"from_id": [0, 1, 2], "to_id": [0, 1, 2]})
+    g.add_connections(edges, "LINKS", "Type000", "from_id", "Type001", "to_id")
+    return g
+
+
+@pytest.fixture
+def extreme_graph():
+    """Graph with 6000+ types for Extreme-tier testing."""
+    g = KnowledgeGraph()
+    for i in range(6500):
+        df = pd.DataFrame({"nid": [0], "name": [f"item_{i}"]})
+        g.add_nodes(df, f"T{i:05d}", "nid", "name")
+    # Add some connections
+    edges = pd.DataFrame({"from_id": [0], "to_id": [0]})
+    g.add_connections(edges, "REL_A", "T00000", "from_id", "T00001", "to_id")
+    g.add_connections(edges, "REL_B", "T00002", "from_id", "T00003", "to_id")
+    return g
+
+
+class TestDescribeScaleTiers:
+    """Tests for scale-adaptive describe() output."""
+
+    # -- Small tier (unchanged behavior) --
+
+    def test_small_tier_has_inline_detail(self, small_graph):
+        """Small graph (≤15 types) should have full inline detail with properties."""
+        root = ET.fromstring(small_graph.describe())
+        types = root.findall(".//type")
+        assert len(types) > 0
+        # Should have property details inline
+        props = root.findall(".//properties")
+        assert len(props) > 0
+
+    def test_small_tier_output_unchanged(self, social_graph):
+        """Social graph (5 types) output should have type elements."""
+        desc = social_graph.describe()
+        root = ET.fromstring(desc)
+        assert root.tag == "graph"
+        types = root.findall(".//type")
+        assert len(types) > 0
+
+    # -- Medium tier (unchanged behavior) --
+
+    def test_medium_tier_compact_listing(self, large_schema_graph):
+        """Medium graph (20 types) should use compact type listing."""
+        desc = large_schema_graph.describe()
+        root = ET.fromstring(desc)
+        types_el = root.find("types")
+        assert types_el is not None
+        # Should have text content (compact listing), not child <type> elements
+        assert types_el.text is not None
+        assert "Type0" in types_el.text
+
+    # -- Large tier --
+
+    def test_large_tier_caps_types(self, large_graph):
+        """Large graph (300 types) should cap types shown."""
+        desc = large_graph.describe()
+        root = ET.fromstring(desc)
+        types_el = root.find("types")
+        assert types_el is not None
+        assert types_el.get("count") == "300"
+        assert types_el.get("shown") == "50"
+
+    def test_large_tier_has_more_element(self, large_graph):
+        """Large graph should have <more> element with remaining count."""
+        desc = large_graph.describe()
+        root = ET.fromstring(desc)
+        more = root.find(".//types/more")
+        assert more is not None
+        assert int(more.get("count")) == 250  # 300 - 50
+
+    def test_large_tier_valid_xml(self, large_graph):
+        """Large-tier output should be valid XML."""
+        root = ET.fromstring(large_graph.describe())
+        assert root.tag == "graph"
+
+    def test_large_tier_bounded_output(self, large_graph):
+        """Large-tier output should be bounded."""
+        desc = large_graph.describe()
+        assert len(desc) < 30_000
+
+    def test_large_tier_no_join_candidates(self, large_graph):
+        """Large tier should skip join candidates (>200 core types)."""
+        root = ET.fromstring(large_graph.describe())
+        hints = root.find("exploration_hints")
+        assert hints is None
+
+    # -- Extreme tier --
+
+    def test_extreme_tier_statistical_summary(self, extreme_graph):
+        """Extreme graph (6500 types) should return statistical summary."""
+        desc = extreme_graph.describe()
+        root = ET.fromstring(desc)
+        assert root.tag == "graph"
+        assert root.get("types") == "6500"
+
+    def test_extreme_tier_has_type_distribution(self, extreme_graph):
+        """Extreme output should have <type_distribution>."""
+        root = ET.fromstring(extreme_graph.describe())
+        dist = root.find("type_distribution")
+        assert dist is not None
+
+    def test_extreme_tier_has_by_size(self, extreme_graph):
+        """Extreme output should have <by_size> element."""
+        root = ET.fromstring(extreme_graph.describe())
+        by_size = root.find(".//type_distribution/by_size")
+        assert by_size is not None
+
+    def test_extreme_tier_has_top_types(self, extreme_graph):
+        """Extreme output should have top-20 types."""
+        root = ET.fromstring(extreme_graph.describe())
+        top = root.find(".//type_distribution/top")
+        assert top is not None
+        types = top.findall("type")
+        assert len(types) == 20
+
+    def test_extreme_tier_has_search_hint(self, extreme_graph):
+        """Extreme output should guide agent to type_search."""
+        desc = extreme_graph.describe()
+        assert "type_search" in desc
+
+    def test_extreme_tier_bounded_output(self, extreme_graph):
+        """Extreme output should be very compact."""
+        desc = extreme_graph.describe()
+        assert len(desc) < 10_000
+
+    def test_extreme_tier_valid_xml(self, extreme_graph):
+        """Extreme output should be valid XML."""
+        root = ET.fromstring(extreme_graph.describe())
+        assert root.tag == "graph"
+
+    def test_extreme_tier_fast(self, extreme_graph):
+        """Extreme describe should complete quickly."""
+        import time
+
+        t0 = time.time()
+        extreme_graph.describe()
+        dt = time.time() - t0
+        assert dt < 5.0, f"Extreme describe took {dt:.2f}s, expected <5s"
+
+    def test_extreme_tier_no_full_type_list(self, extreme_graph):
+        """Extreme output should NOT list all 6500 types."""
+        desc = extreme_graph.describe()
+        # Should not contain the last type name
+        assert "T06499" not in desc
+
+
+# ── Type search tests ───────────────────────────────────────────────────────
+
+
+class TestTypeSearch:
+    """Tests for describe(type_search=...) with neighborhood fan-out."""
+
+    def test_basic_search(self, social_graph):
+        """Should find types matching the search pattern."""
+        result = social_graph.describe(type_search="Person")
+        assert "Person" in result
+
+    def test_case_insensitive(self, social_graph):
+        """Search should be case-insensitive."""
+        result = social_graph.describe(type_search="person")
+        assert "Person" in result
+
+    def test_valid_xml(self, social_graph):
+        """Type search output should be valid XML."""
+        root = ET.fromstring(social_graph.describe(type_search="Person"))
+        assert root.tag == "type_search"
+
+    def test_match_has_count(self, social_graph):
+        """Match elements should have count attribute."""
+        root = ET.fromstring(social_graph.describe(type_search="Person"))
+        matches = root.findall("match")
+        assert len(matches) > 0
+        for m in matches:
+            assert "count" in m.attrib
+
+    def test_match_has_connections(self, social_graph):
+        """Matches should include connection details."""
+        root = ET.fromstring(social_graph.describe(type_search="Person"))
+        matches = root.findall("match")
+        # Person should have outgoing connections
+        person = [m for m in matches if m.get("name") == "Person"]
+        assert len(person) == 1
+        outs = person[0].findall("out")
+        ins = person[0].findall("in")
+        assert len(outs) + len(ins) > 0
+
+    def test_connected_types_layer(self, social_graph):
+        """Search should include connected types in layer 1."""
+        root = ET.fromstring(social_graph.describe(type_search="Person"))
+        connected = root.find("connected")
+        if connected is not None:
+            types = connected.findall("type")
+            # Connected types should have count attribute
+            for t in types:
+                assert "count" in t.attrib
+
+    def test_no_matches(self, social_graph):
+        """Search with no matches should return helpful output."""
+        result = social_graph.describe(type_search="zzz_nonexistent")
+        root = ET.fromstring(result)
+        assert root.find("no_matches") is not None
+
+    def test_no_matches_shows_suggestions(self, social_graph):
+        """No-match output should suggest largest types."""
+        result = social_graph.describe(type_search="zzz_nonexistent")
+        assert "suggestion" in result.lower() or "Largest" in result
+
+    def test_standalone_mode(self, social_graph):
+        """type_search should be standalone — no inventory included."""
+        result = social_graph.describe(type_search="Person")
+        root = ET.fromstring(result)
+        assert root.tag == "type_search"
+        assert root.find("types") is None
+        assert root.find("connections") is None
+
+    def test_hint_guides_deeper(self, social_graph):
+        """Output should guide agent to describe(types=[...])."""
+        result = social_graph.describe(type_search="Person")
+        assert "describe(types=" in result
+
+    def test_capped_at_50(self, extreme_graph):
+        """With many matches, should cap at 50."""
+        result = extreme_graph.describe(type_search="T0")
+        root = ET.fromstring(result)
+        matches = root.findall("match")
+        assert len(matches) <= 50
+
+    def test_search_on_large_graph(self, large_graph):
+        """Search should work on large-tier graphs."""
+        result = large_graph.describe(type_search="Type1")
+        root = ET.fromstring(result)
+        matches = root.findall("match")
+        assert len(matches) > 0
+
+    def test_pattern_in_output(self, social_graph):
+        """Output should echo back the search pattern."""
+        root = ET.fromstring(social_graph.describe(type_search="comp"))
+        assert root.get("pattern") == "comp"
+
+
+# ── Performance guard tests ─────────────────────────────────────────────────
+
+
+class TestPerformanceGuards:
+    """Tests for performance guards in describe()."""
+
+    def test_focused_detail_targeted_capability_scan(self, large_graph):
+        """describe(types=['Type000']) should not scan all 300 types."""
+        import time
+
+        t0 = time.time()
+        result = large_graph.describe(types=["Type000"])
+        dt = time.time() - t0
+        assert dt < 2.0, f"Focused detail took {dt:.2f}s"
+        assert "Type000" in result
+
+    def test_focused_detail_error_suggests_search(self, large_graph):
+        """Error on unknown type in large graph should suggest type_search."""
+        with pytest.raises(ValueError, match="type_search"):
+            large_graph.describe(types=["NonExistent"])
+
+    def test_focused_detail_error_lists_types_small(self, social_graph):
+        """Error on unknown type in small graph should list available types."""
+        with pytest.raises(ValueError, match="Available:"):
+            social_graph.describe(types=["NonExistent"])
+
+    def test_exploration_hints_skip_large(self, large_graph):
+        """Exploration hints should be skipped for >200 core types."""
+        root = ET.fromstring(large_graph.describe())
+        hints = root.find("exploration_hints")
+        assert hints is None
+
+
+# ── Edge type count persistence tests ───────────────────────────────────────
+
+
+class TestRebuildCaches:
+    """Tests for rebuild_caches() and edge type count persistence."""
+
+    def test_rebuild_caches_runs(self, social_graph):
+        """rebuild_caches() should complete without error."""
+        social_graph.rebuild_caches()
+
+    def test_rebuild_caches_warms_describe(self, social_graph):
+        """After rebuild_caches(), describe should work."""
+        social_graph.rebuild_caches()
+        desc = social_graph.describe()
+        assert "KNOWS" in desc
+
+    def test_save_load_preserves_edge_counts(self, social_graph, tmp_path):
+        """Edge type counts should survive save/load cycle."""
+        social_graph.rebuild_caches()
+        path = str(tmp_path / "test.kgl")
+        social_graph.save(path)
+
+        loaded = kglite.load(path)
+        # describe should include connection counts (from warm cache)
+        desc = loaded.describe()
+        root = ET.fromstring(desc)
+        conns = root.findall(".//connections/conn") or root.findall(".//type/connections/out")
+        assert len(conns) > 0
+
+    def test_save_without_rebuild_omits_counts(self, tmp_path):
+        """Save without rebuild_caches should not trigger O(E) scan."""
+        g = KnowledgeGraph()
+        df = pd.DataFrame({"nid": [1, 2], "name": ["a", "b"]})
+        g.add_nodes(df, "A", "nid", "name")
+        g.add_nodes(df, "B", "nid", "name")
+        edges = pd.DataFrame({"from": [1], "to": [1]})
+        g.add_connections(edges, "LINKS", "A", "from", "B", "to")
+        # Save without rebuild — should still work
+        path = str(tmp_path / "test.kgl")
+        g.save(path)
+        loaded = kglite.load(path)
+        # describe still works (recomputes lazily)
+        desc = loaded.describe()
+        assert "LINKS" in desc
+
+    def test_mutation_after_rebuild_invalidates(self, social_graph):
+        """Mutations after rebuild_caches should invalidate the cache."""
+        social_graph.rebuild_caches()
+        # Add a new connection type
+        edges = pd.DataFrame({"from": [1], "to": [2]})
+        social_graph.add_connections(edges, "NEW_REL", "Person", "from", "Person", "to")
+        # describe should still work and show the new connection
+        desc = social_graph.describe()
+        assert "NEW_REL" in desc

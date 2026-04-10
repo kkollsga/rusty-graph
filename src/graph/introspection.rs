@@ -4,7 +4,7 @@
 // All functions take &DirGraph and return Rust structs — PyO3 conversion in mod.rs.
 
 use crate::datatypes::values::Value;
-use crate::graph::schema::{DirGraph, NodeData};
+use crate::graph::schema::{ConnectivityTriple, DirGraph, InternedKey, NodeData};
 use petgraph::Direction;
 use std::collections::{HashMap, HashSet};
 
@@ -44,6 +44,7 @@ pub struct PropertyStatInfo {
 }
 
 /// A single neighbor connection: edge type, connected node type, and count.
+#[derive(Clone)]
 pub struct NeighborConnection {
     pub connection_type: String,
     pub other_type: String,
@@ -51,9 +52,37 @@ pub struct NeighborConnection {
 }
 
 /// Grouped neighbor connections for a node type: incoming and outgoing edges.
+#[derive(Clone)]
 pub struct NeighborsSchema {
     pub outgoing: Vec<NeighborConnection>,
     pub incoming: Vec<NeighborConnection>,
+}
+
+/// Scale classification for adaptive describe output.
+pub enum GraphScale {
+    /// 0-15 core types: full inline detail.
+    Small,
+    /// 16-200 core types: compact inventory listing.
+    Medium,
+    /// 201-5000 core types: top-N types with summary.
+    Large,
+    /// 5001+ core types: statistical summary, search required.
+    Extreme,
+}
+
+/// Classify graph scale by core type count (excluding supporting types).
+pub fn graph_scale(graph: &DirGraph) -> GraphScale {
+    let core_count = graph
+        .type_indices
+        .keys()
+        .filter(|nt| !graph.parent_types.contains_key(*nt))
+        .count();
+    match core_count {
+        0..=15 => GraphScale::Small,
+        16..=200 => GraphScale::Medium,
+        201..=5000 => GraphScale::Large,
+        _ => GraphScale::Extreme,
+    }
 }
 
 /// Level of Cypher documentation requested via `describe(cypher=...)`.
@@ -237,6 +266,346 @@ fn compute_type_capabilities(graph: &DirGraph) -> HashMap<String, TypeCapabiliti
     caps
 }
 
+/// Detect capabilities for specific node types only (avoids scanning all types).
+fn compute_type_capabilities_for(
+    graph: &DirGraph,
+    type_names: &[&str],
+) -> HashMap<String, TypeCapabilities> {
+    let mut caps: HashMap<String, TypeCapabilities> = HashMap::new();
+
+    for &node_type in type_names {
+        if !graph.type_indices.contains_key(node_type) {
+            continue;
+        }
+        let mut tc = TypeCapabilities {
+            has_timeseries: false,
+            has_location: false,
+            has_geometry: false,
+            has_embeddings: false,
+        };
+
+        tc.has_timeseries = graph.timeseries_configs.contains_key(node_type);
+
+        if let Some(sc) = graph.spatial_configs.get(node_type) {
+            tc.has_location = sc.location.is_some() || !sc.points.is_empty();
+            tc.has_geometry = sc.geometry.is_some() || !sc.shapes.is_empty();
+        }
+        if !tc.has_location {
+            if let Some(meta) = graph.node_type_metadata.get(node_type) {
+                tc.has_location = meta.values().any(|t| t.eq_ignore_ascii_case("point"));
+            }
+        }
+
+        tc.has_embeddings = graph.embeddings.keys().any(|(nt, _)| nt == node_type);
+
+        caps.insert(node_type.to_string(), tc);
+    }
+    caps
+}
+
+/// Compute neighbor schema by sampling first `max_nodes` nodes of a type.
+/// Extrapolates counts to full population. Used for types too large to scan fully.
+fn compute_neighbors_schema_sampled(
+    graph: &DirGraph,
+    node_type: &str,
+    max_nodes: usize,
+) -> Result<NeighborsSchema, String> {
+    let node_indices = graph
+        .type_indices
+        .get(node_type)
+        .ok_or_else(|| format!("Node type '{}' not found", node_type))?;
+
+    let total_nodes = node_indices.len();
+    let sample_count = max_nodes.min(total_nodes);
+    if sample_count == 0 {
+        return Ok(NeighborsSchema {
+            outgoing: Vec::new(),
+            incoming: Vec::new(),
+        });
+    }
+
+    let mut outgoing: HashMap<(String, String), usize> = HashMap::new();
+    let mut incoming: HashMap<(String, String), usize> = HashMap::new();
+
+    for &node_idx in node_indices.iter().take(sample_count) {
+        for edge_ref in graph.graph.edges_directed(node_idx, Direction::Outgoing) {
+            if let Some(target_node) = graph.get_node(edge_ref.target()) {
+                let key = (
+                    edge_ref
+                        .weight()
+                        .connection_type_str(&graph.interner)
+                        .to_string(),
+                    target_node.node_type_str(&graph.interner).to_string(),
+                );
+                *outgoing.entry(key).or_insert(0) += 1;
+            }
+        }
+        for edge_ref in graph.graph.edges_directed(node_idx, Direction::Incoming) {
+            if let Some(source_node) = graph.get_node(edge_ref.source()) {
+                let key = (
+                    edge_ref
+                        .weight()
+                        .connection_type_str(&graph.interner)
+                        .to_string(),
+                    source_node.node_type_str(&graph.interner).to_string(),
+                );
+                *incoming.entry(key).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Extrapolate counts to full population
+    let scale = if sample_count < total_nodes {
+        total_nodes as f64 / sample_count as f64
+    } else {
+        1.0
+    };
+
+    let mut outgoing_list: Vec<NeighborConnection> = outgoing
+        .into_iter()
+        .map(|((ct, ot), count)| NeighborConnection {
+            connection_type: ct,
+            other_type: ot,
+            count: (count as f64 * scale).round() as usize,
+        })
+        .collect();
+    outgoing_list.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.connection_type.cmp(&b.connection_type))
+    });
+
+    let mut incoming_list: Vec<NeighborConnection> = incoming
+        .into_iter()
+        .map(|((ct, ot), count)| NeighborConnection {
+            connection_type: ct,
+            other_type: ot,
+            count: (count as f64 * scale).round() as usize,
+        })
+        .collect();
+    incoming_list.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.connection_type.cmp(&b.connection_type))
+    });
+
+    Ok(NeighborsSchema {
+        outgoing: outgoing_list,
+        incoming: incoming_list,
+    })
+}
+
+/// Bounded neighbor schema: samples if type has more than `threshold` nodes.
+fn compute_neighbors_schema_bounded(
+    graph: &DirGraph,
+    node_type: &str,
+    sample_threshold: usize,
+) -> Result<NeighborsSchema, String> {
+    let count = graph
+        .type_indices
+        .get(node_type)
+        .map(|v| v.len())
+        .unwrap_or(0);
+    if count > sample_threshold {
+        compute_neighbors_schema_sampled(graph, node_type, 10_000)
+    } else {
+        compute_neighbors_schema(graph, node_type)
+    }
+}
+
+/// Bounded single-pass endpoint type discovery for connection types with empty metadata.
+/// Scans up to `max_total_scan` edges total, collecting source/target node types per connection type.
+fn discover_endpoint_types_batch(
+    graph: &DirGraph,
+    max_total_scan: usize,
+) -> HashMap<String, (HashSet<String>, HashSet<String>)> {
+    // Use edge_endpoint_keys for zero-allocation iteration on disk graphs
+    let mut result: HashMap<InternedKey, (HashSet<InternedKey>, HashSet<InternedKey>)> =
+        HashMap::new();
+
+    for (scanned, (src_idx, tgt_idx, conn_key)) in graph.graph.edge_endpoint_keys().enumerate() {
+        if scanned >= max_total_scan {
+            break;
+        }
+        let entry = result
+            .entry(conn_key)
+            .or_insert_with(|| (HashSet::new(), HashSet::new()));
+        if let Some(sk) = graph.graph.node_type_of(src_idx) {
+            entry.0.insert(sk);
+        }
+        if let Some(tk) = graph.graph.node_type_of(tgt_idx) {
+            entry.1.insert(tk);
+        }
+    }
+
+    // Resolve interned keys to strings
+    result
+        .into_iter()
+        .map(|(ck, (srcs, tgts))| {
+            let conn = graph.interner.resolve(ck).to_string();
+            let src_set = srcs
+                .into_iter()
+                .map(|k| graph.interner.resolve(k).to_string())
+                .collect();
+            let tgt_set = tgts
+                .into_iter()
+                .map(|k| graph.interner.resolve(k).to_string())
+                .collect();
+            (conn, (src_set, tgt_set))
+        })
+        .collect()
+}
+
+// ── Type connectivity ──────────────────────────────────────────────────────
+
+/// Compute type connectivity triples via a single O(E) pass.
+///
+/// Uses InternedKey-based aggregation (no string allocation during scan)
+/// and sequential iteration for cache-friendly I/O on disk graphs.
+/// Resolves keys to strings only at the end.
+pub fn compute_type_connectivity(graph: &DirGraph) -> Vec<ConnectivityTriple> {
+    // Aggregate with InternedKey tuples — no string allocation per edge.
+    // Uses edge_endpoint_keys() which reads mmap'd data directly on disk graphs
+    // (zero heap allocation, no EdgeData materialization).
+    let mut counts: HashMap<(InternedKey, InternedKey, InternedKey), usize> = HashMap::new();
+
+    for (src_idx, tgt_idx, conn_key) in graph.graph.edge_endpoint_keys() {
+        let src_key = graph.graph.node_type_of(src_idx);
+        let tgt_key = graph.graph.node_type_of(tgt_idx);
+        if let (Some(sk), Some(tk)) = (src_key, tgt_key) {
+            *counts.entry((sk, conn_key, tk)).or_insert(0) += 1;
+        }
+    }
+
+    // Resolve to strings once at the end
+    let mut triples: Vec<ConnectivityTriple> = counts
+        .into_iter()
+        .map(|((sk, ck, tk), count)| ConnectivityTriple {
+            src: graph.interner.resolve(sk).to_string(),
+            conn: graph.interner.resolve(ck).to_string(),
+            tgt: graph.interner.resolve(tk).to_string(),
+            count,
+        })
+        .collect();
+    triples.sort_by(|a, b| b.count.cmp(&a.count));
+    triples
+}
+
+/// Build NeighborsSchema for a specific type from pre-computed triples.
+/// O(triples) linear scan — use `TypeConnectivityIndex` for O(1) lookups.
+pub fn neighbors_from_triples(triples: &[ConnectivityTriple], node_type: &str) -> NeighborsSchema {
+    let mut outgoing: Vec<NeighborConnection> = Vec::new();
+    let mut incoming: Vec<NeighborConnection> = Vec::new();
+
+    for t in triples {
+        if t.src == node_type {
+            outgoing.push(NeighborConnection {
+                connection_type: t.conn.clone(),
+                other_type: t.tgt.clone(),
+                count: t.count,
+            });
+        }
+        if t.tgt == node_type {
+            incoming.push(NeighborConnection {
+                connection_type: t.conn.clone(),
+                other_type: t.src.clone(),
+                count: t.count,
+            });
+        }
+    }
+
+    outgoing.sort_by(|a, b| b.count.cmp(&a.count));
+    incoming.sort_by(|a, b| b.count.cmp(&a.count));
+
+    NeighborsSchema { outgoing, incoming }
+}
+
+/// Pre-indexed type connectivity for O(1) neighbor lookups.
+/// Built once from triples, used for all describe operations in a session.
+pub struct TypeConnectivityIndex {
+    /// type_name → (outgoing, incoming) neighbor connections, sorted by count desc.
+    index: HashMap<String, NeighborsSchema>,
+}
+
+impl TypeConnectivityIndex {
+    /// Build index from flat triples. O(triples) one-time cost.
+    pub fn from_triples(triples: &[ConnectivityTriple]) -> Self {
+        let mut out_map: HashMap<String, Vec<NeighborConnection>> = HashMap::new();
+        let mut in_map: HashMap<String, Vec<NeighborConnection>> = HashMap::new();
+
+        for t in triples {
+            out_map
+                .entry(t.src.clone())
+                .or_default()
+                .push(NeighborConnection {
+                    connection_type: t.conn.clone(),
+                    other_type: t.tgt.clone(),
+                    count: t.count,
+                });
+            in_map
+                .entry(t.tgt.clone())
+                .or_default()
+                .push(NeighborConnection {
+                    connection_type: t.conn.clone(),
+                    other_type: t.src.clone(),
+                    count: t.count,
+                });
+        }
+
+        // Merge into NeighborsSchema per type, sort by count desc.
+        // Collect all type names first (owned) to avoid borrow conflicts.
+        let all_types: HashSet<String> = out_map.keys().chain(in_map.keys()).cloned().collect();
+
+        let mut index = HashMap::with_capacity(all_types.len());
+        for nt in all_types {
+            let mut outgoing = out_map.remove(&nt).unwrap_or_default();
+            outgoing.sort_by(|a, b| b.count.cmp(&a.count));
+            let mut incoming = in_map.remove(&nt).unwrap_or_default();
+            incoming.sort_by(|a, b| b.count.cmp(&a.count));
+            index.insert(nt, NeighborsSchema { outgoing, incoming });
+        }
+
+        TypeConnectivityIndex { index }
+    }
+
+    /// O(1) lookup of neighbors for a type.
+    pub fn get(&self, node_type: &str) -> NeighborsSchema {
+        self.index
+            .get(node_type)
+            .cloned()
+            .unwrap_or(NeighborsSchema {
+                outgoing: Vec::new(),
+                incoming: Vec::new(),
+            })
+    }
+}
+
+/// Derived edge statistics from type connectivity triples.
+pub struct DerivedEdgeStats {
+    /// Edge type → count.
+    pub counts: HashMap<String, usize>,
+    /// Edge type → (source_types, target_types).
+    pub endpoints: HashMap<String, (HashSet<String>, HashSet<String>)>,
+}
+
+/// Derive edge type counts + endpoint types from type connectivity triples.
+/// Avoids separate O(E) scans for these derived data.
+pub fn derive_edge_counts_from_triples(triples: &[ConnectivityTriple]) -> DerivedEdgeStats {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut endpoints: HashMap<String, (HashSet<String>, HashSet<String>)> = HashMap::new();
+
+    for t in triples {
+        *counts.entry(t.conn.clone()).or_insert(0) += t.count;
+        let entry = endpoints
+            .entry(t.conn.clone())
+            .or_insert_with(|| (HashSet::new(), HashSet::new()));
+        entry.0.insert(t.src.clone());
+        entry.1.insert(t.tgt.clone());
+    }
+
+    DerivedEdgeStats { counts, endpoints }
+}
+
 // ── Core functions ──────────────────────────────────────────────────────────
 
 /// Compute per-connection-type stats.
@@ -267,6 +636,47 @@ pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStat
             })
             .collect();
         result.sort_by(|a, b| a.connection_type.cmp(&b.connection_type));
+
+        // Post-process: resolve empty source/target types.
+        // Prefer type connectivity triples (instant) over edge scan.
+        let has_empty = result
+            .iter()
+            .any(|ct| ct.source_types.is_empty() && ct.target_types.is_empty() && ct.count > 0);
+        if has_empty {
+            let triples_guard = graph.type_connectivity_cache.read().unwrap();
+            if let Some(triples) = triples_guard.as_ref() {
+                // Derive endpoints from cached triples — zero I/O
+                let derived = derive_edge_counts_from_triples(triples);
+                for ct in &mut result {
+                    if ct.source_types.is_empty() && ct.target_types.is_empty() {
+                        if let Some((src, tgt)) = derived.endpoints.get(&ct.connection_type) {
+                            let mut src_vec: Vec<String> = src.iter().cloned().collect();
+                            src_vec.sort();
+                            let mut tgt_vec: Vec<String> = tgt.iter().cloned().collect();
+                            tgt_vec.sort();
+                            ct.source_types = src_vec;
+                            ct.target_types = tgt_vec;
+                        }
+                    }
+                }
+            } else {
+                // No cached triples — fall back to bounded edge scan
+                let discovered = discover_endpoint_types_batch(graph, 1_000_000);
+                for ct in &mut result {
+                    if ct.source_types.is_empty() && ct.target_types.is_empty() {
+                        if let Some((src, tgt)) = discovered.get(&ct.connection_type) {
+                            let mut src_vec: Vec<String> = src.iter().cloned().collect();
+                            src_vec.sort();
+                            let mut tgt_vec: Vec<String> = tgt.iter().cloned().collect();
+                            tgt_vec.sort();
+                            ct.source_types = src_vec;
+                            ct.target_types = tgt_vec;
+                        }
+                    }
+                }
+            }
+        }
+
         return result;
     }
 
@@ -1039,12 +1449,22 @@ fn write_connection_map(xml: &mut String, graph: &DirGraph, conn_stats: &[Connec
                     xml_escape(&ct.property_names.join(","))
                 )
             };
+            let from_str = if sources.len() > 10 {
+                format!("{},... ({} total)", sources[..10].join(","), sources.len())
+            } else {
+                sources.join(",")
+            };
+            let to_str = if targets.len() > 10 {
+                format!("{},... ({} total)", targets[..10].join(","), targets.len())
+            } else {
+                targets.join(",")
+            };
             xml.push_str(&format!(
                 "    <conn type=\"{}\" count=\"{}\" from=\"{}\" to=\"{}\"{}{}/>\n",
                 xml_escape(&ct.connection_type),
                 ct.count,
-                sources.join(","),
-                targets.join(","),
+                from_str,
+                to_str,
                 props_attr,
                 temporal_attr,
             ));
@@ -1125,12 +1545,31 @@ fn compute_edge_property_stats(
 
 /// Connections overview: all connection types with count, endpoints, property names.
 fn write_connections_overview(xml: &mut String, graph: &DirGraph) {
-    let conn_stats = compute_connection_type_stats(graph);
+    let mut conn_stats = compute_connection_type_stats(graph);
     if conn_stats.is_empty() {
         xml.push_str("<connections/>\n");
         return;
     }
-    xml.push_str("<connections>\n");
+
+    // At extreme scale (>500 connection types), sort by count and cap at 50
+    let total_conn = conn_stats.len();
+    let capped = total_conn > 500;
+    if capped {
+        conn_stats.sort_by(|a, b| b.count.cmp(&a.count));
+        conn_stats.truncate(50);
+    }
+
+    if capped {
+        xml.push_str(&format!(
+            "<connections total=\"{}\" shown=\"50\">\n",
+            total_conn
+        ));
+    } else {
+        xml.push_str("<connections>\n");
+    }
+    // Cap endpoint type listings to avoid massive output for connections
+    // with thousands of source/target types (e.g. P31 in wikidata)
+    let max_endpoint_types = 10;
     for ct in &conn_stats {
         let props_attr = if ct.property_names.is_empty() {
             String::new()
@@ -1141,13 +1580,38 @@ fn write_connections_overview(xml: &mut String, graph: &DirGraph) {
             )
         };
 
+        let from_str = if ct.source_types.len() > max_endpoint_types {
+            format!(
+                "{},... ({} total)",
+                ct.source_types[..max_endpoint_types].join(","),
+                ct.source_types.len()
+            )
+        } else {
+            ct.source_types.join(",")
+        };
+        let to_str = if ct.target_types.len() > max_endpoint_types {
+            format!(
+                "{},... ({} total)",
+                ct.target_types[..max_endpoint_types].join(","),
+                ct.target_types.len()
+            )
+        } else {
+            ct.target_types.join(",")
+        };
+
         xml.push_str(&format!(
             "  <conn type=\"{}\" count=\"{}\" from=\"{}\" to=\"{}\"{}/>\n",
             xml_escape(&ct.connection_type),
             ct.count,
-            ct.source_types.join(","),
-            ct.target_types.join(","),
+            from_str,
+            to_str,
             props_attr,
+        ));
+    }
+    if capped {
+        xml.push_str(&format!(
+            "  <more count=\"{}\" hint=\"describe(connections=['TYPE']) for specific connection details\"/>\n",
+            total_conn - 50
         ));
     }
     xml.push_str("</connections>\n");
@@ -1356,8 +1820,14 @@ fn write_exploration_hints(xml: &mut String, graph: &DirGraph, conn_stats: &[Con
     let type_count = graph.type_indices.len();
     let edge_count = graph.graph.edge_count();
 
-    // Guard: not useful for trivial graphs or when there are no edges at all
-    if type_count < 2 || edge_count == 0 {
+    // Guard: not useful for trivial graphs, no edges, or too many types
+    // (join candidate search is O(types²) — infeasible above 200 core types)
+    let core_count = graph
+        .type_indices
+        .keys()
+        .filter(|nt| !graph.parent_types.contains_key(*nt))
+        .count();
+    if type_count < 2 || edge_count == 0 || core_count > 200 {
         return;
     }
 
@@ -2071,18 +2541,29 @@ fn write_type_detail(
         }
     }
 
-    // Connections (neighbors) — use pre-computed cache if available
+    // Connections (neighbors) — prefer: pre-computed cache > type connectivity triples > bounded edge scan
     let computed;
     let neighbors_opt = if let Some(cache) = neighbors_cache {
         cache.get(node_type)
     } else {
-        computed = compute_neighbors_schema(graph, node_type).ok();
+        // Try type connectivity triples first (instant), then bounded edge scan
+        let triples_guard = graph.type_connectivity_cache.read().unwrap();
+        computed = if let Some(triples) = triples_guard.as_ref() {
+            Some(neighbors_from_triples(triples, node_type))
+        } else {
+            compute_neighbors_schema_bounded(graph, node_type, 50_000).ok()
+        };
         computed.as_ref()
     };
     if let Some(neighbors) = neighbors_opt {
         if !neighbors.outgoing.is_empty() || !neighbors.incoming.is_empty() {
+            // Cap connections to avoid massive output for types with thousands of neighbors
+            let max_conns = 20;
+            let total_out = neighbors.outgoing.len();
+            let total_in = neighbors.incoming.len();
+            let capped = total_out > max_conns || total_in > max_conns;
             xml.push_str(&format!("{}  <connections>\n", indent));
-            for nc in &neighbors.outgoing {
+            for nc in neighbors.outgoing.iter().take(max_conns) {
                 xml.push_str(&format!(
                     "{}    <out type=\"{}\" target=\"{}\" count=\"{}\"/>\n",
                     indent,
@@ -2091,13 +2572,21 @@ fn write_type_detail(
                     nc.count
                 ));
             }
-            for nc in &neighbors.incoming {
+            for nc in neighbors.incoming.iter().take(max_conns) {
                 xml.push_str(&format!(
                     "{}    <in type=\"{}\" source=\"{}\" count=\"{}\"/>\n",
                     indent,
                     xml_escape(&nc.connection_type),
                     xml_escape(&nc.other_type),
                     nc.count
+                ));
+            }
+            if capped {
+                xml.push_str(&format!(
+                    "{}    <more out=\"{}\" in=\"{}\"/>\n",
+                    indent,
+                    total_out.saturating_sub(max_conns),
+                    total_in.saturating_sub(max_conns)
                 ));
             }
             xml.push_str(&format!("{}  </connections>\n", indent));
@@ -2249,6 +2738,18 @@ fn write_type_detail(
 /// Build inventory for complex graphs (>15 types): size bands with
 /// complexity markers and capability flags.
 fn build_inventory(graph: &DirGraph) -> String {
+    build_inventory_capped(graph, None)
+}
+
+/// Build inventory for Large-tier graphs (201-5000 types): show top-N types, summarize rest.
+fn build_large_inventory(graph: &DirGraph) -> String {
+    build_inventory_capped(graph, Some(50))
+}
+
+/// Build compact inventory with optional type cap.
+/// When `max_types` is None, all types are listed (Medium tier).
+/// When Some(n), only top-n types by count are listed (Large tier).
+fn build_inventory_capped(graph: &DirGraph, max_types: Option<usize>) -> String {
     let mut caps = compute_type_capabilities(graph);
     bubble_capabilities(&mut caps, &graph.parent_types);
     let child_counts = children_counts(&graph.parent_types);
@@ -2290,17 +2791,35 @@ fn build_inventory(graph: &DirGraph) -> String {
 
     let core_count = entries.len();
     let supporting_count = graph.parent_types.len();
+    let shown = max_types.map(|m| m.min(core_count)).unwrap_or(core_count);
+    let hidden = core_count - shown;
+
     if has_tiers {
         xml.push_str(&format!(
-            "  <types core=\"{}\" supporting=\"{}\">\n    ",
-            core_count, supporting_count
+            "  <types core=\"{}\" supporting=\"{}\"{}>\n    ",
+            core_count,
+            supporting_count,
+            if hidden > 0 {
+                format!(" shown=\"{}\"", shown)
+            } else {
+                String::new()
+            }
         ));
     } else {
-        xml.push_str(&format!("  <types count=\"{}\">\n    ", core_count));
+        xml.push_str(&format!(
+            "  <types count=\"{}\"{}>\n    ",
+            core_count,
+            if hidden > 0 {
+                format!(" shown=\"{}\"", shown)
+            } else {
+                String::new()
+            }
+        ));
     }
 
     let type_strs: Vec<String> = entries
         .iter()
+        .take(shown)
         .map(|(nt, count, prop_count)| {
             let tc = caps.get(nt).unwrap_or(&empty_caps);
             let desc = format_type_descriptor(nt, *count, *prop_count, tc);
@@ -2313,6 +2832,12 @@ fn build_inventory(graph: &DirGraph) -> String {
         })
         .collect();
     xml.push_str(&type_strs.join(", "));
+    if hidden > 0 {
+        xml.push_str(&format!(
+            "\n    <more count=\"{}\" hint=\"describe(type_search='pattern') to find more\"/>",
+            hidden
+        ));
+    }
     xml.push_str("\n  </types>\n");
 
     let conn_stats = compute_connection_type_stats(graph);
@@ -2322,6 +2847,133 @@ fn build_inventory(graph: &DirGraph) -> String {
 
     xml.push_str(
         "  <hint>Use describe(types=['TypeName']) for properties, samples. Use describe(connections=['CONN_TYPE']) for edge property stats and samples.</hint>\n",
+    );
+    xml.push_str("</graph>");
+    xml
+}
+
+/// Build statistical summary for extreme-scale graphs (5001+ types).
+/// Uses only pre-loaded data (type_indices, connection_type_metadata) for instant response.
+/// No expensive computations — no capability scan, no join candidates, no edge scans.
+fn build_extreme_inventory(graph: &DirGraph) -> String {
+    let mut xml = String::with_capacity(4096);
+
+    let node_count = graph.graph.node_count();
+    let edge_count = graph.graph.edge_count();
+    let type_count = graph.type_indices.len();
+    let conn_type_count = graph.connection_type_metadata.len();
+
+    xml.push_str(&format!(
+        "<graph nodes=\"{}\" edges=\"{}\" types=\"{}\" connection_types=\"{}\">\n",
+        node_count, edge_count, type_count, conn_type_count
+    ));
+
+    xml.push_str("  <conventions>All nodes have .id and .title</conventions>\n");
+    write_read_only_notice(&mut xml, graph);
+
+    // Type distribution by size tier + top-20 types
+    let mut type_entries: Vec<(&String, usize)> = graph
+        .type_indices
+        .iter()
+        .map(|(nt, indices)| (nt, indices.len()))
+        .collect();
+    type_entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+    let mut by_size: HashMap<&str, usize> = HashMap::new();
+    for &(_, count) in &type_entries {
+        *by_size.entry(size_tier(count)).or_insert(0) += 1;
+    }
+
+    xml.push_str("  <type_distribution>\n");
+    xml.push_str(&format!(
+        "    <by_size vl=\"{}\" l=\"{}\" m=\"{}\" s=\"{}\" vs=\"{}\"/>\n",
+        by_size.get("vl").unwrap_or(&0),
+        by_size.get("l").unwrap_or(&0),
+        by_size.get("m").unwrap_or(&0),
+        by_size.get("s").unwrap_or(&0),
+        by_size.get("vs").unwrap_or(&0),
+    ));
+    xml.push_str("    <top count=\"20\">\n");
+    for &(nt, count) in type_entries.iter().take(20) {
+        xml.push_str(&format!(
+            "      <type name=\"{}\" count=\"{}\"/>\n",
+            xml_escape(nt),
+            count
+        ));
+    }
+    xml.push_str("    </top>\n");
+    xml.push_str("  </type_distribution>\n");
+
+    // Connection summary: top-20 by count.
+    // Only use edge type counts if cache is warm — avoid O(E) scan on cold start.
+    if conn_type_count > 0 && graph.has_edge_type_counts_cache() {
+        let edge_counts = graph.get_edge_type_counts();
+        let mut conn_entries: Vec<(&String, usize)> = graph
+            .connection_type_metadata
+            .keys()
+            .map(|ct| (ct, edge_counts.get(ct).copied().unwrap_or(0)))
+            .collect();
+        conn_entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+        xml.push_str(&format!(
+            "  <connection_summary count=\"{}\">\n",
+            conn_type_count
+        ));
+        xml.push_str("    <top count=\"20\">\n");
+        for &(ct, count) in conn_entries.iter().take(20) {
+            xml.push_str(&format!(
+                "      <conn type=\"{}\" count=\"{}\"/>\n",
+                xml_escape(ct),
+                count
+            ));
+        }
+        xml.push_str("    </top>\n");
+        xml.push_str("  </connection_summary>\n");
+    } else if conn_type_count > 0 {
+        // Cache cold — list connection type names without counts (instant)
+        let mut conn_names: Vec<&String> = graph.connection_type_metadata.keys().collect();
+        conn_names.sort();
+        conn_names.truncate(30);
+        xml.push_str(&format!(
+            "  <connection_summary count=\"{}\" hint=\"counts not yet cached — use describe(connections=True) to populate\">\n",
+            conn_type_count
+        ));
+        for ct in &conn_names {
+            xml.push_str(&format!("    <conn type=\"{}\"/>\n", xml_escape(ct)));
+        }
+        if graph.connection_type_metadata.len() > 30 {
+            xml.push_str(&format!(
+                "    <more count=\"{}\"/>\n",
+                graph.connection_type_metadata.len() - 30
+            ));
+        }
+        xml.push_str("  </connection_summary>\n");
+    } else if edge_count > 0 {
+        xml.push_str(&format!(
+            "  <connection_summary hint=\"{} edges present, use describe(connections=True) for details\"/>\n",
+            edge_count
+        ));
+    }
+
+    // Minimal extensions (skip capability-dependent hints)
+    xml.push_str("  <extensions>\n");
+    xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/label_propagation), component (connected_components), cluster (cluster)\"/>\n");
+    xml.push_str("    <cypher hint=\"Full Cypher with extensions. describe(cypher=True) for reference, describe(cypher=['topic']) for detailed docs.\"/>\n");
+    xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. describe(fluent=True) for reference.\"/>\n");
+    xml.push_str("    <bug_report hint=\"bug_report(query, result, expected, description) — file a Cypher bug report.\"/>\n");
+    xml.push_str("  </extensions>\n");
+
+    // Search hint — teach the agent how to explore
+    xml.push_str(&format!(
+        "  <search_hint>{} types — too many to list. Progressive discovery:\n",
+        type_count
+    ));
+    xml.push_str(
+        "    describe(type_search='software')   — find types by name + see their connections\n",
+    );
+    xml.push_str("    describe(types=['software'])        — full detail: properties, samples\n");
+    xml.push_str(
+        "    describe(connections=['P31'])        — connection detail: per-pair counts, properties, samples</search_hint>\n",
     );
     xml.push_str("</graph>");
     xml
@@ -2380,6 +3032,16 @@ fn build_focused_detail(graph: &DirGraph, types: &[String]) -> Result<String, St
     // Validate all types exist
     for t in types {
         if !graph.type_indices.contains_key(t) {
+            // Bounded error message: list types only for small graphs, suggest search for large
+            let total = graph.type_indices.len();
+            if total > 100 {
+                return Err(format!(
+                    "Node type '{}' not found. {} types in graph — use describe(type_search='{}') to search.",
+                    t,
+                    total,
+                    t.to_lowercase()
+                ));
+            }
             return Err(format!("Node type '{}' not found. Available: {}", t, {
                 let mut names: Vec<&String> = graph.type_indices.keys().collect();
                 names.sort();
@@ -2392,7 +3054,9 @@ fn build_focused_detail(graph: &DirGraph, types: &[String]) -> Result<String, St
         }
     }
 
-    let caps = compute_type_capabilities(graph);
+    // Targeted capability scan — only for requested types, not all types
+    let type_refs: Vec<&str> = types.iter().map(|s| s.as_str()).collect();
+    let caps = compute_type_capabilities_for(graph, &type_refs);
     let empty_caps = TypeCapabilities {
         has_timeseries: false,
         has_location: false,
@@ -2410,6 +3074,180 @@ fn build_focused_detail(graph: &DirGraph, types: &[String]) -> Result<String, St
 
     xml.push_str("</graph>");
     Ok(xml)
+}
+
+// ── Type search with neighborhood fan-out ─────────────────────────────────
+
+/// Build type search results with 1-layer neighborhood fan-out.
+///
+/// 1. Find types matching `pattern` (case-insensitive substring), cap at 50.
+/// 2. For each match, compute bounded neighbor schema (sample if >50K nodes).
+/// 3. Collect connected types (layer 1) — show their neighbor schemas too, cap at 30.
+/// 4. Output as XML with progressive disclosure hints.
+fn build_type_search_results(graph: &DirGraph, pattern: &str) -> String {
+    let pattern_lower = pattern.to_lowercase();
+    let scale = graph_scale(graph);
+    let is_extreme = matches!(scale, GraphScale::Large | GraphScale::Extreme);
+
+    // Adaptive caps (#6): reduce for extreme-scale graphs
+    let max_matches: usize = if is_extreme { 20 } else { 50 };
+    let conns_per_match: usize = if is_extreme { 5 } else { 10 };
+    let max_layer1: usize = if is_extreme { 15 } else { 30 };
+    let conns_per_layer1: usize = if is_extreme { 3 } else { 5 };
+
+    // Find matching types (exclude supporting types).
+    // Case-insensitive substring match without per-type allocation.
+    let pattern_bytes = pattern_lower.as_bytes();
+    let mut matches: Vec<(&String, usize)> = graph
+        .type_indices
+        .iter()
+        .filter(|(nt, _)| {
+            !graph.parent_types.contains_key(*nt)
+                && contains_case_insensitive(nt.as_bytes(), pattern_bytes)
+        })
+        .map(|(nt, indices)| (nt, indices.len()))
+        .collect();
+    matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+    let total_matches = matches.len();
+    matches.truncate(max_matches);
+
+    let mut xml = String::with_capacity(4096);
+    xml.push_str(&format!(
+        "<type_search pattern=\"{}\" matches=\"{}\"",
+        xml_escape(pattern),
+        total_matches
+    ));
+    if total_matches > matches.len() {
+        xml.push_str(&format!(" shown=\"{}\"", matches.len()));
+    }
+    xml.push_str(" depth=\"1\">\n");
+
+    if matches.is_empty() {
+        xml.push_str("  <no_matches/>\n");
+        let mut all_types: Vec<(&String, usize)> = graph
+            .type_indices
+            .iter()
+            .filter(|(nt, _)| !graph.parent_types.contains_key(*nt))
+            .map(|(nt, indices)| (nt, indices.len()))
+            .collect();
+        all_types.sort_by(|a, b| b.1.cmp(&a.1));
+        if !all_types.is_empty() {
+            xml.push_str("  <suggestion>No types match. Largest types in graph:\n");
+            for &(nt, count) in all_types.iter().take(10) {
+                xml.push_str(&format!("    {} ({})\n", xml_escape(nt), count));
+            }
+            xml.push_str("  </suggestion>\n");
+        }
+        xml.push_str("</type_search>");
+        return xml;
+    }
+
+    // #4: Build O(1) index from cached triples (one-time cost, then instant per lookup),
+    // #5: otherwise fall back to bounded edge scan
+    let triples_guard = graph.type_connectivity_cache.read().unwrap();
+    let conn_index = triples_guard
+        .as_ref()
+        .map(|t| TypeConnectivityIndex::from_triples(t));
+
+    // Helper: O(1) lookup from index, or bounded edge scan fallback
+    let get_neighbors = |node_type: &str| -> NeighborsSchema {
+        if let Some(ref idx) = conn_index {
+            idx.get(node_type)
+        } else {
+            compute_neighbors_schema_bounded(graph, node_type, 50_000).unwrap_or(NeighborsSchema {
+                outgoing: Vec::new(),
+                incoming: Vec::new(),
+            })
+        }
+    };
+
+    // Collect connected types across all matches for layer 1
+    let mut connected_types: HashMap<String, usize> = HashMap::new();
+    let match_names: HashSet<&str> = matches.iter().map(|(nt, _)| nt.as_str()).collect();
+
+    // Write matching types with their connections
+    for &(nt, count) in &matches {
+        xml.push_str(&format!(
+            "  <match name=\"{}\" count=\"{}\">\n",
+            xml_escape(nt),
+            count
+        ));
+
+        let neighbors = get_neighbors(nt);
+        for nc in neighbors.outgoing.iter().take(conns_per_match) {
+            xml.push_str(&format!(
+                "    <out type=\"{}\" target=\"{}\" count=\"{}\"/>\n",
+                xml_escape(&nc.connection_type),
+                xml_escape(&nc.other_type),
+                nc.count
+            ));
+            if !match_names.contains(nc.other_type.as_str()) {
+                *connected_types.entry(nc.other_type.clone()).or_insert(0) += nc.count;
+            }
+        }
+        for nc in neighbors.incoming.iter().take(conns_per_match) {
+            xml.push_str(&format!(
+                "    <in type=\"{}\" source=\"{}\" count=\"{}\"/>\n",
+                xml_escape(&nc.connection_type),
+                xml_escape(&nc.other_type),
+                nc.count
+            ));
+            if !match_names.contains(nc.other_type.as_str()) {
+                *connected_types.entry(nc.other_type.clone()).or_insert(0) += nc.count;
+            }
+        }
+
+        xml.push_str("  </match>\n");
+    }
+
+    // Layer 1: connected types (not themselves matching)
+    if !connected_types.is_empty() {
+        let mut layer1: Vec<(String, usize)> = connected_types.into_iter().collect();
+        layer1.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        layer1.truncate(max_layer1);
+
+        xml.push_str("  <connected depth=\"1\">\n");
+        for (nt, _edge_count) in &layer1 {
+            let node_count = graph.type_indices.get(nt).map(|v| v.len()).unwrap_or(0);
+            let neighbors = get_neighbors(nt);
+            let has_conns = !neighbors.outgoing.is_empty() || !neighbors.incoming.is_empty();
+
+            xml.push_str(&format!(
+                "    <type name=\"{}\" count=\"{}\"",
+                xml_escape(nt),
+                node_count
+            ));
+
+            if has_conns {
+                xml.push_str(">\n");
+                for nc in neighbors.outgoing.iter().take(conns_per_layer1) {
+                    xml.push_str(&format!(
+                        "      <out type=\"{}\" target=\"{}\" count=\"{}\"/>\n",
+                        xml_escape(&nc.connection_type),
+                        xml_escape(&nc.other_type),
+                        nc.count
+                    ));
+                }
+                for nc in neighbors.incoming.iter().take(conns_per_layer1) {
+                    xml.push_str(&format!(
+                        "      <in type=\"{}\" source=\"{}\" count=\"{}\"/>\n",
+                        xml_escape(&nc.connection_type),
+                        xml_escape(&nc.other_type),
+                        nc.count
+                    ));
+                }
+                xml.push_str("    </type>\n");
+            } else {
+                xml.push_str("/>\n");
+            }
+        }
+        xml.push_str("  </connected>\n");
+    }
+
+    xml.push_str("  <hint>Use describe(types=['TypeName']) for properties + samples.</hint>\n");
+    xml.push_str("</type_search>");
+    xml
 }
 
 // ── Fluent API reference ──────────────────────────────────────────────────
@@ -3019,14 +3857,35 @@ pub fn compute_description(
     connections: &ConnectionDetail,
     cypher: &CypherDetail,
     fluent: &FluentDetail,
+    type_search: Option<&str>,
 ) -> Result<String, String> {
-    // If connections, cypher, or fluent is requested, return only those tracks
-    let standalone = !matches!(connections, ConnectionDetail::Off)
+    // If type_search, connections, cypher, or fluent is requested, return only those tracks
+    let standalone = type_search.is_some()
+        || !matches!(connections, ConnectionDetail::Off)
         || !matches!(cypher, CypherDetail::Off)
         || !matches!(fluent, FluentDetail::Off);
 
     if standalone {
+        // #10: Lazy type connectivity — compute on first describe that needs it
+        // for Large/Extreme graphs. Amortizes O(E) across the session.
+        let needs_connectivity = type_search.is_some();
+        if needs_connectivity && !graph.has_type_connectivity_cache() {
+            let scale = graph_scale(graph);
+            if matches!(scale, GraphScale::Large | GraphScale::Extreme) {
+                let triples = compute_type_connectivity(graph);
+                // Also derive and cache edge type counts from the same pass
+                if !graph.has_edge_type_counts_cache() {
+                    let derived = derive_edge_counts_from_triples(&triples);
+                    *graph.edge_type_counts_cache.write().unwrap() = Some(derived.counts);
+                }
+                graph.set_type_connectivity(triples);
+            }
+        }
+
         let mut result = String::with_capacity(4096);
+        if let Some(pattern) = type_search {
+            result = build_type_search_results(graph, pattern);
+        }
         match connections {
             ConnectionDetail::Off => {}
             ConnectionDetail::Overview => write_connections_overview(&mut result, graph),
@@ -3055,20 +3914,37 @@ pub fn compute_description(
     let result = match types {
         Some(requested) if !requested.is_empty() => build_focused_detail(graph, requested)?,
         _ => {
-            // Count core types only (exclude supporting types)
-            let core_count = graph
-                .type_indices
-                .keys()
-                .filter(|nt| !graph.parent_types.contains_key(*nt))
-                .count();
-            if core_count <= 15 {
-                build_inventory_with_detail(graph)
-            } else {
-                build_inventory(graph)
+            let scale = graph_scale(graph);
+            match scale {
+                GraphScale::Small => build_inventory_with_detail(graph),
+                GraphScale::Medium => build_inventory(graph),
+                GraphScale::Large => build_large_inventory(graph),
+                GraphScale::Extreme => build_extreme_inventory(graph),
             }
         }
     };
     Ok(result)
+}
+
+/// Case-insensitive substring check without allocation.
+/// `pattern` must already be lowercase ASCII bytes.
+#[inline]
+fn contains_case_insensitive(haystack: &[u8], pattern: &[u8]) -> bool {
+    if pattern.is_empty() {
+        return true;
+    }
+    if haystack.len() < pattern.len() {
+        return false;
+    }
+    'outer: for i in 0..=(haystack.len() - pattern.len()) {
+        for j in 0..pattern.len() {
+            if haystack[i + j].to_ascii_lowercase() != pattern[j] {
+                continue 'outer;
+            }
+        }
+        return true;
+    }
+    false
 }
 
 /// Minimal XML escaping for attribute values.
@@ -3100,19 +3976,21 @@ mcp = FastMCP("my-graph", instructions="Knowledge graph. Call graph_overview fir
 @mcp.tool()
 def graph_overview(
     types: list[str] | None = None,
+    type_search: str | None = None,
     connections: bool | list[str] | None = None,
     cypher: bool | list[str] | None = None,
 ) -> str:
     """Get graph schema, connection details, or Cypher language reference.
 
-    Three independent axes — call with no args first for the overview:
-      graph_overview()                            — inventory + connections with property names
+    Four independent axes — call with no args first for the overview:
+      graph_overview()                            — inventory (adapts to graph scale)
       graph_overview(types=["Field"])             — property schemas, samples
+      graph_overview(type_search="software")      — find types by name + neighborhood
       graph_overview(connections=True)            — all connection types with properties
       graph_overview(connections=["BELONGS_TO"])  — deep-dive: property stats, sample edges
       graph_overview(cypher=True)                 — Cypher clauses, functions, procedures
       graph_overview(cypher=["cluster","MATCH"])  — detailed docs with examples"""
-    return graph.describe(types=types, connections=connections, cypher=cypher)
+    return graph.describe(types=types, type_search=type_search, connections=connections, cypher=cypher)
 
 @mcp.tool()
 def cypher_query(query: str) -> str:
@@ -3147,7 +4025,7 @@ if __name__ == "__main__":
   </setup>
 
   <core_tools desc="Essential — include all three in every MCP server">
-    <tool name="graph_overview" method="graph.describe()" args="types, connections, cypher">
+    <tool name="graph_overview" method="graph.describe()" args="types, type_search, connections, cypher">
       Schema introspection with 3-tier progressive disclosure.
       The agent's entry point — always expose this.
     </tool>

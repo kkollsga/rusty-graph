@@ -2,7 +2,7 @@
 use crate::datatypes::values::{FilterCondition, Value};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
-use petgraph::visit::{IntoEdgeReferences, NodeIndexable};
+use petgraph::visit::{EdgeRef, IntoEdgeReferences, NodeIndexable};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -157,6 +157,17 @@ impl StringInterner {
     #[inline]
     pub fn try_resolve(&self, key: InternedKey) -> Option<&str> {
         self.strings.get(&key).map(|s| s.as_str())
+    }
+
+    /// Compute the InternedKey for a string (if it exists in the interner).
+    #[inline]
+    pub fn try_resolve_to_key(&self, s: &str) -> Option<InternedKey> {
+        let key = InternedKey::from_str(s);
+        if self.strings.contains_key(&key) {
+            Some(key)
+        } else {
+            None
+        }
     }
 }
 
@@ -1185,6 +1196,16 @@ impl SaveMetadata {
     }
 }
 
+/// Type connectivity triple: one row of the type-level graph.
+/// (source_type) -[connection_type]-> (target_type) with edge count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectivityTriple {
+    pub src: String,
+    pub conn: String,
+    pub tgt: String,
+    pub count: usize,
+}
+
 /// Metadata about a connection type: which node types it connects and what properties it carries.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ConnectionTypeInfo {
@@ -1412,6 +1433,11 @@ pub struct DirGraph {
     /// Invalidated on edge mutations (add/remove).
     #[serde(skip)]
     pub(crate) edge_type_counts_cache: Arc<RwLock<Option<HashMap<String, usize>>>>,
+    /// Cached type connectivity: (source_type, connection_type, target_type) → count.
+    /// Computed by `rebuild_caches()`, persisted in metadata, restored on load.
+    /// Invalidated on edge mutations alongside edge_type_counts_cache.
+    #[serde(skip)]
+    pub(crate) type_connectivity_cache: Arc<RwLock<Option<Vec<ConnectivityTriple>>>>,
     /// Columnar embedding storage: (node_type, property_name) -> EmbeddingStore.
     /// Stored separately from NodeData.properties — invisible to normal node API.
     /// Persisted as a separate section in v2 .kgl files.
@@ -1517,6 +1543,7 @@ impl DirGraph {
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
             edge_type_counts_cache: Arc::new(RwLock::new(None)),
+            type_connectivity_cache: Arc::new(RwLock::new(None)),
             embeddings: HashMap::new(),
             timeseries_configs: HashMap::new(),
             timeseries_store: HashMap::new(),
@@ -1559,6 +1586,7 @@ impl DirGraph {
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
             edge_type_counts_cache: Arc::new(RwLock::new(None)),
+            type_connectivity_cache: Arc::new(RwLock::new(None)),
             embeddings: HashMap::new(),
             timeseries_configs: HashMap::new(),
             timeseries_store: HashMap::new(),
@@ -1859,20 +1887,47 @@ impl DirGraph {
                 return cached.clone();
             }
         }
-        // Slow path: compute O(E) and cache
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for edge in self.graph.edge_weights() {
-            let ct_str = self.interner.resolve(edge.connection_type).to_string();
-            *counts.entry(ct_str).or_insert(0) += 1;
+        // Slow path: compute O(E) and cache.
+        // Uses edge_endpoint_keys() (mmap reads, zero heap per edge) instead of
+        // edge_weights() (which materializes EdgeData → OOM on extreme-scale disk graphs).
+        let mut counts: HashMap<InternedKey, usize> = HashMap::new();
+        for (_src, _tgt, conn_key) in self.graph.edge_endpoint_keys() {
+            *counts.entry(conn_key).or_insert(0) += 1;
         }
+        // Resolve to strings
+        let string_counts: HashMap<String, usize> = counts
+            .into_iter()
+            .map(|(k, v)| (self.interner.resolve(k).to_string(), v))
+            .collect();
         let mut write = self.edge_type_counts_cache.write().unwrap();
-        *write = Some(counts.clone());
-        counts
+        *write = Some(string_counts.clone());
+        string_counts
     }
 
-    /// Invalidate the edge type count cache (call after edge mutations).
+    /// Invalidate edge caches (call after edge mutations).
     pub(crate) fn invalidate_edge_type_counts_cache(&self) {
         *self.edge_type_counts_cache.write().unwrap() = None;
+        *self.type_connectivity_cache.write().unwrap() = None;
+    }
+
+    /// Check if edge type count cache is populated (avoids O(E) scan).
+    pub fn has_edge_type_counts_cache(&self) -> bool {
+        self.edge_type_counts_cache.read().unwrap().is_some()
+    }
+
+    /// Check if type connectivity cache is populated.
+    pub fn has_type_connectivity_cache(&self) -> bool {
+        self.type_connectivity_cache.read().unwrap().is_some()
+    }
+
+    /// Get the type connectivity triples (if cached).
+    pub fn get_type_connectivity(&self) -> Option<Vec<ConnectivityTriple>> {
+        self.type_connectivity_cache.read().unwrap().clone()
+    }
+
+    /// Set the type connectivity cache.
+    pub fn set_type_connectivity(&self, triples: Vec<ConnectivityTriple>) {
+        *self.type_connectivity_cache.write().unwrap() = Some(triples);
     }
 
     // ========================================================================
@@ -3849,6 +3904,32 @@ impl GraphBackend {
             GraphBackend::Disk(dg) => crate::graph::graph_iterators::GraphEdges::Disk(
                 dg.edges_directed_iter(a, petgraph::Direction::Outgoing),
             ),
+        }
+    }
+
+    /// Iterate edge endpoint metadata without materializing EdgeData.
+    /// Yields (source_index, target_index, connection_type_key) for each live edge.
+    /// DiskGraph: reads mmap'd edge_endpoints directly (zero heap allocation).
+    /// InMemory: reads from petgraph edge weights.
+    pub fn edge_endpoint_keys(
+        &self,
+    ) -> Box<dyn Iterator<Item = (NodeIndex, NodeIndex, InternedKey)> + '_> {
+        match self {
+            GraphBackend::InMemory(g) => Box::new(g.edge_references().map(|er| {
+                let w = er.weight();
+                (er.source(), er.target(), w.connection_type)
+            })),
+            GraphBackend::Disk(dg) => Box::new((0..dg.next_edge_idx).filter_map(move |i| {
+                let ep = dg.edge_endpoints.get(i as usize);
+                if ep.source == crate::graph::disk_graph::TOMBSTONE_EDGE {
+                    return None;
+                }
+                Some((
+                    NodeIndex::new(ep.source as usize),
+                    NodeIndex::new(ep.target as usize),
+                    InternedKey::from_u64(ep.connection_type),
+                ))
+            })),
         }
     }
 

@@ -641,24 +641,119 @@ pub fn load_ntriples(
         );
     }
 
-    // Drop label cache — no longer needed after Phase 1
+    // Post-Phase-1: resolve Q-code type names using the now-complete label cache.
+    // During streaming, types are assigned as entities arrive — if the P31 target
+    // entity hasn't been seen yet, the raw Q-code is used. Now that all labels are
+    // cached, we can fix these. This renames type_indices keys, node_type_metadata,
+    // type_schemas, and updates node_type InternedKeys in the graph.
+    if config.auto_type {
+        let mut renames: Vec<(String, String)> = Vec::new();
+        for type_name in graph.type_indices.keys() {
+            if let Some(qnum) = parse_qcode_number(type_name) {
+                if let Some(label) = label_cache.get(&qnum) {
+                    if label != type_name && !graph.type_indices.contains_key(label) {
+                        renames.push((type_name.clone(), label.clone()));
+                    }
+                }
+            }
+        }
+        if !renames.is_empty() {
+            let rename_start = std::time::Instant::now();
+            if config.verbose {
+                eprintln!(
+                    "  Resolving {} Q-code type names to labels...",
+                    renames.len()
+                );
+            }
+            let old_key_to_new_key: Vec<(InternedKey, InternedKey)> = renames
+                .iter()
+                .map(|(old, new)| {
+                    let old_key = graph.interner.get_or_intern(old);
+                    let new_key = graph.interner.get_or_intern(new);
+                    (old_key, new_key)
+                })
+                .collect();
+            for (old_name, new_name) in &renames {
+                // Rename type_indices
+                if let Some(indices) = graph.type_indices.remove(old_name) {
+                    graph.type_indices.insert(new_name.clone(), indices);
+                }
+                // Rename node_type_metadata
+                if let Some(meta) = graph.node_type_metadata.remove(old_name) {
+                    graph.node_type_metadata.insert(new_name.clone(), meta);
+                }
+                // Rename type_schemas
+                if let Some(schema) = graph.type_schemas.remove(old_name) {
+                    graph.type_schemas.insert(new_name.clone(), schema);
+                }
+                // Rename type_build_meta
+                if let Some(build_meta) = type_meta.remove(old_name) {
+                    type_meta.insert(new_name.clone(), build_meta);
+                }
+            }
+            // Update node_type InternedKey on affected nodes.
+            // Build lookup map first, then ONE sequential pass over all nodes.
+            // This is O(nodes) not O(renames × nodes).
+            let rename_map: HashMap<u64, u64> = old_key_to_new_key
+                .iter()
+                .map(|(old, new)| (old.as_u64(), new.as_u64()))
+                .collect();
+            match &mut graph.graph {
+                crate::graph::schema::GraphBackend::Disk(ref mut dg) => {
+                    let n = dg.node_slots.len();
+                    for i in 0..n {
+                        let slot = dg.node_slots.get(i);
+                        if slot.is_alive() {
+                            if let Some(&new_type) = rename_map.get(&slot.node_type) {
+                                let mut new_slot = slot;
+                                new_slot.node_type = new_type;
+                                dg.node_slots.set(i, new_slot);
+                            }
+                        }
+                    }
+                }
+                crate::graph::schema::GraphBackend::InMemory(ref mut g) => {
+                    use petgraph::visit::NodeIndexable;
+                    for i in 0..g.node_bound() {
+                        let idx = petgraph::graph::NodeIndex::new(i);
+                        if let Some(node) = g.node_weight_mut(idx) {
+                            if let Some(&new_key) = rename_map.get(&node.node_type.as_u64()) {
+                                node.node_type = InternedKey::from_u64(new_key);
+                            }
+                        }
+                    }
+                }
+            }
+            if config.verbose {
+                eprintln!(
+                    "  [T+{:.0}s] Resolved {} Q-code types ({:.1}s)",
+                    start.elapsed().as_secs_f64(),
+                    renames.len(),
+                    rename_start.elapsed().as_secs_f64()
+                );
+            }
+        }
+    }
+
     let label_cache_size = label_cache.len();
     drop(label_cache);
 
     if config.verbose {
+        let t = start.elapsed().as_secs_f64();
         let buf_len = edge_buffer.len() as u64;
         let num_types = type_meta.len();
         let total_cols: usize = type_meta.values().map(|m| m.columns.len()).sum();
         eprintln!(
-            "  Phase 1 done: {} entities, {} edges buffered, {} types, {} columns ({:.1}s)",
+            "  [T+{:.0}s] Phase 1 done: {} entities, {} edges buffered, {} types, {} columns",
+            t,
             format_count(stats.entities_created),
             format_count(buf_len),
             format_count(num_types as u64),
             format_count(total_cols as u64),
-            start.elapsed().as_secs_f64(),
         );
         eprintln!(
-            "  Label cache: {} entries (freed)",
+            "  [T+{:.0}s] Label cache: {} entries (freed)",
+            t,
             format_count(label_cache_size as u64),
         );
     }
@@ -669,7 +764,8 @@ pub fn load_ntriples(
     if let Some(log_writer) = prop_log.take() {
         if config.verbose {
             eprintln!(
-                "  Phase 1b: building columns with direct-write ({} entities, {} types)...",
+                "  [T+{:.0}s] Phase 1b: building columns with direct-write ({} entities, {} types)...",
+                start.elapsed().as_secs_f64(),
                 format_count(log_writer.count()),
                 type_meta.len(),
             );
@@ -716,14 +812,19 @@ pub fn load_ntriples(
         graph.type_indices.clear();
         if config.verbose {
             eprintln!(
-                "  Freed {} column stores + {} type indices before Phase 2",
-                dropped_stores, type_indices_count,
+                "  [T+{:.0}s] Freed {} column stores + {} type indices before Phase 2",
+                start.elapsed().as_secs_f64(),
+                dropped_stores,
+                type_indices_count,
             );
         }
     }
 
     if config.verbose {
-        eprintln!("  Phase 2: creating edges...");
+        eprintln!(
+            "  [T+{:.0}s] Phase 2: creating edges...",
+            start.elapsed().as_secs_f64()
+        );
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }
 
@@ -738,7 +839,8 @@ pub fn load_ntriples(
 
     if config.verbose {
         eprintln!(
-            "  Phase 2 done: {} edges created, {} skipped ({:.1}s)",
+            "  [T+{:.0}s] Phase 2 done: {} edges created, {} skipped ({:.1}s)",
+            start.elapsed().as_secs_f64(),
             format_count(stats.edges_created),
             format_count(stats.edges_skipped),
             edge_start.elapsed().as_secs_f64(),
@@ -767,19 +869,29 @@ pub fn load_ntriples(
     // Phase 3: Build CSR from pending edges (disk mode)
     if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
         if config.verbose {
-            eprintln!("  Phase 3: building CSR from pending edges...");
+            eprintln!(
+                "  [T+{:.0}s] Phase 3: building CSR from pending edges...",
+                start.elapsed().as_secs_f64()
+            );
         }
         let csr_start = Instant::now();
         dg.build_csr_from_pending();
         if config.verbose {
-            eprintln!("  Phase 3 done ({:.1}s)", csr_start.elapsed().as_secs_f64());
+            eprintln!(
+                "  [T+{:.0}s] Phase 3 done ({:.1}s)",
+                start.elapsed().as_secs_f64(),
+                csr_start.elapsed().as_secs_f64()
+            );
         }
     }
 
     // Rebuild type_indices from DiskNodeSlots (dropped before Phase 2 to save 1 GB)
     if final_mode == StorageMode::Disk {
         if config.verbose {
-            eprintln!("  Rebuilding type indices from node slots...");
+            eprintln!(
+                "  [T+{:.0}s] Rebuilding type indices from node slots...",
+                start.elapsed().as_secs_f64()
+            );
         }
         let rebuild_start = Instant::now();
         if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
@@ -798,7 +910,8 @@ pub fn load_ntriples(
         }
         if config.verbose {
             eprintln!(
-                "  Rebuilt {} type indices ({:.1}s)",
+                "  [T+{:.0}s] Rebuilt {} type indices ({:.1}s)",
+                start.elapsed().as_secs_f64(),
                 graph.type_indices.len(),
                 rebuild_start.elapsed().as_secs_f64(),
             );
@@ -816,7 +929,10 @@ pub fn load_ntriples(
         let meta_path = data_dir.join("columns_meta.json");
         if mmap_path.exists() && meta_path.exists() {
             if config.verbose {
-                eprintln!("  Reloading column stores from mmap...");
+                eprintln!(
+                    "  [T+{:.0}s] Reloading column stores from mmap...",
+                    start.elapsed().as_secs_f64()
+                );
             }
             let reload_start = Instant::now();
             let reload_result: Result<(), String> = (|| {
@@ -869,7 +985,10 @@ pub fn load_ntriples(
     // Uses column stores directly — no node materialization, no arena growth.
     if final_mode == StorageMode::Disk {
         if config.verbose {
-            eprintln!("  Building id indices from column stores...");
+            eprintln!(
+                "  [T+{:.0}s] Building id indices from column stores...",
+                start.elapsed().as_secs_f64()
+            );
             let _ = std::io::Write::flush(&mut std::io::stderr());
         }
         let id_start = Instant::now();
@@ -891,7 +1010,15 @@ pub fn load_ntriples(
         if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
             let data_dir = dg.data_dir.clone();
 
+            if config.verbose {
+                eprintln!(
+                    "  [T+{:.0}s] Saving interner + metadata...",
+                    start.elapsed().as_secs_f64()
+                );
+            }
+
             // Save interner
+            let save_step = Instant::now();
             let interner_map: HashMap<String, String> = graph
                 .interner
                 .iter()
@@ -900,14 +1027,29 @@ pub fn load_ntriples(
             if let Ok(json) = serde_json::to_string(&interner_map) {
                 let _ = std::fs::write(data_dir.join("interner.json"), json);
             }
+            if config.verbose {
+                eprintln!(
+                    "    interner.json ({} entries): {:.1}s",
+                    interner_map.len(),
+                    save_step.elapsed().as_secs_f64()
+                );
+            }
 
             // Save DirGraph metadata
+            let save_step = Instant::now();
             let meta = crate::graph::io_operations::build_disk_metadata(graph);
             if let Ok(json) = serde_json::to_string_pretty(&meta) {
                 let _ = std::fs::write(data_dir.join("metadata.json"), json);
             }
+            if config.verbose {
+                eprintln!(
+                    "    metadata.json: {:.1}s",
+                    save_step.elapsed().as_secs_f64()
+                );
+            }
 
             // Save id_indices (bincode + zstd) so load() doesn't rebuild them
+            let save_step = Instant::now();
             if !graph.id_indices.is_empty() {
                 if let Ok(bytes) = bincode::serialize(&graph.id_indices) {
                     if let Ok(compressed) = zstd::encode_all(bytes.as_slice(), 3) {
@@ -915,8 +1057,16 @@ pub fn load_ntriples(
                     }
                 }
             }
+            if config.verbose {
+                eprintln!(
+                    "    id_indices.bin.zst ({} types): {:.1}s",
+                    graph.id_indices.len(),
+                    save_step.elapsed().as_secs_f64()
+                );
+            }
 
             // Save type_indices (bincode + zstd) so load() doesn't rebuild from node_slots
+            let save_step = Instant::now();
             if !graph.type_indices.is_empty() {
                 if let Ok(bytes) = bincode::serialize(&graph.type_indices) {
                     if let Ok(compressed) = zstd::encode_all(bytes.as_slice(), 3) {
@@ -924,9 +1074,16 @@ pub fn load_ntriples(
                     }
                 }
             }
+            if config.verbose {
+                eprintln!(
+                    "    type_indices.bin.zst ({} types): {:.1}s",
+                    graph.type_indices.len(),
+                    save_step.elapsed().as_secs_f64()
+                );
+            }
 
             if config.verbose {
-                eprintln!("  Saved interner + metadata");
+                eprintln!("  [T+{:.0}s] Save complete", start.elapsed().as_secs_f64());
             }
         }
     }
@@ -1736,9 +1893,15 @@ fn build_columns_direct(
     let mut entity_count = 0u64;
     let total_entities = type_meta.values().map(|m| m.row_count as u64).sum::<u64>();
 
-    // Buffer: type_name -> list of entries for that type
-    let mut buffers: HashMap<String, Vec<BufferedEntry>> = HashMap::new();
+    // Buffer: InternedKey -> list of entries (avoids per-entity string allocation)
+    let mut buffers: HashMap<InternedKey, Vec<BufferedEntry>> = HashMap::new();
     let mut total_buffer_bytes: usize = 0;
+
+    // Build InternedKey lookup for writers (resolve strings once, not per entity)
+    let writer_keys: HashSet<InternedKey> = writers
+        .keys()
+        .filter_map(|name| graph.interner.try_resolve_to_key(name))
+        .collect();
 
     // Flush threshold: configurable via KGLITE_FLUSH_MB env var, default 2048 MB (2 GB)
     let flush_threshold_bytes: usize = std::env::var("KGLITE_FLUSH_MB")
@@ -1749,16 +1912,16 @@ fn build_columns_direct(
 
     for entry_result in reader {
         let entry = entry_result?;
-        let type_name = graph.interner.resolve(entry.node_type).to_string();
+        let type_key = entry.node_type;
 
-        // Skip types not in writers
-        if !writers.contains_key(&type_name) {
+        // Skip types not in writers (O(1) InternedKey lookup, no string allocation)
+        if !writer_keys.contains(&type_key) {
             continue;
         }
 
         let entry_bytes = estimate_entry_bytes(&entry.id, &entry.title, &entry.properties);
 
-        buffers.entry(type_name).or_default().push(BufferedEntry {
+        buffers.entry(type_key).or_default().push(BufferedEntry {
             node_idx: entry.node_idx,
             id: entry.id,
             title: entry.title,
@@ -1778,20 +1941,27 @@ fn build_columns_direct(
 
         // Flush the biggest type when buffer exceeds threshold
         if total_buffer_bytes > flush_threshold_bytes {
-            let biggest_type = buffers
+            let biggest_key = buffers
                 .iter()
                 .max_by_key(|(_, entries)| entries.len())
-                .map(|(name, _)| name.clone());
-            if let Some(ref flush_type) = biggest_type {
-                let entries = buffers.remove(flush_type).unwrap();
+                .map(|(key, _)| *key);
+            if let Some(flush_key) = biggest_key {
+                let entries = buffers.remove(&flush_key).unwrap();
                 let n_entries = entries.len();
-                let flushed =
-                    flush_type_entries(flush_type, &entries, &mut writers, &mut mmap, &mut row_ids);
+                // Resolve InternedKey → String only at flush time (once per flush)
+                let flush_name = graph.interner.resolve(flush_key).to_string();
+                let flushed = flush_type_entries(
+                    &flush_name,
+                    &entries,
+                    &mut writers,
+                    &mut mmap,
+                    &mut row_ids,
+                );
                 total_buffer_bytes = total_buffer_bytes.saturating_sub(flushed);
                 if verbose {
                     eprintln!(
                         "  Phase 1b: flushed {} ({} entries, {:.1} MB)",
-                        flush_type,
+                        flush_name,
                         format_count(n_entries as u64),
                         flushed as f64 / (1 << 20) as f64,
                     );
@@ -1801,13 +1971,14 @@ fn build_columns_direct(
     }
 
     // Flush all remaining buffers
-    let remaining_types: Vec<String> = buffers.keys().cloned().collect();
-    for flush_type in remaining_types {
-        let entries = buffers.remove(&flush_type).unwrap();
+    let remaining_keys: Vec<InternedKey> = buffers.keys().copied().collect();
+    for flush_key in remaining_keys {
+        let entries = buffers.remove(&flush_key).unwrap();
         if entries.is_empty() {
             continue;
         }
         let n_entries = entries.len();
+        let flush_type = graph.interner.resolve(flush_key).to_string();
         flush_type_entries(&flush_type, &entries, &mut writers, &mut mmap, &mut row_ids);
         if verbose {
             eprintln!(
@@ -2376,16 +2547,12 @@ fn create_edges_with_qnum_map(
         }
     }
 
-    // Skip connection type metadata for disk mode with auto-typing —
-    // the O(types²) loop would be 20K² = 400M iterations, catastrophic.
-    // But we DO register the connection type names so has_connection_type() works.
+    // Register connection type names (no O(types²) metadata loop).
     for conn_key in &conn_types_seen {
         let conn_name = graph.interner.resolve(*conn_key).to_string();
         graph.connection_type_metadata.entry(conn_name).or_default();
     }
     graph.invalidate_edge_type_counts_cache();
-
-    // Clean up qnum_to_idx temp file is handled by caller
 }
 
 fn create_edges_from_buffer(
@@ -2480,7 +2647,8 @@ fn create_edges_compact(
     };
 
     if is_disk {
-        // Fast path for disk mode: push directly to pending_edges
+        // Fast path for disk mode: push directly to pending_edges.
+        // Keep this loop LEAN — no random I/O per edge.
         if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
             for i in 0..buf_len {
                 let (src_num, tgt_num, pred_key) = buf.get(i);
@@ -2517,20 +2685,10 @@ fn create_edges_compact(
         }
     }
 
-    // Register connection type metadata once (not per edge)
-    let node_types: Vec<String> = graph.type_indices.keys().cloned().collect();
+    // Register connection type names (no O(types²) metadata loop).
     for conn_key in &conn_types_seen {
         let conn_name = graph.interner.resolve(*conn_key).to_string();
-        for src_type in &node_types {
-            for tgt_type in &node_types {
-                graph.upsert_connection_type_metadata(
-                    &conn_name,
-                    src_type,
-                    tgt_type,
-                    HashMap::new(),
-                );
-            }
-        }
+        graph.connection_type_metadata.entry(conn_name).or_default();
     }
 
     graph.invalidate_edge_type_counts_cache();
