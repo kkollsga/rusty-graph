@@ -2865,6 +2865,26 @@ impl DirGraph {
 
             for &idx in indices {
                 if let Some(node) = self.graph.node_weight(idx) {
+                    // For Columnar nodes in mapped mode, id/title live in the
+                    // old store's id_column/title_column. Preserve them.
+                    let (id_from_store, title_from_store) = if let PropertyStorage::Columnar {
+                        store: old_store,
+                        row_id: old_row,
+                    } = &node.properties
+                    {
+                        (old_store.get_id(*old_row), old_store.get_title(*old_row))
+                    } else {
+                        (None, None)
+                    };
+
+                    // Push id/title columns if the old store had them
+                    if let Some(ref id_val) = id_from_store {
+                        store.push_id(id_val);
+                    }
+                    if let Some(ref title_val) = title_from_store {
+                        store.push_title(title_val);
+                    }
+
                     // Collect properties from current storage
                     let pairs: Vec<(InternedKey, Value)> = match &node.properties {
                         PropertyStorage::Compact { schema, values } => schema
@@ -2884,7 +2904,10 @@ impl DirGraph {
                         PropertyStorage::Map(map) => {
                             map.iter().map(|(&k, v)| (k, v.clone())).collect()
                         }
-                        PropertyStorage::Columnar { .. } => continue, // already columnar
+                        PropertyStorage::Columnar {
+                            store: old_store,
+                            row_id,
+                        } => old_store.row_properties(*row_id),
                     };
 
                     let row_id = store.push_row(&pairs);

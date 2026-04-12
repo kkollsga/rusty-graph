@@ -5,6 +5,13 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.6] - 2026-04-12
+
+### Fixed
+- **Silent data loss on incremental save/load**: Loading a `.kgl` file, adding or updating nodes, then saving and loading again would silently lose properties for the new/updated nodes. The v3 column writer now always consolidates all node properties (Compact, Map, and Columnar) into column stores before writing.
+- **Corrupt `.kgl` file on re-save**: Simply loading and re-saving a `.kgl` file (with no changes) could produce a corrupt file that failed to load with `blob too small for offsets`. The v3 column loader was building the ColumnStore schema from `node_type_metadata` (which includes id/title fields) instead of from the column section metadata (which only has property columns), creating empty placeholder columns that corrupted on write.
+- **`enable_columnar()` dropped Columnar nodes on rebuild**: When rebuilding column stores, nodes already using Columnar storage were skipped, then their old stores were replaced — losing their properties. Now reads properties from old Columnar stores during rebuild and preserves mapped-mode id/title columns.
+
 ## [0.7.5] - 2026-04-10
 
 ### Added

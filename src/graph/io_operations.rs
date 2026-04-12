@@ -699,8 +699,23 @@ fn load_v3(buf: &[u8]) -> io::Result<KnowledgeGraph> {
         let compressed = &buf[section_offset..section_end];
         let packed = zstd_decompress(compressed)?;
 
-        // Get the type schema
-        if let Some(type_schema) = dir_graph.type_schemas.get(&section_meta.type_name) {
+        // Build schema from the column section metadata (exact match for saved
+        // columns). Using type_schemas here would include id/title columns that
+        // are NOT in the column data, creating empty placeholder columns that
+        // corrupt the file on re-save.
+        {
+            let col_keys: Vec<crate::graph::schema::InternedKey> = section_meta
+                .columns
+                .keys()
+                .map(|name| {
+                    dir_graph.interner.get_or_intern(name);
+                    crate::graph::schema::InternedKey::from_str(name)
+                })
+                .collect();
+            let column_schema = Arc::new(crate::graph::schema::TypeSchema::from_keys(
+                col_keys.into_iter(),
+            ));
+
             let type_meta = dir_graph
                 .node_type_metadata
                 .get(&section_meta.type_name)
@@ -712,7 +727,7 @@ fn load_v3(buf: &[u8]) -> io::Result<KnowledgeGraph> {
             std::fs::create_dir_all(&type_temp_dir)?;
 
             let store = ColumnStore::load_packed(
-                Arc::clone(type_schema),
+                column_schema,
                 &type_meta,
                 &dir_graph.interner,
                 &packed,

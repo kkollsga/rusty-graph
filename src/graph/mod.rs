@@ -5340,9 +5340,11 @@ impl KnowledgeGraph {
         // Prep phase (quick): stamp metadata, snapshot index keys
         io_operations::prepare_save(&mut self.inner);
 
-        // Auto-enable columnar if not already active (v3 requires columnar).
-        // The graph stays columnar after save — no disable step needed.
-        if !self.inner.is_columnar() {
+        // Consolidate ALL node properties into column stores (v3 requires columnar).
+        // Always rebuild: after load+add, some nodes may have Compact storage;
+        // after load+update, COW clones diverge from graph.column_stores.
+        // enable_columnar() handles all cases (fresh, mixed, and mapped mode).
+        {
             let graph = Arc::make_mut(&mut self.inner);
             graph.enable_columnar();
         }

@@ -361,3 +361,167 @@ class TestV3Format:
             assert loaded.len() == 50
         finally:
             os.unlink(path)
+
+
+class TestIncrementalSaveLoad:
+    """Regression tests for incremental build workflows: load → modify → save → load."""
+
+    def test_load_save_load_no_changes(self):
+        """Save → load → save → load without changes must not corrupt the file."""
+        graph = KnowledgeGraph()
+        for i in range(25):
+            df = pd.DataFrame([{"id": f"a_{i}", "name": f"Artist {i}", "plays": i * 100}])
+            graph.add_nodes(df, "Artist", "id", "name", conflict_handling="update")
+
+        with tempfile.NamedTemporaryFile(suffix=".kgl", delete=False) as f:
+            path1 = f.name
+        with tempfile.NamedTemporaryFile(suffix=".kgl", delete=False) as f:
+            path2 = f.name
+        try:
+            graph.save(path1)
+            loaded = kglite.load(path1)
+            loaded.save(path2)
+            reloaded = kglite.load(path2)
+
+            assert reloaded.select("Artist").len() == 25
+            node = reloaded.node("Artist", "a_12")
+            assert node["plays"] == 1200
+        finally:
+            os.unlink(path1)
+            os.unlink(path2)
+
+    def test_load_add_save_load(self):
+        """Load → add new nodes → save → load must preserve all properties."""
+        graph = KnowledgeGraph()
+        df = pd.DataFrame([{"id": f"a_{i}", "name": f"Artist {i}", "plays": i * 100} for i in range(25)])
+        graph.add_nodes(df, "Artist", "id", "name")
+
+        with tempfile.NamedTemporaryFile(suffix=".kgl", delete=False) as f:
+            path1 = f.name
+        with tempfile.NamedTemporaryFile(suffix=".kgl", delete=False) as f:
+            path2 = f.name
+        try:
+            graph.save(path1)
+            loaded = kglite.load(path1)
+
+            # Add 75 more artists to the loaded graph
+            df2 = pd.DataFrame([{"id": f"a_{i}", "name": f"Artist {i}", "plays": i * 100} for i in range(25, 100)])
+            loaded.add_nodes(df2, "Artist", "id", "name")
+            loaded.save(path2)
+
+            reloaded = kglite.load(path2)
+            assert reloaded.select("Artist").len() == 100
+
+            # Check original nodes
+            node0 = reloaded.node("Artist", "a_0")
+            assert node0["plays"] == 0
+            node24 = reloaded.node("Artist", "a_24")
+            assert node24["plays"] == 2400
+
+            # Check new nodes
+            node25 = reloaded.node("Artist", "a_25")
+            assert node25["plays"] == 2500
+            node99 = reloaded.node("Artist", "a_99")
+            assert node99["plays"] == 9900
+        finally:
+            os.unlink(path1)
+            os.unlink(path2)
+
+    def test_load_update_save_load(self):
+        """Load → update existing nodes with new property → save → load."""
+        graph = KnowledgeGraph()
+        df = pd.DataFrame([{"id": f"a_{i}", "name": f"Artist {i}", "plays": i * 100} for i in range(25)])
+        graph.add_nodes(df, "Artist", "id", "name")
+
+        with tempfile.NamedTemporaryFile(suffix=".kgl", delete=False) as f:
+            path1 = f.name
+        with tempfile.NamedTemporaryFile(suffix=".kgl", delete=False) as f:
+            path2 = f.name
+        try:
+            graph.save(path1)
+            loaded = kglite.load(path1)
+
+            # Update existing artists with a new 'genre' property
+            df2 = pd.DataFrame([{"id": f"a_{i}", "name": f"Artist {i}", "genre": "rock"} for i in range(25)])
+            loaded.add_nodes(df2, "Artist", "id", "name", conflict_handling="update")
+            loaded.save(path2)
+
+            reloaded = kglite.load(path2)
+            assert reloaded.select("Artist").len() == 25
+
+            node = reloaded.node("Artist", "a_5")
+            assert node["genre"] == "rock"
+            assert node["plays"] == 500
+        finally:
+            os.unlink(path1)
+            os.unlink(path2)
+
+    def test_incremental_one_at_a_time_save_load(self):
+        """Add nodes one at a time, save, load — all properties preserved."""
+        graph = KnowledgeGraph()
+        for i in range(100):
+            df = pd.DataFrame([{"id": f"n_{i}", "title": f"Node {i}", "score": float(i)}])
+            graph.add_nodes(df, "Item", "id", "title", conflict_handling="update")
+
+        with tempfile.NamedTemporaryFile(suffix=".kgl", delete=False) as f:
+            path = f.name
+        try:
+            graph.save(path)
+            loaded = kglite.load(path)
+            assert loaded.select("Item").len() == 100
+
+            node = loaded.node("Item", "n_99")
+            assert node["score"] == 99.0
+        finally:
+            os.unlink(path)
+
+    def test_small_graph_save_load(self):
+        """Very small graphs (5 + 24 nodes) must not corrupt on save/load."""
+        graph = KnowledgeGraph()
+        artists = pd.DataFrame([{"id": f"artist_{i}", "name": f"Artist {i}"} for i in range(5)])
+        tags = pd.DataFrame([{"id": f"tag_{i}", "name": f"Tag {i}"} for i in range(24)])
+        graph.add_nodes(artists, "Artist", "id", "name")
+        graph.add_nodes(tags, "Tag", "id", "name")
+
+        with tempfile.NamedTemporaryFile(suffix=".kgl", delete=False) as f:
+            path = f.name
+        try:
+            graph.save(path)
+            loaded = kglite.load(path)
+            assert loaded.select("Artist").len() == 5
+            assert loaded.select("Tag").len() == 24
+        finally:
+            os.unlink(path)
+
+    def test_multiple_save_load_cycles(self):
+        """Three consecutive save/load cycles with additions each time."""
+        with tempfile.NamedTemporaryFile(suffix=".kgl", delete=False) as f:
+            path = f.name
+        try:
+            # Cycle 1: create + save
+            g = KnowledgeGraph()
+            df1 = pd.DataFrame([{"id": f"n_{i}", "name": f"N{i}", "v": i} for i in range(10)])
+            g.add_nodes(df1, "X", "id", "name")
+            g.save(path)
+
+            # Cycle 2: load + add + save
+            g2 = kglite.load(path)
+            df2 = pd.DataFrame([{"id": f"n_{i}", "name": f"N{i}", "v": i} for i in range(10, 20)])
+            g2.add_nodes(df2, "X", "id", "name")
+            g2.save(path)
+
+            # Cycle 3: load + add + save
+            g3 = kglite.load(path)
+            df3 = pd.DataFrame([{"id": f"n_{i}", "name": f"N{i}", "v": i} for i in range(20, 30)])
+            g3.add_nodes(df3, "X", "id", "name")
+            g3.save(path)
+
+            # Final load: all 30 nodes with properties
+            final = kglite.load(path)
+            assert final.select("X").len() == 30
+
+            for i in [0, 9, 10, 19, 20, 29]:
+                node = final.node("X", f"n_{i}")
+                assert node["v"] == i, f"n_{i} expected v={i}, got {node['v']}"
+        finally:
+            os.unlink(path)
