@@ -5,9 +5,10 @@ Usage: python examples/benchmark_storage_modes.py
 """
 
 import os
+import shutil
 import sys
 import time
-import shutil
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kglite import KnowledgeGraph, load
 
@@ -18,16 +19,16 @@ TEMP_DIR = "/tmp/kglite_bench_modes"
 os.environ["KGLITE_CSR_VERBOSE"] = "1"
 
 CYPHER_QUERIES = [
-    ("Count nodes",            "MATCH (n) RETURN count(n) AS c"),
-    ("Count Entity edges",     "MATCH (n:Entity)-[r]->() RETURN count(r) AS c"),
-    ("Count Entity",           "MATCH (n:Entity) RETURN count(n) AS c"),
-    ("Entity titles L10",      "MATCH (n:Entity) RETURN n.title LIMIT 10"),
-    ("Entity edges L10",       "MATCH (n:Entity)-[r]->(m) RETURN n.title, type(r), m.title LIMIT 10"),
-    ("Entity -[:P31]-> L10",   "MATCH (n:Entity)-[:P31]->(m) RETURN n.title, m.title LIMIT 10"),
+    ("Count nodes", "MATCH (n) RETURN count(n) AS c"),
+    ("Count Entity edges", "MATCH (n:Entity)-[r]->() RETURN count(r) AS c"),
+    ("Count Entity", "MATCH (n:Entity) RETURN count(n) AS c"),
+    ("Entity titles L10", "MATCH (n:Entity) RETURN n.title LIMIT 10"),
+    ("Entity edges L10", "MATCH (n:Entity)-[r]->(m) RETURN n.title, type(r), m.title LIMIT 10"),
+    ("Entity -[:P31]-> L10", "MATCH (n:Entity)-[:P31]->(m) RETURN n.title, m.title LIMIT 10"),
     ("Incoming to Entity L10", "MATCH (n)-[r]->(m:Entity) RETURN n.title, type(r) LIMIT 10"),
-    ("2-hop L10",              "MATCH (a:Entity)-[]->(b)-[]->(c) RETURN a.title, b.title, c.title LIMIT 10"),
-    ("WHERE id=42",            "MATCH (n) WHERE id(n) = 42 RETURN n.title, labels(n)"),
-    ("CONTAINS Einstein",      "MATCH (n) WHERE n.title CONTAINS 'Einstein' RETURN n.title LIMIT 10"),
+    ("2-hop L10", "MATCH (a:Entity)-[]->(b)-[]->(c) RETURN a.title, b.title, c.title LIMIT 10"),
+    ("WHERE id=42", "MATCH (n) WHERE id(n) = 42 RETURN n.title, labels(n)"),
+    ("CONTAINS Einstein", "MATCH (n) WHERE n.title CONTAINS 'Einstein' RETURN n.title LIMIT 10"),
 ]
 
 
@@ -41,9 +42,9 @@ def build_and_benchmark(mode):
         shutil.rmtree(graph_dir)
 
     # Build
-    print(f"\n{'='*60}", flush=True)
+    print(f"\n{'=' * 60}", flush=True)
     print(f"  MODE: {mode}", flush=True)
-    print(f"{'='*60}", flush=True)
+    print(f"{'=' * 60}", flush=True)
 
     if mode == "disk":
         os.makedirs(graph_dir, exist_ok=True)
@@ -56,10 +57,13 @@ def build_and_benchmark(mode):
 
     # Build with 2-minute timeout
     import signal
+
     class BuildTimeout(Exception):
         pass
+
     def _timeout_handler(signum, frame):
         raise BuildTimeout()
+
     old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
     signal.alarm(120)
     try:
@@ -88,7 +92,9 @@ def build_and_benchmark(mode):
     info = g.graph_info()
     results["nodes"] = info.get("node_count", 0)
     results["edges"] = info.get("edge_count", 0)
-    print(f"  Built: {results['nodes']:,} nodes, {results['edges']:,} edges in {results['build_time']:.1f}s", flush=True)
+    print(
+        f"  Built: {results['nodes']:,} nodes, {results['edges']:,} edges in {results['build_time']:.1f}s", flush=True
+    )
 
     # Save + reload
     if mode == "disk":
@@ -112,11 +118,7 @@ def build_and_benchmark(mode):
 
     # Disk size
     if mode == "disk":
-        total_bytes = sum(
-            os.path.getsize(os.path.join(r, f))
-            for r, _, files in os.walk(graph_dir)
-            for f in files
-        )
+        total_bytes = sum(os.path.getsize(os.path.join(r, f)) for r, _, files in os.walk(graph_dir) for f in files)
     else:
         save_path = os.path.join(TEMP_DIR, f"graph_{mode}.kglite")
         total_bytes = os.path.getsize(save_path) if os.path.exists(save_path) else 0
@@ -125,7 +127,7 @@ def build_and_benchmark(mode):
 
     # Cypher queries (30s timeout each)
     print(f"\n  {'Query':35s} {'Time':>8s}  {'Rows':>6s}", flush=True)
-    print(f"  {'-'*55}", flush=True)
+    print(f"  {'-' * 55}", flush=True)
     cypher_times = {}
     for label, query in CYPHER_QUERIES:
         t0 = time.perf_counter()
@@ -143,15 +145,18 @@ def build_and_benchmark(mode):
 
     # Fluent API
     print(f"\n  {'Fluent':35s} {'Time':>8s}  {'Result':>8s}", flush=True)
-    print(f"  {'-'*55}", flush=True)
+    print(f"  {'-' * 55}", flush=True)
     fluent_times = {}
 
     fluent_ops = [
-        ("select(Entity).len()",       lambda: g.select("Entity").len()),
-        ("traverse P31 out L100",      lambda: g.select("Entity").traverse("P31", direction="outgoing", limit=100).len()),
-        ("traverse P31 in L50",        lambda: g.select("Entity").traverse("P31", direction="incoming", limit=50).len()),
-        ("where title contains Berlin",lambda: g.select("Entity").where_({"title": ("contains", "Berlin")}, limit=20).len()),
-        ("describe() length",          lambda: len(g.describe())),
+        ("select(Entity).len()", lambda: g.select("Entity").len()),
+        ("traverse P31 out L100", lambda: g.select("Entity").traverse("P31", direction="outgoing", limit=100).len()),
+        ("traverse P31 in L50", lambda: g.select("Entity").traverse("P31", direction="incoming", limit=50).len()),
+        (
+            "where title contains Berlin",
+            lambda: g.select("Entity").where_({"title": ("contains", "Berlin")}, limit=20).len(),
+        ),
+        ("describe() length", lambda: len(g.describe())),
     ]
 
     for label, fn in fluent_ops:
@@ -173,27 +178,27 @@ def build_and_benchmark(mode):
 def print_comparison(all_results):
     modes = [r["mode"] for r in all_results]
 
-    print(f"\n\n{'='*80}")
-    print(f"  COMPARISON TABLE — 5M Wikidata triples")
-    print(f"{'='*80}\n")
+    print(f"\n\n{'=' * 80}")
+    print("  COMPARISON TABLE — 5M Wikidata triples")
+    print(f"{'=' * 80}\n")
 
     # Build / Save / Load / Disk
     print(f"  {'Metric':35s}", end="")
     for m in modes:
         print(f" {m:>12s}", end="")
     print()
-    print(f"  {'-'*35}", end="")
+    print(f"  {'-' * 35}", end="")
     for _ in modes:
-        print(f" {'-'*12}", end="")
+        print(f" {'-' * 12}", end="")
     print()
 
     for key, label, fmt in [
-        ("nodes",      "Nodes",      lambda v: f"{v:>12,}"),
-        ("edges",      "Edges",      lambda v: f"{v:>12,}"),
-        ("build_time", "Build (s)",   lambda v: f"{v:>11.2f}s"),
-        ("save_time",  "Save (s)",    lambda v: f"{v:>11.2f}s"),
-        ("load_time",  "Load (s)",    lambda v: f"{v:>11.2f}s"),
-        ("disk_mb",    "Disk (MB)",   lambda v: f"{v:>11.1f}M"),
+        ("nodes", "Nodes", lambda v: f"{v:>12,}"),
+        ("edges", "Edges", lambda v: f"{v:>12,}"),
+        ("build_time", "Build (s)", lambda v: f"{v:>11.2f}s"),
+        ("save_time", "Save (s)", lambda v: f"{v:>11.2f}s"),
+        ("load_time", "Load (s)", lambda v: f"{v:>11.2f}s"),
+        ("disk_mb", "Disk (MB)", lambda v: f"{v:>11.1f}M"),
     ]:
         print(f"  {label:35s}", end="")
         for r in all_results:
@@ -205,9 +210,9 @@ def print_comparison(all_results):
     for m in modes:
         print(f" {m:>12s}", end="")
     print()
-    print(f"  {'-'*35}", end="")
+    print(f"  {'-' * 35}", end="")
     for _ in modes:
-        print(f" {'-'*12}", end="")
+        print(f" {'-' * 12}", end="")
     print()
 
     for label, _ in CYPHER_QUERIES:
@@ -226,9 +231,9 @@ def print_comparison(all_results):
     for m in modes:
         print(f" {m:>12s}", end="")
     print()
-    print(f"  {'-'*35}", end="")
+    print(f"  {'-' * 35}", end="")
     for _ in modes:
-        print(f" {'-'*12}", end="")
+        print(f" {'-' * 12}", end="")
     print()
 
     for label in all_results[0]["fluent"]:

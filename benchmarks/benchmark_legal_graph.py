@@ -16,38 +16,67 @@ from kglite import load
 SOURCE_GRAPH = "/Volumes/EksternalHome/Koding/MCP servers/legal/norwegian_law.kgl"
 
 CYPHER_QUERIES = [
-    ("Count nodes",              "MATCH (n) RETURN count(n)"),
-    ("Count CourtDecision",      "MATCH (n:CourtDecision) RETURN count(n)"),
-    ("Count Law",                "MATCH (n:Law) RETURN count(n)"),
-    ("Count LawSection",         "MATCH (n:LawSection) RETURN count(n)"),
-    ("Law titles L10",           "MATCH (n:Law) RETURN n.title LIMIT 10"),
-    ("Decision titles L10",      "MATCH (d:CourtDecision) RETURN d.title LIMIT 10"),
-    ("Decision edges L10",       "MATCH (d:CourtDecision)-[r]->(t) RETURN d.title, type(r), t.title LIMIT 10"),
+    ("Count nodes", "MATCH (n) RETURN count(n)"),
+    ("Count CourtDecision", "MATCH (n:CourtDecision) RETURN count(n)"),
+    ("Count Law", "MATCH (n:Law) RETURN count(n)"),
+    ("Count LawSection", "MATCH (n:LawSection) RETURN count(n)"),
+    ("Law titles L10", "MATCH (n:Law) RETURN n.title LIMIT 10"),
+    ("Decision titles L10", "MATCH (d:CourtDecision) RETURN d.title LIMIT 10"),
+    ("Decision edges L10", "MATCH (d:CourtDecision)-[r]->(t) RETURN d.title, type(r), t.title LIMIT 10"),
     ("Decision -[:CITES]-> L10", "MATCH (d:CourtDecision)-[:CITES]->(s:LawSection) RETURN d.title, s.title LIMIT 10"),
-    ("Decision -[:JUDGED_BY]-> L10", "MATCH (d:CourtDecision)-[:JUDGED_BY]->(j:Judge) RETURN d.title, j.title LIMIT 10"),
-    ("Decision -[:HAS_KEYWORD]-> L10", "MATCH (d:CourtDecision)-[:HAS_KEYWORD]->(k:Keyword) RETURN d.title, k.title LIMIT 10"),
-    ("Incoming to Law L10",      "MATCH (n)-[r]->(l:Law) RETURN n.title, type(r) LIMIT 10"),
-    ("2-hop dec->sec->law L10",  "MATCH (d:CourtDecision)-[:CITES]->(s:LawSection)-[:SECTION_OF]->(l:Law) RETURN d.title, s.title, l.title LIMIT 10"),
-    ("Most cited sections TOP10","MATCH (d:CourtDecision)-[:CITES]->(s:LawSection) RETURN s.title, count(d) AS c ORDER BY c DESC LIMIT 10"),
-    ("Supreme Court L10",        "MATCH (d:CourtDecision) WHERE d.court_level = 'Høyesterett' RETURN d.title LIMIT 10"),
-    ("Keyword strafferett",      "MATCH (d:CourtDecision)-[:HAS_KEYWORD]->(k:Keyword {title: 'strafferett'}) RETURN d.title LIMIT 10"),
-    ("Law by korttittel",        "MATCH (l:Law {korttittel: 'straffeloven'}) RETURN l.title"),
-    ("2-hop law->sec<-decision", "MATCH (l:Law {korttittel: 'straffeloven'})<-[:SECTION_OF]-(s:LawSection)<-[:CITES]-(d:CourtDecision) RETURN s.title, d.title LIMIT 10"),
-    ("Case progression",         "MATCH (d1:CourtDecision)-[:CASE_PROGRESSION]->(d2:CourtDecision) RETURN d1.title, d2.title LIMIT 10"),
-    ("WHERE id=1",               "MATCH (n) WHERE id(n) = 1 RETURN n.title, labels(n)"),
-    ("Count all CITES edges",    "MATCH (d:CourtDecision)-[:CITES]->() RETURN count(d)"),
+    (
+        "Decision -[:JUDGED_BY]-> L10",
+        "MATCH (d:CourtDecision)-[:JUDGED_BY]->(j:Judge) RETURN d.title, j.title LIMIT 10",
+    ),
+    (
+        "Decision -[:HAS_KEYWORD]-> L10",
+        "MATCH (d:CourtDecision)-[:HAS_KEYWORD]->(k:Keyword) RETURN d.title, k.title LIMIT 10",
+    ),
+    ("Incoming to Law L10", "MATCH (n)-[r]->(l:Law) RETURN n.title, type(r) LIMIT 10"),
+    (
+        "2-hop dec->sec->law L10",
+        "MATCH (d:CourtDecision)-[:CITES]->(s:LawSection)-[:SECTION_OF]->(l:Law)"
+        " RETURN d.title, s.title, l.title LIMIT 10",
+    ),
+    (
+        "Most cited sections TOP10",
+        "MATCH (d:CourtDecision)-[:CITES]->(s:LawSection) RETURN s.title, count(d) AS c ORDER BY c DESC LIMIT 10",
+    ),
+    ("Supreme Court L10", "MATCH (d:CourtDecision) WHERE d.court_level = 'Høyesterett' RETURN d.title LIMIT 10"),
+    (
+        "Keyword strafferett",
+        "MATCH (d:CourtDecision)-[:HAS_KEYWORD]->(k:Keyword {title: 'strafferett'}) RETURN d.title LIMIT 10",
+    ),
+    ("Law by korttittel", "MATCH (l:Law {korttittel: 'straffeloven'}) RETURN l.title"),
+    (
+        "2-hop law->sec<-decision",
+        "MATCH (l:Law {korttittel: 'straffeloven'})<-[:SECTION_OF]"
+        "-(s:LawSection)<-[:CITES]-(d:CourtDecision) RETURN s.title, d.title LIMIT 10",
+    ),
+    (
+        "Case progression",
+        "MATCH (d1:CourtDecision)-[:CASE_PROGRESSION]->(d2:CourtDecision) RETURN d1.title, d2.title LIMIT 10",
+    ),
+    ("WHERE id=1", "MATCH (n) WHERE id(n) = 1 RETURN n.title, labels(n)"),
+    ("Count all CITES edges", "MATCH (d:CourtDecision)-[:CITES]->() RETURN count(d)"),
 ]
 
 FLUENT_OPS = [
     ("select(CourtDecision).len()", lambda g: g.select("CourtDecision").len()),
-    ("select(Law).len()",           lambda g: g.select("Law").len()),
-    ("select(LawSection).len()",    lambda g: g.select("LawSection").len()),
-    ("traverse CITES out L100",     lambda g: g.select("CourtDecision").traverse("CITES", direction="outgoing", limit=100).len()),
-    ("traverse CITES in L50",       lambda g: g.select("LawSection").traverse("CITES", direction="incoming", limit=50).len()),
-    ("where court=Høyesterett",     lambda g: g.select("CourtDecision").where_({"court_level": "Høyesterett"}).len()),
-    ("where_connected CITES",       lambda g: g.select("CourtDecision").where_connected("CITES").len()),
-    ("2-hop CITES->SECTION_OF",     lambda g: g.select("CourtDecision").traverse("CITES", limit=50).traverse("SECTION_OF", limit=50).len()),
-    ("describe() length",           lambda g: len(g.describe())),
+    ("select(Law).len()", lambda g: g.select("Law").len()),
+    ("select(LawSection).len()", lambda g: g.select("LawSection").len()),
+    (
+        "traverse CITES out L100",
+        lambda g: g.select("CourtDecision").traverse("CITES", direction="outgoing", limit=100).len(),
+    ),
+    ("traverse CITES in L50", lambda g: g.select("LawSection").traverse("CITES", direction="incoming", limit=50).len()),
+    ("where court=Høyesterett", lambda g: g.select("CourtDecision").where_({"court_level": "Høyesterett"}).len()),
+    ("where_connected CITES", lambda g: g.select("CourtDecision").where_connected("CITES").len()),
+    (
+        "2-hop CITES->SECTION_OF",
+        lambda g: g.select("CourtDecision").traverse("CITES", limit=50).traverse("SECTION_OF", limit=50).len(),
+    ),
+    ("describe() length", lambda g: len(g.describe())),
 ]
 
 
@@ -57,7 +86,11 @@ if __name__ == "__main__":
     g = load(SOURCE_GRAPH)
     load_time = time.perf_counter() - t0
     info = g.graph_info()
-    print(f"Loaded in {load_time:.2f}s — {info['node_count']:,} nodes, {info['edge_count']:,} edges, {info['type_count']} types\n", flush=True)
+    nc, ec, tc = info["node_count"], info["edge_count"], info["type_count"]
+    print(
+        f"Loaded in {load_time:.2f}s — {nc:,} nodes, {ec:,} edges, {tc} types\n",
+        flush=True,
+    )
 
     # Cypher queries
     print(f"{'Query':40s} {'Time':>8s}  {'Rows':>8s}")
