@@ -16,8 +16,9 @@ use petgraph::Direction;
 /// Binary search for the range of CSR edges matching a specific connection_type.
 /// Returns (lo, hi) such that edges[lo..hi] all have the target connection_type.
 /// Requires CSR edges to be sorted by connection_type within [start, end).
+/// Used by DiskEdges iterator and DiskGraph::count_edges_filtered.
 /// Skips tombstoned edges during the search.
-fn binary_search_conn_type(
+pub(crate) fn binary_search_conn_type(
     edges: &MmapOrVec<CsrEdge>,
     endpoints: &MmapOrVec<EdgeEndpoints>,
     start: usize,

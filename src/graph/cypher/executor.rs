@@ -300,7 +300,13 @@ impl<'a> CypherExecutor<'a> {
         let profiling = query.profile;
         let mut profile_stats: Vec<ClauseStats> = Vec::new();
 
+        // Track which clauses have been consumed by fusion (WHERE into MATCH)
+        let mut skip_clause = vec![false; query.clauses.len()];
+
         for (i, clause) in query.clauses.iter().enumerate() {
+            if skip_clause[i] {
+                continue;
+            }
             self.check_deadline()?;
             // Seed first-clause WITH/UNWIND with one empty row so standalone
             // expressions (e.g. `WITH [1,2,3] AS l` or `RETURN 1+2`) can be evaluated.
@@ -333,19 +339,46 @@ impl<'a> CypherExecutor<'a> {
                 continue;
             }
 
+            // WHERE-into-MATCH fusion: when MATCH is followed by WHERE, pass the
+            // WHERE predicate to execute_match for inline filtering during expansion.
+            // This prevents materializing millions of rows that WHERE would discard.
+            let inline_where = if matches!(clause, Clause::Match(_)) {
+                if let Some(Clause::Where(w)) = query.clauses.get(i + 1) {
+                    skip_clause[i + 1] = true;
+                    Some(&w.predicate)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             if profiling {
                 let rows_in = result_set.rows.len();
                 let start = std::time::Instant::now();
-                result_set = self.execute_single_clause(clause, result_set)?;
+                result_set = if let Clause::Match(m) = clause {
+                    self.execute_match(m, result_set, inline_where)?
+                } else {
+                    self.execute_single_clause(clause, result_set)?
+                };
                 let elapsed = start.elapsed();
+                let name = if inline_where.is_some() {
+                    format!("{} + Where (fused)", clause_display_name(clause))
+                } else {
+                    clause_display_name(clause)
+                };
                 profile_stats.push(ClauseStats {
-                    clause_name: clause_display_name(clause),
+                    clause_name: name,
                     rows_in,
                     rows_out: result_set.rows.len(),
                     elapsed_us: elapsed.as_micros() as u64,
                 });
             } else {
-                result_set = self.execute_single_clause(clause, result_set)?;
+                result_set = if let Clause::Match(m) = clause {
+                    self.execute_match(m, result_set, inline_where)?
+                } else {
+                    self.execute_single_clause(clause, result_set)?
+                };
             }
         }
 
@@ -366,7 +399,7 @@ impl<'a> CypherExecutor<'a> {
         result_set: ResultSet,
     ) -> Result<ResultSet, String> {
         match clause {
-            Clause::Match(m) => self.execute_match(m, result_set),
+            Clause::Match(m) => self.execute_match(m, result_set, None),
             Clause::OptionalMatch(m) => self.execute_optional_match(m, result_set),
             Clause::Where(w) => self.execute_where(w, result_set),
             Clause::Return(r) => self.execute_return(r, result_set),
@@ -575,6 +608,7 @@ impl<'a> CypherExecutor<'a> {
         &self,
         clause: &MatchClause,
         existing: ResultSet,
+        inline_where: Option<&Predicate>,
     ) -> Result<ResultSet, String> {
         // Check for shortestPath assignments
         if let Some(pa) = clause.path_assignments.first() {
@@ -629,14 +663,28 @@ impl<'a> CypherExecutor<'a> {
                         }
                     } else {
                         for m in matches {
-                            all_rows.push(self.pattern_match_to_row(m));
+                            let row = self.pattern_match_to_row(m);
+                            // Inline WHERE: evaluate predicate before collecting
+                            if let Some(pred) = inline_where {
+                                if !self.evaluate_predicate(pred, &row).unwrap_or(false) {
+                                    continue; // Skip non-matching row
+                                }
+                            }
+                            all_rows.push(row);
+                            // Stop after limit matching rows (not candidates)
+                            if let Some(limit) = limit_hint {
+                                if all_rows.len() >= limit {
+                                    break;
+                                }
+                            }
                         }
                     }
-                    // Post-match truncation: for edge patterns, limit_hint wasn't
-                    // passed to the PatternExecutor, so truncate here instead.
-                    // For node-only patterns this is a no-op (already limited).
-                    if let Some(limit) = limit_hint {
-                        all_rows.truncate(limit);
+                    // Post-match truncation: for edge patterns without inline WHERE,
+                    // limit_hint wasn't passed to the PatternExecutor, so truncate here.
+                    if inline_where.is_none() {
+                        if let Some(limit) = limit_hint {
+                            all_rows.truncate(limit);
+                        }
                     }
                 } else {
                     // Subsequent patterns: use shared-variable join
@@ -1142,7 +1190,7 @@ impl<'a> CypherExecutor<'a> {
             // OPTIONAL MATCH as first clause: try regular match, but if
             // nothing matches, return one row with all variables set to NULL
             let columns = existing.columns.clone();
-            let result = self.execute_match(clause, existing)?;
+            let result = self.execute_match(clause, existing, None)?;
             if !result.rows.is_empty() {
                 return Ok(result);
             }
@@ -1450,13 +1498,25 @@ impl<'a> CypherExecutor<'a> {
             _ => return None, // both bound or neither bound — fall back
         };
 
-        // Create pattern executor for property matching on the unbound node (if needed)
-        let pe = other_props
-            .as_ref()
-            .map(|_| PatternExecutor::new_lightweight_with_params(self.graph, None, self.params));
-
         let conn_type = edge.connection_type.as_deref();
         let interned_conn = conn_type.map(InternedKey::from_str);
+        let interned_other_type = other_type.as_ref().map(|t| InternedKey::from_str(t));
+
+        // Fast path: when no property filters on the unbound node, use
+        // count_edges_filtered which avoids EdgeData materialization entirely.
+        // On disk with sorted CSR: binary search + sequential count (zero allocations).
+        if other_props.is_none() {
+            let count = self.graph.graph.count_edges_filtered(
+                bound_idx,
+                traverse_dir,
+                interned_conn,
+                interned_other_type,
+            );
+            return Some(count as i64);
+        }
+
+        // Slow path: property filters require per-node property access
+        let pe = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params);
         let mut count: i64 = 0;
 
         for edge_ref in
@@ -1464,24 +1524,16 @@ impl<'a> CypherExecutor<'a> {
                 .graph
                 .edges_directed_filtered(bound_idx, traverse_dir, interned_conn)
         {
-            // Check connection type
-            if let Some(ik) = interned_conn {
-                if edge_ref.weight().connection_type != ik {
-                    continue;
-                }
-            }
-
-            // Get the other node (the one that's NOT bound_idx)
+            // Connection type already filtered by edges_directed_filtered
             let other_idx = if traverse_dir == Direction::Outgoing {
                 edge_ref.target()
             } else {
                 edge_ref.source()
             };
 
-            // Check the other node's type (O(1) mmap read, no materialization)
-            if let Some(ref required_type) = other_type {
+            if let Some(required_type) = interned_other_type {
                 if let Some(nt) = self.graph.graph.node_type_of(other_idx) {
-                    if nt != InternedKey::from_str(required_type) {
+                    if nt != required_type {
                         continue;
                     }
                 } else {
@@ -1489,13 +1541,8 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
 
-            // Check unbound node's properties (uses columnar fast path on disk)
             if let Some(ref props) = other_props {
-                if !pe
-                    .as_ref()
-                    .unwrap()
-                    .node_matches_properties_pub(other_idx, props)
-                {
+                if !pe.node_matches_properties_pub(other_idx, props) {
                     continue;
                 }
             }

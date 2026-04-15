@@ -824,16 +824,14 @@ fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) {
         };
 
         // All checks passed: push limit hint into MATCH.
-        // When WHERE is present, use a generous overcommit (10x) since WHERE
-        // may filter some matches. Keep the LIMIT clause in place for exact
-        // truncation after WHERE filtering.
-        // Without WHERE, the hint is exact and LIMIT can be removed.
+        // The executor fuses WHERE into MATCH (inline evaluation during expansion),
+        // so the hint can be exact in both cases. LIMIT clause is removed since
+        // the executor stops after finding exactly `limit` matching rows.
         if has_where {
-            let hint = limit.saturating_mul(10);
             if let Clause::Match(ref mut m) = query.clauses[i] {
-                m.limit_hint = Some(hint);
+                m.limit_hint = Some(limit);
             }
-            // Keep LIMIT clause — WHERE may filter, so we need exact truncation
+            query.clauses.remove(limit_offset); // Safe: executor enforces exact limit
         } else {
             if let Clause::Match(ref mut m) = query.clauses[i] {
                 m.limit_hint = Some(limit);

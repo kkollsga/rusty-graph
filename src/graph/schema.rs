@@ -3868,6 +3868,49 @@ impl GraphBackend {
         matches!(self, GraphBackend::Disk(_))
     }
 
+    /// Count edges of a specific type without materializing EdgeData.
+    /// On disk graphs with sorted CSR: O(log D + matching) via binary search.
+    /// On in-memory graphs: falls back to edge iteration (still no allocation).
+    pub fn count_edges_filtered(
+        &self,
+        node: NodeIndex,
+        dir: petgraph::Direction,
+        conn_type: Option<InternedKey>,
+        other_node_type: Option<InternedKey>,
+    ) -> usize {
+        match self {
+            GraphBackend::Disk(dg) => {
+                dg.count_edges_filtered(node, dir, conn_type.map(|k| k.as_u64()), other_node_type)
+            }
+            GraphBackend::InMemory(g) => {
+                let mut count = 0;
+                for edge in g.edges_directed(node, dir) {
+                    if let Some(ct) = conn_type {
+                        if edge.weight().connection_type != ct {
+                            continue;
+                        }
+                    }
+                    let other = if dir == petgraph::Direction::Outgoing {
+                        edge.target()
+                    } else {
+                        edge.source()
+                    };
+                    if let Some(required_type) = other_node_type {
+                        if let Some(nd) = g.node_weight(other) {
+                            if nd.node_type != required_type {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                    count += 1;
+                }
+                count
+            }
+        }
+    }
+
     #[inline]
     pub fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
         match self {

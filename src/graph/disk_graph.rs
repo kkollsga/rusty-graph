@@ -674,6 +674,102 @@ impl DiskGraph {
         unsafe { &*(arena.get_unchecked(idx) as *const EdgeData) }
     }
 
+    /// Count edges of a specific type without materializing EdgeData.
+    /// With sorted CSR, uses binary search to find the exact range, then counts
+    /// peers matching the optional node type filter. Zero allocations.
+    pub fn count_edges_filtered(
+        &self,
+        node: NodeIndex,
+        dir: Direction,
+        conn_type: Option<u64>,
+        other_node_type: Option<InternedKey>,
+    ) -> usize {
+        self.ensure_csr();
+        let idx = node.index();
+        let (offsets, edges) = match dir {
+            Direction::Outgoing => (&self.out_offsets, &self.out_edges),
+            Direction::Incoming => (&self.in_offsets, &self.in_edges),
+        };
+        if idx >= offsets.len().saturating_sub(1) {
+            return 0;
+        }
+        let mut start = offsets.get(idx) as usize;
+        let mut end = offsets.get(idx + 1) as usize;
+
+        // Narrow range via binary search when CSR is sorted by type
+        if let Some(ct) = conn_type {
+            if self.csr_sorted_by_type {
+                let (lo, hi) = crate::graph::graph_iterators::binary_search_conn_type(
+                    edges,
+                    &self.edge_endpoints,
+                    start,
+                    end,
+                    ct,
+                );
+                start = lo;
+                end = hi;
+            }
+        }
+
+        let mut count = 0usize;
+        for i in start..end {
+            let e = edges.get(i);
+            if e.edge_idx == TOMBSTONE_EDGE {
+                continue;
+            }
+            // Check connection type (only needed if CSR is NOT sorted)
+            if let Some(ct) = conn_type {
+                if !self.csr_sorted_by_type
+                    && self.edge_endpoints.get(e.edge_idx as usize).connection_type != ct
+                {
+                    continue;
+                }
+            }
+            // Check peer node type (O(1) mmap read, no materialization)
+            if let Some(required_type) = other_node_type {
+                let peer_idx = NodeIndex::new(e.peer as usize);
+                if let Some(nt) = self.node_type_of(peer_idx) {
+                    if nt != required_type {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+            count += 1;
+        }
+
+        // Count overflow edges too
+        let overflow = match dir {
+            Direction::Outgoing => self.overflow_out.get(&(idx as u32)),
+            Direction::Incoming => self.overflow_in.get(&(idx as u32)),
+        };
+        if let Some(list) = overflow {
+            for e in list {
+                if e.edge_idx == TOMBSTONE_EDGE {
+                    continue;
+                }
+                if let Some(ct) = conn_type {
+                    if self.edge_endpoints.get(e.edge_idx as usize).connection_type != ct {
+                        continue;
+                    }
+                }
+                if let Some(required_type) = other_node_type {
+                    let peer_idx = NodeIndex::new(e.peer as usize);
+                    if let Some(nt) = self.node_type_of(peer_idx) {
+                        if nt != required_type {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Auto-build CSR from pending edges if needed. Called from &self query methods.
     /// Check if pending edges need to be built into CSR.
     /// Panics with a helpful message if called with unbuilt edges.
