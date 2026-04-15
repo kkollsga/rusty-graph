@@ -84,12 +84,12 @@ class TestExplainOptimizations:
         assert any("Return" in op for op in ops)
 
     def test_explain_shows_topk_fusion(self, graph):
-        """ORDER BY + LIMIT fuses into FusedOrderByTopK."""
+        """ORDER BY + LIMIT fuses into FusedNodeScanTopK or FusedOrderByTopK."""
         result = graph.cypher("""
             EXPLAIN MATCH (n:Person) RETURN n.name ORDER BY n.name LIMIT 5
         """)
         ops = [r["operation"] for r in result.to_list()]
-        assert any("FusedOrderByTopK" in op for op in ops)
+        assert any("TopK" in op for op in ops)
 
     def test_explain_shows_sort_unfused(self, graph):
         """ORDER BY without LIMIT shows as separate step."""

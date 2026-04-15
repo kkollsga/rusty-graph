@@ -232,6 +232,7 @@ pub fn clause_display_name(clause: &Clause) -> String {
             format!("FusedCountTypedEdge :{edge_type}")
         }
         Clause::FusedNodeScanAggregate { .. } => "FusedNodeScanAggregate".into(),
+        Clause::FusedNodeScanTopK { limit, .. } => format!("FusedNodeScanTopK (k={limit})"),
     }
 }
 
@@ -550,6 +551,21 @@ impl<'a> CypherExecutor<'a> {
                 match_clause,
                 where_predicate.as_ref(),
                 return_clause,
+            ),
+            Clause::FusedNodeScanTopK {
+                match_clause,
+                where_predicate,
+                return_clause,
+                sort_expression,
+                descending,
+                limit,
+            } => self.execute_fused_node_scan_top_k(
+                match_clause,
+                where_predicate.as_ref(),
+                return_clause,
+                sort_expression,
+                *descending,
+                *limit,
             ),
             Clause::Call(c) => self.execute_call(c, result_set),
             Clause::Create(_)
@@ -2413,6 +2429,147 @@ impl<'a> CypherExecutor<'a> {
                     .collect();
                 seen.insert(key)
             });
+        }
+
+        Ok(ResultSet {
+            rows: result_rows,
+            columns,
+        })
+    }
+
+    /// Fused MATCH (n:Type) [WHERE] RETURN expressions ORDER BY expr LIMIT k.
+    /// Single-pass scan: iterates nodes, evaluates sort key per node, maintains
+    /// K-element top-K via sorted Vec (insertion sort). RETURN expressions are
+    /// only evaluated for the K winners. Avoids materializing all rows.
+    fn execute_fused_node_scan_top_k(
+        &self,
+        match_clause: &MatchClause,
+        where_predicate: Option<&Predicate>,
+        return_clause: &ReturnClause,
+        sort_expression: &Expression,
+        descending: bool,
+        limit: usize,
+    ) -> Result<ResultSet, String> {
+        use crate::graph::pattern_matching::PatternElement;
+
+        let pattern = &match_clause.patterns[0];
+        let node_pattern = match &pattern.elements[0] {
+            PatternElement::Node(np) => np,
+            _ => return Err("FusedNodeScanTopK: expected node pattern".into()),
+        };
+        let node_var = node_pattern.variable.as_deref().unwrap_or("_n");
+        let node_type = node_pattern.node_type.as_deref();
+
+        // Get candidate node indices
+        let node_indices: Vec<petgraph::graph::NodeIndex> = if let Some(nt) = node_type {
+            if let Some(indices) = self.graph.type_indices.get(nt) {
+                indices.to_vec()
+            } else {
+                Vec::new()
+            }
+        } else {
+            self.graph.graph.node_indices().collect()
+        };
+
+        // Pattern property filter
+        let pattern_executor = if node_pattern.properties.is_some() {
+            Some(PatternExecutor::new_lightweight_with_params(
+                self.graph,
+                None,
+                self.params,
+            ))
+        } else {
+            None
+        };
+
+        // Pre-fold expressions
+        let folded_sort = self.fold_constants_expr(sort_expression);
+        let folded_where = where_predicate.map(|p| self.fold_constants_pred(p));
+        let folded_where_ref = folded_where.as_ref();
+
+        // Single reusable eval row
+        let mut eval_row = ResultRow::new();
+        eval_row
+            .node_bindings
+            .insert(node_var.to_string(), petgraph::graph::NodeIndex::new(0));
+
+        // Top-K: sorted Vec of (sort_value, node_idx). Insertion sort for small K.
+        let mut top_k: Vec<(Value, petgraph::graph::NodeIndex)> = Vec::with_capacity(limit + 1);
+
+        for (scan_count, &node_idx) in node_indices.iter().enumerate() {
+            // Periodic deadline check
+            if scan_count.is_multiple_of(10000) {
+                self.check_deadline()?;
+            }
+
+            // Pattern property filter
+            if let Some(ref props) = node_pattern.properties {
+                if !pattern_executor
+                    .as_ref()
+                    .unwrap()
+                    .node_matches_properties_pub(node_idx, props)
+                {
+                    continue;
+                }
+            }
+
+            // Set node binding for expression evaluation
+            *eval_row.node_bindings.get_mut(node_var).unwrap() = node_idx;
+
+            // WHERE filter
+            if let Some(pred) = folded_where_ref {
+                if !self.evaluate_predicate(pred, &eval_row).unwrap_or(false) {
+                    continue;
+                }
+            }
+
+            // Evaluate sort key
+            let sort_val = self.evaluate_expression(&folded_sort, &eval_row)?;
+            if matches!(sort_val, Value::Null) {
+                continue;
+            }
+
+            // Insert into top-K sorted Vec
+            let pos = if descending {
+                top_k.partition_point(|(existing, _)| {
+                    crate::graph::filtering_methods::compare_values(existing, &sort_val)
+                        .is_some_and(|o| o != std::cmp::Ordering::Less)
+                })
+            } else {
+                top_k.partition_point(|(existing, _)| {
+                    crate::graph::filtering_methods::compare_values(existing, &sort_val)
+                        .is_some_and(|o| o != std::cmp::Ordering::Greater)
+                })
+            };
+            if pos < limit {
+                top_k.insert(pos, (sort_val, node_idx));
+                if top_k.len() > limit {
+                    top_k.pop();
+                }
+            }
+        }
+
+        // Build RETURN expressions only for the K winners
+        let folded_return_exprs: Vec<Expression> = return_clause
+            .items
+            .iter()
+            .map(|item| self.fold_constants_expr(&item.expression))
+            .collect();
+        let columns: Vec<String> = return_clause
+            .items
+            .iter()
+            .map(return_item_column_name)
+            .collect();
+
+        let mut result_rows = Vec::with_capacity(top_k.len());
+        for (_, winner_idx) in &top_k {
+            *eval_row.node_bindings.get_mut(node_var).unwrap() = *winner_idx;
+            let mut projected = Bindings::with_capacity(columns.len());
+            for (j, expr) in folded_return_exprs.iter().enumerate() {
+                let val = self.evaluate_expression(expr, &eval_row)?;
+                projected.insert(columns[j].clone(), val);
+            }
+            result_rows.push(ResultRow::from_projected(projected));
         }
 
         Ok(ResultSet {

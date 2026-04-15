@@ -221,6 +221,10 @@ pub fn generate_explain_plan(query: &CypherQuery, graph: &DirGraph) -> String {
                 "FusedNodeScanAggregate (optimized MATCH + RETURN agg)".to_string(),
                 None,
             ),
+            Clause::FusedNodeScanTopK { limit, .. } => (
+                format!("FusedNodeScanTopK (optimized MATCH + ORDER BY + LIMIT {limit})"),
+                Some(*limit),
+            ),
         };
         if let Some(est) = est {
             lines.push(format!("  {}. {} (~{} rows)", step, desc, est));
@@ -290,9 +294,9 @@ pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result:
                 Value::Int64(n.min(1) as i64)
             }
             Clause::FusedCountByType { .. } => Value::Int64(graph.type_indices.len() as i64),
-            Clause::FusedVectorScoreTopK { limit, .. } | Clause::FusedOrderByTopK { limit, .. } => {
-                Value::Int64(*limit as i64)
-            }
+            Clause::FusedVectorScoreTopK { limit, .. }
+            | Clause::FusedOrderByTopK { limit, .. }
+            | Clause::FusedNodeScanTopK { limit, .. } => Value::Int64(*limit as i64),
             _ => Value::Null,
         };
 
@@ -311,6 +315,9 @@ pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result:
             }
             Clause::FusedOrderByTopK { .. } => {
                 optimizations.push("order_by_topk_fusion");
+            }
+            Clause::FusedNodeScanTopK { .. } => {
+                optimizations.push("node_scan_topk_fusion");
             }
             Clause::FusedCountAll { .. }
             | Clause::FusedCountByType { .. }

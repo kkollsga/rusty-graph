@@ -130,6 +130,17 @@ pub enum Clause {
         where_predicate: Option<Predicate>,
         return_clause: ReturnClause,
     },
+    /// Optimizer-generated: MATCH (n:Type) [WHERE ...] RETURN expressions ORDER BY expr LIMIT k
+    /// → single-pass node scan with inline top-K selection. Avoids materializing all rows —
+    /// maintains a K-element heap/sorted-vec during scan, evaluates RETURN only for winners.
+    FusedNodeScanTopK {
+        match_clause: MatchClause,
+        where_predicate: Option<Predicate>,
+        return_clause: ReturnClause,
+        sort_expression: Expression,
+        descending: bool,
+        limit: usize,
+    },
 }
 
 // ============================================================================

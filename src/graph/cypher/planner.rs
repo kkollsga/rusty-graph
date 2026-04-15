@@ -25,6 +25,7 @@ pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<Stri
     fuse_match_return_aggregate(query);
     fuse_match_with_aggregate(query);
     fuse_node_scan_aggregate(query);
+    fuse_node_scan_top_k(query);
     fuse_vector_score_order_limit(query);
     fuse_order_by_top_k(query);
     reorder_predicates_by_cost(query);
@@ -2253,6 +2254,156 @@ fn apply_in_property_to_patterns(
 // ============================================================================
 // Fused RETURN + ORDER BY + LIMIT for vector_score
 // ============================================================================
+
+/// Fuse MATCH (n:Type) [WHERE ...] RETURN expr ORDER BY expr LIMIT k into a
+/// single-pass node scan with inline top-K selection. Avoids materializing all
+/// rows — scans nodes directly, evaluates sort key per node, maintains K-element
+/// heap. RETURN expressions are only evaluated for the K winners.
+///
+/// Pattern: MATCH (single node) [WHERE] RETURN (no agg, no distinct) ORDER BY LIMIT
+fn fuse_node_scan_top_k(query: &mut CypherQuery) {
+    use super::executor::is_aggregate_expression;
+
+    // Need at least MATCH + RETURN + ORDER BY + LIMIT (4 clauses)
+    // or MATCH + WHERE + RETURN + ORDER BY + LIMIT (5 clauses)
+    if query.clauses.len() < 4 {
+        return;
+    }
+
+    let mut i = 0;
+    while i + 3 < query.clauses.len() {
+        // Only fuse first-clause MATCH
+        if i > 0 {
+            i += 1;
+            continue;
+        }
+
+        // Detect: MATCH [WHERE] RETURN ORDER_BY LIMIT
+        let (match_idx, where_idx, return_idx, orderby_idx, limit_idx) =
+            if matches!(&query.clauses[i], Clause::Match(_))
+                && matches!(&query.clauses[i + 1], Clause::Where(_))
+                && i + 4 < query.clauses.len()
+                && matches!(&query.clauses[i + 2], Clause::Return(_))
+                && matches!(&query.clauses[i + 3], Clause::OrderBy(_))
+                && matches!(&query.clauses[i + 4], Clause::Limit(_))
+            {
+                (i, Some(i + 1), i + 2, i + 3, i + 4)
+            } else if matches!(&query.clauses[i], Clause::Match(_))
+                && matches!(&query.clauses[i + 1], Clause::Return(_))
+                && matches!(&query.clauses[i + 2], Clause::OrderBy(_))
+                && matches!(&query.clauses[i + 3], Clause::Limit(_))
+            {
+                (i, None, i + 1, i + 2, i + 3)
+            } else {
+                i += 1;
+                continue;
+            };
+
+        // MATCH must be single pattern, single node, no edges
+        let is_single_node = if let Clause::Match(mc) = &query.clauses[match_idx] {
+            mc.patterns.len() == 1
+                && mc.patterns[0].elements.len() == 1
+                && matches!(
+                    mc.patterns[0].elements[0],
+                    crate::graph::pattern_matching::PatternElement::Node(_)
+                )
+                && mc.path_assignments.is_empty()
+        } else {
+            false
+        };
+        if !is_single_node {
+            i += 1;
+            continue;
+        }
+
+        // RETURN must have no aggregation, no DISTINCT, and no function calls
+        // (function calls like ts_sum need special evaluation context)
+        let return_ok = if let Clause::Return(r) = &query.clauses[return_idx] {
+            !r.distinct
+                && !r
+                    .items
+                    .iter()
+                    .any(|item| is_aggregate_expression(&item.expression))
+                && !r
+                    .items
+                    .iter()
+                    .any(|item| matches!(item.expression, Expression::FunctionCall { .. }))
+        } else {
+            false
+        };
+        if !return_ok {
+            i += 1;
+            continue;
+        }
+
+        // ORDER BY must have exactly 1 sort item
+        let sort_info = if let Clause::OrderBy(o) = &query.clauses[orderby_idx] {
+            if o.items.len() == 1 {
+                Some((o.items[0].expression.clone(), !o.items[0].ascending))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let Some((sort_expr, descending)) = sort_info else {
+            i += 1;
+            continue;
+        };
+
+        // LIMIT must be positive literal integer
+        let limit_val = if let Clause::Limit(l) = &query.clauses[limit_idx] {
+            match &l.count {
+                Expression::Literal(Value::Int64(n)) if *n > 0 => Some(*n as usize),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let Some(limit) = limit_val else {
+            i += 1;
+            continue;
+        };
+
+        // All checks passed — fuse
+        // Remove clauses from back to front to preserve indices
+        query.clauses.remove(limit_idx);
+        query.clauses.remove(orderby_idx);
+        let return_clause = if let Clause::Return(r) = query.clauses.remove(return_idx) {
+            r
+        } else {
+            unreachable!()
+        };
+        let where_predicate = if let Some(wi) = where_idx {
+            if let Clause::Where(w) = query.clauses.remove(wi) {
+                Some(w.predicate)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let match_clause = if let Clause::Match(mc) = query.clauses.remove(match_idx) {
+            mc
+        } else {
+            unreachable!()
+        };
+
+        query.clauses.insert(
+            match_idx,
+            Clause::FusedNodeScanTopK {
+                match_clause,
+                where_predicate,
+                return_clause,
+                sort_expression: sort_expr,
+                descending,
+                limit,
+            },
+        );
+
+        i += 1;
+    }
+}
 
 /// Detect `RETURN ... vector_score(...) AS s ... ORDER BY s DESC LIMIT k`
 /// and replace with a fused clause that uses a min-heap (O(n log k) vs O(n log n))
