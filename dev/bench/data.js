@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776284578261,
+  "lastUpdate": 1776289278166,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -5687,6 +5687,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.00003215899182816408",
             "extra": "mean: 964.3782403926699 usec\nrounds: 1015"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "696a7d71b650d90ca255be7d241407e5a1b3a473",
+          "message": "feat: madvise sequential/dontneed for edge-centric scans\n\nAdd advise_sequential() and advise_dontneed() to MmapOrVec. Used by\ncount_edges_grouped_by_peer() to:\n1. MADV_SEQUENTIAL before scanning 13 GB edge_endpoints — enables\n   aggressive kernel readahead and reduces page cache pollution\n2. MADV_DONTNEED after scan — releases page cache pages to reduce\n   memory pressure on constrained machines\n\nThis should prevent OOM on 16 GB machines by avoiding page cache\neviction of other hot data during the sequential scan.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-15T23:38:42+02:00",
+          "tree_id": "11358536fce3b30fd0b8c15ea920faf0a26496c1",
+          "url": "https://github.com/kkollsga/kglite/commit/696a7d71b650d90ca255be7d241407e5a1b3a473"
+        },
+        "date": 1776289277726,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1142.2854645100583,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002314820667661301",
+            "extra": "mean: 875.4379102853362 usec\nrounds: 457"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 752.0057578107057,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000351823007965987",
+            "extra": "mean: 1.3297770523875685 msec\nrounds: 649"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 12382.41438417497,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000042142750945710875",
+            "extra": "mean: 80.75969427077361 usec\nrounds: 5603"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1562.2605853144285,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000021736014227584473",
+            "extra": "mean: 640.0980792834474 usec\nrounds: 782"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 648227.0616557408,
+            "unit": "iter/sec",
+            "range": "stddev: 3.954925407281693e-7",
+            "extra": "mean: 1.5426693193674135 usec\nrounds: 98766"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 127684.879337427,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000010820630811681085",
+            "extra": "mean: 7.8317809061584 usec\nrounds: 17084"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2459.4454353277856,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000022451177821669647",
+            "extra": "mean: 406.5957250508076 usec\nrounds: 4419"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1571.0167778113546,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00003288589881596983",
+            "extra": "mean: 636.5304394731796 usec\nrounds: 1140"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 13457.37586316671,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00000336308956143421",
+            "extra": "mean: 74.30869213789545 usec\nrounds: 9056"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 941.2045739955927,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000018027563271596627",
+            "extra": "mean: 1.0624682748350973 msec\nrounds: 604"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 950.042336527091,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00003404528104682045",
+            "extra": "mean: 1.0525846707584956 msec\nrounds: 896"
           }
         ]
       }
