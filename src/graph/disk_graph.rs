@@ -770,6 +770,93 @@ impl DiskGraph {
         count
     }
 
+    /// Iterate peer node indices for edges of a specific type, without materializing
+    /// EdgeData. Yields (peer_idx, edge_idx) pairs. With sorted CSR, uses binary
+    /// search. Completely avoids reading edge_endpoints.bin (13 GB) — only touches
+    /// out_edges.bin/in_edges.bin + node_slots.bin.
+    pub fn iter_peers_filtered(
+        &self,
+        node: NodeIndex,
+        dir: Direction,
+        conn_type: Option<u64>,
+    ) -> Vec<(NodeIndex, u32)> {
+        self.ensure_csr();
+        let idx = node.index();
+        let (offsets, edges) = match dir {
+            Direction::Outgoing => (&self.out_offsets, &self.out_edges),
+            Direction::Incoming => (&self.in_offsets, &self.in_edges),
+        };
+        if idx >= offsets.len().saturating_sub(1) {
+            return Vec::new();
+        }
+        let mut start = offsets.get(idx) as usize;
+        let mut end = offsets.get(idx + 1) as usize;
+
+        // Narrow range via binary search when CSR is sorted
+        if let Some(ct) = conn_type {
+            if self.csr_sorted_by_type {
+                let (lo, hi) = crate::graph::graph_iterators::binary_search_conn_type(
+                    edges,
+                    &self.edge_endpoints,
+                    start,
+                    end,
+                    ct,
+                );
+                start = lo;
+                end = hi;
+            }
+        }
+
+        let mut result = Vec::with_capacity(end - start);
+        for i in start..end {
+            let e = edges.get(i);
+            if e.edge_idx == TOMBSTONE_EDGE {
+                continue;
+            }
+            // When CSR is NOT sorted, must check type via edge_endpoints
+            if let Some(ct) = conn_type {
+                if !self.csr_sorted_by_type
+                    && self.edge_endpoints.get(e.edge_idx as usize).connection_type != ct
+                {
+                    continue;
+                }
+            }
+            result.push((NodeIndex::new(e.peer as usize), e.edge_idx));
+        }
+
+        // Include overflow edges
+        let overflow = match dir {
+            Direction::Outgoing => self.overflow_out.get(&(idx as u32)),
+            Direction::Incoming => self.overflow_in.get(&(idx as u32)),
+        };
+        if let Some(list) = overflow {
+            for e in list {
+                if e.edge_idx == TOMBSTONE_EDGE {
+                    continue;
+                }
+                if let Some(ct) = conn_type {
+                    if self.edge_endpoints.get(e.edge_idx as usize).connection_type != ct {
+                        continue;
+                    }
+                }
+                result.push((NodeIndex::new(e.peer as usize), e.edge_idx));
+            }
+        }
+        result
+    }
+
+    /// Advise the kernel to prefetch hot mmap regions into page cache.
+    /// Called after load to warm offset arrays and node_slots, reducing
+    /// cold-cache penalty on first queries. Non-blocking — the kernel
+    /// reads pages asynchronously in the background.
+    pub fn prefetch_hot_regions(&self) {
+        // Prefetch out_offsets + in_offsets (948 MB each — always needed for traversal).
+        // Skip node_slots (2 GB) — prefetching it adds too much load latency.
+        // The kernel will page in node_slots on demand during queries.
+        self.out_offsets.advise_willneed();
+        self.in_offsets.advise_willneed();
+    }
+
     /// Auto-build CSR from pending edges if needed. Called from &self query methods.
     /// Check if pending edges need to be built into CSR.
     /// Panics with a helpful message if called with unbuilt edges.

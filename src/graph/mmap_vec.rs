@@ -208,6 +208,20 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         self.len() == 0
     }
 
+    /// Advise the kernel to prefetch this mmap region into page cache.
+    /// No-op for heap-backed storage. Non-blocking on macOS/Linux.
+    #[cfg(unix)]
+    pub fn advise_willneed(&self) {
+        if let MmapOrVec::Mapped { mmap, .. } = self {
+            // memmap2's advise method handles the madvise syscall
+            let _ = mmap.advise(memmap2::Advice::WillNeed);
+        }
+    }
+
+    /// No-op on non-Unix platforms.
+    #[cfg(not(unix))]
+    pub fn advise_willneed(&self) {}
+
     /// Read element at index. Panics if out of bounds.
     pub fn get(&self, index: usize) -> T {
         match self {

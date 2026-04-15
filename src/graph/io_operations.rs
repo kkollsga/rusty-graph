@@ -446,6 +446,9 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
 
     // Load DiskGraph — compressed files decompressed to temp dir, then mmap'd
     let (disk_graph, temp_dir) = crate::graph::disk_graph::DiskGraph::load_from_dir(dir)?;
+    // Prefetch hot mmap regions (offset arrays + node_slots) into page cache.
+    // Non-blocking — kernel reads asynchronously while we continue loading metadata.
+    disk_graph.prefetch_hot_regions();
     graph.graph = GraphBackend::Disk(Box::new(disk_graph));
     graph.storage_mode = StorageMode::Disk;
 
