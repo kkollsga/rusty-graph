@@ -144,6 +144,9 @@ pub struct DiskGraph {
     metadata_dirty: bool,
     // ── CSR edges are sorted by (node, connection_type) — enables binary search
     pub(crate) csr_sorted_by_type: bool,
+    // ── Edge type counts computed during CSR build (raw InternedKey u64 → count).
+    // Converted to String keys by the caller using the interner.
+    pub(crate) edge_type_counts_raw: Option<HashMap<u64, usize>>,
     // ── Temp dir for CSR mmap files (cleaned up on Drop) ──
 }
 
@@ -202,6 +205,7 @@ impl DiskGraph {
             data_dir: data_dir.to_path_buf(),
             metadata_dirty: false,
             csr_sorted_by_type: false,
+            edge_type_counts_raw: None,
         })
     }
 
@@ -342,6 +346,7 @@ impl DiskGraph {
             data_dir: data_dir.to_path_buf(),
             metadata_dirty: false,
             csr_sorted_by_type: false,
+            edge_type_counts_raw: None,
         })
     }
 
@@ -1026,6 +1031,7 @@ impl DiskGraph {
                 .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
         let mut out_counts = vec![0u64; node_bound];
         let mut in_counts = vec![0u64; node_bound];
+        let mut edge_type_counts: HashMap<u64, usize> = HashMap::new();
         for i in 0..pending.len() {
             let (src, tgt, ct) = pending.get(i);
             pending_mmap.push((src, tgt, ct));
@@ -1040,6 +1046,7 @@ impl DiskGraph {
             if (tgt as usize) < node_bound {
                 in_counts[tgt as usize] += 1;
             }
+            *edge_type_counts.entry(ct).or_insert(0) += 1;
         }
         // Free pending_edges (file-backed mmap)
         *pending = MmapOrVec::new();
@@ -1294,6 +1301,7 @@ impl DiskGraph {
         self.in_edges = in_edges;
         self.edge_endpoints = edge_endpoints_vec;
         self.csr_sorted_by_type = true;
+        self.edge_type_counts_raw = Some(edge_type_counts);
 
         // Offsets already mmap-backed to out_offsets.bin / in_offsets.bin.
         // Auto-persist metadata — graph is fully on disk after this
@@ -1326,6 +1334,7 @@ impl DiskGraph {
                 .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
         let mut out_counts = vec![0u64; node_bound];
         let mut in_counts = vec![0u64; node_bound];
+        let mut edge_type_counts: HashMap<u64, usize> = HashMap::new();
         for i in 0..pending.len() {
             let (src, tgt, ct) = pending.get(i);
             edge_endpoints_vec.push(EdgeEndpoints {
@@ -1339,6 +1348,7 @@ impl DiskGraph {
             if (tgt as usize) < node_bound {
                 in_counts[tgt as usize] += 1;
             }
+            *edge_type_counts.entry(ct).or_insert(0) += 1;
         }
         if verbose {
             eprintln!(
@@ -1599,6 +1609,7 @@ impl DiskGraph {
         self.in_offsets = in_offsets;
         self.in_edges = in_edges;
         self.edge_endpoints = edge_endpoints_vec;
+        self.edge_type_counts_raw = Some(edge_type_counts);
 
         let _ = self.write_metadata();
         self.metadata_dirty = false;
@@ -1818,6 +1829,7 @@ impl Clone for DiskGraph {
             data_dir: self.data_dir.clone(),
             metadata_dirty: false,
             csr_sorted_by_type: self.csr_sorted_by_type,
+            edge_type_counts_raw: None,
         }
     }
 }
@@ -2012,6 +2024,7 @@ impl DiskGraph {
                 data_dir: dir.to_path_buf(),
                 metadata_dirty: false,
                 csr_sorted_by_type: meta.csr_sorted_by_type,
+                edge_type_counts_raw: None,
             },
             temp_dir,
         ))

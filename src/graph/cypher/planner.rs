@@ -756,31 +756,42 @@ fn estimate_node_selectivity(
 
 /// This allows the pattern executor to stop early via max_matches.
 ///
-/// Safe when: MATCH → RETURN → LIMIT, with RETURN having no aggregation or DISTINCT.
-/// The LIMIT clause is removed from the pipeline and its value is stored in
-/// `MatchClause.limit_hint`, which `execute_match` passes to PatternExecutor.
+/// Safe when: MATCH → [WHERE] → RETURN → LIMIT, with RETURN having no aggregation
+/// or DISTINCT. The LIMIT clause is removed from the pipeline and its value is
+/// stored in `MatchClause.limit_hint`, which `execute_match` passes to PatternExecutor.
+///
+/// When WHERE is present between MATCH and RETURN, the LIMIT is still pushed into
+/// MATCH as an overcommit hint — the expansion produces at most `limit * 100` candidates,
+/// which WHERE then filters. This prevents O(N) expansion on large types even when
+/// WHERE prevents exact early termination.
 fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) {
     if query.clauses.len() < 3 {
         return;
     }
     let mut i = 0;
     while i + 2 < query.clauses.len() {
-        // Look for MATCH → RETURN → LIMIT
-        let is_pattern = matches!(
-            (
-                &query.clauses[i],
-                &query.clauses[i + 1],
-                &query.clauses[i + 2]
-            ),
-            (Clause::Match(_), Clause::Return(_), Clause::Limit(_))
-        );
-        if !is_pattern {
+        // Look for MATCH → RETURN → LIMIT  or  MATCH → WHERE → RETURN → LIMIT
+        let (has_where, return_offset, limit_offset) = if i + 3 < query.clauses.len()
+            && matches!(&query.clauses[i], Clause::Match(_))
+            && matches!(&query.clauses[i + 1], Clause::Where(_))
+            && matches!(&query.clauses[i + 2], Clause::Return(_))
+            && matches!(&query.clauses[i + 3], Clause::Limit(_))
+        {
+            (true, i + 2, i + 3)
+        } else if matches!(
+            (&query.clauses[i], &query.clauses[i + 1]),
+            (Clause::Match(_), Clause::Return(_))
+        ) && i + 2 < query.clauses.len()
+            && matches!(&query.clauses[i + 2], Clause::Limit(_))
+        {
+            (false, i + 1, i + 2)
+        } else {
             i += 1;
             continue;
-        }
+        };
 
         // Safety check: RETURN must have no aggregation, no DISTINCT, no window functions
-        let safe = if let Clause::Return(r) = &query.clauses[i + 1] {
+        let safe = if let Clause::Return(r) = &query.clauses[return_offset] {
             !r.distinct
                 && !r
                     .items
@@ -799,7 +810,7 @@ fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) {
         }
 
         // Extract LIMIT value — must be a literal positive integer
-        let limit_val = if let Clause::Limit(l) = &query.clauses[i + 2] {
+        let limit_val = if let Clause::Limit(l) = &query.clauses[limit_offset] {
             match &l.count {
                 Expression::Literal(Value::Int64(n)) if *n > 0 => Some(*n as usize),
                 _ => None,
@@ -812,12 +823,23 @@ fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) {
             continue;
         };
 
-        // All checks passed: push limit into MATCH and remove LIMIT clause
-        if let Clause::Match(ref mut m) = query.clauses[i] {
-            m.limit_hint = Some(limit);
+        // All checks passed: push limit hint into MATCH.
+        // When WHERE is present, use a generous overcommit (10x) since WHERE
+        // may filter some matches. Keep the LIMIT clause in place for exact
+        // truncation after WHERE filtering.
+        // Without WHERE, the hint is exact and LIMIT can be removed.
+        if has_where {
+            let hint = limit.saturating_mul(10);
+            if let Clause::Match(ref mut m) = query.clauses[i] {
+                m.limit_hint = Some(hint);
+            }
+            // Keep LIMIT clause — WHERE may filter, so we need exact truncation
+        } else {
+            if let Clause::Match(ref mut m) = query.clauses[i] {
+                m.limit_hint = Some(limit);
+            }
+            query.clauses.remove(limit_offset); // Remove LIMIT — hint is exact
         }
-        query.clauses.remove(i + 2); // Remove LIMIT
-                                     // Don't increment — check the new i+2
     }
 }
 

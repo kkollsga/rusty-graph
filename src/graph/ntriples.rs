@@ -920,6 +920,30 @@ pub fn load_ntriples(
         }
     }
 
+    // Warm edge_type_counts_cache from CSR build data (avoids 14 GB rescan on first query)
+    if final_mode == StorageMode::Disk {
+        if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
+            if let Some(raw_counts) = dg.edge_type_counts_raw.take() {
+                let string_counts: HashMap<String, usize> = raw_counts
+                    .into_iter()
+                    .map(|(key_u64, count)| {
+                        let key = InternedKey::from_u64(key_u64);
+                        let name = graph.interner.resolve(key).to_string();
+                        (name, count)
+                    })
+                    .collect();
+                if config.verbose {
+                    eprintln!(
+                        "  [T+{:.0}s] Cached {} edge type counts from CSR build",
+                        start.elapsed().as_secs_f64(),
+                        string_counts.len()
+                    );
+                }
+                *graph.edge_type_counts_cache.write().unwrap() = Some(string_counts);
+            }
+        }
+    }
+
     // Rebuild type_indices from DiskNodeSlots (dropped before Phase 2 to save 1 GB)
     if final_mode == StorageMode::Disk {
         if config.verbose {
