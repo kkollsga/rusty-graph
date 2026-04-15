@@ -222,6 +222,40 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
     #[cfg(not(unix))]
     pub fn advise_willneed(&self) {}
 
+    /// Advise the kernel that this region will be read sequentially.
+    /// Enables aggressive readahead and reduces page cache pollution.
+    #[cfg(unix)]
+    pub fn advise_sequential(&self) {
+        if let MmapOrVec::Mapped { mmap, len, .. } = self {
+            let byte_len = *len * std::mem::size_of::<T>();
+            if byte_len > 0 {
+                let _ = mmap.advise(memmap2::Advice::Sequential);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub fn advise_sequential(&self) {}
+
+    /// Advise the kernel that this region is no longer needed.
+    /// Releases page cache pages, reducing memory pressure after large scans.
+    /// Uses UncheckedAdvice because MADV_DONTNEED can discard dirty pages
+    /// (safe for our read-only mmap usage).
+    #[cfg(unix)]
+    pub fn advise_dontneed(&self) {
+        if let MmapOrVec::Mapped { mmap, len, .. } = self {
+            let byte_len = *len * std::mem::size_of::<T>();
+            if byte_len > 0 {
+                unsafe {
+                    let _ = mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub fn advise_dontneed(&self) {}
+
     /// Read element at index. Panics if out of bounds.
     pub fn get(&self, index: usize) -> T {
         match self {

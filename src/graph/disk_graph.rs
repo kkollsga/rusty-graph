@@ -857,6 +857,11 @@ impl DiskGraph {
         self.ensure_csr();
         let mut counts: HashMap<u32, i64> = HashMap::new();
 
+        // Advise kernel: sequential read of edge_endpoints (13 GB).
+        // MADV_SEQUENTIAL enables aggressive readahead and avoids polluting
+        // the page cache with pages we won't revisit.
+        self.edge_endpoints.advise_sequential();
+
         // Sequential scan of edge_endpoints — each entry is (source, target, conn_type).
         // 16 bytes per edge, purely sequential.
         for i in 0..self.next_edge_idx as usize {
@@ -873,6 +878,10 @@ impl DiskGraph {
             };
             *counts.entry(peer).or_insert(0) += 1;
         }
+
+        // Release page cache pages after scan to reduce memory pressure.
+        self.edge_endpoints.advise_dontneed();
+
         counts
     }
 
