@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "kglite"
-version = "0.7.9"
+version = "0.7.10"
 dependencies = [
  "bincode",
  "bzip2",

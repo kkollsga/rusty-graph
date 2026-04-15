@@ -5,6 +5,18 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.10] - 2026-04-16
+
+### Added
+- **Connection-type inverted index**: Built during CSR construction, maps edge types to source node IDs. Enables instant lookup of "which nodes have P31 outgoing edges" for unanchored edge queries. Cold-cache `MATCH (a)-[:P31]->(b) LIMIT 50` improved from 14.5s to 4.6s.
+- **madvise hints for edge scans**: Sequential/DontNeed advisories on edge_endpoints during full-graph aggregation to reduce page cache pollution.
+
+### Changed
+- **FusedNodeScanTopK**: New fused clause for `MATCH (n:Type) RETURN n.prop ORDER BY n.prop LIMIT K` — single-pass scan with inline top-K selection, avoids materializing all rows. String sort keys supported.
+- **Streaming top-K for FusedMatchReturnAggregate**: Iterates group nodes directly from type_indices instead of materializing all PatternMatch objects.
+- **Edge-centric aggregation**: For untyped group nodes, scans edge_endpoints sequentially with HashMap accumulation instead of per-node iteration.
+- **Lightweight peer iteration**: `expand_from_node` skips edge_endpoints reads when edge variable is unnamed (disk-only, reduces I/O by ~50%).
+
 ## [0.7.9] - 2026-04-16
 
 ### Changed
