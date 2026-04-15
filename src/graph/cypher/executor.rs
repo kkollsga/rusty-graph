@@ -7022,8 +7022,8 @@ impl<'a> CypherExecutor<'a> {
             self.fold_constants_expr(&return_clause.items[score_item_index].expression)
         };
 
-        // Early type check: if the sort key isn't convertible to f64, fall back
-        // to unfused RETURN → ORDER BY → LIMIT execution.
+        // Type check: if sort key is String, use a String-specific top-K path
+        // instead of the f64 heap. Avoids materializing ALL rows for large types.
         {
             let probe = self.evaluate_expression(&score_expr, &result_set.rows[0])?;
             match probe {
@@ -7032,8 +7032,59 @@ impl<'a> CypherExecutor<'a> {
                 | Value::DateTime(_)
                 | Value::UniqueId(_)
                 | Value::Boolean(_)
-                | Value::Null => {}
+                | Value::Null => {} // Continue to f64 heap below
+                Value::String(_) => {
+                    // String top-K: maintain a sorted Vec of (String, row_index) pairs.
+                    // O(N * K) for small K — much faster than O(N log N) full sort.
+                    self.check_deadline()?;
+                    let mut top_k: Vec<(String, usize)> = Vec::with_capacity(limit + 1);
+                    for (i, row) in result_set.rows.iter().enumerate() {
+                        let val = self.evaluate_expression(&score_expr, row)?;
+                        let s = match val {
+                            Value::String(s) => s,
+                            _ => continue,
+                        };
+                        // Insert into sorted position
+                        let pos = if descending {
+                            top_k.partition_point(|(existing, _)| existing > &s)
+                        } else {
+                            top_k.partition_point(|(existing, _)| existing < &s)
+                        };
+                        if pos < limit {
+                            top_k.insert(pos, (s, i));
+                            if top_k.len() > limit {
+                                top_k.pop();
+                            }
+                        }
+                    }
+                    // Build result rows from top-K winners
+                    let folded_return_exprs: Vec<Expression> = return_clause
+                        .items
+                        .iter()
+                        .map(|item| self.fold_constants_expr(&item.expression))
+                        .collect();
+                    let columns: Vec<String> = return_clause
+                        .items
+                        .iter()
+                        .map(return_item_column_name)
+                        .collect();
+                    let mut final_rows = Vec::with_capacity(top_k.len());
+                    for &(_, row_idx) in &top_k {
+                        let row = &result_set.rows[row_idx];
+                        let mut projected = Bindings::with_capacity(columns.len());
+                        for (j, expr) in folded_return_exprs.iter().enumerate() {
+                            let val = self.evaluate_expression(expr, row)?;
+                            projected.insert(columns[j].clone(), val);
+                        }
+                        final_rows.push(ResultRow::from_projected(projected));
+                    }
+                    return Ok(ResultSet {
+                        rows: final_rows,
+                        columns,
+                    });
+                }
                 _ => {
+                    // Non-numeric, non-string: fall back to full sort
                     let result = self.execute_return(return_clause, result_set)?;
                     let order_clause = OrderByClause {
                         items: vec![OrderItem {

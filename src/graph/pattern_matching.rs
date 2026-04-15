@@ -1677,6 +1677,60 @@ impl<'a> PatternExecutor<'a> {
             return self.expand_var_length(source, edge_pattern, node_pattern, min_hops, max_hops);
         }
 
+        // Lightweight fast path: when the edge has no named variable and no property
+        // filters, skip EdgeData materialization entirely. For disk graphs this avoids
+        // reading edge_endpoints.bin (13 GB on Wikidata), cutting I/O in half.
+        // Only for single connection type (not multi-type) and directed edges.
+        if edge_pattern.variable.is_none()
+            && edge_pattern.properties.is_none()
+            && !edge_pattern.needs_path_info
+            && edge_pattern.connection_types.is_none()
+            && self.graph.graph.is_disk()
+        {
+            let conn_u64 = edge_pattern
+                .connection_type
+                .as_ref()
+                .map(|ct| InternedKey::from_str(ct).as_u64());
+            let directions: &[Direction] = match edge_pattern.direction {
+                EdgeDirection::Outgoing => &[Direction::Outgoing],
+                EdgeDirection::Incoming => &[Direction::Incoming],
+                EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
+            };
+            let mut results = Vec::new();
+            for &dir in directions {
+                if let crate::graph::schema::GraphBackend::Disk(ref dg) = self.graph.graph {
+                    let peers = dg.iter_peers_filtered(source, dir, conn_u64);
+                    for (peer_idx, _edge_idx) in peers {
+                        if max_results.is_some_and(|max| results.len() >= max) {
+                            break;
+                        }
+                        // Check target node type
+                        if !edge_pattern.skip_target_type_check {
+                            if let Some(ref node_type) = node_pattern.node_type {
+                                if let Some(nt) = self.graph.graph.node_type_of(peer_idx) {
+                                    if nt != InternedKey::from_str(node_type) {
+                                        continue;
+                                    }
+                                } else {
+                                    continue;
+                                }
+                            }
+                        }
+                        // Check target node properties
+                        if let Some(ref props) = node_pattern.properties {
+                            if !self.node_matches_properties(peer_idx, props) {
+                                continue;
+                            }
+                        }
+                        // Placeholder binding — caller won't use it (variable is None)
+                        let binding = MatchBinding::NodeRef(peer_idx);
+                        results.push((peer_idx, binding));
+                    }
+                }
+            }
+            return Ok(results);
+        }
+
         let mut results = Vec::new();
 
         // Determine which directions to check (static slice, no heap alloc)
