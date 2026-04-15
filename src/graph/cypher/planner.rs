@@ -17,6 +17,7 @@ pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<Stri
     fold_or_to_in(query);
     push_where_into_match(query, params); // second pass: push newly-created IN predicates
     optimize_pattern_start_node(query, graph);
+    reorder_match_patterns(query, graph);
     push_limit_into_match(query, graph);
     push_distinct_into_match(query);
     fuse_count_short_circuits(query);
@@ -751,6 +752,63 @@ fn estimate_node_selectivity(
             }
             est.max(1)
         }
+    }
+}
+
+/// Reorder patterns within a MATCH clause so the most selective pattern runs first.
+///
+/// For `MATCH (n)-[:P31]->({id:6256}), (n)-[:P30]->({id:46})`, the pattern with
+/// the more selective start node should execute first to minimize the number of
+/// rows passed to subsequent patterns via shared-variable join.
+///
+/// Estimates selectivity by looking at the first node of each pattern (after
+/// start-node optimization has already picked the best direction).
+fn reorder_match_patterns(query: &mut CypherQuery, graph: &DirGraph) {
+    for clause in &mut query.clauses {
+        let mc = match clause {
+            Clause::Match(mc) => mc,
+            _ => continue,
+        };
+        if mc.patterns.len() < 2 {
+            continue;
+        }
+        // Don't reorder if there are path assignments — indices would break
+        if !mc.path_assignments.is_empty() {
+            continue;
+        }
+        // Estimate selectivity for each pattern based on its start node
+        let mut pattern_scores: Vec<(usize, usize)> = mc
+            .patterns
+            .iter()
+            .enumerate()
+            .map(|(i, pat)| {
+                let sel = if let Some(PatternElement::Node(np)) = pat.elements.first() {
+                    estimate_node_selectivity(np, graph)
+                } else {
+                    usize::MAX
+                };
+                (i, sel)
+            })
+            .collect();
+
+        // Sort by selectivity (lower = more selective = should go first)
+        pattern_scores.sort_by_key(|&(_, sel)| sel);
+
+        // Only reorder if the order actually changes
+        let already_ordered = pattern_scores
+            .iter()
+            .enumerate()
+            .all(|(pos, &(idx, _))| pos == idx);
+        if already_ordered {
+            continue;
+        }
+
+        // Rebuild patterns in selectivity order
+        let old_patterns = std::mem::take(&mut mc.patterns);
+        mc.patterns = pattern_scores
+            .iter()
+            .map(|&(idx, _)| old_patterns[idx].clone())
+            .collect();
     }
 }
 
