@@ -2033,20 +2033,54 @@ impl<'a> CypherExecutor<'a> {
             };
 
         let result_rows = if let Some(&(_, descending, limit)) = top_k.as_ref() {
-            // Top-K path: use BinaryHeap to find only the top-k nodes by count
+            // Top-K path: stream through group nodes, count edges per node, maintain
+            // K-element heap. When top_k is set, skip the full group_matches Vec —
+            // iterate type_indices directly to avoid millions of PatternMatch allocations.
             use std::cmp::Reverse;
             use std::collections::BinaryHeap;
 
+            // Get group node candidates directly from type_indices (streaming, no alloc)
+            let group_node_type = match &pattern.elements[group_elem_idx] {
+                PatternElement::Node(np) => np.node_type.as_deref(),
+                _ => None,
+            };
+            let group_node_props = match &pattern.elements[group_elem_idx] {
+                PatternElement::Node(np) => &np.properties,
+                _ => &None,
+            };
+            let group_indices: Vec<petgraph::graph::NodeIndex> = if let Some(nt) = group_node_type {
+                self.graph
+                    .type_indices
+                    .get(nt)
+                    .map(|v| v.to_vec())
+                    .unwrap_or_default()
+            } else {
+                self.graph.graph.node_indices().collect()
+            };
+
+            // Property filter executor (if group node has inline properties)
+            let prop_executor = group_node_props.as_ref().map(|_| {
+                PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
+            });
+
             if descending {
-                // DESC: keep k largest → min-heap (Reverse) of size k
                 let mut heap: BinaryHeap<Reverse<(i64, petgraph::graph::NodeIndex)>> =
                     BinaryHeap::with_capacity(limit + 1);
-                for m in &group_matches {
-                    let Some(node_idx) = extract_node_idx(m) else {
-                        continue;
-                    };
+                for (scan_count, &node_idx) in group_indices.iter().enumerate() {
+                    if scan_count.is_multiple_of(10000) {
+                        self.check_deadline()?;
+                    }
+                    // Property filter on group node
+                    if let Some(ref props) = group_node_props {
+                        if !prop_executor
+                            .as_ref()
+                            .unwrap()
+                            .node_matches_properties_pub(node_idx, props)
+                        {
+                            continue;
+                        }
+                    }
                     let count = count_for_node(node_idx);
-                    // MATCH semantics: skip nodes with zero matching edges
                     if count == 0 {
                         continue;
                     }
@@ -2055,8 +2089,6 @@ impl<'a> CypherExecutor<'a> {
                         heap.pop();
                     }
                 }
-                // Drain into sorted order (DESC): into_sorted_vec on
-                // BinaryHeap<Reverse<_>> yields ascending-of-Reverse = descending.
                 let top: Vec<_> = heap
                     .into_sorted_vec()
                     .into_iter()
@@ -2068,15 +2100,22 @@ impl<'a> CypherExecutor<'a> {
                 }
                 rows
             } else {
-                // ASC: keep k smallest → max-heap of size k
                 let mut heap: BinaryHeap<(i64, petgraph::graph::NodeIndex)> =
                     BinaryHeap::with_capacity(limit + 1);
-                for m in &group_matches {
-                    let Some(node_idx) = extract_node_idx(m) else {
-                        continue;
-                    };
+                for (scan_count, &node_idx) in group_indices.iter().enumerate() {
+                    if scan_count.is_multiple_of(10000) {
+                        self.check_deadline()?;
+                    }
+                    if let Some(ref props) = group_node_props {
+                        if !prop_executor
+                            .as_ref()
+                            .unwrap()
+                            .node_matches_properties_pub(node_idx, props)
+                        {
+                            continue;
+                        }
+                    }
                     let count = count_for_node(node_idx);
-                    // MATCH semantics: skip nodes with zero matching edges
                     if count == 0 {
                         continue;
                     }
@@ -2085,7 +2124,6 @@ impl<'a> CypherExecutor<'a> {
                         heap.pop();
                     }
                 }
-                // Drain into sorted order (ASC): into_sorted_vec yields ascending.
                 let top: Vec<_> = heap.into_sorted_vec();
                 let mut rows = Vec::with_capacity(top.len());
                 for (count, node_idx) in top {
