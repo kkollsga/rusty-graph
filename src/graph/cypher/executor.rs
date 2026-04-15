@@ -12,6 +12,7 @@ use crate::graph::pattern_matching::{
     PropertyMatcher,
 };
 use crate::graph::schema::{DirGraph, EdgeData, InternedKey, NodeData, TypeSchema};
+use crate::graph::schema_validation;
 use crate::graph::spatial;
 use crate::graph::timeseries;
 use crate::graph::value_operations;
@@ -7915,6 +7916,25 @@ fn execute_create(
                         CreateEdgeDirection::Incoming => (target_idx, source_idx),
                     };
 
+                    // Schema lock validation for edge
+                    if graph.schema_locked {
+                        let src_type = graph
+                            .get_node(actual_source)
+                            .map(|n| n.get_node_type_ref(&graph.interner).to_string())
+                            .unwrap_or_default();
+                        let tgt_type = graph
+                            .get_node(actual_target)
+                            .map(|n| n.get_node_type_ref(&graph.interner).to_string())
+                            .unwrap_or_default();
+                        schema_validation::validate_edge_creation(
+                            &edge_pat.connection_type,
+                            &src_type,
+                            &tgt_type,
+                            &graph.connection_type_metadata,
+                            &graph.node_type_metadata,
+                        )?;
+                    }
+
                     // Evaluate edge properties
                     let mut edge_props = HashMap::new();
                     {
@@ -7999,6 +8019,16 @@ fn create_node(
         });
 
     let label = node_pat.label.clone().unwrap_or_else(|| "Node".to_string());
+
+    // Schema lock validation
+    if graph.schema_locked {
+        schema_validation::validate_node_creation(
+            &label,
+            &properties,
+            &graph.node_type_metadata,
+            graph.schema_definition.as_ref(),
+        )?;
+    }
 
     // Pre-intern all property keys (borrows only graph.interner)
     let interned_keys: Vec<InternedKey> = properties
@@ -8155,6 +8185,16 @@ fn execute_set(
                         }
                         None => continue,
                     };
+
+                    // Schema lock validation for SET
+                    if graph.schema_locked {
+                        schema_validation::validate_property_set(
+                            &node_type_str,
+                            property,
+                            &value,
+                            &graph.node_type_metadata,
+                        )?;
+                    }
 
                     // Clone value before it may be consumed by the mutation
                     let value_for_index = value.clone();

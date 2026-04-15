@@ -5,6 +5,14 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.7] - 2026-04-15
+
+### Added
+- **Schema locking**: `lock_schema()` / `unlock_schema()` enforce the graph's known schema on Cypher mutations (CREATE, SET, MERGE). Invalid writes return descriptive errors with "did you mean?" suggestions via edit-distance matching. Works on any graph — locks against `node_type_metadata` and `connection_type_metadata`.
+- **`from_blueprint(lock_schema=True)`**: Convenience parameter to lock the schema immediately after blueprint loading.
+- **`schema_locked` property**: Check whether the schema is currently locked.
+- **`describe()` schema-locked notice**: When schema is locked, `describe()` includes a `<schema-locked>` element so agents know writes will be validated.
+
 ## [0.7.6] - 2026-04-12
 
 ### Fixed

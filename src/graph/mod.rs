@@ -3980,6 +3980,39 @@ impl KnowledgeGraph {
         self.inner.read_only
     }
 
+    /// Lock the schema: future Cypher mutations (CREATE, SET, MERGE) must
+    /// conform to the currently known node types, connection types, and
+    /// property types.
+    ///
+    /// Returns:
+    ///     Self for method chaining.
+    ///
+    /// Example::
+    ///
+    ///     graph.lock_schema()
+    ///     graph.cypher("CREATE (p:Typo {name: 'x'})")  # raises RuntimeError
+    fn lock_schema(&mut self) -> Self {
+        let graph = get_graph_mut(&mut self.inner);
+        graph.schema_locked = true;
+        self.clone()
+    }
+
+    /// Unlock the schema: allow any Cypher mutations without schema validation.
+    ///
+    /// Returns:
+    ///     Self for method chaining.
+    fn unlock_schema(&mut self) -> Self {
+        let graph = get_graph_mut(&mut self.inner);
+        graph.schema_locked = false;
+        self.clone()
+    }
+
+    /// Whether the schema is currently locked.
+    #[getter]
+    fn schema_locked(&self) -> bool {
+        self.inner.schema_locked
+    }
+
     /// Returns a dict of {node_type: count} using the type index (O(type_count)).
     fn node_type_counts(&self) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {

@@ -301,6 +301,7 @@ def from_blueprint(
     *,
     verbose: bool = False,
     save: bool = True,
+    lock_schema: bool = False,
 ) -> KnowledgeGraph:
     """Build a KnowledgeGraph from a JSON blueprint and CSV files.
 
@@ -313,6 +314,9 @@ def from_blueprint(
         verbose: If True, print progress information during loading.
         save: If True and the blueprint specifies an ``output`` path,
             save the graph to that path after building.
+        lock_schema: If True, lock the schema after loading. Cypher
+            mutations will be validated against the blueprint's types
+            and properties.
 
     Returns:
         A new KnowledgeGraph populated from the blueprint.
@@ -1188,6 +1192,39 @@ class KnowledgeGraph:
             graph.read_only()       # -> True
             graph.read_only(False)  # unlock
         """
+        ...
+
+    def lock_schema(self) -> KnowledgeGraph:
+        """Lock the schema: future Cypher mutations must conform to current types.
+
+        When locked, CREATE, SET, and MERGE operations are validated against
+        the graph's known node types, connection types, and property types.
+        Invalid writes return descriptive errors with 'did you mean?' suggestions.
+
+        Returns:
+            Self for method chaining.
+
+        Example::
+
+            graph.lock_schema()
+            graph.cypher("CREATE (p:Typo {name: 'x'})")  # raises RuntimeError
+
+        See Also:
+            :meth:`unlock_schema`, :attr:`schema_locked`
+        """
+        ...
+
+    def unlock_schema(self) -> KnowledgeGraph:
+        """Unlock the schema: allow any Cypher mutations without validation.
+
+        Returns:
+            Self for method chaining.
+        """
+        ...
+
+    @property
+    def schema_locked(self) -> bool:
+        """Whether the schema is currently locked."""
         ...
 
     def graph_info(self) -> dict[str, Any]:

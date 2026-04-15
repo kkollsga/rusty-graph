@@ -1367,6 +1367,11 @@ fn write_read_only_notice(xml: &mut String, graph: &DirGraph) {
             "  <read-only>Cypher mutations disabled: CREATE, SET, DELETE, REMOVE, MERGE</read-only>\n",
         );
     }
+    if graph.schema_locked {
+        xml.push_str(
+            "  <schema-locked>Mutations validated against schema — unknown types/properties rejected</schema-locked>\n",
+        );
+    }
 }
 
 /// Write the `<connections>` element from global edge stats.

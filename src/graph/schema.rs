@@ -1485,6 +1485,11 @@ pub struct DirGraph {
     /// and describe() omits mutation documentation.
     #[serde(skip)]
     pub(crate) read_only: bool,
+    /// If true, Cypher mutations (CREATE, SET, MERGE) are validated against
+    /// the frozen schema (node_type_metadata + connection_type_metadata).
+    /// Unlike read_only, mutations are still allowed — they just must conform.
+    #[serde(skip)]
+    pub(crate) schema_locked: bool,
     /// Monotonically increasing version counter — incremented on every mutation.
     /// Used for optimistic concurrency control in transactions.
     #[serde(skip, default)]
@@ -1555,6 +1560,7 @@ impl DirGraph {
             temp_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
             storage_mode: StorageMode::Default,
             read_only: false,
+            schema_locked: false,
             version: 0,
             interner: StringInterner::new(),
             type_schemas: HashMap::new(),
@@ -1598,6 +1604,7 @@ impl DirGraph {
             temp_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
             storage_mode: StorageMode::Default,
             read_only: false,
+            schema_locked: false,
             version: 0,
             interner: StringInterner::new(),
             type_schemas: HashMap::new(),

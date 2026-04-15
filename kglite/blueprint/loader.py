@@ -37,6 +37,7 @@ def from_blueprint(
     *,
     verbose: bool = False,
     save: bool = True,
+    lock_schema: bool = False,
 ) -> kglite.KnowledgeGraph:
     """Parse a JSON blueprint and build a KnowledgeGraph from CSV files.
 
@@ -45,6 +46,8 @@ def from_blueprint(
         verbose: If True, print detailed progress for every node/edge type.
             When False (default), only warnings and a final summary are printed.
         save: If True and the blueprint specifies an output path, save the graph.
+        lock_schema: If True, lock the schema after loading. Cypher mutations
+            will be validated against the blueprint's types and properties.
 
     Returns:
         A populated KnowledgeGraph.
@@ -83,6 +86,9 @@ def from_blueprint(
         graph.save(str(loader.output_path))
         if verbose:
             print(f"  Saved to {loader.output_path}")
+
+    if lock_schema:
+        graph.lock_schema()
 
     return graph
 
