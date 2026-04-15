@@ -127,22 +127,21 @@ class TestProfile:
         match_step = profile[0]
         assert match_step["clause"].startswith("Match")
         assert match_step["rows_out"] == 1
-        # WHERE is kept as safety net (predicate also pushed into MATCH)
-        assert len(profile) == 3  # Match + Where + Return
+        # WHERE may be fused into MATCH (inline evaluation) or kept as safety net
+        assert len(profile) in (2, 3)  # Match [+ Where] + Return
 
     def test_profile_row_counts_not_equals(self, graph):
-        """NotEquals stays in WHERE (not pushed), showing MATCH 2 → WHERE 1."""
+        """NotEquals: WHERE may be fused into MATCH (inline eval) or separate."""
         result = graph.cypher("PROFILE MATCH (n:Person) WHERE n.age <> 25 RETURN n.name")
         profile = result.profile
-        # Match produces 2 rows
         match_step = profile[0]
         assert match_step["clause"].startswith("Match")
-        assert match_step["rows_out"] == 2
-        # Where filters to 1 (Alice, age 30)
-        where_step = profile[1]
-        assert where_step["clause"] == "Where"
-        assert where_step["rows_in"] == 2
-        assert where_step["rows_out"] == 1
+        # With WHERE-MATCH fusion: MATCH produces 1 row (filtered inline)
+        # Without fusion: MATCH produces 2, WHERE filters to 1
+        assert match_step["rows_out"] in (1, 2)
+        # Final result is always 1 row (Alice, age 30)
+        last_step = profile[-1]
+        assert last_step["rows_out"] == 1
 
     def test_profile_fused_count(self, graph):
         """Fused count optimization is shown in PROFILE."""

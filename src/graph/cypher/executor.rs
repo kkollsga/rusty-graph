@@ -342,10 +342,21 @@ impl<'a> CypherExecutor<'a> {
             // WHERE-into-MATCH fusion: when MATCH is followed by WHERE, pass the
             // WHERE predicate to execute_match for inline filtering during expansion.
             // This prevents materializing millions of rows that WHERE would discard.
-            let inline_where = if matches!(clause, Clause::Match(_)) {
-                if let Some(Clause::Where(w)) = query.clauses.get(i + 1) {
-                    skip_clause[i + 1] = true;
-                    Some(&w.predicate)
+            //
+            // Safety constraints:
+            // - Only first MATCH (empty result set): subsequent MATCHes may reference
+            //   projected variables from prior WITH clauses.
+            // - Only single-pattern MATCH: multi-pattern MATCH (e.g., (a), (b))
+            //   has WHERE predicates that reference variables from later patterns
+            //   that aren't bound yet during the first pattern's expansion.
+            let inline_where = if let Clause::Match(mc) = clause {
+                if result_set.rows.is_empty() && mc.patterns.len() == 1 {
+                    if let Some(Clause::Where(w)) = query.clauses.get(i + 1) {
+                        skip_clause[i + 1] = true;
+                        Some(&w.predicate)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -666,8 +677,10 @@ impl<'a> CypherExecutor<'a> {
                             let row = self.pattern_match_to_row(m);
                             // Inline WHERE: evaluate predicate before collecting
                             if let Some(pred) = inline_where {
-                                if !self.evaluate_predicate(pred, &row).unwrap_or(false) {
-                                    continue; // Skip non-matching row
+                                match self.evaluate_predicate(pred, &row) {
+                                    Ok(true) => {}           // Keep row
+                                    Ok(false) => continue,   // Skip non-matching row
+                                    Err(e) => return Err(e), // Propagate errors (e.g., missing param)
                                 }
                             }
                             all_rows.push(row);
