@@ -5,6 +5,18 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.9] - 2026-04-16
+
+### Changed
+- **Zero-allocation edge counting**: `count()` queries on edge patterns use a new fast path that iterates CSR edges without materializing `EdgeData`. With sorted CSR, uses binary search to narrow to matching edge type. Result: "count instances of City" dropped from 2.3s to 37ms (63x faster).
+- **WHERE-MATCH fusion**: The executor detects MATCH followed by WHERE and evaluates the WHERE predicate inline during pattern expansion. Non-matching rows are skipped immediately, and expansion stops after finding exactly LIMIT matching rows. Previously stuck queries (>10 min) now complete within timeout.
+- **LIMIT push-down through WHERE**: Extended `push_limit_into_match` to handle `MATCH → WHERE → RETURN → LIMIT` pattern. The executor enforces exact LIMIT during fused WHERE evaluation.
+- **Pre-computed edge type counts**: Edge type counts are computed during CSR build (zero overhead — counted inline during endpoint materialization). Persisted to metadata so `FusedCountEdgesByType` is O(1) on reload.
+
+### Fixed
+- **Wikidata type merge**: Q-code types (e.g., "Q5") now properly merge into human-readable labels ("human") during N-Triples build. Previously, when both "Q5" and "human" existed as types, the merge was skipped — now indices and column stores are merged correctly.
+- **Column store key remapping**: Property log entries with old Q-code InternedKeys are remapped to merged label keys during Phase 1b, ensuring column stores have correct data after type merges.
+
 ## [0.7.8] - 2026-04-15
 
 ### Added
