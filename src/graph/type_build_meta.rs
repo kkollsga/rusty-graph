@@ -91,6 +91,25 @@ impl TypeBuildMeta {
         }
     }
 
+    /// Merge another TypeBuildMeta into this one (for type relabeling merges).
+    pub fn merge_from(&mut self, other: &TypeBuildMeta) {
+        self.row_count += other.row_count;
+        self.title_string_bytes += other.title_string_bytes;
+        self.id_string_bytes += other.id_string_bytes;
+        if other.id_is_string {
+            self.id_is_string = true;
+        }
+        for (key, col) in &other.columns {
+            let entry = self.columns.entry(*key).or_insert_with(|| ColumnMeta {
+                col_type: col.col_type,
+                string_bytes: 0,
+                non_null_count: 0,
+            });
+            entry.non_null_count += col.non_null_count;
+            entry.string_bytes += col.string_bytes;
+        }
+    }
+
     /// Record one entity's properties for this type.
     pub fn record_entity(
         &mut self,

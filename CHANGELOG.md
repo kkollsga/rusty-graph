@@ -5,6 +5,21 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.8] - 2026-04-15
+
+### Added
+- **`set_default_timeout(timeout_ms)`**: Set a default per-query timeout (milliseconds) applied to all `cypher()` calls. Per-query `timeout_ms` overrides it.
+- **`set_default_max_rows(max_rows)`**: Set a default cap on intermediate result rows. Queries exceeding this return an error with guidance to add LIMIT. Per-query `max_rows` overrides it.
+- **`cypher(max_rows=N)`**: Per-query max rows limit parameter.
+
+### Changed
+- **Cypher LIMIT push-down**: Tightened source candidate cap from 10,000× to 100× the LIMIT value. Queries like `MATCH (n:Type)-[:EDGE]->(m) RETURN ... LIMIT 10` on large types are now ~100x faster (avoids allocating the full type index).
+- **Cypher pattern start-node optimization**: Improved selectivity estimation for property-filtered nodes (equality filters now estimate /100 instead of /10). Lowered reversal threshold from 10× to 5×. Queries with filters on the target node (e.g., `WHERE b.prop = 'X'`) are now 2-3× faster.
+- **DiskGraph edge iteration**: DiskEdges iterator now reads CSR edges lazily from the mmap instead of pre-collecting into a Vec. Eliminates O(degree) allocation per iterator — critical for high-degree nodes at Wikidata scale.
+- **DiskGraph direct columnar property access**: Property checks in Cypher WHERE clauses and pattern matching now read individual column values directly from the ColumnStore on disk graphs, bypassing full `NodeData` materialization. Eliminates arena allocation and unnecessary id/title reads — ~3x fewer mmap reads per property check.
+- **DiskGraph CSR sorted by connection type**: CSR edges are now sorted by `(node, connection_type)` during build. Edge-type filtering uses binary search instead of linear scan — O(log D + matching) instead of O(D) for high-degree nodes. Metadata flag `csr_sorted_by_type` ensures backward compatibility with older graphs.
+- **Fused aggregation with WHERE clauses**: `FusedNodeScanAggregate` now activates for queries with property filters (e.g., `MATCH (n:Entity) WHERE n.pop > 1M RETURN n.continent, count(n)`). `FusedMatchReturnAggregate` now supports property filters on the unbound (counted) node. Both avoid materializing intermediate result rows.
+
 ## [0.7.7] - 2026-04-15
 
 ### Added

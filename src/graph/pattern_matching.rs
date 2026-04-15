@@ -941,10 +941,9 @@ impl<'a> PatternExecutor<'a> {
         let source_cap = if has_edges {
             // Multi-hop with LIMIT: cap sources to avoid O(N) allocation + PatternMatch
             // construction for millions of nodes. The expansion loop enforces exact
-            // max_matches via early-exit. Cap is generous to avoid missing results
-            // when matches are sparse.
-            self.max_matches
-                .map(|m| m.saturating_mul(10_000).max(100_000))
+            // max_matches via early-exit. 100x headroom handles sparse match patterns
+            // (each source needs only a 1% chance of producing a match to hit the limit).
+            self.max_matches.map(|m| m.saturating_mul(100).max(1000))
         } else {
             // Single-node pattern: exact truncation
             self.max_matches
@@ -1511,15 +1510,20 @@ impl<'a> PatternExecutor<'a> {
         idx: NodeIndex,
         props: &HashMap<String, PropertyMatcher>,
     ) -> bool {
+        // Disk-graph fast path: read properties directly from columnar storage
+        // without materializing full NodeData. Avoids arena allocation and
+        // unnecessary id/title reads. Gated by backend type so in-memory graphs
+        // take the unchanged, faster path below.
+        if self.graph.graph.is_disk() {
+            return self.node_matches_properties_columnar(idx, props);
+        }
+
+        // In-memory path: node_weight() is cheap (pointer chase, no allocation)
         if let Some(node) = self.graph.graph.node_weight(idx) {
             for (key, matcher) in props {
-                // Resolve alias: original column name → canonical field
                 let resolved = self
                     .graph
                     .resolve_alias(node.node_type_str(&self.graph.interner), key);
-                // Check special fields first: name/title maps to title, id maps to id,
-                // type/node_type/label maps to the node's type string.
-                // Use Cow to avoid cloning when possible
                 let value: Option<Cow<'_, Value>> = if resolved == "name" || resolved == "title" {
                     Some(node.title())
                 } else if resolved == "id" {
@@ -1545,6 +1549,49 @@ impl<'a> PatternExecutor<'a> {
         } else {
             false
         }
+    }
+
+    /// Disk-graph columnar fast path for property matching.
+    /// Reads individual column values without full NodeData materialization.
+    fn node_matches_properties_columnar(
+        &self,
+        idx: NodeIndex,
+        props: &HashMap<String, PropertyMatcher>,
+    ) -> bool {
+        let node_type_key = match self.graph.graph.node_type_of(idx) {
+            Some(k) => k,
+            None => return false,
+        };
+        let type_str = match self.graph.interner.try_resolve(node_type_key) {
+            Some(s) => s,
+            None => return false,
+        };
+
+        for (key, matcher) in props {
+            let resolved = self.graph.resolve_alias(type_str, key);
+            let value: Option<Cow<'_, Value>> = if resolved == "name" || resolved == "title" {
+                self.graph.graph.get_node_title(idx).map(Cow::Owned)
+            } else if resolved == "id" {
+                self.graph.graph.get_node_id(idx).map(Cow::Owned)
+            } else if resolved == "type" || resolved == "node_type" || resolved == "label" {
+                Some(Cow::Owned(Value::String(type_str.to_string())))
+            } else {
+                self.graph
+                    .graph
+                    .get_node_property(idx, InternedKey::from_str(resolved))
+                    .map(Cow::Owned)
+            };
+
+            match value {
+                Some(v) => {
+                    if !self.value_matches(&v, matcher) {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+        true
     }
 
     /// Check if a value matches a property matcher.

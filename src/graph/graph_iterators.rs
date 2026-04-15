@@ -6,12 +6,63 @@
 // GraphEdgeRef implements petgraph::visit::EdgeRef so callers that import
 // that trait can call .source(), .target(), .weight(), .id() unchanged.
 
-use crate::graph::disk_graph::{CsrEdge, DiskGraph, DiskNodeSlot, TOMBSTONE_EDGE};
+use crate::graph::disk_graph::{CsrEdge, DiskGraph, DiskNodeSlot, EdgeEndpoints, TOMBSTONE_EDGE};
 use crate::graph::mmap_vec::MmapOrVec;
 use crate::graph::schema::{EdgeData, NodeData};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
+
+/// Binary search for the range of CSR edges matching a specific connection_type.
+/// Returns (lo, hi) such that edges[lo..hi] all have the target connection_type.
+/// Requires CSR edges to be sorted by connection_type within [start, end).
+/// Skips tombstoned edges during the search.
+fn binary_search_conn_type(
+    edges: &MmapOrVec<CsrEdge>,
+    endpoints: &MmapOrVec<EdgeEndpoints>,
+    start: usize,
+    end: usize,
+    target_ct: u64,
+) -> (usize, usize) {
+    if start >= end {
+        return (start, start);
+    }
+
+    // Helper: get connection_type for edge at position i
+    let ct_at = |i: usize| -> u64 {
+        let e = edges.get(i);
+        if e.edge_idx == TOMBSTONE_EDGE {
+            return u64::MAX; // tombstones sort to end
+        }
+        endpoints.get(e.edge_idx as usize).connection_type
+    };
+
+    // Lower bound: first edge with ct >= target_ct
+    let mut lo_l = start;
+    let mut lo_r = end;
+    while lo_l < lo_r {
+        let mid = lo_l + (lo_r - lo_l) / 2;
+        if ct_at(mid) < target_ct {
+            lo_l = mid + 1;
+        } else {
+            lo_r = mid;
+        }
+    }
+
+    // Upper bound: first edge with ct > target_ct
+    let mut hi_l = lo_l;
+    let mut hi_r = end;
+    while hi_l < hi_r {
+        let mid = hi_l + (hi_r - hi_l) / 2;
+        if ct_at(mid) <= target_ct {
+            hi_l = mid + 1;
+        } else {
+            hi_r = mid;
+        }
+    }
+
+    (lo_l, hi_l)
+}
 
 // ============================================================================
 // GraphEdgeRef — unified edge reference
@@ -175,8 +226,11 @@ pub struct DiskEdges<'a> {
     graph: &'a DiskGraph,
     direction: Direction,
     source_node: NodeIndex,
-    // Pre-collected CSR edges (avoids lifetime issues with MmapOrVec)
-    csr_edges: Vec<CsrEdge>,
+    // Lazy CSR edge access — indexes into the mmap'd array on each next() call
+    // instead of pre-collecting into a Vec (avoids O(degree) allocation).
+    csr_edges: Option<&'a MmapOrVec<CsrEdge>>,
+    csr_start: usize,
+    csr_end: usize,
     csr_pos: usize,
     // Overflow edges (appended after CSR construction)
     overflow: Option<&'a [CsrEdge]>,
@@ -190,22 +244,19 @@ impl<'a> DiskEdges<'a> {
         graph: &'a DiskGraph,
         direction: Direction,
         source_node: NodeIndex,
-        edges: &MmapOrVec<CsrEdge>,
+        edges: &'a MmapOrVec<CsrEdge>,
         start: usize,
         end: usize,
         overflow: Option<&'a Vec<CsrEdge>>,
     ) -> Self {
-        // Pre-collect CSR edges into a Vec to avoid borrow issues
-        let mut csr_edges = Vec::with_capacity(end - start);
-        for i in start..end {
-            csr_edges.push(edges.get(i));
-        }
         DiskEdges {
             graph,
             direction,
             source_node,
-            csr_edges,
-            csr_pos: 0,
+            csr_edges: Some(edges),
+            csr_start: start,
+            csr_end: end,
+            csr_pos: start,
             overflow: overflow.map(|v| v.as_slice()),
             overflow_pos: 0,
             conn_type_filter: None,
@@ -217,7 +268,9 @@ impl<'a> DiskEdges<'a> {
             graph,
             direction,
             source_node,
-            csr_edges: Vec::new(),
+            csr_edges: None,
+            csr_start: 0,
+            csr_end: 0,
             csr_pos: 0,
             overflow: None,
             overflow_pos: 0,
@@ -225,10 +278,29 @@ impl<'a> DiskEdges<'a> {
         }
     }
 
-    /// Set a connection type pre-filter. Edges whose connection type doesn't
-    /// match are skipped before materialization.
+    /// Set a connection type pre-filter. When the CSR is sorted by connection
+    /// type (csr_sorted_by_type=true), narrows the iteration range via binary
+    /// search — O(log D) instead of O(D) for high-degree nodes. Falls back to
+    /// linear scan when unsorted (backward-compatible with older graphs).
     pub fn with_conn_type_filter(mut self, ct: u64) -> Self {
         self.conn_type_filter = Some(ct);
+        // Binary search to narrow range when CSR edges are sorted by type
+        if self.graph.csr_sorted_by_type {
+            if let Some(edges) = self.csr_edges {
+                let (lo, hi) = binary_search_conn_type(
+                    edges,
+                    &self.graph.edge_endpoints,
+                    self.csr_start,
+                    self.csr_end,
+                    ct,
+                );
+                self.csr_start = lo;
+                self.csr_end = hi;
+                self.csr_pos = lo;
+                // Clear filter — all edges in [lo, hi) match, no per-edge check needed
+                self.conn_type_filter = None;
+            }
+        }
         self
     }
 
@@ -247,24 +319,26 @@ impl<'a> Iterator for DiskEdges<'a> {
     type Item = GraphEdgeRef<'a>;
 
     fn next(&mut self) -> Option<GraphEdgeRef<'a>> {
-        // First: iterate CSR edges
-        while self.csr_pos < self.csr_edges.len() {
-            let e = self.csr_edges[self.csr_pos];
-            self.csr_pos += 1;
-            if e.edge_idx != TOMBSTONE_EDGE {
-                // Pre-filter by connection type before materializing
-                if let Some(ct) = self.conn_type_filter {
-                    if self
-                        .graph
-                        .edge_endpoints
-                        .get(e.edge_idx as usize)
-                        .connection_type
-                        != ct
-                    {
-                        continue;
+        // First: iterate CSR edges lazily via index into MmapOrVec
+        if let Some(edges) = self.csr_edges {
+            while self.csr_pos < self.csr_end {
+                let e = edges.get(self.csr_pos);
+                self.csr_pos += 1;
+                if e.edge_idx != TOMBSTONE_EDGE {
+                    // Pre-filter by connection type before materializing
+                    if let Some(ct) = self.conn_type_filter {
+                        if self
+                            .graph
+                            .edge_endpoints
+                            .get(e.edge_idx as usize)
+                            .connection_type
+                            != ct
+                        {
+                            continue;
+                        }
                     }
+                    return Some(self.make_edge_ref(&e));
                 }
-                return Some(self.make_edge_ref(&e));
             }
         }
         // Then: iterate overflow edges
@@ -292,7 +366,7 @@ impl<'a> Iterator for DiskEdges<'a> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining_csr = self.csr_edges.len().saturating_sub(self.csr_pos);
+        let remaining_csr = self.csr_end.saturating_sub(self.csr_pos);
         let remaining_overflow = self
             .overflow
             .map(|o| o.len().saturating_sub(self.overflow_pos))

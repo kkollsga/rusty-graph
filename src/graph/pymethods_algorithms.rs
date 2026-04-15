@@ -1039,6 +1039,8 @@ impl KnowledgeGraph {
             last_mutation_stats: None,
             embedder: None,
             temporal_context: TemporalContext::default(),
+            default_timeout_ms: None,
+            default_max_rows: None,
         })
     }
 

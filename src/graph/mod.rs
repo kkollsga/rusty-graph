@@ -180,6 +180,13 @@ pub struct KnowledgeGraph {
     /// Temporal context for auto-filtering temporal nodes/connections.
     /// Set via `date()` method. Default = Today (resolve at query time).
     temporal_context: TemporalContext,
+    /// Default per-query timeout in milliseconds. Applied to cypher() when
+    /// timeout_ms is not explicitly passed. None = no timeout (default).
+    default_timeout_ms: Option<u64>,
+    /// Default maximum result rows. Applied to cypher() when max_rows is not
+    /// explicitly passed. Queries exceeding this limit return an error.
+    /// None = no limit (default).
+    default_max_rows: Option<usize>,
 }
 
 /// Temporal context for automatic date filtering on select/traverse/collect.
@@ -255,6 +262,8 @@ impl Clone for KnowledgeGraph {
             last_mutation_stats: self.last_mutation_stats.clone(),
             embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
             temporal_context: self.temporal_context.clone(),
+            default_timeout_ms: self.default_timeout_ms,
+            default_max_rows: self.default_max_rows,
         }
     }
 }
@@ -1164,6 +1173,8 @@ impl KnowledgeGraph {
             last_mutation_stats: None,
             embedder: None,
             temporal_context: TemporalContext::default(),
+            default_timeout_ms: None,
+            default_max_rows: None,
         })
     }
 
@@ -2725,6 +2736,8 @@ impl KnowledgeGraph {
             last_mutation_stats: None,
             embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
             temporal_context: self.temporal_context.clone(),
+            default_timeout_ms: self.default_timeout_ms,
+            default_max_rows: self.default_max_rows,
         };
 
         // Create and add a report
@@ -4472,6 +4485,8 @@ impl KnowledgeGraph {
             last_mutation_stats: None,
             embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
             temporal_context: self.temporal_context.clone(),
+            default_timeout_ms: self.default_timeout_ms,
+            default_max_rows: self.default_max_rows,
         };
 
         // Store the report in the new graph
@@ -4543,6 +4558,8 @@ impl KnowledgeGraph {
             last_mutation_stats: None,
             embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
             temporal_context: self.temporal_context.clone(),
+            default_timeout_ms: self.default_timeout_ms,
+            default_max_rows: self.default_max_rows,
         };
 
         // Record plan step
@@ -4639,6 +4656,8 @@ impl KnowledgeGraph {
             last_mutation_stats: None,
             embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
             temporal_context: self.temporal_context.clone(),
+            default_timeout_ms: self.default_timeout_ms,
+            default_max_rows: self.default_max_rows,
         };
 
         // Store the report
@@ -4756,6 +4775,8 @@ impl KnowledgeGraph {
                             self.embedder.as_ref().map(|m| m.clone_ref(py))
                         }),
                         temporal_context: self.temporal_context.clone(),
+                        default_timeout_ms: self.default_timeout_ms,
+                        default_max_rows: self.default_max_rows,
                     };
 
                     // Store the calculation report
@@ -4897,6 +4918,8 @@ impl KnowledgeGraph {
                 last_mutation_stats: None,
                 embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
                 temporal_context: self.temporal_context.clone(),
+                default_timeout_ms: self.default_timeout_ms,
+                default_max_rows: self.default_max_rows,
             };
 
             // Add the report
@@ -5033,6 +5056,8 @@ impl KnowledgeGraph {
             last_mutation_stats: None,
             embedder: Python::attach(|py| self.embedder.as_ref().map(|m| m.clone_ref(py))),
             temporal_context: self.temporal_context.clone(),
+            default_timeout_ms: self.default_timeout_ms,
+            default_max_rows: self.default_max_rows,
         }
     }
 
@@ -5387,6 +5412,31 @@ impl KnowledgeGraph {
         let path_owned = path.to_string();
         py.detach(move || io_operations::write_graph_v3(&inner, &path_owned))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))
+    }
+
+    /// Set a default query timeout (milliseconds) applied to all cypher() calls.
+    /// Pass None to disable (default). Per-query timeout_ms overrides this.
+    #[pyo3(signature = (timeout_ms=None))]
+    fn set_default_timeout(&mut self, timeout_ms: Option<u64>) {
+        self.default_timeout_ms = timeout_ms;
+    }
+
+    /// Get the current default query timeout in milliseconds, or None.
+    fn get_default_timeout(&self) -> Option<u64> {
+        self.default_timeout_ms
+    }
+
+    /// Set a default max rows limit applied to all cypher() calls.
+    /// Queries producing more intermediate rows than this will error.
+    /// Pass None to disable (default). Per-query max_rows overrides this.
+    #[pyo3(signature = (max_rows=None))]
+    fn set_default_max_rows(&mut self, max_rows: Option<usize>) {
+        self.default_max_rows = max_rows;
+    }
+
+    /// Get the current default max rows limit, or None.
+    fn get_default_max_rows(&self) -> Option<usize> {
+        self.default_max_rows
     }
 
     /// Get the most recent operation report as a Python dictionary
@@ -6008,7 +6058,7 @@ impl KnowledgeGraph {
     ///     for row in result:
     ///         print(f"{row['person']}: {row['friends']} friends")
     ///     ```
-    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None))]
+    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_rows=None))]
     fn cypher(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
@@ -6016,9 +6066,14 @@ impl KnowledgeGraph {
         to_df: bool,
         params: Option<&Bound<'_, PyDict>>,
         timeout_ms: Option<u64>,
+        max_rows: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
-        let deadline =
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let self_ref = slf.borrow();
+        let effective_timeout = timeout_ms.or(self_ref.default_timeout_ms);
+        let effective_max_rows = max_rows.or(self_ref.default_max_rows);
+        drop(self_ref);
+        let deadline = effective_timeout
+            .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         // Parse the Cypher query (no borrow needed)
         let mut parsed = cypher::parse_cypher(query).map_err(|e| {
@@ -6164,7 +6219,8 @@ impl KnowledgeGraph {
                 this.inner.clone()
             };
             let result = {
-                let executor = cypher::CypherExecutor::with_params(&inner, &param_map, deadline);
+                let executor = cypher::CypherExecutor::with_params(&inner, &param_map, deadline)
+                    .with_max_rows(effective_max_rows);
                 py.detach(|| executor.execute(&parsed))
             }
             .map_err(|e| {

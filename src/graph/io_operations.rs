@@ -605,6 +605,8 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
         last_mutation_stats: None,
         embedder: None,
         temporal_context: TemporalContext::default(),
+        default_timeout_ms: None,
+        default_max_rows: None,
     })
 }
 
@@ -797,6 +799,8 @@ fn load_v3(buf: &[u8]) -> io::Result<KnowledgeGraph> {
         last_mutation_stats: None,
         embedder: None,
         temporal_context: TemporalContext::default(),
+        default_timeout_ms: None,
+        default_max_rows: None,
     })
 }
 

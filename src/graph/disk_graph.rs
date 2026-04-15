@@ -39,14 +39,17 @@ pub struct CsrEdge {
 // No padding issues on any platform since fields are naturally aligned (4+4=8).
 
 /// [DEV] Entry for external merge sort. Carries all fields needed for CsrEdge
-/// output plus the sort key, so the merge never needs to seek back to pending_mmap.
-/// 12 bytes.
+/// output plus sort keys, so the merge never needs to seek back to pending_mmap.
+/// Secondary sort by connection_type ensures edges within each node's CSR range
+/// are grouped by type, enabling O(log D) binary search for type-filtered queries.
+/// 24 bytes (key:4 + conn_type:8 + peer:4 + orig_idx:4 + pad:4).
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 struct MergeSortEntry {
-    key: u32,      // sort key (source or target node index)
-    peer: u32,     // the other endpoint
-    orig_idx: u32, // original edge index (for CsrEdge.edge_idx)
+    key: u32,       // primary sort key (source or target node index)
+    conn_type: u64, // secondary sort key (connection type)
+    peer: u32,      // the other endpoint
+    orig_idx: u32,  // original edge index (for CsrEdge.edge_idx)
 }
 
 /// Edge endpoint metadata — stored in a dense array indexed by edge_idx.
@@ -139,6 +142,8 @@ pub struct DiskGraph {
     pub(crate) data_dir: PathBuf,
     // ── Dirty flag: flushed on Drop or next query ──
     metadata_dirty: bool,
+    // ── CSR edges are sorted by (node, connection_type) — enables binary search
+    pub(crate) csr_sorted_by_type: bool,
     // ── Temp dir for CSR mmap files (cleaned up on Drop) ──
 }
 
@@ -196,6 +201,7 @@ impl DiskGraph {
             free_edge_slots: Vec::new(),
             data_dir: data_dir.to_path_buf(),
             metadata_dirty: false,
+            csr_sorted_by_type: false,
         })
     }
 
@@ -335,6 +341,7 @@ impl DiskGraph {
             free_edge_slots: Vec::new(),
             data_dir: data_dir.to_path_buf(),
             metadata_dirty: false,
+            csr_sorted_by_type: false,
         })
     }
 
@@ -363,6 +370,55 @@ impl DiskGraph {
             return None;
         }
         Some(InternedKey::from_u64(slot.node_type))
+    }
+
+    /// O(1) property read from ColumnStore — no NodeData materialization.
+    /// Returns None if the node is dead, out of bounds, or the property doesn't exist.
+    #[inline]
+    pub fn get_node_property(&self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
+        let i = idx.index();
+        if i >= self.node_slots.len() {
+            return None;
+        }
+        let slot = self.node_slots.get(i);
+        if !slot.is_alive() {
+            return None;
+        }
+        let type_key = InternedKey::from_u64(slot.node_type);
+        let store = self.column_stores.get(&type_key)?;
+        store.get(slot.row_id, key)
+    }
+
+    /// O(1) id value read from ColumnStore — no NodeData materialization.
+    #[inline]
+    pub fn get_node_id(&self, idx: NodeIndex) -> Option<Value> {
+        let i = idx.index();
+        if i >= self.node_slots.len() {
+            return None;
+        }
+        let slot = self.node_slots.get(i);
+        if !slot.is_alive() {
+            return None;
+        }
+        let type_key = InternedKey::from_u64(slot.node_type);
+        let store = self.column_stores.get(&type_key)?;
+        store.get_id(slot.row_id)
+    }
+
+    /// O(1) title value read from ColumnStore — no NodeData materialization.
+    #[inline]
+    pub fn get_node_title(&self, idx: NodeIndex) -> Option<Value> {
+        let i = idx.index();
+        if i >= self.node_slots.len() {
+            return None;
+        }
+        let slot = self.node_slots.get(i);
+        if !slot.is_alive() {
+            return None;
+        }
+        let type_key = InternedKey::from_u64(slot.node_type);
+        let store = self.column_stores.get(&type_key)?;
+        store.get_title(slot.row_id)
     }
 
     /// Get a DiskNodeSlot by index (for rebuild_type_indices without arena).
@@ -1065,15 +1121,18 @@ impl DiskGraph {
                 let step = std::time::Instant::now();
                 let mut entries: Vec<MergeSortEntry> = Vec::with_capacity(edge_count);
                 for i in 0..edge_count {
-                    let (src, tgt, _ct) = pending.get(i);
+                    let (src, tgt, ct) = pending.get(i);
                     let (key, peer) = if by_source { (src, tgt) } else { (tgt, src) };
                     entries.push(MergeSortEntry {
                         key,
+                        conn_type: ct,
                         peer,
                         orig_idx: i as u32,
                     });
                 }
-                entries.sort_unstable_by_key(|e| e.key);
+                // Sort by (node, connection_type) so edges are grouped by type
+                // within each node's CSR range — enables binary search for type filtering.
+                entries.sort_unstable_by_key(|e| (e.key, e.conn_type));
 
                 let mut output =
                     MmapOrVec::mapped(&output_dir.join(format!("{}_edges.bin", label)), edge_count)
@@ -1108,17 +1167,18 @@ impl DiskGraph {
                 // Load chunk from pending_mmap (sequential read)
                 let mut chunk: Vec<MergeSortEntry> = Vec::with_capacity(len);
                 for i in start..end {
-                    let (src, tgt, _ct) = pending.get(i);
+                    let (src, tgt, ct) = pending.get(i);
                     let (key, peer) = if by_source { (src, tgt) } else { (tgt, src) };
                     chunk.push(MergeSortEntry {
                         key,
+                        conn_type: ct,
                         peer,
                         orig_idx: i as u32,
                     });
                 }
 
-                // Sort in memory
-                chunk.sort_unstable_by_key(|e| e.key);
+                // Sort by (node, connection_type) for type-grouped CSR
+                chunk.sort_unstable_by_key(|e| (e.key, e.conn_type));
 
                 // Write to mmap file (sequential)
                 let path = chunk_dir.join(format!("chunk_{}_{}.bin", label, c));
@@ -1145,19 +1205,20 @@ impl DiskGraph {
                 MmapOrVec::mapped(&output_dir.join(format!("{}_edges.bin", label)), edge_count)
                     .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
 
-            // Initialize min-heap with first entry from each chunk
+            // Initialize min-heap with first entry from each chunk.
+            // Heap key: (primary_key, conn_type, chunk_idx) for type-sorted output.
             use std::cmp::Reverse;
-            let mut heap: std::collections::BinaryHeap<Reverse<(u32, usize)>> =
+            let mut heap: std::collections::BinaryHeap<Reverse<(u32, u64, usize)>> =
                 std::collections::BinaryHeap::with_capacity(num_chunks);
             for c in 0..num_chunks {
                 if positions[c] < chunk_lens[c] {
                     let entry = chunk_mmaps[c].get(positions[c]);
-                    heap.push(Reverse((entry.key, c)));
+                    heap.push(Reverse((entry.key, entry.conn_type, c)));
                 }
             }
 
             for _ in 0..edge_count {
-                let Reverse((_key, best_chunk)) = heap.pop().unwrap();
+                let Reverse((_key, _ct, best_chunk)) = heap.pop().unwrap();
                 let entry = chunk_mmaps[best_chunk].get(positions[best_chunk]);
                 positions[best_chunk] += 1;
                 output.push(CsrEdge {
@@ -1167,7 +1228,7 @@ impl DiskGraph {
                 // Refill heap with next entry from same chunk
                 if positions[best_chunk] < chunk_lens[best_chunk] {
                     let next = chunk_mmaps[best_chunk].get(positions[best_chunk]);
-                    heap.push(Reverse((next.key, best_chunk)));
+                    heap.push(Reverse((next.key, next.conn_type, best_chunk)));
                 }
             }
 
@@ -1232,6 +1293,7 @@ impl DiskGraph {
         self.in_offsets = in_offsets;
         self.in_edges = in_edges;
         self.edge_endpoints = edge_endpoints_vec;
+        self.csr_sorted_by_type = true;
 
         // Offsets already mmap-backed to out_offsets.bin / in_offsets.bin.
         // Auto-persist metadata — graph is fully on disk after this
@@ -1417,11 +1479,12 @@ impl DiskGraph {
                     let ep = edge_endpoints_vec.get(i);
                     entries.push(MergeSortEntry {
                         key: ep.target,
+                        conn_type: ep.connection_type,
                         peer: ep.source,
                         orig_idx: i as u32,
                     });
                 }
-                entries.sort_unstable_by_key(|e| e.key);
+                entries.sort_unstable_by_key(|e| (e.key, e.conn_type));
 
                 let mut output = MmapOrVec::mapped(&out_dir.join("in_edges.bin"), edge_count)
                     .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
@@ -1455,11 +1518,12 @@ impl DiskGraph {
                         let ep = edge_endpoints_vec.get(i);
                         entries.push(MergeSortEntry {
                             key: ep.target,
+                            conn_type: ep.connection_type,
                             peer: ep.source,
                             orig_idx: i as u32,
                         });
                     }
-                    entries.sort_unstable_by_key(|e| e.key);
+                    entries.sort_unstable_by_key(|e| (e.key, e.conn_type));
 
                     let chunk_path = sort_dir.join(format!("chunk_in_{}.bin", c));
                     let mut chunk_mmap = MmapOrVec::mapped(&chunk_path, len)
@@ -1486,17 +1550,17 @@ impl DiskGraph {
                     .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
 
                 use std::cmp::Reverse;
-                let mut heap: std::collections::BinaryHeap<Reverse<(u32, usize)>> =
+                let mut heap: std::collections::BinaryHeap<Reverse<(u32, u64, usize)>> =
                     std::collections::BinaryHeap::with_capacity(num_sort_chunks);
                 for c in 0..num_sort_chunks {
                     if chunk_lens[c] > 0 {
                         let entry = chunk_mmaps[c].get(0);
-                        heap.push(Reverse((entry.key, c)));
+                        heap.push(Reverse((entry.key, entry.conn_type, c)));
                     }
                 }
 
                 for _ in 0..edge_count {
-                    let Reverse((_key, best_chunk)) = heap.pop().unwrap();
+                    let Reverse((_key, _ct, best_chunk)) = heap.pop().unwrap();
                     let entry = chunk_mmaps[best_chunk].get(positions[best_chunk]);
                     positions[best_chunk] += 1;
                     output.push(CsrEdge {
@@ -1505,7 +1569,7 @@ impl DiskGraph {
                     });
                     if positions[best_chunk] < chunk_lens[best_chunk] {
                         let next = chunk_mmaps[best_chunk].get(positions[best_chunk]);
-                        heap.push(Reverse((next.key, best_chunk)));
+                        heap.push(Reverse((next.key, next.conn_type, best_chunk)));
                     }
                 }
 
@@ -1753,6 +1817,7 @@ impl Clone for DiskGraph {
             free_edge_slots: self.free_edge_slots.clone(),
             data_dir: self.data_dir.clone(),
             metadata_dirty: false,
+            csr_sorted_by_type: self.csr_sorted_by_type,
         }
     }
 }
@@ -1801,6 +1866,10 @@ struct DiskGraphMeta {
     edge_endpoints_len: usize,
     free_node_slots: Vec<u32>,
     free_edge_slots: Vec<u32>,
+    /// CSR edges sorted by (node, connection_type) — enables binary search.
+    /// Added in v0.7.8; older graphs default to false.
+    #[serde(default)]
+    csr_sorted_by_type: bool,
 }
 
 impl DiskGraph {
@@ -1819,6 +1888,7 @@ impl DiskGraph {
             edge_endpoints_len: self.edge_endpoints.len(),
             free_node_slots: self.free_node_slots.clone(),
             free_edge_slots: self.free_edge_slots.clone(),
+            csr_sorted_by_type: self.csr_sorted_by_type,
         };
         let json = serde_json::to_string_pretty(&meta).map_err(std::io::Error::other)?;
         std::fs::write(self.data_dir.join("disk_graph_meta.json"), json)
@@ -1941,6 +2011,7 @@ impl DiskGraph {
                 free_edge_slots: meta.free_edge_slots,
                 data_dir: dir.to_path_buf(),
                 metadata_dirty: false,
+                csr_sorted_by_type: meta.csr_sorted_by_type,
             },
             temp_dir,
         ))

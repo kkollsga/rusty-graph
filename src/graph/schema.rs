@@ -284,6 +284,15 @@ impl TypeSchema {
         self.slots.len()
     }
 
+    /// Create a new schema containing all keys from both schemas.
+    pub fn merge(&self, other: &TypeSchema) -> TypeSchema {
+        let mut merged = self.clone();
+        for &key in &other.slots {
+            merged.add_key(key);
+        }
+        merged
+    }
+
     /// Add a new key to the schema. Returns the new slot index.
     /// If the key already exists, returns the existing slot index.
     pub fn add_key(&mut self, key: InternedKey) -> u16 {
@@ -3818,6 +3827,45 @@ impl GraphBackend {
             GraphBackend::InMemory(g) => g.node_weight(idx).map(|nd| nd.node_type),
             GraphBackend::Disk(dg) => dg.node_type_of(idx),
         }
+    }
+
+    /// Read a single property without full NodeData materialization.
+    /// On disk graphs, avoids arena allocation and id/title column reads.
+    /// On in-memory graphs, falls through to node_weight().get_property().
+    #[inline]
+    pub fn get_node_property(&self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
+        match self {
+            GraphBackend::InMemory(g) => g
+                .node_weight(idx)
+                .and_then(|nd| nd.properties.get_value(key)),
+            GraphBackend::Disk(dg) => dg.get_node_property(idx, key),
+        }
+    }
+
+    /// Read the node id without full materialization.
+    /// Handles mapped-mode sentinel values (Value::Null → ColumnStore fallback).
+    #[inline]
+    pub fn get_node_id(&self, idx: NodeIndex) -> Option<Value> {
+        match self {
+            GraphBackend::InMemory(g) => g.node_weight(idx).map(|nd| nd.id().into_owned()),
+            GraphBackend::Disk(dg) => dg.get_node_id(idx),
+        }
+    }
+
+    /// Read the node title without full materialization.
+    /// Handles mapped-mode sentinel values (Value::Null → ColumnStore fallback).
+    #[inline]
+    pub fn get_node_title(&self, idx: NodeIndex) -> Option<Value> {
+        match self {
+            GraphBackend::InMemory(g) => g.node_weight(idx).map(|nd| nd.title().into_owned()),
+            GraphBackend::Disk(dg) => dg.get_node_title(idx),
+        }
+    }
+
+    /// Check if this is a disk-backed graph.
+    #[inline]
+    pub fn is_disk(&self) -> bool {
+        matches!(self, GraphBackend::Disk(_))
     }
 
     #[inline]

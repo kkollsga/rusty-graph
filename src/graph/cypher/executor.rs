@@ -248,6 +248,8 @@ pub struct CypherExecutor<'a> {
     vs_cache: OnceLock<VectorScoreCache>,
     /// Optional deadline for aborting long-running queries.
     deadline: Option<Instant>,
+    /// Optional cap on intermediate result rows. Queries exceeding this return an error.
+    max_rows: Option<usize>,
     /// Per-node spatial data cache — populated on first access per NodeIndex.
     /// Eliminates redundant property/config/WKT lookups in cross-product queries.
     spatial_node_cache: RwLock<HashMap<usize, Option<NodeSpatialData>>>,
@@ -266,9 +268,16 @@ impl<'a> CypherExecutor<'a> {
             params,
             vs_cache: OnceLock::new(),
             deadline,
+            max_rows: None,
             spatial_node_cache: RwLock::new(HashMap::new()),
             regex_cache: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Set the maximum number of intermediate result rows.
+    pub fn with_max_rows(mut self, max_rows: Option<usize>) -> Self {
+        self.max_rows = max_rows;
+        self
     }
 
     #[inline]
@@ -807,6 +816,18 @@ impl<'a> CypherExecutor<'a> {
                         }
                     }
                 }
+            }
+        }
+
+        // Enforce max_rows limit if configured
+        if let Some(max) = self.max_rows {
+            if result_rows.len() > max {
+                return Err(format!(
+                    "Query produced {} rows, exceeding max_rows limit of {}. \
+                     Add a LIMIT clause or increase max_rows.",
+                    result_rows.len(),
+                    max
+                ));
             }
         }
 
@@ -1385,11 +1406,10 @@ impl<'a> CypherExecutor<'a> {
             return None;
         }
 
-        // Don't use fast-path if either node has inline property filters
-        // (type filtering is fine, property filtering needs the full executor)
-        if node_a.properties.is_some() || node_b.properties.is_some() {
-            return None;
-        }
+        // Don't use fast-path if the bound (group-key) node has property filters
+        // — the caller already filtered it. The unbound node's properties are
+        // checked inline during counting (supports WHERE push-down on target).
+        // Both nodes having properties is rare and we fall back for it.
 
         // Determine which end is bound
         let a_bound = node_a
@@ -1402,27 +1422,38 @@ impl<'a> CypherExecutor<'a> {
             .and_then(|v| bindings.get(v).copied());
 
         // We need exactly one end bound for the fast-path to help
-        let (bound_idx, other_type, traverse_dir) = match (a_bound, b_bound) {
+        let (bound_idx, other_type, other_props, traverse_dir) = match (a_bound, b_bound) {
             (None, Some(b_idx)) => {
-                // b is bound — traverse from b
+                // b is bound — traverse from b, other node is a
+                if node_b.properties.is_some() {
+                    return None; // bound node with props: fall back
+                }
                 let dir = match edge.direction {
                     EdgeDirection::Outgoing => Direction::Incoming, // (a)->b means b has incoming
                     EdgeDirection::Incoming => Direction::Outgoing, // (a)<-b means b has outgoing
-                    EdgeDirection::Both => return None, // undirected needs both dirs, fall back
+                    EdgeDirection::Both => return None,
                 };
-                (b_idx, &node_a.node_type, dir)
+                (b_idx, &node_a.node_type, &node_a.properties, dir)
             }
             (Some(a_idx), None) => {
-                // a is bound — traverse from a
+                // a is bound — traverse from a, other node is b
+                if node_a.properties.is_some() {
+                    return None; // bound node with props: fall back
+                }
                 let dir = match edge.direction {
                     EdgeDirection::Outgoing => Direction::Outgoing,
                     EdgeDirection::Incoming => Direction::Incoming,
                     EdgeDirection::Both => return None,
                 };
-                (a_idx, &node_b.node_type, dir)
+                (a_idx, &node_b.node_type, &node_b.properties, dir)
             }
             _ => return None, // both bound or neither bound — fall back
         };
+
+        // Create pattern executor for property matching on the unbound node (if needed)
+        let pe = other_props
+            .as_ref()
+            .map(|_| PatternExecutor::new_lightweight_with_params(self.graph, None, self.params));
 
         let conn_type = edge.connection_type.as_deref();
         let interned_conn = conn_type.map(InternedKey::from_str);
@@ -1454,6 +1485,17 @@ impl<'a> CypherExecutor<'a> {
                         continue;
                     }
                 } else {
+                    continue;
+                }
+            }
+
+            // Check unbound node's properties (uses columnar fast path on disk)
+            if let Some(ref props) = other_props {
+                if !pe
+                    .as_ref()
+                    .unwrap()
+                    .node_matches_properties_pub(other_idx, props)
+                {
                     continue;
                 }
             }
@@ -4378,10 +4420,48 @@ impl<'a> CypherExecutor<'a> {
         // Check node bindings first — these carry full property data
         // and must take priority over projected scalars (e.g. after WITH)
         if let Some(&idx) = row.node_bindings.get(variable) {
+            // Disk-graph fast path: resolve properties via direct column access
+            // without full NodeData materialization. Saves arena allocation +
+            // id/title reads per access. In-memory graphs use node_weight()
+            // which is a cheap pointer chase.
+            if self.graph.graph.is_disk() {
+                if let Some(type_key) = self.graph.graph.node_type_of(idx) {
+                    let type_str = self.graph.interner.try_resolve(type_key).unwrap_or("?");
+                    let resolved = self.graph.resolve_alias(type_str, property);
+                    match resolved {
+                        "id" => {
+                            return Ok(self.graph.graph.get_node_id(idx).unwrap_or(Value::Null))
+                        }
+                        "title" | "name" => {
+                            return Ok(self.graph.graph.get_node_title(idx).unwrap_or(Value::Null))
+                        }
+                        "type" | "node_type" | "label" => {
+                            return Ok(Value::String(type_str.to_string()))
+                        }
+                        _ => {
+                            let key = crate::graph::schema::InternedKey::from_str(resolved);
+                            if let Some(val) = self.graph.graph.get_node_property(idx, key) {
+                                return Ok(val);
+                            }
+                            // Fall through to full materialization for spatial
+                            // virtual properties (location, geometry, etc.)
+                            if self.graph.get_spatial_config(type_str).is_some() {
+                                if let Some(node) = self.graph.graph.node_weight(idx) {
+                                    return Ok(resolve_node_property(node, property, self.graph));
+                                }
+                            }
+                            return Ok(Value::Null);
+                        }
+                    }
+                }
+                return Ok(Value::Null);
+            }
+
+            // In-memory path: node_weight() is a cheap pointer chase
             if let Some(node) = self.graph.graph.node_weight(idx) {
                 return Ok(resolve_node_property(node, property, self.graph));
             }
-            return Ok(Value::Null); // Node was deleted?
+            return Ok(Value::Null);
         }
 
         // Edge variable

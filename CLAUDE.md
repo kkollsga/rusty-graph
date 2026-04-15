@@ -17,6 +17,24 @@ make lint                    # fmt --check + clippy (always run before pushing)
 - **Type stubs** (`kglite/__init__.pyi`): source of truth for API docs — update when changing `#[pymethods]`.
 - **Introspection** (`src/graph/introspection.rs`): `describe()` XML schema for AI agents.
 
+## Storage Modes & Optimization Priority
+
+KGLite has three storage modes: `Default` (in-memory petgraph), `Mapped` (mmap-backed columns), and `Disk` (CSR + mmap). **In-memory is the core product.** Disk/mapped are addons for large-graph exploration (e.g., Wikidata).
+
+**When optimizing, in-memory wins every time.** If an optimization helps both in-memory and disk, great. If there's a conflict (e.g., adding overhead to the hot path to protect against disk-scale explosions), find a disk-specific workaround instead. Never regress in-memory performance for disk safety.
+
+- Small graphs (legal, code, domain): ~100K–500K nodes, all in-memory, full scans are fast (<10 ms). Don't add guardrails that penalize these.
+- Large graphs (Wikidata): 100M+ nodes, disk-backed, full scans are catastrophic. Safeguards needed but must be gated behind storage mode or graph-size thresholds.
+- Cypher query planner/executor is shared across all modes. Any changes to `pattern_matching.rs` or `cypher/executor.rs` affect everyone — benchmark on small graphs before merging.
+
+## Performance Work Protocol
+
+Before starting any performance-related code changes:
+1. **Baseline first** — write a benchmark covering all code paths being touched. Run it, record numbers.
+2. **Benchmark on in-memory graphs** — small/medium graphs (legal-scale) must not regress. This is the gate.
+3. **Measure after** — re-run the same benchmark after changes. Report before/after.
+4. **Disk benchmarks are secondary** — nice to show improvement, but never at the cost of in-memory.
+
 ## Key Patterns
 
 - PyO3: `&self` for read-only, return `PyResult<Py<PyAny>>`, use `Python::attach()`.

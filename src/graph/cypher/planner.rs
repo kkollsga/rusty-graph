@@ -663,8 +663,9 @@ fn optimize_pattern_start_node(query: &mut CypherQuery, graph: &DirGraph) {
             let first_sel = estimate_node_selectivity(first_node, graph);
             let last_sel = estimate_node_selectivity(last_node, graph);
 
-            // Only reverse if last node is significantly more selective (10× threshold)
-            if last_sel * 10 >= first_sel {
+            // Only reverse if last node is significantly more selective (5× threshold).
+            // A 5x advantage already saves 80% of expansion work.
+            if last_sel * 5 >= first_sel {
                 continue;
             }
 
@@ -728,8 +729,27 @@ fn estimate_node_selectivity(
                     }
                 }
             }
-            // Heuristic: any property filter reduces candidates by ~10×
-            (type_count / 10).max(1)
+            // Heuristic: equality filters on string properties typically have many
+            // distinct values (~100x reduction each). Range/comparison filters are
+            // gentler (~10x). Multiple filters multiply the reduction.
+            let eq_count = props
+                .values()
+                .filter(|m| {
+                    matches!(
+                        m,
+                        PropertyMatcher::Equals(_) | PropertyMatcher::EqualsParam(_)
+                    )
+                })
+                .count();
+            let other_count = props.len() - eq_count;
+            let mut est = type_count;
+            for _ in 0..eq_count {
+                est /= 100;
+            }
+            for _ in 0..other_count {
+                est /= 10;
+            }
+            est.max(1)
         }
     }
 }
@@ -1113,9 +1133,7 @@ fn fuse_match_return_aggregate(query: &mut CypherQuery) {
         }
 
         // Check MATCH: exactly 1 pattern with 3 or 5 elements
-        let (first_var, second_var, edge_has_props, second_has_props) = if let Clause::Match(m) =
-            &query.clauses[i]
-        {
+        let (first_var, second_var, edge_has_props) = if let Clause::Match(m) = &query.clauses[i] {
             let n_elems = m.patterns[0].elements.len();
             if m.patterns.len() != 1 || (n_elems != 3 && n_elems != 5) {
                 i += 1;
@@ -1165,25 +1183,27 @@ fn fuse_match_return_aggregate(query: &mut CypherQuery) {
                     i += 1;
                     continue;
                 }
-                (first_var, last_var, edge_has_props, false)
+                (first_var, last_var, edge_has_props)
             } else {
                 // 3-element: (a)-[e]->(b)
-                let (second_var, second_has_props) = match &pat.elements[2] {
-                    PatternElement::Node(np) => (np.variable.clone(), np.properties.is_some()),
+                let second_var = match &pat.elements[2] {
+                    PatternElement::Node(np) => np.variable.clone(),
                     _ => {
                         i += 1;
                         continue;
                     }
                 };
-                (first_var, second_var, edge_has_props, second_has_props)
+                (first_var, second_var, edge_has_props)
             }
         } else {
             i += 1;
             continue;
         };
 
-        // try_count_simple_pattern requires no property filters on edge or second node
-        if edge_has_props || second_has_props {
+        // Edge property filters and variable-length edges require the full executor.
+        // Node property filters on the second (unbound) node are allowed — the
+        // counting loop checks them inline via columnar access.
+        if edge_has_props {
             i += 1;
             continue;
         }
@@ -1452,20 +1472,16 @@ fn fuse_node_scan_aggregate(query: &mut CypherQuery) {
             continue;
         };
 
-        // Validate MATCH: single pattern, single node element (no edges),
-        // no pushed-down property matchers (those benefit from index lookups
-        // in the pattern executor, which the fused scan path bypasses).
+        // Validate MATCH: single pattern, single node element (no edges).
+        // Pushed-down properties (e.g. {city: 'Oslo'}) are allowed — the executor
+        // evaluates them inline via PatternExecutor::node_matches_properties_pub().
+        // This enables streaming aggregation for queries like:
+        //   MATCH (n:Entity) WHERE n.population > 1M RETURN n.continent, count(n)
         let is_single_node = if let Clause::Match(mc) = &query.clauses[match_idx] {
-            let no_props = if let PatternElement::Node(np) = &mc.patterns[0].elements[0] {
-                np.properties.is_none()
-            } else {
-                false
-            };
             mc.patterns.len() == 1
                 && mc.patterns[0].elements.len() == 1
                 && matches!(mc.patterns[0].elements[0], PatternElement::Node(_))
                 && mc.path_assignments.is_empty()
-                && no_props
         } else {
             false
         };

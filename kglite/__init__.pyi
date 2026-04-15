@@ -2162,6 +2162,29 @@ class KnowledgeGraph:
     # Operation Reports
     # ====================================================================
 
+    def set_default_timeout(self, timeout_ms: Optional[int] = None) -> None:
+        """Set a default query timeout (milliseconds) for all cypher() calls.
+
+        Pass None to disable (default). Per-query ``timeout_ms`` overrides this.
+        """
+        ...
+
+    def get_default_timeout(self) -> Optional[int]:
+        """Get the current default query timeout in milliseconds, or None."""
+        ...
+
+    def set_default_max_rows(self, max_rows: Optional[int] = None) -> None:
+        """Set a default max rows limit for all cypher() calls.
+
+        Queries producing more intermediate rows than this will raise an error.
+        Pass None to disable (default). Per-query ``max_rows`` overrides this.
+        """
+        ...
+
+    def get_default_max_rows(self) -> Optional[int]:
+        """Get the current default max rows limit, or None."""
+        ...
+
     def last_report(self) -> dict[str, Any]:
         """Get the most recent operation report as a dict.
 
@@ -2819,6 +2842,7 @@ class KnowledgeGraph:
         to_df: bool = False,
         params: Optional[dict[str, Any]] = None,
         timeout_ms: Optional[int] = None,
+        max_rows: Optional[int] = None,
     ) -> Union[ResultView, pd.DataFrame, str]:
         """Execute a Cypher query.
 

@@ -646,12 +646,16 @@ pub fn load_ntriples(
     // entity hasn't been seen yet, the raw Q-code is used. Now that all labels are
     // cached, we can fix these. This renames type_indices keys, node_type_metadata,
     // type_schemas, and updates node_type InternedKeys in the graph.
+    // Mapping from old Q-code type names to new label names (populated by merge below).
+    // Passed to Phase 1b so property log entries with old names find the right column writer.
+    let mut type_rename_map: HashMap<String, String> = HashMap::new();
+
     if config.auto_type {
         let mut renames: Vec<(String, String)> = Vec::new();
         for type_name in graph.type_indices.keys() {
             if let Some(qnum) = parse_qcode_number(type_name) {
                 if let Some(label) = label_cache.get(&qnum) {
-                    if label != type_name && !graph.type_indices.contains_key(label) {
+                    if label != type_name {
                         renames.push((type_name.clone(), label.clone()));
                     }
                 }
@@ -674,23 +678,48 @@ pub fn load_ntriples(
                 })
                 .collect();
             for (old_name, new_name) in &renames {
-                // Rename type_indices
+                // Merge type_indices: if target name already exists, append indices
                 if let Some(indices) = graph.type_indices.remove(old_name) {
-                    graph.type_indices.insert(new_name.clone(), indices);
+                    graph
+                        .type_indices
+                        .entry(new_name.clone())
+                        .or_default()
+                        .extend(indices);
                 }
-                // Rename node_type_metadata
-                if let Some(meta) = graph.node_type_metadata.remove(old_name) {
-                    graph.node_type_metadata.insert(new_name.clone(), meta);
+                // Merge node_type_metadata: keep the richer entry (more property keys)
+                if let Some(old_meta) = graph.node_type_metadata.remove(old_name) {
+                    let entry = graph
+                        .node_type_metadata
+                        .entry(new_name.clone())
+                        .or_default();
+                    for (k, v) in old_meta {
+                        entry.entry(k).or_insert(v);
+                    }
                 }
-                // Rename type_schemas
-                if let Some(schema) = graph.type_schemas.remove(old_name) {
-                    graph.type_schemas.insert(new_name.clone(), schema);
+                // Merge type_schemas: union property keys
+                if let Some(old_schema) = graph.type_schemas.remove(old_name) {
+                    if let Some(existing) = graph.type_schemas.get(new_name) {
+                        let merged = existing.merge(&old_schema);
+                        graph
+                            .type_schemas
+                            .insert(new_name.clone(), Arc::new(merged));
+                    } else {
+                        graph.type_schemas.insert(new_name.clone(), old_schema);
+                    }
                 }
-                // Rename type_build_meta
-                if let Some(build_meta) = type_meta.remove(old_name) {
-                    type_meta.insert(new_name.clone(), build_meta);
+                // Merge type_build_meta: combine row counts and column info
+                if let Some(old_build) = type_meta.remove(old_name) {
+                    let entry = type_meta
+                        .entry(new_name.clone())
+                        .or_insert_with(TypeBuildMeta::new);
+                    entry.merge_from(&old_build);
                 }
             }
+            // Build type_rename_map for Phase 1b (property log entries use old names)
+            for (old_name, new_name) in &renames {
+                type_rename_map.insert(old_name.clone(), new_name.clone());
+            }
+
             // Update node_type InternedKey on affected nodes.
             // Build lookup map first, then ONE sequential pass over all nodes.
             // This is O(nodes) not O(renames × nodes).
@@ -774,8 +803,14 @@ pub fn load_ntriples(
         let log_path = log_writer
             .finish()
             .map_err(|e| format!("Failed to finish property log: {}", e))?;
-        build_columns_direct(graph, &log_path, &type_meta, config.verbose)
-            .map_err(|e| format!("Failed to build columns: {}", e))?;
+        build_columns_direct(
+            graph,
+            &log_path,
+            &type_meta,
+            &type_rename_map,
+            config.verbose,
+        )
+        .map_err(|e| format!("Failed to build columns: {}", e))?;
         let _ = std::fs::remove_file(&log_path);
         if let Some(parent) = log_path.parent() {
             let _ = std::fs::remove_dir(parent);
@@ -1285,6 +1320,7 @@ fn build_columns_direct(
     graph: &mut DirGraph,
     log_path: &std::path::Path,
     type_meta: &HashMap<String, TypeBuildMeta>,
+    type_rename_map: &HashMap<String, String>,
     verbose: bool,
 ) -> std::io::Result<()> {
     use crate::graph::column_store::ColumnStore;
@@ -1903,6 +1939,18 @@ fn build_columns_direct(
         .filter_map(|name| graph.interner.try_resolve_to_key(name))
         .collect();
 
+    // Build InternedKey rename map: old Q-code keys → new label keys.
+    // Property log entries carry old InternedKeys from Phase 1; the type merge
+    // renamed types after Phase 1 but before the log is replayed here.
+    let key_rename: HashMap<InternedKey, InternedKey> = type_rename_map
+        .iter()
+        .filter_map(|(old, new)| {
+            let old_key = graph.interner.try_resolve_to_key(old)?;
+            let new_key = graph.interner.try_resolve_to_key(new)?;
+            Some((old_key, new_key))
+        })
+        .collect();
+
     // Flush threshold: configurable via KGLITE_FLUSH_MB env var, default 2048 MB (2 GB)
     let flush_threshold_bytes: usize = std::env::var("KGLITE_FLUSH_MB")
         .ok()
@@ -1912,7 +1960,11 @@ fn build_columns_direct(
 
     for entry_result in reader {
         let entry = entry_result?;
-        let type_key = entry.node_type;
+        // Remap old Q-code type keys to merged label keys
+        let type_key = key_rename
+            .get(&entry.node_type)
+            .copied()
+            .unwrap_or(entry.node_type);
 
         // Skip types not in writers (O(1) InternedKey lookup, no string allocation)
         if !writer_keys.contains(&type_key) {
