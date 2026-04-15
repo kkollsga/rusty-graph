@@ -3868,6 +3868,15 @@ impl GraphBackend {
         matches!(self, GraphBackend::Disk(_))
     }
 
+    /// Look up source nodes with outgoing edges of a given type (from inverted index).
+    /// Returns None if index not available (in-memory graphs or older disk graphs).
+    pub fn sources_for_conn_type(&self, conn_type: InternedKey) -> Option<Vec<u32>> {
+        match self {
+            GraphBackend::Disk(dg) => dg.sources_for_conn_type(conn_type.as_u64()),
+            GraphBackend::InMemory(_) => None,
+        }
+    }
+
     /// Count ALL edges of a connection type grouped by peer node.
     /// Returns HashMap<peer_u32, count>. Sequential I/O — O(E) for the type.
     pub fn count_edges_grouped_by_peer(

@@ -948,7 +948,46 @@ impl<'a> PatternExecutor<'a> {
             // Single-node pattern: exact truncation
             self.max_matches
         };
-        let mut initial_nodes = self.find_matching_nodes(first_node)?;
+        // Try connection-type inverted index for untyped source nodes with typed edges.
+        // Instead of iterating all 124M nodes hoping to find P31 sources, the inverted
+        // index gives us exactly which nodes have P31 outgoing edges.
+        let mut initial_nodes =
+            if has_edges && first_node.node_type.is_none() && first_node.properties.is_none() {
+                // Check if the first edge has a connection type we can look up
+                let edge_conn_type = if let Some(PatternElement::Edge(ep)) = pattern.elements.get(1)
+                {
+                    if ep.var_length.is_none() {
+                        ep.connection_type
+                            .as_ref()
+                            .map(|ct| InternedKey::from_str(ct))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                // Check edge direction — inverted index only covers outgoing sources
+                let is_outgoing = if let Some(PatternElement::Edge(ep)) = pattern.elements.get(1) {
+                    ep.direction == EdgeDirection::Outgoing
+                } else {
+                    false
+                };
+                if let (Some(ct), true) = (edge_conn_type, is_outgoing) {
+                    if let Some(sources) = self.graph.graph.sources_for_conn_type(ct) {
+                        // Convert u32 source IDs to NodeIndex
+                        sources
+                            .into_iter()
+                            .map(|s| NodeIndex::new(s as usize))
+                            .collect()
+                    } else {
+                        self.find_matching_nodes(first_node)?
+                    }
+                } else {
+                    self.find_matching_nodes(first_node)?
+                }
+            } else {
+                self.find_matching_nodes(first_node)?
+            };
         if let Some(cap) = source_cap {
             if initial_nodes.len() > cap {
                 initial_nodes.truncate(cap);

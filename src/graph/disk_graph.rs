@@ -147,6 +147,13 @@ pub struct DiskGraph {
     // ── Edge type counts computed during CSR build (raw InternedKey u64 → count).
     // Converted to String keys by the caller using the interner.
     pub(crate) edge_type_counts_raw: Option<HashMap<u64, usize>>,
+    // ── Connection-type inverted index: maps conn_type → list of source node IDs
+    // that have at least one outgoing edge of that type. Built during CSR merge sort.
+    // conn_type_index_offsets[i] = start position in conn_type_index_sources for type i.
+    // conn_type_index_types: list of connection type u64s (ordered).
+    pub(crate) conn_type_index_types: MmapOrVec<u64>,
+    pub(crate) conn_type_index_offsets: MmapOrVec<u64>,
+    pub(crate) conn_type_index_sources: MmapOrVec<u32>,
     // ── Temp dir for CSR mmap files (cleaned up on Drop) ──
 }
 
@@ -206,6 +213,9 @@ impl DiskGraph {
             metadata_dirty: false,
             csr_sorted_by_type: false,
             edge_type_counts_raw: None,
+            conn_type_index_types: MmapOrVec::new(),
+            conn_type_index_offsets: MmapOrVec::new(),
+            conn_type_index_sources: MmapOrVec::new(),
         })
     }
 
@@ -347,6 +357,9 @@ impl DiskGraph {
             metadata_dirty: false,
             csr_sorted_by_type: false,
             edge_type_counts_raw: None,
+            conn_type_index_types: MmapOrVec::new(),
+            conn_type_index_offsets: MmapOrVec::new(),
+            conn_type_index_sources: MmapOrVec::new(),
         })
     }
 
@@ -883,6 +896,38 @@ impl DiskGraph {
         self.edge_endpoints.advise_dontneed();
 
         counts
+    }
+
+    /// Look up source nodes that have outgoing edges of the given connection type.
+    /// Returns an iterator-like slice of source node IDs from the inverted index.
+    /// Returns None if the inverted index is not built (older graph format).
+    pub fn sources_for_conn_type(&self, conn_type: u64) -> Option<Vec<u32>> {
+        if self.conn_type_index_types.is_empty() {
+            return None;
+        }
+        // Binary search for the connection type in the sorted types array
+        let num_types = self.conn_type_index_types.len();
+        let mut lo = 0usize;
+        let mut hi = num_types;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let mid_type = self.conn_type_index_types.get(mid);
+            if mid_type < conn_type {
+                lo = mid + 1;
+            } else if mid_type > conn_type {
+                hi = mid;
+            } else {
+                // Found — read the source range
+                let start = self.conn_type_index_offsets.get(mid) as usize;
+                let end = self.conn_type_index_offsets.get(mid + 1) as usize;
+                let mut sources = Vec::with_capacity(end - start);
+                for i in start..end {
+                    sources.push(self.conn_type_index_sources.get(i));
+                }
+                return Some(sources);
+            }
+        }
+        Some(Vec::new()) // Type exists in index but has no sources
     }
 
     pub fn prefetch_hot_regions(&self) {
@@ -1522,6 +1567,80 @@ impl DiskGraph {
         self.csr_sorted_by_type = true;
         self.edge_type_counts_raw = Some(edge_type_counts);
 
+        // ── Build connection-type inverted index ──
+        // Scan out_edges (sorted by source, conn_type) to collect source nodes per type.
+        // One sequential pass over the already-mmap'd arrays — no extra I/O.
+        {
+            let idx_start = std::time::Instant::now();
+            let mut type_sources: HashMap<u64, Vec<u32>> = HashMap::new();
+            for node in 0..node_bound {
+                let start = self.out_offsets.get(node) as usize;
+                let end = self.out_offsets.get(node + 1) as usize;
+                if start == end {
+                    continue;
+                }
+                // With sorted CSR, edges within this node's range are grouped by type.
+                // Track which types this node has.
+                let mut last_type: u64 = u64::MAX;
+                for i in start..end {
+                    let e = self.out_edges.get(i);
+                    if e.edge_idx == TOMBSTONE_EDGE {
+                        continue;
+                    }
+                    let ct = self.edge_endpoints.get(e.edge_idx as usize).connection_type;
+                    if ct != last_type {
+                        type_sources.entry(ct).or_default().push(node as u32);
+                        last_type = ct;
+                    }
+                }
+            }
+            // Serialize to mmap files: types (sorted), offsets, sources (concatenated)
+            let mut sorted_types: Vec<u64> = type_sources.keys().copied().collect();
+            sorted_types.sort();
+            let total_sources: usize = type_sources.values().map(|v| v.len()).sum();
+
+            let mut idx_types = MmapOrVec::mapped(
+                &out_dir.join("conn_type_index_types.bin"),
+                sorted_types.len(),
+            )
+            .unwrap_or_else(|_| MmapOrVec::with_capacity(sorted_types.len()));
+            // offsets has len+1 entries (sentinel at end)
+            let mut idx_offsets = MmapOrVec::mapped(
+                &out_dir.join("conn_type_index_offsets.bin"),
+                sorted_types.len() + 1,
+            )
+            .unwrap_or_else(|_| MmapOrVec::with_capacity(sorted_types.len() + 1));
+            let mut idx_sources =
+                MmapOrVec::mapped(&out_dir.join("conn_type_index_sources.bin"), total_sources)
+                    .unwrap_or_else(|_| MmapOrVec::with_capacity(total_sources));
+
+            let mut offset: u64 = 0;
+            for &ct in &sorted_types {
+                idx_types.push(ct);
+                idx_offsets.push(offset);
+                if let Some(sources) = type_sources.get(&ct) {
+                    for &src in sources {
+                        idx_sources.push(src);
+                    }
+                    offset += sources.len() as u64;
+                }
+            }
+            idx_offsets.push(offset); // sentinel
+
+            self.conn_type_index_types = idx_types;
+            self.conn_type_index_offsets = idx_offsets;
+            self.conn_type_index_sources = idx_sources;
+
+            if verbose {
+                eprintln!(
+                    "    Built conn-type inverted index: {} types, {} source entries ({:.1}s)",
+                    sorted_types.len(),
+                    total_sources,
+                    idx_start.elapsed().as_secs_f64()
+                );
+            }
+        }
+
         // Offsets already mmap-backed to out_offsets.bin / in_offsets.bin.
         // Auto-persist metadata — graph is fully on disk after this
         let _ = self.write_metadata();
@@ -2049,6 +2168,9 @@ impl Clone for DiskGraph {
             metadata_dirty: false,
             csr_sorted_by_type: self.csr_sorted_by_type,
             edge_type_counts_raw: None,
+            conn_type_index_types: MmapOrVec::new(),
+            conn_type_index_offsets: MmapOrVec::new(),
+            conn_type_index_sources: MmapOrVec::new(),
         }
     }
 }
@@ -2244,6 +2366,13 @@ impl DiskGraph {
                 metadata_dirty: false,
                 csr_sorted_by_type: meta.csr_sorted_by_type,
                 edge_type_counts_raw: None,
+                conn_type_index_types: load_raw_or_zst_optional(&dir.join("conn_type_index_types")),
+                conn_type_index_offsets: load_raw_or_zst_optional(
+                    &dir.join("conn_type_index_offsets"),
+                ),
+                conn_type_index_sources: load_raw_or_zst_optional(
+                    &dir.join("conn_type_index_sources"),
+                ),
             },
             temp_dir,
         ))
@@ -2272,6 +2401,23 @@ fn load_raw_or_zst<T: Copy + Default + 'static>(
         return load_compressed(&zst_path, len, temp_dir);
     }
     Ok(MmapOrVec::new())
+}
+
+/// Load a raw .bin file if it exists, otherwise return empty MmapOrVec.
+/// Used for optional supplementary files (e.g., connection-type inverted index).
+fn load_raw_or_zst_optional<T: Copy + Default + 'static>(base_path: &Path) -> MmapOrVec<T> {
+    let raw_path = base_path.with_extension("bin");
+    if raw_path.exists() {
+        let file_len = std::fs::metadata(&raw_path)
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
+        let elem_size = std::mem::size_of::<T>();
+        if file_len > 0 && elem_size > 0 {
+            let len = file_len / elem_size;
+            return MmapOrVec::load_mapped(&raw_path, len).unwrap_or_else(|_| MmapOrVec::new());
+        }
+    }
+    MmapOrVec::new()
 }
 
 /// Load a zstd-compressed file, decompress to temp file, and mmap it.
