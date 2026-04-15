@@ -3868,6 +3868,32 @@ impl GraphBackend {
         matches!(self, GraphBackend::Disk(_))
     }
 
+    /// Count ALL edges of a connection type grouped by peer node.
+    /// Returns HashMap<peer_u32, count>. Sequential I/O — O(E) for the type.
+    pub fn count_edges_grouped_by_peer(
+        &self,
+        conn_type: InternedKey,
+        dir: petgraph::Direction,
+    ) -> HashMap<u32, i64> {
+        match self {
+            GraphBackend::Disk(dg) => dg.count_edges_grouped_by_peer(conn_type.as_u64(), dir),
+            GraphBackend::InMemory(g) => {
+                let mut counts: HashMap<u32, i64> = HashMap::new();
+                for edge in g.edge_references() {
+                    if edge.weight().connection_type != conn_type {
+                        continue;
+                    }
+                    let peer = match dir {
+                        petgraph::Direction::Outgoing => edge.target().index() as u32,
+                        petgraph::Direction::Incoming => edge.source().index() as u32,
+                    };
+                    *counts.entry(peer).or_insert(0) += 1;
+                }
+                counts
+            }
+        }
+    }
+
     /// Count edges of a specific type without materializing EdgeData.
     /// On disk graphs with sorted CSR: O(log D + matching) via binary search.
     /// On in-memory graphs: falls back to edge iteration (still no allocation).

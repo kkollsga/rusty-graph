@@ -849,6 +849,33 @@ impl DiskGraph {
     /// Called after load to warm offset arrays and node_slots, reducing
     /// cold-cache penalty on first queries. Non-blocking — the kernel
     /// reads pages asynchronously in the background.
+    /// Count all edges of a connection type, grouped by peer (target for outgoing,
+    /// source for incoming). Returns a HashMap<peer_node_idx, count>.
+    /// Uses a single sequential scan of edge_endpoints — O(E) total, purely sequential
+    /// I/O (no random access). For outgoing grouping: counts by target. For incoming: by source.
+    pub fn count_edges_grouped_by_peer(&self, conn_type: u64, dir: Direction) -> HashMap<u32, i64> {
+        self.ensure_csr();
+        let mut counts: HashMap<u32, i64> = HashMap::new();
+
+        // Sequential scan of edge_endpoints — each entry is (source, target, conn_type).
+        // 16 bytes per edge, purely sequential.
+        for i in 0..self.next_edge_idx as usize {
+            let ep = self.edge_endpoints.get(i);
+            if ep.source == TOMBSTONE_EDGE {
+                continue;
+            }
+            if ep.connection_type != conn_type {
+                continue;
+            }
+            let peer = match dir {
+                Direction::Outgoing => ep.target, // group by target
+                Direction::Incoming => ep.source, // group by source
+            };
+            *counts.entry(peer).or_insert(0) += 1;
+        }
+        counts
+    }
+
     pub fn prefetch_hot_regions(&self) {
         // Prefetch out_offsets + in_offsets (948 MB each — always needed for traversal).
         // Skip node_slots (2 GB) — prefetching it adds too much load latency.

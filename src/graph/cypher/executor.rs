@@ -2033,12 +2033,92 @@ impl<'a> CypherExecutor<'a> {
             };
 
         let result_rows = if let Some(&(_, descending, limit)) = top_k.as_ref() {
-            // Top-K path: stream through group nodes, count edges per node, maintain
-            // K-element heap. When top_k is set, skip the full group_matches Vec —
-            // iterate type_indices directly to avoid millions of PatternMatch allocations.
             use std::cmp::Reverse;
             use std::collections::BinaryHeap;
 
+            // Edge-centric aggregation: for 3-element patterns with a typed connection,
+            // scan ALL edges of that type once and accumulate counts by peer. O(E_type)
+            // sequential I/O instead of O(all_nodes × per_node_lookup).
+            // This is critical for untyped group nodes (e.g., RETURN b.title, count(a))
+            // where the node-centric path would iterate 124M nodes.
+            let edge_conn_type = match &pattern.elements[1] {
+                PatternElement::Edge(ep) => ep.connection_type.as_ref(),
+                _ => None,
+            };
+            let group_node_props = match &pattern.elements[group_elem_idx] {
+                PatternElement::Node(np) => &np.properties,
+                _ => &None,
+            };
+            if let (3, Some(ct_str), None) = (
+                pattern.elements.len(),
+                edge_conn_type,
+                group_node_props.as_ref(),
+            ) {
+                let conn_key = InternedKey::from_str(ct_str);
+                // Determine scan direction: if group is the TARGET (elem 2), scan
+                // outgoing edges and group by target. If group is SOURCE (elem 0),
+                // scan incoming edges and group by source.
+                let scan_dir = if group_elem_idx == 0 {
+                    // Group = source node (a). We want count of edges FROM a.
+                    // Scan outgoing, peer = target → not what we want.
+                    // Actually: scan outgoing edges, each edge's source = the node
+                    // we iterated from. We want to count by source. But CSR outgoing
+                    // is indexed by source — each node's outgoing edges are contiguous.
+                    // We can just count the range length per node.
+                    // However, the global scan counts by PEER (target), not by source.
+                    // For group=source, we need to count outgoing per-source = CSR range size.
+                    // That's cheaper: just offsets[i+1] - offsets[i] for the type range.
+                    // For simplicity, skip edge-centric for group=source and use node-centric.
+                    None
+                } else {
+                    // Group = target node (b). Scan outgoing, accumulate by target (peer).
+                    Some(Direction::Outgoing)
+                };
+
+                if let Some(dir) = scan_dir {
+                    self.check_deadline()?;
+                    let counts = self.graph.graph.count_edges_grouped_by_peer(conn_key, dir);
+                    // Top-K from the counts HashMap
+                    let heap: BinaryHeap<Reverse<(i64, u32)>> = if descending {
+                        let mut h = BinaryHeap::with_capacity(limit + 1);
+                        for (&peer, &count) in &counts {
+                            h.push(Reverse((count, peer)));
+                            if h.len() > limit {
+                                h.pop();
+                            }
+                        }
+                        h
+                    } else {
+                        // For ASC we need a max-heap — use negative trick
+                        let mut h = BinaryHeap::with_capacity(limit + 1);
+                        for (&peer, &count) in &counts {
+                            h.push(Reverse((-count, peer)));
+                            if h.len() > limit {
+                                h.pop();
+                            }
+                        }
+                        h
+                    };
+
+                    let top: Vec<_> = heap.into_sorted_vec();
+                    let mut rows = Vec::with_capacity(top.len());
+                    for Reverse((score, peer)) in &top {
+                        let count = if descending { *score } else { -*score };
+                        let node_idx = petgraph::graph::NodeIndex::new(*peer as usize);
+                        rows.push(build_row(node_idx, count)?);
+                    }
+                    return Ok(ResultSet {
+                        rows,
+                        columns: return_clause
+                            .items
+                            .iter()
+                            .map(return_item_column_name)
+                            .collect(),
+                    });
+                }
+            }
+
+            // Node-centric top-K path (for typed group nodes or group=source patterns)
             // Get group node candidates directly from type_indices (streaming, no alloc)
             let group_node_type = match &pattern.elements[group_elem_idx] {
                 PatternElement::Node(np) => np.node_type.as_deref(),
