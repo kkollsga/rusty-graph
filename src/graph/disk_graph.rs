@@ -144,6 +144,11 @@ pub struct DiskGraph {
     metadata_dirty: bool,
     // ── CSR edges are sorted by (node, connection_type) — enables binary search
     pub(crate) csr_sorted_by_type: bool,
+    // ── Defer CSR build: when true, ensure_csr() is a no-op. Edges accumulate
+    // in pending_edges without intermediate CSR rebuilds. The CSR is built once
+    // at save time via ensure_disk_edges_built(). Set true during construction
+    // from add_nodes/add_connections, cleared after CSR build.
+    pub(crate) defer_csr: bool,
     // ── Edge type counts computed during CSR build (raw InternedKey u64 → count).
     // Converted to String keys by the caller using the interner.
     pub(crate) edge_type_counts_raw: Option<HashMap<u64, usize>>,
@@ -212,6 +217,7 @@ impl DiskGraph {
             data_dir: data_dir.to_path_buf(),
             metadata_dirty: false,
             csr_sorted_by_type: false,
+            defer_csr: true,
             edge_type_counts_raw: None,
             conn_type_index_types: MmapOrVec::new(),
             conn_type_index_offsets: MmapOrVec::new(),
@@ -356,6 +362,7 @@ impl DiskGraph {
             data_dir: data_dir.to_path_buf(),
             metadata_dirty: false,
             csr_sorted_by_type: false,
+            defer_csr: true,
             edge_type_counts_raw: None,
             conn_type_index_types: MmapOrVec::new(),
             conn_type_index_offsets: MmapOrVec::new(),
@@ -2167,6 +2174,7 @@ impl Clone for DiskGraph {
             data_dir: self.data_dir.clone(),
             metadata_dirty: false,
             csr_sorted_by_type: self.csr_sorted_by_type,
+            defer_csr: false,
             edge_type_counts_raw: None,
             conn_type_index_types: MmapOrVec::new(),
             conn_type_index_offsets: MmapOrVec::new(),
@@ -2365,6 +2373,7 @@ impl DiskGraph {
                 data_dir: dir.to_path_buf(),
                 metadata_dirty: false,
                 csr_sorted_by_type: meta.csr_sorted_by_type,
+                defer_csr: false,
                 edge_type_counts_raw: None,
                 conn_type_index_types: load_raw_or_zst_optional(&dir.join("conn_type_index_types")),
                 conn_type_index_offsets: load_raw_or_zst_optional(
