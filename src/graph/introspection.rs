@@ -867,8 +867,13 @@ fn compute_join_candidates(
                 None => continue,
             };
 
-            // Find shared property names with compatible types
-            for (prop, left_type) in left_meta {
+            // Find shared property names with compatible types.
+            // Sort by property name for deterministic candidate ordering — HashMap
+            // iteration order otherwise depends on RandomState seed and changes
+            // describe() output between processes.
+            let mut props: Vec<(&String, &String)> = left_meta.iter().collect();
+            props.sort_by(|a, b| a.0.cmp(b.0));
+            for (prop, left_type) in props {
                 if let Some(right_type) = right_meta.get(prop) {
                     if types_compatible(left_type, right_type) {
                         let left_vals = sample_unique_values(graph, left, prop, max_sample);
@@ -897,8 +902,15 @@ fn compute_join_candidates(
         }
     }
 
-    // Sort by overlap descending, truncate
-    candidates.sort_by(|a, b| b.overlap.cmp(&a.overlap));
+    // Sort by overlap descending; break ties on (left_type, right_type, left_prop)
+    // for deterministic output across processes.
+    candidates.sort_by(|a, b| {
+        b.overlap
+            .cmp(&a.overlap)
+            .then_with(|| a.left_type.cmp(&b.left_type))
+            .then_with(|| a.right_type.cmp(&b.right_type))
+            .then_with(|| a.left_prop.cmp(&b.left_prop))
+    });
     candidates.truncate(max_candidates);
     candidates
 }

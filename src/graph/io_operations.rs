@@ -107,6 +107,10 @@ pub(crate) struct FileMetadata {
     /// Auto-vacuum threshold (None = disabled, default Some(0.3))
     #[serde(default = "default_auto_vacuum_threshold")]
     auto_vacuum_threshold: Option<f64>,
+    /// Parent types: child_type → parent_type. Determines which types are
+    /// "core" vs "supporting" in describe() output.
+    #[serde(default)]
+    parent_types: HashMap<String, String>,
     /// Spatial configuration per node type.
     #[serde(default)]
     spatial_configs: HashMap<String, SpatialConfig>,
@@ -170,6 +174,7 @@ impl FileMetadata {
             id_field_aliases: graph.id_field_aliases.clone(),
             title_field_aliases: graph.title_field_aliases.clone(),
             auto_vacuum_threshold: graph.auto_vacuum_threshold,
+            parent_types: graph.parent_types.clone(),
             spatial_configs: graph.spatial_configs.clone(),
             timeseries_configs: graph.timeseries_configs.clone(),
             temporal_node_configs: graph.temporal_node_configs.clone(),
@@ -202,6 +207,7 @@ impl FileMetadata {
         graph.id_field_aliases = self.id_field_aliases;
         graph.title_field_aliases = self.title_field_aliases;
         graph.auto_vacuum_threshold = self.auto_vacuum_threshold;
+        graph.parent_types = self.parent_types;
         graph.spatial_configs = self.spatial_configs;
         graph.timeseries_configs = self.timeseries_configs;
         graph.temporal_node_configs = self.temporal_node_configs;
@@ -620,6 +626,33 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
                     if let Ok(indices) = bincode::deserialize(&bytes) {
                         graph.id_indices = indices;
                     }
+                }
+            }
+        }
+    }
+
+    // Load embeddings if present
+    let emb_path = dir.join("embeddings.bin.zst");
+    if emb_path.exists() {
+        if let Ok(compressed) = std::fs::read(&emb_path) {
+            if let Ok(bytes) = zstd::decode_all(compressed.as_slice()) {
+                if let Ok(embeddings) =
+                    bincode::deserialize::<HashMap<(String, String), EmbeddingStore>>(&bytes)
+                {
+                    graph.embeddings = embeddings;
+                }
+            }
+        }
+    }
+
+    // Load timeseries if present
+    let ts_path = dir.join("timeseries.bin.zst");
+    if ts_path.exists() {
+        if let Ok(compressed) = std::fs::read(&ts_path) {
+            if let Ok(bytes) = zstd::decode_all(compressed.as_slice()) {
+                if let Ok(ts_store) = bincode::deserialize::<HashMap<usize, NodeTimeseries>>(&bytes)
+                {
+                    graph.timeseries_store = ts_store;
                 }
             }
         }

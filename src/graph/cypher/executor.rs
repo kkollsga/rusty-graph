@@ -1820,7 +1820,10 @@ impl<'a> CypherExecutor<'a> {
 
         let mut result_rows = Vec::with_capacity(existing.rows.len());
 
-        for row in &existing.rows {
+        for (scan_count, row) in existing.rows.iter().enumerate() {
+            if scan_count.is_multiple_of(2048) {
+                self.check_deadline()?;
+            }
             // Count compatible matches for each pattern without materializing rows
             let mut match_count: i64 = 0;
 
@@ -2077,7 +2080,11 @@ impl<'a> CypherExecutor<'a> {
 
                 if let Some(dir) = scan_dir {
                     self.check_deadline()?;
-                    let counts = self.graph.graph.count_edges_grouped_by_peer(conn_key, dir);
+                    let counts = self.graph.graph.count_edges_grouped_by_peer(
+                        conn_key,
+                        dir,
+                        self.deadline,
+                    )?;
                     // Top-K from the counts HashMap
                     let heap: BinaryHeap<Reverse<(i64, u32)>> = if descending {
                         let mut h = BinaryHeap::with_capacity(limit + 1);
@@ -2212,21 +2219,74 @@ impl<'a> CypherExecutor<'a> {
                 rows
             }
         } else {
-            // Non-top-k: build all rows
-            let mut rows = Vec::with_capacity(group_matches.len());
-            for m in &group_matches {
-                let Some(node_idx) = extract_node_idx(m) else {
-                    continue;
-                };
-                let match_count = count_for_node(node_idx);
-                // MATCH semantics: skip nodes with zero matching edges
-                if match_count == 0 {
-                    continue;
+            // Non-top-k: use edge-centric aggregation when the pattern is a
+            // 3-element typed edge and the group key is the target node. This
+            // replaces an O(|target-nodes| * avg-degree) per-node scan with a
+            // single O(|edges-of-type|) sequential pass — essential when the
+            // group variable has no type filter (124 M target candidates on
+            // Wikidata would OOM or time out).
+            let edge_conn_type = match &pattern.elements[1] {
+                PatternElement::Edge(ep) => ep.connection_type.as_ref(),
+                _ => None,
+            };
+            let group_node_props_nontopk = match &pattern.elements[group_elem_idx] {
+                PatternElement::Node(np) => &np.properties,
+                _ => &None,
+            };
+            let edge_centric_rows = if let (3, Some(ct_str), None, 2) = (
+                pattern.elements.len(),
+                edge_conn_type,
+                group_node_props_nontopk.as_ref(),
+                group_elem_idx,
+            ) {
+                let conn_key = InternedKey::from_str(ct_str);
+                self.check_deadline()?;
+                let counts = self.graph.graph.count_edges_grouped_by_peer(
+                    conn_key,
+                    Direction::Outgoing,
+                    self.deadline,
+                )?;
+                let mut rows = Vec::with_capacity(counts.len());
+                for (peer, count) in counts {
+                    self.check_deadline()?;
+                    let node_idx = petgraph::graph::NodeIndex::new(peer as usize);
+                    rows.push(build_row(node_idx, count)?);
                 }
-                rows.push(build_row(node_idx, match_count)?);
+                Some(rows)
+            } else {
+                None
+            };
+
+            if let Some(rows) = edge_centric_rows {
+                rows
+            } else {
+                // Node-centric fallback: iterate group_matches, count per node.
+                let mut rows = Vec::with_capacity(group_matches.len());
+                for (scan_count, m) in group_matches.iter().enumerate() {
+                    if scan_count.is_multiple_of(2048) {
+                        self.check_deadline()?;
+                    }
+                    let Some(node_idx) = extract_node_idx(m) else {
+                        continue;
+                    };
+                    let match_count = count_for_node(node_idx);
+                    // MATCH semantics: skip nodes with zero matching edges
+                    if match_count == 0 {
+                        continue;
+                    }
+                    rows.push(build_row(node_idx, match_count)?);
+                }
+                rows
             }
-            rows
         };
+
+        // Apply HAVING post-aggregation. Cheap: the row set is at most the
+        // number of distinct group keys, which is bounded by the type/peer
+        // cardinality (thousands to tens of thousands), not the edge count.
+        let mut result_rows = result_rows;
+        if let Some(ref having) = return_clause.having {
+            result_rows.retain(|row| self.evaluate_predicate(having, row).unwrap_or(false));
+        }
 
         let columns: Vec<String> = return_clause
             .items
@@ -2323,7 +2383,11 @@ impl<'a> CypherExecutor<'a> {
         let mut group_accumulators: Vec<InlineAccumulators> = Vec::new();
         let mut group_index_map: HashMap<Vec<Value>, usize> = HashMap::new();
 
-        for &node_idx in node_indices.iter() {
+        for (scan_count, &node_idx) in node_indices.iter().enumerate() {
+            // Timeout check every 10,000 iterations (matches fused_match_return pattern)
+            if scan_count % 10_000 == 0 && scan_count > 0 {
+                self.check_deadline()?;
+            }
             // Check pattern properties using PatternExecutor's matching logic
             if let Some(ref props) = node_pattern.properties {
                 if !pattern_executor

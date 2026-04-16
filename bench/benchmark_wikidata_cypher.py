@@ -129,6 +129,16 @@ def main():
     # Set default timeout
     g.set_default_timeout(TIMEOUT_MS)
 
+    # Open CSV at start and flush per row so partial runs (SIGKILL, OOM, Ctrl-C)
+    # still leave a populated CSV behind. The previous end-of-main writerows path
+    # lost everything on crash.
+    csv_file = open(CSV_OUT, "w", newline="")
+    writer = csv.DictWriter(
+        csv_file, fieldnames=["name", "category", "status", "rows", "time_ms"]
+    )
+    writer.writeheader()
+    csv_file.flush()
+
     results = []
     current_category = None
 
@@ -161,13 +171,16 @@ def main():
                 rows = 0
                 preview = err_str[:40]
 
-        results.append({
+        row_record = {
             "name": name,
             "category": category,
             "status": status,
             "rows": rows,
             "time_ms": round(elapsed * 1000, 1),
-        })
+        }
+        results.append(row_record)
+        writer.writerow(row_record)
+        csv_file.flush()
 
         if status == "ok":
             time_str = f"{elapsed*1000:>8.1f} ms"
@@ -178,6 +191,8 @@ def main():
 
         row_str = f"{rows:>6,}" if isinstance(rows, int) and rows > 0 else f"{'—':>6s}"
         print(f"    {name:36s} {time_str}  {row_str}  {preview}")
+
+    csv_file.close()
 
     # Summary
     print("\n" + "=" * 70)
@@ -208,13 +223,8 @@ def main():
     total_err = sum(s["error"] for s in by_category.values())
     print(f"  {'TOTAL':15s} {total_ok:>4d} {total_tmo:>4d} {total_err:>4d}")
 
-    # Write CSV
-    if results:
-        with open(CSV_OUT, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["name", "category", "status", "rows", "time_ms"])
-            writer.writeheader()
-            writer.writerows(results)
-        print(f"\n  Results written to {CSV_OUT}")
+    # CSV was streamed row-by-row during the benchmark (see earlier loop).
+    print(f"\n  Results written to {CSV_OUT}")
 
     return total_tmo + total_err
 

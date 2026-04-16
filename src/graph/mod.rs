@@ -5414,6 +5414,23 @@ impl KnowledgeGraph {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))
     }
 
+    /// Compact a disk-mode graph: merge overflow edges back into CSR arrays.
+    /// Returns the number of overflow edges that were merged.
+    /// Overflow edges accumulate when edges are added after the initial CSR build
+    /// (e.g., after loading a graph and adding new connections).
+    /// Compaction rebuilds the CSR to include all overflow edges, restoring
+    /// optimal query performance.
+    /// No-op if there are no overflow edges or the graph is not in disk mode.
+    fn compact(&mut self) -> PyResult<usize> {
+        if self.inner.storage_mode != schema::StorageMode::Disk {
+            return Ok(0);
+        }
+        let graph = Arc::make_mut(&mut self.inner);
+        graph
+            .compact_disk()
+            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
+    }
+
     /// Set a default query timeout (milliseconds) applied to all cypher() calls.
     /// Pass None to disable (default). Per-query timeout_ms overrides this.
     #[pyo3(signature = (timeout_ms=None))]

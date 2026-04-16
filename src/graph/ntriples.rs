@@ -406,7 +406,7 @@ pub fn load_ntriples(
     let final_mode = graph.storage_mode;
     let mapped = false;
     let mut current: Option<EntityAccumulator> = None;
-    let use_compact = final_mode == StorageMode::Mapped || final_mode == StorageMode::Disk;
+    let use_compact = final_mode == StorageMode::Disk;
 
     // Property log for Disk mode: serialize properties during Phase 1, replay in Phase 1b
     let mut prop_log: Option<crate::graph::property_log::PropertyLogWriter> =
@@ -2493,9 +2493,8 @@ fn flush_entity(
         properties.insert("P31".to_string(), Value::String(tq.clone()));
     }
 
-    // Choose ID representation: compact u32 for mapped/disk, String for default
-    let use_compact_ids = !mapped
-        && (graph.storage_mode == StorageMode::Mapped || graph.storage_mode == StorageMode::Disk);
+    // Choose ID representation: compact u32 for disk only, String for default/mapped
+    let use_compact_ids = graph.storage_mode == StorageMode::Disk;
     let id_value = if mapped || use_compact_ids {
         parse_qcode_number(&acc.id)
             .map(Value::UniqueId)

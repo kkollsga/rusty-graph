@@ -126,8 +126,13 @@ pub struct DiskGraph {
     // ── Edge properties (sparse, in heap) ──
     edge_properties: HashMap<u32, Vec<(InternedKey, Value)>>,
 
-    // ── Edge materialization arena ──
-    edge_arena: UnsafeCell<Vec<EdgeData>>,
+    // ── Edge materialization arena (Mutex + Box for Rayon thread safety) ──
+    // Box gives stable heap pointers that survive Vec reallocation.
+    #[allow(clippy::vec_box)]
+    edge_arena: std::sync::Mutex<Vec<Box<EdgeData>>>,
+    /// Cache for edge_weight_mut: stores materialized EdgeData that may be modified.
+    /// Flushed to edge_properties on next clear_arenas call.
+    edge_mut_cache: HashMap<u32, EdgeData>,
 
     // ── Pending edges (UnsafeCell for auto-CSR-build from &self queries) ──
     // File-backed (MmapOrVec) to avoid ~14 GB heap allocation at Wikidata scale.
@@ -164,9 +169,9 @@ pub struct DiskGraph {
 
 use std::sync::Arc;
 
-// SAFETY: DiskGraph uses UnsafeCell for node_arena and edge_arena — both are
-// append-only caches mutated through &self. The borrow checker ensures no
-// &mut self can occur while any &self borrow (iterator) is alive.
+// SAFETY: DiskGraph uses UnsafeCell for node_arena (single-threaded materialization)
+// and Mutex<Vec<Box<EdgeData>>> for edge_arena (thread-safe for Rayon parallel queries).
+// Pending edges use UnsafeCell but are only accessed during CSR build (&mut self).
 unsafe impl Send for DiskGraph {}
 unsafe impl Sync for DiskGraph {}
 
@@ -206,7 +211,8 @@ impl DiskGraph {
             edge_count: 0,
             next_edge_idx: 0,
             edge_properties: HashMap::new(),
-            edge_arena: UnsafeCell::new(Vec::with_capacity(256)),
+            edge_arena: std::sync::Mutex::new(Vec::with_capacity(256)),
+            edge_mut_cache: HashMap::new(),
             pending_edges: UnsafeCell::new(
                 MmapOrVec::mapped(&data_dir.join("_pending_edges.bin"), 1 << 20)
                     .unwrap_or_else(|_| MmapOrVec::new()),
@@ -354,7 +360,8 @@ impl DiskGraph {
             edge_count,
             next_edge_idx: edge_idx,
             edge_properties,
-            edge_arena: UnsafeCell::new(Vec::with_capacity(1024)),
+            edge_arena: std::sync::Mutex::new(Vec::with_capacity(1024)),
+            edge_mut_cache: HashMap::new(),
             pending_edges: UnsafeCell::new(MmapOrVec::new()),
             overflow_out: HashMap::new(),
             overflow_in: HashMap::new(),
@@ -411,7 +418,20 @@ impl DiskGraph {
         }
         let type_key = InternedKey::from_u64(slot.node_type);
         let store = self.column_stores.get(&type_key)?;
-        store.get(slot.row_id, key)
+        // Try schema column first, then fall back to special id/title columns.
+        // The id and title are stored as __id__/__title__ (separate from schema),
+        // so store.get() won't find them by their alias names (e.g., "title", "id").
+        if let Some(val) = store.get(slot.row_id, key) {
+            return Some(val);
+        }
+        // Fallback: check if this is an id/title alias
+        if key == InternedKey::from_str("title") {
+            return store.get_title(slot.row_id);
+        }
+        if key == InternedKey::from_str("id") {
+            return store.get_id(slot.row_id);
+        }
+        None
     }
 
     /// O(1) id value read from ColumnStore — no NodeData materialization.
@@ -672,11 +692,8 @@ impl DiskGraph {
     /// (O(1) lookup) and properties from edge_properties HashMap.
     #[inline]
     pub(crate) fn materialize_edge(&self, edge_idx: u32) -> &EdgeData {
-        let arena = unsafe { &mut *self.edge_arena.get() };
-        let idx = arena.len();
         let ep = self.edge_endpoints.get(edge_idx as usize);
         let ct = InternedKey::from_u64(ep.connection_type);
-        // Fast path: skip HashMap lookup when no edges have properties (common)
         let props = if self.edge_properties.is_empty() {
             Vec::new()
         } else {
@@ -685,13 +702,17 @@ impl DiskGraph {
                 .cloned()
                 .unwrap_or_default()
         };
-        arena.push(EdgeData {
+        let boxed = Box::new(EdgeData {
             connection_type: ct,
             properties: props,
         });
-        // SAFETY: arena is append-only during &self borrows.
-        // The reference is valid as long as the &self borrow lives.
-        unsafe { &*(arena.get_unchecked(idx) as *const EdgeData) }
+        // SAFETY: Box allocates on the heap — the pointer is stable even when
+        // the Vec grows. The arena is never cleared while &self borrows are alive
+        // (clear_arenas requires &mut self).
+        let ptr = &*boxed as *const EdgeData;
+        let mut arena = self.edge_arena.lock().unwrap();
+        arena.push(boxed);
+        unsafe { &*ptr }
     }
 
     /// Count edges of a specific type without materializing EdgeData.
@@ -873,7 +894,12 @@ impl DiskGraph {
     /// source for incoming). Returns a HashMap<peer_node_idx, count>.
     /// Uses a single sequential scan of edge_endpoints — O(E) total, purely sequential
     /// I/O (no random access). For outgoing grouping: counts by target. For incoming: by source.
-    pub fn count_edges_grouped_by_peer(&self, conn_type: u64, dir: Direction) -> HashMap<u32, i64> {
+    pub fn count_edges_grouped_by_peer(
+        &self,
+        conn_type: u64,
+        dir: Direction,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<HashMap<u32, i64>, String> {
         self.ensure_csr();
         let mut counts: HashMap<u32, i64> = HashMap::new();
 
@@ -883,8 +909,18 @@ impl DiskGraph {
         self.edge_endpoints.advise_sequential();
 
         // Sequential scan of edge_endpoints — each entry is (source, target, conn_type).
-        // 16 bytes per edge, purely sequential.
-        for i in 0..self.next_edge_idx as usize {
+        // 16 bytes per edge, purely sequential. Deadline check every 1M entries
+        // keeps the per-check cost <0.001% while bounding wall-clock overshoot to ~0.3s.
+        let total = self.next_edge_idx as usize;
+        for i in 0..total {
+            if i.is_multiple_of(1 << 20) {
+                if let Some(dl) = deadline {
+                    if std::time::Instant::now() > dl {
+                        self.edge_endpoints.advise_dontneed();
+                        return Err("Query timed out".to_string());
+                    }
+                }
+            }
             let ep = self.edge_endpoints.get(i);
             if ep.source == TOMBSTONE_EDGE {
                 continue;
@@ -902,39 +938,61 @@ impl DiskGraph {
         // Release page cache pages after scan to reduce memory pressure.
         self.edge_endpoints.advise_dontneed();
 
-        counts
+        Ok(counts)
     }
 
     /// Look up source nodes that have outgoing edges of the given connection type.
     /// Returns an iterator-like slice of source node IDs from the inverted index.
     /// Returns None if the inverted index is not built (older graph format).
     pub fn sources_for_conn_type(&self, conn_type: u64) -> Option<Vec<u32>> {
-        if self.conn_type_index_types.is_empty() {
+        if self.conn_type_index_types.is_empty() && self.overflow_out.is_empty() {
             return None;
         }
-        // Binary search for the connection type in the sorted types array
-        let num_types = self.conn_type_index_types.len();
-        let mut lo = 0usize;
-        let mut hi = num_types;
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            let mid_type = self.conn_type_index_types.get(mid);
-            if mid_type < conn_type {
-                lo = mid + 1;
-            } else if mid_type > conn_type {
-                hi = mid;
-            } else {
-                // Found — read the source range
-                let start = self.conn_type_index_offsets.get(mid) as usize;
-                let end = self.conn_type_index_offsets.get(mid + 1) as usize;
-                let mut sources = Vec::with_capacity(end - start);
-                for i in start..end {
-                    sources.push(self.conn_type_index_sources.get(i));
+
+        // Read from persisted inverted index (binary search)
+        let mut sources = Vec::new();
+        if !self.conn_type_index_types.is_empty() {
+            let num_types = self.conn_type_index_types.len();
+            let mut lo = 0usize;
+            let mut hi = num_types;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let mid_type = self.conn_type_index_types.get(mid);
+                if mid_type < conn_type {
+                    lo = mid + 1;
+                } else if mid_type > conn_type {
+                    hi = mid;
+                } else {
+                    let start = self.conn_type_index_offsets.get(mid) as usize;
+                    let end = self.conn_type_index_offsets.get(mid + 1) as usize;
+                    sources.reserve(end - start);
+                    for i in start..end {
+                        sources.push(self.conn_type_index_sources.get(i));
+                    }
+                    break;
                 }
-                return Some(sources);
             }
         }
-        Some(Vec::new()) // Type exists in index but has no sources
+
+        // Supplement with overflow sources — check each overflow node for matching edges
+        if !self.overflow_out.is_empty() {
+            for (&node_id, edges) in &self.overflow_out {
+                for e in edges {
+                    if e.edge_idx != TOMBSTONE_EDGE {
+                        let ep = self.edge_endpoints.get(e.edge_idx as usize);
+                        if ep.connection_type == conn_type {
+                            sources.push(node_id);
+                            break; // One matching edge is enough
+                        }
+                    }
+                }
+            }
+            // Deduplicate (a node may appear in both CSR index and overflow)
+            sources.sort_unstable();
+            sources.dedup();
+        }
+
+        Some(sources)
     }
 
     pub fn prefetch_hot_regions(&self) {
@@ -957,18 +1015,25 @@ impl DiskGraph {
     /// Clear all materialization arenas. Called before any &mut self operation.
     #[inline]
     fn clear_arenas(&mut self) {
+        // Flush modified edge properties from edge_weight_mut cache
+        for (edge_idx, edge_data) in self.edge_mut_cache.drain() {
+            if edge_data.properties.is_empty() {
+                self.edge_properties.remove(&edge_idx);
+            } else {
+                self.edge_properties.insert(edge_idx, edge_data.properties);
+            }
+        }
         self.node_arena.get_mut().clear();
-        self.edge_arena.get_mut().clear();
+        self.edge_arena.lock().unwrap().clear();
     }
 
     /// Reset materialization arenas between queries to prevent unbounded growth.
-    /// SAFETY: Only call when no references from prior `node_weight()` /
+    /// Only call when no references from prior `node_weight()` /
     /// `materialize_edge()` calls are alive — i.e. between top-level queries.
     pub fn reset_arenas(&self) {
         let node_arena = unsafe { &mut *self.node_arena.get() };
-        let edge_arena = unsafe { &mut *self.edge_arena.get() };
         node_arena.clear();
-        edge_arena.clear();
+        self.edge_arena.lock().unwrap().clear();
     }
 
     pub fn edges_directed_iter(&self, a: NodeIndex, dir: Direction) -> DiskEdges<'_> {
@@ -995,7 +1060,11 @@ impl DiskGraph {
         let start = offsets.get(node) as usize;
         let end = offsets.get(node + 1) as usize;
 
-        let iter = DiskEdges::new(self, dir, a, edges, start, end, None);
+        let overflow = match dir {
+            Direction::Outgoing => self.overflow_out.get(&(node as u32)),
+            Direction::Incoming => self.overflow_in.get(&(node as u32)),
+        };
+        let iter = DiskEdges::new(self, dir, a, edges, start, end, overflow);
         if let Some(ct) = conn_type_filter {
             iter.with_conn_type_filter(ct)
         } else {
@@ -1032,10 +1101,30 @@ impl DiskGraph {
         Some(self.materialize_edge(ei as u32))
     }
 
-    pub fn edge_weight_mut(&mut self, _idx: EdgeIndex) -> Option<&mut EdgeData> {
-        // Edge mutation in disk mode is complex — for now, support via
-        // re-materialization. Full implementation deferred.
-        unimplemented!("DiskGraph: edge_weight_mut not yet supported")
+    pub fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
+        let ei = idx.index();
+        if ei >= self.next_edge_idx as usize {
+            return None;
+        }
+        let ep = self.edge_endpoints.get(ei);
+        if ep.source == TOMBSTONE_EDGE {
+            return None;
+        }
+        self.metadata_dirty = true;
+        // Store in dedicated cache (not the arena) so we can flush correctly.
+        // The arena is append-only and shared with edge_weight (read-only),
+        // making offset tracking fragile. The cache is keyed by edge_idx.
+        let ct = InternedKey::from_u64(ep.connection_type);
+        let props = self
+            .edge_properties
+            .get(&(ei as u32))
+            .cloned()
+            .unwrap_or_default();
+        self.edge_mut_cache.entry(ei as u32).or_insert(EdgeData {
+            connection_type: ct,
+            properties: props,
+        });
+        Some(self.edge_mut_cache.get_mut(&(ei as u32)).unwrap())
     }
 
     pub fn edge_endpoints_fn(&self, idx: EdgeIndex) -> Option<(NodeIndex, NodeIndex)> {
@@ -1066,10 +1155,31 @@ impl DiskGraph {
             self.edge_properties.insert(edge_idx, data.properties);
         }
 
-        // Append to pending edges log (fast Vec push, no HashMap)
-        self.pending_edges
-            .get_mut()
-            .push((a.index() as u32, b.index() as u32, ct.as_u64()));
+        let src = a.index() as u32;
+        let tgt = b.index() as u32;
+        let ct_u64 = ct.as_u64();
+
+        if self.defer_csr || self.out_edges.is_empty() {
+            // Pre-CSR mode: accumulate in pending_edges for bulk build
+            self.pending_edges.get_mut().push((src, tgt, ct_u64));
+        } else {
+            // Post-CSR mode: go directly to overflow + edge_endpoints.
+            // This makes new edges immediately visible to queries via
+            // the DiskEdges iterator which merges CSR + overflow.
+            self.edge_endpoints.push(EdgeEndpoints {
+                source: src,
+                target: tgt,
+                connection_type: ct_u64,
+            });
+            self.overflow_out.entry(src).or_default().push(CsrEdge {
+                peer: tgt,
+                edge_idx,
+            });
+            self.overflow_in.entry(tgt).or_default().push(CsrEdge {
+                peer: src,
+                edge_idx,
+            });
+        }
 
         self.edge_count += 1;
         EdgeIndex::new(edge_idx as usize)
@@ -1271,6 +1381,101 @@ impl DiskGraph {
         } else {
             self.build_csr_partitioned(node_bound, edge_count, verbose);
         }
+        // After CSR is built, subsequent add_edge calls should route to overflow
+        self.defer_csr = false;
+    }
+
+    /// Merge overflow edges back into the CSR arrays via full rebuild.
+    /// Collects all live edges (CSR + overflow, excluding tombstones),
+    /// writes to pending_edges, clears overflow, and rebuilds CSR.
+    /// Returns the number of overflow edges that were merged.
+    pub fn compact(&mut self) -> usize {
+        let overflow_count: usize = self.overflow_out.values().map(|v| v.len()).sum();
+        if overflow_count == 0 {
+            return 0;
+        }
+
+        let verbose = std::env::var("KGLITE_CSR_VERBOSE").is_ok();
+        if verbose {
+            eprintln!(
+                "Compacting: {} CSR edges + {} overflow edges",
+                self.edge_count.saturating_sub(overflow_count),
+                overflow_count
+            );
+        }
+
+        let node_bound = self.node_slots.len();
+
+        // Collect all live edges into a fresh pending_edges buffer.
+        // Source: edge_endpoints (covers both CSR and post-CSR overflow edges).
+        // Skip tombstoned entries.
+        let mut live_count = 0usize;
+        let total_endpoints = self.next_edge_idx as usize;
+
+        let pending_path = self.data_dir.join("_compact_pending.bin");
+        let mut new_pending: MmapOrVec<(u32, u32, u64)> =
+            MmapOrVec::mapped(&pending_path, total_endpoints)
+                .unwrap_or_else(|_| MmapOrVec::with_capacity(total_endpoints));
+
+        // Edge index remapping: old_idx → new_idx
+        // Needed because compaction produces a dense edge array.
+        let mut idx_remap: Vec<u32> = vec![TOMBSTONE_EDGE; total_endpoints];
+
+        for (old_idx, remap_slot) in idx_remap.iter_mut().enumerate().take(total_endpoints) {
+            let ep = self.edge_endpoints.get(old_idx);
+            if ep.source != TOMBSTONE_EDGE
+                && (ep.source as usize) < node_bound
+                && (ep.target as usize) < node_bound
+            {
+                *remap_slot = live_count as u32;
+                new_pending.push((ep.source, ep.target, ep.connection_type));
+                live_count += 1;
+            }
+        }
+
+        // Remap edge properties to new indices
+        let old_props = std::mem::take(&mut self.edge_properties);
+        for (old_idx, props) in old_props {
+            let new_idx = idx_remap[old_idx as usize];
+            if new_idx != TOMBSTONE_EDGE {
+                self.edge_properties.insert(new_idx, props);
+            }
+        }
+
+        // Clear overflow and free slots
+        self.overflow_out.clear();
+        self.overflow_in.clear();
+        self.free_edge_slots.clear();
+
+        // Reset edge tracking
+        self.edge_count = live_count;
+        self.next_edge_idx = live_count as u32;
+
+        // Replace pending_edges and rebuild CSR
+        let old_pending_path = self
+            .pending_edges
+            .get_mut()
+            .file_path()
+            .map(|p| p.to_path_buf());
+        *self.pending_edges.get_mut() = new_pending;
+        if let Some(path) = old_pending_path {
+            let _ = std::fs::remove_file(path);
+        }
+
+        self.build_csr_from_pending();
+
+        // Clean up compact temp file
+        let _ = std::fs::remove_file(&pending_path);
+
+        if verbose {
+            eprintln!(
+                "Compaction done: {} live edges (removed {} tombstoned)",
+                live_count,
+                total_endpoints - live_count
+            );
+        }
+
+        overflow_count
     }
 
     /// [DEV] External merge sort variant — zero random reads.
@@ -1290,7 +1495,17 @@ impl DiskGraph {
                 .as_nanos()
         ));
         let _ = std::fs::create_dir_all(&tmp_dir);
-        let out_dir = &self.data_dir;
+        // CSR output goes to a separate build dir, then atomically swapped into data_dir.
+        // This avoids overwriting mmap'd files that self still references.
+        let build_dir = self.data_dir.join(format!(
+            "_csr_output_{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&build_dir);
+        let out_dir = &build_dir;
 
         // ── Step 1: Materialize + count degrees + build edge_endpoints (from heap) ──
         let step = std::time::Instant::now();
@@ -1566,90 +1781,23 @@ impl DiskGraph {
         // Clean up temp dir (sort chunks + pending.bin)
         let _ = std::fs::remove_dir_all(&tmp_dir);
 
-        self.out_offsets = out_offsets;
-        self.out_edges = out_edges;
-        self.in_offsets = in_offsets;
-        self.in_edges = in_edges;
-        self.edge_endpoints = edge_endpoints_vec;
+        // Atomic swap: move build files to data_dir, re-mmap
+        self.swap_csr_files(
+            &build_dir,
+            node_bound,
+            edge_count,
+            out_offsets,
+            out_edges,
+            in_offsets,
+            in_edges,
+            edge_endpoints_vec,
+        );
         self.csr_sorted_by_type = true;
         self.edge_type_counts_raw = Some(edge_type_counts);
 
-        // ── Build connection-type inverted index ──
-        // Scan out_edges (sorted by source, conn_type) to collect source nodes per type.
-        // One sequential pass over the already-mmap'd arrays — no extra I/O.
-        {
-            let idx_start = std::time::Instant::now();
-            let mut type_sources: HashMap<u64, Vec<u32>> = HashMap::new();
-            for node in 0..node_bound {
-                let start = self.out_offsets.get(node) as usize;
-                let end = self.out_offsets.get(node + 1) as usize;
-                if start == end {
-                    continue;
-                }
-                // With sorted CSR, edges within this node's range are grouped by type.
-                // Track which types this node has.
-                let mut last_type: u64 = u64::MAX;
-                for i in start..end {
-                    let e = self.out_edges.get(i);
-                    if e.edge_idx == TOMBSTONE_EDGE {
-                        continue;
-                    }
-                    let ct = self.edge_endpoints.get(e.edge_idx as usize).connection_type;
-                    if ct != last_type {
-                        type_sources.entry(ct).or_default().push(node as u32);
-                        last_type = ct;
-                    }
-                }
-            }
-            // Serialize to mmap files: types (sorted), offsets, sources (concatenated)
-            let mut sorted_types: Vec<u64> = type_sources.keys().copied().collect();
-            sorted_types.sort();
-            let total_sources: usize = type_sources.values().map(|v| v.len()).sum();
+        // Build connection-type inverted index from the swapped CSR
+        self.build_conn_type_index(node_bound, verbose);
 
-            let mut idx_types = MmapOrVec::mapped(
-                &out_dir.join("conn_type_index_types.bin"),
-                sorted_types.len(),
-            )
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(sorted_types.len()));
-            // offsets has len+1 entries (sentinel at end)
-            let mut idx_offsets = MmapOrVec::mapped(
-                &out_dir.join("conn_type_index_offsets.bin"),
-                sorted_types.len() + 1,
-            )
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(sorted_types.len() + 1));
-            let mut idx_sources =
-                MmapOrVec::mapped(&out_dir.join("conn_type_index_sources.bin"), total_sources)
-                    .unwrap_or_else(|_| MmapOrVec::with_capacity(total_sources));
-
-            let mut offset: u64 = 0;
-            for &ct in &sorted_types {
-                idx_types.push(ct);
-                idx_offsets.push(offset);
-                if let Some(sources) = type_sources.get(&ct) {
-                    for &src in sources {
-                        idx_sources.push(src);
-                    }
-                    offset += sources.len() as u64;
-                }
-            }
-            idx_offsets.push(offset); // sentinel
-
-            self.conn_type_index_types = idx_types;
-            self.conn_type_index_offsets = idx_offsets;
-            self.conn_type_index_sources = idx_sources;
-
-            if verbose {
-                eprintln!(
-                    "    Built conn-type inverted index: {} types, {} source entries ({:.1}s)",
-                    sorted_types.len(),
-                    total_sources,
-                    idx_start.elapsed().as_secs_f64()
-                );
-            }
-        }
-
-        // Offsets already mmap-backed to out_offsets.bin / in_offsets.bin.
-        // Auto-persist metadata — graph is fully on disk after this
         let _ = self.write_metadata();
         self.metadata_dirty = false;
 
@@ -1669,7 +1817,16 @@ impl DiskGraph {
     fn build_csr_partitioned(&mut self, node_bound: usize, edge_count: usize, verbose: bool) {
         let pending = self.pending_edges.get_mut();
         let phase3_start = std::time::Instant::now();
-        let out_dir = &self.data_dir;
+        // CSR output goes to a separate build dir, then atomically swapped into data_dir.
+        let build_dir = self.data_dir.join(format!(
+            "_csr_output_{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&build_dir);
+        let out_dir = &build_dir;
 
         // ── Step 1: Build edge_endpoints + count degrees ──
         // Single sequential pass over pending_edges: write endpoints + count degrees.
@@ -1798,7 +1955,55 @@ impl DiskGraph {
         }
         if verbose {
             eprintln!(
-                "    CSR step 3/4: out_edges scatter ({:.1}s)",
+                "    CSR step 3a/4: out_edges scatter ({:.1}s)",
+                step.elapsed().as_secs_f64()
+            );
+        }
+
+        // Sort each node's out_edges range by connection_type.
+        // Enables binary search for type filtering and conn_type_index build.
+        // Cost: O(E * log D) where D is average degree — at D~7 across Wikidata's
+        // 124 M nodes this totals ~300 s serially. Parallelised via Rayon over
+        // disjoint per-node slices.
+        let step = std::time::Instant::now();
+        {
+            use rayon::prelude::*;
+            // Snapshot offsets into a heap Vec so the parallel closure can index
+            // cheaply without aliasing the out_edges mmap. Cost: ~1 GB at Wikidata
+            // scale (124 M * 8 B), freed at end of scope.
+            let offsets_snap: Vec<u64> = (0..=node_bound).map(|i| out_offsets.get(i)).collect();
+
+            // Raw pointer into out_edges — each node's range is disjoint by
+            // construction, so parallel writes are safe.
+            struct SendPtr(*mut CsrEdge);
+            unsafe impl Send for SendPtr {}
+            unsafe impl Sync for SendPtr {}
+            let base = SendPtr(out_edges.as_mut_slice().as_mut_ptr());
+            let base_ref = &base;
+            let endpoints_ref = &edge_endpoints_vec;
+
+            (0..node_bound).into_par_iter().for_each(|node| {
+                let start = offsets_snap[node] as usize;
+                let end = offsets_snap[node + 1] as usize;
+                if end - start <= 1 {
+                    return;
+                }
+                // SAFETY: disjoint ranges per node; endpoints_ref is read-only.
+                let range: &mut [CsrEdge] =
+                    unsafe { std::slice::from_raw_parts_mut(base_ref.0.add(start), end - start) };
+                let mut with_ct: Vec<(u64, CsrEdge)> = range
+                    .iter()
+                    .map(|&e| (endpoints_ref.get(e.edge_idx as usize).connection_type, e))
+                    .collect();
+                with_ct.sort_unstable_by_key(|&(ct, _)| ct);
+                for (i, &(_, e)) in with_ct.iter().enumerate() {
+                    range[i] = e;
+                }
+            });
+        }
+        if verbose {
+            eprintln!(
+                "    CSR step 3b/4: out_edges sort by type ({:.1}s)",
                 step.elapsed().as_secs_f64()
             );
         }
@@ -1945,16 +2150,26 @@ impl DiskGraph {
             );
         }
 
-        // Reload out_edges (dropped before step 4)
+        // Reload out_edges (dropped before step 4) — still in build_dir
         let out_edges: MmapOrVec<CsrEdge> = MmapOrVec::load_mapped(&out_edges_path, edge_count)
             .unwrap_or_else(|_| MmapOrVec::new());
 
-        self.out_offsets = out_offsets;
-        self.out_edges = out_edges;
-        self.in_offsets = in_offsets;
-        self.in_edges = in_edges;
-        self.edge_endpoints = edge_endpoints_vec;
+        // Atomic swap: move build files to data_dir, re-mmap
+        self.swap_csr_files(
+            &build_dir,
+            node_bound,
+            edge_count,
+            out_offsets,
+            out_edges,
+            in_offsets,
+            in_edges,
+            edge_endpoints_vec,
+        );
+        self.csr_sorted_by_type = true;
         self.edge_type_counts_raw = Some(edge_type_counts);
+
+        // Build connection-type inverted index from the swapped CSR
+        self.build_conn_type_index(node_bound, verbose);
 
         let _ = self.write_metadata();
         self.metadata_dirty = false;
@@ -1965,6 +2180,237 @@ impl DiskGraph {
                 phase3_start.elapsed().as_secs_f64(),
                 edge_count,
                 node_bound
+            );
+        }
+    }
+
+    // ====================================================================
+    // CSR swap helper — atomic replacement of mmap'd CSR files
+    // ====================================================================
+
+    /// Swap CSR files built in `build_dir` into `self.data_dir`.
+    /// 1. Drop old mmap fields (releases file handles)
+    /// 2. Drop build mmaps (releases handles to temp files)
+    /// 3. Rename temp files → data_dir (atomic on same filesystem)
+    /// 4. Re-mmap from data_dir
+    #[allow(clippy::too_many_arguments)]
+    fn swap_csr_files(
+        &mut self,
+        build_dir: &Path,
+        node_bound: usize,
+        edge_count: usize,
+        out_offsets: MmapOrVec<u64>,
+        out_edges: MmapOrVec<CsrEdge>,
+        in_offsets: MmapOrVec<u64>,
+        in_edges: MmapOrVec<CsrEdge>,
+        edge_endpoints: MmapOrVec<EdgeEndpoints>,
+    ) {
+        let data_dir = &self.data_dir;
+
+        // If build_dir == data_dir, files are already in place — just assign.
+        if build_dir == data_dir.as_path() {
+            self.out_offsets = out_offsets;
+            self.out_edges = out_edges;
+            self.in_offsets = in_offsets;
+            self.in_edges = in_edges;
+            self.edge_endpoints = edge_endpoints;
+            return;
+        }
+
+        // Drop old self mmaps (releases file handles to data_dir files)
+        self.out_offsets = MmapOrVec::new();
+        self.out_edges = MmapOrVec::new();
+        self.in_offsets = MmapOrVec::new();
+        self.in_edges = MmapOrVec::new();
+        self.edge_endpoints = MmapOrVec::new();
+
+        // Drop build mmaps (releases file handles to build_dir files)
+        drop(out_offsets);
+        drop(out_edges);
+        drop(in_offsets);
+        drop(in_edges);
+        drop(edge_endpoints);
+
+        // Rename files from build_dir → data_dir (atomic on same filesystem)
+        let csr_files = [
+            "out_offsets.bin",
+            "out_edges.bin",
+            "in_offsets.bin",
+            "in_edges.bin",
+            "edge_endpoints.bin",
+        ];
+        for fname in &csr_files {
+            let src = build_dir.join(fname);
+            let dst = data_dir.join(fname);
+            if src.exists() {
+                // Remove old file first (some filesystems require this)
+                let _ = std::fs::remove_file(&dst);
+                if let Err(e) = std::fs::rename(&src, &dst) {
+                    eprintln!(
+                        "Warning: failed to rename {} → {}: {}",
+                        src.display(),
+                        dst.display(),
+                        e
+                    );
+                }
+            }
+        }
+
+        // Also swap conn_type_index files if present
+        let index_files = [
+            "conn_type_index_types.bin",
+            "conn_type_index_offsets.bin",
+            "conn_type_index_sources.bin",
+        ];
+        for fname in &index_files {
+            let src = build_dir.join(fname);
+            let dst = data_dir.join(fname);
+            if src.exists() {
+                let _ = std::fs::remove_file(&dst);
+                let _ = std::fs::rename(&src, &dst);
+            }
+        }
+
+        // Re-mmap from data_dir
+        self.out_offsets =
+            MmapOrVec::load_mapped(&data_dir.join("out_offsets.bin"), node_bound + 1)
+                .unwrap_or_else(|_| MmapOrVec::new());
+        self.out_edges = MmapOrVec::load_mapped(&data_dir.join("out_edges.bin"), edge_count)
+            .unwrap_or_else(|_| MmapOrVec::new());
+        self.in_offsets = MmapOrVec::load_mapped(&data_dir.join("in_offsets.bin"), node_bound + 1)
+            .unwrap_or_else(|_| MmapOrVec::new());
+        self.in_edges = MmapOrVec::load_mapped(&data_dir.join("in_edges.bin"), edge_count)
+            .unwrap_or_else(|_| MmapOrVec::new());
+        self.edge_endpoints =
+            MmapOrVec::load_mapped(&data_dir.join("edge_endpoints.bin"), edge_count)
+                .unwrap_or_else(|_| MmapOrVec::new());
+
+        // Re-load conn_type_index if swapped
+        let types_path = data_dir.join("conn_type_index_types.bin");
+        if types_path.exists() {
+            let num_types = std::fs::metadata(&types_path)
+                .map(|m| m.len() as usize / std::mem::size_of::<u64>())
+                .unwrap_or(0);
+            if num_types > 0 {
+                self.conn_type_index_types = MmapOrVec::load_mapped(&types_path, num_types)
+                    .unwrap_or_else(|_| MmapOrVec::new());
+                self.conn_type_index_offsets = MmapOrVec::load_mapped(
+                    &data_dir.join("conn_type_index_offsets.bin"),
+                    num_types + 1,
+                )
+                .unwrap_or_else(|_| MmapOrVec::new());
+                let sources_len = std::fs::metadata(data_dir.join("conn_type_index_sources.bin"))
+                    .map(|m| m.len() as usize / std::mem::size_of::<u32>())
+                    .unwrap_or(0);
+                self.conn_type_index_sources = MmapOrVec::load_mapped(
+                    &data_dir.join("conn_type_index_sources.bin"),
+                    sources_len,
+                )
+                .unwrap_or_else(|_| MmapOrVec::new());
+            }
+        }
+
+        // Clean up build dir
+        let _ = std::fs::remove_dir_all(build_dir);
+    }
+
+    /// Build connection-type inverted index from current CSR arrays.
+    /// Reads self.out_offsets, self.out_edges, self.edge_endpoints (must be valid).
+    /// Writes index files to self.data_dir and assigns to self.
+    ///
+    /// Parallelised via Rayon: each thread scans a partition of nodes and builds
+    /// a local `HashMap<conn_type, Vec<node_id>>`, then maps are merged. The
+    /// preceding per-node sort guarantees that within one node's edge range, each
+    /// conn_type appears contiguously, so each type is pushed at most once per
+    /// node and the per-thread map key count is bounded by the global type count.
+    fn build_conn_type_index(&mut self, node_bound: usize, verbose: bool) {
+        use rayon::prelude::*;
+        let idx_start = std::time::Instant::now();
+
+        let out_offsets = &self.out_offsets;
+        let out_edges = &self.out_edges;
+        let edge_endpoints = &self.edge_endpoints;
+        let effective_bound = node_bound.min(out_offsets.len().saturating_sub(1));
+
+        let mut type_sources: HashMap<u64, Vec<u32>> = (0..effective_bound)
+            .into_par_iter()
+            .fold(HashMap::<u64, Vec<u32>>::new, |mut acc, node| {
+                let start = out_offsets.get(node) as usize;
+                let end = out_offsets.get(node + 1) as usize;
+                if start == end {
+                    return acc;
+                }
+                let mut last_type: u64 = u64::MAX;
+                for i in start..end {
+                    let e = out_edges.get(i);
+                    if e.edge_idx == TOMBSTONE_EDGE {
+                        continue;
+                    }
+                    let ct = edge_endpoints.get(e.edge_idx as usize).connection_type;
+                    if ct != last_type {
+                        acc.entry(ct).or_default().push(node as u32);
+                        last_type = ct;
+                    }
+                }
+                acc
+            })
+            .reduce(HashMap::<u64, Vec<u32>>::new, |mut a, b| {
+                for (k, mut v) in b {
+                    a.entry(k).or_default().append(&mut v);
+                }
+                a
+            });
+
+        // Node IDs within each type list are not globally ordered after parallel
+        // reduce (each shard contributed its own range). Sort to match the
+        // previous serial behaviour — callers may assume ascending order.
+        for sources in type_sources.values_mut() {
+            sources.sort_unstable();
+        }
+
+        let mut sorted_types: Vec<u64> = type_sources.keys().copied().collect();
+        sorted_types.sort();
+        let total_sources: usize = type_sources.values().map(|v| v.len()).sum();
+
+        let mut idx_types = MmapOrVec::mapped(
+            &self.data_dir.join("conn_type_index_types.bin"),
+            sorted_types.len(),
+        )
+        .unwrap_or_else(|_| MmapOrVec::with_capacity(sorted_types.len()));
+        let mut idx_offsets = MmapOrVec::mapped(
+            &self.data_dir.join("conn_type_index_offsets.bin"),
+            sorted_types.len() + 1,
+        )
+        .unwrap_or_else(|_| MmapOrVec::with_capacity(sorted_types.len() + 1));
+        let mut idx_sources = MmapOrVec::mapped(
+            &self.data_dir.join("conn_type_index_sources.bin"),
+            total_sources,
+        )
+        .unwrap_or_else(|_| MmapOrVec::with_capacity(total_sources));
+
+        let mut offset: u64 = 0;
+        for &ct in &sorted_types {
+            idx_types.push(ct);
+            idx_offsets.push(offset);
+            if let Some(sources) = type_sources.get(&ct) {
+                for &src in sources {
+                    idx_sources.push(src);
+                }
+                offset += sources.len() as u64;
+            }
+        }
+        idx_offsets.push(offset);
+
+        self.conn_type_index_types = idx_types;
+        self.conn_type_index_offsets = idx_offsets;
+        self.conn_type_index_sources = idx_sources;
+
+        if verbose {
+            eprintln!(
+                "    Built conn-type inverted index: {} types, {} source entries ({:.1}s)",
+                sorted_types.len(),
+                total_sources,
+                idx_start.elapsed().as_secs_f64()
             );
         }
     }
@@ -2166,7 +2612,8 @@ impl Clone for DiskGraph {
             edge_count: self.edge_count,
             next_edge_idx: self.next_edge_idx,
             edge_properties: self.edge_properties.clone(),
-            edge_arena: UnsafeCell::new(Vec::new()),
+            edge_arena: std::sync::Mutex::new(Vec::new()),
+            edge_mut_cache: HashMap::new(),
             pending_edges: UnsafeCell::new(MmapOrVec::new()),
             overflow_out: self.overflow_out.clone(),
             overflow_in: self.overflow_in.clone(),
@@ -2237,6 +2684,10 @@ impl DiskGraph {
     /// Write metadata JSON to the graph directory.
     /// Called automatically after CSR build and after mutations.
     pub(crate) fn write_metadata(&self) -> std::io::Result<()> {
+        self.write_metadata_to(&self.data_dir)
+    }
+
+    fn write_metadata_to(&self, dir: &Path) -> std::io::Result<()> {
         let meta = DiskGraphMeta {
             node_count: self.node_count,
             node_slots_len: self.node_slots.len(),
@@ -2252,7 +2703,7 @@ impl DiskGraph {
             csr_sorted_by_type: self.csr_sorted_by_type,
         };
         let json = serde_json::to_string_pretty(&meta).map_err(std::io::Error::other)?;
-        std::fs::write(self.data_dir.join("disk_graph_meta.json"), json)
+        std::fs::write(dir.join("disk_graph_meta.json"), json)
     }
 
     /// Save disk graph state. For disk mode, binary arrays are already on disk
@@ -2300,8 +2751,22 @@ impl DiskGraph {
             std::fs::write(target_dir.join("edge_properties.bin.zst"), compressed)?;
         }
 
-        // Save metadata
-        self.write_metadata()?;
+        // Save metadata to target_dir (not data_dir)
+        self.write_metadata_to(target_dir)?;
+
+        // Also save conn_type_index files if present and target differs from data_dir
+        if target_dir != self.data_dir {
+            for fname in [
+                "conn_type_index_types.bin",
+                "conn_type_index_offsets.bin",
+                "conn_type_index_sources.bin",
+            ] {
+                let src = self.data_dir.join(fname);
+                if src.exists() {
+                    let _ = std::fs::copy(&src, target_dir.join(fname));
+                }
+            }
+        }
 
         Ok(())
     }
@@ -2365,7 +2830,8 @@ impl DiskGraph {
                 edge_count: meta.edge_count,
                 next_edge_idx: meta.next_edge_idx,
                 edge_properties,
-                edge_arena: UnsafeCell::new(Vec::with_capacity(1024)),
+                edge_arena: std::sync::Mutex::new(Vec::with_capacity(1024)),
+                edge_mut_cache: HashMap::new(),
                 pending_edges: UnsafeCell::new(MmapOrVec::new()),
                 overflow_out,
                 overflow_in,

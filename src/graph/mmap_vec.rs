@@ -329,6 +329,21 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         }
     }
 
+    /// Get a mutable slice of the data. Works for both Heap and Mapped variants.
+    ///
+    /// SAFETY: For `Mapped`, the returned slice aliases the mmap's backing
+    /// storage. Because this method takes `&mut self`, no other borrow of the
+    /// MmapOrVec can coexist; the caller is responsible for any further
+    /// sub-slicing (e.g. `split_at_mut`) to enable safe parallel writes.
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        match self {
+            MmapOrVec::Heap { data } => data.as_mut_slice(),
+            MmapOrVec::Mapped { mmap, len, .. } => unsafe {
+                std::slice::from_raw_parts_mut(mmap.as_mut_ptr() as *mut T, *len)
+            },
+        }
+    }
+
     /// Get a mutable byte-level view of the backing storage.
     /// Works for both Heap and Mapped variants.
     /// Useful for bulk byte operations (memset, copy_from_slice) during build.

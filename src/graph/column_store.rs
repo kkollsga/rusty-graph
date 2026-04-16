@@ -1328,9 +1328,16 @@ impl ColumnStore {
     ///   For "string": data_bytes = offsets + str_data + null_bitmap
     ///   For "mixed": data_bytes = bincode(Vec<Value>)
     pub fn write_packed(&self, interner: &StringInterner) -> io::Result<Vec<u8>> {
+        // If this ColumnStore is mmap-backed (from_mmap_store), materialize
+        // rows from the mmap store so they can be serialized.
+        if let Some(ref mmap_store) = self.mmap_store {
+            return self.write_packed_from_mmap(mmap_store, interner);
+        }
+
         let mut buf: Vec<u8> = Vec::new();
 
-        // Count total columns: schema columns + id/title + overflow entries if present
+        // Write ALL schema columns (including empty ones) to preserve metadata round-trip.
+        // Empty columns are cheap — just type tag + zero-length data blob.
         let extra = self.id_column.is_some() as u32
             + self.title_column.is_some() as u32
             + if self.overflow_offsets.is_some() {
@@ -1344,7 +1351,17 @@ impl ColumnStore {
         for (slot, ik) in self.schema.iter() {
             let col_name = interner.resolve(ik);
             let col = &self.columns[slot as usize];
-            Self::write_packed_column(&mut buf, col_name, col)?;
+            if col.len() == 0 && self.row_count > 0 {
+                // Column is in schema but has no data. Write it as all-null
+                // with the correct row_count so load_packed can deserialize it.
+                let mut padded = TypedColumn::Mixed { data: Vec::new() };
+                for _ in 0..self.row_count {
+                    let _ = padded.push(&Value::Null);
+                }
+                Self::write_packed_column(&mut buf, col_name, &padded)?;
+            } else {
+                Self::write_packed_column(&mut buf, col_name, col)?;
+            }
         }
 
         // Write id/title columns with reserved names
@@ -1378,6 +1395,93 @@ impl ColumnStore {
                 buf.extend_from_slice(&(tag.len() as u16).to_le_bytes());
                 buf.extend_from_slice(tag);
                 let raw = data.as_raw_bytes();
+                buf.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+                buf.extend_from_slice(raw);
+            }
+        }
+
+        Ok(buf)
+    }
+
+    /// Write packed format from an mmap-backed ColumnStore.
+    /// Materializes rows from the MmapColumnStore into Mixed TypedColumns, then serializes.
+    /// This is used when a disk graph is loaded (creating mmap-backed stores) and then re-saved.
+    fn write_packed_from_mmap(
+        &self,
+        mmap_store: &crate::graph::mmap_column_store::MmapColumnStore,
+        interner: &StringInterner,
+    ) -> io::Result<Vec<u8>> {
+        let rc = mmap_store.row_count();
+        let mut buf: Vec<u8> = Vec::new();
+
+        // Materialize ID column
+        let id_col = TypedColumn::Mixed {
+            data: (0..rc)
+                .map(|r| mmap_store.get_id(r).unwrap_or(Value::Null))
+                .collect(),
+        };
+
+        // Materialize title column
+        let title_col = TypedColumn::Mixed {
+            data: (0..rc)
+                .map(|r| mmap_store.get_title(r).unwrap_or(Value::Null))
+                .collect(),
+        };
+
+        // Materialize property columns from col_map
+        let mut prop_columns: Vec<(String, TypedColumn)> = Vec::new();
+        for &key in mmap_store.col_map.keys() {
+            let col_name = interner.resolve(key).to_string();
+            let col = TypedColumn::Mixed {
+                data: (0..rc)
+                    .map(|r| mmap_store.get(r, key).unwrap_or(Value::Null))
+                    .collect(),
+            };
+            prop_columns.push((col_name, col));
+        }
+
+        // Count columns
+        let has_overflow = mmap_store.has_overflow && mmap_store.overflow_offsets.len > 0;
+        let mut num_cols = prop_columns.len() as u32 + 2; // +2 for id + title
+        if has_overflow {
+            num_cols += 2;
+        }
+        buf.extend_from_slice(&num_cols.to_le_bytes());
+
+        // Write property columns
+        for (name, col) in &prop_columns {
+            Self::write_packed_column(&mut buf, name, col)?;
+        }
+
+        // Write id/title
+        Self::write_packed_column(&mut buf, "__id__", &id_col)?;
+        Self::write_packed_column(&mut buf, "__title__", &title_col)?;
+
+        // Write overflow if present
+        if has_overflow {
+            let off_r = &mmap_store.overflow_offsets;
+            let dat_r = &mmap_store.overflow_data;
+            // __overflow_offsets__
+            {
+                let name = b"__overflow_offsets__";
+                buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+                buf.extend_from_slice(name);
+                let tag = b"raw";
+                buf.extend_from_slice(&(tag.len() as u16).to_le_bytes());
+                buf.extend_from_slice(tag);
+                let raw = &mmap_store.mmap[off_r.offset..off_r.offset + off_r.len];
+                buf.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+                buf.extend_from_slice(raw);
+            }
+            // __overflow_data__
+            {
+                let name = b"__overflow_data__";
+                buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+                buf.extend_from_slice(name);
+                let tag = b"raw";
+                buf.extend_from_slice(&(tag.len() as u16).to_le_bytes());
+                buf.extend_from_slice(tag);
+                let raw = &mmap_store.mmap[dat_r.offset..dat_r.offset + dat_r.len];
                 buf.extend_from_slice(&(raw.len() as u64).to_le_bytes());
                 buf.extend_from_slice(raw);
             }

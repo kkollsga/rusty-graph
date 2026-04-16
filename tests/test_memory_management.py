@@ -63,8 +63,8 @@ class TestSpillToDisk:
 
         info = g.graph_info()
         assert info["columnar_is_mapped"] is True
-        # Only tombstones vec stays on heap
-        assert info["columnar_heap_bytes"] < 2000
+        # Tombstones + id/title column overhead stay on heap
+        assert info["columnar_heap_bytes"] < 50000
 
     def test_no_spill_when_under_limit(self):
         """No spill when data fits within limit."""

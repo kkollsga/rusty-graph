@@ -1,7 +1,7 @@
 // src/graph/batch_operations.rs
 use crate::datatypes::Value;
 use crate::graph::schema::{
-    DirGraph, EdgeData, InternedKey, NodeData, PropertyStorage, StorageMode,
+    DirGraph, EdgeData, GraphBackend, InternedKey, NodeData, PropertyStorage, StorageMode,
 };
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
@@ -322,12 +322,10 @@ impl BatchProcessor {
                             ),
                         );
                         for rid in 0..old_store.row_count() {
-                            if let Some(id_val) = old_store.get_id(rid) {
-                                store.push_id(&id_val);
-                            }
-                            if let Some(title_val) = old_store.get_title(rid) {
-                                store.push_title(&title_val);
-                            }
+                            // Always push id/title — use Null as fallback to keep
+                            // columns in sync with row_count
+                            store.push_id(&old_store.get_id(rid).unwrap_or(Value::Null));
+                            store.push_title(&old_store.get_title(rid).unwrap_or(Value::Null));
                             let props = old_store.row_properties(rid);
                             store.push_row(&props);
                         }
@@ -434,12 +432,10 @@ impl BatchProcessor {
                             ),
                         );
                         for rid in 0..old_store.row_count() {
-                            if let Some(id_val) = old_store.get_id(rid) {
-                                store.push_id(&id_val);
-                            }
-                            if let Some(title_val) = old_store.get_title(rid) {
-                                store.push_title(&title_val);
-                            }
+                            // Always push id/title — use Null as fallback to keep
+                            // columns in sync with row_count
+                            store.push_id(&old_store.get_id(rid).unwrap_or(Value::Null));
+                            store.push_title(&old_store.get_title(rid).unwrap_or(Value::Null));
                             let props = old_store.row_properties(rid);
                             store.push_row(&props);
                         }
@@ -481,7 +477,12 @@ impl BatchProcessor {
             for (node_type, store) in owned_stores {
                 graph.column_stores.insert(node_type, Arc::new(store));
             }
-            // Assign Arc refs to all nodes (existing + newly created)
+            // Assign Arc refs to all nodes (existing + newly created).
+            // For disk mode, also update the DiskNodeSlot.row_id directly:
+            // node_weight_mut() materializes into an arena that gets cleared on
+            // the next call, so the property assignment alone doesn't persist
+            // the per-type row_id back to the slot. Without this, slot.row_id
+            // keeps the slot-index value assigned by add_node().
             for (node_idx, node_type, row_id) in deferred_columnar {
                 let arc_store = graph.column_stores.get(&node_type).unwrap().clone();
                 if let Some(node) = graph.graph.node_weight_mut(node_idx) {
@@ -489,6 +490,9 @@ impl BatchProcessor {
                         store: arc_store,
                         row_id,
                     };
+                }
+                if let GraphBackend::Disk(ref mut dg) = graph.graph {
+                    dg.update_row_id(node_idx, row_id);
                 }
             }
         }

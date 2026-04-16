@@ -131,12 +131,15 @@ def test_ntriples_graph(g, mode, label):
     info = g.graph_info()
     print(f"\n  {label} ({mode}): {info.get('node_count',0):,} nodes, {info.get('edge_count',0):,} edges")
 
+    # Disk/mapped store IDs as integers (42), memory stores as strings ('Q42')
+    id_val = 42 if mode in ("disk", "mapped") else "'Q42'"
+
     run_query(g, name, mode, "count(n)", "MATCH (n) RETURN count(n)")
     run_query(g, name, mode, "count by type", "MATCH (n) RETURN n.type, count(n) AS c ORDER BY c DESC LIMIT 10")
     run_query(g, name, mode, "edge count by type", "MATCH ()-[r]->() RETURN type(r), count(*) AS c ORDER BY c DESC LIMIT 10")
-    run_query(g, name, mode, "id lookup", "MATCH (n {id: 42}) RETURN n.id, n.title, n.type")
-    run_query(g, name, mode, "P31 hop", "MATCH ({id:42})-[:P31]->(m) RETURN m.title")
-    run_query(g, name, mode, "2-hop LIM20", "MATCH ({id:42})-[]->(b)-[]->(c) RETURN b.title, c.title LIMIT 20")
+    run_query(g, name, mode, "id lookup", f"MATCH (n {{id: {id_val}}}) RETURN n.id, n.title, n.type")
+    run_query(g, name, mode, "P31 hop", f"MATCH ({{id:{id_val}}})-[:P31]->(m) RETURN m.title")
+    run_query(g, name, mode, "2-hop LIM20", f"MATCH ({{id:{id_val}}})-[]->(b)-[]->(c) RETURN b.title, c.title LIMIT 20")
     run_query(g, name, mode, "P31 LIMIT 50", "MATCH (a)-[:P31]->(b) RETURN a.title, b.title LIMIT 50")
     run_describe(g, name, mode, "describe()")
 

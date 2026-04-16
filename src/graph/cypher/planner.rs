@@ -1295,8 +1295,12 @@ fn fuse_match_return_aggregate(query: &mut CypherQuery) {
 
         // Check RETURN: must have count() aggregate + group-by on one node variable.
         // Determine which variable is the group key (first or second).
+        //
+        // HAVING is allowed and carried through on the ReturnClause — the fused
+        // executor applies it post-aggregation against the small group-by map
+        // instead of against the materialised edge-row set.
         let fusable = if let Clause::Return(r) = &query.clauses[i + 1] {
-            if r.distinct || r.having.is_some() {
+            if r.distinct {
                 false
             } else {
                 let mut has_count = false;
@@ -1448,6 +1452,16 @@ fn fuse_aggregate_order_limit(query: &mut CypherQuery) {
         if !is_pattern {
             i += 1;
             continue;
+        }
+
+        // Skip fusion when HAVING is present. HAVING must apply on the full
+        // aggregated set BEFORE any top-K; absorbing ORDER BY + LIMIT here
+        // would flip that order and drop entries that should've passed.
+        if let Clause::FusedMatchReturnAggregate { return_clause, .. } = &query.clauses[i] {
+            if return_clause.having.is_some() {
+                i += 1;
+                continue;
+            }
         }
 
         // Extract ORDER BY sort key and LIMIT value

@@ -19,15 +19,26 @@ use std::sync::{Arc, RwLock};
 pub struct InternedKey(u64);
 
 impl InternedKey {
-    /// Compute the interned key from a string. Deterministic across runs
-    /// (uses Rust's default SipHash which is seeded per-process, but that's
-    /// fine since InternedKeys are never persisted as u64 — they serialize
-    /// as their original string).
+    /// Compute the interned key from a string. **Must be deterministic across
+    /// processes and library versions** — `DiskNodeSlot.node_type` persists
+    /// this as raw u64 on disk (`disk_graph.rs`), and the loader resolves it
+    /// via the freshly-built interner's hashes. A per-process random seed
+    /// (e.g. `DefaultHasher`) would break cross-process disk loads.
+    ///
+    /// Uses FNV-1a 64-bit. Fast, zero-alloc, dependency-free, deterministic.
+    /// Our corpus (property names, type names) is at most a few thousand
+    /// short strings, so collision risk is negligible; debug builds also
+    /// assert non-collision in `StringInterner::register`.
     #[inline]
     pub fn from_str(s: &str) -> Self {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        s.hash(&mut hasher);
-        InternedKey(hasher.finish())
+        const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+        const FNV_PRIME: u64 = 0x100000001b3;
+        let mut h = FNV_OFFSET;
+        for &byte in s.as_bytes() {
+            h ^= byte as u64;
+            h = h.wrapping_mul(FNV_PRIME);
+        }
+        InternedKey(h)
     }
 
     /// Get the raw u64 hash value. Used for disk storage.
@@ -145,7 +156,14 @@ impl StringInterner {
         self.strings
             .get(&key)
             .map(|s| s.as_str())
-            .expect("BUG: InternedKey not found in StringInterner")
+            .unwrap_or_else(|| {
+                eprintln!(
+                    "BUG: InternedKey {} not found in StringInterner ({} entries)",
+                    key.as_u64(),
+                    self.strings.len()
+                );
+                "<unknown>"
+            })
     }
 
     /// Iterate over all (key, string) pairs in the interner.
@@ -2516,6 +2534,9 @@ impl DirGraph {
 
     /// Snapshot which property/composite indexes exist so they survive serialization.
     /// Called automatically before save.
+    /// Sync node_type_metadata to match actual column store contents.
+    /// Removes properties from metadata that have no data in any column store.
+    /// Called before save to ensure metadata consistency.
     pub fn populate_index_keys(&mut self) {
         self.property_index_keys = self.property_indices.keys().cloned().collect();
         self.composite_index_keys = self.composite_indices.keys().cloned().collect();
@@ -2758,12 +2779,20 @@ impl DirGraph {
         }
     }
 
+    /// Compact a disk-mode graph: merge overflow edges back into CSR arrays.
+    /// Returns the number of overflow edges that were merged.
+    /// No-op if there are no overflow edges.
+    pub fn compact_disk(&mut self) -> Result<usize, String> {
+        match &mut self.graph {
+            GraphBackend::Disk(ref mut dg) => Ok(dg.compact()),
+            _ => Err("compact requires disk mode".to_string()),
+        }
+    }
+
     /// Save a disk-mode graph to a directory. The directory IS the graph.
     /// Persists CSR files, node data, edge properties, column stores, and metadata.
     pub fn save_disk(&mut self, path: &str) -> Result<(), String> {
         // Build CSR from pending edges if not yet built.
-        // Edges from add_connections() are queued in pending_edges —
-        // they must be converted to CSR before saving.
         self.ensure_disk_edges_built();
 
         let dir = std::path::Path::new(path);
@@ -2809,6 +2838,43 @@ impl DirGraph {
                 .map_err(|e| format!("Column compression failed: {}", e))?;
             std::fs::write(type_dir.join("columns.zst"), compressed)
                 .map_err(|e| format!("Failed to write columns: {}", e))?;
+        }
+
+        // Save type_indices and id_indices (previously only written by N-Triples builder)
+        {
+            let ti_bytes = bincode::serialize(&self.type_indices)
+                .map_err(|e| format!("type_indices serialization failed: {}", e))?;
+            let ti_compressed = zstd::encode_all(ti_bytes.as_slice(), 3)
+                .map_err(|e| format!("type_indices compression failed: {}", e))?;
+            std::fs::write(dir.join("type_indices.bin.zst"), ti_compressed)
+                .map_err(|e| format!("Failed to write type_indices: {}", e))?;
+
+            let ii_bytes = bincode::serialize(&self.id_indices)
+                .map_err(|e| format!("id_indices serialization failed: {}", e))?;
+            let ii_compressed = zstd::encode_all(ii_bytes.as_slice(), 3)
+                .map_err(|e| format!("id_indices compression failed: {}", e))?;
+            std::fs::write(dir.join("id_indices.bin.zst"), ii_compressed)
+                .map_err(|e| format!("Failed to write id_indices: {}", e))?;
+        }
+
+        // Save embeddings if any (matches write_graph_v3 behavior for in-memory saves)
+        if !self.embeddings.is_empty() {
+            let emb_bytes = bincode::serialize(&self.embeddings)
+                .map_err(|e| format!("embeddings serialization failed: {}", e))?;
+            let emb_compressed = zstd::encode_all(emb_bytes.as_slice(), 3)
+                .map_err(|e| format!("embeddings compression failed: {}", e))?;
+            std::fs::write(dir.join("embeddings.bin.zst"), emb_compressed)
+                .map_err(|e| format!("Failed to write embeddings: {}", e))?;
+        }
+
+        // Save timeseries_store if any
+        if !self.timeseries_store.is_empty() {
+            let ts_bytes = bincode::serialize(&self.timeseries_store)
+                .map_err(|e| format!("timeseries serialization failed: {}", e))?;
+            let ts_compressed = zstd::encode_all(ts_bytes.as_slice(), 3)
+                .map_err(|e| format!("timeseries compression failed: {}", e))?;
+            std::fs::write(dir.join("timeseries.bin.zst"), ts_compressed)
+                .map_err(|e| format!("Failed to write timeseries: {}", e))?;
         }
 
         Ok(())
@@ -2869,6 +2935,11 @@ impl DirGraph {
         // Track row_id assignment per type
         let mut row_ids: HashMap<String, HashMap<NodeIndex, u32>> = HashMap::new();
 
+        // Clean type_indices: remove entries for deleted/tombstoned nodes
+        for indices in self.type_indices.values_mut() {
+            indices.retain(|&idx| self.graph.node_weight(idx).is_some());
+        }
+
         // First pass: create stores and push rows
         for (node_type, indices) in &self.type_indices {
             let schema = match self.type_schemas.get(node_type) {
@@ -2886,25 +2957,35 @@ impl DirGraph {
 
             for &idx in indices {
                 if let Some(node) = self.graph.node_weight(idx) {
-                    // For Columnar nodes in mapped mode, id/title live in the
-                    // old store's id_column/title_column. Preserve them.
-                    let (id_from_store, title_from_store) = if let PropertyStorage::Columnar {
+                    // Push id/title for every node. For Columnar nodes, read from
+                    // the old column store. For Compact/Map nodes, use node.id/title.
+                    // Always push id and title. For Columnar nodes, try old store first,
+                    // fall back to node fields. For Compact/Map, use node fields directly.
+                    let id_val = if let PropertyStorage::Columnar {
                         store: old_store,
                         row_id: old_row,
                     } = &node.properties
                     {
-                        (old_store.get_id(*old_row), old_store.get_title(*old_row))
+                        old_store
+                            .get_id(*old_row)
+                            .unwrap_or_else(|| node.id.clone())
                     } else {
-                        (None, None)
+                        node.id.clone()
+                    };
+                    let title_val = if let PropertyStorage::Columnar {
+                        store: old_store,
+                        row_id: old_row,
+                    } = &node.properties
+                    {
+                        old_store
+                            .get_title(*old_row)
+                            .unwrap_or_else(|| node.title.clone())
+                    } else {
+                        node.title.clone()
                     };
 
-                    // Push id/title columns if the old store had them
-                    if let Some(ref id_val) = id_from_store {
-                        store.push_id(id_val);
-                    }
-                    if let Some(ref title_val) = title_from_store {
-                        store.push_title(title_val);
-                    }
+                    store.push_id(&id_val);
+                    store.push_title(&title_val);
 
                     // Collect properties from current storage
                     let pairs: Vec<(InternedKey, Value)> = match &node.properties {
@@ -3888,12 +3969,22 @@ impl GraphBackend {
         &self,
         conn_type: InternedKey,
         dir: petgraph::Direction,
-    ) -> HashMap<u32, i64> {
+        deadline: Option<std::time::Instant>,
+    ) -> Result<HashMap<u32, i64>, String> {
         match self {
-            GraphBackend::Disk(dg) => dg.count_edges_grouped_by_peer(conn_type.as_u64(), dir),
+            GraphBackend::Disk(dg) => {
+                dg.count_edges_grouped_by_peer(conn_type.as_u64(), dir, deadline)
+            }
             GraphBackend::InMemory(g) => {
                 let mut counts: HashMap<u32, i64> = HashMap::new();
-                for edge in g.edge_references() {
+                for (i, edge) in g.edge_references().enumerate() {
+                    if i.is_multiple_of(1 << 20) {
+                        if let Some(dl) = deadline {
+                            if std::time::Instant::now() > dl {
+                                return Err("Query timed out".to_string());
+                            }
+                        }
+                    }
                     if edge.weight().connection_type != conn_type {
                         continue;
                     }
@@ -3903,7 +3994,7 @@ impl GraphBackend {
                     };
                     *counts.entry(peer).or_insert(0) += 1;
                 }
-                counts
+                Ok(counts)
             }
         }
     }

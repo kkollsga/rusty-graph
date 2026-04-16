@@ -117,7 +117,8 @@ class TestNTriplesColumnar:
             "tests/data/sample_wikidata.nt",
             languages=["en"],
         )
-        r = graph.cypher("MATCH (n {id: 42}) RETURN n.description, n.P1082").to_df()
+        # Mapped mode uses string IDs (same as default mode)
+        r = graph.cypher('MATCH (n {id: "Q42"}) RETURN n.description, n.P1082').to_df()
         assert r["n.description"][0] == "English author and humourist"
         assert r["n.P1082"][0] == 42
 
@@ -127,6 +128,7 @@ class TestNTriplesColumnar:
             "tests/data/sample_wikidata.nt",
             languages=["en"],
         )
-        r = graph.cypher("MATCH (n {id: 42})-[:P27]->(m) RETURN m.title").to_df()
+        # Mapped mode uses string IDs (same as default mode)
+        r = graph.cypher('MATCH (n {id: "Q42"})-[:P27]->(m) RETURN m.title').to_df()
         assert len(r) == 1
         assert r["m.title"][0] == "United Kingdom"

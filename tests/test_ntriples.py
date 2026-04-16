@@ -127,27 +127,27 @@ class TestFiltering:
         assert countries >= 1  # United Kingdom
 
 
-class TestMappedModeIntegerIDs:
-    """Mapped mode uses Value::UniqueId(u32) for Q-codes."""
+class TestMappedModeStringIDs:
+    """Mapped mode uses string IDs (same as default mode) for API consistency."""
 
-    def test_integer_ids(self, nt_file):
+    def test_string_ids(self, nt_file):
         graph = KnowledgeGraph(storage="mapped")
         graph.load_ntriples(nt_file, languages=["en"])
-        # Q42 should be accessible as integer 42
-        r = graph.cypher("MATCH (n {id: 42}) RETURN n.title").to_df()
+        # Q42 should be accessible as string "Q42" (same as default mode)
+        r = graph.cypher('MATCH (n {id: "Q42"}) RETURN n.title').to_df()
         assert r["n.title"][0] == "Douglas Adams"
 
-    def test_integer_id_in_result(self, nt_file):
+    def test_string_id_in_result(self, nt_file):
         graph = KnowledgeGraph(storage="mapped")
         graph.load_ntriples(nt_file, languages=["en"])
-        r = graph.cypher("MATCH (n {id: 42}) RETURN n.id").to_df()
-        assert r["n.id"][0] == 42  # integer, not "Q42"
+        r = graph.cypher('MATCH (n {id: "Q42"}) RETURN n.id').to_df()
+        assert r["n.id"][0] == "Q42"  # string, same as default mode
 
-    def test_edges_work_with_integer_ids(self, nt_file):
+    def test_edges_work_with_string_ids(self, nt_file):
         graph = KnowledgeGraph(storage="mapped")
         graph.load_ntriples(nt_file, languages=["en"])
         # Q42 -> Q145 via P27 (citizenship)
-        r = graph.cypher("MATCH (n {id: 42})-[:P27]->(m) RETURN m.title").to_df()
+        r = graph.cypher('MATCH (n {id: "Q42"})-[:P27]->(m) RETURN m.title').to_df()
         assert len(r) == 1
         assert r["m.title"][0] == "United Kingdom"
 
@@ -160,7 +160,7 @@ class TestMappedModeIntegerIDs:
     def test_typed_literal_property(self, nt_file):
         graph = KnowledgeGraph(storage="mapped")
         graph.load_ntriples(nt_file, languages=["en"])
-        r = graph.cypher("MATCH (n {id: 42}) RETURN n.P1082").to_df()
+        r = graph.cypher('MATCH (n {id: "Q42"}) RETURN n.P1082').to_df()
         assert r["n.P1082"][0] == 42  # decimal literal parsed as int
 
 

@@ -1058,6 +1058,21 @@ impl<'a> PatternExecutor<'a> {
                     .par_iter()
                     .zip(current_indices.par_iter())
                     .flat_map(|(current_match, &source_idx)| {
+                        // Short-circuit once any thread has detected a timeout/error,
+                        // and independently check the deadline from each thread so a
+                        // parallel expansion over 100M+ sources cannot run unbounded.
+                        if had_error.load(std::sync::atomic::Ordering::Relaxed) {
+                            return Vec::new();
+                        }
+                        if let Some(dl) = self.deadline {
+                            if Instant::now() > dl {
+                                if !had_error.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                    *first_error.lock().unwrap() =
+                                        Some("Query timed out".to_string());
+                                }
+                                return Vec::new();
+                            }
+                        }
                         let expansions = match self.expand_from_node(
                             source_idx,
                             edge_pattern,
