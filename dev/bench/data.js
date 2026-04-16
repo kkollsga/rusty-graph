@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776371880511,
+  "lastUpdate": 1776378445227,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -6596,6 +6596,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.000018383508147357732",
             "extra": "mean: 1.208985471794659 msec\nrounds: 780"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "cf97b315e8b5622a25554a304b04fd3cb127ed7d",
+          "message": "release: v0.7.14 — Wikidata Cypher aggregate + anchored-count perf\n\nTurns five Wikidata Cypher timeouts into sub-second queries by wiring up\ntwo new disk-mode fast paths and unblocking a cache that had been missed\nin v0.7.12.\n\nAdded:\n- Per-(conn_type, peer) edge-count histogram as a persistent disk cache.\n  Built during CSR construction via a single parallel scan of\n  edge_endpoints.bin, stored as three flat peer_count_*.bin files.\n  Replaces the 13 GB sequential scan for unanchored aggregate queries\n  (MATCH (a)-[:T]->(b) RETURN b, count(a) ORDER BY cnt DESC LIMIT N)\n  with a HashMap lookup — ms instead of tens of seconds.\n- FusedCountAnchoredEdges planner rule. Anchored counts like\n  MATCH (m)-[:P31]->({id: 5}) RETURN count(m) are fused into O(log D)\n  CSR offset arithmetic; the anchor resolves to a NodeIndex at plan\n  time via id_indices.\n- Tombstone-free short-circuit in count_edges_filtered. When no\n  removals have happened and there's no peer-type filter, returns\n  end - start directly after the binary search. Adds has_tombstones\n  to DiskGraphMeta (conservatively true for legacy graphs).\n- Bounded sources_for_conn_type. LIMIT-bounded pattern queries no\n  longer pay the 400 MB eager source copy on cold cache.\n- FusedCountTypedEdge now uses the cached edge-type counts (one-liner\n  miss from v0.7.12). 64 s scan → sub-ms lookup.\n- rebuild_caches() rebuilds the peer-count histogram on existing\n  graphs, so users can upgrade without a full rebuild.\n\nFixed:\n- DataFrame / blueprint disk builds now compact overflow into CSR at\n  save time, so conn_type_index and peer_count_histogram reflect\n  every live edge. Previously the first add_connections triggered\n  a partial CSR build; subsequent batches went to overflow and\n  never refreshed the indexes.\n- lookup_peer_counts returns None on cache miss (was Some(empty),\n  which suppressed the correct fallback to count_edges_grouped_by_peer).\n- Deadline plumbed through try_count_simple_pattern and\n  count_edges_filtered (every 1 M iterations). Closes the bypass that\n  let Q5-class hub counts run 5× past the 20 s default timeout.\n- Deadline check added to expand_var_length_fast inner edge loop.\n\nWikidata Cypher benchmark (124 M nodes, 862 M edges) on USB SSD —\n42/44 OK, zero crashes. Selected comparisons vs v0.7.12:\n\n  unanchored_P31_count:   64 s → 0.7 ms (~90 000×)\n  Q5_count_P31_incoming:  100 s TIMEOUT → 615 ms (~160×)\n  Q5_incoming_all_count:  20 s TIMEOUT → 670 ms\n  Q515_count_P31:         1.3 s → 12 ms\n  limit_10_P31 (cold):    2.6 s → 10 ms (~260×)\n  cross_type_limited:     2.5 s → 3 ms (~830×)\n  varpath_Q42_1_2:        31 s TIMEOUT → 92 ms\n\nRemaining: agg_P31_by_target (53 s), agg_P27_by_country and agg_having\n(TIMEOUT) — histogram lookup apparently misses. Tracked in\ndev-documentation/disk-mode-remaining-bugs.md.\n\nVerified: make test (1786 pass), make lint clean, api_benchmark 51/51\nacross memory, mapped, disk.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-17T00:24:39+02:00",
+          "tree_id": "00d5f06fc3f3d1f72e06b2f17c9c30c9c37511e6",
+          "url": "https://github.com/kkollsga/kglite/commit/cf97b315e8b5622a25554a304b04fd3cb127ed7d"
+        },
+        "date": 1776378444755,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1169.908923437785,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000021270703785319005",
+            "extra": "mean: 854.7673925432532 usec\nrounds: 456"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 819.7284514481481,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000323180957065391",
+            "extra": "mean: 1.2199161786240074 msec\nrounds: 683"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 12279.606457727066,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000037031438274193296",
+            "extra": "mean: 81.43583456379743 usec\nrounds: 5960"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1631.5776611801896,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000019929458637179455",
+            "extra": "mean: 612.90370896391 usec\nrounds: 859"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 662715.2907168539,
+            "unit": "iter/sec",
+            "range": "stddev: 4.051578781420419e-7",
+            "extra": "mean: 1.5089436052068572 usec\nrounds: 106907"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 129703.40084593518,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000010767279126455884",
+            "extra": "mean: 7.709898071121698 usec\nrounds: 17885"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2120.242993945621,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00001084813522277897",
+            "extra": "mean: 471.64405346722606 usec\nrounds: 3591"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1608.9772699075063,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000020023123243113883",
+            "extra": "mean: 621.5128197911 usec\nrounds: 1243"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 12085.095909793525,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000038184348136626336",
+            "extra": "mean: 82.74655058298873 usec\nrounds: 9005"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 811.3664238780603,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00001966292164726437",
+            "extra": "mean: 1.232488762870337 msec\nrounds: 641"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 818.2296249837308,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00011062625382041604",
+            "extra": "mean: 1.2221508112956476 msec\nrounds: 779"
           }
         ]
       }
