@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776322208437,
+  "lastUpdate": 1776322548446,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -6293,6 +6293,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.00002030239476677283",
             "extra": "mean: 1.1184931742161275 msec\nrounds: 861"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "41881fd42aae84f72c2e1cfcc82e6a4e4779b3a4",
+          "message": "docs: disk mode iterative updates — findings, analysis, and architecture proposal\n\nDocuments the current state of disk mode with DataFrame API:\n- Root cause of mmap file-handle conflict during CSR rebuild\n- How DuckDB, RocksDB, Neo4j, and SQLite handle live updates\n- Proposed CSR + Overflow + Periodic Compaction architecture\n- What's already built (overflow mechanism, tombstones, slot reuse)\n- What needs building (mmap lifecycle fix, compaction, incremental indices)\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-16T08:53:03+02:00",
+          "tree_id": "01f084799377d5cacd393c48a59cde49143bbae6",
+          "url": "https://github.com/kkollsga/kglite/commit/41881fd42aae84f72c2e1cfcc82e6a4e4779b3a4"
+        },
+        "date": 1776322548129,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1139.86842065804,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00003090516329070518",
+            "extra": "mean: 877.29424017441 usec\nrounds: 458"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 804.9134040927275,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00003439022187779774",
+            "extra": "mean: 1.2423696697251152 msec\nrounds: 654"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 12983.74936979862,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000158986247031708",
+            "extra": "mean: 77.01935485030933 usec\nrounds: 5701"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1521.6785719339707,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00008617701240360764",
+            "extra": "mean: 657.1690095688568 usec\nrounds: 836"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 640279.8062909872,
+            "unit": "iter/sec",
+            "range": "stddev: 4.3396028837625605e-7",
+            "extra": "mean: 1.5618171777004806 usec\nrounds: 58669"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 130084.76622774707,
+            "unit": "iter/sec",
+            "range": "stddev: 9.586317365301987e-7",
+            "extra": "mean: 7.687295207566741 usec\nrounds: 16839"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2542.1530966919786,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000010215602963668862",
+            "extra": "mean: 393.3673394026771 usec\nrounds: 4119"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1564.831430302183,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000026370166833791607",
+            "extra": "mean: 639.0464689266184 usec\nrounds: 1062"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 13528.140288559605,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000036587958439570645",
+            "extra": "mean: 73.91999038076754 usec\nrounds: 7693"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 899.9864683890105,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000233657914410946",
+            "extra": "mean: 1.1111278170548666 msec\nrounds: 645"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 918.4254784480962,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002197450069854681",
+            "extra": "mean: 1.0888199679409416 msec\nrounds: 811"
           }
         ]
       }
