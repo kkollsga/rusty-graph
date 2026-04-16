@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from kglite import load
 
-GRAPH_DIR = "/Volumes/EksternalHome/Data/Wikidata/wikidata_disk_graph"
+GRAPH_DIR = "/Volumes/EksternalHome/Data/Wikidata/wikidata_disk_graph_v2"
 SCRIPT_DIR = Path(__file__).parent
 CSV_OUT = str(SCRIPT_DIR / "benchmark_wikidata_cypher.csv")
 TIMEOUT_MS = 20_000  # 20s per query

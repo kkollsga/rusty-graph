@@ -2776,6 +2776,12 @@ impl DirGraph {
     pub fn ensure_disk_edges_built(&mut self) {
         if let GraphBackend::Disk(ref mut dg) = self.graph {
             dg.build_csr_from_pending();
+            // Don't compact here — overflow-merge is O(E), so calling it
+            // after every add_connections batch would make multi-batch
+            // builds quadratic. Queries still see overflow edges via the
+            // merged DiskEdges iterator. Aggregate caches (conn_type_index
+            // / peer_count_histogram) are refreshed at save time by
+            // `save_disk` when overflow is present.
         }
     }
 
@@ -2794,6 +2800,15 @@ impl DirGraph {
     pub fn save_disk(&mut self, path: &str) -> Result<(), String> {
         // Build CSR from pending edges if not yet built.
         self.ensure_disk_edges_built();
+        // Merge overflow edges back so conn_type_index and
+        // peer_count_histogram reflect every live edge. Skipped during
+        // builds; done here as a one-shot so users only pay the cost at
+        // save time, not per add_connections batch.
+        if let GraphBackend::Disk(ref mut dg) = self.graph {
+            if dg.has_overflow() {
+                dg.compact();
+            }
+        }
 
         let dir = std::path::Path::new(path);
         let dg = match &self.graph {
@@ -3956,15 +3971,39 @@ impl GraphBackend {
 
     /// Look up source nodes with outgoing edges of a given type (from inverted index).
     /// Returns None if index not available (in-memory graphs or older disk graphs).
+    #[allow(dead_code)]
     pub fn sources_for_conn_type(&self, conn_type: InternedKey) -> Option<Vec<u32>> {
+        self.sources_for_conn_type_bounded(conn_type, None)
+    }
+
+    /// Bounded variant — caller passes `Some(cap)` to avoid eager 400 MB
+    /// copies when the pattern executor will truncate to a few thousand
+    /// sources anyway.
+    pub fn sources_for_conn_type_bounded(
+        &self,
+        conn_type: InternedKey,
+        max: Option<usize>,
+    ) -> Option<Vec<u32>> {
         match self {
-            GraphBackend::Disk(dg) => dg.sources_for_conn_type(conn_type.as_u64()),
+            GraphBackend::Disk(dg) => dg.sources_for_conn_type_bounded(conn_type.as_u64(), max),
             GraphBackend::InMemory(_) => None,
         }
     }
 
     /// Count ALL edges of a connection type grouped by peer node.
     /// Returns HashMap<peer_u32, count>. Sequential I/O — O(E) for the type.
+    /// Persistent-cache fast path for per-peer edge counts. Returns Some on
+    /// disk graphs that have the histogram built, None otherwise (caller
+    /// falls back to `count_edges_grouped_by_peer` for the in-memory case
+    /// or older disk graphs). Reply matches the HashMap shape of the slow
+    /// path exactly so the caller logic is identical.
+    pub fn lookup_peer_counts(&self, conn_type: InternedKey) -> Option<HashMap<u32, i64>> {
+        match self {
+            GraphBackend::Disk(dg) => dg.lookup_peer_counts(conn_type.as_u64()),
+            GraphBackend::InMemory(_) => None,
+        }
+    }
+
     pub fn count_edges_grouped_by_peer(
         &self,
         conn_type: InternedKey,
@@ -4008,14 +4047,26 @@ impl GraphBackend {
         dir: petgraph::Direction,
         conn_type: Option<InternedKey>,
         other_node_type: Option<InternedKey>,
-    ) -> usize {
+        deadline: Option<std::time::Instant>,
+    ) -> Result<usize, String> {
         match self {
-            GraphBackend::Disk(dg) => {
-                dg.count_edges_filtered(node, dir, conn_type.map(|k| k.as_u64()), other_node_type)
-            }
+            GraphBackend::Disk(dg) => dg.count_edges_filtered(
+                node,
+                dir,
+                conn_type.map(|k| k.as_u64()),
+                other_node_type,
+                deadline,
+            ),
             GraphBackend::InMemory(g) => {
                 let mut count = 0;
-                for edge in g.edges_directed(node, dir) {
+                for (i, edge) in g.edges_directed(node, dir).enumerate() {
+                    if i.is_multiple_of(1 << 20) {
+                        if let Some(dl) = deadline {
+                            if std::time::Instant::now() > dl {
+                                return Err("Query timed out".to_string());
+                            }
+                        }
+                    }
                     if let Some(ct) = conn_type {
                         if edge.weight().connection_type != ct {
                             continue;
@@ -4037,7 +4088,7 @@ impl GraphBackend {
                     }
                     count += 1;
                 }
-                count
+                Ok(count)
             }
         }
     }

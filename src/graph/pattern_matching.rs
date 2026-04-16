@@ -973,7 +973,14 @@ impl<'a> PatternExecutor<'a> {
                     false
                 };
                 if let (Some(ct), true) = (edge_conn_type, is_outgoing) {
-                    if let Some(sources) = self.graph.graph.sources_for_conn_type(ct) {
+                    // Pass `source_cap` through so we don't eagerly copy the
+                    // whole 400 MB source list from the inverted index for
+                    // a query that only needs 1 000 of them.
+                    if let Some(sources) = self
+                        .graph
+                        .graph
+                        .sources_for_conn_type_bounded(ct, source_cap)
+                    {
                         // Convert u32 source IDs to NodeIndex
                         sources
                             .into_iter()
@@ -1997,7 +2004,20 @@ impl<'a> PatternExecutor<'a> {
                     .graph
                     .edges_directed_filtered(current, direction, conn_key);
 
+                let mut inner_iter: usize = 0;
                 for edge in edges {
+                    inner_iter += 1;
+                    // Inner-loop deadline check. A 1-2 hop fan-out from a hub
+                    // like Q42 can push hundreds of millions of inner
+                    // iterations between the outer `iter_count & 511` check
+                    // — without this the 20 s deadline overshoots to 30+ s.
+                    if inner_iter.is_multiple_of(1 << 20) {
+                        if let Some(dl) = self.deadline {
+                            if Instant::now() > dl {
+                                return Err("Query timed out".to_string());
+                            }
+                        }
+                    }
                     let edge_data = edge.weight();
 
                     // Check connection type(s) (u64 == u64)

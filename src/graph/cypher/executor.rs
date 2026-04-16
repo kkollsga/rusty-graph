@@ -231,6 +231,19 @@ pub fn clause_display_name(clause: &Clause) -> String {
         Clause::FusedCountTypedEdge { edge_type, .. } => {
             format!("FusedCountTypedEdge :{edge_type}")
         }
+        Clause::FusedCountAnchoredEdges {
+            anchor_idx,
+            anchor_direction,
+            edge_type,
+            ..
+        } => {
+            let arrow = match anchor_direction {
+                petgraph::Direction::Outgoing => "→",
+                petgraph::Direction::Incoming => "←",
+            };
+            let t = edge_type.as_deref().unwrap_or("*");
+            format!("FusedCountAnchoredEdges (anchor#{anchor_idx} {arrow} :{t})")
+        }
         Clause::FusedNodeScanAggregate { .. } => "FusedNodeScanAggregate".into(),
         Clause::FusedNodeScanTopK { limit, .. } => format!("FusedNodeScanTopK (k={limit})"),
     }
@@ -529,13 +542,39 @@ impl<'a> CypherExecutor<'a> {
                 })
             }
             Clause::FusedCountTypedEdge { edge_type, alias } => {
-                let interned_et = InternedKey::from_str(edge_type);
-                let count = self
-                    .graph
-                    .graph
-                    .edge_weights()
-                    .filter(|e| e.connection_type == interned_et)
-                    .count() as i64;
+                // Use the cached edge-type count. Populated by the N-Triples
+                // builder and persisted in metadata; for in-memory graphs the
+                // first call walks edges once and caches. Either way this
+                // turns an O(E) scan into an O(1) HashMap lookup (on Wikidata,
+                // 64 s → sub-millisecond).
+                let counts = self.graph.get_edge_type_counts();
+                let count = counts.get(edge_type).copied().unwrap_or(0) as i64;
+                let mut projected = Bindings::with_capacity(1);
+                projected.insert(alias.clone(), Value::Int64(count));
+                Ok(ResultSet {
+                    rows: vec![ResultRow::from_projected(projected)],
+                    columns: vec![alias.clone()],
+                })
+            }
+            Clause::FusedCountAnchoredEdges {
+                anchor_idx,
+                anchor_direction,
+                edge_type,
+                alias,
+            } => {
+                // O(log D) count from CSR offsets (with binary search when a
+                // connection type is specified). The anchor has already been
+                // resolved at plan time; an invalid index falls through
+                // `count_edges_filtered` to a clean `Ok(0)`.
+                let idx = petgraph::graph::NodeIndex::new(*anchor_idx as usize);
+                let conn = edge_type.as_deref().map(InternedKey::from_str);
+                let count = self.graph.graph.count_edges_filtered(
+                    idx,
+                    *anchor_direction,
+                    conn,
+                    None,
+                    self.deadline,
+                )? as i64;
                 let mut projected = Bindings::with_capacity(1);
                 projected.insert(alias.clone(), Value::Int64(count));
                 Ok(ResultSet {
@@ -1459,28 +1498,28 @@ impl<'a> CypherExecutor<'a> {
         &self,
         pattern: &crate::graph::pattern_matching::Pattern,
         bindings: &Bindings<NodeIndex>,
-    ) -> Option<i64> {
+    ) -> Result<Option<i64>, String> {
         // Only handle simple 3-element patterns: Node-Edge-Node
         if pattern.elements.len() != 3 {
-            return None;
+            return Ok(None);
         }
 
         let node_a = match &pattern.elements[0] {
             PatternElement::Node(np) => np,
-            _ => return None,
+            _ => return Ok(None),
         };
         let edge = match &pattern.elements[1] {
             PatternElement::Edge(ep) => ep,
-            _ => return None,
+            _ => return Ok(None),
         };
         let node_b = match &pattern.elements[2] {
             PatternElement::Node(np) => np,
-            _ => return None,
+            _ => return Ok(None),
         };
 
         // Don't use fast-path for variable-length edges or edge property filters
         if edge.var_length.is_some() || edge.properties.is_some() {
-            return None;
+            return Ok(None);
         }
 
         // Don't use fast-path if the bound (group-key) node has property filters
@@ -1503,28 +1542,28 @@ impl<'a> CypherExecutor<'a> {
             (None, Some(b_idx)) => {
                 // b is bound — traverse from b, other node is a
                 if node_b.properties.is_some() {
-                    return None; // bound node with props: fall back
+                    return Ok(None); // bound node with props: fall back
                 }
                 let dir = match edge.direction {
                     EdgeDirection::Outgoing => Direction::Incoming, // (a)->b means b has incoming
                     EdgeDirection::Incoming => Direction::Outgoing, // (a)<-b means b has outgoing
-                    EdgeDirection::Both => return None,
+                    EdgeDirection::Both => return Ok(None),
                 };
                 (b_idx, &node_a.node_type, &node_a.properties, dir)
             }
             (Some(a_idx), None) => {
                 // a is bound — traverse from a, other node is b
                 if node_a.properties.is_some() {
-                    return None; // bound node with props: fall back
+                    return Ok(None); // bound node with props: fall back
                 }
                 let dir = match edge.direction {
                     EdgeDirection::Outgoing => Direction::Outgoing,
                     EdgeDirection::Incoming => Direction::Incoming,
-                    EdgeDirection::Both => return None,
+                    EdgeDirection::Both => return Ok(None),
                 };
                 (a_idx, &node_b.node_type, &node_b.properties, dir)
             }
-            _ => return None, // both bound or neither bound — fall back
+            _ => return Ok(None), // both bound or neither bound — fall back
         };
 
         let conn_type = edge.connection_type.as_deref();
@@ -1540,19 +1579,27 @@ impl<'a> CypherExecutor<'a> {
                 traverse_dir,
                 interned_conn,
                 interned_other_type,
-            );
-            return Some(count as i64);
+                self.deadline,
+            )?;
+            return Ok(Some(count as i64));
         }
 
-        // Slow path: property filters require per-node property access
+        // Slow path: property filters require per-node property access.
+        // This loop can iterate millions of edges for hub nodes (Q5 has ~40 M
+        // incoming P31 edges), so check the deadline every 1 M iterations.
         let pe = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params);
         let mut count: i64 = 0;
+        let mut iter: usize = 0;
 
         for edge_ref in
             self.graph
                 .graph
                 .edges_directed_filtered(bound_idx, traverse_dir, interned_conn)
         {
+            iter += 1;
+            if iter.is_multiple_of(1 << 20) {
+                self.check_deadline()?;
+            }
             // Connection type already filtered by edges_directed_filtered
             let other_idx = if traverse_dir == Direction::Outgoing {
                 edge_ref.target()
@@ -1579,7 +1626,7 @@ impl<'a> CypherExecutor<'a> {
             count += 1;
         }
 
-        Some(count)
+        Ok(Some(count))
     }
 
     /// Count matches for a 5-element pattern (a)-[e1]->(b)<-[e2]-(c)
@@ -1829,7 +1876,8 @@ impl<'a> CypherExecutor<'a> {
 
             for pattern in &match_clause.patterns {
                 // Fast-path: direct edge traversal when one end is pre-bound
-                if let Some(fast_count) = self.try_count_simple_pattern(pattern, &row.node_bindings)
+                if let Some(fast_count) =
+                    self.try_count_simple_pattern(pattern, &row.node_bindings)?
                 {
                     match_count += fast_count;
                 } else {
@@ -1991,20 +2039,23 @@ impl<'a> CypherExecutor<'a> {
             })
         };
 
-        // Helper: count edges for a node
-        let count_for_node = |node_idx: petgraph::graph::NodeIndex| -> i64 {
+        // Helper: count edges for a node. Returns Result so the deadline
+        // surfaced by try_count_simple_pattern can propagate through the
+        // surrounding heap/loop and terminate the query cleanly.
+        let count_for_node = |node_idx: petgraph::graph::NodeIndex| -> Result<i64, String> {
             if pattern.elements.len() == 5 {
                 if group_elem_idx == 0 {
-                    self.count_two_hop_pattern(pattern, node_idx)
+                    Ok(self.count_two_hop_pattern(pattern, node_idx))
                 } else {
                     // group is at position 4 — traverse backward from last node
-                    self.count_two_hop_pattern_reverse(pattern, node_idx)
+                    Ok(self.count_two_hop_pattern_reverse(pattern, node_idx))
                 }
             } else {
                 let mut bindings_for_count = Bindings::with_capacity(1);
                 bindings_for_count.insert(group_var.to_string(), node_idx);
-                self.try_count_simple_pattern(pattern, &bindings_for_count)
-                    .unwrap_or(0)
+                Ok(self
+                    .try_count_simple_pattern(pattern, &bindings_for_count)?
+                    .unwrap_or(0))
             }
         };
 
@@ -2080,11 +2131,20 @@ impl<'a> CypherExecutor<'a> {
 
                 if let Some(dir) = scan_dir {
                     self.check_deadline()?;
-                    let counts = self.graph.graph.count_edges_grouped_by_peer(
-                        conn_key,
-                        dir,
-                        self.deadline,
-                    )?;
+                    // Fast path: persistent per-(conn_type, peer) histogram
+                    // answers in O(distinct-peers). Falls back to edge_endpoints
+                    // scan for in-memory graphs and older disk graphs that
+                    // lack the histogram.
+                    let counts = if let Some(cached) = self.graph.graph.lookup_peer_counts(conn_key)
+                    {
+                        cached
+                    } else {
+                        self.graph.graph.count_edges_grouped_by_peer(
+                            conn_key,
+                            dir,
+                            self.deadline,
+                        )?
+                    };
                     // Top-K from the counts HashMap
                     let heap: BinaryHeap<Reverse<(i64, u32)>> = if descending {
                         let mut h = BinaryHeap::with_capacity(limit + 1);
@@ -2167,7 +2227,7 @@ impl<'a> CypherExecutor<'a> {
                             continue;
                         }
                     }
-                    let count = count_for_node(node_idx);
+                    let count = count_for_node(node_idx)?;
                     if count == 0 {
                         continue;
                     }
@@ -2202,7 +2262,7 @@ impl<'a> CypherExecutor<'a> {
                             continue;
                         }
                     }
-                    let count = count_for_node(node_idx);
+                    let count = count_for_node(node_idx)?;
                     if count == 0 {
                         continue;
                     }
@@ -2241,11 +2301,17 @@ impl<'a> CypherExecutor<'a> {
             ) {
                 let conn_key = InternedKey::from_str(ct_str);
                 self.check_deadline()?;
-                let counts = self.graph.graph.count_edges_grouped_by_peer(
-                    conn_key,
-                    Direction::Outgoing,
-                    self.deadline,
-                )?;
+                // Fast path: persistent histogram. See matching comment at the
+                // top-k branch.
+                let counts = if let Some(cached) = self.graph.graph.lookup_peer_counts(conn_key) {
+                    cached
+                } else {
+                    self.graph.graph.count_edges_grouped_by_peer(
+                        conn_key,
+                        Direction::Outgoing,
+                        self.deadline,
+                    )?
+                };
                 let mut rows = Vec::with_capacity(counts.len());
                 for (peer, count) in counts {
                     self.check_deadline()?;
@@ -2269,7 +2335,7 @@ impl<'a> CypherExecutor<'a> {
                     let Some(node_idx) = extract_node_idx(m) else {
                         continue;
                     };
-                    let match_count = count_for_node(node_idx);
+                    let match_count = count_for_node(node_idx)?;
                     // MATCH semantics: skip nodes with zero matching edges
                     if match_count == 0 {
                         continue;
@@ -2853,7 +2919,7 @@ impl<'a> CypherExecutor<'a> {
             let mut bindings_for_count = Bindings::with_capacity(1);
             bindings_for_count.insert(group_var.to_string(), node_idx);
             let match_count = self
-                .try_count_simple_pattern(pattern, &bindings_for_count)
+                .try_count_simple_pattern(pattern, &bindings_for_count)?
                 .unwrap_or(0);
 
             // Skip nodes with 0 matches (MATCH semantics — no outer join)

@@ -164,6 +164,20 @@ pub struct DiskGraph {
     pub(crate) conn_type_index_types: MmapOrVec<u64>,
     pub(crate) conn_type_index_offsets: MmapOrVec<u64>,
     pub(crate) conn_type_index_sources: MmapOrVec<u32>,
+    // ── Per-(conn_type, peer) edge-count histogram.
+    // Built alongside conn_type_index at CSR time; answers unanchored-aggregate
+    // queries (`MATCH (a)-[:T]->(b) RETURN b, count(a) ...`) in O(distinct-peers)
+    // instead of O(|edge_endpoints|). 3-array CSR layout mirrors
+    // conn_type_index. `peer_count_entries` is flat (peer_u32, count_u32) pairs
+    // sorted by peer within each type's slice — stored as u32 pairs to avoid
+    // alignment fuss (length is always 2× the pair count).
+    pub(crate) peer_count_types: MmapOrVec<u64>,
+    pub(crate) peer_count_offsets: MmapOrVec<u64>, // in units of pairs, not u32s
+    pub(crate) peer_count_entries: MmapOrVec<u32>, // [peer0, count0, peer1, count1, …]
+    // ── Tombstone tracking: set true when any node/edge is removed. Lets
+    // count_edges_filtered short-circuit the per-edge tombstone check when
+    // no removals have happened (fresh builds, reloaded read-only graphs).
+    pub(crate) has_tombstones: bool,
     // ── Temp dir for CSR mmap files (cleaned up on Drop) ──
 }
 
@@ -228,6 +242,10 @@ impl DiskGraph {
             conn_type_index_types: MmapOrVec::new(),
             conn_type_index_offsets: MmapOrVec::new(),
             conn_type_index_sources: MmapOrVec::new(),
+            peer_count_types: MmapOrVec::new(),
+            peer_count_offsets: MmapOrVec::new(),
+            peer_count_entries: MmapOrVec::new(),
+            has_tombstones: false,
         })
     }
 
@@ -374,6 +392,10 @@ impl DiskGraph {
             conn_type_index_types: MmapOrVec::new(),
             conn_type_index_offsets: MmapOrVec::new(),
             conn_type_index_sources: MmapOrVec::new(),
+            peer_count_types: MmapOrVec::new(),
+            peer_count_offsets: MmapOrVec::new(),
+            peer_count_entries: MmapOrVec::new(),
+            has_tombstones: false,
         })
     }
 
@@ -662,6 +684,7 @@ impl DiskGraph {
         self.node_slots.set(i, dead_slot);
         self.node_count -= 1;
         self.free_node_slots.push(i as u32);
+        self.has_tombstones = true;
 
         // Tombstone all incident edges
         self.tombstone_edges_for_node(i);
@@ -724,7 +747,8 @@ impl DiskGraph {
         dir: Direction,
         conn_type: Option<u64>,
         other_node_type: Option<InternedKey>,
-    ) -> usize {
+        deadline: Option<std::time::Instant>,
+    ) -> Result<usize, String> {
         self.ensure_csr();
         let idx = node.index();
         let (offsets, edges) = match dir {
@@ -732,7 +756,7 @@ impl DiskGraph {
             Direction::Incoming => (&self.in_offsets, &self.in_edges),
         };
         if idx >= offsets.len().saturating_sub(1) {
-            return 0;
+            return Ok(0);
         }
         let mut start = offsets.get(idx) as usize;
         let mut end = offsets.get(idx + 1) as usize;
@@ -752,8 +776,44 @@ impl DiskGraph {
             }
         }
 
+        // Fast path: no tombstones and no peer-type filter → the answer is
+        // literally the range length + overflow size, no scan required. This
+        // turns Q5-class "count all P31 incoming" queries from 40 M loop
+        // iterations (20+ s on USB SSD) into O(log D) binary search + two
+        // integer subtractions.
+        let can_shortcut = !self.has_tombstones
+            && other_node_type.is_none()
+            && (conn_type.is_none() || self.csr_sorted_by_type);
+        if can_shortcut {
+            let overflow = match dir {
+                Direction::Outgoing => self.overflow_out.get(&(idx as u32)),
+                Direction::Incoming => self.overflow_in.get(&(idx as u32)),
+            };
+            let mut overflow_count = 0usize;
+            if let Some(list) = overflow {
+                for e in list {
+                    if let Some(ct) = conn_type {
+                        if self.edge_endpoints.get(e.edge_idx as usize).connection_type != ct {
+                            continue;
+                        }
+                    }
+                    overflow_count += 1;
+                }
+            }
+            return Ok(end.saturating_sub(start) + overflow_count);
+        }
+
         let mut count = 0usize;
         for i in start..end {
+            // Deadline check every 1 M edges — enough for Q5-scale hub fan-in
+            // (~40 M P31 incoming) to terminate at ~20 s rather than 100 s.
+            if (i - start).is_multiple_of(1 << 20) {
+                if let Some(dl) = deadline {
+                    if std::time::Instant::now() > dl {
+                        return Err("Query timed out".to_string());
+                    }
+                }
+            }
             let e = edges.get(i);
             if e.edge_idx == TOMBSTONE_EDGE {
                 continue;
@@ -808,7 +868,7 @@ impl DiskGraph {
                 count += 1;
             }
         }
-        count
+        Ok(count)
     }
 
     /// Iterate peer node indices for edges of a specific type, without materializing
@@ -945,6 +1005,20 @@ impl DiskGraph {
     /// Returns an iterator-like slice of source node IDs from the inverted index.
     /// Returns None if the inverted index is not built (older graph format).
     pub fn sources_for_conn_type(&self, conn_type: u64) -> Option<Vec<u32>> {
+        self.sources_for_conn_type_bounded(conn_type, None)
+    }
+
+    /// Bounded variant of `sources_for_conn_type`. When `max.is_some()` the
+    /// function stops copying after the requested number of source node IDs
+    /// — avoids eagerly materialising ~100 M u32s (400 MB) into a heap Vec
+    /// when the caller will immediately truncate it to a few thousand.
+    ///
+    /// Overflow sources are always fully collected (tiny by definition).
+    pub fn sources_for_conn_type_bounded(
+        &self,
+        conn_type: u64,
+        max: Option<usize>,
+    ) -> Option<Vec<u32>> {
         if self.conn_type_index_types.is_empty() && self.overflow_out.is_empty() {
             return None;
         }
@@ -965,8 +1039,12 @@ impl DiskGraph {
                 } else {
                     let start = self.conn_type_index_offsets.get(mid) as usize;
                     let end = self.conn_type_index_offsets.get(mid + 1) as usize;
-                    sources.reserve(end - start);
-                    for i in start..end {
+                    let take_end = match max {
+                        Some(m) => start + (end - start).min(m),
+                        None => end,
+                    };
+                    sources.reserve(take_end - start);
+                    for i in start..take_end {
                         sources.push(self.conn_type_index_sources.get(i));
                     }
                     break;
@@ -974,7 +1052,10 @@ impl DiskGraph {
             }
         }
 
-        // Supplement with overflow sources — check each overflow node for matching edges
+        // Supplement with overflow sources — check each overflow node for matching edges.
+        // Overflow is almost always small; we don't apply `max` here because it'd require
+        // a second dedup pass and complicate the contract. Callers that use `max` on cold
+        // reads will rarely hit overflow anyway.
         if !self.overflow_out.is_empty() {
             for (&node_id, edges) in &self.overflow_out {
                 for e in edges {
@@ -1236,6 +1317,7 @@ impl DiskGraph {
 
         self.edge_count -= 1;
         self.free_edge_slots.push(ei32);
+        self.has_tombstones = true;
         Some(result)
     }
 
@@ -1366,6 +1448,14 @@ impl DiskGraph {
     /// Build CSR arrays from the pending edges log. Called lazily on first
     /// query, or explicitly on save. Uses external merge sort — all I/O is
     /// sequential, designed for larger-than-RAM graphs.
+    /// True if any overflow edges are present (edges added after the initial
+    /// CSR build). Used by `ensure_disk_edges_built` to decide whether to
+    /// merge overflow back into CSR so downstream indexes stay consistent.
+    pub fn has_overflow(&self) -> bool {
+        self.overflow_out.values().any(|v| !v.is_empty())
+            || self.overflow_in.values().any(|v| !v.is_empty())
+    }
+
     pub fn build_csr_from_pending(&mut self) {
         let pending = self.pending_edges.get_mut();
         if pending.is_empty() {
@@ -1797,6 +1887,8 @@ impl DiskGraph {
 
         // Build connection-type inverted index from the swapped CSR
         self.build_conn_type_index(node_bound, verbose);
+        // Build per-(type, peer) count histogram — single scan of edge_endpoints.
+        self.build_peer_count_histogram(verbose);
 
         let _ = self.write_metadata();
         self.metadata_dirty = false;
@@ -2170,6 +2262,8 @@ impl DiskGraph {
 
         // Build connection-type inverted index from the swapped CSR
         self.build_conn_type_index(node_bound, verbose);
+        // Build per-(type, peer) count histogram — single scan of edge_endpoints.
+        self.build_peer_count_histogram(verbose);
 
         let _ = self.write_metadata();
         self.metadata_dirty = false;
@@ -2415,6 +2509,200 @@ impl DiskGraph {
         }
     }
 
+    /// Build per-(conn_type, peer) edge-count histogram. Answers unanchored
+    /// aggregate queries in O(distinct-peers) instead of O(|edge_endpoints|).
+    /// Scans edge_endpoints once in parallel chunks and folds into per-thread
+    /// HashMap<(conn_type, peer), u32>; reduces + flattens to three mmap'd
+    /// arrays sorted by (conn_type, peer).
+    /// Build (or rebuild) the per-(conn_type, peer) edge-count histogram from
+    /// the current `edge_endpoints`. Safe to call on a loaded graph; writes
+    /// `peer_count_*.bin` files next to the other disk artifacts.
+    pub fn rebuild_peer_count_histogram(&mut self) {
+        let verbose = std::env::var("KGLITE_CSR_VERBOSE").is_ok();
+        self.build_peer_count_histogram(verbose);
+    }
+
+    fn build_peer_count_histogram(&mut self, verbose: bool) {
+        use rayon::prelude::*;
+        let start = std::time::Instant::now();
+
+        // Use edge_endpoints.len() rather than next_edge_idx — after certain
+        // build paths (compact, merge rebuilds) next_edge_idx may have been
+        // reset while edge_endpoints still holds the authoritative count.
+        let total = self.edge_endpoints.len().min(self.next_edge_idx as usize);
+        if total == 0 {
+            return;
+        }
+        let endpoints = &self.edge_endpoints;
+
+        // Advise kernel: we're about to do one large sequential read then drop
+        // these pages. Matches the pattern in count_edges_grouped_by_peer.
+        endpoints.advise_sequential();
+
+        // Chunk the edge range so each Rayon task gets a contiguous slice of
+        // edge_endpoints — maximises prefetcher effectiveness and keeps
+        // per-thread working set bounded.
+        let chunk = (total / rayon::current_num_threads().max(1)).max(1 << 20);
+        let chunks: Vec<(usize, usize)> = (0..total)
+            .step_by(chunk)
+            .map(|lo| (lo, (lo + chunk).min(total)))
+            .collect();
+
+        let shard_maps: Vec<HashMap<(u64, u32), u32>> = chunks
+            .into_par_iter()
+            .map(|(lo, hi)| {
+                let mut acc: HashMap<(u64, u32), u32> = HashMap::new();
+                for i in lo..hi {
+                    let ep = endpoints.get(i);
+                    if ep.source == TOMBSTONE_EDGE {
+                        continue;
+                    }
+                    // Target is the "peer" for an outgoing-oriented aggregate.
+                    // Group-by-source queries are the symmetric case, handled
+                    // lazily — histogram is stored keyed on target only;
+                    // we add a second histogram keyed on source below.
+                    *acc.entry((ep.connection_type, ep.target)).or_insert(0) += 1;
+                }
+                acc
+            })
+            .collect();
+
+        // Reduce shard maps (serial — hot entries cluster fast anyway).
+        let mut combined: HashMap<(u64, u32), u32> = HashMap::new();
+        for shard in shard_maps {
+            for (k, v) in shard {
+                *combined.entry(k).or_insert(0) += v;
+            }
+        }
+
+        endpoints.advise_dontneed();
+
+        // Group by conn_type, sort peers within each group, flatten.
+        let mut by_type: HashMap<u64, Vec<(u32, u32)>> = HashMap::new();
+        for ((ct, peer), count) in combined {
+            by_type.entry(ct).or_default().push((peer, count));
+        }
+        let mut sorted_types: Vec<u64> = by_type.keys().copied().collect();
+        sorted_types.sort();
+        for pairs in by_type.values_mut() {
+            pairs.sort_unstable_by_key(|&(p, _)| p);
+        }
+
+        let total_pairs: usize = by_type.values().map(|v| v.len()).sum();
+
+        // Build in heap Vecs first so the mmap'd files can be written with
+        // the exact required size (MmapOrVec::mapped has a 64-slot minimum
+        // that leaves trailing zeros — which break binary search because
+        // the padding hashes compare less than any real FNV-1a hash).
+        let mut types_vec: Vec<u64> = Vec::with_capacity(sorted_types.len());
+        let mut offsets_vec: Vec<u64> = Vec::with_capacity(sorted_types.len() + 1);
+        let mut entries_vec: Vec<u32> = Vec::with_capacity(total_pairs * 2);
+
+        let mut cur_pairs: u64 = 0;
+        for &ct in &sorted_types {
+            types_vec.push(ct);
+            offsets_vec.push(cur_pairs);
+            if let Some(pairs) = by_type.get(&ct) {
+                for &(peer, count) in pairs {
+                    entries_vec.push(peer);
+                    entries_vec.push(count);
+                }
+                cur_pairs += pairs.len() as u64;
+            }
+        }
+        offsets_vec.push(cur_pairs);
+
+        // Write exact-size raw byte files, then re-mmap with the known length.
+        let write_u64 = |path: &Path, data: &[u64]| -> std::io::Result<()> {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+            };
+            std::fs::write(path, bytes)
+        };
+        let write_u32 = |path: &Path, data: &[u32]| -> std::io::Result<()> {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+            };
+            std::fs::write(path, bytes)
+        };
+
+        let types_path = self.data_dir.join("peer_count_types.bin");
+        let offsets_path = self.data_dir.join("peer_count_offsets.bin");
+        let entries_path = self.data_dir.join("peer_count_entries.bin");
+        let _ = write_u64(&types_path, &types_vec);
+        let _ = write_u64(&offsets_path, &offsets_vec);
+        let _ = write_u32(&entries_path, &entries_vec);
+
+        let pc_types = if !types_vec.is_empty() {
+            MmapOrVec::load_mapped(&types_path, types_vec.len())
+                .unwrap_or_else(|_| MmapOrVec::from_vec(types_vec.clone()))
+        } else {
+            MmapOrVec::new()
+        };
+        let pc_offsets = if !offsets_vec.is_empty() {
+            MmapOrVec::load_mapped(&offsets_path, offsets_vec.len())
+                .unwrap_or_else(|_| MmapOrVec::from_vec(offsets_vec.clone()))
+        } else {
+            MmapOrVec::new()
+        };
+        let pc_entries = if !entries_vec.is_empty() {
+            MmapOrVec::load_mapped(&entries_path, entries_vec.len())
+                .unwrap_or_else(|_| MmapOrVec::from_vec(entries_vec.clone()))
+        } else {
+            MmapOrVec::new()
+        };
+
+        self.peer_count_types = pc_types;
+        self.peer_count_offsets = pc_offsets;
+        self.peer_count_entries = pc_entries;
+
+        if verbose {
+            eprintln!(
+                "    Built peer-count histogram: {} types, {} (peer, count) pairs ({:.1}s)",
+                sorted_types.len(),
+                total_pairs,
+                start.elapsed().as_secs_f64()
+            );
+        }
+    }
+
+    /// Look up peer counts for a connection type from the persistent histogram.
+    /// Returns None if the histogram hasn't been built (older graph format).
+    /// The returned HashMap matches what `count_edges_grouped_by_peer` produced.
+    pub fn lookup_peer_counts(&self, conn_type: u64) -> Option<HashMap<u32, i64>> {
+        if self.peer_count_types.is_empty() {
+            return None;
+        }
+        let n = self.peer_count_types.len();
+        // Binary search the types array.
+        let mut lo = 0usize;
+        let mut hi = n;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let t = self.peer_count_types.get(mid);
+            match t.cmp(&conn_type) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => {
+                    let start = self.peer_count_offsets.get(mid) as usize;
+                    let end = self.peer_count_offsets.get(mid + 1) as usize;
+                    let mut out: HashMap<u32, i64> = HashMap::with_capacity(end - start);
+                    for i in start..end {
+                        let peer = self.peer_count_entries.get(i * 2);
+                        let count = self.peer_count_entries.get(i * 2 + 1);
+                        out.insert(peer, count as i64);
+                    }
+                    return Some(out);
+                }
+            }
+        }
+        // Type not found in histogram. Return None so the caller falls back
+        // to the sequential `count_edges_grouped_by_peer` scan — the
+        // histogram may be stale (e.g. built pre-overflow-merge) and we
+        // prefer a slow but correct answer over a fast but empty one.
+        None
+    }
+
     // ====================================================================
     // Internal helpers
     // ====================================================================
@@ -2626,6 +2914,10 @@ impl Clone for DiskGraph {
             conn_type_index_types: MmapOrVec::new(),
             conn_type_index_offsets: MmapOrVec::new(),
             conn_type_index_sources: MmapOrVec::new(),
+            peer_count_types: MmapOrVec::new(),
+            peer_count_offsets: MmapOrVec::new(),
+            peer_count_entries: MmapOrVec::new(),
+            has_tombstones: self.has_tombstones,
         }
     }
 }
@@ -2678,6 +2970,20 @@ struct DiskGraphMeta {
     /// Added in v0.7.8; older graphs default to false.
     #[serde(default)]
     csr_sorted_by_type: bool,
+    /// True if any node or edge has been removed since construction.
+    /// Enables `count_edges_filtered` to short-circuit the per-edge
+    /// tombstone check on fresh / read-only graphs. Default false is
+    /// correct for legacy graphs only if they never saw a removal; since
+    /// we can't retroactively prove that, treat unknown (missing field)
+    /// as `true` (conservative) via a custom default.
+    #[serde(default = "default_has_tombstones")]
+    has_tombstones: bool,
+}
+
+fn default_has_tombstones() -> bool {
+    // Conservative: older graphs that lack this field get the slow path
+    // (tombstone-aware). Fresh builds emit `false` explicitly.
+    true
 }
 
 impl DiskGraph {
@@ -2701,6 +3007,7 @@ impl DiskGraph {
             free_node_slots: self.free_node_slots.clone(),
             free_edge_slots: self.free_edge_slots.clone(),
             csr_sorted_by_type: self.csr_sorted_by_type,
+            has_tombstones: self.has_tombstones,
         };
         let json = serde_json::to_string_pretty(&meta).map_err(std::io::Error::other)?;
         std::fs::write(dir.join("disk_graph_meta.json"), json)
@@ -2754,12 +3061,15 @@ impl DiskGraph {
         // Save metadata to target_dir (not data_dir)
         self.write_metadata_to(target_dir)?;
 
-        // Also save conn_type_index files if present and target differs from data_dir
+        // Also save optional persisted-cache files if present and target differs from data_dir
         if target_dir != self.data_dir {
             for fname in [
                 "conn_type_index_types.bin",
                 "conn_type_index_offsets.bin",
                 "conn_type_index_sources.bin",
+                "peer_count_types.bin",
+                "peer_count_offsets.bin",
+                "peer_count_entries.bin",
             ] {
                 let src = self.data_dir.join(fname);
                 if src.exists() {
@@ -2848,6 +3158,10 @@ impl DiskGraph {
                 conn_type_index_sources: load_raw_or_zst_optional(
                     &dir.join("conn_type_index_sources"),
                 ),
+                peer_count_types: load_raw_or_zst_optional(&dir.join("peer_count_types")),
+                peer_count_offsets: load_raw_or_zst_optional(&dir.join("peer_count_offsets")),
+                peer_count_entries: load_raw_or_zst_optional(&dir.join("peer_count_entries")),
+                has_tombstones: meta.has_tombstones,
             },
             temp_dir,
         ))

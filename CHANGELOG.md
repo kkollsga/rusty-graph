@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.14] — 2026-04-17
+
+### Added
+- **Per-(conn_type, peer) edge-count histogram** as a persistent disk cache. Built once at CSR-build time (parallelised via Rayon, single sequential scan of `edge_endpoints.bin`), stored as three flat `peer_count_*.bin` files. Unanchored aggregate queries like `MATCH (a)-[:TYPE]->(b) RETURN b.title, count(a) ORDER BY cnt DESC LIMIT N` now return in ~ms instead of scanning the full 13 GB `edge_endpoints` array. Rebuildable on existing disk graphs via `g.rebuild_caches()` without a full graph rebuild.
+- **`FusedCountAnchoredEdges` planner rule + executor**. `MATCH (var)-[r:TYPE?]->({id: V}) RETURN count(var)` (and the three symmetric variants) is now fused into O(log D) CSR offset arithmetic. The anchor is resolved to a `NodeIndex` at plan time via `graph.id_indices`. Combined with the tombstone short-circuit (below) this turns hub-node count queries (e.g. ~40 M incoming edges on Q5) from 100 s TIMEOUTs into sub-second lookups.
+- **Tombstone-free short-circuit in `count_edges_filtered`**. When no nodes/edges have been removed and no peer-type filter is set, the function returns `end - start + overflow_count` directly after binary-searching for the connection-type range — skipping the per-edge tombstone check on hot hubs. Adds a `has_tombstones: bool` flag to `DiskGraph` and `DiskGraphMeta` (defaults to conservative `true` on legacy graphs so correctness is preserved; new builds flip it false).
+- **Bounded `sources_for_conn_type`**. `DiskGraph::sources_for_conn_type_bounded(conn_type, max)` stops copying source node IDs after `max` entries, avoiding the ~400 MB eager heap allocation on cold-cache `LIMIT`-bounded pattern-matching queries. `pattern_matching.rs` now passes the `source_cap` through so e.g. `LIMIT 10` queries only read 1 000 sources from `conn_type_index_sources.bin` on first access.
+- **`FusedCountTypedEdge` uses cached edge-type counts**. A one-liner that had been missed in v0.7.12: `MATCH (_)-[:TYPE]->(_) RETURN count(*)` now returns `edge_type_counts[TYPE]` in O(1) instead of scanning `edge_weights()` (64 s → sub-millisecond on Wikidata's 862 M edges).
+- **`rebuild_caches` refreshes the peer-count histogram** on existing disk graphs, so users don't need to rebuild from scratch to get the v0.7.14 aggregate speedups.
+
+### Fixed
+- **DataFrame / blueprint disk builds now rebuild indexes at save time**. Previously, the first `add_connections` batch triggered a CSR build (via `ensure_disk_edges_built`) which wrote `conn_type_index` and `peer_count_histogram` reflecting only that first batch's edges. Subsequent batches added edges to overflow but never refreshed those indexes. Fix: `save_disk` now calls `compact()` once when overflow has accumulated, merging overflow back into CSR and rebuilding the indexes from all live edges. The per-batch `ensure_disk_edges_built` is now a no-op for overflow purposes (no O(E²) cost during multi-batch builds).
+- **`lookup_peer_counts` returns `None` on type miss**. Previously returned `Some(empty_map)`, which blocked the caller from falling back to the sequential-scan path when the histogram was stale. Now returns `None` so callers see a clean cache miss.
+- **Deadline checks in anchored-count paths**. `try_count_simple_pattern` / `count_edges_filtered` now accept an `Option<Instant>` deadline and check it every 1 M iterations. Closes the bypass that let `Q5_count_P31_incoming` run to 100 s past the 20 s default timeout.
+- **Deadline check in `expand_var_length_fast` inner loop**. The outer queue loop was already checked every 512 pops, but the per-edge inner loop was unbounded — a single hub expansion could process 100 M+ edges without checking. Added an inner check every 1 M iterations.
+- **Benchmark metric: Wikidata `unanchored_P31_count` now returns in 0.7 ms** (was 64 s with a wrong answer on cold deadline checks), `Q5_count_P31_incoming` 615 ms (was 100 s TIMEOUT), `Q5_incoming_all_count` 670 ms (was 20 s TIMEOUT), `cross_type_limited` 3 ms (was 2.5 s), `limit_10_P31` 10 ms cold-cache (was 2.6 s).
+
 ## [0.7.12] — 2026-04-16
 
 ### Added

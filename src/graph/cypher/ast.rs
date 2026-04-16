@@ -122,6 +122,23 @@ pub enum Clause {
         edge_type: String,
         alias: String,
     },
+    /// Optimizer-generated: MATCH (var)-[r:TYPE?]->({id: VAL}) RETURN count(var)
+    /// (or the symmetric incoming form) → O(log D) CSR offset subtraction on
+    /// the anchored node. Anchor node index is resolved at plan time via
+    /// `graph.id_indices`. Connection type is None when the query didn't
+    /// specify one.
+    FusedCountAnchoredEdges {
+        /// Resolved NodeIndex of the anchor (`{id: VAL}` side).
+        anchor_idx: u32,
+        /// Direction relative to the anchor. Outgoing = edges that leave the
+        /// anchor; Incoming = edges that enter it.
+        anchor_direction: petgraph::Direction,
+        /// Connection type name (None = all types). Kept as String so the
+        /// executor interns with the live interner; covers mmap-mode FNV
+        /// hashes automatically.
+        edge_type: Option<String>,
+        alias: String,
+    },
     /// Optimizer-generated: MATCH (n:Type) [WHERE ...] RETURN group_keys, agg_funcs(...)
     /// → single-pass node scan with inline aggregation. Avoids materializing intermediate
     /// ResultRows — evaluates group keys and aggregates directly from node properties.

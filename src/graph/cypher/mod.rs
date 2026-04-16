@@ -217,6 +217,25 @@ pub fn generate_explain_plan(query: &CypherQuery, graph: &DirGraph) -> String {
                 ),
                 Some(1),
             ),
+            Clause::FusedCountAnchoredEdges {
+                anchor_idx,
+                anchor_direction,
+                edge_type,
+                ..
+            } => {
+                let arrow = match anchor_direction {
+                    petgraph::Direction::Outgoing => "→",
+                    petgraph::Direction::Incoming => "←",
+                };
+                let t = edge_type.as_deref().unwrap_or("*");
+                (
+                    format!(
+                        "FusedCountAnchoredEdges (anchor#{} {} :{})",
+                        anchor_idx, arrow, t
+                    ),
+                    Some(1),
+                )
+            }
             Clause::FusedNodeScanAggregate { .. } => (
                 "FusedNodeScanAggregate (optimized MATCH + RETURN agg)".to_string(),
                 None,
@@ -285,7 +304,8 @@ pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result:
             Clause::FusedCountAll { .. }
             | Clause::FusedMatchReturnAggregate { .. }
             | Clause::FusedOptionalMatchAggregate { .. }
-            | Clause::FusedCountTypedEdge { .. } => Value::Int64(1),
+            | Clause::FusedCountTypedEdge { .. }
+            | Clause::FusedCountAnchoredEdges { .. } => Value::Int64(1),
             Clause::FusedCountTypedNode { node_type, .. } => {
                 let n = graph
                     .type_indices
@@ -324,6 +344,7 @@ pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result:
             | Clause::FusedCountEdgesByType { .. }
             | Clause::FusedCountTypedNode { .. }
             | Clause::FusedCountTypedEdge { .. }
+            | Clause::FusedCountAnchoredEdges { .. }
             | Clause::FusedMatchReturnAggregate { .. } => {
                 optimizations.push("count_fusion");
             }

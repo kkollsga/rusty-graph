@@ -20,6 +20,7 @@ pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<Stri
     reorder_match_patterns(query, graph);
     push_limit_into_match(query, graph);
     push_distinct_into_match(query);
+    fuse_anchored_edge_count(query, graph);
     fuse_count_short_circuits(query);
     fuse_optional_match_aggregate(query);
     fuse_match_return_aggregate(query);
@@ -148,6 +149,158 @@ fn mark_skip_target_type_check(query: &mut CypherQuery, graph: &DirGraph) {
 ///
 /// Any trailing ORDER BY / LIMIT clauses are left in place since they
 /// operate on the tiny fused result set.
+/// Fuse `MATCH (var)-[r:TYPE?]->({id: V}) RETURN count(var)` (and the three
+/// symmetric variants) into `FusedCountAnchoredEdges` — O(log D) offset
+/// arithmetic on the anchored node's CSR range. When `has_tombstones` is
+/// false the executor takes a pure subtraction; otherwise it still walks the
+/// narrowed range.
+///
+/// Conservative: if the anchor's `{id: V}` literal doesn't resolve to any
+/// known node (e.g. typo, or a value from a different graph), skip fusion and
+/// let the normal executor return 0 via the usual path. That preserves
+/// Cypher semantics.
+fn fuse_anchored_edge_count(query: &mut CypherQuery, graph: &DirGraph) {
+    use crate::graph::pattern_matching::{EdgeDirection, PropertyMatcher};
+
+    if query.clauses.len() < 2 {
+        return;
+    }
+    let is_match_return = matches!(
+        (&query.clauses[0], &query.clauses[1]),
+        (Clause::Match(_), Clause::Return(_))
+    );
+    if !is_match_return {
+        return;
+    }
+    let match_clause = if let Clause::Match(m) = &query.clauses[0] {
+        m
+    } else {
+        return;
+    };
+    let return_clause = if let Clause::Return(r) = &query.clauses[1] {
+        r
+    } else {
+        return;
+    };
+    if return_clause.distinct || return_clause.having.is_some() {
+        return;
+    }
+    if match_clause.patterns.len() != 1 || !match_clause.path_assignments.is_empty() {
+        return;
+    }
+    let pat = &match_clause.patterns[0];
+    if pat.elements.len() != 3 {
+        return;
+    }
+
+    let src_node = match &pat.elements[0] {
+        PatternElement::Node(np) => np,
+        _ => return,
+    };
+    let edge = match &pat.elements[1] {
+        PatternElement::Edge(ep) => ep,
+        _ => return,
+    };
+    let tgt_node = match &pat.elements[2] {
+        PatternElement::Node(np) => np,
+        _ => return,
+    };
+
+    if edge.properties.is_some() || edge.var_length.is_some() {
+        return;
+    }
+    if edge.direction == EdgeDirection::Both {
+        return;
+    }
+
+    // Helper: does the node look like a pure `{id: VAL}` literal anchor —
+    // no type, no variable, exactly one property keyed `id` with a literal
+    // Equals matcher? Returns the id value on match.
+    let as_anchor_id = |np: &crate::graph::pattern_matching::NodePattern| -> Option<Value> {
+        if np.node_type.is_some() || np.variable.is_some() {
+            return None;
+        }
+        let props = np.properties.as_ref()?;
+        if props.len() != 1 {
+            return None;
+        }
+        if let Some(PropertyMatcher::Equals(val)) = props.get("id") {
+            Some(val.clone())
+        } else {
+            None
+        }
+    };
+    // Helper: the other side is a named variable with no type/property filter.
+    fn as_pure_var(np: &crate::graph::pattern_matching::NodePattern) -> Option<&String> {
+        if np.node_type.is_some() || np.properties.is_some() {
+            return None;
+        }
+        np.variable.as_ref()
+    }
+
+    let (var_name, anchor_val, anchor_dir) = match (as_pure_var(src_node), as_anchor_id(tgt_node)) {
+        (Some(v), Some(id)) => {
+            // var -[edge]-> {id: V}
+            // anchor is the TARGET; traverse from anchor in the opposite dir.
+            let dir = match edge.direction {
+                EdgeDirection::Outgoing => petgraph::Direction::Incoming,
+                EdgeDirection::Incoming => petgraph::Direction::Outgoing,
+                EdgeDirection::Both => return,
+            };
+            (v, id, dir)
+        }
+        _ => match (as_anchor_id(src_node), as_pure_var(tgt_node)) {
+            (Some(id), Some(v)) => {
+                // {id: V} -[edge]-> var
+                let dir = match edge.direction {
+                    EdgeDirection::Outgoing => petgraph::Direction::Outgoing,
+                    EdgeDirection::Incoming => petgraph::Direction::Incoming,
+                    EdgeDirection::Both => return,
+                };
+                (v, id, dir)
+            }
+            _ => return,
+        },
+    };
+
+    // RETURN must be exactly one item, which is count(var) or count(*).
+    if return_clause.items.len() != 1 {
+        return;
+    }
+    if !is_count_of_var_or_star(&return_clause.items[0].expression, Some(var_name)) {
+        return;
+    }
+
+    // Resolve the anchor across node types. O(types) HashMap lookups; at
+    // typical schema sizes this is negligible, and on Wikidata-scale (~88 k
+    // types) we still only do one `HashMap::get` per type.
+    let mut resolved: Option<petgraph::graph::NodeIndex> = None;
+    for node_type in graph.type_indices.keys() {
+        if let Some(idx) = graph.lookup_by_id_readonly(node_type, &anchor_val) {
+            resolved = Some(idx);
+            break;
+        }
+    }
+    let anchor_idx = match resolved {
+        Some(idx) => idx.index() as u32,
+        None => return, // anchor not found — leave unfused, normal path returns 0
+    };
+
+    let alias = return_item_column_name(&return_clause.items[0]);
+    let edge_type = edge.connection_type.clone();
+
+    query.clauses.drain(0..2);
+    query.clauses.insert(
+        0,
+        Clause::FusedCountAnchoredEdges {
+            anchor_idx,
+            anchor_direction: anchor_dir,
+            edge_type,
+            alias,
+        },
+    );
+}
+
 fn fuse_count_short_circuits(query: &mut CypherQuery) {
     use crate::graph::pattern_matching::EdgeDirection;
 

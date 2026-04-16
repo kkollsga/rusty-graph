@@ -5085,6 +5085,17 @@ impl KnowledgeGraph {
     /// restored by ``load()``, so this only needs to be called once
     /// after building or mutating a graph.
     fn rebuild_caches(&mut self) {
+        // On disk graphs, also rebuild the per-(conn_type, peer) edge-count
+        // histogram so the Cypher planner's fast path for unanchored
+        // aggregate queries works. Legacy disk graphs built before v0.7.13
+        // won't have the histogram files — this call creates them.
+        {
+            let graph = get_graph_mut(&mut self.inner);
+            if let schema::GraphBackend::Disk(ref mut dg) = graph.graph {
+                dg.rebuild_peer_count_histogram();
+            }
+        }
+
         // Single O(E) pass: compute type connectivity triples
         // Uses edge_endpoint_keys() — mmap reads only, no heap allocation per edge.
         let triples = introspection::compute_type_connectivity(&self.inner);
