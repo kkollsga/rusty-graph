@@ -1069,6 +1069,47 @@ pub fn load_ntriples(
         if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
             let data_dir = dg.data_dir.clone();
 
+            // Build type_connectivity_cache from connection_type_metadata + edge_type_counts.
+            // This makes describe(types=['human']) instant instead of scanning 10K nodes.
+            {
+                let mut triples = Vec::new();
+                for (conn_type, info) in &graph.connection_type_metadata {
+                    let edge_count = graph
+                        .edge_type_counts_cache
+                        .read()
+                        .unwrap()
+                        .as_ref()
+                        .and_then(|counts| counts.get(conn_type).copied())
+                        .unwrap_or(0);
+                    for src in &info.source_types {
+                        for tgt in &info.target_types {
+                            triples.push(crate::graph::schema::ConnectivityTriple {
+                                src: src.clone(),
+                                conn: conn_type.clone(),
+                                tgt: tgt.clone(),
+                                count: edge_count,
+                            });
+                        }
+                    }
+                }
+                if !triples.is_empty() {
+                    *graph.type_connectivity_cache.write().unwrap() = Some(triples);
+                    if config.verbose {
+                        eprintln!(
+                            "  [T+{:.0}s] Built type connectivity cache ({} triples)",
+                            start.elapsed().as_secs_f64(),
+                            graph
+                                .type_connectivity_cache
+                                .read()
+                                .unwrap()
+                                .as_ref()
+                                .map(|t| t.len())
+                                .unwrap_or(0),
+                        );
+                    }
+                }
+            }
+
             if config.verbose {
                 eprintln!(
                     "  [T+{:.0}s] Saving interner + metadata...",

@@ -217,6 +217,30 @@ impl FileMetadata {
         // Restore type connectivity cache if persisted
         if let Some(triples) = self.type_connectivity {
             *graph.type_connectivity_cache.write().unwrap() = Some(triples);
+        } else if !graph.connection_type_metadata.is_empty() {
+            // Derive type connectivity from connection_type_metadata (instant, no I/O).
+            // This covers older graphs that don't have persisted type_connectivity.
+            let edge_counts = graph.edge_type_counts_cache.read().unwrap();
+            let mut triples = Vec::new();
+            for (conn_type, info) in &graph.connection_type_metadata {
+                let count = edge_counts
+                    .as_ref()
+                    .and_then(|c| c.get(conn_type).copied())
+                    .unwrap_or(0);
+                for src in &info.source_types {
+                    for tgt in &info.target_types {
+                        triples.push(crate::graph::schema::ConnectivityTriple {
+                            src: src.clone(),
+                            conn: conn_type.clone(),
+                            tgt: tgt.clone(),
+                            count,
+                        });
+                    }
+                }
+            }
+            if !triples.is_empty() {
+                *graph.type_connectivity_cache.write().unwrap() = Some(triples);
+            }
         }
     }
 }

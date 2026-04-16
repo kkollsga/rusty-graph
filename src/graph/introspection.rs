@@ -2518,7 +2518,38 @@ fn write_type_detail(
     ));
 
     // Properties (exclude builtins: type, title, id)
-    if let Ok(stats) = compute_property_stats(graph, node_type, 15, Some(200)) {
+    // For very large types (>1M nodes), skip property sampling and use metadata-only
+    // property names. This avoids cold-cache page faults on multi-GB column files.
+    if count > 1_000_000 {
+        if let Some(meta) = graph.node_type_metadata.get(node_type) {
+            let mut prop_names: Vec<&String> = meta
+                .keys()
+                .filter(|k| {
+                    !matches!(
+                        k.as_str(),
+                        "type" | "title" | "id" | "nid" | "description" | "label"
+                    )
+                })
+                .collect();
+            prop_names.sort();
+            if !prop_names.is_empty() {
+                let total = prop_names.len();
+                let show = prop_names
+                    .iter()
+                    .take(30)
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                xml.push_str(&format!(
+                    "{}  <properties count=\"{}\" hint=\"{}{}\"/>\n",
+                    indent,
+                    total,
+                    show,
+                    if total > 30 { ", ..." } else { "" }
+                ));
+            }
+        }
+    } else if let Ok(stats) = compute_property_stats(graph, node_type, 15, Some(200)) {
         let filtered: Vec<&PropertyStatInfo> = stats
             .iter()
             .filter(|p| !matches!(p.property_name.as_str(), "type" | "title" | "id"))
