@@ -302,6 +302,8 @@ def from_blueprint(
     verbose: bool = False,
     save: bool = True,
     lock_schema: bool = False,
+    storage: str = "default",
+    path: Optional[str] = None,
 ) -> KnowledgeGraph:
     """Build a KnowledgeGraph from a JSON blueprint and CSV files.
 

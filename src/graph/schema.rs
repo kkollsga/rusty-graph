@@ -2760,7 +2760,12 @@ impl DirGraph {
 
     /// Save a disk-mode graph to a directory. The directory IS the graph.
     /// Persists CSR files, node data, edge properties, column stores, and metadata.
-    pub fn save_disk(&self, path: &str) -> Result<(), String> {
+    pub fn save_disk(&mut self, path: &str) -> Result<(), String> {
+        // Build CSR from pending edges if not yet built.
+        // Edges from add_connections() are queued in pending_edges —
+        // they must be converted to CSR before saving.
+        self.ensure_disk_edges_built();
+
         let dir = std::path::Path::new(path);
         let dg = match &self.graph {
             GraphBackend::Disk(dg) => dg,

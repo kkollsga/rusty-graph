@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import time
-from typing import Any, Union
+from typing import Any, Optional, Union
 import warnings
 
 import numpy as np
@@ -38,6 +38,8 @@ def from_blueprint(
     verbose: bool = False,
     save: bool = True,
     lock_schema: bool = False,
+    storage: str = "default",
+    path: Optional[str] = None,
 ) -> kglite.KnowledgeGraph:
     """Parse a JSON blueprint and build a KnowledgeGraph from CSV files.
 
@@ -63,7 +65,7 @@ def from_blueprint(
     with open(blueprint_path) as f:
         raw = json.load(f)
 
-    loader = BlueprintLoader(raw, verbose=verbose)
+    loader = BlueprintLoader(raw, verbose=verbose, storage=storage, path=path)
 
     # Suppress UserWarning from add_connections — we track skips in the loader
     with warnings.catch_warnings():
@@ -96,10 +98,17 @@ def from_blueprint(
 class BlueprintLoader:
     """Stateful loader that processes a blueprint dict into a KnowledgeGraph."""
 
-    def __init__(self, raw: dict[str, Any], verbose: bool = False):
+    def __init__(
+        self, raw: dict[str, Any], verbose: bool = False, storage: str = "default", path: Optional[str] = None
+    ):
         self.raw = raw
         self.verbose = verbose
-        self.graph = kglite.KnowledgeGraph()
+        kwargs: dict[str, Any] = {}
+        if storage != "default":
+            kwargs["storage"] = storage
+        if path is not None:
+            kwargs["path"] = path
+        self.graph = kglite.KnowledgeGraph(**kwargs)
         self.errors: list[dict[str, str]] = []
         self.warnings: list[dict[str, str]] = []
 
