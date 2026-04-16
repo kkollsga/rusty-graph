@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776322644968,
+  "lastUpdate": 1776371880511,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -6495,6 +6495,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.00008661852005563685",
             "extra": "mean: 1.060203964325494 msec\nrounds: 897"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "4fe19e6283a1f031924b501d6fe32de00addbe79",
+          "message": "release: v0.7.12 — disk-mode correctness + Wikidata query robustness\n\nShips six inter-related fixes exposed by the API benchmark (49→51/51) and the\nWikidata disk-mode Cypher benchmark, plus Phase 3 CSR-build parallelisation.\n\nFixed:\n- Disk DataFrame/blueprint builds wrote wrong node row_ids once a second node\n  type was added: `batch_operations` pass 2 modified the DiskGraph materialisation\n  arena (cleared on next access) instead of the slot row_id. Now calls\n  `DiskGraph::update_row_id` directly.\n- `InternedKey::from_str` replaced `DefaultHasher` (per-process SipHash seed)\n  with FNV-1a so `DiskNodeSlot.node_type` resolves across processes. Breaking\n  change for disk graphs saved by earlier releases.\n- `save_disk` / `load_disk_dir` persist `parent_types`, `embeddings`, and\n  `timeseries_store` — previously omitted, causing describe() drift and\n  embedding/timeseries loss across reloads.\n- Streaming HAVING aggregate no longer OOMs on 124M-node Wikidata graphs.\n  Planner permits HAVING fusion; executor non-top-k path uses edge-centric\n  `count_edges_grouped_by_peer` and applies HAVING post-aggregation.\n- `describe()` now deterministic: `compute_join_candidates` sorts property\n  iteration and uses a stable tiebreaker.\n- `count_edges_grouped_by_peer` and pattern-matching parallel expansion now\n  honour the query deadline, so unanchored Wikidata aggregates terminate at\n  the default 20 s timeout instead of running unbounded.\n\nAdded:\n- Parallel Phase 3 CSR build: per-node sort-by-conn_type and\n  `build_conn_type_index` are now Rayon-parallelised, cutting the two new\n  serial passes from ~1000 s to ~100-200 s on Wikidata-scale builds.\n- `bench/benchmark_wikidata_cypher.py` streams CSV row-by-row so partial\n  runs (SIGKILL/OOM/Ctrl-C) still leave a populated CSV.\n- `MmapOrVec::as_mut_slice` for safe parallel writes to disjoint ranges.\n\nVerified: `make lint` clean, 1786 tests pass, `bench/api_benchmark.py` 51/51\nacross memory, mapped, and disk modes. Full Wikidata rebuild (124M nodes,\n862M edges) completes cleanly in ~77 min; cross-process reload confirmed.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-16T22:34:36+02:00",
+          "tree_id": "c696c19fcec0aad95ee11a919d16214adae80d36",
+          "url": "https://github.com/kkollsga/kglite/commit/4fe19e6283a1f031924b501d6fe32de00addbe79"
+        },
+        "date": 1776371879928,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1161.6629491736255,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000029937756231303417",
+            "extra": "mean: 860.8348925231471 usec\nrounds: 428"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 811.7794708935713,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000046728021214227366",
+            "extra": "mean: 1.231861651908053 msec\nrounds: 655"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 12600.061929034371,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000036441491404926576",
+            "extra": "mean: 79.36468928741502 usec\nrounds: 5629"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1622.5221671594077,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000025747423667213243",
+            "extra": "mean: 616.3243992843109 usec\nrounds: 839"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 677204.2584485068,
+            "unit": "iter/sec",
+            "range": "stddev: 3.9419987544782795e-7",
+            "extra": "mean: 1.4766593498555765 usec\nrounds: 81183"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 125438.44588966145,
+            "unit": "iter/sec",
+            "range": "stddev: 9.359186119536412e-7",
+            "extra": "mean: 7.972037543255462 usec\nrounds: 17633"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2197.7725324134067,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00007101916288739103",
+            "extra": "mean: 455.0061415600117 usec\nrounds: 2423"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1637.396790171826,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000020819740764463765",
+            "extra": "mean: 610.7255162599051 usec\nrounds: 1230"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 13802.733148310479,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000035718045510496123",
+            "extra": "mean: 72.44941920234145 usec\nrounds: 9270"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 831.3059160781136,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00001931254567627197",
+            "extra": "mean: 1.2029266009771005 msec\nrounds: 614"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 827.1397988890355,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000018383508147357732",
+            "extra": "mean: 1.208985471794659 msec\nrounds: 780"
           }
         ]
       }
