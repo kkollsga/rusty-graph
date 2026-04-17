@@ -5,6 +5,7 @@ use crate::datatypes::values::Value;
 use crate::graph::cypher::result::Bindings;
 use crate::graph::filtering_methods::{compare_values, values_equal};
 use crate::graph::schema::{DirGraph, InternedKey};
+use crate::graph::storage::GraphRead;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::Direction;
 use rayon::prelude::*;
@@ -1667,7 +1668,6 @@ impl<'a> PatternExecutor<'a> {
                 && resolved != "label"
             {
                 if let PropertyMatcher::Equals(Value::String(target)) = matcher {
-                    use crate::graph::storage::GraphRead;
                     let k = InternedKey::from_str(resolved);
                     match self.graph.graph.str_prop_eq(idx, k, target) {
                         Some(true) => continue,
@@ -1789,6 +1789,9 @@ impl<'a> PatternExecutor<'a> {
         // filters, skip EdgeData materialization entirely. For disk graphs this avoids
         // reading edge_endpoints.bin (13 GB on Wikidata), cutting I/O in half.
         // Only for single connection type (not multi-type) and directed edges.
+        // The `is_disk()` gate avoids the redundant work on memory/mapped, where
+        // EdgeData materialization is already free via petgraph. The trait's
+        // `iter_peers_filtered` dispatches to the disk CSR fast-path.
         if edge_pattern.variable.is_none()
             && edge_pattern.properties.is_none()
             && !edge_pattern.needs_path_info
@@ -1806,34 +1809,33 @@ impl<'a> PatternExecutor<'a> {
             };
             let mut results = Vec::new();
             for &dir in directions {
-                if let crate::graph::schema::GraphBackend::Disk(ref dg) = self.graph.graph {
-                    let peers = dg.iter_peers_filtered(source, dir, conn_u64);
-                    for (peer_idx, _edge_idx) in peers {
-                        if max_results.is_some_and(|max| results.len() >= max) {
-                            break;
-                        }
-                        // Check target node type
-                        if !edge_pattern.skip_target_type_check {
-                            if let Some(ref node_type) = node_pattern.node_type {
-                                if let Some(nt) = self.graph.graph.node_type_of(peer_idx) {
-                                    if nt != InternedKey::from_str(node_type) {
-                                        continue;
-                                    }
-                                } else {
+                for (peer_idx, _edge_idx) in
+                    self.graph.graph.iter_peers_filtered(source, dir, conn_u64)
+                {
+                    if max_results.is_some_and(|max| results.len() >= max) {
+                        break;
+                    }
+                    // Check target node type
+                    if !edge_pattern.skip_target_type_check {
+                        if let Some(ref node_type) = node_pattern.node_type {
+                            if let Some(nt) = self.graph.graph.node_type_of(peer_idx) {
+                                if nt != InternedKey::from_str(node_type) {
                                     continue;
                                 }
-                            }
-                        }
-                        // Check target node properties
-                        if let Some(ref props) = node_pattern.properties {
-                            if !self.node_matches_properties(peer_idx, props) {
+                            } else {
                                 continue;
                             }
                         }
-                        // Placeholder binding — caller won't use it (variable is None)
-                        let binding = MatchBinding::NodeRef(peer_idx);
-                        results.push((peer_idx, binding));
                     }
+                    // Check target node properties
+                    if let Some(ref props) = node_pattern.properties {
+                        if !self.node_matches_properties(peer_idx, props) {
+                            continue;
+                        }
+                    }
+                    // Placeholder binding — caller won't use it (variable is None)
+                    let binding = MatchBinding::NodeRef(peer_idx);
+                    results.push((peer_idx, binding));
                 }
             }
             return Ok(results);
