@@ -12,18 +12,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub mod batch_operations;
-pub mod block_column;
-pub mod block_pool;
 pub mod bug_report;
-pub mod build_column_store;
 pub mod calculations;
 pub mod clustering;
-pub mod column_store;
 pub mod cypher;
 pub mod data_retrieval;
 pub mod debugging;
-#[allow(dead_code)]
-pub mod disk_graph;
 pub mod equation_parser;
 pub mod export;
 pub mod filtering_methods;
@@ -32,14 +26,9 @@ pub mod graph_algorithms;
 pub mod graph_iterators;
 pub mod introspection;
 pub mod io_operations;
-pub mod lookups;
 pub mod maintain_graph;
-#[allow(dead_code)]
-pub mod mmap_column_store;
-pub mod mmap_vec;
 pub mod ntriples;
 pub mod pattern_matching;
-pub mod property_log;
 pub mod reporting;
 pub mod schema;
 pub mod schema_validation;
@@ -51,7 +40,6 @@ pub mod subgraph;
 pub mod temporal;
 pub mod timeseries;
 pub mod traversal_methods;
-pub mod type_build_meta;
 pub mod value_operations;
 pub mod vector_search;
 
@@ -1149,7 +1137,7 @@ impl KnowledgeGraph {
                         )
                     })?;
                     let data_dir = std::path::Path::new(dir);
-                    let dg = crate::graph::disk_graph::DiskGraph::new_at_path(data_dir).map_err(
+                    let dg = crate::graph::storage::disk::disk_graph::DiskGraph::new_at_path(data_dir).map_err(
                         |e| {
                             PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
                                 "Failed to create disk graph at '{}': {}",

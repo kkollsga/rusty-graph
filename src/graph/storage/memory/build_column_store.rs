@@ -6,10 +6,10 @@
 // encounter, with null backfill for all prior rows.
 
 use crate::datatypes::values::Value;
-use crate::graph::block_column::{BlockColumn, ColumnType};
-use crate::graph::block_pool::BlockPool;
-use crate::graph::column_store::{ColumnStore, TypedColumn};
-use crate::graph::mmap_vec::{MmapBytes, MmapOrVec};
+use crate::graph::storage::disk::block_column::{BlockColumn, ColumnType};
+use crate::graph::storage::disk::block_pool::BlockPool;
+use crate::graph::storage::memory::column_store::{ColumnStore, TypedColumn};
+use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
 use crate::graph::schema::{InternedKey, StringInterner, TypeSchema};
 use std::collections::HashMap;
 use std::io;

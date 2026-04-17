@@ -8,7 +8,7 @@
 // and MmapBytes for string data. Mixed columns stay heap-only (Vec<Value>).
 
 use crate::datatypes::values::Value;
-use crate::graph::mmap_vec::{MmapBytes, MmapOrVec};
+use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
 use crate::graph::schema::{InternedKey, StringInterner, TypeSchema};
 use chrono::NaiveDate;
 use std::collections::HashMap;
@@ -628,7 +628,7 @@ pub struct ColumnStore {
     overflow_data: Option<MmapBytes>,
     /// Optional mmap-backed store for disk mode. When present, get/get_id/get_title
     /// delegate to this instead of the TypedColumn arrays above.
-    mmap_store: Option<Arc<crate::graph::mmap_column_store::MmapColumnStore>>,
+    mmap_store: Option<Arc<crate::graph::storage::mapped::mmap_column_store::MmapColumnStore>>,
 }
 
 impl Clone for ColumnStore {
@@ -700,7 +700,7 @@ impl ColumnStore {
     /// Create a ColumnStore backed by a shared mmap (disk mode).
     /// All get/get_id/get_title calls delegate to the MmapColumnStore.
     pub fn from_mmap_store(
-        mmap_store: Arc<crate::graph::mmap_column_store::MmapColumnStore>,
+        mmap_store: Arc<crate::graph::storage::mapped::mmap_column_store::MmapColumnStore>,
     ) -> Self {
         let rc = mmap_store.row_count();
         ColumnStore {
@@ -1480,7 +1480,7 @@ impl ColumnStore {
     /// This is used when a disk graph is loaded (creating mmap-backed stores) and then re-saved.
     fn write_packed_from_mmap(
         &self,
-        mmap_store: &crate::graph::mmap_column_store::MmapColumnStore,
+        mmap_store: &crate::graph::storage::mapped::mmap_column_store::MmapColumnStore,
         interner: &StringInterner,
     ) -> io::Result<Vec<u8>> {
         let rc = mmap_store.row_count();

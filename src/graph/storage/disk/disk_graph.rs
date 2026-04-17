@@ -13,7 +13,7 @@ use crate::graph::graph_iterators::{
     DiskEdgeIndices, DiskEdgeReferences, DiskEdges, DiskEdgesConnecting, DiskNeighbors,
     DiskNodeIndices,
 };
-use crate::graph::mmap_vec::MmapOrVec;
+use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::Direction;
@@ -110,7 +110,7 @@ pub struct DiskGraph {
     node_arena: UnsafeCell<Vec<NodeData>>,
 
     // ── Column stores for node properties (Arc refs, data mmap'd) ──
-    pub(crate) column_stores: HashMap<InternedKey, Arc<crate::graph::column_store::ColumnStore>>,
+    pub(crate) column_stores: HashMap<InternedKey, Arc<crate::graph::storage::memory::column_store::ColumnStore>>,
 
     // ── Edge CSR (mmap'd) ──
     out_offsets: MmapOrVec<u64>,
@@ -426,7 +426,7 @@ impl DiskGraph {
     /// Set column store references. Called by DirGraph after columnar setup or load.
     pub fn set_column_stores(
         &mut self,
-        stores: HashMap<InternedKey, Arc<crate::graph::column_store::ColumnStore>>,
+        stores: HashMap<InternedKey, Arc<crate::graph::storage::memory::column_store::ColumnStore>>,
     ) {
         self.column_stores = stores;
     }

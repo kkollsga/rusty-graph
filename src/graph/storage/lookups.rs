@@ -1,5 +1,5 @@
-// src/graph/lookups.rs
-use super::schema::{Graph, InternedKey};
+// src/graph/storage/lookups.rs
+use crate::graph::schema::{Graph, InternedKey};
 use crate::datatypes::Value;
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
@@ -43,7 +43,7 @@ impl TypeLookup {
     /// Falls back to graph scan if id_indices has been invalidated (e.g., after node deletion).
     /// Does not build title_to_index since it's unused in the add_nodes hot path.
     pub fn from_id_indices(
-        id_indices: &HashMap<String, super::schema::TypeIdIndex>,
+        id_indices: &HashMap<String, crate::graph::schema::TypeIdIndex>,
         graph: &Graph,
         node_type: String,
     ) -> Result<Self, String> {
@@ -123,7 +123,7 @@ impl CombinedTypeLookup {
     /// Fast constructor using pre-built id_indices from DirGraph (avoids full-graph scan).
     /// Falls back to graph scan if id_indices has been invalidated for either type.
     pub fn from_id_indices(
-        id_indices: &HashMap<String, super::schema::TypeIdIndex>,
+        id_indices: &HashMap<String, crate::graph::schema::TypeIdIndex>,
         graph: &Graph,
         source_type: String,
         target_type: String,

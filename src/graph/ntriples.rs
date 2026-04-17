@@ -23,12 +23,12 @@
 // methods on `DiskGraph` when the folder split happens.
 
 use crate::datatypes::values::Value;
-use crate::graph::mmap_vec::MmapOrVec;
+use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use crate::graph::schema::{
     DirGraph, EdgeData, InternedKey, NodeData, PropertyStorage, TypeSchema,
 };
 use crate::graph::storage::{GraphRead, GraphWrite};
-use crate::graph::type_build_meta::{ColType, TypeBuildMeta};
+use crate::graph::storage::type_build_meta::{ColType, TypeBuildMeta};
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use std::collections::{HashMap, HashSet};
@@ -423,7 +423,7 @@ pub fn load_ntriples(
     let use_compact = graph.graph.is_disk();
 
     // Property log for Disk mode: serialize properties during Phase 1, replay in Phase 1b
-    let mut prop_log: Option<crate::graph::property_log::PropertyLogWriter> =
+    let mut prop_log: Option<crate::graph::storage::memory::property_log::PropertyLogWriter> =
         if graph.graph.is_disk() {
             let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
                 std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
@@ -452,7 +452,7 @@ pub fn load_ntriples(
                 eprintln!("  Property log: {}", log_path.display());
             }
             Some(
-                crate::graph::property_log::PropertyLogWriter::new(&log_path, 1)
+                crate::graph::storage::memory::property_log::PropertyLogWriter::new(&log_path, 1)
                     .map_err(|e| format!("Failed to create property log: {}", e))?,
             )
         } else {
@@ -1045,7 +1045,7 @@ pub fn load_ntriples(
 
                 for type_meta in &columns_meta {
                     let mmap_store = type_meta.to_mmap_store(Arc::clone(&mmap_arc));
-                    let store = crate::graph::column_store::ColumnStore::from_mmap_store(Arc::new(
+                    let store = crate::graph::storage::memory::column_store::ColumnStore::from_mmap_store(Arc::new(
                         mmap_store,
                     ));
                     graph
@@ -1317,15 +1317,15 @@ pub struct ColumnTypeMeta {
 }
 
 impl RegionMeta {
-    fn from_region(r: &crate::graph::mmap_column_store::Region) -> Self {
+    fn from_region(r: &crate::graph::storage::mapped::mmap_column_store::Region) -> Self {
         RegionMeta {
             offset: r.offset,
             len: r.len,
         }
     }
 
-    fn to_region(self) -> crate::graph::mmap_column_store::Region {
-        crate::graph::mmap_column_store::Region {
+    fn to_region(self) -> crate::graph::storage::mapped::mmap_column_store::Region {
+        crate::graph::storage::mapped::mmap_column_store::Region {
             offset: self.offset,
             len: self.len,
         }
@@ -1337,8 +1337,8 @@ impl ColumnTypeMeta {
     pub fn to_mmap_store(
         &self,
         mmap: Arc<memmap2::MmapMut>,
-    ) -> crate::graph::mmap_column_store::MmapColumnStore {
-        use crate::graph::mmap_column_store::{
+    ) -> crate::graph::storage::mapped::mmap_column_store::MmapColumnStore {
+        use crate::graph::storage::mapped::mmap_column_store::{
             ColRef, FixedColumnMeta, MmapColumnStore, StrColumnMeta,
         };
 
@@ -1420,11 +1420,11 @@ fn build_columns_direct(
     type_rename_map: &HashMap<String, String>,
     verbose: bool,
 ) -> std::io::Result<()> {
-    use crate::graph::column_store::ColumnStore;
-    use crate::graph::mmap_column_store::{
+    use crate::graph::storage::memory::column_store::ColumnStore;
+    use crate::graph::storage::mapped::mmap_column_store::{
         ColRef, FixedColumnMeta, MmapColumnStore, Region, StrColumnMeta,
     };
-    use crate::graph::property_log::PropertyLogReader;
+    use crate::graph::storage::memory::property_log::PropertyLogReader;
     use memmap2::MmapMut;
 
     let alloc_start = Instant::now();
@@ -2486,7 +2486,7 @@ fn flush_entity(
     edge_buffer: &mut EdgeBuffer,
     stats: &mut NTriplesStats,
     mapped: bool,
-    prop_log: &mut Option<crate::graph::property_log::PropertyLogWriter>,
+    prop_log: &mut Option<crate::graph::storage::memory::property_log::PropertyLogWriter>,
     label_cache: &mut HashMap<u32, String>,
     type_meta: &mut HashMap<String, TypeBuildMeta>,
     qnum_to_idx: &mut Option<MmapOrVec<u32>>,

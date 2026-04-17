@@ -14,7 +14,7 @@
 //! Phase 7's structural reorg.
 
 use crate::datatypes::Value;
-use crate::graph::disk_graph::{DiskGraph, TOMBSTONE_EDGE};
+use crate::graph::storage::disk::disk_graph::{DiskGraph, TOMBSTONE_EDGE};
 use crate::graph::graph_iterators::{
     GraphEdgeIndices, GraphEdgeReferences, GraphEdges, GraphEdgesConnecting, GraphNeighbors,
     GraphNodeIndices,

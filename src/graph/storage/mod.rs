@@ -9,11 +9,18 @@
 //! - [`MappedGraph`] — mmap-columnar-spill variant (Phase 5 promoted
 //!   this from a type alias to a distinct struct so its trait impls
 //!   can diverge from memory's once the column ownership differs).
-//! - [`crate::graph::disk_graph::DiskGraph`] — CSR + mmap columns.
+//! - [`crate::graph::storage::disk::disk_graph::DiskGraph`] — CSR + mmap
+//!   columns.
 //!
 //! Rule for new storage operations: add the method to [`GraphRead`] or
 //! [`GraphWrite`] first, implement per-backend, and let the
 //! `GraphBackend` dispatcher route to them — never the other way.
+
+pub mod disk;
+pub mod lookups;
+pub mod mapped;
+pub mod memory;
+pub mod type_build_meta;
 
 use crate::datatypes::Value;
 use crate::graph::graph_iterators::GraphEdgeRef;

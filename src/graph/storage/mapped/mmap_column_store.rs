@@ -12,7 +12,7 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::InternedKey;
-use crate::graph::type_build_meta::ColType;
+use crate::graph::storage::type_build_meta::ColType;
 use chrono::NaiveDate;
 use memmap2::MmapMut;
 use std::collections::HashMap;

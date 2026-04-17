@@ -6,7 +6,7 @@
 // created after rows already exist (null backfill via null bitmap).
 
 use crate::datatypes::values::Value;
-use crate::graph::block_pool::{BlockId, BlockPool};
+use crate::graph::storage::disk::block_pool::{BlockId, BlockPool};
 use chrono::NaiveDate;
 use std::io;
 

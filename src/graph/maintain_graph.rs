@@ -3,7 +3,7 @@ use crate::datatypes::{DataFrame, Value};
 use crate::graph::batch_operations::{
     BatchProcessor, ConflictHandling, ConnectionBatchProcessor, NodeAction,
 };
-use crate::graph::lookups::{CombinedTypeLookup, TypeLookup};
+use crate::graph::storage::lookups::{CombinedTypeLookup, TypeLookup};
 use crate::graph::reporting::{ConnectionOperationReport, NodeOperationReport};
 use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, TypeSchema};
 use crate::graph::spatial;

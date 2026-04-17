@@ -380,7 +380,7 @@ pub(crate) enum PropertyStorage {
     /// Column-oriented storage — properties live in a per-type `ColumnStore`.
     /// The node's row is identified by `row_id`.
     Columnar {
-        store: Arc<crate::graph::column_store::ColumnStore>,
+        store: Arc<crate::graph::storage::memory::column_store::ColumnStore>,
         row_id: u32,
     },
 }
@@ -1607,7 +1607,7 @@ pub struct DirGraph {
     /// use `PropertyStorage::Columnar` instead of `Compact`.
     /// Not persisted — rebuilt on load if columnar mode is enabled.
     #[serde(skip)]
-    pub(crate) column_stores: HashMap<String, Arc<crate::graph::column_store::ColumnStore>>,
+    pub(crate) column_stores: HashMap<String, Arc<crate::graph::storage::memory::column_store::ColumnStore>>,
     /// Memory limit for columnar heap storage. If Some(n), `enable_columnar()`
     /// will spill columns to temp files when total heap_bytes exceeds n.
     #[serde(skip)]
@@ -2847,10 +2847,10 @@ impl DirGraph {
         // Extract the StableDiGraph and build DiskGraph
         let disk_graph = match &mut self.graph {
             GraphBackend::Memory(g) => {
-                crate::graph::disk_graph::DiskGraph::from_stable_digraph(g.inner_mut(), &data_dir)
+                crate::graph::storage::disk::disk_graph::DiskGraph::from_stable_digraph(g.inner_mut(), &data_dir)
             }
             GraphBackend::Mapped(g) => {
-                crate::graph::disk_graph::DiskGraph::from_stable_digraph(g.inner_mut(), &data_dir)
+                crate::graph::storage::disk::disk_graph::DiskGraph::from_stable_digraph(g.inner_mut(), &data_dir)
             }
             GraphBackend::Disk(_) => return Err("Already in disk mode".to_string()),
             GraphBackend::Recording(_) => {
@@ -3050,7 +3050,7 @@ impl DirGraph {
     /// This reduces memory usage by eliminating per-node `Value` enum overhead
     /// for homogeneous typed columns.
     pub fn enable_columnar(&mut self) {
-        use crate::graph::column_store::ColumnStore;
+        use crate::graph::storage::memory::column_store::ColumnStore;
 
         // Ensure properties are compacted first
         if self.type_schemas.is_empty() {
@@ -3244,8 +3244,8 @@ impl DirGraph {
     pub fn ensure_column_store_for_push(
         &mut self,
         node_type: &str,
-    ) -> &mut crate::graph::column_store::ColumnStore {
-        use crate::graph::column_store::ColumnStore;
+    ) -> &mut crate::graph::storage::memory::column_store::ColumnStore {
+        use crate::graph::storage::memory::column_store::ColumnStore;
 
         let current_schema = self
             .type_schemas
@@ -3983,7 +3983,7 @@ impl EdgeData {
 // Graph Backend Abstraction
 // ============================================================================
 
-pub use crate::graph::disk_graph::DiskGraph;
+pub use crate::graph::storage::disk::disk_graph::DiskGraph;
 pub use crate::graph::storage::{MappedGraph, MemoryGraph, RecordingGraph};
 
 /// Graph storage backend. Four variants — heap-resident memory,

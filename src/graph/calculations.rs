@@ -1,6 +1,6 @@
 // src/graph/calculations.rs
 use super::equation_parser::{AggregateType, Evaluator, Expr, Parser};
-use super::lookups::TypeLookup;
+use crate::graph::storage::lookups::TypeLookup;
 use super::maintain_graph;
 use super::statistics_methods::{get_parent_child_pairs, ParentChildPair};
 use crate::datatypes::values::Value;

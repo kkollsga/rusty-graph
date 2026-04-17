@@ -12,7 +12,7 @@
 //   [section]  embeddings.zst (optional)
 //   [section]  timeseries.zst (optional)
 
-use crate::graph::column_store::ColumnStore;
+use crate::graph::storage::memory::column_store::ColumnStore;
 use crate::graph::reporting::OperationReports;
 use crate::graph::schema::{
     CompositeIndexKey, ConnectionTypeInfo, ConnectivityTriple, CowSelection, DirGraph,
@@ -498,7 +498,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
     }
 
     // Load DiskGraph — compressed files decompressed to temp dir, then mmap'd
-    let (disk_graph, temp_dir) = crate::graph::disk_graph::DiskGraph::load_from_dir(dir)?;
+    let (disk_graph, temp_dir) = crate::graph::storage::disk::disk_graph::DiskGraph::load_from_dir(dir)?;
     // Prefetch hot mmap regions (offset arrays + node_slots) into page cache.
     // Non-blocking — kernel reads asynchronously while we continue loading metadata.
     disk_graph.prefetch_hot_regions();
@@ -597,7 +597,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
 
         for tm in type_metas {
             let store = tm.to_mmap_store(std::sync::Arc::clone(&mmap_arc));
-            let cs = crate::graph::column_store::ColumnStore::from_mmap_store(std::sync::Arc::new(
+            let cs = crate::graph::storage::memory::column_store::ColumnStore::from_mmap_store(std::sync::Arc::new(
                 store,
             ));
             graph.column_stores.insert(tm.type_name, Arc::new(cs));
@@ -633,7 +633,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
                             .get(&type_name)
                             .map(|v| v.len() as u32)
                             .unwrap_or(0);
-                        let store = crate::graph::column_store::ColumnStore::load_packed(
+                        let store = crate::graph::storage::memory::column_store::ColumnStore::load_packed(
                             schema,
                             &type_meta,
                             &graph.interner,
