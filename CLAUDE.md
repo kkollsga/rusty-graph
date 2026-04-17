@@ -12,7 +12,8 @@ make lint                    # fmt --check + clippy (always run before pushing)
 ## Architecture
 
 - **Rust core** (`src/`): `KnowledgeGraph` with `#[pymethods]` via PyO3, `petgraph` storage.
-- **Cypher engine** (`src/graph/cypher/`): parser → AST → executor.
+- **Cypher engine** (`src/graph/languages/cypher/`): parser → AST → executor. Phase 8 moved this under the `languages/` umbrella; a future `languages/fluent/` is a peer for the Rust-side fluent-chain surface.
+- **Shared query primitives** (`src/graph/core/`): pattern matching, filtering, traversal, iterators — used by Cypher and the fluent API.
 - **Python package** (`kglite/`): thin wrapper + `code_tree/` (tree-sitter codebase parsing).
 - **Type stubs** (`kglite/__init__.pyi`): source of truth for API docs — update when changing `#[pymethods]`.
 - **Introspection** (`src/graph/introspection.rs`): `describe()` XML schema for AI agents.
@@ -25,7 +26,7 @@ KGLite has three storage modes: `Default` (in-memory petgraph), `Mapped` (mmap-b
 
 - Small graphs (legal, code, domain): ~100K–500K nodes, all in-memory, full scans are fast (<10 ms). Don't add guardrails that penalize these.
 - Large graphs (Wikidata): 100M+ nodes, disk-backed, full scans are catastrophic. Safeguards needed but must be gated behind storage mode or graph-size thresholds.
-- Cypher query planner/executor is shared across all modes. Any changes to `pattern_matching.rs` or `cypher/executor.rs` affect everyone — benchmark on small graphs before merging.
+- Cypher query planner/executor is shared across all modes. Any changes to `core/pattern_matching.rs` or `languages/cypher/executor.rs` affect everyone — benchmark on small graphs before merging.
 
 ## Performance Work Protocol
 
@@ -39,7 +40,7 @@ Before starting any performance-related code changes:
 
 - PyO3: `&self` for read-only, return `PyResult<Py<PyAny>>`, use `Python::attach()`.
 - Use `.cast::<T>()` not `.downcast::<T>()` (deprecated in pyo3 0.27+).
-- Private helpers go in non-`#[pymethods]` `impl KnowledgeGraph` block.
+- **All `#[pymethods]` / `#[pyclass]` live under `src/graph/pyapi/`.** Private `impl KnowledgeGraph` helpers stay in `src/graph/mod.rs` (pub(crate) when called from pyapi).
 - Value conversion: `py_out::value_to_py()` and `py_out::nodeinfo_to_pydict()`.
 
 ## Storage-backend work (0.8.0 refactor)
@@ -55,9 +56,9 @@ plan: `todo.md` at repo root.
 
 ## When Changing a `#[pymethods]` Function
 
-1. `src/graph/mod.rs` — implementation
+1. `src/graph/pyapi/kg_methods.rs` (or domain file under `pyapi/`) — implementation
 2. `kglite/__init__.pyi` — type stub + docstring
-3. `src/graph/introspection.rs` — `describe()` output (if agent-facing)
+3. `src/graph/introspection/*.rs` — `describe()` output (if agent-facing)
 4. `examples/mcp_server.py` — MCP tool (if agent-facing)
 5. `CHANGELOG.md` — `[Unreleased]` section
 

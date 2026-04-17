@@ -1877,7 +1877,7 @@ fn edge_weight(
         let g = &graph.graph;
         if let Some(edge_data) = g.edge_weight(edge_id) {
             if let Some(val) = edge_data.get_property(prop) {
-                return crate::graph::query::value_operations::value_to_f64(val).unwrap_or(1.0);
+                return crate::graph::core::value_operations::value_to_f64(val).unwrap_or(1.0);
             }
         }
     }

@@ -24,7 +24,7 @@ pub mod memory;
 pub mod type_build_meta;
 
 use crate::datatypes::Value;
-use crate::graph::query::graph_iterators::GraphEdgeRef;
+use crate::graph::core::graph_iterators::GraphEdgeRef;
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;

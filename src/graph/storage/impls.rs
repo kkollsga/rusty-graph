@@ -14,7 +14,7 @@
 //! Phase 7's structural reorg.
 
 use crate::datatypes::Value;
-use crate::graph::query::graph_iterators::{
+use crate::graph::core::graph_iterators::{
     GraphEdgeIndices, GraphEdgeReferences, GraphEdges, GraphEdgesConnecting, GraphNeighbors,
     GraphNodeIndices,
 };

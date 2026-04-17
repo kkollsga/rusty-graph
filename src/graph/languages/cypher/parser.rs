@@ -1,5 +1,5 @@
 // src/graph/cypher/parser.rs
-// Cypher clause parser - delegates MATCH patterns to crate::graph::query::pattern_matching::parse_pattern()
+// Cypher clause parser - delegates MATCH patterns to crate::graph::core::pattern_matching::parse_pattern()
 
 use super::ast::*;
 use super::tokenizer::{token_to_keyword_name, CypherToken};
@@ -319,7 +319,7 @@ impl CypherParser {
     /// Parse one or more comma-separated patterns in MATCH
     fn parse_match_patterns(
         &mut self,
-    ) -> Result<Vec<crate::graph::query::pattern_matching::Pattern>, String> {
+    ) -> Result<Vec<crate::graph::core::pattern_matching::Pattern>, String> {
         let mut patterns = Vec::new();
 
         loop {
@@ -330,7 +330,7 @@ impl CypherParser {
                 return Err("Expected a pattern in MATCH clause".to_string());
             }
 
-            let pattern = crate::graph::query::pattern_matching::parse_pattern(&pattern_str)
+            let pattern = crate::graph::core::pattern_matching::parse_pattern(&pattern_str)
                 .map_err(|e| format!("Pattern parse error: {}", e))?;
             patterns.push(pattern);
 
@@ -349,7 +349,7 @@ impl CypherParser {
     /// extract_exists_pattern_string which stops at RBrace instead of clause boundaries.
     fn parse_exists_patterns(
         &mut self,
-    ) -> Result<Vec<crate::graph::query::pattern_matching::Pattern>, String> {
+    ) -> Result<Vec<crate::graph::core::pattern_matching::Pattern>, String> {
         let mut patterns = Vec::new();
 
         loop {
@@ -361,7 +361,7 @@ impl CypherParser {
                 break;
             }
 
-            let pattern = crate::graph::query::pattern_matching::parse_pattern(&pattern_str)
+            let pattern = crate::graph::core::pattern_matching::parse_pattern(&pattern_str)
                 .map_err(|e| format!("Pattern parse error in EXISTS: {}", e))?;
             patterns.push(pattern);
 
@@ -639,7 +639,7 @@ impl CypherParser {
                 if self.check(&CypherToken::LParen) {
                     let pattern_str = self.extract_pattern_string()?;
                     let pattern =
-                        crate::graph::query::pattern_matching::parse_pattern(&pattern_str)?;
+                        crate::graph::core::pattern_matching::parse_pattern(&pattern_str)?;
                     self.expect(&CypherToken::RParen)?; // consume outer )
                     return Ok(Predicate::Exists {
                         patterns: vec![pattern],
@@ -660,7 +660,7 @@ impl CypherParser {
             if self.looks_like_pattern_start() {
                 // Inline pattern predicate — desugar to EXISTS { pattern }
                 let pattern_str = self.extract_pattern_string()?;
-                let pattern = crate::graph::query::pattern_matching::parse_pattern(&pattern_str)?;
+                let pattern = crate::graph::core::pattern_matching::parse_pattern(&pattern_str)?;
                 return Ok(Predicate::Exists {
                     patterns: vec![pattern],
                     where_clause: None,

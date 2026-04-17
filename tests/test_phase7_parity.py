@@ -37,32 +37,36 @@ SRC_GRAPH = REPO_ROOT / "src" / "graph"
 HARD_CAP = 2500
 
 GOD_FILE_EXCEPTIONS = {
-    "cypher/executor.rs": (
+    # Phase 8 renamed cypher/ → languages/cypher/.
+    "languages/cypher/executor.rs": (
         "Cypher executor (~12k lines). Splitting introduces artificial "
         "seams in the single `impl CypherExecutor` block. Planned 0.9.0 "
-        "split: cypher/executor/{mutations, expression_eval, value_ops}."
+        "split: executor/{mutations, expression_eval, value_ops}."
     ),
-    "cypher/planner.rs": (
+    "languages/cypher/planner.rs": (
         "Query planner (~3.5k lines). Fusion passes share helpers; "
         "splitting cost is high, immediate benefit low. Planned 0.9.0 "
         "split along fusion-family boundaries."
     ),
-    "cypher/parser.rs": (
+    "languages/cypher/parser.rs": (
         "Cypher recursive-descent parser. Single `impl CypherParser` "
         "block is idiomatic; artificial seams hurt readability. "
         "Accepted monolithic."
     ),
-    "query/pattern_matching.rs": (
+    # Phase 8 renamed query/ → core/.
+    "core/pattern_matching.rs": (
         "Pattern matcher (~2.6k lines). Barely over cap; parser + "
         "executor are tightly coupled. 0.9.0 candidate for split at "
         "the Parser impl boundary."
     ),
-    "mod.rs": (
-        "KnowledgeGraph #[pymethods] core (~6.7k lines). 105 pymethods "
-        "in one file. Stage 2.1 already moved indexable subsets to "
-        "pyapi/pymethods_*.rs. Further carving to pyapi/{mod, algorithms, "
-        "export, indexes} is a 0.9.0 follow-up — PyO3 class-registration "
-        "considerations make the split non-trivial."
+    # Phase 8 moved all KnowledgeGraph #[pymethods] here from mod.rs.
+    # mod.rs itself drops under the cap (~1k lines).
+    "pyapi/kg_methods.rs": (
+        "KnowledgeGraph #[pymethods] core (~5.4k lines). ~102 pymethods "
+        "in one file. Phase 8 consolidated all PyO3 boundary code under "
+        "pyapi/. Further 4-way split into kg_{core,mutation,introspection,"
+        "fluent}.rs is scheduled for Phase 9 alongside other god-file "
+        "splits."
     ),
     "schema.rs": (
         "DirGraph + shared schema types (~5.1k lines). Phase 7 Stage 2.2 "
@@ -162,17 +166,19 @@ def test_mod_rs_purity():
     """Each subdir-`mod.rs` is short (no big impl blocks, no long fns)."""
     subdirs = [
         "algorithms",
+        "core",
         "features",
         "introspection",
         "io",
+        "languages",
+        "languages/cypher",
+        "languages/fluent",
         "mutation",
         "pyapi",
-        "query",
         "storage",
         "storage/disk",
         "storage/mapped",
         "storage/memory",
-        "cypher",
     ]
     offenders: list[str] = []
     for sub in subdirs:
@@ -188,7 +194,7 @@ def test_mod_rs_purity():
         # Other subdir mod.rs files are pure re-exports.
         if sub == "storage":
             cap = 800
-        elif sub == "cypher":
+        elif sub == "languages/cypher":
             cap = 500
         else:
             cap = 300

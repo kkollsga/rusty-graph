@@ -45,7 +45,8 @@ ENUM_MATCH_WHITELIST = {
     # Trait / enum declarations + the 4-arm dispatcher — required.
     "storage/mod.rs": "GraphRead / GraphWrite trait surface",
     "schema.rs": "GraphBackend enum + dispatcher impls",
-    "mod.rs": "PyO3 boundary (KnowledgeGraph class registration)",
+    # PyO3 boundary moved from mod.rs → pyapi/kg_methods.rs in Phase 8.
+    "pyapi/kg_methods.rs": "PyO3 boundary (KnowledgeGraph class registration)",
     # Disk-internal boundary — unchanged since Phase 5.
     "io/ntriples.rs": "disk-internal bulk-build (ntriples loader)",
     "io/io_operations.rs": "disk-internal .kgl load_disk_dir path",

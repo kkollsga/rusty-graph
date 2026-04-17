@@ -146,7 +146,7 @@ impl CypherExecutor<'_> {
 
         let sort_cmp = |a: usize, b: usize| -> std::cmp::Ordering {
             for (i, item) in order_by.iter().enumerate() {
-                if let Some(ord) = crate::graph::query::filtering_methods::compare_values(
+                if let Some(ord) = crate::graph::core::filtering_methods::compare_values(
                     &sort_keys[a][i],
                     &sort_keys[b][i],
                 ) {
@@ -178,7 +178,7 @@ impl CypherExecutor<'_> {
                         key_buf.push('\x1F');
                     }
                     let val = self.evaluate_expression(expr, row).unwrap_or(Value::Null);
-                    crate::graph::query::value_operations::format_value_compact_into(
+                    crate::graph::core::value_operations::format_value_compact_into(
                         &mut key_buf,
                         &val,
                     );

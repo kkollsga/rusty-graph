@@ -94,7 +94,7 @@ fn edge_matches_conditions(
         let ik = InternedKey::from_str(field);
         match properties.iter().find(|(k, _)| *k == ik).map(|(_, v)| v) {
             Some(value) => {
-                crate::graph::query::filtering_methods::matches_condition(value, condition)
+                crate::graph::core::filtering_methods::matches_condition(value, condition)
             }
             None => {
                 // Missing field is treated as null
@@ -524,7 +524,7 @@ fn make_traversal_full(
         let target_vec: Vec<NodeIndex> = targets.into_iter().collect();
 
         // Apply filtering and sorting in one pass
-        let processed_nodes = crate::graph::query::filtering_methods::process_nodes(
+        let processed_nodes = crate::graph::core::filtering_methods::process_nodes(
             graph,
             target_vec,
             filter_target,
@@ -793,7 +793,7 @@ fn insert_matches_into_selection(
     ))];
 
     for (parent, children) in matches {
-        let processed = crate::graph::query::filtering_methods::process_nodes(
+        let processed = crate::graph::core::filtering_methods::process_nodes(
             graph,
             children,
             filter_target,

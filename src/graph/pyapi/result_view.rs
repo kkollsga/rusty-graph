@@ -1,14 +1,18 @@
-// src/graph/cypher/result_view.rs
+// src/graph/pyapi/result_view.rs
 // Lazy ResultView — Polars-style result container.
 // Data stays in Rust and converts to Python only on access.
+//
+// Moved from src/graph/languages/cypher/result_view.rs in Phase 8 to bring
+// all #[pyclass] definitions under pyapi/. The Cypher-internal preprocessing
+// logic stays in `languages/cypher/py_convert.rs`; we import it here.
 
-use super::py_convert::{
+use crate::datatypes::values::Value;
+use crate::graph::algorithms::graph_algorithms::CentralityResult;
+use crate::graph::languages::cypher::py_convert::{
     preprocess_values_owned, preprocessed_result_to_dataframe, preprocessed_value_to_py,
     stats_to_py, PreProcessedValue,
 };
-use super::result::{ClauseStats, CypherResult, MutationStats};
-use crate::datatypes::values::Value;
-use crate::graph::algorithms::graph_algorithms::CentralityResult;
+use crate::graph::languages::cypher::result::{ClauseStats, CypherResult, MutationStats};
 use crate::graph::schema::{DirGraph, NodeData};
 use crate::graph::storage::GraphRead;
 use petgraph::Direction;
@@ -168,7 +172,7 @@ impl ResultView {
     pub fn from_nodes_with_graph(
         graph: &DirGraph,
         node_indices: &[petgraph::graph::NodeIndex],
-        temporal_context: &super::super::TemporalContext,
+        temporal_context: &crate::graph::TemporalContext,
     ) -> Self {
         use crate::datatypes::values::format_value;
 
@@ -226,7 +230,7 @@ impl ResultView {
             .collect();
 
         // Resolve temporal context to a concrete ref_date or range for edge filtering
-        use super::super::TemporalContext;
+        use crate::graph::TemporalContext;
         let is_all = matches!(temporal_context, TemporalContext::All);
         let ref_date = match temporal_context {
             TemporalContext::Today => Some(chrono::Local::now().date_naive()),

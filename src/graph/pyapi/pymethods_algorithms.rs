@@ -11,7 +11,7 @@ use crate::graph::schema::{CowSelection, PlanStep};
 use crate::graph::storage::lookups;
 use crate::graph::{
     centrality_results_to_dataframe, centrality_results_to_py_dict, community_results_to_py,
-    cypher, KnowledgeGraph, TemporalContext,
+    KnowledgeGraph, TemporalContext,
 };
 
 #[pymethods]
@@ -720,7 +720,11 @@ impl KnowledgeGraph {
             centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
             {
-                let view = cypher::ResultView::from_centrality(&self.inner, results, top_k);
+                let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
+                    &self.inner,
+                    results,
+                    top_k,
+                );
                 Py::new(py, view).map(|v| v.into_any())
             }
         }
@@ -786,7 +790,11 @@ impl KnowledgeGraph {
             centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
             {
-                let view = cypher::ResultView::from_centrality(&self.inner, results, top_k);
+                let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
+                    &self.inner,
+                    results,
+                    top_k,
+                );
                 Py::new(py, view).map(|v| v.into_any())
             }
         }
@@ -842,7 +850,11 @@ impl KnowledgeGraph {
             centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
             {
-                let view = cypher::ResultView::from_centrality(&self.inner, results, top_k);
+                let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
+                    &self.inner,
+                    results,
+                    top_k,
+                );
                 Py::new(py, view).map(|v| v.into_any())
             }
         }
@@ -905,7 +917,11 @@ impl KnowledgeGraph {
             centrality_results_to_py_dict(py, &self.inner, results, top_k)
         } else {
             {
-                let view = cypher::ResultView::from_centrality(&self.inner, results, top_k);
+                let view = crate::graph::pyapi::result_view::ResultView::from_centrality(
+                    &self.inner,
+                    results,
+                    top_k,
+                );
                 Py::new(py, view).map(|v| v.into_any())
             }
         }

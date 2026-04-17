@@ -2,7 +2,7 @@
 // Full Cypher AST definitions
 
 use crate::datatypes::values::Value;
-use crate::graph::query::pattern_matching::Pattern;
+use crate::graph::core::pattern_matching::Pattern;
 
 // ============================================================================
 // Top-Level Query

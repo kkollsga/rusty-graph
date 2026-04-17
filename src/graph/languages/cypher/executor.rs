@@ -5,7 +5,7 @@ use super::ast::*;
 use super::result::*;
 use crate::datatypes::values::Value;
 use crate::graph::algorithms::vector_search as vs;
-use crate::graph::query::pattern_matching::{
+use crate::graph::core::pattern_matching::{
     EdgeDirection, MatchBinding, Pattern, PatternElement, PatternExecutor, PatternMatch,
     PropertyMatcher,
 };
@@ -707,17 +707,15 @@ impl<'a> CypherExecutor<'a> {
                                 .bindings
                                 .iter()
                                 .find(|(name, _)| name == dedup_var)
-                                .is_some_and(|(_, b)| {
-                                    match b {
-                                    crate::graph::query::pattern_matching::MatchBinding::Node {
+                                .is_some_and(|(_, b)| match b {
+                                    crate::graph::core::pattern_matching::MatchBinding::Node {
                                         index,
                                         ..
                                     } => !seen.insert(*index),
-                                    crate::graph::query::pattern_matching::MatchBinding::NodeRef(
+                                    crate::graph::core::pattern_matching::MatchBinding::NodeRef(
                                         index,
                                     ) => !seen.insert(*index),
                                     _ => false,
-                                }
                                 });
                             if !dominated {
                                 all_rows.push(self.pattern_match_to_row(m));
@@ -906,7 +904,7 @@ impl<'a> CypherExecutor<'a> {
                                             .unwrap_or_default();
                                         row.path_bindings.insert(
                                             pa.variable.clone(),
-                                            crate::graph::cypher::result::PathBinding {
+                                            crate::graph::languages::cypher::result::PathBinding {
                                                 source: eb.source,
                                                 target: eb.target,
                                                 hops: 1,
@@ -1206,7 +1204,7 @@ impl<'a> CypherExecutor<'a> {
     /// Iterates ALL pattern elements to capture every hop, not just the first.
     fn synthesize_path_from_pattern(
         &self,
-        pattern: &crate::graph::query::pattern_matching::Pattern,
+        pattern: &crate::graph::core::pattern_matching::Pattern,
         row: &ResultRow,
     ) -> Option<PathBinding> {
         let mut node_vars: Vec<&str> = Vec::new();
@@ -1453,11 +1451,11 @@ impl<'a> CypherExecutor<'a> {
                         let val = nd.get_property(key);
                         let ok = match matcher {
                             PropertyMatcher::Equals(expected) => val.as_deref().is_some_and(|v| {
-                                crate::graph::query::filtering_methods::values_equal(v, expected)
+                                crate::graph::core::filtering_methods::values_equal(v, expected)
                             }),
                             PropertyMatcher::In(values) => val.as_deref().is_some_and(|v| {
                                 values.iter().any(|exp| {
-                                    crate::graph::query::filtering_methods::values_equal(v, exp)
+                                    crate::graph::core::filtering_methods::values_equal(v, exp)
                                 })
                             }),
                             // Complex matchers — fall back to slow path
@@ -1495,7 +1493,7 @@ impl<'a> CypherExecutor<'a> {
 
     fn try_count_simple_pattern(
         &self,
-        pattern: &crate::graph::query::pattern_matching::Pattern,
+        pattern: &crate::graph::core::pattern_matching::Pattern,
         bindings: &Bindings<NodeIndex>,
     ) -> Result<Option<i64>, String> {
         // Only handle simple 3-element patterns: Node-Edge-Node
@@ -1633,7 +1631,7 @@ impl<'a> CypherExecutor<'a> {
     /// Traverses: first_node --e1--> middle_nodes --e2--> count last nodes.
     fn count_two_hop_pattern(
         &self,
-        pattern: &crate::graph::query::pattern_matching::Pattern,
+        pattern: &crate::graph::core::pattern_matching::Pattern,
         first_idx: NodeIndex,
     ) -> i64 {
         use petgraph::Direction;
@@ -1737,7 +1735,7 @@ impl<'a> CypherExecutor<'a> {
     /// Reads elements [3],[2],[1],[0] with flipped edge directions.
     fn count_two_hop_pattern_reverse(
         &self,
-        pattern: &crate::graph::query::pattern_matching::Pattern,
+        pattern: &crate::graph::core::pattern_matching::Pattern,
         last_idx: NodeIndex,
     ) -> i64 {
         use petgraph::Direction;
@@ -2003,7 +2001,7 @@ impl<'a> CypherExecutor<'a> {
         };
 
         // Build a single-node pattern for matching group keys
-        let group_only_pattern = crate::graph::query::pattern_matching::Pattern {
+        let group_only_pattern = crate::graph::core::pattern_matching::Pattern {
             elements: vec![pattern.elements[group_elem_idx].clone()],
         };
 
@@ -2024,7 +2022,7 @@ impl<'a> CypherExecutor<'a> {
         }
 
         // Helper: extract node index from a match binding
-        let extract_node_idx = |m: &crate::graph::query::pattern_matching::PatternMatch| -> Option<petgraph::graph::NodeIndex> {
+        let extract_node_idx = |m: &crate::graph::core::pattern_matching::PatternMatch| -> Option<petgraph::graph::NodeIndex> {
             m.bindings.iter().find_map(|(name, binding)| {
                 if name == group_var {
                     match binding {
@@ -2378,7 +2376,7 @@ impl<'a> CypherExecutor<'a> {
         where_predicate: Option<&Predicate>,
         return_clause: &ReturnClause,
     ) -> Result<ResultSet, String> {
-        use crate::graph::query::pattern_matching::PatternElement;
+        use crate::graph::core::pattern_matching::PatternElement;
 
         // Extract node variable and type from the single-element pattern
         let pattern = &match_clause.patterns[0];
@@ -2525,7 +2523,7 @@ impl<'a> CypherExecutor<'a> {
                     }
                     if !matches!(val, Value::Null) {
                         if acc.mins[ai].is_none()
-                            || crate::graph::query::filtering_methods::compare_values(
+                            || crate::graph::core::filtering_methods::compare_values(
                                 val,
                                 acc.mins[ai].as_ref().unwrap(),
                             ) == Some(std::cmp::Ordering::Less)
@@ -2533,7 +2531,7 @@ impl<'a> CypherExecutor<'a> {
                             acc.mins[ai] = Some(val.clone());
                         }
                         if acc.maxs[ai].is_none()
-                            || crate::graph::query::filtering_methods::compare_values(
+                            || crate::graph::core::filtering_methods::compare_values(
                                 val,
                                 acc.maxs[ai].as_ref().unwrap(),
                             ) == Some(std::cmp::Ordering::Greater)
@@ -2705,7 +2703,7 @@ impl<'a> CypherExecutor<'a> {
         descending: bool,
         limit: usize,
     ) -> Result<ResultSet, String> {
-        use crate::graph::query::pattern_matching::PatternElement;
+        use crate::graph::core::pattern_matching::PatternElement;
 
         let pattern = &match_clause.patterns[0];
         let node_pattern = match &pattern.elements[0] {
@@ -2790,12 +2788,12 @@ impl<'a> CypherExecutor<'a> {
             // Insert into top-K sorted Vec
             let pos = if descending {
                 top_k.partition_point(|(existing, _)| {
-                    crate::graph::query::filtering_methods::compare_values(existing, &sort_val)
+                    crate::graph::core::filtering_methods::compare_values(existing, &sort_val)
                         .is_some_and(|o| o != std::cmp::Ordering::Less)
                 })
             } else {
                 top_k.partition_point(|(existing, _)| {
-                    crate::graph::query::filtering_methods::compare_values(existing, &sort_val)
+                    crate::graph::core::filtering_methods::compare_values(existing, &sort_val)
                         .is_some_and(|o| o != std::cmp::Ordering::Greater)
                 })
             };
@@ -2878,7 +2876,7 @@ impl<'a> CypherExecutor<'a> {
         };
 
         // Build single-node pattern for matching group keys
-        let group_only_pattern = crate::graph::query::pattern_matching::Pattern {
+        let group_only_pattern = crate::graph::core::pattern_matching::Pattern {
             elements: vec![pattern.elements[group_elem_idx].clone()],
         };
 
@@ -3150,7 +3148,7 @@ impl<'a> CypherExecutor<'a> {
                 let lat = match node
                     .get_property(&spec.lat_prop)
                     .as_deref()
-                    .and_then(crate::graph::query::value_operations::value_to_f64)
+                    .and_then(crate::graph::core::value_operations::value_to_f64)
                 {
                     Some(v) => v,
                     None => return false,
@@ -3158,7 +3156,7 @@ impl<'a> CypherExecutor<'a> {
                 let lon = match node
                     .get_property(&spec.lon_prop)
                     .as_deref()
-                    .and_then(crate::graph::query::value_operations::value_to_f64)
+                    .and_then(crate::graph::core::value_operations::value_to_f64)
                 {
                     Some(v) => v,
                     None => return false,
@@ -3407,7 +3405,7 @@ impl<'a> CypherExecutor<'a> {
                 let val = self.evaluate_expression(expr, row)?;
                 for item in list {
                     let item_val = self.evaluate_expression(item, row)?;
-                    if crate::graph::query::filtering_methods::values_equal(&val, &item_val) {
+                    if crate::graph::core::filtering_methods::values_equal(&val, &item_val) {
                         return Ok(true);
                     }
                 }
@@ -3419,7 +3417,7 @@ impl<'a> CypherExecutor<'a> {
                 Ok(values.contains(&val)
                     || values
                         .iter()
-                        .any(|v| crate::graph::query::filtering_methods::values_equal(v, &val)))
+                        .any(|v| crate::graph::core::filtering_methods::values_equal(v, &val)))
             }
             Predicate::StartsWith { expr, pattern } => {
                 let val = self.evaluate_expression(expr, row)?;
@@ -3501,7 +3499,7 @@ impl<'a> CypherExecutor<'a> {
                 let list_val = self.evaluate_expression(list_expr, row)?;
                 let items = parse_list_value(&list_val);
                 for item in &items {
-                    if crate::graph::query::filtering_methods::values_equal(&val, item) {
+                    if crate::graph::core::filtering_methods::values_equal(&val, item) {
                         return Ok(true);
                     }
                 }
@@ -3589,7 +3587,7 @@ impl<'a> CypherExecutor<'a> {
 
         // threshold must be a literal number
         let threshold = match threshold_expr {
-            Expression::Literal(val) => crate::graph::query::value_operations::value_to_f64(val)?,
+            Expression::Literal(val) => crate::graph::core::value_operations::value_to_f64(val)?,
             _ => return None,
         };
 
@@ -3669,7 +3667,7 @@ impl<'a> CypherExecutor<'a> {
                 // threshold must be a literal number
                 let threshold = match threshold_expr {
                     Expression::Literal(val) => {
-                        crate::graph::query::value_operations::value_to_f64(val)?
+                        crate::graph::core::value_operations::value_to_f64(val)?
                     }
                     _ => return None,
                 };
@@ -3795,7 +3793,7 @@ impl<'a> CypherExecutor<'a> {
     /// Extract f64 from a Literal expression
     fn extract_literal_f64(expr: &Expression) -> Option<f64> {
         if let Expression::Literal(val) = expr {
-            crate::graph::query::value_operations::value_to_f64(val)
+            crate::graph::core::value_operations::value_to_f64(val)
         } else {
             None
         }
@@ -4168,7 +4166,7 @@ impl<'a> CypherExecutor<'a> {
             Expression::Concat(left, right) => {
                 let l = self.evaluate_expression(left, row)?;
                 let r = self.evaluate_expression(right, row)?;
-                Ok(crate::graph::query::value_operations::string_concat(&l, &r))
+                Ok(crate::graph::core::value_operations::string_concat(&l, &r))
             }
             Expression::Negate(inner) => {
                 let val = self.evaluate_expression(inner, row)?;
@@ -4682,7 +4680,7 @@ impl<'a> CypherExecutor<'a> {
             for (condition, result) in when_clauses {
                 if let CaseCondition::Expression(cond_expr) = condition {
                     let cond_val = self.evaluate_expression(cond_expr, row)?;
-                    if crate::graph::query::filtering_methods::values_equal(&operand_val, &cond_val)
+                    if crate::graph::core::filtering_methods::values_equal(&operand_val, &cond_val)
                     {
                         return self.evaluate_expression(result, row);
                     }
@@ -4803,11 +4801,11 @@ impl<'a> CypherExecutor<'a> {
             let lat = node
                 .get_property(lat_f)
                 .as_deref()
-                .and_then(crate::graph::query::value_operations::value_to_f64)?;
+                .and_then(crate::graph::core::value_operations::value_to_f64)?;
             let lon = node
                 .get_property(lon_f)
                 .as_deref()
-                .and_then(crate::graph::query::value_operations::value_to_f64)?;
+                .and_then(crate::graph::core::value_operations::value_to_f64)?;
             Some((lat, lon))
         });
 
@@ -4828,10 +4826,10 @@ impl<'a> CypherExecutor<'a> {
             if let (Some(lat), Some(lon)) = (
                 node.get_property(lat_f)
                     .as_deref()
-                    .and_then(crate::graph::query::value_operations::value_to_f64),
+                    .and_then(crate::graph::core::value_operations::value_to_f64),
                 node.get_property(lon_f)
                     .as_deref()
-                    .and_then(crate::graph::query::value_operations::value_to_f64),
+                    .and_then(crate::graph::core::value_operations::value_to_f64),
             ) {
                 points.insert(name.clone(), (lat, lon));
             }
@@ -5458,11 +5456,11 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 2 {
                     return Err("point() requires 2 arguments: lat, lon".into());
                 }
-                let lat = crate::graph::query::value_operations::value_to_f64(
+                let lat = crate::graph::core::value_operations::value_to_f64(
                     &self.evaluate_expression(&args[0], row)?,
                 )
                 .ok_or("point(): lat must be numeric")?;
-                let lon = crate::graph::query::value_operations::value_to_f64(
+                let lon = crate::graph::core::value_operations::value_to_f64(
                     &self.evaluate_expression(&args[1], row)?,
                 )
                 .ok_or("point(): lon must be numeric")?;
@@ -5510,19 +5508,19 @@ impl<'a> CypherExecutor<'a> {
                     }
                 }
                 4 => {
-                    let lat1 = crate::graph::query::value_operations::value_to_f64(
+                    let lat1 = crate::graph::core::value_operations::value_to_f64(
                         &self.evaluate_expression(&args[0], row)?,
                     )
                     .ok_or("distance(): args must be numeric")?;
-                    let lon1 = crate::graph::query::value_operations::value_to_f64(
+                    let lon1 = crate::graph::core::value_operations::value_to_f64(
                         &self.evaluate_expression(&args[1], row)?,
                     )
                     .ok_or("distance(): args must be numeric")?;
-                    let lat2 = crate::graph::query::value_operations::value_to_f64(
+                    let lat2 = crate::graph::core::value_operations::value_to_f64(
                         &self.evaluate_expression(&args[2], row)?,
                     )
                     .ok_or("distance(): args must be numeric")?;
-                    let lon2 = crate::graph::query::value_operations::value_to_f64(
+                    let lon2 = crate::graph::core::value_operations::value_to_f64(
                         &self.evaluate_expression(&args[3], row)?,
                     )
                     .ok_or("distance(): args must be numeric")?;
@@ -6855,7 +6853,7 @@ impl<'a> CypherExecutor<'a> {
                         min_val = Some(match min_val {
                             None => val,
                             Some(current) => {
-                                if crate::graph::query::filtering_methods::compare_values(
+                                if crate::graph::core::filtering_methods::compare_values(
                                     &val, &current,
                                 ) == Some(std::cmp::Ordering::Less)
                                 {
@@ -6878,7 +6876,7 @@ impl<'a> CypherExecutor<'a> {
                         max_val = Some(match max_val {
                             None => val,
                             Some(current) => {
-                                if crate::graph::query::filtering_methods::compare_values(
+                                if crate::graph::core::filtering_methods::compare_values(
                                     &val, &current,
                                 ) == Some(std::cmp::Ordering::Greater)
                                 {
@@ -7018,42 +7016,32 @@ impl<'a> CypherExecutor<'a> {
             Expression::Add(left, right) => {
                 let l = self.evaluate_aggregate_with_rows(left, rows)?;
                 let r = self.evaluate_aggregate_with_rows(right, rows)?;
-                Ok(crate::graph::query::value_operations::arithmetic_add(
-                    &l, &r,
-                ))
+                Ok(crate::graph::core::value_operations::arithmetic_add(&l, &r))
             }
             Expression::Subtract(left, right) => {
                 let l = self.evaluate_aggregate_with_rows(left, rows)?;
                 let r = self.evaluate_aggregate_with_rows(right, rows)?;
-                Ok(crate::graph::query::value_operations::arithmetic_sub(
-                    &l, &r,
-                ))
+                Ok(crate::graph::core::value_operations::arithmetic_sub(&l, &r))
             }
             Expression::Multiply(left, right) => {
                 let l = self.evaluate_aggregate_with_rows(left, rows)?;
                 let r = self.evaluate_aggregate_with_rows(right, rows)?;
-                Ok(crate::graph::query::value_operations::arithmetic_mul(
-                    &l, &r,
-                ))
+                Ok(crate::graph::core::value_operations::arithmetic_mul(&l, &r))
             }
             Expression::Divide(left, right) => {
                 let l = self.evaluate_aggregate_with_rows(left, rows)?;
                 let r = self.evaluate_aggregate_with_rows(right, rows)?;
-                Ok(crate::graph::query::value_operations::arithmetic_div(
-                    &l, &r,
-                ))
+                Ok(crate::graph::core::value_operations::arithmetic_div(&l, &r))
             }
             Expression::Modulo(left, right) => {
                 let l = self.evaluate_aggregate_with_rows(left, rows)?;
                 let r = self.evaluate_aggregate_with_rows(right, rows)?;
-                Ok(crate::graph::query::value_operations::arithmetic_mod(
-                    &l, &r,
-                ))
+                Ok(crate::graph::core::value_operations::arithmetic_mod(&l, &r))
             }
             Expression::Concat(left, right) => {
                 let l = self.evaluate_aggregate_with_rows(left, rows)?;
                 let r = self.evaluate_aggregate_with_rows(right, rows)?;
-                Ok(crate::graph::query::value_operations::string_concat(&l, &r))
+                Ok(crate::graph::core::value_operations::string_concat(&l, &r))
             }
             // Non-aggregate expression in an aggregation context - evaluate with first row
             _ => {
@@ -7233,7 +7221,7 @@ impl<'a> CypherExecutor<'a> {
                             mins[si] = Some(match mins[si].take() {
                                 None => val.clone(),
                                 Some(current) => {
-                                    if crate::graph::query::filtering_methods::compare_values(
+                                    if crate::graph::core::filtering_methods::compare_values(
                                         val, &current,
                                     ) == Some(std::cmp::Ordering::Less)
                                     {
@@ -7251,7 +7239,7 @@ impl<'a> CypherExecutor<'a> {
                             maxs[si] = Some(match maxs[si].take() {
                                 None => val.clone(),
                                 Some(current) => {
-                                    if crate::graph::query::filtering_methods::compare_values(
+                                    if crate::graph::core::filtering_methods::compare_values(
                                         val, &current,
                                     ) == Some(std::cmp::Ordering::Greater)
                                     {
@@ -7364,7 +7352,7 @@ impl<'a> CypherExecutor<'a> {
         let mut indices: Vec<usize> = (0..result_set.rows.len()).collect();
         indices.sort_by(|&a, &b| {
             for (i, item) in clause.items.iter().enumerate() {
-                if let Some(ordering) = crate::graph::query::filtering_methods::compare_values(
+                if let Some(ordering) = crate::graph::core::filtering_methods::compare_values(
                     &sort_keys[a][i],
                     &sort_keys[b][i],
                 ) {
@@ -9763,25 +9751,25 @@ fn evaluate_comparison(
     // (except IS NULL / IS NOT NULL which are handled elsewhere, and
     // Equals/NotEquals which handle Null explicitly via values_equal).
     match op {
-        ComparisonOp::Equals => Ok(crate::graph::query::filtering_methods::values_equal(
+        ComparisonOp::Equals => Ok(crate::graph::core::filtering_methods::values_equal(
             left, right,
         )),
-        ComparisonOp::NotEquals => Ok(!crate::graph::query::filtering_methods::values_equal(
+        ComparisonOp::NotEquals => Ok(!crate::graph::core::filtering_methods::values_equal(
             left, right,
         )),
         _ if matches!(left, Value::Null) || matches!(right, Value::Null) => Ok(false),
-        ComparisonOp::LessThan => Ok(crate::graph::query::filtering_methods::compare_values(
+        ComparisonOp::LessThan => Ok(crate::graph::core::filtering_methods::compare_values(
             left, right,
         ) == Some(std::cmp::Ordering::Less)),
         ComparisonOp::LessThanEq => Ok(matches!(
-            crate::graph::query::filtering_methods::compare_values(left, right),
+            crate::graph::core::filtering_methods::compare_values(left, right),
             Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
         )),
-        ComparisonOp::GreaterThan => Ok(crate::graph::query::filtering_methods::compare_values(
+        ComparisonOp::GreaterThan => Ok(crate::graph::core::filtering_methods::compare_values(
             left, right,
         ) == Some(std::cmp::Ordering::Greater)),
         ComparisonOp::GreaterThanEq => Ok(matches!(
-            crate::graph::query::filtering_methods::compare_values(left, right),
+            crate::graph::core::filtering_methods::compare_values(left, right),
             Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
         )),
         ComparisonOp::RegexMatch => match (left, right) {
@@ -9828,10 +9816,10 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
             if let Some(config) = graph.get_spatial_config(node_type_str) {
                 if resolved == "location" {
                     if let Some((lat_f, lon_f)) = &config.location {
-                        let lat = crate::graph::query::value_operations::value_to_f64(
+                        let lat = crate::graph::core::value_operations::value_to_f64(
                             node.get_property(lat_f).as_deref().unwrap_or(&Value::Null),
                         );
-                        let lon = crate::graph::query::value_operations::value_to_f64(
+                        let lon = crate::graph::core::value_operations::value_to_f64(
                             node.get_property(lon_f).as_deref().unwrap_or(&Value::Null),
                         );
                         if let (Some(lat), Some(lon)) = (lat, lon) {
@@ -9847,10 +9835,10 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
                     }
                 }
                 if let Some((lat_f, lon_f)) = config.points.get(resolved) {
-                    let lat = crate::graph::query::value_operations::value_to_f64(
+                    let lat = crate::graph::core::value_operations::value_to_f64(
                         node.get_property(lat_f).as_deref().unwrap_or(&Value::Null),
                     );
-                    let lon = crate::graph::query::value_operations::value_to_f64(
+                    let lon = crate::graph::core::value_operations::value_to_f64(
                         node.get_property(lon_f).as_deref().unwrap_or(&Value::Null),
                     );
                     if let (Some(lat), Some(lon)) = (lat, lon) {
@@ -9974,7 +9962,7 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
 
 // Delegate to shared value_operations module
 fn format_value_compact(val: &Value) -> String {
-    crate::graph::query::value_operations::format_value_compact(val)
+    crate::graph::core::value_operations::format_value_compact(val)
 }
 /// JSON-safe value formatting: strings are quoted, others are as-is.
 /// Used for list serialization so py_convert can parse via json.loads.
@@ -9988,7 +9976,7 @@ fn format_value_json(val: &Value) -> String {
     }
 }
 fn value_to_f64(val: &Value) -> Option<f64> {
-    crate::graph::query::value_operations::value_to_f64(val)
+    crate::graph::core::value_operations::value_to_f64(val)
 }
 
 /// Auto-coerce non-string types (DateTime, Int64, Float64, Boolean) to String
@@ -10020,25 +10008,25 @@ fn parse_json_float_list(s: &str) -> Result<Vec<f32>, String> {
         .collect()
 }
 fn arithmetic_add(a: &Value, b: &Value) -> Value {
-    crate::graph::query::value_operations::arithmetic_add(a, b)
+    crate::graph::core::value_operations::arithmetic_add(a, b)
 }
 fn arithmetic_sub(a: &Value, b: &Value) -> Value {
-    crate::graph::query::value_operations::arithmetic_sub(a, b)
+    crate::graph::core::value_operations::arithmetic_sub(a, b)
 }
 fn arithmetic_mul(a: &Value, b: &Value) -> Value {
-    crate::graph::query::value_operations::arithmetic_mul(a, b)
+    crate::graph::core::value_operations::arithmetic_mul(a, b)
 }
 fn arithmetic_div(a: &Value, b: &Value) -> Value {
-    crate::graph::query::value_operations::arithmetic_div(a, b)
+    crate::graph::core::value_operations::arithmetic_div(a, b)
 }
 fn arithmetic_mod(a: &Value, b: &Value) -> Value {
-    crate::graph::query::value_operations::arithmetic_mod(a, b)
+    crate::graph::core::value_operations::arithmetic_mod(a, b)
 }
 fn arithmetic_negate(a: &Value) -> Value {
-    crate::graph::query::value_operations::arithmetic_negate(a)
+    crate::graph::core::value_operations::arithmetic_negate(a)
 }
 fn to_integer(val: &Value) -> Value {
-    crate::graph::query::value_operations::to_integer(val)
+    crate::graph::core::value_operations::to_integer(val)
 }
 fn as_i64(val: &Value) -> Result<i64, String> {
     match val {
@@ -10051,10 +10039,10 @@ fn as_i64(val: &Value) -> Result<i64, String> {
     }
 }
 fn to_float(val: &Value) -> Value {
-    crate::graph::query::value_operations::to_float(val)
+    crate::graph::core::value_operations::to_float(val)
 }
 fn parse_value_string(s: &str) -> Value {
-    crate::graph::query::value_operations::parse_value_string(s)
+    crate::graph::core::value_operations::parse_value_string(s)
 }
 
 /// Split a list string like "[1, 2, [3, 4], 5]" into top-level items,

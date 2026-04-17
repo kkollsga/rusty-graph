@@ -1,10 +1,16 @@
-# KGLite — architecture (as of end of Phase 6 of the 0.8.0 refactor)
+# KGLite — architecture (as of end of Phase 8 of the 0.8.0 refactor)
 
 This document is the living spec for how storage is layered in kglite.
 It's updated as each phase of the 0.8.0 refactor lands. See `todo.md`
-for the full plan. Phase 7 (structural reorg + audit) is in progress;
-the Target structure block below will be re-checked once the reorg
-lands.
+for the full plan.
+
+Phase 8 reorganised the source tree so that (a) every `#[pymethods]` /
+`#[pyclass]` attribute lives under `src/graph/pyapi/`, (b) query-interface
+languages live under `src/graph/languages/` (peers: `cypher` and
+`fluent`), and (c) shared query primitives live under `src/graph/core/`.
+Phase 9 will split the remaining god files (executor.rs, schema.rs,
+introspection.rs, planner.rs, disk_graph.rs, ntriples.rs, parser.rs,
+pattern_matching.rs, pyapi/kg_methods.rs).
 
 ## TL;DR
 
@@ -17,7 +23,8 @@ lands.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│ PyO3 boundary (src/graph/mod.rs — KnowledgeGraph #[pymethods])   │
+│ PyO3 boundary (src/graph/pyapi/kg_methods.rs + transaction.rs +  │
+│                result_view.rs + pymethods_*.rs)                  │
 │   Dispatches on storage="..." at construction                    │
 └───────┬───────────────────────┬───────────────────────┬──────────┘
         │                       │                       │
@@ -107,38 +114,62 @@ flags) live on the concrete `DirGraph`, not on any trait. Rationale:
   `GraphBackend`.
 - Adding a `GraphTransaction` trait would only duplicate what
   `DirGraph::begin` / `commit` already provide; PyO3 txn boundaries
-  in `src/graph/mod.rs` take `&mut self` on the full DirGraph.
+  in `src/graph/pyapi/transaction.rs` take `&mut self` on the full DirGraph.
 
 This keeps the `storage/` trait layer focused on per-backend data
 operations, not cross-cutting bookkeeping.
 
 ## Target structure
 
-Destination layout for `src/graph/` at end of 0.8.0 (see `todo.md`
-for the full migration plan — files move to their target subdir
-during the phase that already touches them):
+Destination layout for `src/graph/` after Phase 8 (updated 2026-04-17):
 
 ```
 src/graph/
-├── mod.rs                 # Re-exports + short module doc. No logic.
-├── kg.rs                  # KnowledgeGraph struct + core #[pymethods]
+├── mod.rs                 # Struct defs, private helpers, CoW selection utilities. No #[pymethods].
 │
 ├── storage/               # Trait layer + per-backend subfolders
-│   ├── mod.rs             # GraphRead / GraphWrite / GraphTraverse traits + GraphBackend enum
-│   ├── schema.rs          # Shared schema types
+│   ├── mod.rs             # GraphRead / GraphWrite traits + GraphBackend enum
 │   ├── interner.rs        # StringInterner + InternedKey
+│   ├── impls.rs           # Shared trait-impl helpers
+│   ├── lookups.rs
+│   ├── recording.rs       # RecordingGraph<G> validation wrapper
+│   ├── type_build_meta.rs
 │   ├── memory/            # Heap-resident backend
 │   ├── mapped/            # mmap-Columnar backend
 │   └── disk/              # CSR + mmap backend
 │
-├── cypher/                # Unchanged (already a subdir)
-├── query/                 # Shared execution (pattern matching, filters, traversal)
+├── core/                  # Shared query primitives (was query/ pre-Phase 8)
+│   ├── pattern_matching.rs     # (Phase 9: split into pattern_matching/)
+│   ├── filtering_methods.rs
+│   ├── traversal_methods.rs
+│   ├── graph_iterators.rs
+│   ├── data_retrieval.rs
+│   ├── calculations.rs
+│   ├── value_operations.rs
+│   └── statistics_methods.rs
+│
+├── languages/             # Query-interface languages (NEW in Phase 8)
+│   ├── mod.rs
+│   ├── cypher/            # Moved from graph/cypher/ in Phase 8
+│   └── fluent/            # NEW: fluent selection chain docs/entry (today's Rust is thin — Python-facing in pyapi/)
+│
 ├── algorithms/            # PageRank, centrality, components, clustering, vector
 ├── introspection/         # describe(), schema(), debug, bug_report
 ├── io/                    # Load / save / ntriples / export
 ├── features/              # spatial / temporal / timeseries / equations
 ├── mutation/              # Batch / maintain / validate / subgraph
-└── pyapi/                 # #[pymethods] blocks at the edge
+│
+└── pyapi/                 # ALL #[pymethods] + #[pyclass] live here
+    ├── mod.rs             # Module registration
+    ├── kg_methods.rs      # KnowledgeGraph #[pymethods] (Phase 9: split into kg_{core,mutation,introspection,fluent})
+    ├── transaction.rs     # Transaction #[pyclass]
+    ├── result_view.rs     # ResultView + ResultIter #[pyclass]
+    ├── pymethods_algorithms.rs
+    ├── pymethods_export.rs
+    ├── pymethods_indexes.rs
+    ├── pymethods_spatial.rs
+    ├── pymethods_timeseries.rs
+    └── pymethods_vector.rs
 ```
 
 ## Rules for new storage code

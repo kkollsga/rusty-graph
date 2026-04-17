@@ -3,7 +3,7 @@
 
 use super::ast::*;
 use crate::datatypes::values::Value;
-use crate::graph::query::pattern_matching::{PatternElement, PropertyMatcher};
+use crate::graph::core::pattern_matching::{PatternElement, PropertyMatcher};
 use crate::graph::schema::DirGraph;
 use crate::graph::storage::GraphRead;
 use std::collections::HashMap;
@@ -85,7 +85,7 @@ fn mark_fast_var_length_paths(query: &mut CypherQuery) {
 /// in the BFS inner loop is redundant. This saves one `StableDiGraph` slab
 /// dereference per visited node.
 fn mark_skip_target_type_check(query: &mut CypherQuery, graph: &DirGraph) {
-    use crate::graph::query::pattern_matching::EdgeDirection;
+    use crate::graph::core::pattern_matching::EdgeDirection;
 
     for clause in &mut query.clauses {
         let mc = match clause {
@@ -161,7 +161,7 @@ fn mark_skip_target_type_check(query: &mut CypherQuery, graph: &DirGraph) {
 /// let the normal executor return 0 via the usual path. That preserves
 /// Cypher semantics.
 fn fuse_anchored_edge_count(query: &mut CypherQuery, graph: &DirGraph) {
-    use crate::graph::query::pattern_matching::{EdgeDirection, PropertyMatcher};
+    use crate::graph::core::pattern_matching::{EdgeDirection, PropertyMatcher};
 
     if query.clauses.len() < 2 {
         return;
@@ -217,7 +217,7 @@ fn fuse_anchored_edge_count(query: &mut CypherQuery, graph: &DirGraph) {
     // Helper: does the node look like a pure `{id: VAL}` literal anchor —
     // no type, no variable, exactly one property keyed `id` with a literal
     // Equals matcher? Returns the id value on match.
-    let as_anchor_id = |np: &crate::graph::query::pattern_matching::NodePattern| -> Option<Value> {
+    let as_anchor_id = |np: &crate::graph::core::pattern_matching::NodePattern| -> Option<Value> {
         if np.node_type.is_some() || np.variable.is_some() {
             return None;
         }
@@ -232,7 +232,7 @@ fn fuse_anchored_edge_count(query: &mut CypherQuery, graph: &DirGraph) {
         }
     };
     // Helper: the other side is a named variable with no type/property filter.
-    fn as_pure_var(np: &crate::graph::query::pattern_matching::NodePattern) -> Option<&String> {
+    fn as_pure_var(np: &crate::graph::core::pattern_matching::NodePattern) -> Option<&String> {
         if np.node_type.is_some() || np.properties.is_some() {
             return None;
         }
@@ -303,7 +303,7 @@ fn fuse_anchored_edge_count(query: &mut CypherQuery, graph: &DirGraph) {
 }
 
 fn fuse_count_short_circuits(query: &mut CypherQuery) {
-    use crate::graph::query::pattern_matching::EdgeDirection;
+    use crate::graph::core::pattern_matching::EdgeDirection;
 
     if query.clauses.len() < 2 {
         return;
@@ -778,7 +778,7 @@ fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<String, Value
 ///
 /// Must run AFTER `push_where_into_match` (so equality predicates are already in the pattern).
 fn optimize_pattern_start_node(query: &mut CypherQuery, graph: &DirGraph) {
-    use crate::graph::query::pattern_matching::EdgeDirection;
+    use crate::graph::core::pattern_matching::EdgeDirection;
 
     for clause in &mut query.clauses {
         let (patterns, path_assignments) = match clause {
@@ -843,7 +843,7 @@ fn optimize_pattern_start_node(query: &mut CypherQuery, graph: &DirGraph) {
 /// Estimate the number of candidate nodes for a node pattern.
 /// Lower = more selective = better as start node.
 fn estimate_node_selectivity(
-    np: &crate::graph::query::pattern_matching::NodePattern,
+    np: &crate::graph::core::pattern_matching::NodePattern,
     graph: &DirGraph,
 ) -> usize {
     let type_count = np
@@ -1133,7 +1133,7 @@ fn push_distinct_into_match(query: &mut CypherQuery) {
             if let Clause::Match(ref mc) = &query.clauses[match_idx] {
                 let is_node_var = mc.patterns.iter().any(|p| {
                     p.elements.iter().any(|e| {
-                        if let crate::graph::query::pattern_matching::PatternElement::Node(np) = e {
+                        if let crate::graph::core::pattern_matching::PatternElement::Node(np) = e {
                             np.variable.as_deref() == Some(dv.as_str())
                         } else {
                             false
@@ -2005,7 +2005,7 @@ fn fuse_match_with_aggregate(query: &mut CypherQuery) {
 
 /// Collect variable names and their node types from patterns
 fn collect_pattern_variables(
-    patterns: &[crate::graph::query::pattern_matching::Pattern],
+    patterns: &[crate::graph::core::pattern_matching::Pattern],
 ) -> Vec<(String, Option<String>)> {
     let mut vars = Vec::new();
     for pattern in patterns {
@@ -2294,7 +2294,7 @@ fn try_extract_comparison(
 /// If the same property already has a comparison matcher (e.g. `year >= 2015`
 /// followed by `year <= 2022`), merge them into a `Range` matcher.
 fn apply_comparison_to_patterns(
-    patterns: &mut [crate::graph::query::pattern_matching::Pattern],
+    patterns: &mut [crate::graph::core::pattern_matching::Pattern],
     var_name: &str,
     property: &str,
     op: ComparisonOp,
@@ -2378,7 +2378,7 @@ fn merge_comparison(
 
 /// Apply a property equality condition to the matching node pattern in MATCH
 fn apply_property_to_patterns(
-    patterns: &mut [crate::graph::query::pattern_matching::Pattern],
+    patterns: &mut [crate::graph::core::pattern_matching::Pattern],
     var_name: &str,
     property: &str,
     value: Value,
@@ -2401,7 +2401,7 @@ fn apply_property_to_patterns(
 
 /// Apply an IN-list property condition to the matching node pattern in MATCH
 fn apply_in_property_to_patterns(
-    patterns: &mut [crate::graph::query::pattern_matching::Pattern],
+    patterns: &mut [crate::graph::core::pattern_matching::Pattern],
     var_name: &str,
     property: &str,
     values: Vec<Value>,
@@ -2473,7 +2473,7 @@ fn fuse_node_scan_top_k(query: &mut CypherQuery) {
                 && mc.patterns[0].elements.len() == 1
                 && matches!(
                     mc.patterns[0].elements[0],
-                    crate::graph::query::pattern_matching::PatternElement::Node(_)
+                    crate::graph::core::pattern_matching::PatternElement::Node(_)
                 )
                 && mc.path_assignments.is_empty()
         } else {
@@ -3373,7 +3373,7 @@ impl TextScoreCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::cypher::parser::parse_cypher;
+    use crate::graph::languages::cypher::parser::parse_cypher;
 
     #[test]
     fn test_predicate_pushdown_simple() {

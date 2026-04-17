@@ -2,8 +2,8 @@
 // Supports patterns like: (p:Play)-[:HAS_PROSPECT]->(pr:Prospect)-[:BECAME_DISCOVERY]->(d:Discovery)
 
 use crate::datatypes::values::Value;
-use crate::graph::cypher::result::Bindings;
-use crate::graph::query::filtering_methods::{compare_values, values_equal};
+use crate::graph::core::filtering_methods::{compare_values, values_equal};
+use crate::graph::languages::cypher::result::Bindings;
 use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::GraphRead;
 use petgraph::graph::{EdgeIndex, NodeIndex};
