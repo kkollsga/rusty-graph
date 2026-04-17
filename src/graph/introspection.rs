@@ -5,6 +5,7 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{ConnectivityTriple, DirGraph, InternedKey, NodeData};
+use crate::graph::storage::GraphRead;
 use petgraph::Direction;
 use std::collections::{HashMap, HashSet};
 
@@ -802,16 +803,15 @@ fn sample_unique_values(
     property: &str,
     max: usize,
 ) -> HashSet<String> {
-    use crate::graph::storage::GraphRead;
     let mut unique = HashSet::new();
     let Some(indices) = graph.type_indices.get(node_type) else {
         return unique;
     };
     let key = InternedKey::from_str(property);
-    // `&impl GraphRead` — monomorphised per backend, no vtable cost.
-    // First consumer of the GraphRead trait; Phase 1 will hoist this helper
-    // into a more general `sample_values<G: GraphRead>(backend: &G, ...)`
-    // once type_indices moves onto a wider metadata trait.
+    // `&dyn GraphRead` — trait-object dispatch; vtable cost is negligible
+    // versus the per-property reads inside the loop. A generic
+    // `sample_values<G: GraphRead>(backend: &G, ...)` variant will appear
+    // when `type_indices` moves onto a wider metadata trait.
     let backend: &dyn GraphRead = &graph.graph;
     for &idx in indices {
         if unique.len() >= max {
