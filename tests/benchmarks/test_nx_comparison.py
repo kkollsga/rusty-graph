@@ -24,6 +24,43 @@ from kglite import KnowledgeGraph
 
 pytestmark = pytest.mark.benchmark
 
+# Optional deps for memory / disk footprint measurements.
+try:
+    import psutil as _psutil
+except ImportError:
+    _psutil = None
+
+
+def _rss_bytes():
+    """Current RSS of the test process in bytes (None if psutil missing)."""
+    return _psutil.Process().memory_info().rss if _psutil is not None else None
+
+
+def _dir_size(path):
+    """Total bytes occupied by a directory tree. Returns 0 if missing."""
+    import os
+
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            fp = os.path.join(root, f)
+            try:
+                total += os.path.getsize(fp)
+            except OSError:
+                pass
+    return total
+
+
+def _fmt_bytes(n):
+    if n is None:
+        return "n/a"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}TB"
+
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -1139,6 +1176,465 @@ class TestSerializationPerformance:
             for p in [rg_path, nx_path]:
                 if os.path.exists(p):
                     os.unlink(p)
+
+
+# ============================================================================
+# Storage-mode helpers + benchmarks
+# ============================================================================
+
+
+def _build_kg_mode(n, mode, path=None, edge_factor=3, seed=42):
+    """Build a kglite graph in the given storage mode with the same shape as
+    ``_build_paired_graphs``. ``mode`` is one of 'memory', 'mapped', 'disk'.
+
+    ``path`` is required for ``mode='disk'`` (directory that becomes the graph).
+    Returns (kg, node_names).
+    """
+    rng = random.Random(seed)
+    node_names = [f"N{i}" for i in range(n)]
+    node_values = [rng.uniform(0, 100) for _ in range(n)]
+    node_groups = [rng.randint(1, 5) for _ in range(n)]
+
+    n_edges = edge_factor * n
+    edge_set = set()
+    while len(edge_set) < n_edges:
+        s = rng.randint(0, n - 1)
+        t = rng.randint(0, n - 1)
+        if s != t:
+            edge_set.add((s, t))
+    edges = list(edge_set)
+
+    if mode == "memory":
+        kg = KnowledgeGraph()
+    elif mode == "mapped":
+        kg = KnowledgeGraph(storage="mapped")
+    elif mode == "disk":
+        if path is None:
+            raise ValueError("mode='disk' requires path")
+        kg = KnowledgeGraph(storage="disk", path=str(path))
+    else:
+        raise ValueError(f"unknown storage mode: {mode}")
+
+    df_nodes = pd.DataFrame(
+        {
+            "id": list(range(n)),
+            "name": node_names,
+            "value": node_values,
+            "group": node_groups,
+        }
+    )
+    kg.add_nodes(df_nodes, "Node", "id", "name")
+    df_edges = pd.DataFrame(
+        {
+            "from_id": [s for s, t in edges],
+            "to_id": [t for s, t in edges],
+        }
+    )
+    kg.add_connections(df_edges, "EDGE", "Node", "from_id", "Node", "to_id")
+    return kg, node_names
+
+
+STORAGE_MODES = ("memory", "mapped", "disk")
+
+
+# ============================================================================
+# Schema introspection benchmarks
+# ============================================================================
+
+
+class TestSchemaIntrospectionPerformance:
+    """Locks in the cost of the agent-facing describe()/schema()/find() path.
+
+    These are the default entry points for MCP servers — a regression here
+    adds latency to every tool session. NX has no direct analog, so we only
+    record kglite timings but include find-by-name vs NX linear scan.
+    """
+
+    @pytest.mark.parametrize("n", [100, 1000, 10000])
+    def test_describe(self, n):
+        kg, _, _ = _build_paired_graphs(n, edge_factor=3)
+        # Warm the caches (describe() touches capability + connectivity metadata)
+        kg.describe()
+        t0 = time.perf_counter()
+        for _ in range(5):
+            kg.describe()
+        rg_time = (time.perf_counter() - t0) / 5
+        print(f"  describe_{n}: rg={rg_time * 1000:.2f}ms/call")
+
+    @pytest.mark.parametrize("n", [100, 1000, 10000])
+    def test_schema(self, n):
+        kg, _, _ = _build_paired_graphs(n, edge_factor=3)
+        kg.schema()
+        t0 = time.perf_counter()
+        for _ in range(5):
+            kg.schema()
+        rg_time = (time.perf_counter() - t0) / 5
+        print(f"  schema_{n}: rg={rg_time * 1000:.2f}ms/call")
+
+    @pytest.mark.parametrize("n", [100, 1000, 10000])
+    def test_find_by_name(self, n):
+        """Indexed node lookup vs NX linear scan (20 random targets)."""
+        kg, nx_g, names = _build_paired_graphs(n, edge_factor=3)
+        rng = random.Random(7)
+        targets = [rng.choice(names) for _ in range(20)]
+
+        t0 = time.perf_counter()
+        for name in targets:
+            kg.find(name, node_type="Node")
+        rg_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        for name in targets:
+            _ = [n for n, d in nx_g.nodes(data=True) if n == name]
+        nx_time = time.perf_counter() - t0
+
+        ratio = nx_time / rg_time if rg_time > 0 else float("inf")
+        print(f"  find_by_name_20x_{n}: rg={rg_time * 1000:.3f}ms, nx={nx_time * 1000:.3f}ms, speedup={ratio:.1f}x")
+
+
+# ============================================================================
+# Property-heavy query benchmarks
+# ============================================================================
+
+
+class TestPropertyQueryPerformance:
+    """Filter-style queries that dominate real KG workloads.
+
+    kglite pushes predicates through the Cypher planner; NX is a Python scan.
+    These should show a consistent multi-× win for kglite.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup_graph(self):
+        self.kg, self.nx_g, _ = _build_paired_graphs(10000, edge_factor=3)
+
+    def test_multi_predicate_filter(self):
+        t0 = time.perf_counter()
+        rg_result = self.kg.cypher("MATCH (n:Node) WHERE n.group = 1 AND n.value > 50 RETURN n.name")
+        rg_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        nx_result = [n for n, d in self.nx_g.nodes(data=True) if d["group"] == 1 and d["value"] > 50]
+        nx_time = time.perf_counter() - t0
+
+        assert len(rg_result) == len(nx_result)
+        ratio = nx_time / rg_time if rg_time > 0 else float("inf")
+        print(
+            f"  multi_predicate_10k: rg={rg_time * 1000:.3f}ms, "
+            f"nx={nx_time * 1000:.3f}ms, speedup={ratio:.1f}x, {len(rg_result)} results"
+        )
+
+    def test_in_list_filter(self):
+        t0 = time.perf_counter()
+        rg_result = self.kg.cypher("MATCH (n:Node) WHERE n.group IN [1, 3, 5] RETURN n.name")
+        rg_time = time.perf_counter() - t0
+
+        in_set = {1, 3, 5}
+        t0 = time.perf_counter()
+        nx_result = [n for n, d in self.nx_g.nodes(data=True) if d["group"] in in_set]
+        nx_time = time.perf_counter() - t0
+
+        assert len(rg_result) == len(nx_result)
+        ratio = nx_time / rg_time if rg_time > 0 else float("inf")
+        print(
+            f"  in_list_10k: rg={rg_time * 1000:.3f}ms, "
+            f"nx={nx_time * 1000:.3f}ms, speedup={ratio:.1f}x, {len(rg_result)} results"
+        )
+
+    def test_string_contains(self):
+        t0 = time.perf_counter()
+        rg_result = self.kg.cypher("MATCH (n:Node) WHERE n.name CONTAINS '42' RETURN n.name")
+        rg_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        nx_result = [n for n, _ in self.nx_g.nodes(data=True) if "42" in n]
+        nx_time = time.perf_counter() - t0
+
+        assert len(rg_result) == len(nx_result)
+        ratio = nx_time / rg_time if rg_time > 0 else float("inf")
+        print(
+            f"  contains_10k: rg={rg_time * 1000:.3f}ms, "
+            f"nx={nx_time * 1000:.3f}ms, speedup={ratio:.1f}x, {len(rg_result)} results"
+        )
+
+    def test_range_filter(self):
+        t0 = time.perf_counter()
+        rg_result = self.kg.cypher("MATCH (n:Node) WHERE n.value >= 25 AND n.value < 75 RETURN n.name")
+        rg_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        nx_result = [n for n, d in self.nx_g.nodes(data=True) if 25 <= d["value"] < 75]
+        nx_time = time.perf_counter() - t0
+
+        assert len(rg_result) == len(nx_result)
+        ratio = nx_time / rg_time if rg_time > 0 else float("inf")
+        print(
+            f"  range_10k: rg={rg_time * 1000:.3f}ms, "
+            f"nx={nx_time * 1000:.3f}ms, speedup={ratio:.1f}x, {len(rg_result)} results"
+        )
+
+
+# ============================================================================
+# Multi-hop traversal benchmarks
+# ============================================================================
+
+
+class TestTraversalPerformance:
+    """Multi-hop neighborhood queries — kglite Cypher vs NX bfs_tree/successors."""
+
+    @pytest.mark.parametrize("n", [1000, 10000])
+    def test_two_hop_neighbors(self, n):
+        """Count 2-hop out-neighbors of a sample of nodes."""
+        kg, nx_g, names = _build_paired_graphs(n, edge_factor=3)
+        rng = random.Random(3)
+        seeds = [rng.choice(names) for _ in range(20)]
+
+        t0 = time.perf_counter()
+        for name in seeds:
+            kg.cypher(f"MATCH (a:Node {{name: '{name}'}})-[:EDGE*2]->(b:Node) RETURN count(DISTINCT b) AS cnt")
+        rg_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        for name in seeds:
+            # 2-hop via NX: expand out-neighbors twice
+            lvl1 = set(nx_g.successors(name)) if name in nx_g else set()
+            lvl2 = set()
+            for m in lvl1:
+                lvl2.update(nx_g.successors(m))
+            _ = len(lvl2)
+        nx_time = time.perf_counter() - t0
+
+        ratio = nx_time / rg_time if rg_time > 0 else float("inf")
+        print(f"  two_hop_20x_{n}: rg={rg_time * 1000:.2f}ms, nx={nx_time * 1000:.2f}ms, speedup={ratio:.1f}x")
+
+    @pytest.mark.parametrize("n", [1000, 10000])
+    def test_three_hop_aggregation(self, n):
+        """3-hop traversal with per-group aggregation."""
+        kg, nx_g, names = _build_paired_graphs(n, edge_factor=3)
+        rng = random.Random(9)
+        seeds = [rng.choice(names) for _ in range(10)]
+
+        t0 = time.perf_counter()
+        for name in seeds:
+            kg.cypher(
+                f"MATCH (a:Node {{name: '{name}'}})-[:EDGE*3]->(b:Node) RETURN b.group AS grp, count(DISTINCT b) AS cnt"
+            )
+        rg_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        for name in seeds:
+            lvl = {name} if name in nx_g else set()
+            for _ in range(3):
+                nxt = set()
+                for m in lvl:
+                    nxt.update(nx_g.successors(m))
+                lvl = nxt
+            groups = defaultdict(int)
+            for m in lvl:
+                groups[nx_g.nodes[m]["group"]] += 1
+        nx_time = time.perf_counter() - t0
+
+        ratio = nx_time / rg_time if rg_time > 0 else float("inf")
+        print(f"  three_hop_agg_10x_{n}: rg={rg_time * 1000:.2f}ms, nx={nx_time * 1000:.2f}ms, speedup={ratio:.1f}x")
+
+
+# ============================================================================
+# Storage-mode matrix: memory vs mapped vs disk (+ NX as baseline)
+# ============================================================================
+
+
+class TestStorageModeMatrix:
+    """Cross-cut kglite's three storage modes at 10K nodes.
+
+    **API parity contract**: the same Python/Cypher calls must work
+    identically in ``memory``, ``mapped``, and ``disk`` modes. This class
+    runs each critical operation in all three modes — any per-mode failure
+    surfaces as its own pytest failure, exposing API mismatches rather than
+    hiding them. Result values are asserted equal across modes where
+    applicable, so subtle silent divergences also fail.
+    """
+
+    N = 10_000
+
+    def _build(self, mode, tmp_path):
+        if mode == "disk":
+            dpath = tmp_path / f"disk_{self.N}"
+            dpath.mkdir(exist_ok=True)
+            return _build_kg_mode(self.N, mode, path=dpath)
+        return _build_kg_mode(self.N, mode)
+
+    @pytest.mark.parametrize("mode", STORAGE_MODES)
+    def test_construction(self, mode, tmp_path):
+        """Wall-clock build time, mode by mode."""
+        t0 = time.perf_counter()
+        kg, _ = self._build(mode, tmp_path)
+        rg_time = time.perf_counter() - t0
+        del kg
+        print(f"  construction_{self.N}_{mode}: {rg_time:.3f}s")
+
+    @pytest.mark.parametrize("mode", STORAGE_MODES)
+    def test_describe(self, mode, tmp_path):
+        """Agent-facing introspection must work in every mode."""
+        kg, _ = self._build(mode, tmp_path)
+        kg.describe()
+        t0 = time.perf_counter()
+        for _ in range(5):
+            out = kg.describe()
+        rg_time = (time.perf_counter() - t0) / 5
+        assert "<graph" in out, f"describe() on {mode} returned malformed output"
+        print(f"  describe_{self.N}_{mode}: {rg_time * 1000:.2f}ms/call")
+
+    @pytest.mark.parametrize("mode", STORAGE_MODES)
+    def test_schema(self, mode, tmp_path):
+        kg, _ = self._build(mode, tmp_path)
+        t0 = time.perf_counter()
+        for _ in range(5):
+            s = kg.schema()
+        rg_time = (time.perf_counter() - t0) / 5
+        assert "Node" in s["node_types"], f"schema() on {mode} missing Node type"
+        print(f"  schema_{self.N}_{mode}: {rg_time * 1000:.2f}ms/call")
+
+    @pytest.mark.parametrize("mode", STORAGE_MODES)
+    def test_find(self, mode, tmp_path):
+        kg, names = self._build(mode, tmp_path)
+        rng = random.Random(5)
+        targets = [rng.choice(names) for _ in range(20)]
+        t0 = time.perf_counter()
+        for name in targets:
+            hit = kg.find(name, node_type="Node")
+            assert hit, f"find('{name}') on {mode} returned no result"
+        rg_time = time.perf_counter() - t0
+        print(f"  find_20x_{self.N}_{mode}: {rg_time * 1000:.2f}ms")
+
+    @pytest.mark.parametrize("mode", STORAGE_MODES)
+    def test_multi_predicate(self, mode, tmp_path):
+        kg, _ = self._build(mode, tmp_path)
+        # Warm
+        kg.cypher("MATCH (n:Node) WHERE n.group = 1 AND n.value > 50 RETURN count(n) AS c")
+        t0 = time.perf_counter()
+        for _ in range(3):
+            r = kg.cypher("MATCH (n:Node) WHERE n.group = 1 AND n.value > 50 RETURN count(n) AS c")
+        rg_time = (time.perf_counter() - t0) / 3
+        assert r[0]["c"] > 0, f"multi-predicate on {mode} returned zero — parity bug?"
+        print(f"  multi_predicate_{self.N}_{mode}: {rg_time * 1000:.2f}ms/call")
+
+    @pytest.mark.parametrize("mode", STORAGE_MODES)
+    def test_pagerank(self, mode, tmp_path):
+        kg, _ = self._build(mode, tmp_path)
+        t0 = time.perf_counter()
+        scores = kg.pagerank()
+        rg_time = time.perf_counter() - t0
+        assert len(scores) == self.N, f"pagerank on {mode} returned {len(scores)} != {self.N}"
+        print(f"  pagerank_{self.N}_{mode}: {rg_time * 1000:.2f}ms")
+
+    @pytest.mark.parametrize("mode", STORAGE_MODES)
+    def test_two_hop(self, mode, tmp_path):
+        kg, names = self._build(mode, tmp_path)
+        rng = random.Random(3)
+        seeds = [rng.choice(names) for _ in range(10)]
+        t0 = time.perf_counter()
+        for name in seeds:
+            kg.cypher(f"MATCH (a:Node {{name: '{name}'}})-[:EDGE*2]->(b:Node) RETURN count(DISTINCT b) AS cnt")
+        rg_time = time.perf_counter() - t0
+        print(f"  two_hop_10x_{self.N}_{mode}: {rg_time * 1000:.2f}ms")
+
+    def test_cross_mode_result_parity(self, tmp_path):
+        """Same query must return the same rows in every storage mode.
+
+        A silent divergence here (e.g. disk returns a subset) is an API
+        parity bug — much harder to spot than a crash.
+        """
+        query = "MATCH (n:Node) WHERE n.group = 1 AND n.value > 50 RETURN count(n) AS c"
+        results = {}
+        for mode in STORAGE_MODES:
+            kg, _ = self._build(mode, tmp_path)
+            results[mode] = kg.cypher(query)[0]["c"]
+            del kg
+        expected = results["memory"]
+        for mode, got in results.items():
+            assert got == expected, f"storage mode '{mode}' returned {got}, expected {expected} (all modes: {results})"
+        print(f"  parity_multi_predicate: all modes agree on {expected} rows")
+
+
+# ============================================================================
+# Footprint: RAM and on-disk size across storage modes + NX
+# ============================================================================
+
+
+class TestFootprint:
+    """Report resident memory + serialized graph size at representative scales.
+
+    Memory is approximated by the RSS delta around graph construction — noisy
+    but useful for relative comparison. ``psutil`` is required to emit numbers;
+    without it we just report wall time and disk size.
+
+    For kglite memory mode we save to a ``.kgl`` file to measure disk size.
+    For kglite mapped mode we ``save()`` to a ``.kgl`` (mmap state is backed
+    by the save file). For kglite disk mode the graph *is* a directory, so we
+    report the directory size as-is. For NX we pickle.
+    """
+
+    @pytest.mark.parametrize("n", [1000, 10000, 50000])
+    def test_footprint(self, n, tmp_path):
+        import gc
+        import pickle
+
+        # ---- NetworkX ---------------------------------------------------
+        gc.collect()
+        rss_before = _rss_bytes()
+        nx_g = nx.DiGraph()
+        rng = random.Random(42)
+        node_names = [f"N{i}" for i in range(n)]
+        for i, name in enumerate(node_names):
+            nx_g.add_node(name, value=rng.uniform(0, 100), group=rng.randint(1, 5))
+        edge_set = set()
+        while len(edge_set) < 3 * n:
+            s = rng.randint(0, n - 1)
+            t = rng.randint(0, n - 1)
+            if s != t:
+                edge_set.add((s, t))
+        for s, t in edge_set:
+            nx_g.add_edge(node_names[s], node_names[t])
+        rss_after = _rss_bytes()
+        nx_rss = (rss_after - rss_before) if rss_before is not None else None
+        nx_path = tmp_path / f"nx_{n}.pkl"
+        with open(nx_path, "wb") as f:
+            pickle.dump(nx_g, f, protocol=pickle.HIGHEST_PROTOCOL)
+        nx_disk = nx_path.stat().st_size
+        del nx_g
+        gc.collect()
+
+        results = []
+        results.append(("networkx", nx_rss, nx_disk))
+
+        # ---- kglite storage modes --------------------------------------
+        for mode in STORAGE_MODES:
+            gc.collect()
+            rss_before = _rss_bytes()
+            if mode == "disk":
+                dpath = tmp_path / f"kg_{mode}_{n}"
+                dpath.mkdir(exist_ok=True)
+                kg, _ = _build_kg_mode(n, mode, path=dpath)
+            else:
+                kg, _ = _build_kg_mode(n, mode)
+            rss_after = _rss_bytes()
+            rss_delta = (rss_after - rss_before) if rss_before is not None else None
+
+            if mode == "disk":
+                # The directory IS the graph; no separate save needed.
+                disk_size = _dir_size(str(dpath))
+            else:
+                save_path = tmp_path / f"kg_{mode}_{n}.kgl"
+                kg.save(str(save_path))
+                disk_size = save_path.stat().st_size
+
+            results.append((f"kglite-{mode}", rss_delta, disk_size))
+            del kg
+            gc.collect()
+
+        print(f"  footprint_{n}:")
+        for label, rss, disk in results:
+            print(f"    {label:15s} rss={_fmt_bytes(rss):>8s}  disk={_fmt_bytes(disk):>8s}")
 
 
 # ============================================================================
