@@ -493,14 +493,29 @@ impl BatchProcessor {
             }
         }
 
-        // Process updates in current chunk
+        // Process updates in current chunk.
+        //
+        // Disk vs memory/mapped split (Phase 5 xfail fix):
+        // - Memory / mapped: `node_weight_mut` returns a live `&mut NodeData`.
+        //   `node.properties.insert` does `Arc::make_mut(store)` which clones
+        //   the store onto the node and mutates the clone. Reads go through
+        //   the node's own properties Arc → see updates immediately.
+        // - Disk: `node_weight_mut` materialises NodeData into an arena that
+        //   `clear_arenas` drops on the next `&mut self` call. Mutations via
+        //   the arena never reach `dg.column_stores`, which is where
+        //   `DiskGraph::get_node_property` reads from. To fix, disk updates
+        //   mutate `graph.column_stores` directly via `Arc::make_mut` and
+        //   then re-sync to `dg.column_stores` at the end of the loop.
+        //   O(types) clones per chunk instead of the broken O(rows) pattern.
+        let is_disk = GraphRead::is_disk(&graph.graph);
+        let mut disk_updates_applied = false;
+
         for update in self.updates.drain(..) {
             if update.conflict_mode == ConflictHandling::Skip {
-                // Skip this node entirely
                 continue;
             }
 
-            // Pre-intern property keys before borrowing graph.graph mutably
+            // Pre-intern property keys before borrowing graph.graph mutably.
             let interned_props: Vec<(InternedKey, Value)> = update
                 .properties
                 .into_iter()
@@ -510,18 +525,82 @@ impl BatchProcessor {
                 })
                 .collect();
 
-            if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, update.node_idx) {
+            if is_disk {
+                // Resolve (type_name, row_id) from the disk slot.
+                let (type_name, row_id) = match &graph.graph {
+                    crate::graph::schema::GraphBackend::Disk(ref dg) => {
+                        let slot = dg.node_slot(update.node_idx.index());
+                        if !slot.is_alive() {
+                            continue;
+                        }
+                        let type_key = InternedKey::from_u64(slot.node_type);
+                        let type_name = graph.interner.resolve(type_key).to_string();
+                        (type_name, slot.row_id)
+                    }
+                    _ => unreachable!("is_disk guard"),
+                };
+
+                let Some(arc_store) = graph.column_stores.get_mut(&type_name) else {
+                    continue;
+                };
+                let store = Arc::make_mut(arc_store);
                 match update.conflict_mode {
-                    ConflictHandling::Skip => unreachable!(), // handled above
+                    ConflictHandling::Skip => unreachable!(),
                     ConflictHandling::Replace => {
-                        // Current behavior - complete replacement
+                        if let Some(new_title) = update.title {
+                            store.set_title(row_id, &new_title);
+                        }
+                        // Null out every currently-set property on this row
+                        // before applying the new set — matches heap
+                        // `PropertyStorage::replace_all` semantics.
+                        let existing: Vec<InternedKey> = store
+                            .row_properties(row_id)
+                            .into_iter()
+                            .map(|(k, _)| k)
+                            .collect();
+                        for k in existing {
+                            store.set(row_id, k, &Value::Null, None);
+                        }
+                        for (k, v) in interned_props {
+                            store.set(row_id, k, &v, None);
+                        }
+                    }
+                    ConflictHandling::Update | ConflictHandling::Sum => {
+                        if let Some(new_title) = update.title {
+                            store.set_title(row_id, &new_title);
+                        }
+                        for (k, v) in interned_props {
+                            store.set(row_id, k, &v, None);
+                        }
+                    }
+                    ConflictHandling::Preserve => {
+                        if let Some(new_title) = update.title {
+                            let cur = store.get_title(row_id).unwrap_or(Value::Null);
+                            if matches!(cur, Value::Null) {
+                                store.set_title(row_id, &new_title);
+                            }
+                        }
+                        for (k, v) in interned_props {
+                            if store.get(row_id, k).is_none() {
+                                store.set(row_id, k, &v, None);
+                            }
+                        }
+                    }
+                }
+                disk_updates_applied = true;
+                stats.updates += 1;
+            } else if let Some(node) =
+                GraphWrite::node_weight_mut(&mut graph.graph, update.node_idx)
+            {
+                match update.conflict_mode {
+                    ConflictHandling::Skip => unreachable!(),
+                    ConflictHandling::Replace => {
                         if let Some(new_title) = update.title {
                             node.title = new_title;
                         }
                         node.properties.replace_all(interned_props);
                     }
                     ConflictHandling::Update | ConflictHandling::Sum => {
-                        // Update only if provided (Sum acts as Update for nodes)
                         if let Some(new_title) = update.title {
                             node.title = new_title;
                         }
@@ -530,13 +609,11 @@ impl BatchProcessor {
                         }
                     }
                     ConflictHandling::Preserve => {
-                        // Update only if provided, but preserve existing values
                         if let Some(new_title) = update.title {
                             if *node.title() == Value::Null {
                                 node.title = new_title;
                             }
                         }
-                        // Merge properties with preference to existing values
                         for (k, v) in interned_props {
                             node.properties.insert_if_absent(k, v);
                         }
@@ -544,6 +621,10 @@ impl BatchProcessor {
                 }
                 stats.updates += 1;
             }
+        }
+
+        if disk_updates_applied {
+            graph.sync_disk_column_stores();
         }
 
         // Update metrics

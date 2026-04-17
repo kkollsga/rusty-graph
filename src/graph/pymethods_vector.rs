@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::schema;
+use super::storage::GraphRead;
 use super::{io_operations, vector_search, KnowledgeGraph};
 
 #[pymethods]

@@ -1,6 +1,7 @@
 // src/graph/filtering_methods.rs
 use crate::datatypes::values::{FilterCondition, Value};
 use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, SelectionOperation};
+use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};

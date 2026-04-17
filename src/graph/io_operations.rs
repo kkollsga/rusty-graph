@@ -20,6 +20,7 @@ use crate::graph::schema::{
     SerdeDeserializeGuard, SerdeSerializeGuard, SpatialConfig, StringInterner,
     StripPropertiesGuard, TemporalConfig,
 };
+use crate::graph::storage::{GraphRead, GraphWrite};
 use crate::graph::timeseries::{NodeTimeseries, TimeseriesConfig};
 use crate::graph::{KnowledgeGraph, TemporalContext};
 use bincode::Options;

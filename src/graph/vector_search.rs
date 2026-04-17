@@ -2,6 +2,7 @@
 // Operates on the current graph selection for filtered vector search.
 
 use crate::graph::schema::{CurrentSelection, DirGraph, EmbeddingStore};
+use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use std::collections::BinaryHeap;
 

@@ -302,19 +302,22 @@ def test_collect_then_delete_snapshot(tmp_path):
         assert snapshots[mode] == ref, f"post-delete snapshot diverged in {mode}: {snapshots[mode]} vs memory {ref}"
 
 
-# ─── Known disk divergences (xfail — Phase 5 work) ──────────────────────────
+# ─── Previously-known disk divergences (Phase 5 reconciled) ─────────────────
 #
-# Pre-existing disk-mode bugs surfaced by Phase 2 parity authoring.
-# They are NOT regressions from the Phase 2 trait refactor — they fail
-# on pre-migration code. Filed for Phase 5 columnar cleanup + final
-# audit, where the root cause (disk batch_operations property-update
-# path + disk MERGE edge re-match) is already in scope.
-#
-# Strict=True so a future fix trips the xfail and prompts removal.
+# These three tests pinned Phase-2-era disk-mode bugs: `add_nodes` conflict
+# handling (update/replace) silently dropped property mutations, and
+# `MERGE ... -[:KNOWS]->` failed to make the new edge visible to a
+# subsequent MATCH. Phase 5 fixed both:
+#   - Update/replace: `batch_operations.rs::flush_chunk` now mutates
+#     `graph.column_stores` directly on disk graphs (the previous path
+#     materialised NodeData into a per-query arena that `clear_arenas`
+#     dropped before the next read).
+#   - MERGE visibility: `DiskGraph::new_at_path` defaults `defer_csr=false`
+#     so single-edge inserts route to overflow immediately; bulk loaders
+#     (`add_connections` / ntriples) explicitly enable deferral.
 
 
-@pytest.mark.xfail(strict=True, reason="Phase 5: disk conflict_handling='update' ignores property changes")
-def test_known_disk_divergence_conflict_update(tmp_path):
+def test_disk_conflict_update_applies(tmp_path):
     kg = _new_kg("disk", path=str(tmp_path / "kg_disk_upd"))
     _build_seed(kg)
     df = pd.DataFrame([{"pid": 1, "name": "Alice Updated", "email": "alice@new.com"}])
@@ -324,8 +327,7 @@ def test_known_disk_divergence_conflict_update(tmp_path):
     assert rows == [{"email": "alice@new.com"}]
 
 
-@pytest.mark.xfail(strict=True, reason="Phase 5: disk conflict_handling='replace' ignores property changes")
-def test_known_disk_divergence_conflict_replace(tmp_path):
+def test_disk_conflict_replace_clears_omitted_properties(tmp_path):
     kg = _new_kg("disk", path=str(tmp_path / "kg_disk_rep"))
     _build_seed(kg)
     df = pd.DataFrame([{"pid": 1, "name": "Alice Updated", "email": "alice@new.com"}])
@@ -335,8 +337,7 @@ def test_known_disk_divergence_conflict_replace(tmp_path):
     assert rows == [{"age": None, "email": "alice@new.com"}]
 
 
-@pytest.mark.xfail(strict=True, reason="Phase 5: disk MERGE edge not visible after creation")
-def test_known_disk_divergence_merge_edge(tmp_path):
+def test_disk_merge_edge_visible_after_creation(tmp_path):
     kg = _new_kg("disk", path=str(tmp_path / "kg_disk_merge"))
     _build_seed(kg)
     for _ in range(2):

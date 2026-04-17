@@ -7,7 +7,7 @@ use crate::graph::lookups::{CombinedTypeLookup, TypeLookup};
 use crate::graph::reporting::{ConnectionOperationReport, NodeOperationReport};
 use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, TypeSchema};
 use crate::graph::spatial;
-use crate::graph::storage::GraphWrite;
+use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

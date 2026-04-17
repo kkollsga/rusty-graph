@@ -7,6 +7,7 @@ use crate::graph::schema::{
     TemporalConfig,
 };
 use crate::graph::spatial;
+use crate::graph::storage::GraphRead;
 use crate::graph::temporal;
 use crate::graph::vector_search;
 use chrono::NaiveDate;

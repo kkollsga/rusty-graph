@@ -27,6 +27,7 @@ pub use result_view::{ResultIter, ResultView};
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::DirGraph;
+use crate::graph::storage::GraphRead;
 
 use ast::*;
 

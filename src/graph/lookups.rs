@@ -1,6 +1,7 @@
 // src/graph/lookups.rs
 use super::schema::{Graph, InternedKey};
 use crate::datatypes::Value;
+use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

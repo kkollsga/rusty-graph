@@ -1940,6 +1940,7 @@ mod tests {
     use super::*;
     use crate::datatypes::values::Value;
     use crate::graph::schema::{DirGraph, EdgeData, NodeData};
+    use crate::graph::storage::GraphWrite;
     use std::collections::HashMap;
 
     /// Build a linear graph: A -> B -> C -> D -> E

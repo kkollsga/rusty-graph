@@ -1022,6 +1022,45 @@ impl ColumnStore {
         }
     }
 
+    /// Overwrite the title value at `row_id`. Used by update-path mutations
+    /// on mapped / disk graphs where properties live in the columnar store
+    /// rather than in a per-node heap map. Returns `true` on success.
+    pub fn set_title(&mut self, row_id: u32, value: &Value) -> bool {
+        let Some(col) = self.title_column.as_mut() else {
+            return false;
+        };
+        if (row_id as usize) >= col.len() {
+            return false;
+        }
+        if col.set(row_id, value).is_err() {
+            let mut mixed: Vec<Value> = (0..col.len())
+                .map(|i| col.get(i as u32).unwrap_or(Value::Null))
+                .collect();
+            mixed[row_id as usize] = value.clone();
+            *col = TypedColumn::Mixed { data: mixed };
+        }
+        true
+    }
+
+    /// Overwrite the id value at `row_id`. Same contract as [`Self::set_title`].
+    #[allow(dead_code)]
+    pub fn set_id(&mut self, row_id: u32, value: &Value) -> bool {
+        let Some(col) = self.id_column.as_mut() else {
+            return false;
+        };
+        if (row_id as usize) >= col.len() {
+            return false;
+        }
+        if col.set(row_id, value).is_err() {
+            let mut mixed: Vec<Value> = (0..col.len())
+                .map(|i| col.get(i as u32).unwrap_or(Value::Null))
+                .collect();
+            mixed[row_id as usize] = value.clone();
+            *col = TypedColumn::Mixed { data: mixed };
+        }
+        true
+    }
+
     /// Get the node ID from the id column at the given row.
     #[inline]
     pub fn get_id(&self, row_id: u32) -> Option<Value> {

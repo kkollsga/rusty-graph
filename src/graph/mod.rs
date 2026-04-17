@@ -3,6 +3,7 @@ use crate::datatypes::values::{FilterCondition, Value};
 use crate::datatypes::{py_in, py_out};
 use crate::graph::calculations::StatResult;
 use crate::graph::reporting::{OperationReport, OperationReports};
+use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};

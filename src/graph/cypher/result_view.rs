@@ -10,6 +10,7 @@ use super::result::{ClauseStats, CypherResult, MutationStats};
 use crate::datatypes::values::Value;
 use crate::graph::graph_algorithms::CentralityResult;
 use crate::graph::schema::{DirGraph, NodeData};
+use crate::graph::storage::GraphRead;
 use petgraph::Direction;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySlice};

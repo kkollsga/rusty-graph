@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Disk-mode `add_nodes(conflict_handling="update")` now applies
+  property updates.** Previously on disk graphs, re-inserting an
+  existing node via `add_nodes(..., conflict_handling="update")`
+  silently dropped the new values — `node_weight_mut` materialised
+  `NodeData` into a per-query arena that `clear_arenas` discarded
+  before the next read, so the mutation never reached
+  `DiskGraph::column_stores` where reads happen. The batch-update path
+  now mutates the per-type column store directly via `Arc::make_mut`
+  and re-syncs with `sync_disk_column_stores` at the end of the chunk.
+  Memory and mapped graphs are unaffected (they already worked).
+- **Disk-mode `add_nodes(conflict_handling="replace")` now clears
+  omitted properties.** Same root cause as above; Replace now nulls
+  out every previously-set property on the row before writing the new
+  set, matching the `PropertyStorage::replace_all` semantics of the
+  heap backends.
+- **Disk-mode `MERGE` edges are visible to subsequent `MATCH`
+  queries.** `DiskGraph` used to default `defer_csr = true` so every
+  `add_edge` on a fresh graph queued into `pending_edges`, which
+  `edges_directed` never reads. One-off Cypher mutations now route
+  directly to the overflow buffer (visible immediately); bulk loaders
+  (`add_connections`, ntriples) still use the pending+rebuild path via
+  `build_csr_from_pending`.
+
 ### Changed
 - **Deterministic `.kgl` v3 saves.** `save()` now produces byte-identical
   output for identical graphs regardless of per-process HashMap
@@ -15,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.kgl` files load unchanged — the format on the wire is a strict
   subset of the previous format's possible outputs. Enables byte-level
   golden-hash format-drift tests.
+- **`ConnectionTypeInfo` serialises with sorted keys.** `source_types`
+  and `target_types` (HashSet<String>) and `property_types`
+  (HashMap<String, String>) now emit in lexicographic order, hardening
+  the v3 golden-hash invariant for fixtures richer than single-element
+  sets. Existing `.kgl` files load unchanged.
 
 ## [0.7.17] — 2026-04-17
 

@@ -10,6 +10,7 @@ use wkt::TryFromWkt;
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{CurrentSelection, DirGraph};
+use crate::graph::storage::GraphRead;
 
 /// Filter nodes that fall within a geographic bounding box
 ///

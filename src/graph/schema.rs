@@ -2,7 +2,6 @@
 use crate::datatypes::values::{FilterCondition, Value};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
-use petgraph::visit::{EdgeRef, IntoEdgeReferences, NodeIndexable};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -1335,12 +1334,37 @@ pub struct ConnectivityTriple {
 }
 
 /// Metadata about a connection type: which node types it connects and what properties it carries.
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ConnectionTypeInfo {
     pub source_types: HashSet<String>,
     pub target_types: HashSet<String>,
     /// property_name → type_string (e.g. "weight" → "Float64")
     pub property_types: HashMap<String, String>,
+}
+
+/// Custom serializer emits sorted keys for the two HashSet<String> and the
+/// HashMap<String, String> so that `.kgl` v3 saves stay byte-deterministic
+/// regardless of per-run HashMap seed. Phase 4's golden-hash test pinned the
+/// current digest; Phase 5 hardened the invariant so richer fixtures
+/// (multiple source/target types or property keys) don't slip through.
+impl Serialize for ConnectionTypeInfo {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut sorted_sources: Vec<&String> = self.source_types.iter().collect();
+        sorted_sources.sort();
+        let mut sorted_targets: Vec<&String> = self.target_types.iter().collect();
+        sorted_targets.sort();
+        let mut sorted_props: Vec<(&String, &String)> = self.property_types.iter().collect();
+        sorted_props.sort_by(|a, b| a.0.cmp(b.0));
+        let property_types: std::collections::BTreeMap<&String, &String> =
+            sorted_props.into_iter().collect();
+
+        let mut state = serializer.serialize_struct("ConnectionTypeInfo", 3)?;
+        state.serialize_field("source_types", &sorted_sources)?;
+        state.serialize_field("target_types", &sorted_targets)?;
+        state.serialize_field("property_types", &property_types)?;
+        state.end()
+    }
 }
 
 /// Custom deserializer to handle both old format (source_type/target_type as single strings)
@@ -2817,13 +2841,16 @@ impl DirGraph {
         ));
 
         // Extract the StableDiGraph and build DiskGraph
-        let inner = match &mut self.graph {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g,
+        let disk_graph = match &mut self.graph {
+            GraphBackend::Memory(g) => {
+                crate::graph::disk_graph::DiskGraph::from_stable_digraph(g.inner_mut(), &data_dir)
+            }
+            GraphBackend::Mapped(g) => {
+                crate::graph::disk_graph::DiskGraph::from_stable_digraph(g.inner_mut(), &data_dir)
+            }
             GraphBackend::Disk(_) => return Err("Already in disk mode".to_string()),
-        };
-
-        let disk_graph = crate::graph::disk_graph::DiskGraph::from_stable_digraph(inner, &data_dir)
-            .map_err(|e| format!("Failed to create DiskGraph: {}", e))?;
+        }
+        .map_err(|e| format!("Failed to create DiskGraph: {}", e))?;
 
         // Register temp dir for cleanup
         if let Ok(mut dirs) = self.temp_dirs.lock() {
@@ -3951,26 +3978,17 @@ pub use crate::graph::disk_graph::DiskGraph;
 pub use crate::graph::storage::{MappedGraph, MemoryGraph};
 
 /// Graph storage backend. Three variants — heap-resident memory,
-/// mmap-backed mapped, and CSR-on-disk.
-///
-/// `Memory` and `Mapped` currently wrap the same newtype
-/// [`MemoryGraph`] — the distinguisher today is construction intent
-/// (mapped mode builds with columnar spill enabled). Phase 0.3+
-/// promotes `MappedGraph` to its own type when the backends' impls
-/// need to diverge.
-///
-/// Both `Memory` and `Mapped` carry a `MemoryGraph` that `Deref`s to
-/// `StableDiGraph`, so existing `g.method()` call sites compile
-/// unchanged and a single `Self::Memory(g) | Self::Mapped(g)` pattern
-/// covers both at match sites.
+/// mmap-columnar-spilled mapped, and CSR-on-disk. Phase 5 promoted
+/// `MappedGraph` from a type alias to a distinct struct so each
+/// backend owns its own [`GraphRead`] / [`GraphWrite`] impl in
+/// [`crate::graph::storage::impls`]; this enum now acts as a dumb
+/// 3-arm dispatcher.
 #[allow(clippy::large_enum_variant)]
 pub enum GraphBackend {
     Memory(MemoryGraph),
     Mapped(MappedGraph),
     Disk(Box<DiskGraph>),
 }
-
-// -- Constructors --
 
 impl GraphBackend {
     #[inline]
@@ -3984,432 +4002,15 @@ impl GraphBackend {
         GraphBackend::Memory(MemoryGraph::with_capacity(nodes, edges))
     }
 
-    /// Access the inner `StableDiGraph` directly. Used for petgraph algorithms
-    /// (e.g. `kosaraju_scc`) that require petgraph trait bounds.
+    /// Borrow the inner heap `StableDiGraph` for petgraph algorithms
+    /// (e.g. `kosaraju_scc`) that require concrete petgraph types.
+    /// Disk panics — callers must gate on [`GraphRead::is_disk`].
     #[inline]
     pub fn as_stable_digraph(&self) -> &StableDiGraph<NodeData, EdgeData> {
         match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g,
+            GraphBackend::Memory(g) => g.inner(),
+            GraphBackend::Mapped(g) => g.inner(),
             GraphBackend::Disk(_) => unimplemented!("Disk backend: as_stable_digraph"),
-        }
-    }
-
-    /// Check if this is a heap-resident memory-backed graph.
-    #[inline]
-    #[allow(dead_code)] // part of the symmetric is_memory/is_mapped/is_disk trio
-    pub fn is_memory(&self) -> bool {
-        matches!(self, GraphBackend::Memory(_))
-    }
-
-    /// Check if this is an mmap-Columnar-backed graph.
-    #[inline]
-    pub fn is_mapped(&self) -> bool {
-        matches!(self, GraphBackend::Mapped(_))
-    }
-}
-
-// -- Node methods --
-
-impl GraphBackend {
-    #[inline]
-    pub fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.node_weight(idx),
-            GraphBackend::Disk(dg) => dg.node_weight(idx),
-        }
-    }
-
-    /// O(1) node type lookup without materializing the full NodeData.
-    /// For DiskGraph, reads directly from mmap'd node_slots (no arena allocation,
-    /// no id/title string copies). For InMemory, reads from the petgraph node.
-    #[inline]
-    pub fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                g.node_weight(idx).map(|nd| nd.node_type)
-            }
-            GraphBackend::Disk(dg) => dg.node_type_of(idx),
-        }
-    }
-
-    /// Read a single property without full NodeData materialization.
-    /// On disk graphs, avoids arena allocation and id/title column reads.
-    /// On in-memory graphs, falls through to node_weight().get_property().
-    #[inline]
-    pub fn get_node_property(&self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g
-                .node_weight(idx)
-                .and_then(|nd| nd.properties.get_value(key)),
-            GraphBackend::Disk(dg) => dg.get_node_property(idx, key),
-        }
-    }
-
-    // Zero-alloc string equality is the inaugural method on the new
-    // `GraphRead` trait — see `impl GraphRead for GraphBackend` below.
-    // Inherent method deleted: all callers use the trait.
-
-    /// Read the node id without full materialization.
-    /// Handles mapped-mode sentinel values (Value::Null → ColumnStore fallback).
-    #[inline]
-    pub fn get_node_id(&self, idx: NodeIndex) -> Option<Value> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                g.node_weight(idx).map(|nd| nd.id().into_owned())
-            }
-            GraphBackend::Disk(dg) => dg.get_node_id(idx),
-        }
-    }
-
-    /// Read the node title without full materialization.
-    /// Handles mapped-mode sentinel values (Value::Null → ColumnStore fallback).
-    #[inline]
-    pub fn get_node_title(&self, idx: NodeIndex) -> Option<Value> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                g.node_weight(idx).map(|nd| nd.title().into_owned())
-            }
-            GraphBackend::Disk(dg) => dg.get_node_title(idx),
-        }
-    }
-
-    /// Check if this is a disk-backed graph.
-    #[inline]
-    pub fn is_disk(&self) -> bool {
-        matches!(self, GraphBackend::Disk(_))
-    }
-
-    /// Look up source nodes with outgoing edges of a given type (from inverted index).
-    /// Returns None if index not available (in-memory graphs or older disk graphs).
-    #[allow(dead_code)]
-    pub fn sources_for_conn_type(&self, conn_type: InternedKey) -> Option<Vec<u32>> {
-        self.sources_for_conn_type_bounded(conn_type, None)
-    }
-
-    /// Bounded variant — caller passes `Some(cap)` to avoid eager 400 MB
-    /// copies when the pattern executor will truncate to a few thousand
-    /// sources anyway.
-    pub fn sources_for_conn_type_bounded(
-        &self,
-        conn_type: InternedKey,
-        max: Option<usize>,
-    ) -> Option<Vec<u32>> {
-        match self {
-            GraphBackend::Disk(dg) => dg.sources_for_conn_type_bounded(conn_type.as_u64(), max),
-            GraphBackend::Memory(_) | GraphBackend::Mapped(_) => None,
-        }
-    }
-
-    /// Count ALL edges of a connection type grouped by peer node.
-    /// Returns HashMap<peer_u32, count>. Sequential I/O — O(E) for the type.
-    /// Persistent-cache fast path for per-peer edge counts. Returns Some on
-    /// disk graphs that have the histogram built, None otherwise (caller
-    /// falls back to `count_edges_grouped_by_peer` for the in-memory case
-    /// or older disk graphs). Reply matches the HashMap shape of the slow
-    /// path exactly so the caller logic is identical.
-    pub fn lookup_peer_counts(&self, conn_type: InternedKey) -> Option<HashMap<u32, i64>> {
-        match self {
-            GraphBackend::Disk(dg) => dg.lookup_peer_counts(conn_type.as_u64()),
-            GraphBackend::Memory(_) | GraphBackend::Mapped(_) => None,
-        }
-    }
-
-    pub fn count_edges_grouped_by_peer(
-        &self,
-        conn_type: InternedKey,
-        dir: petgraph::Direction,
-        deadline: Option<std::time::Instant>,
-    ) -> Result<HashMap<u32, i64>, String> {
-        match self {
-            GraphBackend::Disk(dg) => {
-                dg.count_edges_grouped_by_peer(conn_type.as_u64(), dir, deadline)
-            }
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                let mut counts: HashMap<u32, i64> = HashMap::new();
-                for (i, edge) in g.edge_references().enumerate() {
-                    if i.is_multiple_of(1 << 20) {
-                        if let Some(dl) = deadline {
-                            if std::time::Instant::now() > dl {
-                                return Err("Query timed out".to_string());
-                            }
-                        }
-                    }
-                    if edge.weight().connection_type != conn_type {
-                        continue;
-                    }
-                    let peer = match dir {
-                        petgraph::Direction::Outgoing => edge.target().index() as u32,
-                        petgraph::Direction::Incoming => edge.source().index() as u32,
-                    };
-                    *counts.entry(peer).or_insert(0) += 1;
-                }
-                Ok(counts)
-            }
-        }
-    }
-
-    /// Count edges of a specific type without materializing EdgeData.
-    /// On disk graphs with sorted CSR: O(log D + matching) via binary search.
-    /// On in-memory graphs: falls back to edge iteration (still no allocation).
-    pub fn count_edges_filtered(
-        &self,
-        node: NodeIndex,
-        dir: petgraph::Direction,
-        conn_type: Option<InternedKey>,
-        other_node_type: Option<InternedKey>,
-        deadline: Option<std::time::Instant>,
-    ) -> Result<usize, String> {
-        match self {
-            GraphBackend::Disk(dg) => dg.count_edges_filtered(
-                node,
-                dir,
-                conn_type.map(|k| k.as_u64()),
-                other_node_type,
-                deadline,
-            ),
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                let mut count = 0;
-                for (i, edge) in g.edges_directed(node, dir).enumerate() {
-                    if i.is_multiple_of(1 << 20) {
-                        if let Some(dl) = deadline {
-                            if std::time::Instant::now() > dl {
-                                return Err("Query timed out".to_string());
-                            }
-                        }
-                    }
-                    if let Some(ct) = conn_type {
-                        if edge.weight().connection_type != ct {
-                            continue;
-                        }
-                    }
-                    let other = if dir == petgraph::Direction::Outgoing {
-                        edge.target()
-                    } else {
-                        edge.source()
-                    };
-                    if let Some(required_type) = other_node_type {
-                        if let Some(nd) = g.node_weight(other) {
-                            if nd.node_type != required_type {
-                                continue;
-                            }
-                        } else {
-                            continue;
-                        }
-                    }
-                    count += 1;
-                }
-                Ok(count)
-            }
-        }
-    }
-
-    #[inline]
-    pub fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.node_weight_mut(idx),
-            GraphBackend::Disk(dg) => dg.node_weight_mut(idx),
-        }
-    }
-
-    #[inline]
-    pub fn node_indices(&self) -> crate::graph::graph_iterators::GraphNodeIndices<'_> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                crate::graph::graph_iterators::GraphNodeIndices::InMemory(g.node_indices())
-            }
-            GraphBackend::Disk(dg) => {
-                crate::graph::graph_iterators::GraphNodeIndices::Disk(dg.node_indices_iter())
-            }
-        }
-    }
-
-    #[inline]
-    pub fn node_count(&self) -> usize {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.node_count(),
-            GraphBackend::Disk(dg) => dg.node_count(),
-        }
-    }
-
-    #[inline]
-    pub fn node_bound(&self) -> usize {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.node_bound(),
-            GraphBackend::Disk(dg) => dg.node_bound(),
-        }
-    }
-
-    #[inline]
-    pub fn add_node(&mut self, data: NodeData) -> NodeIndex {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.add_node(data),
-            GraphBackend::Disk(dg) => dg.add_node(data),
-        }
-    }
-
-    #[inline]
-    pub fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.remove_node(idx),
-            GraphBackend::Disk(dg) => dg.remove_node(idx),
-        }
-    }
-}
-
-impl GraphBackend {
-    /// Reset materialization arenas between queries to prevent unbounded memory
-    /// growth. No-op for InMemory graphs. For DiskGraph, frees all NodeData and
-    /// EdgeData allocated during the previous query.
-    #[inline]
-    pub fn reset_arenas(&self) {
-        if let GraphBackend::Disk(dg) = self {
-            dg.reset_arenas();
-        }
-    }
-}
-
-// -- Edge methods --
-
-impl GraphBackend {
-    #[inline]
-    pub fn edges_directed(
-        &self,
-        a: NodeIndex,
-        dir: petgraph::Direction,
-    ) -> crate::graph::graph_iterators::GraphEdges<'_> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                crate::graph::graph_iterators::GraphEdges::InMemory(g.edges_directed(a, dir))
-            }
-            GraphBackend::Disk(dg) => {
-                crate::graph::graph_iterators::GraphEdges::Disk(dg.edges_directed_iter(a, dir))
-            }
-        }
-    }
-
-    /// Like `edges_directed`, but pre-filters by connection type in the DiskGraph
-    /// path (skipping materialization of non-matching edges). For InMemory graphs,
-    /// falls back to the same iterator with post-filtering by callers.
-    #[inline]
-    pub fn edges_directed_filtered(
-        &self,
-        a: NodeIndex,
-        dir: petgraph::Direction,
-        conn_type_filter: Option<crate::graph::schema::InternedKey>,
-    ) -> crate::graph::graph_iterators::GraphEdges<'_> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                // InMemory: no pre-filter, callers still post-filter
-                crate::graph::graph_iterators::GraphEdges::InMemory(g.edges_directed(a, dir))
-            }
-            GraphBackend::Disk(dg) => crate::graph::graph_iterators::GraphEdges::Disk(
-                dg.edges_directed_filtered_iter(a, dir, conn_type_filter.map(|k| k.as_u64())),
-            ),
-        }
-    }
-
-    /// Iterate edge endpoint metadata without materializing EdgeData.
-    /// Yields (source_index, target_index, connection_type_key) for each live edge.
-    /// DiskGraph: reads mmap'd edge_endpoints directly (zero heap allocation).
-    /// InMemory: reads from petgraph edge weights.
-    pub fn edge_endpoint_keys(
-        &self,
-    ) -> Box<dyn Iterator<Item = (NodeIndex, NodeIndex, InternedKey)> + '_> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                Box::new(g.edge_references().map(|er| {
-                    let w = er.weight();
-                    (er.source(), er.target(), w.connection_type)
-                }))
-            }
-            GraphBackend::Disk(dg) => Box::new((0..dg.next_edge_idx).filter_map(move |i| {
-                let ep = dg.edge_endpoints.get(i as usize);
-                if ep.source == crate::graph::disk_graph::TOMBSTONE_EDGE {
-                    return None;
-                }
-                Some((
-                    NodeIndex::new(ep.source as usize),
-                    NodeIndex::new(ep.target as usize),
-                    InternedKey::from_u64(ep.connection_type),
-                ))
-            })),
-        }
-    }
-
-    #[inline]
-    pub fn edge_count(&self) -> usize {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.edge_count(),
-            GraphBackend::Disk(dg) => dg.edge_count(),
-        }
-    }
-
-    #[inline]
-    pub fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.edge_weight_mut(idx),
-            GraphBackend::Disk(dg) => dg.edge_weight_mut(idx),
-        }
-    }
-
-    #[inline]
-    pub fn edge_endpoints(&self, idx: EdgeIndex) -> Option<(NodeIndex, NodeIndex)> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.edge_endpoints(idx),
-            GraphBackend::Disk(dg) => dg.edge_endpoints_fn(idx),
-        }
-    }
-
-    #[inline]
-    pub fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.add_edge(a, b, data),
-            GraphBackend::Disk(dg) => dg.add_edge(a, b, data),
-        }
-    }
-
-    #[inline]
-    pub fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.remove_edge(idx),
-            GraphBackend::Disk(dg) => dg.remove_edge(idx),
-        }
-    }
-}
-
-// -- Neighbor methods --
-
-impl GraphBackend {
-    #[inline]
-    pub fn neighbors_undirected(
-        &self,
-        a: NodeIndex,
-    ) -> crate::graph::graph_iterators::GraphNeighbors<'_> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                crate::graph::graph_iterators::GraphNeighbors::InMemory(g.neighbors_undirected(a))
-            }
-            GraphBackend::Disk(dg) => {
-                crate::graph::graph_iterators::GraphNeighbors::Disk(dg.neighbors_undirected_iter(a))
-            }
-        }
-    }
-
-    #[inline]
-    pub fn neighbors_directed(
-        &self,
-        a: NodeIndex,
-        dir: petgraph::Direction,
-    ) -> crate::graph::graph_iterators::GraphNeighbors<'_> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                crate::graph::graph_iterators::GraphNeighbors::InMemory(
-                    g.neighbors_directed(a, dir),
-                )
-            }
-            GraphBackend::Disk(dg) => crate::graph::graph_iterators::GraphNeighbors::Disk(
-                dg.neighbors_directed_iter(a, dir),
-            ),
         }
     }
 }
@@ -4421,7 +4022,8 @@ impl std::ops::Index<NodeIndex> for GraphBackend {
     #[inline]
     fn index(&self, index: NodeIndex) -> &NodeData {
         match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => &g[index],
+            GraphBackend::Memory(g) => &g.inner()[index],
+            GraphBackend::Mapped(g) => &g.inner()[index],
             GraphBackend::Disk(dg) => &dg[index],
         }
     }
@@ -4432,7 +4034,8 @@ impl std::ops::Index<EdgeIndex> for GraphBackend {
     #[inline]
     fn index(&self, index: EdgeIndex) -> &EdgeData {
         match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => &g[index],
+            GraphBackend::Memory(g) => &g.inner()[index],
+            GraphBackend::Mapped(g) => &g.inner()[index],
             GraphBackend::Disk(dg) => &dg[index],
         }
     }
@@ -4456,7 +4059,8 @@ impl Clone for GraphBackend {
 impl Serialize for GraphBackend {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.serialize(serializer),
+            GraphBackend::Memory(g) => g.serialize(serializer),
+            GraphBackend::Mapped(g) => g.serialize(serializer),
             GraphBackend::Disk(_) => Err(serde::ser::Error::custom(
                 "Disk backend does not support serialization",
             )),
@@ -4476,14 +4080,18 @@ impl<'de> Deserialize<'de> for GraphBackend {
 impl std::fmt::Debug for GraphBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                write!(
-                    f,
-                    "InMemory({} nodes, {} edges)",
-                    g.node_count(),
-                    g.edge_count()
-                )
-            }
+            GraphBackend::Memory(g) => write!(
+                f,
+                "Memory({} nodes, {} edges)",
+                g.node_count(),
+                g.edge_count()
+            ),
+            GraphBackend::Mapped(g) => write!(
+                f,
+                "Mapped({} nodes, {} edges)",
+                g.node_count(),
+                g.edge_count()
+            ),
             GraphBackend::Disk(_) => write!(f, "Disk(placeholder)"),
         }
     }
@@ -4491,11 +4099,15 @@ impl std::fmt::Debug for GraphBackend {
 
 pub type Graph = GraphBackend;
 
-// -- GraphRead trait impl --
-// Phase 0.3 anchors the storage-read API on this trait. Memory/Mapped
-// callers go through `GraphRead::method(...)` rather than inherent
-// `GraphBackend` methods; Phase 1 migrates more consumers + adds
-// per-backend impls when MappedGraph promotes from a type alias.
+// ============================================================================
+// GraphRead / GraphWrite dispatcher impls
+//
+// Phase 5 shrank these to dumb 3-arm dispatchers. The real impls live
+// on each backend in `src/graph/storage/impls.rs`. The inherent
+// `impl GraphBackend` method blocks that used to host these bodies are
+// deleted — every caller either uses the trait (most of the codebase)
+// or goes through the per-backend impl directly.
+// ============================================================================
 
 use crate::graph::storage::{GraphRead, GraphWrite};
 
@@ -4509,108 +4121,133 @@ impl GraphRead for GraphBackend {
 
     #[inline]
     fn node_count(&self) -> usize {
-        GraphBackend::node_count(self)
+        match self {
+            Self::Memory(g) => GraphRead::node_count(g),
+            Self::Mapped(g) => GraphRead::node_count(g),
+            Self::Disk(g) => GraphRead::node_count(g.as_ref()),
+        }
     }
 
     #[inline]
     fn edge_count(&self) -> usize {
-        GraphBackend::edge_count(self)
-    }
-
-    #[inline]
-    fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey> {
-        GraphBackend::node_type_of(self, idx)
-    }
-
-    #[inline]
-    fn get_node_property(&self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
-        GraphBackend::get_node_property(self, idx, key)
-    }
-
-    #[inline]
-    fn get_node_id(&self, idx: NodeIndex) -> Option<Value> {
-        GraphBackend::get_node_id(self, idx)
-    }
-
-    #[inline]
-    fn get_node_title(&self, idx: NodeIndex) -> Option<Value> {
-        GraphBackend::get_node_title(self, idx)
-    }
-
-    #[inline]
-    fn str_prop_eq(&self, idx: NodeIndex, key: InternedKey, target: &str) -> Option<bool> {
         match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g
-                .node_weight(idx)
-                .and_then(|nd| nd.properties.str_prop_eq(key, target)),
-            GraphBackend::Disk(_) => {
-                // Disk path keeps the allocating route for now; the win is
-                // mapped-mode-specific. Equality still works correctly.
-                GraphRead::get_node_property(self, idx, key)
-                    .map(|v| matches!(v, Value::String(ref s) if s == target))
-            }
+            Self::Memory(g) => GraphRead::edge_count(g),
+            Self::Mapped(g) => GraphRead::edge_count(g),
+            Self::Disk(g) => GraphRead::edge_count(g.as_ref()),
         }
     }
 
     #[inline]
     fn node_bound(&self) -> usize {
-        GraphBackend::node_bound(self)
+        match self {
+            Self::Memory(g) => GraphRead::node_bound(g),
+            Self::Mapped(g) => GraphRead::node_bound(g),
+            Self::Disk(g) => GraphRead::node_bound(g.as_ref()),
+        }
     }
 
     #[inline]
     fn is_memory(&self) -> bool {
-        GraphBackend::is_memory(self)
+        matches!(self, Self::Memory(_))
     }
 
     #[inline]
     fn is_mapped(&self) -> bool {
-        GraphBackend::is_mapped(self)
+        matches!(self, Self::Mapped(_))
     }
 
     #[inline]
     fn is_disk(&self) -> bool {
-        GraphBackend::is_disk(self)
+        matches!(self, Self::Disk(_))
     }
 
     #[inline]
-    fn node_data(&self, idx: NodeIndex) -> Option<&NodeData> {
-        GraphBackend::node_weight(self, idx)
+    fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey> {
+        match self {
+            Self::Memory(g) => GraphRead::node_type_of(g, idx),
+            Self::Mapped(g) => GraphRead::node_type_of(g, idx),
+            Self::Disk(g) => GraphRead::node_type_of(g.as_ref(), idx),
+        }
+    }
+
+    #[inline]
+    fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
+        match self {
+            Self::Memory(g) => GraphRead::node_weight(g, idx),
+            Self::Mapped(g) => GraphRead::node_weight(g, idx),
+            Self::Disk(g) => GraphRead::node_weight(g.as_ref(), idx),
+        }
+    }
+
+    #[inline]
+    fn get_node_property(&self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
+        match self {
+            Self::Memory(g) => GraphRead::get_node_property(g, idx, key),
+            Self::Mapped(g) => GraphRead::get_node_property(g, idx, key),
+            Self::Disk(g) => GraphRead::get_node_property(g.as_ref(), idx, key),
+        }
+    }
+
+    #[inline]
+    fn get_node_id(&self, idx: NodeIndex) -> Option<Value> {
+        match self {
+            Self::Memory(g) => GraphRead::get_node_id(g, idx),
+            Self::Mapped(g) => GraphRead::get_node_id(g, idx),
+            Self::Disk(g) => GraphRead::get_node_id(g.as_ref(), idx),
+        }
+    }
+
+    #[inline]
+    fn get_node_title(&self, idx: NodeIndex) -> Option<Value> {
+        match self {
+            Self::Memory(g) => GraphRead::get_node_title(g, idx),
+            Self::Mapped(g) => GraphRead::get_node_title(g, idx),
+            Self::Disk(g) => GraphRead::get_node_title(g.as_ref(), idx),
+        }
+    }
+
+    #[inline]
+    fn str_prop_eq(&self, idx: NodeIndex, key: InternedKey, target: &str) -> Option<bool> {
+        match self {
+            Self::Memory(g) => GraphRead::str_prop_eq(g, idx, key, target),
+            Self::Mapped(g) => GraphRead::str_prop_eq(g, idx, key, target),
+            Self::Disk(g) => GraphRead::str_prop_eq(g.as_ref(), idx, key, target),
+        }
     }
 
     #[inline]
     fn node_indices(&self) -> crate::graph::graph_iterators::GraphNodeIndices<'_> {
-        GraphBackend::node_indices(self)
+        match self {
+            Self::Memory(g) => GraphRead::node_indices(g),
+            Self::Mapped(g) => GraphRead::node_indices(g),
+            Self::Disk(g) => GraphRead::node_indices(g.as_ref()),
+        }
     }
 
     #[inline]
     fn edge_indices(&self) -> crate::graph::graph_iterators::GraphEdgeIndices<'_> {
         match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                crate::graph::graph_iterators::GraphEdgeIndices::InMemory(g.edge_indices())
-            }
-            GraphBackend::Disk(dg) => {
-                crate::graph::graph_iterators::GraphEdgeIndices::Disk(dg.edge_indices_iter())
-            }
+            Self::Memory(g) => GraphRead::edge_indices(g),
+            Self::Mapped(g) => GraphRead::edge_indices(g),
+            Self::Disk(g) => GraphRead::edge_indices(g.as_ref()),
         }
     }
 
     #[inline]
     fn edge_references(&self) -> crate::graph::graph_iterators::GraphEdgeReferences<'_> {
         match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                crate::graph::graph_iterators::GraphEdgeReferences::InMemory(g.edge_references())
-            }
-            GraphBackend::Disk(dg) => {
-                crate::graph::graph_iterators::GraphEdgeReferences::Disk(dg.edge_references_iter())
-            }
+            Self::Memory(g) => GraphRead::edge_references(g),
+            Self::Mapped(g) => GraphRead::edge_references(g),
+            Self::Disk(g) => GraphRead::edge_references(g.as_ref()),
         }
     }
 
     #[inline]
     fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = &'a EdgeData> + 'a> {
         match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => Box::new(g.edge_weights()),
-            GraphBackend::Disk(dg) => dg.edge_weights_iter(),
+            Self::Memory(g) => GraphRead::edge_weights(g),
+            Self::Mapped(g) => GraphRead::edge_weights(g),
+            Self::Disk(g) => GraphRead::edge_weights(g.as_ref()),
         }
     }
 
@@ -4620,18 +4257,19 @@ impl GraphRead for GraphBackend {
         idx: NodeIndex,
         dir: petgraph::Direction,
     ) -> crate::graph::graph_iterators::GraphEdges<'_> {
-        GraphBackend::edges_directed(self, idx, dir)
+        match self {
+            Self::Memory(g) => GraphRead::edges_directed(g, idx, dir),
+            Self::Mapped(g) => GraphRead::edges_directed(g, idx, dir),
+            Self::Disk(g) => GraphRead::edges_directed(g.as_ref(), idx, dir),
+        }
     }
 
     #[inline]
     fn edges(&self, idx: NodeIndex) -> crate::graph::graph_iterators::GraphEdges<'_> {
         match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                crate::graph::graph_iterators::GraphEdges::InMemory(g.edges(idx))
-            }
-            GraphBackend::Disk(dg) => crate::graph::graph_iterators::GraphEdges::Disk(
-                dg.edges_directed_iter(idx, petgraph::Direction::Outgoing),
-            ),
+            Self::Memory(g) => GraphRead::edges(g, idx),
+            Self::Mapped(g) => GraphRead::edges(g, idx),
+            Self::Disk(g) => GraphRead::edges(g.as_ref(), idx),
         }
     }
 
@@ -4642,7 +4280,13 @@ impl GraphRead for GraphBackend {
         dir: petgraph::Direction,
         conn_type_filter: Option<InternedKey>,
     ) -> crate::graph::graph_iterators::GraphEdges<'_> {
-        GraphBackend::edges_directed_filtered(self, idx, dir, conn_type_filter)
+        match self {
+            Self::Memory(g) => GraphRead::edges_directed_filtered(g, idx, dir, conn_type_filter),
+            Self::Mapped(g) => GraphRead::edges_directed_filtered(g, idx, dir, conn_type_filter),
+            Self::Disk(g) => {
+                GraphRead::edges_directed_filtered(g.as_ref(), idx, dir, conn_type_filter)
+            }
+        }
     }
 
     #[inline]
@@ -4652,43 +4296,48 @@ impl GraphRead for GraphBackend {
         b: NodeIndex,
     ) -> crate::graph::graph_iterators::GraphEdgesConnecting<'_> {
         match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                crate::graph::graph_iterators::GraphEdgesConnecting::InMemory(
-                    g.edges_connecting(a, b),
-                )
-            }
-            GraphBackend::Disk(dg) => crate::graph::graph_iterators::GraphEdgesConnecting::Disk(
-                dg.edges_connecting_iter(a, b),
-            ),
+            Self::Memory(g) => GraphRead::edges_connecting(g, a, b),
+            Self::Mapped(g) => GraphRead::edges_connecting(g, a, b),
+            Self::Disk(g) => GraphRead::edges_connecting(g.as_ref(), a, b),
         }
     }
 
     #[inline]
     fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData> {
         match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.edge_weight(idx),
-            GraphBackend::Disk(dg) => dg.edge_weight(idx),
+            Self::Memory(g) => GraphRead::edge_weight(g, idx),
+            Self::Mapped(g) => GraphRead::edge_weight(g, idx),
+            Self::Disk(g) => GraphRead::edge_weight(g.as_ref(), idx),
         }
     }
 
     #[inline]
     fn find_edge(&self, a: NodeIndex, b: NodeIndex) -> Option<EdgeIndex> {
         match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.find_edge(a, b),
-            GraphBackend::Disk(dg) => dg.find_edge(a, b),
+            Self::Memory(g) => GraphRead::find_edge(g, a, b),
+            Self::Mapped(g) => GraphRead::find_edge(g, a, b),
+            Self::Disk(g) => GraphRead::find_edge(g.as_ref(), a, b),
         }
     }
 
     #[inline]
     fn edge_endpoints(&self, idx: EdgeIndex) -> Option<(NodeIndex, NodeIndex)> {
-        GraphBackend::edge_endpoints(self, idx)
+        match self {
+            Self::Memory(g) => GraphRead::edge_endpoints(g, idx),
+            Self::Mapped(g) => GraphRead::edge_endpoints(g, idx),
+            Self::Disk(g) => GraphRead::edge_endpoints(g.as_ref(), idx),
+        }
     }
 
     #[inline]
     fn edge_endpoint_keys<'a>(
         &'a self,
     ) -> Box<dyn Iterator<Item = (NodeIndex, NodeIndex, InternedKey)> + 'a> {
-        GraphBackend::edge_endpoint_keys(self)
+        match self {
+            Self::Memory(g) => GraphRead::edge_endpoint_keys(g),
+            Self::Mapped(g) => GraphRead::edge_endpoint_keys(g),
+            Self::Disk(g) => GraphRead::edge_endpoint_keys(g.as_ref()),
+        }
     }
 
     #[inline]
@@ -4697,7 +4346,11 @@ impl GraphRead for GraphBackend {
         idx: NodeIndex,
         dir: petgraph::Direction,
     ) -> crate::graph::graph_iterators::GraphNeighbors<'_> {
-        GraphBackend::neighbors_directed(self, idx, dir)
+        match self {
+            Self::Memory(g) => GraphRead::neighbors_directed(g, idx, dir),
+            Self::Mapped(g) => GraphRead::neighbors_directed(g, idx, dir),
+            Self::Disk(g) => GraphRead::neighbors_directed(g.as_ref(), idx, dir),
+        }
     }
 
     #[inline]
@@ -4705,7 +4358,11 @@ impl GraphRead for GraphBackend {
         &self,
         idx: NodeIndex,
     ) -> crate::graph::graph_iterators::GraphNeighbors<'_> {
-        GraphBackend::neighbors_undirected(self, idx)
+        match self {
+            Self::Memory(g) => GraphRead::neighbors_undirected(g, idx),
+            Self::Mapped(g) => GraphRead::neighbors_undirected(g, idx),
+            Self::Disk(g) => GraphRead::neighbors_undirected(g.as_ref(), idx),
+        }
     }
 
     #[inline]
@@ -4714,12 +4371,20 @@ impl GraphRead for GraphBackend {
         conn_type: InternedKey,
         max: Option<usize>,
     ) -> Option<Vec<u32>> {
-        GraphBackend::sources_for_conn_type_bounded(self, conn_type, max)
+        match self {
+            Self::Memory(g) => GraphRead::sources_for_conn_type_bounded(g, conn_type, max),
+            Self::Mapped(g) => GraphRead::sources_for_conn_type_bounded(g, conn_type, max),
+            Self::Disk(g) => GraphRead::sources_for_conn_type_bounded(g.as_ref(), conn_type, max),
+        }
     }
 
     #[inline]
     fn lookup_peer_counts(&self, conn_type: InternedKey) -> Option<HashMap<u32, i64>> {
-        GraphBackend::lookup_peer_counts(self, conn_type)
+        match self {
+            Self::Memory(g) => GraphRead::lookup_peer_counts(g, conn_type),
+            Self::Mapped(g) => GraphRead::lookup_peer_counts(g, conn_type),
+            Self::Disk(g) => GraphRead::lookup_peer_counts(g.as_ref(), conn_type),
+        }
     }
 
     #[inline]
@@ -4729,7 +4394,13 @@ impl GraphRead for GraphBackend {
         dir: petgraph::Direction,
         deadline: Option<std::time::Instant>,
     ) -> Result<HashMap<u32, i64>, String> {
-        GraphBackend::count_edges_grouped_by_peer(self, conn_type, dir, deadline)
+        match self {
+            Self::Memory(g) => GraphRead::count_edges_grouped_by_peer(g, conn_type, dir, deadline),
+            Self::Mapped(g) => GraphRead::count_edges_grouped_by_peer(g, conn_type, dir, deadline),
+            Self::Disk(g) => {
+                GraphRead::count_edges_grouped_by_peer(g.as_ref(), conn_type, dir, deadline)
+            }
+        }
     }
 
     #[inline]
@@ -4741,7 +4412,22 @@ impl GraphRead for GraphBackend {
         other_node_type: Option<InternedKey>,
         deadline: Option<std::time::Instant>,
     ) -> Result<usize, String> {
-        GraphBackend::count_edges_filtered(self, node, dir, conn_type, other_node_type, deadline)
+        match self {
+            Self::Memory(g) => {
+                GraphRead::count_edges_filtered(g, node, dir, conn_type, other_node_type, deadline)
+            }
+            Self::Mapped(g) => {
+                GraphRead::count_edges_filtered(g, node, dir, conn_type, other_node_type, deadline)
+            }
+            Self::Disk(g) => GraphRead::count_edges_filtered(
+                g.as_ref(),
+                node,
+                dir,
+                conn_type,
+                other_node_type,
+                deadline,
+            ),
+        }
     }
 
     #[inline]
@@ -4751,73 +4437,80 @@ impl GraphRead for GraphBackend {
         dir: petgraph::Direction,
         conn_type: Option<u64>,
     ) -> Box<dyn Iterator<Item = (NodeIndex, EdgeIndex)> + 'a> {
-        // Disk override: use the CSR fast-path that skips EdgeData materialisation
-        // (important on Wikidata — cuts I/O in half). Memory/mapped fall through
-        // to the trait default (edges_directed + post-filter).
         match self {
-            GraphBackend::Disk(dg) => Box::new(
-                dg.iter_peers_filtered(node, dir, conn_type)
-                    .into_iter()
-                    .map(|(peer, edge_idx)| (peer, EdgeIndex::new(edge_idx as usize))),
-            ),
-            GraphBackend::Memory(_) | GraphBackend::Mapped(_) => Box::new(
-                GraphBackend::edges_directed(self, node, dir).filter_map(move |er| {
-                    if let Some(want) = conn_type {
-                        if er.weight().connection_type.as_u64() != want {
-                            return None;
-                        }
-                    }
-                    let peer = match dir {
-                        petgraph::Direction::Outgoing => er.target(),
-                        petgraph::Direction::Incoming => er.source(),
-                    };
-                    Some((peer, er.id()))
-                }),
-            ),
+            Self::Memory(g) => GraphRead::iter_peers_filtered(g, node, dir, conn_type),
+            Self::Mapped(g) => GraphRead::iter_peers_filtered(g, node, dir, conn_type),
+            Self::Disk(g) => GraphRead::iter_peers_filtered(g.as_ref(), node, dir, conn_type),
         }
     }
 
     #[inline]
     fn reset_arenas(&self) {
-        GraphBackend::reset_arenas(self);
+        if let Self::Disk(g) = self {
+            GraphRead::reset_arenas(g.as_ref());
+        }
     }
 }
 
 impl GraphWrite for GraphBackend {
     #[inline]
     fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
-        GraphBackend::node_weight_mut(self, idx)
+        match self {
+            Self::Memory(g) => GraphWrite::node_weight_mut(g, idx),
+            Self::Mapped(g) => GraphWrite::node_weight_mut(g, idx),
+            Self::Disk(g) => GraphWrite::node_weight_mut(g.as_mut(), idx),
+        }
     }
 
     #[inline]
     fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
-        GraphBackend::edge_weight_mut(self, idx)
+        match self {
+            Self::Memory(g) => GraphWrite::edge_weight_mut(g, idx),
+            Self::Mapped(g) => GraphWrite::edge_weight_mut(g, idx),
+            Self::Disk(g) => GraphWrite::edge_weight_mut(g.as_mut(), idx),
+        }
     }
 
     #[inline]
     fn add_node(&mut self, data: NodeData) -> NodeIndex {
-        GraphBackend::add_node(self, data)
+        match self {
+            Self::Memory(g) => GraphWrite::add_node(g, data),
+            Self::Mapped(g) => GraphWrite::add_node(g, data),
+            Self::Disk(g) => GraphWrite::add_node(g.as_mut(), data),
+        }
     }
 
     #[inline]
     fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData> {
-        GraphBackend::remove_node(self, idx)
+        match self {
+            Self::Memory(g) => GraphWrite::remove_node(g, idx),
+            Self::Mapped(g) => GraphWrite::remove_node(g, idx),
+            Self::Disk(g) => GraphWrite::remove_node(g.as_mut(), idx),
+        }
     }
 
     #[inline]
     fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
-        GraphBackend::add_edge(self, a, b, data)
+        match self {
+            Self::Memory(g) => GraphWrite::add_edge(g, a, b, data),
+            Self::Mapped(g) => GraphWrite::add_edge(g, a, b, data),
+            Self::Disk(g) => GraphWrite::add_edge(g.as_mut(), a, b, data),
+        }
     }
 
     #[inline]
     fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData> {
-        GraphBackend::remove_edge(self, idx)
+        match self {
+            Self::Memory(g) => GraphWrite::remove_edge(g, idx),
+            Self::Mapped(g) => GraphWrite::remove_edge(g, idx),
+            Self::Disk(g) => GraphWrite::remove_edge(g.as_mut(), idx),
+        }
     }
 
     #[inline]
     fn update_row_id(&mut self, node_idx: NodeIndex, row_id: u32) {
-        if let GraphBackend::Disk(dg) = self {
-            dg.update_row_id(node_idx, row_id);
+        if let Self::Disk(g) = self {
+            GraphWrite::update_row_id(g.as_mut(), node_idx, row_id);
         }
     }
 }

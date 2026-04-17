@@ -2,6 +2,7 @@
 //
 // PyO3 methods for timeseries operations on KnowledgeGraph.
 
+use super::storage::GraphRead;
 use super::timeseries::{self, NodeTimeseries, TimeseriesConfig};
 use super::{get_graph_mut, KnowledgeGraph};
 use crate::datatypes::py_in;

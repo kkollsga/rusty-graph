@@ -755,9 +755,17 @@ pub fn load_ntriples(
                         }
                     }
                 }
-                crate::graph::schema::GraphBackend::Memory(ref mut g)
-                | crate::graph::schema::GraphBackend::Mapped(ref mut g) => {
-                    use petgraph::visit::NodeIndexable;
+                crate::graph::schema::GraphBackend::Memory(ref mut g) => {
+                    for i in 0..g.node_bound() {
+                        let idx = petgraph::graph::NodeIndex::new(i);
+                        if let Some(node) = g.node_weight_mut(idx) {
+                            if let Some(&new_key) = rename_map.get(&node.node_type.as_u64()) {
+                                node.node_type = InternedKey::from_u64(new_key);
+                            }
+                        }
+                    }
+                }
+                crate::graph::schema::GraphBackend::Mapped(ref mut g) => {
                     for i in 0..g.node_bound() {
                         let idx = petgraph::graph::NodeIndex::new(i);
                         if let Some(node) = g.node_weight_mut(idx) {
@@ -2864,11 +2872,11 @@ fn create_edges_strings(
                 let edge_data =
                     EdgeData::new(pred_label.clone(), HashMap::new(), &mut graph.interner);
 
-                let src_type = GraphRead::node_data(&graph.graph, src)
+                let src_type = GraphRead::node_weight(&graph.graph, src)
                     .unwrap()
                     .node_type_str(&graph.interner)
                     .to_string();
-                let tgt_type = GraphRead::node_data(&graph.graph, tgt)
+                let tgt_type = GraphRead::node_weight(&graph.graph, tgt)
                     .unwrap()
                     .node_type_str(&graph.interner)
                     .to_string();

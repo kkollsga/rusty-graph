@@ -237,7 +237,17 @@ impl DiskGraph {
             data_dir: data_dir.to_path_buf(),
             metadata_dirty: false,
             csr_sorted_by_type: false,
-            defer_csr: true,
+            // Phase 5: `defer_csr = false` by default so one-off Cypher
+            // CREATE / MERGE inserts route directly to overflow_out /
+            // overflow_in + edge_endpoints, where `edges_directed` reads
+            // them immediately. Bulk loaders that want to batch edges in
+            // `pending_edges` and rebuild the CSR at the end (ntriples)
+            // flip this to `true` on the freshly-constructed DiskGraph.
+            // Previously the default-`true` path silently dropped
+            // Cypher-created edges from subsequent MATCH queries — the
+            // pending buffer was written but `edges_directed_filtered_iter`
+            // only reads CSR + overflow, not pending.
+            defer_csr: false,
             edge_type_counts_raw: None,
             conn_type_index_types: MmapOrVec::new(),
             conn_type_index_offsets: MmapOrVec::new(),
@@ -387,7 +397,17 @@ impl DiskGraph {
             data_dir: data_dir.to_path_buf(),
             metadata_dirty: false,
             csr_sorted_by_type: false,
-            defer_csr: true,
+            // Phase 5: `defer_csr = false` by default so one-off Cypher
+            // CREATE / MERGE inserts route directly to overflow_out /
+            // overflow_in + edge_endpoints, where `edges_directed` reads
+            // them immediately. Bulk loaders that want to batch edges in
+            // `pending_edges` and rebuild the CSR at the end (ntriples)
+            // flip this to `true` on the freshly-constructed DiskGraph.
+            // Previously the default-`true` path silently dropped
+            // Cypher-created edges from subsequent MATCH queries — the
+            // pending buffer was written but `edges_directed_filtered_iter`
+            // only reads CSR + overflow, not pending.
+            defer_csr: false,
             edge_type_counts_raw: None,
             conn_type_index_types: MmapOrVec::new(),
             conn_type_index_offsets: MmapOrVec::new(),
@@ -1133,18 +1153,21 @@ impl DiskGraph {
             Direction::Outgoing => (&self.out_offsets, &self.out_edges),
             Direction::Incoming => (&self.in_offsets, &self.in_edges),
         };
-
-        if node >= offsets.len().saturating_sub(1) {
-            return DiskEdges::new_empty(self, dir, a);
-        }
-
-        let start = offsets.get(node) as usize;
-        let end = offsets.get(node + 1) as usize;
-
         let overflow = match dir {
             Direction::Outgoing => self.overflow_out.get(&(node as u32)),
             Direction::Incoming => self.overflow_in.get(&(node as u32)),
         };
+
+        // If the CSR offset table hasn't been built yet (fresh disk graph
+        // pre-first-build, or a node added after build_csr_from_pending),
+        // the overflow path may still carry edges. Fall through with an
+        // empty CSR range instead of skipping the iterator entirely.
+        let (start, end) = if node < offsets.len().saturating_sub(1) {
+            (offsets.get(node) as usize, offsets.get(node + 1) as usize)
+        } else {
+            (0, 0)
+        };
+
         let iter = DiskEdges::new(self, dir, a, edges, start, end, overflow);
         if let Some(ct) = conn_type_filter {
             iter.with_conn_type_filter(ct)
@@ -1240,8 +1263,11 @@ impl DiskGraph {
         let tgt = b.index() as u32;
         let ct_u64 = ct.as_u64();
 
-        if self.defer_csr || self.out_edges.is_empty() {
-            // Pre-CSR mode: accumulate in pending_edges for bulk build
+        if self.defer_csr {
+            // Bulk-build mode: accumulate in pending_edges; caller is
+            // responsible for `build_csr_from_pending()` at batch end.
+            // Set explicitly by bulk loaders (ntriples); off by default so
+            // individual Cypher mutations stay visible via overflow.
             self.pending_edges.get_mut().push((src, tgt, ct_u64));
         } else {
             // Post-CSR mode: go directly to overflow + edge_endpoints.

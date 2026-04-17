@@ -1,31 +1,19 @@
-//! Storage-backend types and (future) `GraphRead` / `GraphWrite` traits.
+//! Storage-backend types and `GraphRead` / `GraphWrite` traits.
 //!
 //! Anchor for the 0.8.0 storage-architecture refactor (see `todo.md`).
-//! The long-term target is a single `GraphRead` trait every backend
-//! implements, with the only enum match on
-//! [`crate::graph::schema::GraphBackend`] living at the PyO3 boundary.
+//! Every backend implements [`GraphRead`] / [`GraphWrite`] directly;
+//! the [`crate::graph::schema::GraphBackend`] enum is a dumb dispatcher.
+//! Per-backend trait impls live in [`crate::graph::storage::impls`].
 //!
-//! In this increment (Phase 0.2) the wrapper is intentionally thin:
+//! - [`MemoryGraph`] — heap-resident, petgraph `StableDiGraph`.
+//! - [`MappedGraph`] — mmap-columnar-spill variant (Phase 5 promoted
+//!   this from a type alias to a distinct struct so its trait impls
+//!   can diverge from memory's once the column ownership differs).
+//! - [`crate::graph::disk_graph::DiskGraph`] — CSR + mmap columns.
 //!
-//! - [`MemoryGraph`] is a newtype around `petgraph::StableDiGraph`
-//!   that `Deref`s to the inner graph, so existing `g.method()` call
-//!   sites compile unchanged.
-//! - [`MappedGraph`] is **currently a type alias** for
-//!   [`MemoryGraph`]. The two `GraphBackend` variants `Memory` and
-//!   `Mapped` hold the same inner type, which lets match arms write
-//!   `Self::Memory(g) | Self::Mapped(g) => g.method()` — zero branch
-//!   duplication today. The distinguishing behaviour (mapped-mode
-//!   spills columnar properties to mmap on build) lives on the
-//!   parent `DirGraph` for now.
-//!
-//! Phase 0.3+ promotes `MappedGraph` to a distinct struct when the
-//! two backends' impls need to diverge (e.g. when each owns its own
-//! column store). At that point per-backend `GraphRead` impls start
-//! making sense. Today they'd be identical boilerplate.
-//!
-//! Rule for new storage operations: add the method to a trait in this
-//! module first, implement per-backend, and delegate from
-//! `GraphBackend` — never the other way around.
+//! Rule for new storage operations: add the method to [`GraphRead`] or
+//! [`GraphWrite`] first, implement per-backend, and let the
+//! `GraphBackend` dispatcher route to them — never the other way.
 
 use crate::datatypes::Value;
 use crate::graph::graph_iterators::GraphEdgeRef;
@@ -121,13 +109,19 @@ pub trait GraphRead {
     fn node_bound(&self) -> usize;
 
     /// `true` for heap-resident [`GraphBackend::Memory`].
-    fn is_memory(&self) -> bool;
+    fn is_memory(&self) -> bool {
+        false
+    }
 
     /// `true` for the mmap-Columnar [`GraphBackend::Mapped`] variant.
-    fn is_mapped(&self) -> bool;
+    fn is_mapped(&self) -> bool {
+        false
+    }
 
     /// `true` for disk-backed [`GraphBackend::Disk`] (CSR + mmap columns).
-    fn is_disk(&self) -> bool;
+    fn is_disk(&self) -> bool {
+        false
+    }
 
     // ─────────────── per-node reads ───────────────
 
@@ -139,7 +133,10 @@ pub trait GraphRead {
     /// in hot loops. On the disk backend, materialises NodeData through
     /// the per-query arena, which is cheap per-call but accumulates if
     /// called many times without [`GraphRead::reset_arenas`].
-    fn node_data(&self, idx: NodeIndex) -> Option<&NodeData>;
+    ///
+    /// Named `node_weight` for consistency with petgraph's `StableDiGraph`
+    /// primitive, which is the heap-backed implementation of this method.
+    fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData>;
 
     /// Read a single property without full NodeData materialisation.
     /// Used by the hot WHERE-scan path. Returns `None` if the property
@@ -372,9 +369,13 @@ pub trait GraphWrite: GraphRead {
 #[derive(Clone, Debug, Default)]
 pub struct MemoryGraph(pub(crate) StableDiGraph<NodeData, EdgeData>);
 
-/// Memory-mapped in-memory graph backend — *currently* a type alias
-/// for [`MemoryGraph`]. See module docs.
-pub type MappedGraph = MemoryGraph;
+/// Memory-mapped in-memory graph backend — Phase 5 promoted this to a
+/// distinct struct (previously a type alias for [`MemoryGraph`]) so
+/// per-backend trait impls can diverge. Today its shape matches
+/// `MemoryGraph` but the `GraphBackend::Mapped` variant carries its
+/// own identity, letting the column-store ownership split cleanly.
+#[derive(Clone, Debug, Default)]
+pub struct MappedGraph(pub(crate) StableDiGraph<NodeData, EdgeData>);
 
 impl MemoryGraph {
     #[inline]
@@ -387,6 +388,45 @@ impl MemoryGraph {
     pub fn with_capacity(nodes: usize, edges: usize) -> Self {
         Self(StableDiGraph::with_capacity(nodes, edges))
     }
+
+    /// Borrow the inner `StableDiGraph`. Shared with [`MappedGraph`]
+    /// for match arms that need the heap backend's petgraph view.
+    #[inline]
+    pub fn inner(&self) -> &StableDiGraph<NodeData, EdgeData> {
+        &self.0
+    }
+
+    /// Mutable borrow of the inner `StableDiGraph`.
+    #[inline]
+    pub fn inner_mut(&mut self) -> &mut StableDiGraph<NodeData, EdgeData> {
+        &mut self.0
+    }
+}
+
+impl MappedGraph {
+    #[inline]
+    pub fn new() -> Self {
+        Self(StableDiGraph::new())
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub fn with_capacity(nodes: usize, edges: usize) -> Self {
+        Self(StableDiGraph::with_capacity(nodes, edges))
+    }
+
+    /// Borrow the inner `StableDiGraph`. Shared with [`MemoryGraph`]
+    /// for match arms that need the heap backend's petgraph view.
+    #[inline]
+    pub fn inner(&self) -> &StableDiGraph<NodeData, EdgeData> {
+        &self.0
+    }
+
+    /// Mutable borrow of the inner `StableDiGraph`.
+    #[inline]
+    pub fn inner_mut(&mut self) -> &mut StableDiGraph<NodeData, EdgeData> {
+        &mut self.0
+    }
 }
 
 impl Deref for MemoryGraph {
@@ -398,6 +438,21 @@ impl Deref for MemoryGraph {
 }
 
 impl DerefMut for MemoryGraph {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Deref for MappedGraph {
+    type Target = StableDiGraph<NodeData, EdgeData>;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for MappedGraph {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
@@ -417,3 +472,17 @@ impl<'de> serde::Deserialize<'de> for MemoryGraph {
         StableDiGraph::deserialize(de).map(MemoryGraph)
     }
 }
+
+impl serde::Serialize for MappedGraph {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(ser)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MappedGraph {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        StableDiGraph::deserialize(de).map(MappedGraph)
+    }
+}
+
+pub mod impls;
