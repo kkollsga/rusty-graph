@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.16] — 2026-04-17
+
+CI-fix release on top of 0.7.15. No functional changes to the Cypher
+engine; dependency bumps + clippy 1.95 compatibility only.
+
+### Dependencies
+- **pyo3 0.27 → 0.28**, **geo 0.29 → 0.33**, **wkt 0.11 → 0.14**,
+  **bzip2 0.5 → 0.6**. API changes absorbed: `#[pyclass(skip_from_py_object)]`
+  on `KnowledgeGraph` (pyo3 0.28 opt-in); `Geodesic` is now a static value
+  (call as `Geodesic.distance(...)` / `length(&Geodesic)`) with the
+  `LengthMeasurable` trait imported from `geo::line_measures`.
+- Clippy 1.95 compat: `sort_by` → `sort_by_key(Reverse)`, collapsed `if`/
+  `match` guard patterns, `file_len.checked_div(elem_size)`, removed
+  redundant `.into_iter()` in `IntoIterator` args.
+
 ## [0.7.15] — 2026-04-17
 
 ### Added

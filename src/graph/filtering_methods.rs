@@ -92,11 +92,9 @@ fn precompile_regex_patterns(
 
 fn collect_regex_patterns(condition: &FilterCondition, cache: &mut HashMap<String, regex::Regex>) {
     match condition {
-        FilterCondition::Regex(pattern) => {
-            if !cache.contains_key(pattern) {
-                if let Ok(re) = regex::Regex::new(pattern) {
-                    cache.insert(pattern.clone(), re);
-                }
+        FilterCondition::Regex(pattern) if !cache.contains_key(pattern) => {
+            if let Ok(re) = regex::Regex::new(pattern) {
+                cache.insert(pattern.clone(), re);
             }
         }
         FilterCondition::Not(inner) => collect_regex_patterns(inner, cache),

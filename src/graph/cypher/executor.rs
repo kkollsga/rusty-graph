@@ -3267,21 +3267,19 @@ impl<'a> CypherExecutor<'a> {
                 left,
                 operator,
                 right,
-            } => {
-                if *operator == ComparisonOp::Equals {
-                    if let (
-                        Expression::PropertyAccess { variable, property },
-                        Expression::Literal(value),
-                    ) = (left, right)
-                    {
-                        results.push((variable.clone(), property.clone(), value.clone()));
-                    } else if let (
-                        Expression::Literal(value),
-                        Expression::PropertyAccess { variable, property },
-                    ) = (left, right)
-                    {
-                        results.push((variable.clone(), property.clone(), value.clone()));
-                    }
+            } if *operator == ComparisonOp::Equals => {
+                if let (
+                    Expression::PropertyAccess { variable, property },
+                    Expression::Literal(value),
+                ) = (left, right)
+                {
+                    results.push((variable.clone(), property.clone(), value.clone()));
+                } else if let (
+                    Expression::Literal(value),
+                    Expression::PropertyAccess { variable, property },
+                ) = (left, right)
+                {
+                    results.push((variable.clone(), property.clone(), value.clone()));
                 }
             }
             Predicate::And(left, right) => {

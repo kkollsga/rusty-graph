@@ -169,7 +169,7 @@ fn resolve_noderefs(graph: &schema::Graph, rows: &mut [Vec<Value>]) {
 /// All read methods take `&self`; mutations use `Arc::make_mut` for copy-on-write.
 /// Supports Cypher queries, property filtering, traversals, graph algorithms,
 /// and code entity exploration methods (`find`, `source`, `context`, `toc`).
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 pub struct KnowledgeGraph {
     inner: Arc<DirGraph>,
     selection: CowSelection, // Using Cow wrapper for copy-on-write semantics

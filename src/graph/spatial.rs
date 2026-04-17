@@ -2,7 +2,8 @@
 // Provides spatial filtering and geometry operations on graph nodes
 
 use geo::geometry::{Geometry, LineString, Point, Polygon};
-use geo::{Centroid, Closest, ClosestPoint, Contains, GeodesicArea, Intersects, Length, Rect};
+use geo::line_measures::LengthMeasurable;
+use geo::{Centroid, Closest, ClosestPoint, Contains, GeodesicArea, Intersects, Rect};
 use geo::{Distance, Geodesic};
 use petgraph::graph::NodeIndex;
 use wkt::TryFromWkt;
@@ -119,7 +120,7 @@ pub fn near_point(
 /// Geodesic distance between two points in meters (WGS84 ellipsoid, Karney algorithm).
 #[inline]
 pub(crate) fn geodesic_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    Geodesic::distance(Point::new(lon1, lat1), Point::new(lon2, lat2))
+    Geodesic.distance(Point::new(lon1, lat1), Point::new(lon2, lat2))
 }
 
 /// Filter nodes within a certain distance of a point (in meters).
@@ -210,11 +211,11 @@ pub(crate) fn geometry_area_m2(geom: &Geometry<f64>) -> Result<f64, String> {
 /// Geodesic perimeter/length of a geometry in meters (WGS84 ellipsoid).
 pub(crate) fn geometry_perimeter_m(geom: &Geometry<f64>) -> Result<f64, String> {
     let length_m = match geom {
-        Geometry::Polygon(p) => p.exterior().length::<Geodesic>(),
-        Geometry::MultiPolygon(mp) => mp.iter().map(|p| p.exterior().length::<Geodesic>()).sum(),
-        Geometry::LineString(l) => l.length::<Geodesic>(),
-        Geometry::MultiLineString(ml) => ml.iter().map(|l| l.length::<Geodesic>()).sum(),
-        Geometry::Rect(r) => rect_to_polygon(r).exterior().length::<Geodesic>(),
+        Geometry::Polygon(p) => p.exterior().length(&Geodesic),
+        Geometry::MultiPolygon(mp) => mp.iter().map(|p| p.exterior().length(&Geodesic)).sum(),
+        Geometry::LineString(l) => l.length(&Geodesic),
+        Geometry::MultiLineString(ml) => ml.iter().map(|l| l.length(&Geodesic)).sum(),
+        Geometry::Rect(r) => rect_to_polygon(r).exterior().length(&Geodesic),
         _ => return Err("perimeter() requires a polygon or line geometry".into()),
     };
     Ok(length_m)

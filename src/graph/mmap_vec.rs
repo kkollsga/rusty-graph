@@ -141,11 +141,7 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         let file_len = file.metadata()?.len() as usize;
         let elem_size = std::mem::size_of::<T>();
-        let capacity = if elem_size > 0 {
-            file_len / elem_size
-        } else {
-            len
-        };
+        let capacity = file_len.checked_div(elem_size).unwrap_or(len);
 
         if capacity < len {
             return Err(io::Error::new(

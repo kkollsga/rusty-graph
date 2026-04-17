@@ -17,11 +17,6 @@ kglite.KnowledgeGraph.embed_texts
 kglite.KnowledgeGraph.search_text
 kglite.KnowledgeGraph.vector_search
 
-# PyO3 uses Ellipsis (...) as sentinel for "not provided" vs explicit None.
-# Stubs use None as the default since Ellipsis isn't a valid type annotation default.
-kglite.KnowledgeGraph.collect_children
-kglite.KnowledgeGraph.traverse
-
 # Overloaded methods: stubtest compares against runtime's single dispatch signature.
 # The overloads are correct for type-checking but structurally differ from runtime.
 kglite.KnowledgeGraph.sample

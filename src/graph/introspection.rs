@@ -487,7 +487,7 @@ pub fn compute_type_connectivity(graph: &DirGraph) -> Vec<ConnectivityTriple> {
             count,
         })
         .collect();
-    triples.sort_by(|a, b| b.count.cmp(&a.count));
+    triples.sort_by_key(|t| std::cmp::Reverse(t.count));
     triples
 }
 
@@ -514,8 +514,8 @@ pub fn neighbors_from_triples(triples: &[ConnectivityTriple], node_type: &str) -
         }
     }
 
-    outgoing.sort_by(|a, b| b.count.cmp(&a.count));
-    incoming.sort_by(|a, b| b.count.cmp(&a.count));
+    outgoing.sort_by_key(|o| std::cmp::Reverse(o.count));
+    incoming.sort_by_key(|i| std::cmp::Reverse(i.count));
 
     NeighborsSchema { outgoing, incoming }
 }
@@ -559,9 +559,9 @@ impl TypeConnectivityIndex {
         let mut index = HashMap::with_capacity(all_types.len());
         for nt in all_types {
             let mut outgoing = out_map.remove(&nt).unwrap_or_default();
-            outgoing.sort_by(|a, b| b.count.cmp(&a.count));
+            outgoing.sort_by_key(|o| std::cmp::Reverse(o.count));
             let mut incoming = in_map.remove(&nt).unwrap_or_default();
-            incoming.sort_by(|a, b| b.count.cmp(&a.count));
+            incoming.sort_by_key(|i| std::cmp::Reverse(i.count));
             index.insert(nt, NeighborsSchema { outgoing, incoming });
         }
 
@@ -1572,7 +1572,7 @@ fn write_connections_overview(xml: &mut String, graph: &DirGraph) {
     let total_conn = conn_stats.len();
     let capped = total_conn > 500;
     if capped {
-        conn_stats.sort_by(|a, b| b.count.cmp(&a.count));
+        conn_stats.sort_by_key(|c| std::cmp::Reverse(c.count));
         conn_stats.truncate(50);
     }
 
@@ -1689,7 +1689,7 @@ fn write_connections_detail(
             *pair_counts.entry((src_type, tgt_type)).or_insert(0) += 1;
         }
         let mut pairs: Vec<((String, String), usize)> = pair_counts.into_iter().collect();
-        pairs.sort_by(|a, b| b.1.cmp(&a.1));
+        pairs.sort_by_key(|p| std::cmp::Reverse(p.1));
 
         xml.push_str("    <endpoints>\n");
         for ((src, tgt), count) in &pairs {
@@ -3179,7 +3179,7 @@ fn build_type_search_results(graph: &DirGraph, pattern: &str) -> String {
             .filter(|(nt, _)| !graph.parent_types.contains_key(*nt))
             .map(|(nt, indices)| (nt, indices.len()))
             .collect();
-        all_types.sort_by(|a, b| b.1.cmp(&a.1));
+        all_types.sort_by_key(|t| std::cmp::Reverse(t.1));
         if !all_types.is_empty() {
             xml.push_str("  <suggestion>No types match. Largest types in graph:\n");
             for &(nt, count) in all_types.iter().take(10) {

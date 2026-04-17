@@ -1718,7 +1718,7 @@ fn build_columns_direct(
             }
             type_sizes.push((tn.as_str(), sz, meta.row_count));
         }
-        type_sizes.sort_by(|a, b| b.1.cmp(&a.1));
+        type_sizes.sort_by_key(|t| std::cmp::Reverse(t.1));
         for (tn, sz, rc) in type_sizes.iter().take(10) {
             eprintln!(
                 "    {:>8.1} GB  {:>10} rows  {}",

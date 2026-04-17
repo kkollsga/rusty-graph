@@ -483,13 +483,11 @@ impl MmapColumnStore {
             1 | 2 => *pos += 8, // Int64 or Float64
             3 | 5 => *pos += 4, // UniqueId or Date
             4 => *pos += 1,     // Bool
-            6 => {
+            6 if *pos + 4 <= blob.len() => {
                 // String: u32 length prefix + bytes
-                if *pos + 4 <= blob.len() {
-                    let slen = u32::from_le_bytes(blob[*pos..*pos + 4].try_into().unwrap_or([0; 4]))
-                        as usize;
-                    *pos += 4 + slen;
-                }
+                let slen =
+                    u32::from_le_bytes(blob[*pos..*pos + 4].try_into().unwrap_or([0; 4])) as usize;
+                *pos += 4 + slen;
             }
             _ => {}
         }

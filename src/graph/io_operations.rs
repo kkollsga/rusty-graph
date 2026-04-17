@@ -774,9 +774,7 @@ fn load_v3(buf: &[u8]) -> io::Result<KnowledgeGraph> {
                     crate::graph::schema::InternedKey::from_str(name)
                 })
                 .collect();
-            let column_schema = Arc::new(crate::graph::schema::TypeSchema::from_keys(
-                col_keys.into_iter(),
-            ));
+            let column_schema = Arc::new(crate::graph::schema::TypeSchema::from_keys(col_keys));
 
             let type_meta = dir_graph
                 .node_type_metadata
