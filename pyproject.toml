@@ -82,8 +82,9 @@ testpaths = ["tests"]
 markers = [
     "benchmark: performance benchmark tests (deselect with '-m not benchmark')",
     "slow: slow tests taking >5s (deselect with '-m not slow')",
+    "parity: cross-storage-mode oracle tests (memory vs mapped vs disk)",
 ]
-addopts = "-m 'not benchmark'"
+addopts = "-m 'not benchmark and not parity'"
 
 [tool.mypy]
 ignore_missing_imports = true
