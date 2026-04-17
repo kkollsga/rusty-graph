@@ -827,7 +827,29 @@ fn sample_unique_values(
     unique
 }
 
+/// Insert a `(type, prop)` sample into the cache if not already present.
+/// Stores `None` for empty results to avoid resampling.
+fn populate_sample(
+    cache: &mut HashMap<(String, String), Option<HashSet<String>>>,
+    graph: &DirGraph,
+    node_type: &str,
+    property: &str,
+    max: usize,
+) {
+    let key = (node_type.to_string(), property.to_string());
+    if cache.contains_key(&key) {
+        return;
+    }
+    let vals = sample_unique_values(graph, node_type, property, max);
+    cache.insert(key, if vals.is_empty() { None } else { Some(vals) });
+}
+
 /// Find join candidates between disconnected core type pairs.
+///
+/// Performance note: samples each (type, property) at most once by memoising
+/// into `sample_cache`. Without this, a property shared across N types gets
+/// resampled O(N²) times — which was 6× slower on columnar-backed graphs
+/// (where each property read clones through the column store).
 fn compute_join_candidates(
     graph: &DirGraph,
     connected_pairs: &HashSet<(String, String)>,
@@ -843,13 +865,19 @@ fn compute_join_candidates(
     core_types.sort();
 
     let mut candidates: Vec<JoinCandidate> = Vec::new();
+    // Memoise sampled values per (type, property). `None` means "already sampled
+    // and found empty" so we don't resample.
+    let mut sample_cache: HashMap<(String, String), Option<HashSet<String>>> = HashMap::new();
 
     // Check all unordered pairs of disconnected core types
-    for i in 0..core_types.len() {
+    'outer: for i in 0..core_types.len() {
         if candidates.len() >= max_candidates * 3 {
             break; // Early exit: we have enough raw candidates
         }
         for j in (i + 1)..core_types.len() {
+            if candidates.len() >= max_candidates * 3 {
+                break 'outer;
+            }
             let left = core_types[i];
             let right = core_types[j];
 
@@ -874,29 +902,41 @@ fn compute_join_candidates(
             let mut props: Vec<(&String, &String)> = left_meta.iter().collect();
             props.sort_by(|a, b| a.0.cmp(b.0));
             for (prop, left_type) in props {
-                if let Some(right_type) = right_meta.get(prop) {
-                    if types_compatible(left_type, right_type) {
-                        let left_vals = sample_unique_values(graph, left, prop, max_sample);
-                        if left_vals.is_empty() {
-                            continue;
-                        }
-                        let right_vals = sample_unique_values(graph, right, prop, max_sample);
-                        if right_vals.is_empty() {
-                            continue;
-                        }
-                        let overlap = left_vals.intersection(&right_vals).count();
-                        if overlap > 0 {
-                            candidates.push(JoinCandidate {
-                                left_type: left.clone(),
-                                left_prop: prop.clone(),
-                                left_unique: left_vals.len(),
-                                right_type: right.clone(),
-                                right_prop: prop.clone(),
-                                right_unique: right_vals.len(),
-                                overlap,
-                            });
-                        }
-                    }
+                let Some(right_type) = right_meta.get(prop) else {
+                    continue;
+                };
+                if !types_compatible(left_type, right_type) {
+                    continue;
+                }
+                // Populate cache for both sides, then read — avoids simultaneous
+                // immutable+mutable borrows on `sample_cache`.
+                populate_sample(&mut sample_cache, graph, left, prop, max_sample);
+                if sample_cache
+                    .get(&(left.clone(), prop.clone()))
+                    .is_none_or(|v| v.is_none())
+                {
+                    continue;
+                }
+                populate_sample(&mut sample_cache, graph, right, prop, max_sample);
+                let left_vals = match sample_cache.get(&(left.clone(), prop.clone())) {
+                    Some(Some(v)) => v,
+                    _ => continue,
+                };
+                let right_vals = match sample_cache.get(&(right.clone(), prop.clone())) {
+                    Some(Some(v)) => v,
+                    _ => continue,
+                };
+                let overlap = left_vals.intersection(right_vals).count();
+                if overlap > 0 {
+                    candidates.push(JoinCandidate {
+                        left_type: left.clone(),
+                        left_prop: prop.clone(),
+                        left_unique: left_vals.len(),
+                        right_type: right.clone(),
+                        right_prop: prop.clone(),
+                        right_unique: right_vals.len(),
+                        overlap,
+                    });
                 }
             }
         }
