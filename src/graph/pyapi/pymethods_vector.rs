@@ -8,10 +8,10 @@ use pyo3::IntoPyObjectExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::schema;
-use super::storage::GraphRead;
-use super::io::io_operations;
-use super::KnowledgeGraph;
+use crate::graph::schema;
+use crate::graph::storage::GraphRead;
+use crate::graph::io::io_operations;
+use crate::graph::KnowledgeGraph;
 
 #[pymethods]
 impl KnowledgeGraph {

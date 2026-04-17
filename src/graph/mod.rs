@@ -21,12 +21,7 @@ pub mod query;
 pub mod schema;
 pub mod storage;
 
-mod pymethods_algorithms;
-mod pymethods_export;
-mod pymethods_indexes;
-mod pymethods_spatial;
-mod pymethods_timeseries;
-mod pymethods_vector;
+mod pyapi;
 
 use schema::{
     ConnectionSchemaDefinition, CowSelection, DirGraph, NodeSchemaDefinition, PlanStep,

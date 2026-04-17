@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use super::{get_graph_mut, KnowledgeGraph};
+use crate::graph::{get_graph_mut, KnowledgeGraph};
 
 #[pymethods]
 impl KnowledgeGraph {

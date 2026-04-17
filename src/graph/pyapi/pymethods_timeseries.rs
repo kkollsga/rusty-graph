@@ -2,9 +2,9 @@
 //
 // PyO3 methods for timeseries operations on KnowledgeGraph.
 
-use super::storage::GraphRead;
-use super::features::timeseries::{NodeTimeseries, TimeseriesConfig};
-use super::{get_graph_mut, KnowledgeGraph};
+use crate::graph::storage::GraphRead;
+use crate::graph::features::timeseries::{NodeTimeseries, TimeseriesConfig};
+use crate::graph::{get_graph_mut, KnowledgeGraph};
 use crate::datatypes::py_in;
 use chrono::NaiveDate;
 use pyo3::prelude::*;
@@ -474,7 +474,7 @@ fn ts_config_to_py(py: Python<'_>, config: &TimeseriesConfig) -> PyResult<Py<PyA
     Ok(dict.into_any().unbind())
 }
 
-use super::schema::DirGraph;
+use crate::graph::schema::DirGraph;
 use crate::datatypes::values::Value;
 use petgraph::graph::NodeIndex;
 

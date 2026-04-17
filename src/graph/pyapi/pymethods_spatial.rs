@@ -3,8 +3,8 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use super::schema::{CowSelection, DirGraph, PlanStep, SelectionOperation, SpatialConfig};
-use super::{get_graph_mut, KnowledgeGraph};
+use crate::graph::schema::{CowSelection, DirGraph, PlanStep, SelectionOperation, SpatialConfig};
+use crate::graph::{get_graph_mut, KnowledgeGraph};
 
 /// Extract a WKT string from a Python argument.
 /// Accepts either a plain str or any object with a `.wkt` property

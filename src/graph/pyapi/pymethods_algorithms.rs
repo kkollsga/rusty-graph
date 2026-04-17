@@ -6,9 +6,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::sync::Arc;
 
-use super::introspection::reporting::OperationReports;
-use super::schema::{CowSelection, PlanStep};
-use super::{
+use crate::graph::introspection::reporting::OperationReports;
+use crate::graph::schema::{CowSelection, PlanStep};
+use crate::graph::{
     centrality_results_to_dataframe, centrality_results_to_py_dict, community_results_to_py,
     cypher, KnowledgeGraph, TemporalContext,
 };
