@@ -1,6 +1,7 @@
 // src/graph/data_retrieval.rs
 use crate::datatypes::values::{format_value, Value};
 use crate::graph::schema::{CurrentSelection, DirGraph, NodeInfo};
+use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -76,7 +77,7 @@ pub fn get_nodes(
     // return empty to respect the query result.
     if selection_is_empty && !has_query_operations {
         let mut all_nodes = Vec::new();
-        for node_idx in graph.graph.node_indices() {
+        for node_idx in GraphRead::node_indices(&graph.graph) {
             if let Some(node) = graph.get_node(node_idx) {
                 let node_info = node.to_node_info(&graph.interner);
                 all_nodes.push(node_info);
