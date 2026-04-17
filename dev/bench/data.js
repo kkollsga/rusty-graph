@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776404842181,
+  "lastUpdate": 1776406439982,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -6899,6 +6899,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.000016408385799134443",
             "extra": "mean: 1.125129528789642 msec\nrounds: 851"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "fa63011c4b1747a0421bdbddfa69df538db95f76",
+          "message": "release: v0.7.17 — Python 3.14 wheels\n\nAdds Python 3.14 to the CI test matrix and wheel-build pipeline across\nLinux, macOS (Intel + arm64), and Windows. Enabled by pyo3 0.28 (bumped\nin 0.7.16), which supports up to ABI3_MAX_MINOR = 14.\n\nVerified locally: full test suite (1758 passed, 4 skipped — matching\n3.12 once optional tree-sitter code-tree tests are excluded) against\nCPython 3.14.3 on macOS aarch64, release build.\n\nCI changes:\n- .github/workflows/ci.yml: add 3.14 to python-version matrix\n- .github/workflows/build_wheels.yml: add 3.14 include entries for all\n  four OS/target combos\n- pyproject.toml: add 3.14 classifier\n- .gitignore: cover .venv* (added during the 3.14 compat test)\n\nNo functional changes to kglite itself.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-17T07:51:59+02:00",
+          "tree_id": "4147e4c6149584babdc4754d8687f79e8c1e9a68",
+          "url": "https://github.com/kkollsga/kglite/commit/fa63011c4b1747a0421bdbddfa69df538db95f76"
+        },
+        "date": 1776406439641,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1065.353349328723,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002323997714455524",
+            "extra": "mean: 938.6557057619408 usec\nrounds: 486"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 762.7324550210269,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00012211546551123745",
+            "extra": "mean: 1.3110757165465474 msec\nrounds: 695"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 13651.233611057052,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000004692993442782003",
+            "extra": "mean: 73.25345302054113 usec\nrounds: 7333"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1744.7701000895584,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002029508839631956",
+            "extra": "mean: 573.1414126988252 usec\nrounds: 945"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 701277.1211722958,
+            "unit": "iter/sec",
+            "range": "stddev: 4.29986577618281e-7",
+            "extra": "mean: 1.4259698053864092 usec\nrounds: 95878"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 127078.32107406987,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000013710956607352962",
+            "extra": "mean: 7.869162824531905 usec\nrounds: 18609"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2259.824741838408,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000014454559682153928",
+            "extra": "mean: 442.51219197931346 usec\nrounds: 3516"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1699.1127785378312,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000040187892125741845",
+            "extra": "mean: 588.5424514672584 usec\nrounds: 1329"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 13892.496026241244,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00000464604193783822",
+            "extra": "mean: 71.98130545519832 usec\nrounds: 11347"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 876.1129886150237,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000026242477287154454",
+            "extra": "mean: 1.1414052901793172 msec\nrounds: 672"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 898.7609742934139,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000017600329166331525",
+            "extra": "mean: 1.1126428812579205 msec\nrounds: 859"
           }
         ]
       }
