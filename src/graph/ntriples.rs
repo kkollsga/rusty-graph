@@ -12,7 +12,7 @@
 use crate::datatypes::values::Value;
 use crate::graph::mmap_vec::MmapOrVec;
 use crate::graph::schema::{
-    DirGraph, EdgeData, InternedKey, NodeData, PropertyStorage, StorageMode, TypeSchema,
+    DirGraph, EdgeData, InternedKey, NodeData, PropertyStorage, TypeSchema,
 };
 use crate::graph::type_build_meta::{ColType, TypeBuildMeta};
 use bzip2::read::BzDecoder;
@@ -403,14 +403,14 @@ pub fn load_ntriples(
     // For Disk mode: serialize properties to a compressed log file (fast, ~100 ns/entity).
     // Phase 1b replays the log to build ColumnStores in bulk.
     // For other modes: use fast non-mapped insertion (HashMap properties, then Phase 1b).
-    let final_mode = graph.storage_mode;
+    // final_mode was graph.storage_mode; now read from graph.graph variant
     let mapped = false;
     let mut current: Option<EntityAccumulator> = None;
-    let use_compact = final_mode == StorageMode::Disk;
+    let use_compact = graph.graph.is_disk();
 
     // Property log for Disk mode: serialize properties during Phase 1, replay in Phase 1b
     let mut prop_log: Option<crate::graph::property_log::PropertyLogWriter> =
-        if final_mode == StorageMode::Disk {
+        if graph.graph.is_disk() {
             let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
                 std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
             });
@@ -445,7 +445,7 @@ pub fn load_ntriples(
             None
         };
     let mut edge_buffer = if use_compact {
-        if final_mode == StorageMode::Disk {
+        if graph.graph.is_disk() {
             // File-backed edge buffer: avoids holding ~14 GB in RAM during Phase 1b
             let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
                 std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
@@ -473,7 +473,7 @@ pub fn load_ntriples(
     // For disk mode: build qnum_to_idx during Phase 1 (instead of from id_indices in Phase 2).
     // This lets us skip id_indices entirely, saving ~11 GB at full Wikidata scale.
     // Pre-allocate for 150M Q-numbers (~600 MB mmap, lazily paged).
-    let mut qnum_to_idx: Option<MmapOrVec<u32>> = if final_mode == StorageMode::Disk {
+    let mut qnum_to_idx: Option<MmapOrVec<u32>> = if graph.graph.is_disk() {
         let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
             std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
         });
@@ -741,7 +741,8 @@ pub fn load_ntriples(
                         }
                     }
                 }
-                crate::graph::schema::GraphBackend::InMemory(ref mut g) => {
+                crate::graph::schema::GraphBackend::Memory(ref mut g)
+                | crate::graph::schema::GraphBackend::Mapped(ref mut g) => {
                     use petgraph::visit::NodeIndexable;
                     for i in 0..g.node_bound() {
                         let idx = petgraph::graph::NodeIndex::new(i);
@@ -821,7 +822,7 @@ pub fn load_ntriples(
                 conv_start.elapsed().as_secs_f64()
             );
         }
-    } else if final_mode == StorageMode::Mapped {
+    } else if graph.graph.is_mapped() {
         if config.verbose {
             eprintln!("  Phase 1b: converting to columnar storage...");
         }
@@ -837,7 +838,7 @@ pub fn load_ntriples(
 
     // Free everything not needed for Phase 2+3 to maximize page cache.
     // Phase 2 only needs qnum_to_idx + edge_buffer. Phase 3 only needs pending_edges.
-    if final_mode == StorageMode::Disk {
+    if graph.graph.is_disk() {
         let dropped_stores = graph.column_stores.len();
         graph.column_stores.clear();
         graph.sync_disk_column_stores();
@@ -921,7 +922,7 @@ pub fn load_ntriples(
     }
 
     // Warm edge_type_counts_cache from CSR build data (avoids 14 GB rescan on first query)
-    if final_mode == StorageMode::Disk {
+    if graph.graph.is_disk() {
         if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
             if let Some(raw_counts) = dg.edge_type_counts_raw.take() {
                 let string_counts: HashMap<String, usize> = raw_counts
@@ -945,7 +946,7 @@ pub fn load_ntriples(
     }
 
     // Rebuild type_indices from DiskNodeSlots (dropped before Phase 2 to save 1 GB)
-    if final_mode == StorageMode::Disk {
+    if graph.graph.is_disk() {
         if config.verbose {
             eprintln!(
                 "  [T+{:.0}s] Rebuilding type indices from node slots...",
@@ -978,7 +979,7 @@ pub fn load_ntriples(
     }
 
     // Reload column stores by re-opening the mmap file + reading saved metadata.
-    if final_mode == StorageMode::Disk {
+    if graph.graph.is_disk() {
         let data_dir = if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
             dg.data_dir.clone()
         } else {
@@ -1042,7 +1043,7 @@ pub fn load_ntriples(
 
     // Build id_indices for all types so WHERE id(n) = X is O(1).
     // Uses column stores directly — no node materialization, no arena growth.
-    if final_mode == StorageMode::Disk {
+    if graph.graph.is_disk() {
         if config.verbose {
             eprintln!(
                 "  [T+{:.0}s] Building id indices from column stores...",
@@ -1065,7 +1066,7 @@ pub fn load_ntriples(
     }
 
     // Save interner + metadata to disk so load() works.
-    if final_mode == StorageMode::Disk {
+    if graph.graph.is_disk() {
         if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
             let data_dir = dg.data_dir.clone();
 
@@ -2494,7 +2495,7 @@ fn flush_entity(
     }
 
     // Choose ID representation: compact u32 for disk only, String for default/mapped
-    let use_compact_ids = graph.storage_mode == StorageMode::Disk;
+    let use_compact_ids = graph.graph.is_disk();
     let id_value = if mapped || use_compact_ids {
         parse_qcode_number(&acc.id)
             .map(Value::UniqueId)

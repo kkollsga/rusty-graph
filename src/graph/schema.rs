@@ -1457,21 +1457,6 @@ impl EmbeddingStore {
 }
 
 /// Core graph storage: a directed graph (petgraph `StableDiGraph`) with fast
-/// Storage mode for the graph. Controls memory layout and spill behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum StorageMode {
-    /// Heap-resident storage. Default for small-to-medium graphs.
-    #[default]
-    Default,
-    /// Memory-mapped columnar storage from the start. Designed for large graphs
-    /// that may approach or exceed available RAM. Properties are stored in
-    /// mmap-backed columns, enabling OS-managed paging.
-    Mapped,
-    /// Fully disk-backed storage. Not yet implemented.
-    /// Designed for very large graphs (100M+ nodes) that exceed available RAM.
-    Disk,
-}
-
 /// type-based indexing and optional property/composite/range/spatial indexes.
 ///
 /// Fields include `type_indices` for O(1) node-type lookup, `property_indices`
@@ -1606,9 +1591,6 @@ pub struct DirGraph {
     /// Uses Arc so clones share ownership — only the last clone cleans up.
     #[serde(skip)]
     pub(crate) temp_dirs: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
-    /// Storage mode: Default (heap) or Mapped (mmap-backed columnar from start).
-    #[serde(default)]
-    pub(crate) storage_mode: StorageMode,
     /// If true, Cypher mutations (CREATE, SET, DELETE, REMOVE, MERGE) are rejected
     /// and describe() omits mutation documentation.
     #[serde(skip)]
@@ -1686,7 +1668,6 @@ impl DirGraph {
             memory_limit: None,
             spill_dir: None,
             temp_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
-            storage_mode: StorageMode::Default,
             read_only: false,
             schema_locked: false,
             version: 0,
@@ -1730,7 +1711,6 @@ impl DirGraph {
             memory_limit: None,
             spill_dir: None,
             temp_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
-            storage_mode: StorageMode::Default,
             read_only: false,
             schema_locked: false,
             version: 0,
@@ -2838,7 +2818,7 @@ impl DirGraph {
 
         // Extract the StableDiGraph and build DiskGraph
         let inner = match &mut self.graph {
-            GraphBackend::InMemory(g) => g,
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g,
             GraphBackend::Disk(_) => return Err("Already in disk mode".to_string()),
         };
 
@@ -2851,7 +2831,6 @@ impl DirGraph {
         }
 
         self.graph = GraphBackend::Disk(Box::new(disk_graph));
-        self.storage_mode = StorageMode::Disk;
         Ok(())
     }
 
@@ -3026,7 +3005,7 @@ impl DirGraph {
             }
         }
 
-        self.graph = GraphBackend::InMemory(g);
+        self.graph = GraphBackend::Memory(MemoryGraph(g));
         Ok(())
     }
 
@@ -3293,7 +3272,7 @@ impl DirGraph {
     }
 
     /// Check heap usage of column stores and spill largest to disk if over limit.
-    /// No-op if memory_limit is None or storage_mode is Default.
+    /// No-op if memory_limit is None or the backend is memory-mode.
     pub fn maybe_spill_columns(&mut self) {
         let limit = match self.memory_limit {
             Some(l) => l,
@@ -3429,7 +3408,7 @@ impl DirGraph {
         }
 
         // Replace graph storage
-        self.graph = GraphBackend::InMemory(new_graph);
+        self.graph = GraphBackend::Memory(MemoryGraph(new_graph));
 
         // Remap embedding stores to use new node indices
         for store in self.embeddings.values_mut() {
@@ -3969,14 +3948,25 @@ impl EdgeData {
 // ============================================================================
 
 pub use crate::graph::disk_graph::DiskGraph;
+pub use crate::graph::storage::{MappedGraph, MemoryGraph};
 
-/// Graph storage backend: in-memory (petgraph) or disk-backed.
+/// Graph storage backend. Three variants — heap-resident memory,
+/// mmap-backed mapped, and CSR-on-disk.
 ///
-/// All methods delegate to the inner `StableDiGraph` for `InMemory`.
-/// The `Disk` variant is a placeholder that panics at runtime.
+/// `Memory` and `Mapped` currently wrap the same newtype
+/// [`MemoryGraph`] — the distinguisher today is construction intent
+/// (mapped mode builds with columnar spill enabled). Phase 0.3+
+/// promotes `MappedGraph` to its own type when the backends' impls
+/// need to diverge.
+///
+/// Both `Memory` and `Mapped` carry a `MemoryGraph` that `Deref`s to
+/// `StableDiGraph`, so existing `g.method()` call sites compile
+/// unchanged and a single `Self::Memory(g) | Self::Mapped(g)` pattern
+/// covers both at match sites.
 #[allow(clippy::large_enum_variant)]
 pub enum GraphBackend {
-    InMemory(StableDiGraph<NodeData, EdgeData>),
+    Memory(MemoryGraph),
+    Mapped(MappedGraph),
     Disk(Box<DiskGraph>),
 }
 
@@ -3985,13 +3975,13 @@ pub enum GraphBackend {
 impl GraphBackend {
     #[inline]
     pub fn new() -> Self {
-        GraphBackend::InMemory(StableDiGraph::new())
+        GraphBackend::Memory(MemoryGraph::new())
     }
 
     #[inline]
     #[allow(dead_code)]
     pub fn with_capacity(nodes: usize, edges: usize) -> Self {
-        GraphBackend::InMemory(StableDiGraph::with_capacity(nodes, edges))
+        GraphBackend::Memory(MemoryGraph::with_capacity(nodes, edges))
     }
 
     /// Access the inner `StableDiGraph` directly. Used for petgraph algorithms
@@ -3999,9 +3989,22 @@ impl GraphBackend {
     #[inline]
     pub fn as_stable_digraph(&self) -> &StableDiGraph<NodeData, EdgeData> {
         match self {
-            GraphBackend::InMemory(g) => g,
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g,
             GraphBackend::Disk(_) => unimplemented!("Disk backend: as_stable_digraph"),
         }
+    }
+
+    /// Check if this is a heap-resident memory-backed graph.
+    #[inline]
+    #[allow(dead_code)] // part of the symmetric is_memory/is_mapped/is_disk trio
+    pub fn is_memory(&self) -> bool {
+        matches!(self, GraphBackend::Memory(_))
+    }
+
+    /// Check if this is an mmap-Columnar-backed graph.
+    #[inline]
+    pub fn is_mapped(&self) -> bool {
+        matches!(self, GraphBackend::Mapped(_))
     }
 }
 
@@ -4011,7 +4014,7 @@ impl GraphBackend {
     #[inline]
     pub fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
         match self {
-            GraphBackend::InMemory(g) => g.node_weight(idx),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.node_weight(idx),
             GraphBackend::Disk(dg) => dg.node_weight(idx),
         }
     }
@@ -4022,7 +4025,9 @@ impl GraphBackend {
     #[inline]
     pub fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey> {
         match self {
-            GraphBackend::InMemory(g) => g.node_weight(idx).map(|nd| nd.node_type),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
+                g.node_weight(idx).map(|nd| nd.node_type)
+            }
             GraphBackend::Disk(dg) => dg.node_type_of(idx),
         }
     }
@@ -4033,7 +4038,7 @@ impl GraphBackend {
     #[inline]
     pub fn get_node_property(&self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
         match self {
-            GraphBackend::InMemory(g) => g
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g
                 .node_weight(idx)
                 .and_then(|nd| nd.properties.get_value(key)),
             GraphBackend::Disk(dg) => dg.get_node_property(idx, key),
@@ -4047,7 +4052,7 @@ impl GraphBackend {
     #[inline]
     pub fn node_prop_str_eq(&self, idx: NodeIndex, key: InternedKey, target: &str) -> Option<bool> {
         match self {
-            GraphBackend::InMemory(g) => g
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g
                 .node_weight(idx)
                 .and_then(|nd| nd.properties.str_prop_eq(key, target)),
             GraphBackend::Disk(_) => {
@@ -4064,7 +4069,9 @@ impl GraphBackend {
     #[inline]
     pub fn get_node_id(&self, idx: NodeIndex) -> Option<Value> {
         match self {
-            GraphBackend::InMemory(g) => g.node_weight(idx).map(|nd| nd.id().into_owned()),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
+                g.node_weight(idx).map(|nd| nd.id().into_owned())
+            }
             GraphBackend::Disk(dg) => dg.get_node_id(idx),
         }
     }
@@ -4074,7 +4081,9 @@ impl GraphBackend {
     #[inline]
     pub fn get_node_title(&self, idx: NodeIndex) -> Option<Value> {
         match self {
-            GraphBackend::InMemory(g) => g.node_weight(idx).map(|nd| nd.title().into_owned()),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
+                g.node_weight(idx).map(|nd| nd.title().into_owned())
+            }
             GraphBackend::Disk(dg) => dg.get_node_title(idx),
         }
     }
@@ -4102,7 +4111,7 @@ impl GraphBackend {
     ) -> Option<Vec<u32>> {
         match self {
             GraphBackend::Disk(dg) => dg.sources_for_conn_type_bounded(conn_type.as_u64(), max),
-            GraphBackend::InMemory(_) => None,
+            GraphBackend::Memory(_) | GraphBackend::Mapped(_) => None,
         }
     }
 
@@ -4116,7 +4125,7 @@ impl GraphBackend {
     pub fn lookup_peer_counts(&self, conn_type: InternedKey) -> Option<HashMap<u32, i64>> {
         match self {
             GraphBackend::Disk(dg) => dg.lookup_peer_counts(conn_type.as_u64()),
-            GraphBackend::InMemory(_) => None,
+            GraphBackend::Memory(_) | GraphBackend::Mapped(_) => None,
         }
     }
 
@@ -4130,7 +4139,7 @@ impl GraphBackend {
             GraphBackend::Disk(dg) => {
                 dg.count_edges_grouped_by_peer(conn_type.as_u64(), dir, deadline)
             }
-            GraphBackend::InMemory(g) => {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
                 let mut counts: HashMap<u32, i64> = HashMap::new();
                 for (i, edge) in g.edge_references().enumerate() {
                     if i.is_multiple_of(1 << 20) {
@@ -4173,7 +4182,7 @@ impl GraphBackend {
                 other_node_type,
                 deadline,
             ),
-            GraphBackend::InMemory(g) => {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
                 let mut count = 0;
                 for (i, edge) in g.edges_directed(node, dir).enumerate() {
                     if i.is_multiple_of(1 << 20) {
@@ -4212,7 +4221,7 @@ impl GraphBackend {
     #[inline]
     pub fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
         match self {
-            GraphBackend::InMemory(g) => g.node_weight_mut(idx),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.node_weight_mut(idx),
             GraphBackend::Disk(dg) => dg.node_weight_mut(idx),
         }
     }
@@ -4220,7 +4229,7 @@ impl GraphBackend {
     #[inline]
     pub fn node_indices(&self) -> crate::graph::graph_iterators::GraphNodeIndices<'_> {
         match self {
-            GraphBackend::InMemory(g) => {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
                 crate::graph::graph_iterators::GraphNodeIndices::InMemory(g.node_indices())
             }
             GraphBackend::Disk(dg) => {
@@ -4232,7 +4241,7 @@ impl GraphBackend {
     #[inline]
     pub fn node_count(&self) -> usize {
         match self {
-            GraphBackend::InMemory(g) => g.node_count(),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.node_count(),
             GraphBackend::Disk(dg) => dg.node_count(),
         }
     }
@@ -4240,7 +4249,7 @@ impl GraphBackend {
     #[inline]
     pub fn node_bound(&self) -> usize {
         match self {
-            GraphBackend::InMemory(g) => g.node_bound(),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.node_bound(),
             GraphBackend::Disk(dg) => dg.node_bound(),
         }
     }
@@ -4248,7 +4257,7 @@ impl GraphBackend {
     #[inline]
     pub fn add_node(&mut self, data: NodeData) -> NodeIndex {
         match self {
-            GraphBackend::InMemory(g) => g.add_node(data),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.add_node(data),
             GraphBackend::Disk(dg) => dg.add_node(data),
         }
     }
@@ -4256,7 +4265,7 @@ impl GraphBackend {
     #[inline]
     pub fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData> {
         match self {
-            GraphBackend::InMemory(g) => g.remove_node(idx),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.remove_node(idx),
             GraphBackend::Disk(dg) => dg.remove_node(idx),
         }
     }
@@ -4284,7 +4293,7 @@ impl GraphBackend {
         dir: petgraph::Direction,
     ) -> crate::graph::graph_iterators::GraphEdges<'_> {
         match self {
-            GraphBackend::InMemory(g) => {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
                 crate::graph::graph_iterators::GraphEdges::InMemory(g.edges_directed(a, dir))
             }
             GraphBackend::Disk(dg) => {
@@ -4304,7 +4313,7 @@ impl GraphBackend {
         conn_type_filter: Option<crate::graph::schema::InternedKey>,
     ) -> crate::graph::graph_iterators::GraphEdges<'_> {
         match self {
-            GraphBackend::InMemory(g) => {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
                 // InMemory: no pre-filter, callers still post-filter
                 crate::graph::graph_iterators::GraphEdges::InMemory(g.edges_directed(a, dir))
             }
@@ -4317,7 +4326,7 @@ impl GraphBackend {
     #[inline]
     pub fn edges(&self, a: NodeIndex) -> crate::graph::graph_iterators::GraphEdges<'_> {
         match self {
-            GraphBackend::InMemory(g) => {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
                 crate::graph::graph_iterators::GraphEdges::InMemory(g.edges(a))
             }
             GraphBackend::Disk(dg) => crate::graph::graph_iterators::GraphEdges::Disk(
@@ -4334,10 +4343,12 @@ impl GraphBackend {
         &self,
     ) -> Box<dyn Iterator<Item = (NodeIndex, NodeIndex, InternedKey)> + '_> {
         match self {
-            GraphBackend::InMemory(g) => Box::new(g.edge_references().map(|er| {
-                let w = er.weight();
-                (er.source(), er.target(), w.connection_type)
-            })),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
+                Box::new(g.edge_references().map(|er| {
+                    let w = er.weight();
+                    (er.source(), er.target(), w.connection_type)
+                }))
+            }
             GraphBackend::Disk(dg) => Box::new((0..dg.next_edge_idx).filter_map(move |i| {
                 let ep = dg.edge_endpoints.get(i as usize);
                 if ep.source == crate::graph::disk_graph::TOMBSTONE_EDGE {
@@ -4355,7 +4366,7 @@ impl GraphBackend {
     #[inline]
     pub fn edge_references(&self) -> crate::graph::graph_iterators::GraphEdgeReferences<'_> {
         match self {
-            GraphBackend::InMemory(g) => {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
                 crate::graph::graph_iterators::GraphEdgeReferences::InMemory(g.edge_references())
             }
             GraphBackend::Disk(dg) => {
@@ -4367,7 +4378,7 @@ impl GraphBackend {
     #[inline]
     pub fn edge_count(&self) -> usize {
         match self {
-            GraphBackend::InMemory(g) => g.edge_count(),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.edge_count(),
             GraphBackend::Disk(dg) => dg.edge_count(),
         }
     }
@@ -4375,7 +4386,7 @@ impl GraphBackend {
     #[inline]
     pub fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData> {
         match self {
-            GraphBackend::InMemory(g) => g.edge_weight(idx),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.edge_weight(idx),
             GraphBackend::Disk(dg) => dg.edge_weight(idx),
         }
     }
@@ -4383,7 +4394,7 @@ impl GraphBackend {
     #[inline]
     pub fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
         match self {
-            GraphBackend::InMemory(g) => g.edge_weight_mut(idx),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.edge_weight_mut(idx),
             GraphBackend::Disk(dg) => dg.edge_weight_mut(idx),
         }
     }
@@ -4393,7 +4404,7 @@ impl GraphBackend {
     #[inline]
     pub fn edge_weights(&self) -> Box<dyn Iterator<Item = &EdgeData> + '_> {
         match self {
-            GraphBackend::InMemory(g) => Box::new(g.edge_weights()),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => Box::new(g.edge_weights()),
             GraphBackend::Disk(dg) => dg.edge_weights_iter(),
         }
     }
@@ -4401,7 +4412,7 @@ impl GraphBackend {
     #[inline]
     pub fn edge_indices(&self) -> crate::graph::graph_iterators::GraphEdgeIndices<'_> {
         match self {
-            GraphBackend::InMemory(g) => {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
                 crate::graph::graph_iterators::GraphEdgeIndices::InMemory(g.edge_indices())
             }
             GraphBackend::Disk(dg) => {
@@ -4413,7 +4424,7 @@ impl GraphBackend {
     #[inline]
     pub fn edge_endpoints(&self, idx: EdgeIndex) -> Option<(NodeIndex, NodeIndex)> {
         match self {
-            GraphBackend::InMemory(g) => g.edge_endpoints(idx),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.edge_endpoints(idx),
             GraphBackend::Disk(dg) => dg.edge_endpoints_fn(idx),
         }
     }
@@ -4421,7 +4432,7 @@ impl GraphBackend {
     #[inline]
     pub fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
         match self {
-            GraphBackend::InMemory(g) => g.add_edge(a, b, data),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.add_edge(a, b, data),
             GraphBackend::Disk(dg) => dg.add_edge(a, b, data),
         }
     }
@@ -4429,7 +4440,7 @@ impl GraphBackend {
     #[inline]
     pub fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData> {
         match self {
-            GraphBackend::InMemory(g) => g.remove_edge(idx),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.remove_edge(idx),
             GraphBackend::Disk(dg) => dg.remove_edge(idx),
         }
     }
@@ -4437,7 +4448,7 @@ impl GraphBackend {
     #[inline]
     pub fn find_edge(&self, a: NodeIndex, b: NodeIndex) -> Option<EdgeIndex> {
         match self {
-            GraphBackend::InMemory(g) => g.find_edge(a, b),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.find_edge(a, b),
             GraphBackend::Disk(dg) => dg.find_edge(a, b),
         }
     }
@@ -4449,7 +4460,7 @@ impl GraphBackend {
         b: NodeIndex,
     ) -> crate::graph::graph_iterators::GraphEdgesConnecting<'_> {
         match self {
-            GraphBackend::InMemory(g) => {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
                 crate::graph::graph_iterators::GraphEdgesConnecting::InMemory(
                     g.edges_connecting(a, b),
                 )
@@ -4470,7 +4481,7 @@ impl GraphBackend {
         a: NodeIndex,
     ) -> crate::graph::graph_iterators::GraphNeighbors<'_> {
         match self {
-            GraphBackend::InMemory(g) => {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
                 crate::graph::graph_iterators::GraphNeighbors::InMemory(g.neighbors_undirected(a))
             }
             GraphBackend::Disk(dg) => {
@@ -4486,9 +4497,11 @@ impl GraphBackend {
         dir: petgraph::Direction,
     ) -> crate::graph::graph_iterators::GraphNeighbors<'_> {
         match self {
-            GraphBackend::InMemory(g) => crate::graph::graph_iterators::GraphNeighbors::InMemory(
-                g.neighbors_directed(a, dir),
-            ),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
+                crate::graph::graph_iterators::GraphNeighbors::InMemory(
+                    g.neighbors_directed(a, dir),
+                )
+            }
             GraphBackend::Disk(dg) => crate::graph::graph_iterators::GraphNeighbors::Disk(
                 dg.neighbors_directed_iter(a, dir),
             ),
@@ -4503,7 +4516,7 @@ impl std::ops::Index<NodeIndex> for GraphBackend {
     #[inline]
     fn index(&self, index: NodeIndex) -> &NodeData {
         match self {
-            GraphBackend::InMemory(g) => &g[index],
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => &g[index],
             GraphBackend::Disk(dg) => &dg[index],
         }
     }
@@ -4514,7 +4527,7 @@ impl std::ops::Index<EdgeIndex> for GraphBackend {
     #[inline]
     fn index(&self, index: EdgeIndex) -> &EdgeData {
         match self {
-            GraphBackend::InMemory(g) => &g[index],
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => &g[index],
             GraphBackend::Disk(dg) => &dg[index],
         }
     }
@@ -4525,7 +4538,8 @@ impl std::ops::Index<EdgeIndex> for GraphBackend {
 impl Clone for GraphBackend {
     fn clone(&self) -> Self {
         match self {
-            GraphBackend::InMemory(g) => GraphBackend::InMemory(g.clone()),
+            GraphBackend::Memory(g) => GraphBackend::Memory(g.clone()),
+            GraphBackend::Mapped(g) => GraphBackend::Mapped(g.clone()),
             GraphBackend::Disk(dg) => GraphBackend::Disk(dg.clone()),
         }
     }
@@ -4537,7 +4551,7 @@ impl Clone for GraphBackend {
 impl Serialize for GraphBackend {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            GraphBackend::InMemory(g) => g.serialize(serializer),
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.serialize(serializer),
             GraphBackend::Disk(_) => Err(serde::ser::Error::custom(
                 "Disk backend does not support serialization",
             )),
@@ -4548,7 +4562,7 @@ impl Serialize for GraphBackend {
 impl<'de> Deserialize<'de> for GraphBackend {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let g = StableDiGraph::<NodeData, EdgeData>::deserialize(deserializer)?;
-        Ok(GraphBackend::InMemory(g))
+        Ok(GraphBackend::Memory(MemoryGraph(g)))
     }
 }
 
@@ -4557,7 +4571,7 @@ impl<'de> Deserialize<'de> for GraphBackend {
 impl std::fmt::Debug for GraphBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GraphBackend::InMemory(g) => {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
                 write!(
                     f,
                     "InMemory({} nodes, {} edges)",

@@ -443,7 +443,7 @@ pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
 
 /// Load a disk-mode graph from a directory.
 fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
-    use crate::graph::schema::{GraphBackend, StorageMode};
+    use crate::graph::schema::GraphBackend;
 
     // Verify this is a disk graph directory
     if !dir.join("disk_graph_meta.json").exists() {
@@ -480,7 +480,6 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
     // Non-blocking — kernel reads asynchronously while we continue loading metadata.
     disk_graph.prefetch_hot_regions();
     graph.graph = GraphBackend::Disk(Box::new(disk_graph));
-    graph.storage_mode = StorageMode::Disk;
 
     // Register temp dir for cleanup on drop
     if let Ok(mut dirs) = graph.temp_dirs.lock() {

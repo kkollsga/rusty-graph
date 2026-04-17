@@ -1,7 +1,7 @@
 // src/graph/batch_operations.rs
 use crate::datatypes::Value;
 use crate::graph::schema::{
-    DirGraph, EdgeData, GraphBackend, InternedKey, NodeData, PropertyStorage, StorageMode,
+    DirGraph, EdgeData, GraphBackend, InternedKey, NodeData, PropertyStorage,
 };
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
@@ -198,8 +198,7 @@ impl BatchProcessor {
     fn flush_chunk(&mut self, graph: &mut DirGraph) -> Result<BatchStats, String> {
         let start = Instant::now();
         let mut stats = BatchStats::default();
-        let mapped =
-            graph.storage_mode == StorageMode::Mapped || graph.storage_mode == StorageMode::Disk;
+        let mapped = graph.graph.is_mapped() || graph.graph.is_disk();
 
         // In mapped mode, we use a two-pass approach to avoid O(n²) Arc cloning:
         // Pass 1: detach existing nodes' Arc refs, push all rows into owned ColumnStores

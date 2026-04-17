@@ -565,7 +565,7 @@ fn find_all_paths_recursive(
 pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
     // For disk mode, fall back to weakly_connected_components since
     // kosaraju_scc requires petgraph trait bounds.
-    if graph.storage_mode == crate::graph::schema::StorageMode::Disk {
+    if graph.graph.is_disk() {
         return weakly_connected_components(graph);
     }
     kosaraju_scc(graph.graph.as_stable_digraph())

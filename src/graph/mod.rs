@@ -45,6 +45,7 @@ pub mod schema_validation;
 pub mod set_operations;
 pub mod spatial;
 pub mod statistics_methods;
+pub mod storage;
 pub mod subgraph;
 pub mod temporal;
 pub mod timeseries;
@@ -1134,8 +1135,9 @@ impl KnowledgeGraph {
         if let Some(mode) = storage {
             match mode {
                 "mapped" => {
-                    graph.storage_mode = schema::StorageMode::Mapped;
-                    // Set memory limit to 0 so columnar stores spill to disk immediately
+                    // Mapped mode: switch the backend variant and force
+                    // columnar property storage to spill to mmap on build.
+                    graph.graph = schema::GraphBackend::Mapped(schema::MappedGraph::new());
                     graph.memory_limit = Some(0);
                 }
                 "disk" => {
@@ -1146,7 +1148,6 @@ impl KnowledgeGraph {
                         )
                     })?;
                     let data_dir = std::path::Path::new(dir);
-                    graph.storage_mode = schema::StorageMode::Disk;
                     let dg = crate::graph::disk_graph::DiskGraph::new_at_path(data_dir).map_err(
                         |e| {
                             PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
@@ -1540,7 +1541,7 @@ impl KnowledgeGraph {
         self.selection.clear();
 
         // Disk mode: sync column stores to DiskGraph after batch processing
-        if graph.storage_mode == schema::StorageMode::Disk {
+        if graph.graph.is_disk() {
             graph.sync_disk_column_stores();
         }
 
@@ -5399,7 +5400,7 @@ impl KnowledgeGraph {
 
     fn save(&mut self, py: Python<'_>, path: &str) -> PyResult<()> {
         // Disk mode: save as directory (the folder IS the graph)
-        if self.inner.storage_mode == schema::StorageMode::Disk {
+        if self.inner.graph.is_disk() {
             let graph = Arc::make_mut(&mut self.inner);
             return graph
                 .save_disk(path)
@@ -5433,7 +5434,7 @@ impl KnowledgeGraph {
     /// optimal query performance.
     /// No-op if there are no overflow edges or the graph is not in disk mode.
     fn compact(&mut self) -> PyResult<usize> {
-        if self.inner.storage_mode != schema::StorageMode::Disk {
+        if !self.inner.graph.is_disk() {
             return Ok(0);
         }
         let graph = Arc::make_mut(&mut self.inner);
