@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Deterministic `.kgl` v3 saves.** `save()` now produces byte-identical
+  output for identical graphs regardless of per-process HashMap
+  randomisation. `write_graph_v3` iterates `column_stores` in sorted
+  order and canonicalises the metadata JSON (object keys sorted). Old
+  `.kgl` files load unchanged — the format on the wire is a strict
+  subset of the previous format's possible outputs. Enables byte-level
+  golden-hash format-drift tests.
+
 ## [0.7.17] — 2026-04-17
 
 ### Added

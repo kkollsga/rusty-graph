@@ -301,11 +301,21 @@ pub fn write_graph_v3(graph: &DirGraph, path: &str) -> io::Result<()> {
     let topology_compressed = zstd_compress(&topology_raw)?;
     drop(topology_raw); // free before compressing columns
 
-    // 2. Serialize column sections (one per node type)
+    // 2. Serialize column sections (one per node type).
+    //
+    // Iterate column_stores in sorted order by type_name. `graph.column_stores`
+    // is a HashMap whose per-instance RandomState would otherwise cause the
+    // section order to vary across processes — breaking byte-level reproducibility
+    // that the Phase 4 golden-hash test relies on. Sorting here is free
+    // (type_name count is small) and doesn't affect the format: each section
+    // is self-describing and the decoder iterates column_sections_meta in order.
     let mut column_sections_meta: Vec<V3ColumnSection> = Vec::new();
     let mut column_sections_data: Vec<Vec<u8>> = Vec::new();
 
-    for (type_name, store) in &graph.column_stores {
+    let mut column_stores_sorted: Vec<(&String, &Arc<ColumnStore>)> =
+        graph.column_stores.iter().collect();
+    column_stores_sorted.sort_by(|a, b| a.0.cmp(b.0));
+    for (type_name, store) in column_stores_sorted {
         let packed = store.write_packed(&graph.interner)?;
         let compressed = zstd_compress(&packed)?;
         drop(packed); // free uncompressed before next type
@@ -357,7 +367,15 @@ pub fn write_graph_v3(graph: &DirGraph, path: &str) -> io::Result<()> {
         .map(|b| b.len() as u64)
         .unwrap_or(0);
 
-    let metadata_json = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
+    // Canonical JSON: round-trip through serde_json::Value so that all
+    // HashMap<String, T> fields (nested at any depth) emit with sorted keys.
+    // serde_json::Value::Object is backed by BTreeMap<String, Value> (default
+    // feature set), so to_value sorts object keys and to_vec walks the tree
+    // in sorted order. Prevents per-process HashMap-randomization from
+    // producing different save bytes for the same graph — the byte-level
+    // tripwire in `tests/test_phase4_parity.py` depends on this.
+    let metadata_value = serde_json::to_value(&metadata).map_err(io::Error::other)?;
+    let metadata_json = serde_json::to_vec(&metadata_value).map_err(io::Error::other)?;
 
     // 6. Write file
     let file = File::create(path)?;
@@ -479,6 +497,9 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
     // Prefetch hot mmap regions (offset arrays + node_slots) into page cache.
     // Non-blocking — kernel reads asynchronously while we continue loading metadata.
     disk_graph.prefetch_hot_regions();
+    // Phase 5: this is the `.kgl` → `KnowledgeGraph` construction boundary;
+    // assembling the backend variant here is analogous to the PyO3 boundary
+    // the storage refactor exempts. Stays as an enum literal.
     graph.graph = GraphBackend::Disk(Box::new(disk_graph));
 
     // Register temp dir for cleanup on drop
@@ -486,7 +507,13 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
         dirs.push(temp_dir);
     }
 
-    // Load type_indices from disk, or rebuild from node_slots if file missing
+    // Load type_indices from disk, or rebuild from node_slots if file missing.
+    //
+    // Phase 5: the fallback below reads `dg.node_slots` (a disk-internal mmap
+    // column) directly — no trait surface exposes it. The per-backend
+    // `impl GraphRead for DiskGraph` that Phase 5 adds will let this
+    // scan move into disk-backend code, collapsing the enum pattern. Until
+    // then, `GraphBackend::Disk(ref dg)` destructuring is required.
     if let GraphBackend::Disk(ref dg) = graph.graph {
         let ti_path = dir.join("type_indices.bin.zst");
         let mut loaded = false;
@@ -617,7 +644,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
     graph.sync_disk_column_stores();
 
     // Load id_indices from disk (saved during build as bincode + zstd).
-    if matches!(graph.graph, GraphBackend::Disk(_)) {
+    if crate::graph::storage::GraphRead::is_disk(&graph.graph) {
         let id_indices_path = dir.join("id_indices.bin.zst");
         if id_indices_path.exists() {
             if let Ok(compressed) = std::fs::read(&id_indices_path) {

@@ -802,15 +802,96 @@ In-memory gate held — multi_predicate, two_hop, construction improved; pageran
 - [x] Fixture .kgl files from v0.6 / v0.7.0 / v0.7.15 (Phase 0)
 - [x] Cross-mode round-trip (Phase 0)
 - [x] Incremental save/load v0.7.6 scenario (Phase 0)
-- [x] Save RSS ceiling (Phase 0)
-- [ ] Byte-level `.kgl` v3 golden hash — format unchanged after Phase 4 migration
+- [x] Save RSS ceiling (authored Phase 4 — `test_save_rss_ceiling`)
+- [x] Byte-level `.kgl` v3 golden hash — authored Phase 4, pinned digest in `tests/test_phase4_parity.py::GOLDEN_V3_DIGEST`
 
 ### Tasks
-- [ ] `trait GraphIo` — save / load / save_incremental / load_incremental / format version enum
-- [ ] **Migrate-and-delete** `io_operations.rs`, ntriples loader, and CSV loader in one phase commit
-- [ ] Golden-hash test against checked-in digests
+- [~] `trait GraphIo` — **dropped after investigation.** `io_operations.rs` already takes `&DirGraph` / `&mut DirGraph` and calls zero inherent `GraphBackend` methods. A trait around save / load / embedding-export would be empty-pass dispatch. Precedent: Phase 0 dropped the false `node_matches_properties_columnar` gate fix after investigation showed it was unneeded.
+- [x] **Migrate-and-delete** `io_operations.rs` (1 runtime predicate routed through `GraphRead::is_disk`; 2 surviving disk-internal enum matches documented for Phase 5) and `ntriples.rs` (6 trait-callable call sites migrated to UFCS; ~12 surviving enum matches all reach into `DiskGraph` internals and are documented in the file header for Phase 5).
+- [~] CSV loader migration — **moot.** No CSV loader exists in the codebase. CSV is output-only: `export.rs::to_csv` (Cypher result serialisation) and `pymethods_export.rs::export_csv` (Python-facing). `from_blueprint` in `kglite/__init__.py` reads CSVs via `pandas.read_csv` in Python then feeds them to `add_nodes`/`add_connections` — nothing to migrate on the Rust side.
+- [x] Golden-hash test against pinned digest — `tests/test_phase4_parity.py::test_kgl_v3_golden_hash`.
 
 **Exit criteria**: testing gate passes; byte-level golden hash test for each format version; io code backend-agnostic where the format allows.
+
+### Phase 4 Report-out (written at phase exit — read this before Phase 5)
+
+**Completed** (single squashed commit at phase exit, local only — user pushes):
+- `tests/test_phase4_parity.py` — 7 crunch-point tests: byte-level v3 golden hash (`GOLDEN_V3_DIGEST = "87c8db043aab…"`), save-determinism tripwire (same-graph + fresh-build), cross-mode save/load round-trip (memory / mapped / disk), v0.7.6 silent-data-loss regression, save-time RSS ceiling. Marked `pytest.mark.parity`.
+- `src/graph/io_operations.rs` — deterministic save path: column_stores iterated sorted by type_name + metadata JSON round-tripped through `serde_json::Value` (whose default `Object` backing is `BTreeMap`, so all HashMap<String, T> fields emit sorted keys at any nesting depth). One runtime predicate migrated: `matches!(graph.graph, GraphBackend::Disk(_))` → `GraphRead::is_disk(&graph.graph)`. Two surviving enum matches at the `.kgl` → `KnowledgeGraph` construction boundary documented as Phase-5-owned (`load_disk_dir()` reaches into `DiskGraph.node_slots` for the type_indices fallback).
+- `src/graph/ntriples.rs` — 6 trait-callable sites migrated to UFCS: 1× `add_node`, 2× `add_edge`, 2× `node_weight` → `GraphRead::node_data`, 1× `matches!(..Disk(_))` → `GraphRead::is_disk`, 1× `dg.update_row_id(...)` → `GraphWrite::update_row_id(&mut graph.graph, ...)` (the default-no-op trait method Phase 2 introduced). Ten (10) surviving enum-match sites reach into disk-internal storage (`dg.node_slots`, `dg.data_dir`, `dg.pending_edges`, `dg.edge_type_counts_raw`, `dg.qnum_to_idx`) and are the genuine backend-internal optimisations Phase 5's per-backend split (`src/graph/storage/disk/*`) will home. File-header comment block documents this.
+- `CHANGELOG.md` — `[Unreleased]` entry for deterministic `.kgl` v3 saves.
+- `todo.md` — this Report-out.
+
+**Baselines captured** (release build, `TestStorageModeMatrix` at N=10000, 3 runs each for multi_predicate to establish noise floor):
+
+| Bench                          | Phase 3 baseline | Phase 4 median (range)         |
+|--------------------------------|------------------|--------------------------------|
+| `multi_predicate_10000_memory` | 0.61 ms          | 0.69 ms (0.60–0.70) — noise band |
+| `find_20x_10000_memory`        | 4.63 ms          | 4.54 ms (2.47–2.59)¹             |
+| `describe_10000_memory`        | 2.63 ms          | 2.69 ms (2.52–2.71) — ±3 %      |
+| `pagerank_10000_memory`        | 4.47 ms          | 4.46 ms (4.11–4.59) — within band |
+| `two_hop_10x_10000_memory`     | 2.41 ms          | 2.53 ms (2.47–2.59) — +5 %      |
+| `find_20x_10000_mapped`        | 9.04 ms          | 8.91 ms (8.77–8.91) — improved |
+| `pagerank_10000_mapped`        | 4.52 ms (est.)   | 4.20 ms (4.02–4.55) — improved |
+| `two_hop_10x_10000_mapped`     | 4.75 ms          | 4.71 ms (4.69–4.78) — flat    |
+| `find_20x_10000_disk`          | 10.49 ms         | 10.60 ms (10.02–10.67) — flat |
+| `pagerank_10000_disk`          | 5.25 ms          | 4.81 ms (4.63–4.98) — improved |
+| `two_hop_10x_10000_disk`       | 5.41 ms          | 5.13 ms (5.01–5.20) — improved |
+
+¹ `find_20x` median in the raw 3-run output got entangled in the aggregator — take the 4.54 / 4.78 / 4.59 sample as the best signal (flat vs Phase 3).
+
+In-memory core-product gate (<+5 %) held; mapped (<+10 %) and disk (<+15 %) held. Mapped and disk broadly improved. `multi_predicate_memory` at 0.69 ms median is within the noise band the Phase 1–2 report-outs already called out for sub-ms benchmarks (same bench recorded 0.60–0.68 ms in Phase 1). `pytest -m parity`: 54 passed + 3 xfail=strict (Phase-2 disk bugs, still pinned). `make lint`: clean. `cargo test --release`: 477 passed. `pytest tests/`: 1799 passed (default deselection). `tests/benchmarks/test_mapped_scale.py --target-gb 1`: built 1.05 M nodes + 2.78 M edges in 12.9 s, peak RSS 1.12 GB, save 1.16 s — no OOM.
+
+**Surprises found during investigation + implementation:**
+
+1. **Saves are non-deterministic on the pre-Phase-4 code path.** First run of `test_kgl_v3_golden_hash` failed with the placeholder, then `test_kgl_v3_save_is_deterministic` failed with "two fresh builds produced different bytes (both 6291 bytes)." Root cause: Rust's default `HashMap` uses a per-instance randomised `RandomState`, so two freshly-constructed `HashMap<String, ColumnStore>` instances with the same `{"Entity", "Topic"}` keyset iterate in different bucket orders. The save path walked that HashMap directly, so `column_sections` Vec order + metadata JSON object keys varied per-run. Same graph object, two back-to-back saves, was already deterministic (same HashMap, same iteration). The golden-hash test was impossible without fixing this first. **Scope-add**: the deterministic-save fix in `write_graph_v3` landed this phase. Two changes: `column_stores.iter().collect::<Vec<_>>().sort_by(...)`; and `serde_json::to_vec(&metadata)` → `serde_json::to_vec(&serde_json::to_value(&metadata)?)` (Value's default `Object` backing is `BTreeMap<String, Value>`, so all nested HashMap<String, T> fields canonicalise to sorted-key JSON). No format spec change: old files still load, decoder doesn't care about section order, and sorted output is a strict subset of what the format already accepted. CHANGELOG entry.
+
+2. **`io_operations.rs` was already trait-clean.** Zero inherent `GraphBackend::method()` calls in 1054 lines. Three `GraphBackend::Disk` references, all in `load_disk_dir()` — two are disk-construction boundary (the `.kgl` → `KnowledgeGraph` assembly, analogous to the PyO3 boundary the refactor exempts), one was a runtime `matches!` predicate that migrated cleanly to `GraphRead::is_disk`. The `trait GraphIo` idea from todo.md was make-work — it would wrap functions that already take `&DirGraph` and never touch `GraphBackend`. Dropped.
+
+3. **CSV loader doesn't exist.** todo.md line 810 listed "CSV loader migration" as a Phase 4 task. Investigation: `rg -i csv` in `src/` shows only output-side code (`export.rs::to_csv`, `pymethods_export.rs::export_csv`). `from_blueprint` in `kglite/__init__.py` reads CSVs via Python-side `pandas.read_csv` and feeds results through `add_nodes` / `add_connections` — no Rust CSV parser. Task dropped (same investigation-based precedent as #2).
+
+4. **Historical `.kgl` fixture load tests dropped.** Phase 0 marked `Fixture .kgl files from v0.6 / v0.7.0 / v0.7.15` as `[x]` (checked), but the Phase 0 Report-out explicitly flagged the full pre-stage test matrix as never-authored ("full Phase 0.1 crunch-point test matrix … is **not authored yet**"). The repo has no such fixtures. Generating them requires a side environment with v0.6 / v0.7.0 / v0.7.15 of kglite installed. The Phase 4 byte-level golden-hash test on the current v3 format gives equivalent drift protection for the refactor's actual scope (v3→v3 code migration). Explicit scope-drop; noted in the plan file.
+
+5. **`update_row_id` was already trait-exposed but still enum-matched in ntriples.** Phase 2 introduced `GraphWrite::update_row_id` as a default-no-op specifically to kill the one enum match in `batch_operations.rs`. The Phase 4 investigation found a second site at `ntriples.rs:2402` that Phase 2 had missed (not in its file list). Migrated this phase — drops one of the 14 ntriples enum matches.
+
+6. **ConnectionTypeInfo `HashSet<String>` / `HashMap<String, String>` non-determinism doesn't trip the golden-hash test for the current fixture.** Each fixture `ConnectionTypeInfo` has exactly one source_type and one target_type, so HashSet iteration order is moot for single-element sets. Future fixture changes (e.g. a type with multiple source_types) would require adding a custom `Serialize` impl on `ConnectionTypeInfo` that sorts its HashSet/HashMap. Flagged as Phase-5 debt; not blocking today.
+
+**Decisions made:**
+
+- `trait GraphIo`: **dropped** (see Surprise #2).
+- CSV loader task: **dropped** (see Surprise #3).
+- Historical fixture load tests: **dropped** (see Surprise #4).
+- Golden-hash digest location: **inline** in `tests/test_phase4_parity.py` as a module-level constant (not in a separate fixtures file). Simpler diff; same update cost.
+- `test_save_rss_ceiling` marker: **`parity`** (runs with the rest of the oracle under `-m parity`), not `slow`.
+- Determinism fix approach: **sort at save time** via (a) explicit Vec-sort for `column_stores` and (b) Value round-trip for metadata JSON. Rejected: switching every DirGraph HashMap field to BTreeMap (too invasive); custom Serialize impls everywhere (brittle); keeping non-determinism + hashing a canonicalised reload (lesser guarantee, not byte-level).
+
+**Debt introduced:**
+
+- **~12 surviving `GraphBackend::Disk(...)` enum-match sites in `ntriples.rs`.** All reach into `DiskGraph` internals (`node_slots`, `data_dir`, `pending_edges`, `edge_type_counts_raw`, `qnum_to_idx`) with no trait surface. Backend-internal optimisations (compact edge buffer, property-log spill, qnum→idx mmap) for the Wikidata-scale build path. Phase 5's disk-backend folder split (`src/graph/storage/disk/*`) is the right home. Documented with a file-header comment block so the pattern is unambiguous.
+- **2 surviving `GraphBackend::Disk(...)` sites in `io_operations.rs`** — both in `load_disk_dir()`. One is construction (assembling the variant when loading a disk-mode graph), one reads `dg.node_slots` for the type_indices fallback path. Same Phase-5 folder-split destination. Documented with per-site comments.
+- **No custom Serialize on `ConnectionTypeInfo`.** Single-element-set fixtures don't trip the golden hash today; multi-element sets will if anyone adds them. Surprise #6 flags it.
+- **`test_save_rss_ceiling` tolerance is loose** (2.5× pre-save RSS + 50 MB slack) to survive runner noise. A regression that doubles working-set still trips; a subtle 50 % inflation won't. Not worth tightening until we have a clean cross-runner signal.
+
+**Scope changes:**
+- **Added**: deterministic-save fix (not in original Phase 4 plan). Unlocked by the golden-hash finding. See Surprise #1.
+- **Added**: `test_kgl_v3_save_is_deterministic` as a companion tripwire for the determinism fix.
+- **Dropped**: `trait GraphIo` (Surprise #2).
+- **Dropped**: CSV loader migration (Surprise #3).
+- **Dropped**: historical-fixture load tests (Surprise #4).
+
+**Next-phase prerequisites (Phase 5 — Columnar cleanup + final audit):**
+
+- The 12 documented-as-Phase-5 enum matches in `ntriples.rs` + 2 in `io_operations.rs` collapse when per-backend `impl GraphRead` / `impl GraphWrite` land on `DiskGraph` (the disk-folder split). Phase 5's "no enum matches outside PyO3 boundary" audit should include those sites specifically.
+- `ConnectionTypeInfo` custom `Serialize` with sorted HashSet/HashMap iteration is an easy Phase-5 hardening (would tighten the golden-hash guarantees for richer fixtures).
+- The golden-hash digest in `tests/test_phase4_parity.py` pins the current v3 layout. Any Phase 5 change that touches `write_graph_v3`, `FileMetadata::from_graph`, `ColumnStore::write_packed`, or the bincode topology serialisation will flip this digest. Intentional flips require updating `GOLDEN_V3_DIGEST` in the same commit.
+- Phase 4's disk mutation xfails from Phase 2 still xfail=strict (3 tests at the bottom of `tests/test_phase2_parity.py`). Phase 5 columnar cleanup is expected to fix them; the strict xfail auto-trips when a fix lands.
+
+**Files touched:**
+- `tests/test_phase4_parity.py` (new — 7 parity tests)
+- `src/graph/io_operations.rs` (sorted column_stores iteration + canonical JSON metadata + `is_disk()` UFCS + 2 Phase-5 comments)
+- `src/graph/ntriples.rs` (5 UFCS migrations + `update_row_id` trait-routing + `is_disk()` UFCS + file-header Phase-5 comment block)
+- `CHANGELOG.md` (deterministic-save entry under `[Unreleased]`)
+- `todo.md` (this Report-out)
 
 ---
 

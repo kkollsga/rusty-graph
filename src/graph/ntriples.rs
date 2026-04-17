@@ -8,12 +8,26 @@
 //   2. Accumulate properties per subject; flush node on subject change
 //   3. Buffer edges (source_id, target_id, predicate)
 //   4. After EOF: create all buffered edges, skip if target missing
+//
+// Phase 4 note (2026-04-17): the trait-reachable write-path calls here
+// (`add_node`, `add_edge`, `node_weight` → `node_data`, `update_row_id`)
+// were migrated to UFCS dispatch through `GraphWrite` / `GraphRead`. The
+// remaining `GraphBackend::Disk(ref dg)` destructuring sites all reach
+// into disk-internal storage (`dg.node_slots`, `dg.data_dir`,
+// `dg.pending_edges`, `dg.edge_type_counts_raw`, `dg.qnum_to_idx`) that
+// has no trait surface — these are legitimate backend-internal
+// optimisations (compact edge buffer, property-log spill, qnum→idx
+// mmap) that live here because the Wikidata-scale build path needs
+// them. Phase 5's per-backend split (`src/graph/storage/disk/*`) is the
+// natural home for this code; the enum matches collapse into plain
+// methods on `DiskGraph` when the folder split happens.
 
 use crate::datatypes::values::Value;
 use crate::graph::mmap_vec::MmapOrVec;
 use crate::graph::schema::{
     DirGraph, EdgeData, InternedKey, NodeData, PropertyStorage, TypeSchema,
 };
+use crate::graph::storage::{GraphRead, GraphWrite};
 use crate::graph::type_build_meta::{ColType, TypeBuildMeta};
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
@@ -2398,10 +2412,13 @@ fn build_columns_direct(
     }
 
     // ── Step 5: Fix up DiskNodeSlot row_ids ────────────────────────────────
-
-    if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
+    //
+    // `update_row_id` is on `GraphWrite` (disk override, default no-op on
+    // memory/mapped). Phase 2 introduced this exactly to replace the
+    // enum-match here.
+    if GraphRead::is_disk(&graph.graph) {
         for &(node_idx, row_id) in &row_ids {
-            dg.update_row_id(node_idx, row_id);
+            GraphWrite::update_row_id(&mut graph.graph, node_idx, row_id);
         }
         if verbose {
             eprintln!(
@@ -2546,7 +2563,7 @@ fn flush_entity(
         Vec::new()
     };
 
-    let node_idx = graph.graph.add_node(node_data);
+    let node_idx = GraphWrite::add_node(&mut graph.graph, node_data);
 
     // Write to property log after add_node so we have the node_idx
     if let Some(ref mut log) = prop_log {
@@ -2748,7 +2765,7 @@ fn create_edges_compact(
     // Stream edges — use direct pending_edges push for disk mode (bypass add_edge overhead)
     let buf_len = buf.len();
     let qnum_len = qnum_to_idx.len();
-    let is_disk = matches!(graph.graph, crate::graph::schema::GraphBackend::Disk(_));
+    let is_disk = GraphRead::is_disk(&graph.graph);
 
     // Lookup helper: qnum_to_idx stores node_index+1, 0 = not present
     let lookup = |qnum: u32| -> Option<u32> {
@@ -2793,7 +2810,7 @@ fn create_edges_compact(
                     connection_type: pred_key,
                     properties: Vec::new(),
                 };
-                graph.graph.add_edge(src, tgt, edge_data);
+                GraphWrite::add_edge(&mut graph.graph, src, tgt, edge_data);
                 conn_types_seen.insert(pred_key);
                 stats.edges_created += 1;
             } else {
@@ -2847,15 +2864,11 @@ fn create_edges_strings(
                 let edge_data =
                     EdgeData::new(pred_label.clone(), HashMap::new(), &mut graph.interner);
 
-                let src_type = graph
-                    .graph
-                    .node_weight(src)
+                let src_type = GraphRead::node_data(&graph.graph, src)
                     .unwrap()
                     .node_type_str(&graph.interner)
                     .to_string();
-                let tgt_type = graph
-                    .graph
-                    .node_weight(tgt)
+                let tgt_type = GraphRead::node_data(&graph.graph, tgt)
                     .unwrap()
                     .node_type_str(&graph.interner)
                     .to_string();
@@ -2865,7 +2878,7 @@ fn create_edges_strings(
                 entry.0.insert(src_type);
                 entry.1.insert(tgt_type);
 
-                graph.graph.add_edge(src, tgt, edge_data);
+                GraphWrite::add_edge(&mut graph.graph, src, tgt, edge_data);
                 stats.edges_created += 1;
             }
             _ => {
