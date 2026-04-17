@@ -14,6 +14,7 @@ use crate::graph::pattern_matching::{
 use crate::graph::schema::{DirGraph, EdgeData, InternedKey, NodeData, TypeSchema};
 use crate::graph::schema_validation;
 use crate::graph::spatial;
+use crate::graph::storage::GraphRead;
 use crate::graph::timeseries;
 use crate::graph::value_operations;
 use crate::graph::vector_search as vs;
@@ -308,7 +309,7 @@ impl<'a> CypherExecutor<'a> {
     pub fn execute(&self, query: &CypherQuery) -> Result<CypherResult, String> {
         // Reset DiskGraph materialization arenas to prevent unbounded growth
         // across queries. No-op for InMemory graphs.
-        self.graph.graph.reset_arenas();
+        GraphRead::reset_arenas(&self.graph.graph);
 
         let mut result_set = ResultSet::new();
         let profiling = query.profile;
@@ -8408,7 +8409,7 @@ pub fn execute_mutable(
     params: HashMap<String, Value>,
     deadline: Option<Instant>,
 ) -> Result<CypherResult, String> {
-    graph.graph.reset_arenas();
+    GraphRead::reset_arenas(&graph.graph);
 
     let mut result_set = ResultSet::new();
     let mut stats = MutationStats::default();
