@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776428798468,
+  "lastUpdate": 1776431958588,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -7202,6 +7202,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.00001827853159825575",
             "extra": "mean: 1.115264486205386 msec\nrounds: 870"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "a7a8cdd02e1348c538a22edb569545dbfb512013",
+          "message": "refactor: Phase 3 — GATs on GraphRead + edge-method migration\n\nAdds generic associated types (NodeIndicesIter, EdgesIter,\nNeighborsIter, etc.) to every iterator-returning method on GraphRead.\nPromotes the last 7 inherent edge methods (edges, edge_references,\nedge_weight, edge_indices, find_edge, edges_connecting, edge_weights)\nonto the trait and deletes their GraphBackend inherent counterparts.\nMigrates 11 caller files off direct `graph.graph.X()` / `self.graph.graph.X()`\nsyntax for the full iteration/edge-method surface. Drops `&dyn GraphRead`\nsupport (GATs make the trait non-object-safe); one caller in\nintrospection.rs flipped to `&impl GraphRead`.\n\nAuthors tests/test_phase3_parity.py (13 parity tests) covering\ntraversal-under-mutation isolation (CREATE + DELETE variants) and\nrow-count parity across memory/mapped/disk for 3 Cypher patterns that\nexercise the migrated edge methods.\n\nPer-backend `impl GraphRead for MemoryGraph / DiskGraph` deferred to\nPhase 5 (paired with columnar cleanup + MappedGraph struct promotion).\nToday's GATs are the trait shape; Phase 5 lands the inlining payoff.\n\nIn-memory benchmarks (TestStorageModeMatrix at N=10000): two_hop -27%,\nmulti_predicate -11%, construction -28%; pagerank +4% and find +5%\nwithin single-run noise band. Mapped/disk within ±10%. make test\n+ make lint + pytest -m parity all green.\n\nSee todo.md Phase 3 Report-out for full details.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-17T15:14:27+02:00",
+          "tree_id": "36f3c7250fba4803b3286f63e34d94c4ab54b561",
+          "url": "https://github.com/kkollsga/kglite/commit/a7a8cdd02e1348c538a22edb569545dbfb512013"
+        },
+        "date": 1776431958263,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1166.940753144761,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000024493349394241354",
+            "extra": "mean: 856.941534782399 usec\nrounds: 460"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 822.9727563601355,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00003460547240990663",
+            "extra": "mean: 1.215107052173665 msec\nrounds: 690"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 12450.826578698363,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000005625676987818989",
+            "extra": "mean: 80.31595281480037 usec\nrounds: 5489"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1639.2496619662893,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000020255190323188828",
+            "extra": "mean: 610.0352028137644 usec\nrounds: 853"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 671822.1490427906,
+            "unit": "iter/sec",
+            "range": "stddev: 3.798675203732899e-7",
+            "extra": "mean: 1.4884891803951326 usec\nrounds: 82720"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 128063.19384154967,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000010474876928533814",
+            "extra": "mean: 7.808644857298204 usec\nrounds: 18142"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2176.3495879226375,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00003449214264965045",
+            "extra": "mean: 459.4850044080083 usec\nrounds: 3176"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1609.2995879899884,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00008869836089616871",
+            "extra": "mean: 621.388340283488 usec\nrounds: 1199"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 13648.599749373983,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000033971333357426395",
+            "extra": "mean: 73.2675892298671 usec\nrounds: 10232"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 834.2313087207949,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000019110754465889318",
+            "extra": "mean: 1.1987083073319242 msec\nrounds: 641"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 828.4010465035476,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00001855081346063828",
+            "extra": "mean: 1.2071447811669531 msec\nrounds: 754"
           }
         ]
       }
