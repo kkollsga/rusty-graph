@@ -809,3 +809,111 @@ Total ≈ 10–15 days focused. The single longest task is splitting
 - **Modified docs**: `ARCHITECTURE.md`, `CLAUDE.md`, `todo.md` (this Report-out + earlier rewrite to forward-looking plan).
 - **Unchanged**: `kglite/__init__.pyi` (zero diff vs pre-Phase 8 — API-stability contract held).
 
+</details>
+
+---
+
+## Phase 9 Report-out (written at phase exit — read this before Phase 10)
+
+**Completed** (single squashed commit `refactor: Phase 9 — god-file content splits` on `main`, local only — user pushes):
+
+Every `.rs` under `src/graph/` is now at or under the 2,500-line hard cap. `GOD_FILE_EXCEPTIONS` is empty. The 9 files that Phase 8 left in the exception list have been split into themed submodules:
+
+1. **`core/pattern_matching.rs` (2,610)** → `core/pattern_matching/` (4 files: `mod`, `pattern`, `parser`, `matcher`). Largest submodule: `matcher.rs` at 1,632 lines. The planned `property_matcher.rs` was subsumed into `pattern.rs` + `matcher.rs` — the enum is 26 lines of types (lives with other AST types) and the evaluation method `value_matches` is too tangled with `PatternExecutor` state to extract.
+2. **`io/ntriples.rs` (3,022)** → `io/ntriples/` (4 files: `mod`, `parser`, `writer`, `loader`). Largest: `loader.rs` at 2,412 lines (`load_ntriples` + `build_columns_direct` + flush_entity + metadata structs + tests — unavoidable cohesion). `mod.rs` now owns the public `NTriplesStats` + `NTriplesConfig` types.
+3. **`pyapi/kg_methods.rs` (5,419)** → `pyapi/kg_{mutation, fluent, introspection, core}.rs` (4 files, 1,058 + 1,594 + 1,481 + 1,368 lines). PyO3 merges multiple `#[pymethods] impl KnowledgeGraph` blocks at class-registration time, same pattern as existing `pymethods_*.rs`. Method split by category (ingestion / fluent chain / introspection / maintenance+core). All 105 methods present on `KnowledgeGraph`; smoke test confirmed `method_count = 163` (includes 58 methods from the other `pymethods_*.rs` files).
+4. **`introspection.rs` (4,204)** → `introspection/` (added 6 new files: `mod`, `describe`, `schema_overview`, `connectivity`, `capabilities`, `topics`). Largest: `describe.rs` at 1,660 lines. The 40 `write_topic_*` functions (Cypher tier-3 + Fluent tier-3 tier-3) consolidated into `topics.rs` (1,184 lines). `mod.rs` kept the public return types + `graph_scale` free fn + re-exports. Existing `bug_report.rs` / `debugging.rs` / `reporting.rs` from Phase 7 are unchanged.
+5. **`languages/cypher/parser.rs` (2,920)** → `languages/cypher/parser/` (5 files: `mod`, `match_pattern`, `predicate`, `expression`, `clauses`). `mod.rs` hosts the token helpers + `parse_query` orchestrator + `parse_cypher` public entry + the tests module (931 lines). Each sub-file adds another `impl CypherParser` block; Rust merges them at codegen.
+6. **`languages/cypher/planner.rs` (3,552)** → `languages/cypher/planner/` (6 files: `mod`, `join_order`, `index_selection`, `cost_model`, `fusion`, `simplification`). Largest: `fusion.rs` at 1,700 lines (10 `fuse_*` passes share cross-clause helpers). `is_aggregate_expression` was already in `ast.rs` since Phase 6 — Phase 9 removed the `pub use super::ast::...` re-export from `executor.rs` so planner imports it directly. Also moved `rewrite_text_score` re-export from `cypher/mod.rs` → `planner::simplification::rewrite_text_score`.
+7. **`storage/disk/disk_graph.rs` (3,276)** → `storage/disk/` (added `csr.rs` + `builder.rs`; `disk_graph.rs` shrunk to 2,108 lines). `csr.rs` holds the 4 `#[repr(C)]` types (`CsrEdge`, `MergeSortEntry`, `EdgeEndpoints`, `DiskNodeSlot`) + `TOMBSTONE_EDGE`. `builder.rs` holds the CSR-build methods (`build_csr_merge_sort`, `build_csr_partitioned`, `swap_csr_files`, `build_conn_type_index`, `build_peer_count_histogram`) wrapped in a second `impl DiskGraph` block. The existing `block_column.rs` + `block_pool.rs` were NOT consolidated into a single `blocks.rs` — they each stand on their own and are well-sized; consolidation would have added churn with no structural benefit.
+8. **`schema.rs` (5,141)** → `schema.rs` (2,396) + `dir_graph.rs` (2,135) + `storage/backend.rs` (652). A deliberate minimal 3-way split after a broader 8-way split showed too much visibility fanout + cross-module type reference pressure. Re-exports at the top of `schema.rs` preserve every `crate::graph::schema::X` import path used elsewhere in the crate. Two whitelist additions: `dir_graph.rs` has 13 internal `GraphBackend::{Memory,Mapped,Disk,Recording}` enum-match sites for index-maintenance fast paths — added to `ENUM_MATCH_WHITELIST` with a rationale (petgraph-only optimisations).
+9. **`languages/cypher/executor.rs` (12,144)** → `languages/cypher/executor/` (9 files: `mod` + 7 impl-submodules + `tests`). The dominant task. Sizes: `expression.rs` 2,403, `tests.rs` 1,975 (cfg-gated), `match_clause.rs` 1,895, `return_clause.rs` 1,297, `where_clause.rs` 1,125, `mod.rs` 1,114, `write.rs` 1,041, `call_clause.rs` 709, `helpers.rs` 688. Every sub-file adds another `impl<'a> CypherExecutor<'a>` block; Rust merges them at codegen. Shared helper import is a `use super::*; use super::helpers::*;` glob pair at the top of each clause submodule. `helpers.rs` holds the free-fn helpers (`expression_to_string`, `evaluate_comparison`, arithmetic ops, type coercions, property resolution) + `return_item_column_name` (pub, re-exported for `planner/fusion.rs` + `cypher/window.rs`). `tests.rs` is `#[cfg(test)] pub mod tests;` from `mod.rs`.
+
+### Whitelist + exception updates
+
+- `tests/test_phase7_parity.py::GOD_FILE_EXCEPTIONS`: **emptied**. `test_god_file_gate` now passes with zero exceptions over the full `src/graph/` tree.
+- `tests/test_phase5_parity.py::ENUM_MATCH_WHITELIST` + `tests/test_phase6_parity.py::ENUM_MATCH_WHITELIST`: `schema.rs` replaced by `storage/backend.rs` (dispatcher's new home); `pyapi/kg_methods.rs` replaced by all four `pyapi/kg_{core,mutation,introspection,fluent}.rs` (PyO3-boundary files all carry `GraphBackend::` variant-match for storage-mode toggles); `io/ntriples.rs` replaced by `io/ntriples/{loader,writer}.rs` (both reach into `DiskGraph` internals for bulk-build). New entry: `dir_graph.rs` (petgraph-only fast paths on backend variants).
+- `tests/test_phase7_parity.py::test_mod_rs_purity`: subdir list extended with `core/pattern_matching`, `io/ntriples`, `languages/cypher/{executor, parser, planner}`. Caps per subdir: `storage/mod.rs` 800, `languages/cypher/mod.rs` 500, `languages/cypher/executor/mod.rs` 1,200 (hosts the `CypherExecutor` struct + filter specs + constructor + `execute()` orchestrator + `finalize_result` — shared state every clause-submodule borrows from), `languages/cypher/parser/mod.rs` 1,000 (struct + token helpers + `parse_query` + public `parse_cypher` entry + tests module), `languages/cypher/planner/mod.rs` 400 (orchestrator + `mark_*` helpers + tests). All other subdir mod.rs files keep the 300-line cap.
+
+### Baselines held
+
+- `kglite/__init__.pyi` MD5: `cfefb71c1f6a8b819dd11c73ef8af3be` (byte-identical to Phase 8 — API-stability contract held).
+- `cargo test --release`: **490 passed** (matches Phase 8).
+- `pytest tests/` (excl benchmarks + parity): **1,799 passed** (matches Phase 8).
+- `pytest -m parity tests/`: **69 passed, 1 skipped** (same composition as Phase 8).
+- `python -m mypy.stubtest kglite`: **Success: no issues found in 20 modules**.
+- `make lint`: clean (cargo fmt + clippy -D warnings + ruff format/check + stubtest).
+- `kglite/kglite.cpython-312-darwin.so`: **7,046,320 bytes** vs Phase 8's 7,046,288 (+32 bytes, 0.0005% — noise; well under ×1.05 cap of 7,398,602).
+- Phase 7 `.kgl` v3 `GOLDEN_V3_DIGEST` unchanged.
+
+### Key file-size deltas
+
+| File | Pre-Phase-9 | Post-Phase-9 | Δ |
+|------|-------------|--------------|---|
+| `languages/cypher/executor.rs` | 12,144 | (split) | — |
+| `pyapi/kg_methods.rs` | 5,419 | (split) | — |
+| `schema.rs` | 5,141 | 2,396 | −53% |
+| `introspection.rs` | 4,204 | (split) | — |
+| `languages/cypher/planner.rs` | 3,552 | (split) | — |
+| `storage/disk/disk_graph.rs` | 3,276 | 2,108 | −36% |
+| `io/ntriples.rs` | 3,022 | (split) | — |
+| `languages/cypher/parser.rs` | 2,920 | (split) | — |
+| `core/pattern_matching.rs` | 2,610 | (split) | — |
+| **Largest remaining file** | 12,144 | 2,412 (`io/ntriples/loader.rs`) | −80% |
+
+### Surprises found during investigation + implementation
+
+1. **`is_aggregate_expression` was already in `ast.rs`** despite the Phase 9 plan calling for its move from `executor.rs`. The 0.0b task was a one-line visibility fix (`pub use` → `use`) on a re-export line, not a fn migration — Phase 6 had already moved it.
+2. **`core/pattern_matching::PropertyMatcher` has no free evaluation fn** — it's evaluated as a method on `PatternExecutor` (`value_matches`) which captures `self.params`. The planned `property_matcher.rs` was an empty file in practice; split reduced to 3 submodules (`mod`, `pattern`, `parser`, `matcher`) that more accurately mirror the code's lifecycle.
+3. **Pattern-matching `parser.rs` has no standalone test file** — tests live in a `#[cfg(test)] mod tests` at the end of the file. Phase 9 kept them with `parser.rs` (they test `tokenize` + `parse_pattern`, not matcher eval).
+4. **`ntriples.rs` had hidden doc-attribute + derive boundaries.** First extraction attempt cut the `#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]` attribute off `RegionMeta` (attribute on line 1256, struct on 1257, I started extraction at 1257). Caught by compile failure; re-extracted from one line earlier.
+5. **`schema.rs` is too tangled for an 8-way split.** First split attempt carved into 8 submodules (`storage`, `typeid`, `selection`, `configs`, `dir_graph`, `node_edge`, `backend`, `validation`). Cross-module type fanout was extreme — `DirGraph` pulls from ~15 sibling types, `GraphBackend` needs `MemoryGraph`/`MappedGraph`/`DiskGraph`/`RecordingGraph` simultaneously, `PropertyStorage` is `pub(crate)` but referenced in 4 places. Visibility fixes + derives were dropping under sed extraction. Reverted to a **3-way minimal split** after 30+ min of visibility chases: extract `DirGraph` + `GraphInfo` + `IndexStats` → `graph/dir_graph.rs`; extract `GraphBackend` + trait impls + dispatcher → `storage/backend.rs`; keep everything else in `schema.rs`. Re-exports preserve every external `crate::graph::schema::X` import path.
+6. **`cargo fmt` + `cargo fix` + `cargo clippy --fix` repeatedly pruned "unused" `pub use MemoryGraph` and `pub use RecordingGraph`.** These re-exports are test-only and `#[allow(unused_imports)]` is insufficient for stopping the auto-fix. Fix: added explicit `// DO NOT REMOVE` comments to the affected `pub use` lines in `schema.rs` and `storage/mod.rs` — plus `#[allow(unused_imports)]`.
+7. **Executor's `#[cfg(test)] mod tests` was not self-contained.** 1,975 lines of tests were nested inside a `mod tests { ... }` block that I re-exported as a submodule. Flattened the outer `mod tests { ... }` wrapper — `tests.rs` is declared via `#[cfg(test)] pub mod tests;` and its content is directly the test fns + helper fns. Imports had to shift from `use super::*` to `use super::helpers::*; use super::*;` since the tests are now one level deeper in the module tree.
+8. **Clippy's `doc_lazy_continuation` + `empty_line_after_doc_comment` lints trip heavily on extraction seams.** Any time I cut across a doc-comment-then-blank-line-then-fn boundary, clippy fails. Wrote a Python one-liner to collapse blank lines between `///` comments and the following item in the 6 affected files. A handful remained — fixed by hand.
+9. **The `Graph` type alias in `schema.rs` is `GraphBackend`, not `StableDiGraph<NodeData, EdgeData>`.** My initial `dir_graph.rs` had `type Graph = StableDiGraph<…>;` — wrong. `DirGraph.graph` is a `GraphBackend` enum. Corrected to import `Graph` from `storage::backend`.
+10. **`Cow` import chain broke write.rs.** The write-path uses `node.get_field_ref(...).map(Cow::into_owned)` — requires `Cow` in scope. Added `use std::borrow::Cow;` to `write.rs`.
+11. **Executor impl-submodule glob imports require `use super::*`** (not `use super::super::*`). Sibling submodules share their enclosing `impl<'a> CypherExecutor<'a>` block via Rust's impl-merging; methods must also be `pub(super)` so cross-file method-to-method calls work. A handful of trait-impl methods (`PartialEq::eq`, `PartialOrd::partial_cmp`, `Ord::cmp`) got `pub(super)` blanket-promoted by accident and had to be reverted — trait-method impls don't accept visibility modifiers.
+12. **`fold_constants_expr` is called from `window.rs`** (outside executor), so promoting it to `pub(super)` in `where_clause.rs` wasn't enough — widened to `pub(crate)`.
+
+### Decisions made
+
+1. **schema.rs: 3-way split (not 8-way).** See Surprise #5. The pragmatic split keeps visibility simple, preserves all import paths via re-exports, and lands every file under cap. Further decomposition (splitting selection state, configs, NodeData/EdgeData into their own files) is a 0.9.0 consideration — not worth the visibility fanout churn at 0.8.0.
+2. **Executor split follows clause boundaries, not a shared-helper layer.** Each clause-category (MATCH, WHERE, expression eval, RETURN, UNWIND/CALL, write) gets its own file + impl block. Shared helpers (arithmetic, to_string, property resolution) in `helpers.rs`. This matches Cypher semantics (each clause is a distinct AST variant) and keeps clause-specific changes local to one file.
+3. **Disk backend: 3-file split (not 5-way).** Consolidating `block_pool.rs` + `block_column.rs` into a single `blocks.rs` was dropped — both files are well-sized and the block-allocator / column-store abstractions are distinct. `csr.rs` + `builder.rs` + `disk_graph.rs` is the minimal split that gets `disk_graph.rs` under the cap.
+4. **Introspection: topics.rs is the pragmatic home for tier-3 writers.** The 40 Cypher `write_topic_*` + the 20+ Fluent `write_fluent_topic_*` functions live in one `topics.rs` file. They're cohesive (all string-templating XML for describe() output) and splitting across `cypher_topics.rs` + `fluent_topics.rs` would have been artificial — `write_cypher_topics` + `write_fluent_topics` dispatchers share no state with the individual topic writers.
+5. **Tests pre-promotion:** tests inside executor, parser, schema test modules needed `use crate::graph::storage::{GraphRead, GraphWrite};` (trait methods moved from inherent). Added those explicitly; trait-import churn costs nothing at runtime.
+6. **Re-exports marked `#[allow(unused_imports)]` + explicit `DO NOT REMOVE` comments.** Both `MemoryGraph` in `schema.rs` and `RecordingGraph` in `storage/mod.rs` are re-exports whose only callers are in `#[cfg(test)]` modules. `cargo fix` prunes them aggressively. Kept intentionally.
+
+### Debt introduced / carried to Phase 10
+
+- **Nothing new.** Every file in `src/graph/` is under the 2,500-line hard cap. `GOD_FILE_EXCEPTIONS` is empty. No `#[deprecated]`, no shims, no "TODO: migrate later" markers. The `legacy: Legacy::deserialize(...)` local variable in `schema.rs` is about the legacy `.kgl` on-disk format deserialization path — not a debt marker.
+- **One Rust-idiom wart:** `schema.rs` retains the `Graph` type alias (`pub type Graph = GraphBackend;`) re-exported from `storage::backend`. Callers use it interchangeably with `GraphBackend`. Keeping it for now to avoid a blanket rename; future hygiene pass can drop it.
+- **`languages/fluent/` is still empty stubs** (from Phase 8). Phase 9's kg_fluent.rs split did NOT move Rust-side fluent logic from `#[pymethods]` into `languages/fluent/` — the Python-facing entry points stay in pyapi, and the chain state is still just `CowSelection` mutations via KG's `&mut self`. If a non-Python fluent caller appears (SPARQL? GraphQL?) this is where to extract it. Not a 0.8.0 blocker.
+
+### Scope changes vs the approved plan
+
+- **pattern_matching/property_matcher.rs dropped.** The planned 4th submodule had too little to do (26 lines of enum + eval tangled with PatternExecutor state). Split stayed 3 submodules + `mod.rs`.
+- **disk/blocks.rs consolidation dropped.** Original plan consolidated `block_pool.rs` + `block_column.rs` into `blocks.rs`. Both files stand on their own and are under cap. Consolidation would have been pure code churn.
+- **schema.rs 8-way split reduced to 3-way.** See Surprise #5 / Decision #1.
+- **Fluent-chain extraction to `languages/fluent/` dropped.** Not in Phase 9 scope — the pyapi split mechanically separated kg_fluent.rs from the other pymethods files, but no Rust-side extraction happened. Phase 10 / post-0.8.0 if needed.
+
+### Next-phase prerequisites (Phase 10 — testing hardening)
+
+- **Every subdir under `src/graph/` now has a `mod.rs`.** Phase 10's cross-mode parity tests can reference specific submodule paths (e.g. `languages/cypher/executor/expression.rs`) when writing test fixtures. The deepest nesting is 3 levels (`languages/cypher/executor/`).
+- **`GOD_FILE_EXCEPTIONS` is empty** — Phase 10 can safely add new submodules without breaking the audit. If Phase 10 adds `tests/test_edge_cases.py` with large fixture data, those go under `tests/` (not `src/graph/`).
+- **`test_exception_list_still_applies`** becomes a no-op in Phase 9. Consider deleting outright in Phase 11 (when the list has stayed empty across a phase).
+- **Phase-6 `file-count-budget` test** (skipped post-Phase-7) wasn't re-evaluated in Phase 9 — still self-skips. Still a candidate for deletion in Phase 10 or 11.
+- **`RAYON_THRESHOLD`** is now `pub(super) const` in `executor/mod.rs`, re-exported via `use super::RAYON_THRESHOLD` in clause submodules. Window-function code in `cypher/window.rs` imports it via `use super::executor::RAYON_THRESHOLD`. Any future code that needs the threshold should follow this pattern.
+- **Doc comments with trailing blank lines are now a clippy error.** The `doc_lazy_continuation` + `empty_line_after_doc_comment` lints are strict. Future PRs should not introduce blank lines between `///` and the item they document.
+
+### Files touched
+
+- **New files (schema 3-way split)**: `src/graph/dir_graph.rs`, `src/graph/storage/backend.rs`.
+- **New subdirs (8 god files)**: `src/graph/core/pattern_matching/` (4 files), `src/graph/io/ntriples/` (4 files), `src/graph/introspection/` (6 files; 3 pre-existing), `src/graph/languages/cypher/executor/` (9 files), `src/graph/languages/cypher/parser/` (5 files), `src/graph/languages/cypher/planner/` (6 files), `src/graph/pyapi/kg_{core,mutation,introspection,fluent}.rs`, `src/graph/storage/disk/{csr,builder}.rs`.
+- **Removed files**: `src/graph/core/pattern_matching.rs`, `src/graph/io/ntriples.rs`, `src/graph/introspection.rs`, `src/graph/languages/cypher/{executor,parser,planner}.rs`, `src/graph/pyapi/kg_methods.rs`, `src/graph/storage/disk/disk_graph.rs` (replaced with a shrunk version in-place).
+- **Modified (path-ref updates)**: `src/graph/mod.rs` (added `pub mod dir_graph;`), `src/graph/schema.rs` (+ re-exports for DirGraph/GraphBackend/MappedGraph/MemoryGraph), `src/graph/storage/mod.rs` (+ `pub mod backend;` + `pub use recording::RecordingGraph;`), `src/graph/core/graph_iterators.rs` (CSR types path), `src/graph/storage/impls.rs` (TOMBSTONE_EDGE path), `src/graph/languages/cypher/mod.rs` (rewrite_text_score re-export path), `src/graph/languages/cypher/window.rs` (return_item_column_name path), `src/graph/languages/cypher/planner/*.rs` (ast path depth + imports).
+- **Modified tests**: `tests/test_phase5_parity.py`, `tests/test_phase6_parity.py`, `tests/test_phase7_parity.py`.
+- **Modified docs**: (none this commit — ARCHITECTURE.md / CLAUDE.md / AUDIT_0.8.0.md / CHANGELOG.md updates deferred to the separate `docs:` commit that accompanies this phase).
+- **Unchanged**: `kglite/__init__.pyi` (zero diff vs pre-Phase 9 — API-stability contract held).
+
