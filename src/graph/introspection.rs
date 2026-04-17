@@ -2,6 +2,14 @@
 //
 // Schema introspection functions for exploring graph structure.
 // All functions take &DirGraph and return Rust structs — PyO3 conversion in mod.rs.
+//
+// Submodules (under src/graph/introspection/): describe/schema-overview
+// helpers (bug_report, debugging, reporting). Phase 7 Stage 2.2 carves
+// this file itself into themed submodules + turns it into mod.rs.
+
+pub mod bug_report;
+pub mod debugging;
+pub mod reporting;
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{ConnectivityTriple, DirGraph, InternedKey, NodeData};

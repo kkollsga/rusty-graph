@@ -4,7 +4,7 @@ use crate::graph::maintain_graph;
 use crate::graph::query::statistics_methods::{get_parent_child_pairs, ParentChildPair};
 use crate::graph::storage::lookups::TypeLookup;
 use crate::datatypes::values::Value;
-use crate::graph::reporting::CalculationOperationReport; // Remove unused OperationReport import
+use crate::graph::introspection::reporting::CalculationOperationReport; // Remove unused OperationReport import
 use crate::graph::schema::{CurrentSelection, DirGraph, NodeData, StringInterner};
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;

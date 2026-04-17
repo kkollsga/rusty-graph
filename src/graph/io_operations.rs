@@ -13,7 +13,7 @@
 //   [section]  timeseries.zst (optional)
 
 use crate::graph::storage::memory::column_store::ColumnStore;
-use crate::graph::reporting::OperationReports;
+use crate::graph::introspection::reporting::OperationReports;
 use crate::graph::schema::{
     CompositeIndexKey, ConnectionTypeInfo, ConnectivityTriple, CowSelection, DirGraph,
     EmbeddingStore, IndexKey, PropertyStorage, SaveMetadata, SchemaDefinition,

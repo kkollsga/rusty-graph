@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::sync::Arc;
 
-use super::reporting::OperationReports;
+use super::introspection::reporting::OperationReports;
 use super::schema::{CowSelection, PlanStep};
 use super::{
     centrality_results_to_dataframe, centrality_results_to_py_dict, community_results_to_py,

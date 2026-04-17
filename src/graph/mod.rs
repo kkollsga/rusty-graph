@@ -2,7 +2,7 @@
 use crate::datatypes::values::{FilterCondition, Value};
 use crate::datatypes::{py_in, py_out};
 use crate::graph::query::calculations::StatResult;
-use crate::graph::reporting::{OperationReport, OperationReports};
+use crate::graph::introspection::reporting::{OperationReport, OperationReports};
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use pyo3::prelude::*;
@@ -13,9 +13,7 @@ use std::sync::Arc;
 
 pub mod algorithms;
 pub mod batch_operations;
-pub mod bug_report;
 pub mod cypher;
-pub mod debugging;
 pub mod equation_parser;
 pub mod export;
 pub mod introspection;
@@ -23,7 +21,6 @@ pub mod io_operations;
 pub mod maintain_graph;
 pub mod ntriples;
 pub mod query;
-pub mod reporting;
 pub mod schema;
 pub mod schema_validation;
 pub mod set_operations;
@@ -283,7 +280,7 @@ impl KnowledgeGraph {
     /// Convert a ConnectionOperationReport to a Python dict and emit a warning
     /// if any rows were skipped.
     fn connection_report_to_py(
-        result: &reporting::ConnectionOperationReport,
+        result: &crate::graph::introspection::reporting::ConnectionOperationReport,
         connection_type: &str,
     ) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {
@@ -2721,7 +2718,7 @@ impl KnowledgeGraph {
         };
 
         // Create and add a report
-        let report = reporting::NodeOperationReport {
+        let report = crate::graph::introspection::reporting::NodeOperationReport {
             operation_type: "update".to_string(),
             timestamp: chrono::Utc::now(),
             nodes_created: 0,
@@ -4919,7 +4916,7 @@ impl KnowledgeGraph {
     }
 
     fn schema_text(&self) -> PyResult<String> {
-        let schema_string = debugging::get_schema_string(&self.inner);
+        let schema_string = introspection::debugging::get_schema_string(&self.inner);
         Ok(schema_string)
     }
 
@@ -4999,7 +4996,7 @@ impl KnowledgeGraph {
         description: &str,
         path: Option<&str>,
     ) -> PyResult<String> {
-        bug_report::write_bug_report(query, result, expected, description, path)
+        crate::graph::introspection::bug_report::write_bug_report(query, result, expected, description, path)
             .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)
     }
 
@@ -5013,7 +5010,7 @@ impl KnowledgeGraph {
     }
 
     fn selection(&self) -> PyResult<String> {
-        Ok(debugging::get_selection_string(
+        Ok(introspection::debugging::get_selection_string(
             &self.inner,
             &self.selection,
         ))
