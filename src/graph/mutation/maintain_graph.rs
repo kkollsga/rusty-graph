@@ -1,11 +1,11 @@
 // src/graph/maintain_graph.rs
 use crate::datatypes::{DataFrame, Value};
+use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOperationReport};
 use crate::graph::mutation::batch_operations::{
     BatchProcessor, ConflictHandling, ConnectionBatchProcessor, NodeAction,
 };
-use crate::graph::storage::lookups::{CombinedTypeLookup, TypeLookup};
-use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOperationReport};
 use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, TypeSchema};
+use crate::graph::storage::lookups::{CombinedTypeLookup, TypeLookup};
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
@@ -1213,13 +1213,15 @@ fn compute_spatial_property(
         "distance" => {
             let (lat1, lon1) = resolve_location(leaf_node, leaf_spatial)?;
             let (lat2, lon2) = resolve_location(ancestor_node, ancestor_spatial)?;
-            Some(Value::Float64(crate::graph::features::spatial::geodesic_distance(
-                lat1, lon1, lat2, lon2,
-            )))
+            Some(Value::Float64(
+                crate::graph::features::spatial::geodesic_distance(lat1, lon1, lat2, lon2),
+            ))
         }
         "area" => {
             let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
-            crate::graph::features::spatial::geometry_area_m2(&geom).ok().map(Value::Float64)
+            crate::graph::features::spatial::geometry_area_m2(&geom)
+                .ok()
+                .map(Value::Float64)
         }
         "perimeter" => {
             let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;

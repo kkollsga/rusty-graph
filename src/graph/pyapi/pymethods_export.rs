@@ -85,8 +85,9 @@ impl KnowledgeGraph {
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
             }
             "csv" => {
-                let (nodes_csv, edges_csv) = crate::graph::io::export::to_csv(&self.inner, selection)
-                    .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+                let (nodes_csv, edges_csv) =
+                    crate::graph::io::export::to_csv(&self.inner, selection)
+                        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
                 // Write nodes file
                 let nodes_path = path.replace(".csv", "_nodes.csv");
@@ -173,8 +174,13 @@ impl KnowledgeGraph {
             None
         };
 
-        let summary = crate::graph::io::export::to_csv_dir(&self.inner, path, selection, &self.inner.parent_types)
-            .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
+        let summary = crate::graph::io::export::to_csv_dir(
+            &self.inner,
+            path,
+            selection,
+            &self.inner.parent_types,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
 
         if verbose {
             for line in &summary.log_lines {

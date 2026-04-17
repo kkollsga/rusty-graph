@@ -2,10 +2,10 @@
 //
 // PyO3 methods for timeseries operations on KnowledgeGraph.
 
-use crate::graph::storage::GraphRead;
-use crate::graph::features::timeseries::{NodeTimeseries, TimeseriesConfig};
-use crate::graph::{get_graph_mut, KnowledgeGraph};
 use crate::datatypes::py_in;
+use crate::graph::features::timeseries::{NodeTimeseries, TimeseriesConfig};
+use crate::graph::storage::GraphRead;
+use crate::graph::{get_graph_mut, KnowledgeGraph};
 use chrono::NaiveDate;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -127,8 +127,12 @@ impl KnowledgeGraph {
                 )
             })?;
 
-        crate::graph::features::timeseries::validate_channel_length(ts.keys.len(), values.len(), &channel_name)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        crate::graph::features::timeseries::validate_channel_length(
+            ts.keys.len(),
+            values.len(),
+            &channel_name,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Update config channels list
         if let Some(node) = graph.graph.node_weight(node_idx) {
@@ -393,12 +397,14 @@ impl KnowledgeGraph {
         let end_date = end
             .as_ref()
             .map(|s| {
-                crate::graph::features::timeseries::parse_date_query(s).map(|(d, prec)| crate::graph::features::timeseries::expand_end(d, prec))
+                crate::graph::features::timeseries::parse_date_query(s)
+                    .map(|(d, prec)| crate::graph::features::timeseries::expand_end(d, prec))
             })
             .transpose()
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
-        let (lo, hi) = crate::graph::features::timeseries::find_range(&ts.keys, start_date, end_date);
+        let (lo, hi) =
+            crate::graph::features::timeseries::find_range(&ts.keys, start_date, end_date);
         let keys_slice = &ts.keys[lo..hi];
 
         let result = PyDict::new(py);
@@ -474,8 +480,8 @@ fn ts_config_to_py(py: Python<'_>, config: &TimeseriesConfig) -> PyResult<Py<PyA
     Ok(dict.into_any().unbind())
 }
 
-use crate::graph::schema::DirGraph;
 use crate::datatypes::values::Value;
+use crate::graph::schema::DirGraph;
 use petgraph::graph::NodeIndex;
 
 /// Parse time index keys from Python — accepts either list[str] or list[list[int]].

@@ -323,7 +323,9 @@ impl Evaluator {
                                 if matches!(value, Value::Null) {
                                     null_results += 1;
                                     None
-                                } else if let Some(f) = crate::graph::query::value_operations::value_to_f64(&value) {
+                                } else if let Some(f) =
+                                    crate::graph::query::value_operations::value_to_f64(&value)
+                                {
                                     successful_evals += 1;
                                     Some(f)
                                 } else {
@@ -367,11 +369,21 @@ impl Evaluator {
 
                 // Use shared aggregation functions (population std: divides by N)
                 let result = match agg_type {
-                    AggregateType::Sum => crate::graph::query::value_operations::aggregate_sum(&values),
-                    AggregateType::Mean => crate::graph::query::value_operations::aggregate_mean(&values).unwrap(),
-                    AggregateType::Std => crate::graph::query::value_operations::aggregate_std(&values, true).unwrap(),
-                    AggregateType::Min => crate::graph::query::value_operations::aggregate_min(&values).unwrap(),
-                    AggregateType::Max => crate::graph::query::value_operations::aggregate_max(&values).unwrap(),
+                    AggregateType::Sum => {
+                        crate::graph::query::value_operations::aggregate_sum(&values)
+                    }
+                    AggregateType::Mean => {
+                        crate::graph::query::value_operations::aggregate_mean(&values).unwrap()
+                    }
+                    AggregateType::Std => {
+                        crate::graph::query::value_operations::aggregate_std(&values, true).unwrap()
+                    }
+                    AggregateType::Min => {
+                        crate::graph::query::value_operations::aggregate_min(&values).unwrap()
+                    }
+                    AggregateType::Max => {
+                        crate::graph::query::value_operations::aggregate_max(&values).unwrap()
+                    }
                     AggregateType::Count => values.len() as f64,
                 };
 

@@ -8,9 +8,9 @@ use pyo3::IntoPyObjectExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::graph::io::io_operations;
 use crate::graph::schema;
 use crate::graph::storage::GraphRead;
-use crate::graph::io::io_operations;
 use crate::graph::KnowledgeGraph;
 
 #[pymethods]

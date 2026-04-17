@@ -317,7 +317,9 @@ impl CypherParser {
     }
 
     /// Parse one or more comma-separated patterns in MATCH
-    fn parse_match_patterns(&mut self) -> Result<Vec<crate::graph::query::pattern_matching::Pattern>, String> {
+    fn parse_match_patterns(
+        &mut self,
+    ) -> Result<Vec<crate::graph::query::pattern_matching::Pattern>, String> {
         let mut patterns = Vec::new();
 
         loop {
@@ -345,7 +347,9 @@ impl CypherParser {
 
     /// Parse patterns inside EXISTS { ... } — same as parse_match_patterns but uses
     /// extract_exists_pattern_string which stops at RBrace instead of clause boundaries.
-    fn parse_exists_patterns(&mut self) -> Result<Vec<crate::graph::query::pattern_matching::Pattern>, String> {
+    fn parse_exists_patterns(
+        &mut self,
+    ) -> Result<Vec<crate::graph::query::pattern_matching::Pattern>, String> {
         let mut patterns = Vec::new();
 
         loop {
@@ -634,7 +638,8 @@ impl CypherParser {
                                 // Support EXISTS((...)) — inner parens are the pattern
                 if self.check(&CypherToken::LParen) {
                     let pattern_str = self.extract_pattern_string()?;
-                    let pattern = crate::graph::query::pattern_matching::parse_pattern(&pattern_str)?;
+                    let pattern =
+                        crate::graph::query::pattern_matching::parse_pattern(&pattern_str)?;
                     self.expect(&CypherToken::RParen)?; // consume outer )
                     return Ok(Predicate::Exists {
                         patterns: vec![pattern],

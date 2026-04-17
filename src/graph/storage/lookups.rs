@@ -1,6 +1,6 @@
 // src/graph/storage/lookups.rs
-use crate::graph::schema::{Graph, InternedKey};
 use crate::datatypes::Value;
+use crate::graph::schema::{Graph, InternedKey};
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use serde::{Deserialize, Serialize};

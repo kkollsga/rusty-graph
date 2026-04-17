@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 use crate::graph::introspection::reporting::OperationReports;
 use crate::graph::schema::{CowSelection, PlanStep};
+use crate::graph::storage::lookups;
 use crate::graph::{
     centrality_results_to_dataframe, centrality_results_to_py_dict, community_results_to_py,
     cypher, KnowledgeGraph, TemporalContext,
 };
-use crate::graph::storage::lookups;
 
 #[pymethods]
 impl KnowledgeGraph {
@@ -94,7 +94,10 @@ impl KnowledgeGraph {
                 // Build path info list
                 let path_list = PyList::empty(py);
                 for &node_idx in &path_result.path {
-                    if let Some(info) = crate::graph::algorithms::graph_algorithms::get_node_info(&self.inner, node_idx) {
+                    if let Some(info) = crate::graph::algorithms::graph_algorithms::get_node_info(
+                        &self.inner,
+                        node_idx,
+                    ) {
                         let node_dict = PyDict::new(py);
                         node_dict.set_item("type", &info.node_type)?;
                         node_dict.set_item("title", &info.title)?;
@@ -105,8 +108,10 @@ impl KnowledgeGraph {
                 result_dict.set_item("path", path_list)?;
 
                 // Build connections list
-                let connections =
-                    crate::graph::algorithms::graph_algorithms::get_path_connections(&self.inner, &path_result.path);
+                let connections = crate::graph::algorithms::graph_algorithms::get_path_connections(
+                    &self.inner,
+                    &path_result.path,
+                );
                 let conn_list = PyList::empty(py);
                 for conn in connections {
                     match conn {
@@ -167,11 +172,13 @@ impl KnowledgeGraph {
             })?;
 
         // Find shortest path cost only (no path reconstruction — faster)
-        Ok(crate::graph::algorithms::graph_algorithms::shortest_path_cost(
-            &self.inner,
-            source_idx,
-            target_idx,
-        ))
+        Ok(
+            crate::graph::algorithms::graph_algorithms::shortest_path_cost(
+                &self.inner,
+                source_idx,
+                target_idx,
+            ),
+        )
     }
 
     /// Batch shortest path lengths — computes distances for multiple pairs at once.
@@ -220,7 +227,10 @@ impl KnowledgeGraph {
             index_pairs.push((src_idx, tgt_idx));
         }
 
-        let results = crate::graph::algorithms::graph_algorithms::shortest_path_cost_batch(&self.inner, &index_pairs);
+        let results = crate::graph::algorithms::graph_algorithms::shortest_path_cost_batch(
+            &self.inner,
+            &index_pairs,
+        );
 
         let result_list = PyList::empty(py);
         for result in results {
@@ -463,7 +473,9 @@ impl KnowledgeGraph {
             // Build path info list
             let path_list = PyList::empty(py);
             for &node_idx in &path {
-                if let Some(info) = crate::graph::algorithms::graph_algorithms::get_node_info(&self.inner, node_idx) {
+                if let Some(info) =
+                    crate::graph::algorithms::graph_algorithms::get_node_info(&self.inner, node_idx)
+                {
                     let node_dict = PyDict::new(py);
                     node_dict.set_item("type", &info.node_type)?;
                     node_dict.set_item("title", &info.title)?;
@@ -474,7 +486,10 @@ impl KnowledgeGraph {
             path_dict.set_item("path", path_list)?;
 
             // Build connections list
-            let connections = crate::graph::algorithms::graph_algorithms::get_path_connections(&self.inner, &path);
+            let connections = crate::graph::algorithms::graph_algorithms::get_path_connections(
+                &self.inner,
+                &path,
+            );
             let conn_list = PyList::empty(py);
             for conn in connections {
                 match conn {
@@ -632,8 +647,11 @@ impl KnowledgeGraph {
         })?;
 
         for node_idx in level.iter_node_indices() {
-            if let Some(info) = crate::graph::algorithms::graph_algorithms::get_node_info(&self.inner, node_idx) {
-                let degree = crate::graph::algorithms::graph_algorithms::node_degree(&self.inner, node_idx);
+            if let Some(info) =
+                crate::graph::algorithms::graph_algorithms::get_node_info(&self.inner, node_idx)
+            {
+                let degree =
+                    crate::graph::algorithms::graph_algorithms::node_degree(&self.inner, node_idx);
                 result_dict.set_item(&info.title, degree)?;
             }
         }
@@ -991,8 +1009,12 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
 
-        crate::graph::mutation::subgraph::expand_selection(&self.inner, &mut new_kg.selection, hops)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        crate::graph::mutation::subgraph::expand_selection(
+            &self.inner,
+            &mut new_kg.selection,
+            hops,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Record actual result - use node_count() to avoid allocation
         let actual = new_kg
@@ -1030,8 +1052,9 @@ impl KnowledgeGraph {
     ///     subgraph.save('north_sea_region.kgl')
     ///     ```
     fn to_subgraph(&self) -> PyResult<Self> {
-        let extracted = crate::graph::mutation::subgraph::extract_subgraph(&self.inner, &self.selection)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        let extracted =
+            crate::graph::mutation::subgraph::extract_subgraph(&self.inner, &self.selection)
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         Ok(KnowledgeGraph {
             inner: Arc::new(extracted),
@@ -1058,8 +1081,9 @@ impl KnowledgeGraph {
     ///         - 'node_types': Dict of node type -> count
     ///         - 'connection_types': Dict of connection type -> count
     fn subgraph_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let stats = crate::graph::mutation::subgraph::get_subgraph_stats(&self.inner, &self.selection)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        let stats =
+            crate::graph::mutation::subgraph::get_subgraph_stats(&self.inner, &self.selection)
+                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         let result_dict = PyDict::new(py);
         result_dict.set_item("node_count", stats.node_count)?;

@@ -93,7 +93,9 @@ fn edge_matches_conditions(
     conditions.iter().all(|(field, condition)| {
         let ik = InternedKey::from_str(field);
         match properties.iter().find(|(k, _)| *k == ik).map(|(_, v)| v) {
-            Some(value) => crate::graph::query::filtering_methods::matches_condition(value, condition),
+            Some(value) => {
+                crate::graph::query::filtering_methods::matches_condition(value, condition)
+            }
             None => {
                 // Missing field is treated as null
                 matches!(condition, FilterCondition::IsNull)
@@ -863,7 +865,9 @@ fn spatial_contains_traversal(
                 // resolve='geometry': polygon-in-polygon containment
                 if let Some(tgt_geom) = resolve_node_geom(tgt_node, target_spatial, geometry_field)
                 {
-                    if crate::graph::features::spatial::geometry_contains_geometry(&src_geom, &tgt_geom) {
+                    if crate::graph::features::spatial::geometry_contains_geometry(
+                        &src_geom, &tgt_geom,
+                    ) {
                         matched.push(tgt_idx);
                     }
                 }
@@ -1096,7 +1100,9 @@ fn distance_point_mode(
 
         let mut matched = Vec::new();
         for tgt in &target_locs {
-            let dist = crate::graph::features::spatial::geodesic_distance(src_lat, src_lon, tgt.lat, tgt.lon);
+            let dist = crate::graph::features::spatial::geodesic_distance(
+                src_lat, src_lon, tgt.lat, tgt.lon,
+            );
             if dist <= max_distance_m {
                 matched.push(tgt.idx);
             }
@@ -1177,10 +1183,12 @@ fn distance_closest_mode(
                     // Both have geometry: use point_to_geometry for better approximation
                     // (try both directions, take minimum)
                     let d1 = src_point.and_then(|(lat, lon)| {
-                        crate::graph::features::spatial::point_to_geometry_distance_m(lat, lon, tg).ok()
+                        crate::graph::features::spatial::point_to_geometry_distance_m(lat, lon, tg)
+                            .ok()
                     });
                     let d2 = tgt_point.and_then(|(lat, lon)| {
-                        crate::graph::features::spatial::point_to_geometry_distance_m(lat, lon, sg).ok()
+                        crate::graph::features::spatial::point_to_geometry_distance_m(lat, lon, sg)
+                            .ok()
                     });
                     match (d1, d2) {
                         (Some(a), Some(b)) => Some(a.min(b)),
@@ -1188,27 +1196,32 @@ fn distance_closest_mode(
                         (None, Some(b)) => Some(b),
                         (None, None) => {
                             // Last resort: centroid-to-centroid
-                            crate::graph::features::spatial::geometry_to_geometry_distance_m(sg, tg).ok()
+                            crate::graph::features::spatial::geometry_to_geometry_distance_m(sg, tg)
+                                .ok()
                         }
                     }
                 }
                 (Some(sg), None) => {
                     // Source has geometry, target is a point
                     tgt_point.and_then(|(lat, lon)| {
-                        crate::graph::features::spatial::point_to_geometry_distance_m(lat, lon, sg).ok()
+                        crate::graph::features::spatial::point_to_geometry_distance_m(lat, lon, sg)
+                            .ok()
                     })
                 }
                 (None, Some(tg)) => {
                     // Source is a point, target has geometry
                     src_point.and_then(|(lat, lon)| {
-                        crate::graph::features::spatial::point_to_geometry_distance_m(lat, lon, tg).ok()
+                        crate::graph::features::spatial::point_to_geometry_distance_m(lat, lon, tg)
+                            .ok()
                     })
                 }
                 (None, None) => {
                     // Both are points — fallback to geodesic
                     match (src_point, tgt_point) {
                         (Some((lat1, lon1)), Some((lat2, lon2))) => {
-                            Some(crate::graph::features::spatial::geodesic_distance(lat1, lon1, lat2, lon2))
+                            Some(crate::graph::features::spatial::geodesic_distance(
+                                lat1, lon1, lat2, lon2,
+                            ))
                         }
                         _ => None,
                     }
@@ -1278,10 +1291,18 @@ fn semantic_score_traversal(
         })?;
 
     let similarity_fn = match metric {
-        crate::graph::algorithms::vector_search::DistanceMetric::Cosine => crate::graph::algorithms::vector_search::cosine_similarity,
-        crate::graph::algorithms::vector_search::DistanceMetric::DotProduct => crate::graph::algorithms::vector_search::dot_product,
-        crate::graph::algorithms::vector_search::DistanceMetric::Euclidean => crate::graph::algorithms::vector_search::neg_euclidean_distance,
-        crate::graph::algorithms::vector_search::DistanceMetric::Poincare => crate::graph::algorithms::vector_search::neg_poincare_distance,
+        crate::graph::algorithms::vector_search::DistanceMetric::Cosine => {
+            crate::graph::algorithms::vector_search::cosine_similarity
+        }
+        crate::graph::algorithms::vector_search::DistanceMetric::DotProduct => {
+            crate::graph::algorithms::vector_search::dot_product
+        }
+        crate::graph::algorithms::vector_search::DistanceMetric::Euclidean => {
+            crate::graph::algorithms::vector_search::neg_euclidean_distance
+        }
+        crate::graph::algorithms::vector_search::DistanceMetric::Poincare => {
+            crate::graph::algorithms::vector_search::neg_poincare_distance
+        }
     };
     let threshold_f32 = threshold as f32;
 
@@ -1338,8 +1359,6 @@ fn cluster_traversal(
     eps: Option<f64>,
     min_samples: Option<usize>,
 ) -> Result<(), String> {
-    
-
     let level_idx = selection.get_level_count().saturating_sub(1);
     let level = selection
         .get_level(level_idx)

@@ -364,9 +364,14 @@ impl KnowledgeGraph {
     ) -> PyResult<Self> {
         let geometry_field = resolve_geometry_field(&self.inner, &self.selection, geometry_field);
 
-        let matching_nodes =
-            crate::graph::features::spatial::contains_point(&self.inner, &self.selection, geometry_field, lat, lon)
-                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        let matching_nodes = crate::graph::features::spatial::contains_point(
+            &self.inner,
+            &self.selection,
+            geometry_field,
+            lat,
+            lon,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Create new selection with matching nodes
         let mut new_kg = self.clone();
@@ -422,9 +427,13 @@ impl KnowledgeGraph {
         let wkt_string = extract_wkt(query_wkt)?;
         let geometry_field = resolve_geometry_field(&self.inner, &self.selection, geometry_field);
 
-        let matching_nodes =
-            crate::graph::features::spatial::intersects_geometry(&self.inner, &self.selection, geometry_field, &wkt_string)
-                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        let matching_nodes = crate::graph::features::spatial::intersects_geometry(
+            &self.inner,
+            &self.selection,
+            geometry_field,
+            &wkt_string,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Create new selection with matching nodes
         let mut new_kg = self.clone();
@@ -477,7 +486,13 @@ impl KnowledgeGraph {
             resolve_lat_lon_fields(&self.inner, &self.selection, lat_field, lon_field);
         let geom_fb = resolve_geom_fallback(&self.inner, &self.selection);
 
-        match crate::graph::features::spatial::get_bounds(&self.inner, &self.selection, lat_field, lon_field, geom_fb) {
+        match crate::graph::features::spatial::get_bounds(
+            &self.inner,
+            &self.selection,
+            lat_field,
+            lon_field,
+            geom_fb,
+        ) {
             Some((min_lat, max_lat, min_lon, max_lon)) => {
                 if as_shapely {
                     make_shapely_box(py, min_lat, max_lat, min_lon, max_lon)

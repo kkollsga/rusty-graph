@@ -171,7 +171,6 @@ impl ResultView {
         temporal_context: &super::super::TemporalContext,
     ) -> Self {
         use crate::datatypes::values::format_value;
-        
 
         let nodes_vec: Vec<&NodeData> = node_indices
             .iter()
@@ -250,10 +249,19 @@ impl ResultView {
             let ct_str = edge_data.connection_type_str(&graph.interner);
             if let Some(configs) = graph.temporal_edge_configs.get(ct_str) {
                 if let Some(d) = &ref_date {
-                    return crate::graph::features::temporal::is_temporally_valid_multi(&edge_data.properties, configs, d);
+                    return crate::graph::features::temporal::is_temporally_valid_multi(
+                        &edge_data.properties,
+                        configs,
+                        d,
+                    );
                 }
                 if let Some((s, e)) = &range_dates {
-                    return crate::graph::features::temporal::overlaps_range_multi(&edge_data.properties, configs, s, e);
+                    return crate::graph::features::temporal::overlaps_range_multi(
+                        &edge_data.properties,
+                        configs,
+                        s,
+                        e,
+                    );
                 }
             }
             true

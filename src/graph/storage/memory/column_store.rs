@@ -8,8 +8,8 @@
 // and MmapBytes for string data. Mixed columns stay heap-only (Vec<Value>).
 
 use crate::datatypes::values::Value;
-use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
 use crate::graph::schema::{InternedKey, StringInterner, TypeSchema};
+use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
 use chrono::NaiveDate;
 use std::collections::HashMap;
 use std::io;

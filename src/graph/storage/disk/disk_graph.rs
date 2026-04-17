@@ -13,8 +13,8 @@ use crate::graph::query::graph_iterators::{
     DiskEdgeIndices, DiskEdgeReferences, DiskEdges, DiskEdgesConnecting, DiskNeighbors,
     DiskNodeIndices,
 };
-use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
+use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::Direction;
 use std::cell::UnsafeCell;
@@ -110,7 +110,8 @@ pub struct DiskGraph {
     node_arena: UnsafeCell<Vec<NodeData>>,
 
     // ── Column stores for node properties (Arc refs, data mmap'd) ──
-    pub(crate) column_stores: HashMap<InternedKey, Arc<crate::graph::storage::memory::column_store::ColumnStore>>,
+    pub(crate) column_stores:
+        HashMap<InternedKey, Arc<crate::graph::storage::memory::column_store::ColumnStore>>,
 
     // ── Edge CSR (mmap'd) ──
     out_offsets: MmapOrVec<u64>,

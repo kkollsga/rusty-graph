@@ -1587,7 +1587,8 @@ pub struct DirGraph {
     /// Timeseries configuration per node type: type_name → TimeseriesConfig.
     /// Declares composite key labels and known channels for auto-resolution.
     #[serde(default)]
-    pub(crate) timeseries_configs: HashMap<String, crate::graph::features::timeseries::TimeseriesConfig>,
+    pub(crate) timeseries_configs:
+        HashMap<String, crate::graph::features::timeseries::TimeseriesConfig>,
     /// Per-node timeseries storage: NodeIndex.index() → NodeTimeseries.
     /// Stored separately from NodeData.properties (like embeddings).
     /// Persisted as a separate section in v2 .kgl files.
@@ -1607,7 +1608,8 @@ pub struct DirGraph {
     /// use `PropertyStorage::Columnar` instead of `Compact`.
     /// Not persisted — rebuilt on load if columnar mode is enabled.
     #[serde(skip)]
-    pub(crate) column_stores: HashMap<String, Arc<crate::graph::storage::memory::column_store::ColumnStore>>,
+    pub(crate) column_stores:
+        HashMap<String, Arc<crate::graph::storage::memory::column_store::ColumnStore>>,
     /// Memory limit for columnar heap storage. If Some(n), `enable_columnar()`
     /// will spill columns to temp files when total heap_bytes exceeds n.
     #[serde(skip)]
@@ -2847,10 +2849,16 @@ impl DirGraph {
         // Extract the StableDiGraph and build DiskGraph
         let disk_graph = match &mut self.graph {
             GraphBackend::Memory(g) => {
-                crate::graph::storage::disk::disk_graph::DiskGraph::from_stable_digraph(g.inner_mut(), &data_dir)
+                crate::graph::storage::disk::disk_graph::DiskGraph::from_stable_digraph(
+                    g.inner_mut(),
+                    &data_dir,
+                )
             }
             GraphBackend::Mapped(g) => {
-                crate::graph::storage::disk::disk_graph::DiskGraph::from_stable_digraph(g.inner_mut(), &data_dir)
+                crate::graph::storage::disk::disk_graph::DiskGraph::from_stable_digraph(
+                    g.inner_mut(),
+                    &data_dir,
+                )
             }
             GraphBackend::Disk(_) => return Err("Already in disk mode".to_string()),
             GraphBackend::Recording(_) => {

@@ -439,8 +439,8 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::storage::disk::disk_graph::DiskGraph;
     use crate::graph::schema::{EdgeData, GraphBackend, MappedGraph, MemoryGraph, StringInterner};
+    use crate::graph::storage::disk::disk_graph::DiskGraph;
     use std::collections::HashMap;
     use tempfile::TempDir;
 

@@ -1,10 +1,10 @@
 // src/graph/query/calculations.rs
-use crate::graph::features::equation_parser::{AggregateType, Evaluator, Expr, Parser};
-use crate::graph::query::statistics_methods::{get_parent_child_pairs, ParentChildPair};
-use crate::graph::storage::lookups::TypeLookup;
 use crate::datatypes::values::Value;
+use crate::graph::features::equation_parser::{AggregateType, Evaluator, Expr, Parser};
 use crate::graph::introspection::reporting::CalculationOperationReport; // Remove unused OperationReport import
+use crate::graph::query::statistics_methods::{get_parent_child_pairs, ParentChildPair};
 use crate::graph::schema::{CurrentSelection, DirGraph, NodeData, StringInterner};
+use crate::graph::storage::lookups::TypeLookup;
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
@@ -257,8 +257,11 @@ pub fn process_equation(
     }
 
     // Update the node properties with verified node indices
-    let update_result =
-        crate::graph::mutation::maintain_graph::update_node_properties(graph, &nodes_to_update, target_property)?;
+    let update_result = crate::graph::mutation::maintain_graph::update_node_properties(
+        graph,
+        &nodes_to_update,
+        target_property,
+    )?;
 
     // Update nodes_updated from the result (now used)
     let nodes_updated = update_result.nodes_updated;
@@ -682,14 +685,17 @@ pub fn store_count_results(
     }
 
     // Use the optimized batch update (which now returns a NodeOperationReport)
-    let update_result =
-        match crate::graph::mutation::maintain_graph::update_node_properties(graph, &nodes_to_update, target_property) {
-            Ok(result) => result,
-            Err(e) => {
-                errors.push(format!("Failed to update node properties: {}", e));
-                return Err(format!("Failed to update node properties: {}", e));
-            }
-        };
+    let update_result = match crate::graph::mutation::maintain_graph::update_node_properties(
+        graph,
+        &nodes_to_update,
+        target_property,
+    ) {
+        Ok(result) => result,
+        Err(e) => {
+            errors.push(format!("Failed to update node properties: {}", e));
+            return Err(format!("Failed to update node properties: {}", e));
+        }
+    };
 
     // Add any errors from the update operation
     for error in &update_result.errors {

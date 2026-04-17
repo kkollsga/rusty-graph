@@ -12,7 +12,7 @@
 //   [section]  embeddings.zst (optional)
 //   [section]  timeseries.zst (optional)
 
-use crate::graph::storage::memory::column_store::ColumnStore;
+use crate::graph::features::timeseries::{NodeTimeseries, TimeseriesConfig};
 use crate::graph::introspection::reporting::OperationReports;
 use crate::graph::schema::{
     CompositeIndexKey, ConnectionTypeInfo, ConnectivityTriple, CowSelection, DirGraph,
@@ -20,8 +20,8 @@ use crate::graph::schema::{
     SerdeDeserializeGuard, SerdeSerializeGuard, SpatialConfig, StringInterner,
     StripPropertiesGuard, TemporalConfig,
 };
+use crate::graph::storage::memory::column_store::ColumnStore;
 use crate::graph::storage::{GraphRead, GraphWrite};
-use crate::graph::features::timeseries::{NodeTimeseries, TimeseriesConfig};
 use crate::graph::{KnowledgeGraph, TemporalContext};
 use bincode::Options;
 use flate2::read::GzDecoder;
@@ -498,7 +498,8 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
     }
 
     // Load DiskGraph — compressed files decompressed to temp dir, then mmap'd
-    let (disk_graph, temp_dir) = crate::graph::storage::disk::disk_graph::DiskGraph::load_from_dir(dir)?;
+    let (disk_graph, temp_dir) =
+        crate::graph::storage::disk::disk_graph::DiskGraph::load_from_dir(dir)?;
     // Prefetch hot mmap regions (offset arrays + node_slots) into page cache.
     // Non-blocking — kernel reads asynchronously while we continue loading metadata.
     disk_graph.prefetch_hot_regions();
@@ -597,9 +598,9 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
 
         for tm in type_metas {
             let store = tm.to_mmap_store(std::sync::Arc::clone(&mmap_arc));
-            let cs = crate::graph::storage::memory::column_store::ColumnStore::from_mmap_store(std::sync::Arc::new(
-                store,
-            ));
+            let cs = crate::graph::storage::memory::column_store::ColumnStore::from_mmap_store(
+                std::sync::Arc::new(store),
+            );
             graph.column_stores.insert(tm.type_name, Arc::new(cs));
         }
     } else {
@@ -633,14 +634,15 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
                             .get(&type_name)
                             .map(|v| v.len() as u32)
                             .unwrap_or(0);
-                        let store = crate::graph::storage::memory::column_store::ColumnStore::load_packed(
-                            schema,
-                            &type_meta,
-                            &graph.interner,
-                            &packed,
-                            row_count,
-                            None,
-                        )?;
+                        let store =
+                            crate::graph::storage::memory::column_store::ColumnStore::load_packed(
+                                schema,
+                                &type_meta,
+                                &graph.interner,
+                                &packed,
+                                row_count,
+                                None,
+                            )?;
                         graph.column_stores.insert(type_name, Arc::new(store));
                     }
                 }

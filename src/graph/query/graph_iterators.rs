@@ -6,9 +6,11 @@
 // GraphEdgeRef implements petgraph::visit::EdgeRef so callers that import
 // that trait can call .source(), .target(), .weight(), .id() unchanged.
 
-use crate::graph::storage::disk::disk_graph::{CsrEdge, DiskGraph, DiskNodeSlot, EdgeEndpoints, TOMBSTONE_EDGE};
-use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use crate::graph::schema::{EdgeData, NodeData};
+use crate::graph::storage::disk::disk_graph::{
+    CsrEdge, DiskGraph, DiskNodeSlot, EdgeEndpoints, TOMBSTONE_EDGE,
+};
+use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
