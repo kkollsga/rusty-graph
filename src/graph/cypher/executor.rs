@@ -2351,6 +2351,7 @@ impl<'a> CypherExecutor<'a> {
         // cardinality (thousands to tens of thousands), not the edge count.
         let mut result_rows = result_rows;
         if let Some(ref having) = return_clause.having {
+            augment_rows_with_aggregate_keys(&mut result_rows, &return_clause.items);
             result_rows.retain(|row| self.evaluate_predicate(having, row).unwrap_or(false));
         }
 
@@ -2614,7 +2615,7 @@ impl<'a> CypherExecutor<'a> {
                             // DISTINCT aggregation not supported by inline — shouldn't reach here
                             Value::Null
                         } else {
-                            match name.to_lowercase().as_str() {
+                            match name.as_str() {
                                 "count" => Value::Int64(acc.counts[ai]),
                                 "sum" => {
                                     if acc.counts[ai] == 0 {
@@ -2664,6 +2665,7 @@ impl<'a> CypherExecutor<'a> {
 
         // Handle HAVING
         if let Some(ref having) = return_clause.having {
+            augment_rows_with_aggregate_keys(&mut result_rows, &return_clause.items);
             result_rows.retain(|row| self.evaluate_predicate(having, row).unwrap_or(false));
         }
 
@@ -3372,6 +3374,16 @@ impl<'a> CypherExecutor<'a> {
                 Ok(l ^ r)
             }
             Predicate::Not(inner) => Ok(!self.evaluate_predicate(inner, row)?),
+            Predicate::LabelCheck { variable, label } => {
+                // True iff the variable is bound to a node whose type matches `label`.
+                // Unbound (OPTIONAL MATCH) or non-node bindings are false.
+                if let Some(&idx) = row.node_bindings.get(variable) {
+                    if let Some(node) = self.graph.graph.node_weight(idx) {
+                        return Ok(node.node_type_str(&self.graph.interner) == label);
+                    }
+                }
+                Ok(false)
+            }
             Predicate::IsNull(expr) => {
                 let val = self.evaluate_expression(expr, row)?;
                 Ok(matches!(val, Value::Null))
@@ -3560,7 +3572,7 @@ impl<'a> CypherExecutor<'a> {
             Expression::FunctionCall { name, args, .. } => (name, args),
             _ => return None,
         };
-        if !name.eq_ignore_ascii_case("vector_score") || args.len() < 3 || args.len() > 4 {
+        if name != "vector_score" || args.len() < 3 || args.len() > 4 {
             return None;
         }
 
@@ -3676,7 +3688,7 @@ impl<'a> CypherExecutor<'a> {
         inclusive: bool,
     ) -> Option<DistanceFilterSpec> {
         if let Expression::FunctionCall { name, args, .. } = expr {
-            if name.to_lowercase() != "distance" {
+            if name != "distance" {
                 return None;
             }
             match args.len() {
@@ -3725,7 +3737,7 @@ impl<'a> CypherExecutor<'a> {
     /// Extract (variable, lat_prop, lon_prop) from point(n.lat, n.lon)
     fn extract_point_var_props(expr: &Expression) -> Option<(String, String, String)> {
         if let Expression::FunctionCall { name, args, .. } = expr {
-            if name.to_lowercase() != "point" || args.len() != 2 {
+            if name != "point" || args.len() != 2 {
                 return None;
             }
             let (var1, lat_prop) = Self::extract_prop_access(&args[0])?;
@@ -3747,7 +3759,7 @@ impl<'a> CypherExecutor<'a> {
             return Some((*lat, *lon));
         }
         if let Expression::FunctionCall { name, args, .. } = expr {
-            if name.to_lowercase() != "point" || args.len() != 2 {
+            if name != "point" || args.len() != 2 {
                 return None;
             }
             let lat = Self::extract_literal_f64(&args[0])?;
@@ -3821,7 +3833,7 @@ impl<'a> CypherExecutor<'a> {
     /// Extract a ContainsFilterSpec from a contains() function call expression.
     fn extract_contains_call(expr: &Expression, negated: bool) -> Option<ContainsFilterSpec> {
         if let Expression::FunctionCall { name, args, .. } = expr {
-            if !name.eq_ignore_ascii_case("contains") || args.len() != 2 {
+            if name != "contains" || args.len() != 2 {
                 return None;
             }
             // Arg 1: must be a bare Variable (node with geometry config)
@@ -3840,7 +3852,7 @@ impl<'a> CypherExecutor<'a> {
                     name: pname,
                     args: pargs,
                     ..
-                } if pname.eq_ignore_ascii_case("point") && pargs.len() == 2 => {
+                } if pname == "point" && pargs.len() == 2 => {
                     let lat = Self::extract_literal_f64(&pargs[0])?;
                     let lon = Self::extract_literal_f64(&pargs[1])?;
                     ContainsTarget::ConstantPoint(lat, lon)
@@ -3874,8 +3886,12 @@ impl<'a> CypherExecutor<'a> {
                 if is_aggregate_expression(expr) {
                     return false;
                 }
-                // Check that the function name is a known scalar (not aggregate)
-                let _ = name;
+                // Non-deterministic functions must be evaluated per-row even
+                // when all args are constants — otherwise constant folding
+                // collapses them to a single value for the whole query.
+                if matches!(name.as_str(), "rand" | "random" | "randomuuid") {
+                    return false;
+                }
                 args.iter().all(Self::is_row_independent)
             }
             Expression::Add(l, r)
@@ -4061,6 +4077,7 @@ impl<'a> CypherExecutor<'a> {
                 expr: self.fold_constants_expr(expr),
                 list_expr: self.fold_constants_expr(list_expr),
             },
+            Predicate::LabelCheck { .. } => pred.clone(),
         }
     }
 
@@ -4142,6 +4159,17 @@ impl<'a> CypherExecutor<'a> {
                 Ok(arithmetic_negate(&val))
             }
             Expression::FunctionCall { name, args, .. } => {
+                // HAVING context: aggregate function calls reference pre-computed
+                // projected values. `count(m)` in HAVING resolves to the matching
+                // column in the row (stored under alias or under its expression
+                // string — augment_rows_with_aggregate_keys ensures both forms
+                // are present before HAVING is evaluated).
+                if is_aggregate_expression(expr) {
+                    let col_key = expression_to_string(expr);
+                    if let Some(val) = row.projected.get(&col_key) {
+                        return Ok(val.clone());
+                    }
+                }
                 // Non-aggregate functions evaluated per-row
                 self.evaluate_scalar_function(name, args, row)
             }
@@ -4176,12 +4204,12 @@ impl<'a> CypherExecutor<'a> {
                 // Without this, nodes(p) returns a JSON string that parse_list_value
                 // cannot split correctly (commas inside JSON objects).
                 if let Expression::FunctionCall { name, args, .. } = list_expr.as_ref() {
-                    let fn_lower = name.to_lowercase();
-                    if fn_lower == "nodes" || fn_lower == "relationships" || fn_lower == "rels" {
+                    let fn_name = name.as_str();
+                    if fn_name == "nodes" || fn_name == "relationships" || fn_name == "rels" {
                         if let Some(Expression::Variable(path_var)) = args.first() {
                             if let Some(path) = row.path_bindings.get(path_var) {
                                 let path = path.clone();
-                                return if fn_lower == "nodes" {
+                                return if fn_name == "nodes" {
                                     self.list_comp_nodes(variable, &path, filter, map_expr, row)
                                 } else {
                                     self.list_comp_relationships(
@@ -4294,7 +4322,7 @@ impl<'a> CypherExecutor<'a> {
             Expression::IndexAccess { expr, index } => {
                 // Fast path: labels(n)[0] — bypass JSON round-trip
                 if let Expression::FunctionCall { name, args, .. } = expr.as_ref() {
-                    if name.eq_ignore_ascii_case("labels") {
+                    if name == "labels" {
                         if let Some(Expression::Variable(var)) = args.first() {
                             if let Expression::Literal(Value::Int64(lit_idx)) = index.as_ref() {
                                 if *lit_idx == 0 {
@@ -4995,7 +5023,7 @@ impl<'a> CypherExecutor<'a> {
         args: &[Expression],
         row: &ResultRow,
     ) -> Result<Value, String> {
-        match name.to_lowercase().as_str() {
+        match name {
             "toupper" | "touppercase" => {
                 let val = self.evaluate_expression(&args[0], row)?;
                 match val {
@@ -5297,19 +5325,18 @@ impl<'a> CypherExecutor<'a> {
                 let start_val = self.evaluate_expression(&args[1], row)?;
                 match (&str_val, &start_val) {
                     (Value::String(s), Value::Int64(start)) => {
-                        let chars: Vec<char> = s.chars().collect();
-                        let start_idx = (*start as usize).min(chars.len());
-                        let substr = if args.len() == 3 {
+                        let start_idx = (*start).max(0) as usize;
+                        let substr: String = if args.len() == 3 {
                             let len_val = self.evaluate_expression(&args[2], row)?;
                             match len_val {
                                 Value::Int64(len) => {
-                                    let end_idx = (start_idx + len as usize).min(chars.len());
-                                    chars[start_idx..end_idx].iter().collect()
+                                    let take = (len).max(0) as usize;
+                                    s.chars().skip(start_idx).take(take).collect()
                                 }
                                 _ => return Ok(Value::Null),
                             }
                         } else {
-                            chars[start_idx..].iter().collect()
+                            s.chars().skip(start_idx).collect()
                         };
                         Ok(Value::String(substr))
                     }
@@ -5791,7 +5818,7 @@ impl<'a> CypherExecutor<'a> {
                 let (ts, channel, _config) = self.resolve_timeseries_channel(&args[0], row)?;
                 let (lo, hi) = self.resolve_ts_range(ts, &args[1..], row)?;
                 let slice = &channel[lo..hi];
-                match name.to_lowercase().as_str() {
+                match name {
                     "ts_sum" => Ok(Value::Float64(timeseries::ts_sum(slice))),
                     "ts_avg" => {
                         let v = timeseries::ts_avg(slice);
@@ -6043,18 +6070,44 @@ impl<'a> CypherExecutor<'a> {
             }
             "pi" => Ok(Value::Float64(std::f64::consts::PI)),
             "rand" | "random" => {
-                // Simple time-seeded PRNG (no external crate needed)
+                // Thread-local xorshift64 PRNG. Seeded once per thread from
+                // SystemTime mixed with a monotonic per-thread counter;
+                // subsequent calls just advance the state. Avoids per-call
+                // SystemTime::now() overhead and guarantees distinct values
+                // within a tight per-row loop. The counter splat ensures
+                // parallel rayon workers don't collide on the same nanosecond.
+                use std::cell::Cell;
+                use std::sync::atomic::{AtomicU64, Ordering};
                 use std::time::SystemTime;
-                let seed = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos();
-                // xorshift64
-                let mut x = seed as u64 | 1;
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                Ok(Value::Float64((x as f64) / (u64::MAX as f64)))
+                static THREAD_COUNTER: AtomicU64 = AtomicU64::new(0);
+                thread_local! {
+                    static XORSHIFT_STATE: Cell<u64> = {
+                        let nanos = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos() as u64;
+                        let counter = THREAD_COUNTER.fetch_add(1, Ordering::Relaxed);
+                        // Mix counter via splitmix64-ish avalanche so adjacent
+                        // thread IDs produce well-separated seeds.
+                        let mut seed = nanos.wrapping_add(counter.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                        seed ^= seed >> 30;
+                        seed = seed.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                        seed ^= seed >> 27;
+                        seed = seed.wrapping_mul(0x94D0_49BB_1331_11EB);
+                        seed ^= seed >> 31;
+                        Cell::new(seed | 1)
+                    };
+                }
+                let val = XORSHIFT_STATE.with(|state| {
+                    let mut x = state.get();
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    state.set(x);
+                    // Use top 53 bits → f64 mantissa to avoid precision loss.
+                    ((x >> 11) as f64) / ((1u64 << 53) as f64)
+                });
+                Ok(Value::Float64(val))
             }
 
             // ── Temporal filtering functions ──────────────────────────────
@@ -6430,6 +6483,7 @@ impl<'a> CypherExecutor<'a> {
 
         // Apply HAVING filter (post-aggregation)
         if let Some(ref having) = clause.having {
+            augment_rows_with_aggregate_keys(&mut result.rows, &clause.items);
             let where_clause = WhereClause {
                 predicate: having.clone(),
             };
@@ -6641,45 +6695,54 @@ impl<'a> CypherExecutor<'a> {
                 name,
                 args,
                 distinct,
-            } => match name.to_lowercase().as_str() {
+            } => match name.as_str() {
                 "count" => {
                     if args.len() == 1 && matches!(args[0], Expression::Star) {
                         Ok(Value::Int64(rows.len() as i64))
+                    } else if *distinct {
+                        // For DISTINCT on a node/edge variable, key on the
+                        // binding index directly — typed sets avoid the
+                        // per-row `format!("n:{}", ...)` allocation the
+                        // previous implementation used. For other expression
+                        // forms, key on the Value itself.
+                        let var_name = match &args[0] {
+                            Expression::Variable(v) => Some(v.as_str()),
+                            _ => None,
+                        };
+                        let mut count = 0i64;
+                        let mut seen_nodes: HashSet<usize> = HashSet::new();
+                        let mut seen_edges: HashSet<usize> = HashSet::new();
+                        let mut seen_values: HashSet<Value> = HashSet::new();
+                        for row in rows {
+                            let val = self.evaluate_expression(&args[0], row)?;
+                            if matches!(val, Value::Null) {
+                                continue;
+                            }
+                            if let Some(vn) = var_name {
+                                if let Some(&idx) = row.node_bindings.get(vn) {
+                                    if seen_nodes.insert(idx.index()) {
+                                        count += 1;
+                                    }
+                                    continue;
+                                }
+                                if let Some(eb) = row.edge_bindings.get(vn) {
+                                    if seen_edges.insert(eb.edge_index.index()) {
+                                        count += 1;
+                                    }
+                                    continue;
+                                }
+                            }
+                            if seen_values.insert(val) {
+                                count += 1;
+                            }
+                        }
+                        Ok(Value::Int64(count))
                     } else {
                         let mut count = 0i64;
-                        let mut seen = HashSet::new();
-                        // For DISTINCT on a node/edge variable, use the binding
-                        // index as the identity key so that two distinct nodes
-                        // with the same title are not incorrectly merged.
-                        let var_name = if *distinct {
-                            match &args[0] {
-                                Expression::Variable(v) => Some(v.as_str()),
-                                _ => None,
-                            }
-                        } else {
-                            None
-                        };
                         for row in rows {
                             let val = self.evaluate_expression(&args[0], row)?;
                             if !matches!(val, Value::Null) {
-                                if *distinct {
-                                    let identity = if let Some(vn) = var_name {
-                                        if let Some(&idx) = row.node_bindings.get(vn) {
-                                            format!("n:{}", idx.index())
-                                        } else if let Some(eb) = row.edge_bindings.get(vn) {
-                                            format!("e:{}", eb.edge_index.index())
-                                        } else {
-                                            format_value_compact(&val)
-                                        }
-                                    } else {
-                                        format_value_compact(&val)
-                                    };
-                                    if seen.insert(identity) {
-                                        count += 1;
-                                    }
-                                } else {
-                                    count += 1;
-                                }
+                                count += 1;
                             }
                         }
                         Ok(Value::Int64(count))
@@ -6995,7 +7058,7 @@ impl<'a> CypherExecutor<'a> {
                     if *distinct {
                         return Ok(None); // DISTINCT needs dedup — bail
                     }
-                    let kind = match name.to_lowercase().as_str() {
+                    let kind = match name.as_str() {
                         "count" => {
                             if args.len() == 1 && matches!(args[0], Expression::Star) {
                                 AggKind::CountStar
@@ -9351,6 +9414,33 @@ fn try_match_merge_pattern(
 // is_aggregate_expression and is_window_expression are in ast.rs
 pub use super::ast::{is_aggregate_expression, is_window_expression};
 
+/// Augment each row's `projected` with an expression-keyed copy of every
+/// aggregate return item, so HAVING predicates like `count(m) > 1` can
+/// resolve even when the RETURN item is aliased (`count(m) AS c`).
+/// Without this, the aliased aggregate is stored only under `c` and a
+/// HAVING reference to `count(m)` would fall through to scalar dispatch
+/// (which errors for aggregates and gets swallowed by unwrap_or(false)).
+pub(super) fn augment_rows_with_aggregate_keys(rows: &mut [ResultRow], items: &[ReturnItem]) {
+    for item in items {
+        if !is_aggregate_expression(&item.expression) {
+            continue;
+        }
+        let alias_key = return_item_column_name(item);
+        let expr_key = expression_to_string(&item.expression);
+        if alias_key == expr_key {
+            continue;
+        }
+        for row in rows.iter_mut() {
+            if row.projected.contains_key(&expr_key) {
+                continue;
+            }
+            if let Some(val) = row.projected.get(&alias_key).cloned() {
+                row.projected.insert(expr_key.clone(), val);
+            }
+        }
+    }
+}
+
 /// Get the column name for a return item
 pub(super) fn return_item_column_name(item: &ReturnItem) -> String {
     if let Some(ref alias) = item.alias {
@@ -9557,6 +9647,7 @@ fn predicate_to_string(pred: &Predicate) -> String {
                 expression_to_string(pattern)
             )
         }
+        Predicate::LabelCheck { variable, label } => format!("{}:{}", variable, label),
         _ => "predicate(...)".to_string(),
     }
 }

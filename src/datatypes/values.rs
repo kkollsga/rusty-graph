@@ -158,6 +158,16 @@ impl Value {
             _ => None,
         }
     }
+
+    /// Borrow the inner `&str` for `Value::String`. Prefer over `as_string()`
+    /// when ownership isn't needed — avoids the per-call `String` clone.
+    #[allow(dead_code)]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -653,6 +663,14 @@ mod tests {
         assert_eq!(Value::Boolean(true).as_string(), None);
         assert_eq!(Value::Null.as_string(), None);
         assert_eq!(Value::UniqueId(1).as_string(), None);
+    }
+
+    #[test]
+    fn test_as_str_borrowed() {
+        let v = Value::String("hello".to_string());
+        assert_eq!(v.as_str(), Some("hello"));
+        assert_eq!(Value::Int64(42).as_str(), None);
+        assert_eq!(Value::Null.as_str(), None);
     }
 
     // ========================================================================

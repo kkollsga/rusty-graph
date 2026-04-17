@@ -242,6 +242,12 @@ pub enum Predicate {
         expr: Expression,
         list_expr: Expression,
     },
+    /// `WHERE n:Label` — true when the variable's node type matches.
+    /// Parsed as a boolean predicate alongside MATCH-level label filtering.
+    LabelCheck {
+        variable: String,
+        label: String,
+    },
 }
 
 /// Comparison operators
@@ -581,13 +587,14 @@ pub struct YieldItem {
 // Expression classification helpers
 // ============================================================================
 
-/// Check if an expression contains an aggregate function call
+/// Check if an expression contains an aggregate function call.
+/// Function names are normalized to lowercase at parse time, so direct
+/// comparison against lowercase literals is sufficient.
 pub fn is_aggregate_expression(expr: &Expression) -> bool {
     match expr {
         Expression::FunctionCall { name, args, .. } => {
-            let lower = name.to_lowercase();
             if matches!(
-                lower.as_str(),
+                name.as_str(),
                 "count"
                     | "sum"
                     | "avg"

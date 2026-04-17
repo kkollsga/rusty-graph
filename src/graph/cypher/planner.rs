@@ -489,7 +489,7 @@ fn is_count_of_var_or_star(expr: &Expression, node_var: Option<&str>) -> bool {
         distinct,
     } = expr
     {
-        if name.to_lowercase() != "count" || *distinct {
+        if name != "count" || *distinct {
             return false;
         }
         if args.len() == 1 {
@@ -530,7 +530,7 @@ fn is_node_type_accessor(expr: &Expression, node_var: Option<&str>) -> bool {
             is_type_prop && node_var.is_some_and(|nv| variable == nv)
         }
         Expression::FunctionCall { name, args, .. } => {
-            if name.to_lowercase() == "labels" && args.len() == 1 {
+            if name == "labels" && args.len() == 1 {
                 if let Expression::Variable(v) = &args[0] {
                     return node_var.is_some_and(|nv| v == nv);
                 }
@@ -562,7 +562,7 @@ fn identify_edge_type_count_pair(
 /// Check if expression is `type(r)`.
 fn is_edge_type_function(expr: &Expression, edge_var: Option<&str>) -> bool {
     if let Expression::FunctionCall { name, args, .. } = expr {
-        if name.to_lowercase() == "type" && args.len() == 1 {
+        if name == "type" && args.len() == 1 {
             if let Expression::Variable(v) = &args[0] {
                 return edge_var.is_some_and(|ev| v == ev);
             }
@@ -1221,7 +1221,7 @@ fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
                 distinct,
             } = &item.expression
             {
-                if name.eq_ignore_ascii_case("count") {
+                if name == "count" {
                     // Reject DISTINCT — fused path can't deduplicate
                     if *distinct {
                         return false;
@@ -1286,7 +1286,7 @@ fn is_fusable_with_clause(with: &WithClause) -> bool {
         if is_aggregate_expression(&item.expression) {
             // Only fuse for count() — not sum/collect/avg etc.
             match &item.expression {
-                Expression::FunctionCall { name, .. } if name.eq_ignore_ascii_case("count") => {
+                Expression::FunctionCall { name, .. } if name == "count" => {
                     has_count = true;
                 }
                 _ => return false, // Non-count aggregate → bail
@@ -1314,7 +1314,7 @@ fn is_fusable_return_clause(ret: &ReturnClause) -> bool {
         if is_aggregate_expression(&item.expression) {
             // Only fuse for count() — not sum/collect/avg etc.
             match &item.expression {
-                Expression::FunctionCall { name, .. } if name.eq_ignore_ascii_case("count") => {
+                Expression::FunctionCall { name, .. } if name == "count" => {
                     has_count = true;
                 }
                 _ => return false, // Non-count aggregate → bail
@@ -1514,7 +1514,7 @@ fn fuse_match_return_aggregate(query: &mut CypherQuery) {
                                     name,
                                     args,
                                     distinct,
-                                } if name.eq_ignore_ascii_case("count") => {
+                                } if name == "count" => {
                                     if *distinct {
                                         count_var_ok = false;
                                         break;
@@ -1940,7 +1940,7 @@ fn fuse_match_with_aggregate(query: &mut CypherQuery) {
                                     name,
                                     args,
                                     distinct,
-                                } if name.eq_ignore_ascii_case("count") => {
+                                } if name == "count" => {
                                     if *distinct {
                                         count_var_ok = false;
                                         break;
@@ -2614,7 +2614,7 @@ fn fuse_vector_score_order_limit(query: &mut CypherQuery) {
                 matches!(
                     &item.expression,
                     Expression::FunctionCall { name, .. }
-                        if name.eq_ignore_ascii_case("vector_score")
+                        if name == "vector_score"
                 )
             });
             match found {
@@ -2911,6 +2911,7 @@ fn estimate_predicate_cost(pred: &Predicate) -> u32 {
         Predicate::StartsWith { .. } | Predicate::EndsWith { .. } | Predicate::Contains { .. } => 5,
         Predicate::Exists { .. } => 100, // Pattern existence checks are expensive
         Predicate::InExpression { .. } => 10,
+        Predicate::LabelCheck { .. } => 1, // Single node-type string compare
     }
 }
 
@@ -2923,7 +2924,7 @@ fn estimate_expression_cost(expr: &Expression) -> u32 {
         Expression::Variable(_) => 1,
         Expression::Star => 1,
         Expression::FunctionCall { name, args, .. } => {
-            let base = match name.to_lowercase().as_str() {
+            let base = match name.as_str() {
                 "point" => 3,
                 "distance" => 10,
                 "contains" => 50,
@@ -3134,9 +3135,7 @@ impl TextScoreCollector {
         params: &HashMap<String, Value>,
     ) -> Result<(), String> {
         match expr {
-            Expression::FunctionCall { name, args, .. }
-                if name.eq_ignore_ascii_case("text_score") =>
-            {
+            Expression::FunctionCall { name, args, .. } if name == "text_score" => {
                 if args.len() != 3 && args.len() != 4 {
                     return Err(
                         "text_score() requires 3 arguments: (node, text_column, query_text) \
@@ -3361,6 +3360,7 @@ impl TextScoreCollector {
                 self.rewrite_expr(list_expr, params)?;
                 Ok(())
             }
+            Predicate::LabelCheck { .. } => Ok(()),
         }
     }
 }

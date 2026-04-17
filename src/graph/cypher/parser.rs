@@ -670,6 +670,42 @@ impl CypherParser {
 
         let left = self.parse_expression()?;
 
+        // Label-check predicate: `WHERE n:Label` (and chained `n:A:B` = AND).
+        // Only applies when the LHS is a bare Variable — `count(n):Foo` isn't valid.
+        if self.check(&CypherToken::Colon) {
+            if let Expression::Variable(var) = &left {
+                let var = var.clone();
+                self.advance(); // consume :
+                let first_label = match self.advance().cloned() {
+                    Some(CypherToken::Identifier(name)) => name,
+                    other => {
+                        return Err(format!("Expected label name after ':', got {:?}", other));
+                    }
+                };
+                let mut pred = Predicate::LabelCheck {
+                    variable: var.clone(),
+                    label: first_label,
+                };
+                while self.check(&CypherToken::Colon) {
+                    self.advance();
+                    let next_label = match self.advance().cloned() {
+                        Some(CypherToken::Identifier(name)) => name,
+                        other => {
+                            return Err(format!("Expected label name after ':', got {:?}", other));
+                        }
+                    };
+                    pred = Predicate::And(
+                        Box::new(pred),
+                        Box::new(Predicate::LabelCheck {
+                            variable: var.clone(),
+                            label: next_label,
+                        }),
+                    );
+                }
+                return Ok(pred);
+            }
+        }
+
         // parse_expression() may have already consumed IS NULL / IS NOT NULL
         // and returned Expression::IsNull/IsNotNull — convert to Predicate form
         if let Expression::IsNull(inner) = left {
@@ -1216,6 +1252,17 @@ impl CypherParser {
 
     /// Parse function call: name(args...)
     fn parse_function_call(&mut self, name: String) -> Result<Expression, String> {
+        // Normalize function name to lowercase once at parse time so downstream
+        // dispatch (planner, executor, aggregate detection) doesn't pay a
+        // `.to_lowercase()` per row. Cypher function names are case-insensitive.
+        let name = if name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || !c.is_alphabetic())
+        {
+            name
+        } else {
+            name.to_ascii_lowercase()
+        };
         self.expect(&CypherToken::LParen)?;
 
         // Check for DISTINCT

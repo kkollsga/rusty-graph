@@ -382,6 +382,102 @@ pub(crate) enum PropertyStorage {
     },
 }
 
+/// Zero-allocation iterator over property key strings.
+/// Replaces the prior `Box<dyn Iterator>` returned by `PropertyStorage::keys`,
+/// saving one heap allocation per call (keys/iter runs in the hot path of
+/// `keys(n)` and `RETURN n {.*}` per row).
+pub(crate) enum PropertyKeyIter<'a> {
+    Map {
+        inner: std::collections::hash_map::Keys<'a, InternedKey, Value>,
+        interner: &'a StringInterner,
+    },
+    Compact {
+        slots: &'a [InternedKey],
+        values: &'a [Value],
+        slot_idx: usize,
+        interner: &'a StringInterner,
+    },
+    Columnar(std::vec::IntoIter<&'a str>),
+}
+
+impl<'a> Iterator for PropertyKeyIter<'a> {
+    type Item = &'a str;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a str> {
+        match self {
+            PropertyKeyIter::Map { inner, interner } => inner.next().map(|k| interner.resolve(*k)),
+            PropertyKeyIter::Compact {
+                slots,
+                values,
+                slot_idx,
+                interner,
+            } => loop {
+                let i = *slot_idx;
+                if i >= slots.len() {
+                    return None;
+                }
+                *slot_idx = i + 1;
+                if values.get(i).is_some_and(|v| !matches!(v, Value::Null)) {
+                    return Some(interner.resolve(slots[i]));
+                }
+            },
+            PropertyKeyIter::Columnar(iter) => iter.next(),
+        }
+    }
+}
+
+/// Zero-allocation iterator over (key_string, &Value) property pairs.
+/// Same rationale as `PropertyKeyIter` — saves the per-call heap alloc for
+/// the prior `Box<dyn Iterator>`.
+pub(crate) enum PropertyIter<'a> {
+    Map {
+        inner: std::collections::hash_map::Iter<'a, InternedKey, Value>,
+        interner: &'a StringInterner,
+    },
+    Compact {
+        slots: &'a [InternedKey],
+        values: &'a [Value],
+        slot_idx: usize,
+        interner: &'a StringInterner,
+    },
+    /// Columnar storage can't produce `&'a Value` references since values aren't
+    /// stored as owned `Value`s — callers use `iter_owned()` instead. This variant
+    /// exists only so the enum shape matches across all `PropertyStorage` cases.
+    Columnar,
+}
+
+impl<'a> Iterator for PropertyIter<'a> {
+    type Item = (&'a str, &'a Value);
+
+    #[inline]
+    fn next(&mut self) -> Option<(&'a str, &'a Value)> {
+        match self {
+            PropertyIter::Map { inner, interner } => {
+                inner.next().map(|(k, v)| (interner.resolve(*k), v))
+            }
+            PropertyIter::Compact {
+                slots,
+                values,
+                slot_idx,
+                interner,
+            } => loop {
+                let i = *slot_idx;
+                if i >= slots.len() {
+                    return None;
+                }
+                *slot_idx = i + 1;
+                if let Some(v) = values.get(i) {
+                    if !matches!(v, Value::Null) {
+                        return Some((interner.resolve(slots[i]), v));
+                    }
+                }
+            },
+            PropertyIter::Columnar => None,
+        }
+    }
+}
+
 impl PropertyStorage {
     /// Look up a property value by interned key. Returns None if absent or Value::Null.
     ///
@@ -589,62 +685,46 @@ impl PropertyStorage {
         }
     }
 
-    pub fn keys<'a>(
-        &'a self,
-        interner: &'a StringInterner,
-    ) -> Box<dyn Iterator<Item = &'a str> + 'a> {
+    pub fn keys<'a>(&'a self, interner: &'a StringInterner) -> PropertyKeyIter<'a> {
         match self {
-            PropertyStorage::Map(map) => Box::new(map.keys().map(move |k| interner.resolve(*k))),
-            PropertyStorage::Compact { schema, values } => Box::new(
-                schema
-                    .slots
-                    .iter()
-                    .enumerate()
-                    .filter(move |(i, _)| values.get(*i).is_some_and(|v| !matches!(v, Value::Null)))
-                    .map(move |(_, ik)| interner.resolve(*ik)),
-            ),
+            PropertyStorage::Map(map) => PropertyKeyIter::Map {
+                inner: map.keys(),
+                interner,
+            },
+            PropertyStorage::Compact { schema, values } => PropertyKeyIter::Compact {
+                slots: &schema.slots,
+                values,
+                slot_idx: 0,
+                interner,
+            },
             PropertyStorage::Columnar { store, row_id } => {
-                // Collect keys for Columnar since we can't return references into the store
+                // Columnar can't borrow keys through the enum — materialize once.
                 let props = store.row_properties(*row_id);
                 let keys: Vec<&'a str> = props
                     .iter()
                     .filter_map(|(ik, _)| interner.try_resolve(*ik))
                     .collect();
-                Box::new(keys.into_iter())
+                PropertyKeyIter::Columnar(keys.into_iter())
             }
         }
     }
 
     /// Iterate over (key_string, &Value) pairs. Requires interner for resolution.
-    /// For Map/Compact, yields borrowed references. For Columnar, yields owned values
-    /// (the Cow return type from `get()` handles this — callers should use `get()` directly
-    /// for Columnar when possible).
-    pub fn iter<'a>(
-        &'a self,
-        interner: &'a StringInterner,
-    ) -> Box<dyn Iterator<Item = (&'a str, &'a Value)> + 'a> {
+    /// For Map/Compact, yields borrowed references. For Columnar, yields nothing —
+    /// callers that need columnar property pairs should use `iter_owned()`.
+    pub fn iter<'a>(&'a self, interner: &'a StringInterner) -> PropertyIter<'a> {
         match self {
-            PropertyStorage::Map(map) => {
-                Box::new(map.iter().map(move |(k, v)| (interner.resolve(*k), v)))
-            }
-            PropertyStorage::Compact { schema, values } => {
-                Box::new(schema.slots.iter().enumerate().filter_map(move |(i, ik)| {
-                    values.get(i).and_then(|v| {
-                        if matches!(v, Value::Null) {
-                            None
-                        } else {
-                            Some((interner.resolve(*ik), v))
-                        }
-                    })
-                }))
-            }
-            PropertyStorage::Columnar { .. } => {
-                // Columnar can't return &Value references (data isn't stored as Values).
-                // Return empty — callers should use columnar_iter() instead.
-                // In practice, iter() is only called from export/introspection paths
-                // that first convert to Compact via save().
-                Box::new(std::iter::empty())
-            }
+            PropertyStorage::Map(map) => PropertyIter::Map {
+                inner: map.iter(),
+                interner,
+            },
+            PropertyStorage::Compact { schema, values } => PropertyIter::Compact {
+                slots: &schema.slots,
+                values,
+                slot_idx: 0,
+                interner,
+            },
+            PropertyStorage::Columnar { .. } => PropertyIter::Columnar,
         }
     }
 

@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.15] — 2026-04-17
+
+### Added
+- **`WHERE n:Label` predicate**. Cypher now supports label checks as boolean
+  predicates (not just MATCH-level filters). Composes with `AND`/`OR`/`NOT`
+  and chained `n:A:B` form (`n:A AND n:B`). Example:
+  `MATCH (n) WHERE n:Person OR n:Org RETURN count(n)`.
+- **`Value::as_str() -> Option<&str>`**. Borrowing companion to the existing
+  `as_string()`. Prefer when ownership is not required — avoids the per-call
+  `String` clone.
+
+### Changed
+- **Function names lowercased at parse time** instead of per-row during
+  dispatch. Every Cypher scalar/aggregate dispatch used to call
+  `.to_lowercase()` on the function name each time it evaluated a row
+  (21+ sites); names are now normalized once in `parse_function_call` and
+  compared directly. Pure CPU win on function-heavy queries.
+- **`count(DISTINCT n)` uses typed identity sets** — `HashSet<usize>` keyed
+  on node/edge indices (with a `HashSet<Value>` fallback for non-binding
+  expressions) instead of per-row `format!("n:{}", idx.index())` string
+  formatting. ~20–26% faster on DISTINCT-count queries.
+- **`substring()` skips intermediate `Vec<char>`** — uses `chars().skip(start)
+  .take(len).collect()` instead of materializing the full char vector.
+  ~10–18% faster on substring-heavy queries.
+- **Zero-allocation property iterators**. `PropertyStorage::keys()` and
+  `::iter()` return explicit `PropertyKeyIter` / `PropertyIter` enums instead
+  of `Box<dyn Iterator>`. Saves one heap allocation per `keys(n)` /
+  `RETURN n {.*}` / property-scan call. ~10% faster on `keys(n)` over
+  all nodes.
+
+### Fixed
+- **`HAVING` with aggregate expressions**. `HAVING count(m) > 1` was silently
+  returning zero rows when the RETURN item was aliased (`count(m) AS c`).
+  Root cause: the aggregate function call fell through to per-row scalar
+  dispatch, which errored with "Aggregate function cannot be used outside
+  of RETURN/WITH", and the error was swallowed by `unwrap_or(false)`,
+  dropping every row. Now `HAVING count(m)` and `HAVING c` both resolve
+  to the pre-computed aggregate value regardless of aliasing. Unaliased,
+  `DISTINCT`, and no-group-by forms all covered.
+- **`rand()` / `random()` correctness under tight loops**. The previous
+  SystemTime-per-call seeding could return identical values for adjacent
+  rows when the system clock resolved two calls to the same nanosecond,
+  and constant folding could collapse `rand()` to a single value for the
+  whole query. Replaced with a thread-local xorshift64 PRNG, seeded once
+  per thread with a splitmix64-avalanched counter (so parallel Rayon
+  workers don't collide), and marked as row-dependent so it bypasses
+  constant folding. Also uses the top 53 bits of state for full f64
+  mantissa precision.
+
 ## [0.7.14] — 2026-04-17
 
 ### Added
