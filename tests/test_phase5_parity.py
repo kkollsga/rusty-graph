@@ -46,8 +46,8 @@ ENUM_MATCH_WHITELIST = {
     # pending_edges, column_stores, data_dir, qnum_to_idx) for bulk-path
     # performance. Documented and intentional; Phase 7's backend-subdir
     # reorg homes these with the disk backend.
-    "ntriples.rs": "disk-internal bulk-build (ntriples loader)",
-    "io_operations.rs": "disk-internal .kgl load_disk_dir path",
+    "io/ntriples.rs": "disk-internal bulk-build (ntriples loader)",
+    "io/io_operations.rs": "disk-internal .kgl load_disk_dir path",
     "batch_operations.rs": "disk-internal update-path row_id lookup",
 }
 

@@ -47,8 +47,8 @@ ENUM_MATCH_WHITELIST = {
     "schema.rs": "GraphBackend enum + dispatcher impls",
     "mod.rs": "PyO3 boundary (KnowledgeGraph class registration)",
     # Disk-internal boundary — unchanged since Phase 5.
-    "ntriples.rs": "disk-internal bulk-build (ntriples loader)",
-    "io_operations.rs": "disk-internal .kgl load_disk_dir path",
+    "io/ntriples.rs": "disk-internal bulk-build (ntriples loader)",
+    "io/io_operations.rs": "disk-internal .kgl load_disk_dir path",
     "batch_operations.rs": "disk-internal update-path row_id lookup",
 }
 
