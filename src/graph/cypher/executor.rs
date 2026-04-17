@@ -9,7 +9,6 @@ use crate::graph::query::pattern_matching::{
     PropertyMatcher,
 };
 use crate::graph::schema::{DirGraph, EdgeData, InternedKey, NodeData, TypeSchema};
-use crate::graph::schema_validation;
 use crate::graph::storage::{GraphRead, GraphWrite};
 use crate::graph::algorithms::vector_search as vs;
 use chrono::Datelike;
@@ -8596,7 +8595,7 @@ fn execute_create(
                             .get_node(actual_target)
                             .map(|n| n.get_node_type_ref(&graph.interner).to_string())
                             .unwrap_or_default();
-                        schema_validation::validate_edge_creation(
+                        crate::graph::mutation::schema_validation::validate_edge_creation(
                             &edge_pat.connection_type,
                             &src_type,
                             &tgt_type,
@@ -8695,7 +8694,7 @@ fn create_node(
 
     // Schema lock validation
     if graph.schema_locked {
-        schema_validation::validate_node_creation(
+        crate::graph::mutation::schema_validation::validate_node_creation(
             &label,
             &properties,
             &graph.node_type_metadata,
@@ -8861,7 +8860,7 @@ fn execute_set(
 
                     // Schema lock validation for SET
                     if graph.schema_locked {
-                        schema_validation::validate_property_set(
+                        crate::graph::mutation::schema_validation::validate_property_set(
                             &node_type_str,
                             property,
                             &value,

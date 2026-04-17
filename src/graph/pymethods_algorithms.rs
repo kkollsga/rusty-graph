@@ -10,7 +10,7 @@ use super::introspection::reporting::OperationReports;
 use super::schema::{CowSelection, PlanStep};
 use super::{
     centrality_results_to_dataframe, centrality_results_to_py_dict, community_results_to_py,
-    cypher, subgraph, KnowledgeGraph, TemporalContext,
+    cypher, KnowledgeGraph, TemporalContext,
 };
 use crate::graph::storage::lookups;
 
@@ -991,7 +991,7 @@ impl KnowledgeGraph {
             .map(|l| l.node_count())
             .unwrap_or(0);
 
-        subgraph::expand_selection(&self.inner, &mut new_kg.selection, hops)
+        crate::graph::mutation::subgraph::expand_selection(&self.inner, &mut new_kg.selection, hops)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Record actual result - use node_count() to avoid allocation
@@ -1030,7 +1030,7 @@ impl KnowledgeGraph {
     ///     subgraph.save('north_sea_region.kgl')
     ///     ```
     fn to_subgraph(&self) -> PyResult<Self> {
-        let extracted = subgraph::extract_subgraph(&self.inner, &self.selection)
+        let extracted = crate::graph::mutation::subgraph::extract_subgraph(&self.inner, &self.selection)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         Ok(KnowledgeGraph {
@@ -1058,7 +1058,7 @@ impl KnowledgeGraph {
     ///         - 'node_types': Dict of node type -> count
     ///         - 'connection_types': Dict of connection type -> count
     fn subgraph_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let stats = subgraph::get_subgraph_stats(&self.inner, &self.selection)
+        let stats = crate::graph::mutation::subgraph::get_subgraph_stats(&self.inner, &self.selection)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         let result_dict = PyDict::new(py);

@@ -1,6 +1,5 @@
 // src/graph/query/calculations.rs
 use crate::graph::features::equation_parser::{AggregateType, Evaluator, Expr, Parser};
-use crate::graph::maintain_graph;
 use crate::graph::query::statistics_methods::{get_parent_child_pairs, ParentChildPair};
 use crate::graph::storage::lookups::TypeLookup;
 use crate::datatypes::values::Value;
@@ -259,7 +258,7 @@ pub fn process_equation(
 
     // Update the node properties with verified node indices
     let update_result =
-        maintain_graph::update_node_properties(graph, &nodes_to_update, target_property)?;
+        crate::graph::mutation::maintain_graph::update_node_properties(graph, &nodes_to_update, target_property)?;
 
     // Update nodes_updated from the result (now used)
     let nodes_updated = update_result.nodes_updated;
@@ -684,7 +683,7 @@ pub fn store_count_results(
 
     // Use the optimized batch update (which now returns a NodeOperationReport)
     let update_result =
-        match maintain_graph::update_node_properties(graph, &nodes_to_update, target_property) {
+        match crate::graph::mutation::maintain_graph::update_node_properties(graph, &nodes_to_update, target_property) {
             Ok(result) => result,
             Err(e) => {
                 errors.push(format!("Failed to update node properties: {}", e));

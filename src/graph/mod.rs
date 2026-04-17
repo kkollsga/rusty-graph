@@ -12,18 +12,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub mod algorithms;
-pub mod batch_operations;
 pub mod cypher;
 pub mod features;
 pub mod introspection;
 pub mod io;
-pub mod maintain_graph;
+pub mod mutation;
 pub mod query;
 pub mod schema;
-pub mod schema_validation;
-pub mod set_operations;
 pub mod storage;
-pub mod subgraph;
 
 mod pymethods_algorithms;
 mod pymethods_export;
@@ -1292,7 +1288,7 @@ impl KnowledgeGraph {
         let graph = get_graph_mut(&mut self.inner);
 
         let uid_field_clone = unique_id_field.clone();
-        let result = maintain_graph::add_nodes(
+        let result = crate::graph::mutation::maintain_graph::add_nodes(
             graph,
             df_result,
             node_type.clone(),
@@ -1727,7 +1723,7 @@ impl KnowledgeGraph {
 
             let graph = get_graph_mut(&mut self.inner);
 
-            let result = maintain_graph::add_connections(
+            let result = crate::graph::mutation::maintain_graph::add_connections(
                 graph,
                 df_result,
                 connection_type.clone(),
@@ -1806,7 +1802,7 @@ impl KnowledgeGraph {
 
         let graph = get_graph_mut(&mut self.inner);
 
-        let result = maintain_graph::add_connections(
+        let result = crate::graph::mutation::maintain_graph::add_connections(
             graph,
             df_result,
             connection_type.clone(),
@@ -1933,7 +1929,7 @@ impl KnowledgeGraph {
 
             let graph = get_graph_mut(&mut self.inner);
 
-            let report = maintain_graph::add_nodes(
+            let report = crate::graph::mutation::maintain_graph::add_nodes(
                 graph,
                 df_result,
                 node_type.clone(),
@@ -2103,7 +2099,7 @@ impl KnowledgeGraph {
 
             let graph = get_graph_mut(&mut self.inner);
 
-            let report = maintain_graph::add_connections(
+            let report = crate::graph::mutation::maintain_graph::add_connections(
                 graph,
                 df_result,
                 connection_name.clone(),
@@ -2682,7 +2678,7 @@ impl KnowledgeGraph {
                 .map(|&idx| (Some(idx), property_value.clone()))
                 .collect();
 
-            match maintain_graph::update_node_properties(graph, &node_values, property_name) {
+            match crate::graph::mutation::maintain_graph::update_node_properties(graph, &node_values, property_name) {
                 Ok(report) => {
                     total_updated += report.nodes_updated;
                     errors.extend(report.errors);
@@ -4127,7 +4123,7 @@ impl KnowledgeGraph {
 
             let graph = get_graph_mut(&mut self.inner);
 
-            maintain_graph::update_node_properties(graph, &nodes, target_property)
+            crate::graph::mutation::maintain_graph::update_node_properties(graph, &nodes, target_property)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
             if !keep_selection.unwrap_or(false) {
@@ -4435,7 +4431,7 @@ impl KnowledgeGraph {
 
         let graph = get_graph_mut(&mut self.inner);
 
-        let result = maintain_graph::create_connections(
+        let result = crate::graph::mutation::maintain_graph::create_connections(
             graph,
             &self.selection,
             connection_type,
@@ -4483,7 +4479,7 @@ impl KnowledgeGraph {
         properties: &Bound<'_, PyDict>,
         keep_selection: Option<bool>,
     ) -> PyResult<Self> {
-        use crate::graph::maintain_graph::{add_properties as core_add_properties, PropertySpec};
+        use crate::graph::mutation::maintain_graph::{add_properties as core_add_properties, PropertySpec};
 
         // Convert PyDict → HashMap<String, PropertySpec>
         let mut spec_map: HashMap<String, PropertySpec> = HashMap::new();
@@ -4614,7 +4610,7 @@ impl KnowledgeGraph {
 
         let graph = get_graph_mut(&mut self.inner);
 
-        let result = maintain_graph::update_node_properties(graph, &nodes, store_as.unwrap())
+        let result = crate::graph::mutation::maintain_graph::update_node_properties(graph, &nodes, store_as.unwrap())
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         let mut new_kg = KnowledgeGraph {
@@ -5605,7 +5601,7 @@ impl KnowledgeGraph {
     /// Returns a new KnowledgeGraph with the union of both selections
     fn union(&self, other: &Self) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        set_operations::union_selections(&mut new_kg.selection, &other.selection)
+        crate::graph::mutation::set_operations::union_selections(&mut new_kg.selection, &other.selection)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
     }
@@ -5614,7 +5610,7 @@ impl KnowledgeGraph {
     /// Returns a new KnowledgeGraph with only nodes that exist in both selections
     fn intersection(&self, other: &Self) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        set_operations::intersection_selections(&mut new_kg.selection, &other.selection)
+        crate::graph::mutation::set_operations::intersection_selections(&mut new_kg.selection, &other.selection)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
     }
@@ -5623,7 +5619,7 @@ impl KnowledgeGraph {
     /// Returns a new KnowledgeGraph with nodes from self that are not in other
     fn difference(&self, other: &Self) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        set_operations::difference_selections(&mut new_kg.selection, &other.selection)
+        crate::graph::mutation::set_operations::difference_selections(&mut new_kg.selection, &other.selection)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
     }
@@ -5632,7 +5628,7 @@ impl KnowledgeGraph {
     /// Returns a new KnowledgeGraph with nodes that are in exactly one of the selections
     fn symmetric_difference(&self, other: &Self) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        set_operations::symmetric_difference_selections(&mut new_kg.selection, &other.selection)
+        crate::graph::mutation::set_operations::symmetric_difference_selections(&mut new_kg.selection, &other.selection)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
     }
@@ -5810,7 +5806,7 @@ impl KnowledgeGraph {
         })?;
 
         let errors =
-            schema_validation::validate_graph(&self.inner, schema, strict.unwrap_or(false));
+            crate::graph::mutation::schema_validation::validate_graph(&self.inner, schema, strict.unwrap_or(false));
 
         // Convert errors to Python list of dicts
         let result = PyList::empty(py);

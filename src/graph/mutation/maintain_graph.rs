@@ -1,6 +1,6 @@
 // src/graph/maintain_graph.rs
 use crate::datatypes::{DataFrame, Value};
-use crate::graph::batch_operations::{
+use crate::graph::mutation::batch_operations::{
     BatchProcessor, ConflictHandling, ConnectionBatchProcessor, NodeAction,
 };
 use crate::graph::storage::lookups::{CombinedTypeLookup, TypeLookup};
