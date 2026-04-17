@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776427112359,
+  "lastUpdate": 1776428798468,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -7101,6 +7101,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.00001988227763278138",
             "extra": "mean: 1.1833405188444692 msec\nrounds: 796"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "9f491f87efccfe90ad778a7d808e70b727ff8d74",
+          "message": "refactor: Phase 2 — GraphWrite trait + mutation-path migration\n\nIntroduces trait GraphWrite: GraphRead (7 methods) in\nsrc/graph/storage/mod.rs. Write-path callers in batch_operations.rs,\ncypher/executor.rs (CREATE / SET / DELETE paths), maintain_graph.rs,\nand subgraph.rs now route through UFCS trait dispatch. The one\nGraphBackend::Disk(ref mut dg) enum match in batch_operations.rs\ncollapses into a default-no-op GraphWrite::update_row_id override.\n\nTransaction boundary decision: transactions stay on DirGraph (OCC\nversion, read_only, schema_locked — all DirGraph-level). No\nGraphTransaction trait. Documented in ARCHITECTURE.md.\n\nNew parity suite tests/test_phase2_parity.py (14 tests, @parity):\nconflict matrix, mid-batch failure, schema-locked rejection, tombstone\nvisibility, MERGE idempotency, collect-then-delete snapshot. Three\nxfail=strict tests pin pre-existing disk-mode mutation bugs for\nPhase 5: add_nodes(conflict='update') and ='replace' on disk don't\napply property changes; MERGE edge isn't visible after creation on\ndisk.\n\nBenchmarks hold vs Phase 1 (in-memory within ±5%, mapped/disk within\ngates). 477 Rust tests + 1799 Python tests + 34 parity tests green.\n\nReport-out appended to todo.md Phase 2 section.",
+          "timestamp": "2026-04-17T14:23:25+02:00",
+          "tree_id": "96c0c4df770cd5d8339f741e3bca1439244dcbf9",
+          "url": "https://github.com/kkollsga/kglite/commit/9f491f87efccfe90ad778a7d808e70b727ff8d74"
+        },
+        "date": 1776428797511,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1070.6807435192352,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000459307281858542",
+            "extra": "mean: 933.9852295401207 usec\nrounds: 501"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 775.3591867753436,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002803986152340148",
+            "extra": "mean: 1.2897248359936504 msec\nrounds: 689"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 12605.595517404841,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000005366400032983406",
+            "extra": "mean: 79.32984987653114 usec\nrounds: 6095"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1693.8673748408835,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002026494129318572",
+            "extra": "mean: 590.3649924740636 usec\nrounds: 930"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 695930.1193488062,
+            "unit": "iter/sec",
+            "range": "stddev: 4.201977186066572e-7",
+            "extra": "mean: 1.4369258812015742 usec\nrounds: 86874"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 125992.80154551053,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000013162206356220515",
+            "extra": "mean: 7.936961379803787 usec\nrounds: 20611"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2178.465789829201,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00001579983781751111",
+            "extra": "mean: 459.0386521876037 usec\nrounds: 3246"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1694.169735199598,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00009932738686628892",
+            "extra": "mean: 590.2596293766193 usec\nrounds: 1314"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 13968.761235324457,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000046017276277102565",
+            "extra": "mean: 71.58830931057666 usec\nrounds: 10837"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 863.6229625962583,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0003956282490101136",
+            "extra": "mean: 1.157912704166364 msec\nrounds: 720"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 896.6482949730016,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00001827853159825575",
+            "extra": "mean: 1.115264486205386 msec\nrounds: 870"
           }
         ]
       }
