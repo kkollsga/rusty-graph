@@ -2,7 +2,6 @@
 
 use pyo3::prelude::*;
 
-use super::export;
 use super::schema::CurrentSelection;
 use super::KnowledgeGraph;
 
@@ -68,25 +67,25 @@ impl KnowledgeGraph {
 
         match fmt {
             "graphml" => {
-                let content = export::to_graphml(&self.inner, selection)
+                let content = crate::graph::io::export::to_graphml(&self.inner, selection)
                     .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
                 std::fs::write(path, content)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
             }
             "gexf" => {
-                let content = export::to_gexf(&self.inner, selection)
+                let content = crate::graph::io::export::to_gexf(&self.inner, selection)
                     .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
                 std::fs::write(path, content)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
             }
             "d3" | "json" => {
-                let content = export::to_d3_json(&self.inner, selection)
+                let content = crate::graph::io::export::to_d3_json(&self.inner, selection)
                     .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
                 std::fs::write(path, content)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
             }
             "csv" => {
-                let (nodes_csv, edges_csv) = export::to_csv(&self.inner, selection)
+                let (nodes_csv, edges_csv) = crate::graph::io::export::to_csv(&self.inner, selection)
                     .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
                 // Write nodes file
@@ -174,7 +173,7 @@ impl KnowledgeGraph {
             None
         };
 
-        let summary = export::to_csv_dir(&self.inner, path, selection, &self.inner.parent_types)
+        let summary = crate::graph::io::export::to_csv_dir(&self.inner, path, selection, &self.inner.parent_types)
             .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
 
         if verbose {
@@ -250,11 +249,11 @@ impl KnowledgeGraph {
         };
 
         match format {
-            "graphml" => export::to_graphml(&self.inner, selection)
+            "graphml" => crate::graph::io::export::to_graphml(&self.inner, selection)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>),
-            "gexf" => export::to_gexf(&self.inner, selection)
+            "gexf" => crate::graph::io::export::to_gexf(&self.inner, selection)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>),
-            "d3" | "json" => export::to_d3_json(&self.inner, selection)
+            "d3" | "json" => crate::graph::io::export::to_d3_json(&self.inner, selection)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>),
             _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Unknown export format: '{}'. Supported: graphml, gexf, d3, json",

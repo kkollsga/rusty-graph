@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 mod datatypes;
 mod graph;
 use graph::cypher::{ResultIter, ResultView};
-use graph::io_operations::load_file;
+use graph::io::io_operations::load_file;
 use graph::{KnowledgeGraph, Transaction};
 
 #[pyfunction]

@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use super::schema;
 use super::storage::GraphRead;
-use super::{io_operations, KnowledgeGraph};
+use super::io::io_operations;
+use super::KnowledgeGraph;
 
 #[pymethods]
 impl KnowledgeGraph {

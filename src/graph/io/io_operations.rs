@@ -572,7 +572,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
     let meta_json_path = dir.join("columns_meta.json");
     let has_mmap = mmap_path.exists() && (meta_bin_path.exists() || meta_json_path.exists());
     if has_mmap {
-        use crate::graph::ntriples::ColumnTypeMeta;
+        use crate::graph::io::ntriples::ColumnTypeMeta;
         use memmap2::MmapMut;
 
         let file = std::fs::OpenOptions::new()

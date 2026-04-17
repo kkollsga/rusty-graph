@@ -1169,7 +1169,7 @@ pub fn load_ntriples(
 
             // Save DirGraph metadata
             let save_step = Instant::now();
-            let meta = crate::graph::io_operations::build_disk_metadata(graph);
+            let meta = crate::graph::io::io_operations::build_disk_metadata(graph);
             if let Ok(json) = serde_json::to_string_pretty(&meta) {
                 let _ = std::fs::write(data_dir.join("metadata.json"), json);
             }

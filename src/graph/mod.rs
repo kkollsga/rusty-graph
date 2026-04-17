@@ -15,11 +15,9 @@ pub mod algorithms;
 pub mod batch_operations;
 pub mod cypher;
 pub mod equation_parser;
-pub mod export;
 pub mod introspection;
-pub mod io_operations;
+pub mod io;
 pub mod maintain_graph;
-pub mod ntriples;
 pub mod query;
 pub mod schema;
 pub mod schema_validation;
@@ -5333,7 +5331,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         use std::collections::HashSet;
 
-        let config = ntriples::NTriplesConfig {
+        let config = crate::graph::io::ntriples::NTriplesConfig {
             predicates: predicates.map(|v| v.into_iter().collect::<HashSet<_>>()),
             languages: languages.map(|v| v.into_iter().collect::<HashSet<_>>()),
             node_types: node_types
@@ -5360,7 +5358,7 @@ impl KnowledgeGraph {
         };
 
         let graph = Arc::make_mut(&mut self.inner);
-        let stats = ntriples::load_ntriples(graph, path, &config)
+        let stats = crate::graph::io::ntriples::load_ntriples(graph, path, &config)
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
         Python::attach(|py| {
@@ -5384,7 +5382,7 @@ impl KnowledgeGraph {
         }
 
         // Prep phase (quick): stamp metadata, snapshot index keys
-        io_operations::prepare_save(&mut self.inner);
+        io::io_operations::prepare_save(&mut self.inner);
 
         // Consolidate ALL node properties into column stores (v3 requires columnar).
         // Always rebuild: after load+add, some nodes may have Compact storage;
@@ -5398,7 +5396,7 @@ impl KnowledgeGraph {
         // Heavy phase: serialize, compress, write — release GIL for other Python threads
         let inner = self.inner.clone();
         let path_owned = path.to_string();
-        py.detach(move || io_operations::write_graph_v3(&inner, &path_owned))
+        py.detach(move || io::io_operations::write_graph_v3(&inner, &path_owned))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))
     }
 

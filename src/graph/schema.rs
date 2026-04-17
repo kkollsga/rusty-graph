@@ -2933,7 +2933,7 @@ impl DirGraph {
             .map_err(|e| format!("DiskGraph save failed: {}", e))?;
 
         // Save DirGraph metadata as JSON
-        let meta = crate::graph::io_operations::build_disk_metadata(self);
+        let meta = crate::graph::io::io_operations::build_disk_metadata(self);
         let meta_json = serde_json::to_string_pretty(&meta)
             .map_err(|e| format!("Metadata serialization failed: {}", e))?;
         std::fs::write(dir.join("metadata.json"), meta_json)
