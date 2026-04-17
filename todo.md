@@ -156,7 +156,7 @@ by reading every prior report-out in order.
 - **No feature-gated dual implementations.** Either the old or the new code exists. Not both.
 - **Public Python API stays semantically stable.** Parity tests enforce. Adding new Python methods is fine; changing existing signatures is not.
 - **`.kgl` v3 on-disk format frozen.** Old files still load byte-compatibly — user contract.
-- **No god files.** Soft cap 1500 lines per `.rs` file; hard cap 2500. `mod.rs` files should be re-exports + a short module doc only, never a dumping ground. Enforced as a Phase 7 gate (test fails if any `.rs` under `src/graph/` exceeds 2500 lines). Splits happen during the phase that already touches the file — don't do a separate "split phase".
+- **No god files.** Soft cap 1500 lines per `.rs` file; hard cap 2500. `mod.rs` files should be re-exports + a short module doc only, never a dumping ground. Enforced as a Phase 7 gate (test fails if any `.rs` under `src/graph/` exceeds 2500 lines). **Structural splits are Phase 7's job** — the "split when touched" rule was not followed in Phases 0–4 (no file got split despite heavy migration), and the 2026-04-17 decision is to stop pretending and do the full reorg as one housekeeping pass. Phase 5 stays tightly scoped to columnar cleanup + per-backend impls. Phase 7 does the `git mv`s and module-carving.
 
 ### Parity-test discipline
 - Every phase has a **risks** list and **crunch-point tests** targeting those risks.
@@ -277,12 +277,12 @@ src/
 - Hard cap: **2500 lines** — CI fails if any `.rs` under `src/graph/` exceeds
 - `mod.rs` files exempt only for re-exports + module doc comments; no `impl` blocks, no function bodies > 20 lines
 
-**Migration strategy**:
-- Files move to target subdirs **during the phase that already touches them**. The phase that migrates `pattern_matching.rs` to the trait ALSO moves it to `src/graph/query/pattern_matching.rs` in the same PR, and splits it if it's over the line cap.
-- Don't do a big-bang "move everything" PR — it destroys git blame across a week of work.
-- `storage/` with its three backend subfolders is created in Phase 0.2–0.3 so the trait and the `Mapped` variant have homes from day one.
-- `disk_graph.rs` (3234 lines) gets carved into `storage/disk/*` in the phase that migrates disk-backend code — likely Phase 1 for reads, Phase 2 for writes.
-- If a file stays flat through all phases (e.g. `bug_report.rs`), it gets moved in the Phase 7 housekeeping pass as a one-commit `git mv`.
+**Migration strategy** (revised 2026-04-17 after Phases 0–4 shipped):
+- **All structural splits are Phase 7's job.** The original plan was "split opportunistically as each phase touches a file"; in practice Phases 0–4 migrated ~a dozen files to the trait layer without splitting any of them. Rather than apologise for the drift, Phase 7 owns the full reorg as a dedicated housekeeping pass.
+- Phase 7 does the `git mv`s and module-carving in one structural pass — a fresh-memory agent at Phase 7 kickoff can execute the moves mechanically against the target layout below without carrying week-old refactor context.
+- `storage/mod.rs` exists (created Phase 0) and houses the `GraphRead` / `GraphWrite` traits. The three backend *subfolders* (`storage/memory/`, `storage/mapped/`, `storage/disk/`) do not exist yet — Phase 7 creates them.
+- Phase 5 stays tightly scoped to its columnar-cleanup + per-backend impls + 3 Phase-2 xfail fixes, without also doing file moves. Per-backend impls can live in `schema.rs` or a temporary `storage/impls.rs` in Phase 5; Phase 7 relocates them to the backend folders.
+- Accepted trade-off: Phase 7's diff is large (≈15 file moves + splits) but cohesive, and git blame is preserved via `git mv`. A big-bang reorg costs one reviewer pass; a drip-feed costs one context-load per phase.
 
 **Why this shape (not more, not less)**:
 - Eight top-level subdirs roughly match the public API surface areas — storage, query, algorithms, introspection, IO, features, mutation, Python bindings. A user opening the repo can find things by domain.
@@ -901,6 +901,15 @@ Unlocked by earlier phases. Also serves as the final "no enum matches
 anywhere except PyO3 boundary" validation — most of that cleanup already
 happened via delete-as-you-go in Phases 1–4.
 
+**Out of scope** (decided 2026-04-17): file moves and directory-structure
+changes. Phase 5 does per-backend `impl GraphRead` / `impl GraphWrite`
+(they can live temporarily in `schema.rs` or a new `storage/impls.rs` at
+the top level), columnar cleanup, and fixes for the 3 Phase-2 disk xfail
+bugs. Phase 7 owns the full structural reorg including relocating those
+impls to `storage/memory/*`, `storage/mapped/*`, `storage/disk/*`. This
+keeps Phase 5 tightly scoped — the per-backend impls and xfail fixes are
+already substantial work without also shuffling files.
+
 ### Risks
 - Forgotten fallback path — the `if let Some(ref ms) = self.mmap_store` branches sometimes handle edge cases (null semantics, overflow bag) that differ from the heap path.
 - Column promotion/demotion inconsistency between heap and mmap stores.
@@ -947,7 +956,7 @@ Prove the architecture is actually open/closed.
 
 ---
 
-## Phase 7 — Comprehensive final audit
+## Phase 7 — Comprehensive final audit + structural reorg
 
 This is a **skeptical, end-to-end sweep** of the entire codebase — code,
 tests, benchmarks, docs, APIs, formats, cross-platform. Its purpose is to
@@ -957,6 +966,28 @@ incremental; this one looks at the whole.
 Phase 7 must be executed by a fresh-memory agent — the plan-mode kickoff
 is non-negotiable. The audit itself produces a written report against
 which the release (Phase 8) is then cut.
+
+**Structural reorg is part of Phase 7 scope** (decided 2026-04-17,
+post-Phase 4). Phases 0–4 did not split any files despite the original
+"split opportunistically" rule; Phase 7 catches up on the full target
+layout in one pass. Concrete files expected to move/split:
+
+- `src/graph/mod.rs` (~6667 lines) → `graph/kg.rs` + distribute `#[pymethods]` across `graph/pyapi/*`
+- `src/graph/schema.rs` (~5335 lines) → `graph/storage/{schema,interner}.rs` + distribute types
+- `src/graph/disk_graph.rs` (~3234 lines) → `graph/storage/disk/{mod,csr,column_store,blocks,builder}.rs`
+- `src/graph/ntriples.rs` (~2985 lines) → `graph/io/ntriples/*`
+- `src/graph/pattern_matching.rs` (~2608 lines) → `graph/query/pattern_matching*`
+- `src/graph/introspection.rs` (~4188 lines) → `graph/introspection/*`
+- `src/graph/graph_algorithms.rs` (~2294 lines) → `graph/algorithms/{pagerank,centrality,components,shortest_path,clustering}.rs`
+- `src/graph/column_store.rs` + `build_column_store.rs` → `graph/storage/memory/*`
+- `src/graph/mmap_column_store.rs` + `mmap_vec.rs` → `graph/storage/mapped/*`
+- `src/graph/block_column.rs` + `block_pool.rs` → `graph/storage/disk/blocks.rs`
+- Flat files (`bug_report.rs`, `export.rs`, `lookups.rs`, etc.) → `git mv` into their target subdirs per the layout at the top of this file.
+
+The moves happen as a **series of `git mv` commits** (one per top-level
+subdir created) so git blame is preserved. Content splits (carving
+`mod.rs` into multiple files) happen after the moves. Audit categories
+below then run against the reorganised tree.
 
 ### Risks
 - **Self-deception** — auditor skips a category because "we already checked that" in an earlier phase. Earlier phases catch local regressions; the audit catches cross-phase drift.
