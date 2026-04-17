@@ -4624,6 +4624,158 @@ impl GraphRead for GraphBackend {
             }
         }
     }
+
+    #[inline]
+    fn node_bound(&self) -> usize {
+        GraphBackend::node_bound(self)
+    }
+
+    #[inline]
+    fn is_memory(&self) -> bool {
+        GraphBackend::is_memory(self)
+    }
+
+    #[inline]
+    fn is_mapped(&self) -> bool {
+        GraphBackend::is_mapped(self)
+    }
+
+    #[inline]
+    fn is_disk(&self) -> bool {
+        GraphBackend::is_disk(self)
+    }
+
+    #[inline]
+    fn node_data(&self, idx: NodeIndex) -> Option<&NodeData> {
+        GraphBackend::node_weight(self, idx)
+    }
+
+    #[inline]
+    fn node_indices(&self) -> crate::graph::graph_iterators::GraphNodeIndices<'_> {
+        GraphBackend::node_indices(self)
+    }
+
+    #[inline]
+    fn edges_directed(
+        &self,
+        idx: NodeIndex,
+        dir: petgraph::Direction,
+    ) -> crate::graph::graph_iterators::GraphEdges<'_> {
+        GraphBackend::edges_directed(self, idx, dir)
+    }
+
+    #[inline]
+    fn edges_directed_filtered(
+        &self,
+        idx: NodeIndex,
+        dir: petgraph::Direction,
+        conn_type_filter: Option<InternedKey>,
+    ) -> crate::graph::graph_iterators::GraphEdges<'_> {
+        GraphBackend::edges_directed_filtered(self, idx, dir, conn_type_filter)
+    }
+
+    #[inline]
+    fn edge_endpoints(&self, idx: EdgeIndex) -> Option<(NodeIndex, NodeIndex)> {
+        GraphBackend::edge_endpoints(self, idx)
+    }
+
+    #[inline]
+    fn edge_endpoint_keys<'a>(
+        &'a self,
+    ) -> Box<dyn Iterator<Item = (NodeIndex, NodeIndex, InternedKey)> + 'a> {
+        GraphBackend::edge_endpoint_keys(self)
+    }
+
+    #[inline]
+    fn neighbors_directed(
+        &self,
+        idx: NodeIndex,
+        dir: petgraph::Direction,
+    ) -> crate::graph::graph_iterators::GraphNeighbors<'_> {
+        GraphBackend::neighbors_directed(self, idx, dir)
+    }
+
+    #[inline]
+    fn neighbors_undirected(
+        &self,
+        idx: NodeIndex,
+    ) -> crate::graph::graph_iterators::GraphNeighbors<'_> {
+        GraphBackend::neighbors_undirected(self, idx)
+    }
+
+    #[inline]
+    fn sources_for_conn_type_bounded(
+        &self,
+        conn_type: InternedKey,
+        max: Option<usize>,
+    ) -> Option<Vec<u32>> {
+        GraphBackend::sources_for_conn_type_bounded(self, conn_type, max)
+    }
+
+    #[inline]
+    fn lookup_peer_counts(&self, conn_type: InternedKey) -> Option<HashMap<u32, i64>> {
+        GraphBackend::lookup_peer_counts(self, conn_type)
+    }
+
+    #[inline]
+    fn count_edges_grouped_by_peer(
+        &self,
+        conn_type: InternedKey,
+        dir: petgraph::Direction,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<HashMap<u32, i64>, String> {
+        GraphBackend::count_edges_grouped_by_peer(self, conn_type, dir, deadline)
+    }
+
+    #[inline]
+    fn count_edges_filtered(
+        &self,
+        node: NodeIndex,
+        dir: petgraph::Direction,
+        conn_type: Option<InternedKey>,
+        other_node_type: Option<InternedKey>,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<usize, String> {
+        GraphBackend::count_edges_filtered(self, node, dir, conn_type, other_node_type, deadline)
+    }
+
+    #[inline]
+    fn iter_peers_filtered<'a>(
+        &'a self,
+        node: NodeIndex,
+        dir: petgraph::Direction,
+        conn_type: Option<u64>,
+    ) -> Box<dyn Iterator<Item = (NodeIndex, EdgeIndex)> + 'a> {
+        // Disk override: use the CSR fast-path that skips EdgeData materialisation
+        // (important on Wikidata — cuts I/O in half). Memory/mapped fall through
+        // to the trait default (edges_directed + post-filter).
+        match self {
+            GraphBackend::Disk(dg) => Box::new(
+                dg.iter_peers_filtered(node, dir, conn_type)
+                    .into_iter()
+                    .map(|(peer, edge_idx)| (peer, EdgeIndex::new(edge_idx as usize))),
+            ),
+            GraphBackend::Memory(_) | GraphBackend::Mapped(_) => Box::new(
+                GraphBackend::edges_directed(self, node, dir).filter_map(move |er| {
+                    if let Some(want) = conn_type {
+                        if er.weight().connection_type.as_u64() != want {
+                            return None;
+                        }
+                    }
+                    let peer = match dir {
+                        petgraph::Direction::Outgoing => er.target(),
+                        petgraph::Direction::Incoming => er.source(),
+                    };
+                    Some((peer, er.id()))
+                }),
+            ),
+        }
+    }
+
+    #[inline]
+    fn reset_arenas(&self) {
+        GraphBackend::reset_arenas(self);
+    }
 }
 
 // ============================================================================

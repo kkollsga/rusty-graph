@@ -28,43 +28,82 @@
 //! `GraphBackend` — never the other way around.
 
 use crate::datatypes::Value;
+use crate::graph::graph_iterators::{GraphEdges, GraphNeighbors, GraphNodeIndices};
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
-use petgraph::graph::NodeIndex;
+use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
+use petgraph::Direction;
+use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
+use std::time::Instant;
 
 // ──────────────────────────────────────────────────────────────────────────
 // GraphRead — unified read interface over storage backends
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Read-side interface shared by every storage backend.
-#[allow(dead_code)] // read methods land incrementally across Phases 0.3 → 1
 ///
-/// Phase 0.3 introduces this trait with a minimal surface (counts +
-/// single-property reads + zero-alloc string equality) and migrates
-/// two proof-of-concept call sites. Phase 1 expands to cover edge
-/// iteration, neighbour lookup, and schema metadata — at which point
-/// read-heavy files (pattern_matching, introspection, cypher/executor,
-/// graph_algorithms) all migrate to `&impl GraphRead`.
+/// Phase 0.3 seeded this trait with counts + single-property reads +
+/// zero-alloc string equality. Phase 1 expands it to cover iteration,
+/// neighbour lookup, backend-kind predicates, and the disk-only helpers
+/// the hot Cypher path needs (peer histograms, edge-count caches,
+/// connection-type source-node indexes). After Phase 1 every read-path
+/// file migrates off inherent `GraphBackend::*` methods.
 ///
 /// Implemented today for [`crate::graph::schema::GraphBackend`];
-/// per-backend impls arrive in Phase 1 when `MappedGraph` stops being
-/// a type alias and the three backends start diverging.
+/// per-backend impls arrive later when `MappedGraph` stops being a
+/// type alias and the three backends start diverging.
 ///
 /// Dispatch guidance for consumers:
 /// - **hot loops** — take `&impl GraphRead` so the backend is
 ///   monomorphised and the dispatch cost disappears
 /// - **boundary code / object-safe containers** — take
 ///   `&dyn GraphRead`, trading the vtable cost for simpler API shapes
+///
+/// ### Disk-only helpers
+///
+/// Methods such as [`GraphRead::sources_for_conn_type_bounded`],
+/// [`GraphRead::lookup_peer_counts`], and [`GraphRead::iter_peers_filtered`]
+/// have meaningful implementations only on the disk backend (they read
+/// from persistent indexes built at `.kgl` load time). Memory and mapped
+/// backends return `None` / fall back via `edges_directed`. The
+/// `Option` / fallback contract is preserved from the pre-refactor
+/// inherent methods so callers do not need to change their handling.
+#[allow(dead_code)] // phase-1 consumers migrate file-by-file after this PR
 pub trait GraphRead {
+    // ─────────────── counts / backend identity ───────────────
+
     /// Total live node count across all types.
     fn node_count(&self) -> usize;
 
     /// Total live edge count.
     fn edge_count(&self) -> usize;
 
+    /// Upper bound on node indices (petgraph `node_bound`). May exceed
+    /// [`GraphRead::node_count`] when nodes have been removed from a
+    /// `StableDiGraph` without vacuuming.
+    fn node_bound(&self) -> usize;
+
+    /// `true` for heap-resident [`GraphBackend::Memory`].
+    fn is_memory(&self) -> bool;
+
+    /// `true` for the mmap-Columnar [`GraphBackend::Mapped`] variant.
+    fn is_mapped(&self) -> bool;
+
+    /// `true` for disk-backed [`GraphBackend::Disk`] (CSR + mmap columns).
+    fn is_disk(&self) -> bool;
+
+    // ─────────────── per-node reads ───────────────
+
     /// Node type key for a given index. `None` if the node has been removed.
     fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey>;
+
+    /// Borrow the full NodeData. **Escape hatch** — prefer granular reads
+    /// ([`GraphRead::get_node_property`], [`GraphRead::get_node_id`], etc.)
+    /// in hot loops. On the disk backend, materialises NodeData through
+    /// the per-query arena, which is cheap per-call but accumulates if
+    /// called many times without [`GraphRead::reset_arenas`].
+    fn node_data(&self, idx: NodeIndex) -> Option<&NodeData>;
 
     /// Read a single property without full NodeData materialisation.
     /// Used by the hot WHERE-scan path. Returns `None` if the property
@@ -87,6 +126,124 @@ pub trait GraphRead {
     /// - `Some(true)` — stored value equals `target` byte-for-byte
     /// - `Some(false)` — stored value is present but differs
     fn str_prop_eq(&self, idx: NodeIndex, key: InternedKey, target: &str) -> Option<bool>;
+
+    // ─────────────── iteration ───────────────
+
+    /// Iterator over all live node indices.
+    fn node_indices(&self) -> GraphNodeIndices<'_>;
+
+    // ─────────────── per-node edges / neighbours ───────────────
+
+    /// Directed edges incident to `idx` (yielded as [`GraphEdgeRef`]).
+    fn edges_directed(&self, idx: NodeIndex, dir: Direction) -> GraphEdges<'_>;
+
+    /// Like [`GraphRead::edges_directed`] but the disk backend can
+    /// pre-filter by connection type, skipping EdgeData materialisation
+    /// for non-matching edges. Memory/mapped callers still post-filter.
+    fn edges_directed_filtered(
+        &self,
+        idx: NodeIndex,
+        dir: Direction,
+        conn_type_filter: Option<InternedKey>,
+    ) -> GraphEdges<'_>;
+
+    /// `(source, target)` endpoints for an edge, without materialising
+    /// EdgeData. `None` if the edge has been removed.
+    fn edge_endpoints(&self, idx: EdgeIndex) -> Option<(NodeIndex, NodeIndex)>;
+
+    /// Iterate edge endpoint metadata without materialising EdgeData.
+    /// Yields `(source, target, connection_type)` for every live edge.
+    /// On the disk backend this reads mmap'd `edge_endpoints` directly
+    /// (zero heap allocation per edge).
+    fn edge_endpoint_keys<'a>(
+        &'a self,
+    ) -> Box<dyn Iterator<Item = (NodeIndex, NodeIndex, InternedKey)> + 'a>;
+
+    /// Neighbours reached via an edge in `dir`.
+    fn neighbors_directed(&self, idx: NodeIndex, dir: Direction) -> GraphNeighbors<'_>;
+
+    /// Neighbours reached via an edge in either direction.
+    fn neighbors_undirected(&self, idx: NodeIndex) -> GraphNeighbors<'_>;
+
+    // ─────────────── disk-only helpers (Option / fallback contract) ─────
+
+    /// Source nodes with outgoing edges of a given connection type,
+    /// read from the disk inverted index. `None` on memory/mapped or on
+    /// older disk graphs without this index.
+    ///
+    /// `max` caps the number of sources returned to avoid eager
+    /// allocations when the pattern executor will truncate downstream.
+    fn sources_for_conn_type_bounded(
+        &self,
+        _conn_type: InternedKey,
+        _max: Option<usize>,
+    ) -> Option<Vec<u32>> {
+        None
+    }
+
+    /// Per-peer edge count for a connection type, read from the
+    /// histogram cache on the disk backend. `None` on memory/mapped or
+    /// on older disk graphs (caller falls back to
+    /// [`GraphRead::count_edges_grouped_by_peer`]).
+    fn lookup_peer_counts(&self, _conn_type: InternedKey) -> Option<HashMap<u32, i64>> {
+        None
+    }
+
+    /// Count edges of a connection type grouped by peer node, via a full
+    /// scan. Every backend implements this — disk uses sequential CSR
+    /// I/O; memory/mapped iterate petgraph edges.
+    fn count_edges_grouped_by_peer(
+        &self,
+        conn_type: InternedKey,
+        dir: Direction,
+        deadline: Option<Instant>,
+    ) -> Result<HashMap<u32, i64>, String>;
+
+    /// Count edges from/to `node` matching optional connection-type and
+    /// peer-node-type filters. On disk uses sorted-CSR binary search
+    /// (O(log D + matching)); on memory/mapped iterates without
+    /// allocation.
+    fn count_edges_filtered(
+        &self,
+        node: NodeIndex,
+        dir: Direction,
+        conn_type: Option<InternedKey>,
+        other_node_type: Option<InternedKey>,
+        deadline: Option<Instant>,
+    ) -> Result<usize, String>;
+
+    /// Peer-iteration fast path used by the Cypher edge-no-variable
+    /// optimisation. Yields `(peer, edge_idx)` pairs **without**
+    /// materialising EdgeData — on disk this halves I/O on Wikidata-scale
+    /// graphs.
+    ///
+    /// Default implementation falls back to [`GraphRead::edges_directed`]
+    /// + post-filter. The disk backend overrides with a direct CSR walk.
+    fn iter_peers_filtered<'a>(
+        &'a self,
+        node: NodeIndex,
+        dir: Direction,
+        conn_type: Option<u64>,
+    ) -> Box<dyn Iterator<Item = (NodeIndex, EdgeIndex)> + 'a> {
+        let iter = self.edges_directed(node, dir).filter_map(move |er| {
+            if let Some(want) = conn_type {
+                if er.weight().connection_type.as_u64() != want {
+                    return None;
+                }
+            }
+            let peer = match dir {
+                Direction::Outgoing => er.target(),
+                Direction::Incoming => er.source(),
+            };
+            Some((peer, er.id()))
+        });
+        Box::new(iter)
+    }
+
+    /// Reset per-query materialisation arenas. No-op on memory/mapped;
+    /// frees NodeData / EdgeData allocated during the previous query on
+    /// the disk backend. Called between Cypher queries to cap memory.
+    fn reset_arenas(&self) {}
 }
 
 // ──────────────────────────────────────────────────────────────────────────
