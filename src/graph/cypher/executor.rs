@@ -2203,7 +2203,10 @@ impl<'a> CypherExecutor<'a> {
                     .map(|v| v.to_vec())
                     .unwrap_or_default()
             } else {
-                self.graph.graph.node_indices().collect()
+                {
+                    let g = &self.graph.graph;
+                    g.node_indices().collect()
+                }
             };
 
             // Property filter executor (if group node has inline properties)
@@ -2396,7 +2399,10 @@ impl<'a> CypherExecutor<'a> {
                 Vec::new()
             }
         } else {
-            self.graph.graph.node_indices().collect()
+            {
+                let g = &self.graph.graph;
+                g.node_indices().collect()
+            }
         };
 
         // Classify RETURN items into group keys and aggregates
@@ -2719,7 +2725,10 @@ impl<'a> CypherExecutor<'a> {
                 Vec::new()
             }
         } else {
-            self.graph.graph.node_indices().collect()
+            {
+                let g = &self.graph.graph;
+                g.node_indices().collect()
+            }
         };
 
         // Pattern property filter
@@ -4106,7 +4115,10 @@ impl<'a> CypherExecutor<'a> {
                 }
                 // Edge variable — return connection_type as representative value
                 if let Some(edge) = row.edge_bindings.get(name) {
-                    if let Some(edge_data) = self.graph.graph.edge_weight(edge.edge_index) {
+                    if let Some(edge_data) = {
+                        let g = &self.graph.graph;
+                        g.edge_weight(edge.edge_index)
+                    } {
                         return Ok(Value::String(
                             edge_data
                                 .connection_type_str(&self.graph.interner)
@@ -5197,7 +5209,10 @@ impl<'a> CypherExecutor<'a> {
                 // type(r) returns the relationship type
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(edge) = row.edge_bindings.get(var) {
-                        if let Some(edge_data) = self.graph.graph.edge_weight(edge.edge_index) {
+                        if let Some(edge_data) = {
+                            let g = &self.graph.graph;
+                            g.edge_weight(edge.edge_index)
+                        } {
                             return Ok(Value::String(
                                 edge_data
                                     .connection_type_str(&self.graph.interner)
@@ -5252,7 +5267,10 @@ impl<'a> CypherExecutor<'a> {
                         }
                     }
                     if let Some(edge) = row.edge_bindings.get(var) {
-                        if let Some(edge_data) = self.graph.graph.edge_weight(edge.edge_index) {
+                        if let Some(edge_data) = {
+                            let g = &self.graph.graph;
+                            g.edge_weight(edge.edge_index)
+                        } {
                             let mut keys: Vec<&str> = vec!["type"];
                             keys.extend(edge_data.property_keys(&self.graph.interner));
                             keys.sort();
@@ -9768,7 +9786,8 @@ fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> V
 
 /// Resolve a property from an EdgeBinding by looking up the graph
 fn resolve_edge_property(graph: &DirGraph, edge: &EdgeBinding, property: &str) -> Value {
-    if let Some(edge_data) = graph.graph.edge_weight(edge.edge_index) {
+    let g = &graph.graph;
+    if let Some(edge_data) = g.edge_weight(edge.edge_index) {
         match property {
             "type" | "connection_type" => {
                 Value::String(edge_data.connection_type_str(&graph.interner).to_string())

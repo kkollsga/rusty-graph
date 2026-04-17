@@ -28,7 +28,7 @@
 //! `GraphBackend` — never the other way around.
 
 use crate::datatypes::Value;
-use crate::graph::graph_iterators::{GraphEdges, GraphNeighbors, GraphNodeIndices};
+use crate::graph::graph_iterators::GraphEdgeRef;
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
@@ -43,22 +43,27 @@ use std::time::Instant;
 
 /// Read-side interface shared by every storage backend.
 ///
-/// Phase 0.3 seeded this trait with counts + single-property reads +
-/// zero-alloc string equality. Phase 1 expands it to cover iteration,
-/// neighbour lookup, backend-kind predicates, and the disk-only helpers
-/// the hot Cypher path needs (peer histograms, edge-count caches,
-/// connection-type source-node indexes). After Phase 1 every read-path
-/// file migrates off inherent `GraphBackend::*` methods.
+/// Phase 0.3 seeded this trait with counts + single-property reads.
+/// Phase 1 expanded it to cover iteration, neighbour lookup, backend-kind
+/// predicates, and disk-only helpers. Phase 3 converted iterator-returning
+/// methods to GATs (associated types with lifetime parameters) and promoted
+/// the remaining inherent edge accessors (`edges`, `edge_references`,
+/// `edge_weight`, `edge_indices`, `find_edge`, `edges_connecting`,
+/// `edge_weights`) onto the trait.
 ///
 /// Implemented today for [`crate::graph::schema::GraphBackend`];
-/// per-backend impls arrive later when `MappedGraph` stops being a
-/// type alias and the three backends start diverging.
+/// per-backend impls (`MemoryGraph`, `DiskGraph`) will land in Phase 5
+/// alongside the columnar cleanup that lets them diverge meaningfully.
 ///
-/// Dispatch guidance for consumers:
-/// - **hot loops** — take `&impl GraphRead` so the backend is
-///   monomorphised and the dispatch cost disappears
-/// - **boundary code / object-safe containers** — take
-///   `&dyn GraphRead`, trading the vtable cost for simpler API shapes
+/// ### GATs and object-safety
+///
+/// The iterator methods use generic associated types (e.g.
+/// [`GraphRead::EdgesIter`]). This makes the trait **non-object-safe**:
+/// `&dyn GraphRead` does not compile. All consumers take `&impl GraphRead`
+/// (monomorphised) instead. Two methods that need type erasure for
+/// backend-specific fast paths (`iter_peers_filtered`, `edge_endpoint_keys`)
+/// return `Box<dyn Iterator<…> + 'a>` explicitly and stay non-GAT; they
+/// would otherwise require a second associated type per method.
 ///
 /// ### Disk-only helpers
 ///
@@ -71,6 +76,37 @@ use std::time::Instant;
 /// inherent methods so callers do not need to change their handling.
 #[allow(dead_code)] // phase-1 consumers migrate file-by-file after this PR
 pub trait GraphRead {
+    // ─────────────── generic associated types ───────────────
+
+    /// Iterator over all live node indices.
+    type NodeIndicesIter<'a>: Iterator<Item = NodeIndex>
+    where
+        Self: 'a;
+
+    /// Iterator over all live edge indices.
+    type EdgeIndicesIter<'a>: Iterator<Item = EdgeIndex>
+    where
+        Self: 'a;
+
+    /// Iterator over edges incident to a node (directed).
+    type EdgesIter<'a>: Iterator<Item = GraphEdgeRef<'a>>
+    where
+        Self: 'a;
+
+    /// Iterator over all edges in the graph (yielded as `GraphEdgeRef`).
+    type EdgeReferencesIter<'a>: Iterator<Item = GraphEdgeRef<'a>>
+    where
+        Self: 'a;
+
+    /// Iterator over edges connecting a given pair of nodes.
+    type EdgesConnectingIter<'a>: Iterator<Item = GraphEdgeRef<'a>>
+    where
+        Self: 'a;
+
+    /// Iterator over neighbour node indices.
+    type NeighborsIter<'a>: Iterator<Item = NodeIndex>
+    where
+        Self: 'a;
     // ─────────────── counts / backend identity ───────────────
 
     /// Total live node count across all types.
@@ -130,12 +166,28 @@ pub trait GraphRead {
     // ─────────────── iteration ───────────────
 
     /// Iterator over all live node indices.
-    fn node_indices(&self) -> GraphNodeIndices<'_>;
+    fn node_indices(&self) -> Self::NodeIndicesIter<'_>;
+
+    /// Iterator over all live edge indices.
+    fn edge_indices(&self) -> Self::EdgeIndicesIter<'_>;
+
+    /// Iterator over every live edge in the graph, yielding
+    /// [`GraphEdgeRef`] with materialised `EdgeData`.
+    fn edge_references(&self) -> Self::EdgeReferencesIter<'_>;
+
+    /// Iterator over every live edge's weight (EdgeData). Boxed because
+    /// petgraph's underlying `edge_weights` returns an opaque
+    /// `impl Iterator` that can't be named as a GAT associated type.
+    fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = &'a EdgeData> + 'a>;
 
     // ─────────────── per-node edges / neighbours ───────────────
 
     /// Directed edges incident to `idx` (yielded as [`GraphEdgeRef`]).
-    fn edges_directed(&self, idx: NodeIndex, dir: Direction) -> GraphEdges<'_>;
+    fn edges_directed(&self, idx: NodeIndex, dir: Direction) -> Self::EdgesIter<'_>;
+
+    /// Default-direction edges (outgoing) incident to `idx` — matches
+    /// petgraph's `StableDiGraph::edges`.
+    fn edges(&self, idx: NodeIndex) -> Self::EdgesIter<'_>;
 
     /// Like [`GraphRead::edges_directed`] but the disk backend can
     /// pre-filter by connection type, skipping EdgeData materialisation
@@ -145,7 +197,16 @@ pub trait GraphRead {
         idx: NodeIndex,
         dir: Direction,
         conn_type_filter: Option<InternedKey>,
-    ) -> GraphEdges<'_>;
+    ) -> Self::EdgesIter<'_>;
+
+    /// Iterator over edges directly connecting `a` → `b`.
+    fn edges_connecting(&self, a: NodeIndex, b: NodeIndex) -> Self::EdgesConnectingIter<'_>;
+
+    /// Borrow a single edge's weight.
+    fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData>;
+
+    /// First edge index from `a` to `b`, if one exists.
+    fn find_edge(&self, a: NodeIndex, b: NodeIndex) -> Option<EdgeIndex>;
 
     /// `(source, target)` endpoints for an edge, without materialising
     /// EdgeData. `None` if the edge has been removed.
@@ -160,10 +221,10 @@ pub trait GraphRead {
     ) -> Box<dyn Iterator<Item = (NodeIndex, NodeIndex, InternedKey)> + 'a>;
 
     /// Neighbours reached via an edge in `dir`.
-    fn neighbors_directed(&self, idx: NodeIndex, dir: Direction) -> GraphNeighbors<'_>;
+    fn neighbors_directed(&self, idx: NodeIndex, dir: Direction) -> Self::NeighborsIter<'_>;
 
     /// Neighbours reached via an edge in either direction.
-    fn neighbors_undirected(&self, idx: NodeIndex) -> GraphNeighbors<'_>;
+    fn neighbors_undirected(&self, idx: NodeIndex) -> Self::NeighborsIter<'_>;
 
     // ─────────────── disk-only helpers (Option / fallback contract) ─────
 
@@ -264,9 +325,10 @@ pub trait GraphRead {
 /// against the schema metadata sits architecturally above storage.
 /// Documented decision: keep transactions on DirGraph.
 ///
-/// Dispatch guidance matches [`GraphRead`]: `&mut impl GraphWrite`
-/// in hot mutation loops, `&mut dyn GraphWrite` at wider API
-/// boundaries.
+/// Dispatch guidance: `&mut impl GraphWrite` everywhere. Because
+/// `GraphWrite: GraphRead` and `GraphRead` is non-object-safe (GAT
+/// iterators — see [`GraphRead`] docs), `&mut dyn GraphWrite` also
+/// does not compile. All mutation consumers take `&mut impl GraphWrite`.
 #[allow(dead_code)] // phase-2 consumers migrate file-by-file after this PR
 pub trait GraphWrite: GraphRead {
     /// Mutable borrow of the full NodeData. Escape hatch for property

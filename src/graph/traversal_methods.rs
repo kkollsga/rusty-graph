@@ -236,6 +236,7 @@ fn make_traversal_fast(
     let mut all_targets_per_parent: HashMap<NodeIndex, Vec<NodeIndex>> =
         HashMap::with_capacity(source_nodes.len());
 
+    let g = &graph.graph;
     // Process each source node
     for &source_node in &source_nodes {
         let mut targets: HashSet<NodeIndex> = HashSet::new();
@@ -245,7 +246,7 @@ fn make_traversal_fast(
             match target_type {
                 None => true,
                 Some(types) => {
-                    let nt = graph.graph[idx].node_type;
+                    let nt = g[idx].node_type;
                     types.iter().any(|t| InternedKey::from_str(t) == nt)
                 }
             }
@@ -254,7 +255,7 @@ fn make_traversal_fast(
         // Process edges based on direction
         match direction {
             Some(Direction::Outgoing) => {
-                for edge in graph.graph.edges_directed(source_node, Direction::Outgoing) {
+                for edge in g.edges_directed(source_node, Direction::Outgoing) {
                     if edge.weight().connection_type == conn_key {
                         let t = edge.target();
                         if type_ok(t) {
@@ -264,7 +265,7 @@ fn make_traversal_fast(
                 }
             }
             Some(Direction::Incoming) => {
-                for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
+                for edge in g.edges_directed(source_node, Direction::Incoming) {
                     if edge.weight().connection_type == conn_key {
                         let t = edge.source();
                         if type_ok(t) {
@@ -275,7 +276,7 @@ fn make_traversal_fast(
             }
             None => {
                 // Both directions
-                for edge in graph.graph.edges_directed(source_node, Direction::Outgoing) {
+                for edge in g.edges_directed(source_node, Direction::Outgoing) {
                     if edge.weight().connection_type == conn_key {
                         let t = edge.target();
                         if type_ok(t) {
@@ -283,7 +284,7 @@ fn make_traversal_fast(
                         }
                     }
                 }
-                for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
+                for edge in g.edges_directed(source_node, Direction::Incoming) {
                     if edge.weight().connection_type == conn_key {
                         let t = edge.source();
                         if type_ok(t) {
@@ -419,12 +420,13 @@ fn make_traversal_full(
         // Pre-intern connection type for fast u64 == u64 comparison
         let conn_key = InternedKey::from_str(&connection_type);
 
+        let g = &graph.graph;
         // Helper: check if a target node passes the type filter
         let type_ok = |idx: NodeIndex| -> bool {
             match target_type {
                 None => true,
                 Some(types) => {
-                    let nt = graph.graph[idx].node_type;
+                    let nt = g[idx].node_type;
                     types.iter().any(|t| InternedKey::from_str(t) == nt)
                 }
             }
@@ -434,7 +436,7 @@ fn make_traversal_full(
         for &source_node in source_nodes {
             match direction {
                 Some(Direction::Outgoing) => {
-                    for edge in graph.graph.edges_directed(source_node, Direction::Outgoing) {
+                    for edge in g.edges_directed(source_node, Direction::Outgoing) {
                         if edge.weight().connection_type == conn_key {
                             if let Some(conn_filter) = filter_connection {
                                 if !edge_matches_conditions(&edge.weight().properties, conn_filter)
@@ -455,7 +457,7 @@ fn make_traversal_full(
                     }
                 }
                 Some(Direction::Incoming) => {
-                    for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
+                    for edge in g.edges_directed(source_node, Direction::Incoming) {
                         if edge.weight().connection_type == conn_key {
                             if let Some(conn_filter) = filter_connection {
                                 if !edge_matches_conditions(&edge.weight().properties, conn_filter)
@@ -477,7 +479,7 @@ fn make_traversal_full(
                 }
                 None => {
                     // Both directions
-                    for edge in graph.graph.edges_directed(source_node, Direction::Outgoing) {
+                    for edge in g.edges_directed(source_node, Direction::Outgoing) {
                         if edge.weight().connection_type == conn_key {
                             if let Some(conn_filter) = filter_connection {
                                 if !edge_matches_conditions(&edge.weight().properties, conn_filter)
@@ -496,7 +498,7 @@ fn make_traversal_full(
                             }
                         }
                     }
-                    for edge in graph.graph.edges_directed(source_node, Direction::Incoming) {
+                    for edge in g.edges_directed(source_node, Direction::Incoming) {
                         if edge.weight().connection_type == conn_key {
                             if let Some(conn_filter) = filter_connection {
                                 if !edge_matches_conditions(&edge.weight().properties, conn_filter)

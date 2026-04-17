@@ -328,8 +328,9 @@ fn compute_neighbors_schema_sampled(
     let mut outgoing: HashMap<(String, String), usize> = HashMap::new();
     let mut incoming: HashMap<(String, String), usize> = HashMap::new();
 
+    let g = &graph.graph;
     for &node_idx in node_indices.iter().take(sample_count) {
-        for edge_ref in graph.graph.edges_directed(node_idx, Direction::Outgoing) {
+        for edge_ref in g.edges_directed(node_idx, Direction::Outgoing) {
             if let Some(target_node) = graph.get_node(edge_ref.target()) {
                 let key = (
                     edge_ref
@@ -341,7 +342,7 @@ fn compute_neighbors_schema_sampled(
                 *outgoing.entry(key).or_insert(0) += 1;
             }
         }
-        for edge_ref in graph.graph.edges_directed(node_idx, Direction::Incoming) {
+        for edge_ref in g.edges_directed(node_idx, Direction::Incoming) {
             if let Some(source_node) = graph.get_node(edge_ref.source()) {
                 let key = (
                     edge_ref
@@ -690,7 +691,8 @@ pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStat
     }
     let mut stats: HashMap<String, Accum> = HashMap::new();
 
-    for edge_ref in graph.graph.edge_references() {
+    let g = &graph.graph;
+    for edge_ref in g.edge_references() {
         let edge_data = edge_ref.weight();
         let entry = stats
             .entry(edge_data.connection_type_str(&graph.interner).to_string())
@@ -808,11 +810,7 @@ fn sample_unique_values(
         return unique;
     };
     let key = InternedKey::from_str(property);
-    // `&dyn GraphRead` — trait-object dispatch; vtable cost is negligible
-    // versus the per-property reads inside the loop. A generic
-    // `sample_values<G: GraphRead>(backend: &G, ...)` variant will appear
-    // when `type_indices` moves onto a wider metadata trait.
-    let backend: &dyn GraphRead = &graph.graph;
+    let backend = &graph.graph;
     for &idx in indices {
         if unique.len() >= max {
             break;
@@ -1248,8 +1246,9 @@ pub fn compute_neighbors_schema(
     let mut outgoing: HashMap<(String, String), usize> = HashMap::new();
     let mut incoming: HashMap<(String, String), usize> = HashMap::new();
 
+    let g = &graph.graph;
     for &node_idx in node_indices {
-        for edge_ref in graph.graph.edges_directed(node_idx, Direction::Outgoing) {
+        for edge_ref in g.edges_directed(node_idx, Direction::Outgoing) {
             if let Some(target_node) = graph.get_node(edge_ref.target()) {
                 let key = (
                     edge_ref
@@ -1261,7 +1260,7 @@ pub fn compute_neighbors_schema(
                 *outgoing.entry(key).or_insert(0) += 1;
             }
         }
-        for edge_ref in graph.graph.edges_directed(node_idx, Direction::Incoming) {
+        for edge_ref in g.edges_directed(node_idx, Direction::Incoming) {
             if let Some(source_node) = graph.get_node(edge_ref.source()) {
                 let key = (
                     edge_ref
@@ -1311,7 +1310,8 @@ pub fn compute_all_neighbors_schemas(graph: &DirGraph) -> HashMap<String, Neighb
     // Key: (source_type, conn_type, target_type) → count
     let mut edge_counts: HashMap<(String, String, String), usize> = HashMap::new();
 
-    for edge_ref in graph.graph.edge_references() {
+    let g = &graph.graph;
+    for edge_ref in g.edge_references() {
         if let (Some(source), Some(target)) = (
             graph.get_node(edge_ref.source()),
             graph.get_node(edge_ref.target()),
@@ -1545,8 +1545,9 @@ fn compute_edge_property_stats(
     let mut all_props: HashSet<String> = HashSet::new();
     let mut total_edges: usize = 0;
 
+    let g = &graph.graph;
     // First pass: discover property names
-    for edge_ref in graph.graph.edge_references() {
+    for edge_ref in g.edge_references() {
         let ed = edge_ref.weight();
         if ed.connection_type_str(&graph.interner) == connection_type {
             total_edges += 1;
@@ -1569,7 +1570,7 @@ fn compute_edge_property_stats(
         let mut value_set: HashSet<Value> = HashSet::new();
         let mut first_type: Option<&'static str> = None;
 
-        for edge_ref in graph.graph.edge_references() {
+        for edge_ref in g.edge_references() {
             let ed = edge_ref.weight();
             if ed.connection_type_str(&graph.interner) != connection_type {
                 continue;
@@ -1719,7 +1720,8 @@ fn write_connections_detail(
 
         // Per source→target pair counts
         let mut pair_counts: HashMap<(String, String), usize> = HashMap::new();
-        for edge_ref in graph.graph.edge_references() {
+        let g = &graph.graph;
+        for edge_ref in g.edge_references() {
             let ed = edge_ref.weight();
             if ed.connection_type_str(&graph.interner) != *topic {
                 continue;
@@ -1779,7 +1781,7 @@ fn write_connections_detail(
         // Sample edges (first 2)
         xml.push_str("    <samples>\n");
         let mut sample_count = 0;
-        for edge_ref in graph.graph.edge_references() {
+        for edge_ref in g.edge_references() {
             let ed = edge_ref.weight();
             if ed.connection_type_str(&graph.interner) != *topic {
                 continue;

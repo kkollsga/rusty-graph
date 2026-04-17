@@ -41,12 +41,23 @@ for the full plan.
 └──────────────────┘   └──────────────────┘   └────────────────────┘
 ```
 
-### Trait layer (Phase 0.3 → Phase 2)
+### Trait layer (Phase 0.3 → Phase 3)
 
-`GraphRead` (Phase 0.3, expanded in Phase 1) covers reads — counts,
-per-node property access, iteration, neighbour lookup, backend
-identity, and the disk-only helpers the hot Cypher path needs (peer
-histograms, edge-count caches, connection-type source-node indexes).
+`GraphRead` (Phase 0.3, expanded in Phase 1, GAT-converted in Phase 3)
+covers reads — counts, per-node property access, iteration, neighbour
+lookup, backend identity, edge-level accessors (edges, edge_references,
+edge_weight, edge_indices, find_edge, edges_connecting, edge_weights),
+and the disk-only helpers the hot Cypher path needs (peer histograms,
+edge-count caches, connection-type source-node indexes).
+
+**Iterator methods use GATs.** Phase 3 replaced the concrete return
+types of `node_indices`, `edges_directed`, `neighbors_directed`,
+`edge_references`, `edges`, `edge_indices`, and `edges_connecting` with
+generic associated types (`Self::NodeIndicesIter<'_>`, etc.). This
+makes the trait non-object-safe — `&dyn GraphRead` no longer compiles.
+The payoff lands in Phase 5, when per-backend `impl GraphRead for
+MemoryGraph` and `impl GraphRead for DiskGraph` return their native
+iterator types without going through the `GraphBackend` enum match.
 
 `GraphWrite: GraphRead` (Phase 2) covers mutations:
 
@@ -121,9 +132,10 @@ src/graph/
 
 1. **Add to the trait first.** A new read operation should be a trait method in `src/graph/storage/mod.rs`, implemented per-backend. Don't add inherent methods to `GraphBackend` and expect consumers to match on the variant — that's the layering we're getting rid of.
 2. **Delete as you go.** The PR that introduces the trait-based path is the same PR that deletes the old enum-match code. No `#[deprecated]` shims.
-3. **`&impl GraphRead` in hot loops; `&dyn GraphRead` at boundaries.** Monomorphisation for tight scan code (Cypher executor, algorithm inner loops). Trait objects where the API ergonomics matter more than the vtable cost (boundary helpers, collections of heterogeneous graphs).
-4. **In-memory performance is sacred.** If an optimisation helps mapped or disk at the cost of memory, find a mode-specific way. Never regress the core product.
-5. **No god files.** Soft cap 1500 lines per `.rs`; hard cap 2500 (enforced in Phase 7). `mod.rs` files are re-exports + module docs only — no `impl` blocks, no functions > 20 lines.
+3. **`&impl GraphRead` everywhere; no `&dyn GraphRead`.** Phase 3 added GATs to every iterator method on `GraphRead`, which makes the trait non-object-safe. All consumers take `&impl GraphRead` (monomorphised). Two methods that need type erasure for backend-specific fast paths (`iter_peers_filtered`, `edge_endpoint_keys`) explicitly return `Box<dyn Iterator<…> + 'a>` and stay non-GAT.
+4. **Iterator-returning methods must use GATs.** When adding a new iteration point to `GraphRead`, declare an associated type (`type FooIter<'a>: Iterator<Item = …> where Self: 'a;`) and return `Self::FooIter<'_>` from the method. This sets up the trait for future per-backend impls (Phase 5) without requiring call-site rewrites.
+5. **In-memory performance is sacred.** If an optimisation helps mapped or disk at the cost of memory, find a mode-specific way. Never regress the core product.
+6. **No god files.** Soft cap 1500 lines per `.rs`; hard cap 2500 (enforced in Phase 7). `mod.rs` files are re-exports + module docs only — no `impl` blocks, no functions > 20 lines.
 
 ## Open questions tracked in `todo.md`
 

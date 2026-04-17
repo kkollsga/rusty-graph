@@ -536,9 +536,10 @@ pub fn filter_nodes(
         }
 
         // Regular processing with capacity hint
-        let estimated_capacity = graph.graph.node_count() / 2;
+        let g = &graph.graph;
+        let estimated_capacity = g.node_count() / 2;
         let mut all_nodes = Vec::with_capacity(estimated_capacity);
-        all_nodes.extend(graph.graph.node_indices());
+        all_nodes.extend(g.node_indices());
 
         let processed = process_nodes(
             graph,
@@ -594,8 +595,9 @@ pub fn sort_nodes(
         .ok_or_else(|| "No active selection level".to_string())?;
 
     if level.selections.is_empty() {
-        let mut all_nodes = Vec::with_capacity(graph.graph.node_count() / 2);
-        all_nodes.extend(graph.graph.node_indices());
+        let g = &graph.graph;
+        let mut all_nodes = Vec::with_capacity(g.node_count() / 2);
+        all_nodes.extend(g.node_indices());
 
         let sorted = sort_nodes_by_fields(graph, all_nodes, &sort_fields);
         if !sorted.is_empty() {
@@ -629,8 +631,9 @@ pub fn limit_nodes_per_group(
         .ok_or_else(|| "No active selection level".to_string())?;
 
     if level.selections.is_empty() {
-        let mut all_nodes = Vec::with_capacity(graph.graph.node_count().min(max_per_group));
-        all_nodes.extend(graph.graph.node_indices().take(max_per_group));
+        let g = &graph.graph;
+        let mut all_nodes = Vec::with_capacity(g.node_count().min(max_per_group));
+        all_nodes.extend(g.node_indices().take(max_per_group));
 
         if !all_nodes.is_empty() {
             level.add_selection(None, all_nodes);
@@ -737,7 +740,8 @@ pub fn offset_nodes(
 
     if level.selections.is_empty() {
         // Skip first n nodes from the whole graph
-        let all_nodes: Vec<NodeIndex> = graph.graph.node_indices().skip(n).collect();
+        let g = &graph.graph;
+        let all_nodes: Vec<NodeIndex> = g.node_indices().skip(n).collect();
         if !all_nodes.is_empty() {
             level.add_selection(None, all_nodes);
         }

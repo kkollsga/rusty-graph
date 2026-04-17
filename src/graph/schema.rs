@@ -4308,18 +4308,6 @@ impl GraphBackend {
         }
     }
 
-    #[inline]
-    pub fn edges(&self, a: NodeIndex) -> crate::graph::graph_iterators::GraphEdges<'_> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                crate::graph::graph_iterators::GraphEdges::InMemory(g.edges(a))
-            }
-            GraphBackend::Disk(dg) => crate::graph::graph_iterators::GraphEdges::Disk(
-                dg.edges_directed_iter(a, petgraph::Direction::Outgoing),
-            ),
-        }
-    }
-
     /// Iterate edge endpoint metadata without materializing EdgeData.
     /// Yields (source_index, target_index, connection_type_key) for each live edge.
     /// DiskGraph: reads mmap'd edge_endpoints directly (zero heap allocation).
@@ -4349,18 +4337,6 @@ impl GraphBackend {
     }
 
     #[inline]
-    pub fn edge_references(&self) -> crate::graph::graph_iterators::GraphEdgeReferences<'_> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                crate::graph::graph_iterators::GraphEdgeReferences::InMemory(g.edge_references())
-            }
-            GraphBackend::Disk(dg) => {
-                crate::graph::graph_iterators::GraphEdgeReferences::Disk(dg.edge_references_iter())
-            }
-        }
-    }
-
-    #[inline]
     pub fn edge_count(&self) -> usize {
         match self {
             GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.edge_count(),
@@ -4369,40 +4345,10 @@ impl GraphBackend {
     }
 
     #[inline]
-    pub fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.edge_weight(idx),
-            GraphBackend::Disk(dg) => dg.edge_weight(idx),
-        }
-    }
-
-    #[inline]
     pub fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
         match self {
             GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.edge_weight_mut(idx),
             GraphBackend::Disk(dg) => dg.edge_weight_mut(idx),
-        }
-    }
-
-    /// Iterate all edge weights. Returns a boxed iterator because petgraph's
-    /// `edge_weights()` returns an opaque `impl Iterator` type.
-    #[inline]
-    pub fn edge_weights(&self) -> Box<dyn Iterator<Item = &EdgeData> + '_> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => Box::new(g.edge_weights()),
-            GraphBackend::Disk(dg) => dg.edge_weights_iter(),
-        }
-    }
-
-    #[inline]
-    pub fn edge_indices(&self) -> crate::graph::graph_iterators::GraphEdgeIndices<'_> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                crate::graph::graph_iterators::GraphEdgeIndices::InMemory(g.edge_indices())
-            }
-            GraphBackend::Disk(dg) => {
-                crate::graph::graph_iterators::GraphEdgeIndices::Disk(dg.edge_indices_iter())
-            }
         }
     }
 
@@ -4427,32 +4373,6 @@ impl GraphBackend {
         match self {
             GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.remove_edge(idx),
             GraphBackend::Disk(dg) => dg.remove_edge(idx),
-        }
-    }
-
-    #[inline]
-    pub fn find_edge(&self, a: NodeIndex, b: NodeIndex) -> Option<EdgeIndex> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.find_edge(a, b),
-            GraphBackend::Disk(dg) => dg.find_edge(a, b),
-        }
-    }
-
-    #[inline]
-    pub fn edges_connecting(
-        &self,
-        a: NodeIndex,
-        b: NodeIndex,
-    ) -> crate::graph::graph_iterators::GraphEdgesConnecting<'_> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
-                crate::graph::graph_iterators::GraphEdgesConnecting::InMemory(
-                    g.edges_connecting(a, b),
-                )
-            }
-            GraphBackend::Disk(dg) => crate::graph::graph_iterators::GraphEdgesConnecting::Disk(
-                dg.edges_connecting_iter(a, b),
-            ),
         }
     }
 }
@@ -4580,6 +4500,13 @@ pub type Graph = GraphBackend;
 use crate::graph::storage::{GraphRead, GraphWrite};
 
 impl GraphRead for GraphBackend {
+    type NodeIndicesIter<'a> = crate::graph::graph_iterators::GraphNodeIndices<'a>;
+    type EdgeIndicesIter<'a> = crate::graph::graph_iterators::GraphEdgeIndices<'a>;
+    type EdgesIter<'a> = crate::graph::graph_iterators::GraphEdges<'a>;
+    type EdgeReferencesIter<'a> = crate::graph::graph_iterators::GraphEdgeReferences<'a>;
+    type EdgesConnectingIter<'a> = crate::graph::graph_iterators::GraphEdgesConnecting<'a>;
+    type NeighborsIter<'a> = crate::graph::graph_iterators::GraphNeighbors<'a>;
+
     #[inline]
     fn node_count(&self) -> usize {
         GraphBackend::node_count(self)
@@ -4656,12 +4583,56 @@ impl GraphRead for GraphBackend {
     }
 
     #[inline]
+    fn edge_indices(&self) -> crate::graph::graph_iterators::GraphEdgeIndices<'_> {
+        match self {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
+                crate::graph::graph_iterators::GraphEdgeIndices::InMemory(g.edge_indices())
+            }
+            GraphBackend::Disk(dg) => {
+                crate::graph::graph_iterators::GraphEdgeIndices::Disk(dg.edge_indices_iter())
+            }
+        }
+    }
+
+    #[inline]
+    fn edge_references(&self) -> crate::graph::graph_iterators::GraphEdgeReferences<'_> {
+        match self {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
+                crate::graph::graph_iterators::GraphEdgeReferences::InMemory(g.edge_references())
+            }
+            GraphBackend::Disk(dg) => {
+                crate::graph::graph_iterators::GraphEdgeReferences::Disk(dg.edge_references_iter())
+            }
+        }
+    }
+
+    #[inline]
+    fn edge_weights<'a>(&'a self) -> Box<dyn Iterator<Item = &'a EdgeData> + 'a> {
+        match self {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => Box::new(g.edge_weights()),
+            GraphBackend::Disk(dg) => dg.edge_weights_iter(),
+        }
+    }
+
+    #[inline]
     fn edges_directed(
         &self,
         idx: NodeIndex,
         dir: petgraph::Direction,
     ) -> crate::graph::graph_iterators::GraphEdges<'_> {
         GraphBackend::edges_directed(self, idx, dir)
+    }
+
+    #[inline]
+    fn edges(&self, idx: NodeIndex) -> crate::graph::graph_iterators::GraphEdges<'_> {
+        match self {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
+                crate::graph::graph_iterators::GraphEdges::InMemory(g.edges(idx))
+            }
+            GraphBackend::Disk(dg) => crate::graph::graph_iterators::GraphEdges::Disk(
+                dg.edges_directed_iter(idx, petgraph::Direction::Outgoing),
+            ),
+        }
     }
 
     #[inline]
@@ -4672,6 +4643,40 @@ impl GraphRead for GraphBackend {
         conn_type_filter: Option<InternedKey>,
     ) -> crate::graph::graph_iterators::GraphEdges<'_> {
         GraphBackend::edges_directed_filtered(self, idx, dir, conn_type_filter)
+    }
+
+    #[inline]
+    fn edges_connecting(
+        &self,
+        a: NodeIndex,
+        b: NodeIndex,
+    ) -> crate::graph::graph_iterators::GraphEdgesConnecting<'_> {
+        match self {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => {
+                crate::graph::graph_iterators::GraphEdgesConnecting::InMemory(
+                    g.edges_connecting(a, b),
+                )
+            }
+            GraphBackend::Disk(dg) => crate::graph::graph_iterators::GraphEdgesConnecting::Disk(
+                dg.edges_connecting_iter(a, b),
+            ),
+        }
+    }
+
+    #[inline]
+    fn edge_weight(&self, idx: EdgeIndex) -> Option<&EdgeData> {
+        match self {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.edge_weight(idx),
+            GraphBackend::Disk(dg) => dg.edge_weight(idx),
+        }
+    }
+
+    #[inline]
+    fn find_edge(&self, a: NodeIndex, b: NodeIndex) -> Option<EdgeIndex> {
+        match self {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g.find_edge(a, b),
+            GraphBackend::Disk(dg) => dg.find_edge(a, b),
+        }
     }
 
     #[inline]

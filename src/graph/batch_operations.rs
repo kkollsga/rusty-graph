@@ -1,7 +1,7 @@
 // src/graph/batch_operations.rs
 use crate::datatypes::Value;
 use crate::graph::schema::{DirGraph, EdgeData, InternedKey, NodeData, PropertyStorage};
-use crate::graph::storage::GraphWrite;
+use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

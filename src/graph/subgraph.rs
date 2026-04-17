@@ -2,7 +2,7 @@
 //! Subgraph extraction and selection expansion operations
 
 use crate::graph::schema::{CurrentSelection, DirGraph, EdgeData};
-use crate::graph::storage::GraphWrite;
+use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 
@@ -26,12 +26,13 @@ pub fn expand_selection(
     let mut visited = frontier.clone();
 
     // BFS expansion for N hops
+    let g = &graph.graph;
     for _ in 0..hops {
         let mut next_frontier = HashSet::new();
 
         for &node in &frontier {
             // Add all neighbors (both directions)
-            for neighbor in graph.graph.neighbors_undirected(node) {
+            for neighbor in g.neighbors_undirected(node) {
                 // Only add if not already visited
                 if visited.insert(neighbor) {
                     next_frontier.insert(neighbor);

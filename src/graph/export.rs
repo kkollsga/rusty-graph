@@ -3,6 +3,7 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{CurrentSelection, DirGraph};
+use crate::graph::storage::GraphRead;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
@@ -45,10 +46,16 @@ pub fn to_graphml(
         if let Some(level) = sel.get_level(level_idx) {
             level.get_all_nodes()
         } else {
-            graph.graph.node_indices().collect()
+            {
+                let g = &graph.graph;
+                g.node_indices().collect()
+            }
         }
     } else {
-        graph.graph.node_indices().collect()
+        {
+            let g = &graph.graph;
+            g.node_indices().collect()
+        }
     };
 
     let node_set: std::collections::HashSet<_> = node_indices.iter().copied().collect();
@@ -86,7 +93,10 @@ pub fn to_graphml(
     // Export edges (only between selected nodes)
     let mut edge_id = 0;
     for &source_idx in &node_indices {
-        for edge in graph.graph.edges(source_idx) {
+        for edge in {
+            let g = &graph.graph;
+            g.edges(source_idx)
+        } {
             let target_idx = edge.target();
 
             // Only include edge if target is in selection
@@ -137,10 +147,16 @@ pub fn to_d3_json(
         if let Some(level) = sel.get_level(level_idx) {
             level.get_all_nodes()
         } else {
-            graph.graph.node_indices().collect()
+            {
+                let g = &graph.graph;
+                g.node_indices().collect()
+            }
         }
     } else {
-        graph.graph.node_indices().collect()
+        {
+            let g = &graph.graph;
+            g.node_indices().collect()
+        }
     };
 
     let node_set: std::collections::HashSet<_> = node_indices.iter().copied().collect();
@@ -178,7 +194,10 @@ pub fn to_d3_json(
     // Build links array
     let mut links_json = Vec::new();
     for &source_idx in &node_indices {
-        for edge in graph.graph.edges(source_idx) {
+        for edge in {
+            let g = &graph.graph;
+            g.edges(source_idx)
+        } {
             let target_idx = edge.target();
 
             if node_set.contains(&target_idx) {
@@ -253,10 +272,16 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
         if let Some(level) = sel.get_level(level_idx) {
             level.get_all_nodes()
         } else {
-            graph.graph.node_indices().collect()
+            {
+                let g = &graph.graph;
+                g.node_indices().collect()
+            }
         }
     } else {
-        graph.graph.node_indices().collect()
+        {
+            let g = &graph.graph;
+            g.node_indices().collect()
+        }
     };
 
     let node_set: std::collections::HashSet<_> = node_indices.iter().copied().collect();
@@ -290,7 +315,10 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
     xml.push_str("    <edges>\n");
     let mut edge_id = 0;
     for &source_idx in &node_indices {
-        for edge in graph.graph.edges(source_idx) {
+        for edge in {
+            let g = &graph.graph;
+            g.edges(source_idx)
+        } {
             let target_idx = edge.target();
 
             if node_set.contains(&target_idx) {
@@ -332,10 +360,16 @@ pub fn to_csv(
         if let Some(level) = sel.get_level(level_idx) {
             level.get_all_nodes()
         } else {
-            graph.graph.node_indices().collect()
+            {
+                let g = &graph.graph;
+                g.node_indices().collect()
+            }
         }
     } else {
-        graph.graph.node_indices().collect()
+        {
+            let g = &graph.graph;
+            g.node_indices().collect()
+        }
     };
 
     let node_set: std::collections::HashSet<_> = node_indices.iter().copied().collect();
@@ -356,7 +390,10 @@ pub fn to_csv(
     // Build edges CSV
     let mut edges_csv = String::from("source,target,type\n");
     for &source_idx in &node_indices {
-        for edge in graph.graph.edges(source_idx) {
+        for edge in {
+            let g = &graph.graph;
+            g.edges(source_idx)
+        } {
             let target_idx = edge.target();
 
             if node_set.contains(&target_idx) {
@@ -432,7 +469,10 @@ pub fn to_csv_dir(
     }
     let mut edges_by_type: BTreeMap<String, Vec<EdgeInfo>> = BTreeMap::new();
     for &source_idx in &node_indices {
-        for edge in graph.graph.edges(source_idx) {
+        for edge in {
+            let g = &graph.graph;
+            g.edges(source_idx)
+        } {
             let target_idx = edge.target();
             if node_set.contains(&target_idx) {
                 let w = edge.weight();
@@ -700,15 +740,16 @@ fn selected_node_indices(
     graph: &DirGraph,
     selection: Option<&CurrentSelection>,
 ) -> Vec<petgraph::graph::NodeIndex> {
+    let g = &graph.graph;
     if let Some(sel) = selection {
         let level_idx = sel.get_level_count().saturating_sub(1);
         if let Some(level) = sel.get_level(level_idx) {
             level.get_all_nodes()
         } else {
-            graph.graph.node_indices().collect()
+            g.node_indices().collect()
         }
     } else {
-        graph.graph.node_indices().collect()
+        g.node_indices().collect()
     }
 }
 

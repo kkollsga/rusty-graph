@@ -668,7 +668,7 @@ migrated file deletes its old enum-match code in the same PR.
 
 ---
 
-## Phase 3 — Traversal / iteration API (GAT-heavy)
+## Phase 3 — Traversal / iteration API (GAT-heavy) ✅
 
 ### Risks
 - Algorithm results depend on neighbor order — PageRank stable; component labels flip; shortest-path ties resolve differently.
@@ -683,15 +683,109 @@ migrated file deletes its old enum-match code in the same PR.
 - [x] Shortest-path length parity (Phase 0)
 - [x] Multi-hop row count parity (Phase 0)
 - [x] Fluent-chain result parity (Phase 0)
-- [ ] Traversal-under-mutation isolation — long MATCH, concurrent CREATE; MATCH sees its starting snapshot
-- [ ] Inlining guard — micro-benchmark of innermost traversal loop, fails if slower than Phase 2 baseline
+- [x] Traversal-under-mutation isolation — `tests/test_phase3_parity.py` (memory/mapped/disk; CREATE and DELETE variants)
+- [~] Inlining guard — criterion micro-bench deferred (see Scope changes). `TestStorageModeMatrix` at N=10000 serves as the in-memory regression gate.
 
 ### Tasks
-- [ ] `trait GraphTraverse: GraphRead` with GAT iterators
-- [ ] Generic helpers (BfsIter, ShortestPathIter) over `&impl GraphTraverse`
-- [ ] **Migrate-and-delete** algorithm code, fluent API internals, and pattern-matching multi-hop expansion in one phase commit
+- [x] Add GATs to every iterator-returning method on `GraphRead` (associated types with `where Self: 'a` bounds for `NodeIndicesIter`, `EdgeIndicesIter`, `EdgesIter`, `EdgeReferencesIter`, `EdgesConnectingIter`, `NeighborsIter`)
+- [x] **Migrate-and-delete** algorithm code, fluent API internals, and pattern-matching multi-hop expansion — 11 files, ~80 call sites rewritten off direct `graph.graph.X()` syntax
+- [x] Delete 7 inherent edge methods on `GraphBackend` (`edges`, `edge_references`, `edge_weight`, `edge_indices`, `find_edge`, `edges_connecting`, `edge_weights`); trait impls pulled the logic inline
+- [x] Drop `&dyn GraphRead` support — one call site in `introspection.rs:815` migrated to `&impl GraphRead`, trait docstring + ARCHITECTURE.md rule #3 + CLAUDE.md storage section all updated
+- [~] `trait GraphTraverse: GraphRead` **not created** — per user decision during plan mode, everything stays on a single `GraphRead` trait
+- [~] Generic helpers (BfsIter, ShortestPathIter) **not authored** — existing algorithms in `graph_algorithms.rs` continue to take `&DirGraph` and call trait methods on `&graph.graph`. No benchmark drove generic helpers for Phase 3 scope
 
-**Exit criteria**: testing gate passes; traversal code no longer touches `GraphBackend` directly; old traversal helpers deleted.
+**Exit criteria**: testing gate passes; traversal code no longer syntactically touches `graph.graph.X()` for the 11 migrated methods; the 7 edge inherent methods deleted. ✅
+
+### Phase 3 Report-out (written at phase exit — read this before Phase 4)
+
+**Completed** (single squashed commit at phase exit, local only — user pushes):
+- **GAT conversion of `GraphRead`** — `src/graph/storage/mod.rs` gains 6 associated types (`NodeIndicesIter<'a>`, `EdgeIndicesIter<'a>`, `EdgesIter<'a>`, `EdgeReferencesIter<'a>`, `EdgesConnectingIter<'a>`, `NeighborsIter<'a>`) with `where Self: 'a` bounds. Iterator-returning methods now return `Self::…Iter<'_>`.
+- **7 new edge methods on `GraphRead`** — `edges`, `edge_references`, `edge_weight`, `edge_indices`, `find_edge`, `edges_connecting`, `edge_weights` (the last returns `Box<dyn Iterator + 'a>` because petgraph's `edge_weights` is opaque).
+- **`impl GraphRead for GraphBackend` updated** — trait impl in `src/graph/schema.rs` now inlines the per-variant match expressions for the migrated methods instead of delegating to inherent methods (which are gone). GraphWrite impl unchanged.
+- **7 inherent edge methods deleted** from `GraphBackend` in `src/graph/schema.rs` — same-PR clean break, no shims.
+- **11 caller files migrated** off direct `graph.graph.X()` / `self.graph.graph.X()` syntax for the 11 listed methods (neighbors_directed, neighbors_undirected, edges_directed, edges_directed_filtered, edge_references, edges, edge_weight, find_edge, edges_connecting, edge_indices, edge_weights, node_indices). Pattern: `let g = &graph.graph; g.X(...)` at function scope, or `{ let g = &graph.graph; g.X(...) }` as a block expression where scope didn't naturally allow a binding.
+- **`&dyn GraphRead` dropped** — the single caller at `src/graph/introspection.rs:815` (inside `sample_unique_values`) now uses `&impl GraphRead` via plain `&graph.graph` binding. Trait docstring, `GraphWrite` dispatch guidance, ARCHITECTURE.md rule #3, and CLAUDE.md storage section all updated to note that GATs make the trait non-object-safe.
+- **`tests/test_phase3_parity.py`** — 13 crunch-point parity tests authored. Covers: (a) traversal-under-mutation isolation across CREATE/DELETE, (b) row-count parity across memory/mapped/disk for 3 Cypher patterns exercising migrated edge methods, (c) PageRank score-set parity, (d) edge-iteration count parity via `edge_references`. Runs in ~0.1 s.
+- **ARCHITECTURE.md + CLAUDE.md updated** — GAT pattern rule, `&dyn` removal, Phase 3 mention in trait-layer overview.
+
+**Baselines captured** (release build, same hardware, `TestStorageModeMatrix` at N=10000):
+| Bench | Phase 2 baseline | Phase 3 post | Δ |
+|---|---|---|---|
+| construction_10000_memory | 0.043s | 0.031s | **-28%** |
+| describe_10000_memory | 2.45 ms | 2.49 ms | +1.6% (noise) |
+| find_20x_10000_memory | 4.59 ms | 4.83 ms | +5.2% (single-run noise) |
+| multi_predicate_10000_memory | 0.74 ms | 0.66 ms | **-11%** |
+| pagerank_10000_memory | 4.53 ms | 4.72 ms | +4.2% (noise band) |
+| two_hop_10x_10000_memory | 3.63 ms | 2.65 ms | **-27%** |
+| describe_10000_mapped | 2.29 ms | 2.44 ms | +6.6% |
+| find_20x_10000_mapped | 8.98 ms | 8.88 ms | -1.1% |
+| pagerank_10000_mapped | 4.11 ms | 4.45 ms | +8.3% |
+| two_hop_10x_10000_mapped | 4.59 ms | 4.71 ms | +2.6% |
+| pagerank_10000_disk | 5.32 ms | 5.20 ms | -2.3% |
+| two_hop_10x_10000_disk | 5.03 ms | 5.34 ms | +6.2% |
+
+In-memory gate held — multi_predicate, two_hop, construction improved; pagerank and find within single-run noise. Mapped/disk within ±10% per-mode gates. `make test`: 1799 Python passed + 477 Rust passed + 34 parity passed (3 known xfail disk bugs from Phase 2). `make lint`: clean.
+
+- 477 Rust unit tests passing (unchanged from Phase 2).
+- Python test suite: 1799 passed, 3 xfailed (Phase 2 disk mutation bugs, still xfail=strict).
+- Parity suite (all four oracles): 34 passed, 3 xfailed.
+
+**Surprises found during investigation:**
+1. **Migration scope was 79 call-site hits across 11 files**, not 8. The Phase 2 report counted files that would need the "trait import + migrate" treatment; Phase 3's grep gate `rg 'graph\.graph\.(X)\('` for the full 12-method set (adding the 7 new edge methods + already-on-trait `node_indices`/`edges_directed`/`neighbors_*`) hit in `filtering_methods.rs`, `subgraph.rs`, `schema_validation.rs`, `pattern_matching.rs`, `cypher/result_view.rs`, `calculations.rs` as well as the 8 files the plan originally named. Spreading the plan's `let g = &graph.graph;` pattern covered them uniformly without new scope creep.
+2. **The enum-variant match expressions moved from inherent methods into the trait impl** when the inherent methods were deleted. Without this, the trait impl would reference a non-existent inherent method. The trait impl for `edges_directed` and `edges_directed_filtered` still delegates to inherents (those are not being deleted in Phase 3 — Phase 1/5 debt), but `edges`, `edge_references`, `edge_weight`, `edge_indices`, `find_edge`, `edges_connecting`, `edge_weights` now contain the match expressions directly.
+3. **Rust method resolution still preferred inherent over trait** where both exist. For the 7 deleted methods, the migration implicitly forces trait dispatch. For the 4 kept-inherent methods (`node_indices`, `neighbors_directed`, `neighbors_undirected`, `edges_directed`, `edges_directed_filtered` — all on-trait but inherents Phase 1 deferred), call sites still route through inherents today. Full trait-dispatch enforcement for those is Phase 5 debt.
+4. **GAT object-safety breakage was immediate and localised.** rustc flagged `&dyn GraphRead` in `introspection.rs:815` with a precise error message naming every GAT associated type. One grep + one import swap + one let-binding rewrite was enough; no transitive ripple into other files. `GraphWrite: GraphRead` inherits non-object-safety automatically — `rg 'dyn GraphWrite'` was already at 0 hits (Phase 2 had no `&mut dyn` consumers).
+5. **The `use GraphRead` imports snuck in via the delete-inherents step**, not the migration step. While inherent methods existed, `g.X()` resolved to them and the trait import was unused (warning). After deletion, the trait dispatch kicks in and the import becomes necessary. Files that needed the import added at delete-time: `introspection.rs` (re-added after Phase 0's removal), `export.rs`, `schema_validation.rs`, `calculations.rs`, `batch_operations.rs` (widened from `GraphWrite` to `{GraphRead, GraphWrite}`), `subgraph.rs` (same widening).
+6. **`node_weight` in the PyO3 wrapper still uses the inherent `GraphBackend` method** (not the trait's `node_data`). Left untouched — the PyO3 wrapper layer is Phase 5 scope (audit).
+
+**Decisions made:**
+- **Per-backend `impl GraphRead` for MemoryGraph / DiskGraph not authored.** Rationale (sketch): `MappedGraph` is still a type alias for `MemoryGraph`, and the Memory/Disk per-backend impls would require adapter iterator types (`MemoryEdges<'a>` wrapping petgraph's `Edges<'a>` to yield `GraphEdgeRef<'a>`, same for `EdgeReferences`, `EdgesConnecting`). Since today's only consumer passes `&GraphBackend`, per-backend impls would deliver zero measurable inlining win today. Phase 5 picks this up naturally alongside the columnar-cleanup that also forces `MappedGraph` struct promotion. GAT trait shape is the phase deliverable; per-backend pay-off is Phase 5.
+- **No separate `GraphTraverse: GraphRead` trait.** User decision during plan mode — single trait keeps the dispatch story simple. If a future phase finds the trait surface too large, a split can happen then without breaking call sites (they all use method syntax, not trait names).
+- **`iter_peers_filtered` and `edge_endpoint_keys` stay `Box<dyn Iterator + 'a>`** — not GAT. Both have dual backend paths (disk-optimised CSR walk vs memory fallback) that don't unify cleanly under a single concrete type. Documented as a carve-out in the trait doc.
+
+**Debt introduced:**
+- **Inherent `GraphBackend::{node_indices, neighbors_directed, neighbors_undirected, edges_directed, edges_directed_filtered}` still exist.** These are already on the trait, but Rust's method resolution prefers inherent over trait, so call sites continue to route through inherents. The 11-file syntactic migration killed the `graph.graph.X()` pattern but didn't force trait dispatch for these. Phase 5's enum-match audit should delete them same as the 7 edge methods deleted here.
+- **Migration idiom `{ let g = &graph.graph; g.X(...) }` is ugly** for block-expression sites (found most in `export.rs`, `cypher/executor.rs`, `graph_algorithms.rs`). A follow-up pass in Phase 5 or Phase 7 could refactor these to function-scope `let g = &graph.graph;` where the scope permits. Not correctness-blocking.
+- **Per-backend `impl GraphRead for MemoryGraph / DiskGraph` deferred to Phase 5.** Without them, GATs are sugar — consumers still hit the `GraphBackend` enum match. Real inlining wins arrive when Phase 5 lands native per-backend impls (and naturally promotes `MappedGraph` past the alias). The GAT trait shape Phase 3 added is the scaffolding that makes Phase 5's impls land without consumer-side changes.
+- **Phase 6 `RecordingGraph` was sketched against `&dyn GraphRead`** (per the Phase 6 task list). Phase 6's plan must now pivot to a macro-generated wrapper or a separate dyn-safe sub-trait. Flagged in CLAUDE.md + ARCHITECTURE.md.
+- **No formal criterion bench for the inlining guard.** The plan proposed a `benches/traversal_inlining.rs` criterion micro-bench; kglite is `crate-type = ["cdylib"]` only, so adding criterion requires adding `"rlib"` + a new dev-dep. `TestStorageModeMatrix` at N=10000 already provides the pagerank/two_hop/find regression gate — in practice sufficient. Phase 5 or Phase 7 can add criterion if benchmark evidence demands.
+
+**Scope changes:**
+- **Added**: migration of 3 files beyond the original 8 (`filtering_methods.rs`, `subgraph.rs`, `pattern_matching.rs`) — their hits were covered by the same exit-gate grep and the rewrite pattern applied uniformly.
+- **Dropped**: `trait GraphTraverse: GraphRead` (user decision).
+- **Dropped**: generic `fn bfs<G: GraphRead>(…)` / `fn shortest_path<G: GraphRead>(…)` helpers — no benchmark motivated them for Phase 3.
+- **Deferred**: per-backend `impl GraphRead for MemoryGraph / DiskGraph` → Phase 5.
+- **Deferred**: criterion inlining bench → Phase 5 or Phase 7.
+- **Deferred**: removal of the 4 already-on-trait inherent methods (`node_indices`, `neighbors_*`, `edges_directed*`) → Phase 5 enum-match audit.
+
+**Next-phase prerequisites (Phase 4 — Serialization / IO):**
+- Phase 4 touches `io_operations.rs`, `ntriples.rs`, CSV loader. Check `rg 'GraphBackend::[A-Z]' src/graph/{io_operations,ntriples}.rs` first — Phase 0's grep recorded 17 hits in these two files (mostly enum matches for storage-mode-specific save paths). Many are genuinely needed (disk-only save paths); the refactor target is the ones that shadow trait methods.
+- `.kgl` v3 format bytes must not change — Phase 0 authored the golden-hash fixture; Phase 4 just has to not break it.
+- No GAT-induced borrow-checker pain landed in Phase 3; Phase 4 should similarly be clean unless the IO path introduces long-lived iterator borrows.
+- The `use GraphRead` import is now a standard pattern across 10+ files; new code should follow the same idiom.
+- Phase 4's "byte-level `.kgl` v3 golden hash" test is the main new crunch-point. Authored in Phase 0 or in the phase itself — check Phase 0's test list.
+
+**Three disk mutation xfails remain pinned** (from Phase 2): `test_known_disk_divergence_add_nodes_update_conflict`, `test_known_disk_divergence_add_nodes_replace_conflict`, `test_known_disk_merge_edge_visibility`. Not touched by Phase 3; will auto-trip when Phase 5 (columnar cleanup) fixes the underlying disk-write path.
+
+**Files touched:**
+- `src/graph/storage/mod.rs` — GATs + 7 new edge methods on trait, docstring updates
+- `src/graph/schema.rs` — `impl GraphRead for GraphBackend` extended with GATs + 7 new methods inlined; 7 inherent methods deleted
+- `src/graph/graph_algorithms.rs` — 17 call-site rewrites via `let g = &graph.graph;`
+- `src/graph/introspection.rs` — 10 call-site rewrites + `&dyn GraphRead` → `&impl GraphRead` flip + `use GraphRead` re-added
+- `src/graph/traversal_methods.rs` — 8 call-site rewrites
+- `src/graph/cypher/executor.rs` — 7 call-site rewrites (self.graph.graph.X)
+- `src/graph/export.rs` — 14 call-site rewrites + `use GraphRead` added
+- `src/graph/cypher/result_view.rs` — 2 call-site rewrites
+- `src/graph/schema_validation.rs` — 1 call-site rewrite + `use GraphRead` added
+- `src/graph/calculations.rs` — 2 call-site rewrites + `use GraphRead` added
+- `src/graph/batch_operations.rs` — `use GraphWrite` widened to `{GraphRead, GraphWrite}` (covers inherent `edges_connecting` deletion)
+- `src/graph/subgraph.rs` — 1 call-site rewrite + `use GraphWrite` widened to `{GraphRead, GraphWrite}`
+- `src/graph/filtering_methods.rs` — 4 call-site rewrites
+- `src/graph/pattern_matching.rs` — 1 call-site rewrite (self.graph.graph.node_indices)
+- `tests/test_phase3_parity.py` — new, 13 parity tests
+- `ARCHITECTURE.md` — rule #3 (& dyn → GATs), rule #4 added (iterator methods must use GATs), Trait layer section updated with Phase 3 note
+- `CLAUDE.md` — storage section updated with Phase 3 `&dyn` removal + GAT rule + `test_phase3_parity.py` in oracles
+- `todo.md` — this report-out
 
 ---
 

@@ -6,6 +6,7 @@ use super::statistics_methods::{get_parent_child_pairs, ParentChildPair};
 use crate::datatypes::values::Value;
 use crate::graph::reporting::CalculationOperationReport; // Remove unused OperationReport import
 use crate::graph::schema::{CurrentSelection, DirGraph, NodeData, StringInterner};
+use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
 use std::time::Instant; // For timing operations
@@ -479,18 +480,18 @@ pub fn evaluate_connection_equation(
 
             // Collect edge properties from edges connecting parent to children
             // Use find_edge for O(1) lookup instead of O(n) linear search
+            let g = &graph.graph;
             let edge_objects: Vec<HashMap<String, Value>> = pair
                 .children
                 .iter()
                 .filter_map(|&child_idx| {
                     // Try parent->child direction first, then child->parent
-                    let edge_idx = graph
-                        .graph
+                    let edge_idx = g
                         .find_edge(parent_idx, child_idx)
-                        .or_else(|| graph.graph.find_edge(child_idx, parent_idx));
+                        .or_else(|| g.find_edge(child_idx, parent_idx));
 
                     edge_idx
-                        .and_then(|idx| graph.graph.edge_weight(idx))
+                        .and_then(|idx| g.edge_weight(idx))
                         .map(|edge_data| {
                             let mut props = edge_data.properties_cloned(&graph.interner);
                             // Also include the connection_type as a property

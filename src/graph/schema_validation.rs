@@ -5,6 +5,7 @@ use crate::datatypes::values::Value;
 use crate::graph::schema::{
     ConnectionTypeInfo, DirGraph, NodeSchemaDefinition, SchemaDefinition, ValidationError,
 };
+use crate::graph::storage::GraphRead;
 use std::collections::HashMap;
 
 /// Validate the graph against the provided schema definition
@@ -120,7 +121,8 @@ fn validate_connections(
     let mut connection_type_counts: HashMap<String, usize> = HashMap::new();
 
     // Iterate through all edges
-    for edge_ref in graph.graph.edge_references() {
+    let g = &graph.graph;
+    for edge_ref in g.edge_references() {
         let edge_data = edge_ref.weight();
         let connection_type = edge_data.connection_type_str(&graph.interner);
 

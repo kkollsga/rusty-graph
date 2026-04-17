@@ -27,16 +27,17 @@ fn filtered_neighbors_undirected(
     connection_types: Option<&[InternedKey]>,
 ) -> Vec<NodeIndex> {
     use petgraph::Direction;
+    let g = &graph.graph;
     match connection_types {
-        None => graph.graph.neighbors_undirected(node).collect(),
+        None => g.neighbors_undirected(node).collect(),
         Some(types) => {
             let mut neighbors = Vec::new();
-            for edge in graph.graph.edges_directed(node, Direction::Outgoing) {
+            for edge in g.edges_directed(node, Direction::Outgoing) {
                 if types.iter().any(|t| *t == edge.weight().connection_type) {
                     neighbors.push(edge.target());
                 }
             }
-            for edge in graph.graph.edges_directed(node, Direction::Incoming) {
+            for edge in g.edges_directed(node, Direction::Incoming) {
                 if types.iter().any(|t| *t == edge.weight().connection_type) {
                     neighbors.push(edge.source());
                 }
@@ -53,13 +54,10 @@ fn filtered_neighbors_outgoing(
     connection_types: Option<&[InternedKey]>,
 ) -> Vec<NodeIndex> {
     use petgraph::Direction;
+    let g = &graph.graph;
     match connection_types {
-        None => graph
-            .graph
-            .neighbors_directed(node, Direction::Outgoing)
-            .collect(),
-        Some(types) => graph
-            .graph
+        None => g.neighbors_directed(node, Direction::Outgoing).collect(),
+        Some(types) => g
             .edges_directed(node, Direction::Outgoing)
             .filter(|e| types.iter().any(|t| *t == e.weight().connection_type))
             .map(|e| e.target())
@@ -160,7 +158,10 @@ pub fn shortest_path_cost(graph: &DirGraph, source: NodeIndex, target: NodeIndex
         for &current_idx in &current_level {
             let current = NodeIndex::new(current_idx);
 
-            for neighbor in graph.graph.neighbors_undirected(current) {
+            for neighbor in {
+                let g = &graph.graph;
+                g.neighbors_undirected(current)
+            } {
                 let neighbor_idx = neighbor.index();
                 if !visited[neighbor_idx] {
                     if neighbor_idx == target_idx {
@@ -187,7 +188,10 @@ pub fn shortest_path_cost_batch(
     let node_bound = graph.graph.node_bound();
 
     // Pre-build undirected adjacency list ONCE for all queries
-    let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+    let nodes: Vec<NodeIndex> = {
+        let g = &graph.graph;
+        g.node_indices().collect()
+    };
     let n = nodes.len();
     let mut node_to_idx = vec![usize::MAX; node_bound];
     for (i, &node) in nodes.iter().enumerate() {
@@ -195,7 +199,10 @@ pub fn shortest_path_cost_batch(
     }
 
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for edge in graph.graph.edge_references() {
+    for edge in {
+        let g = &graph.graph;
+        g.edge_references()
+    } {
         let src_i = node_to_idx[edge.source().index()];
         let tgt_i = node_to_idx[edge.target().index()];
         if src_i != usize::MAX && tgt_i != usize::MAX {
@@ -576,7 +583,10 @@ pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
 /// This is often more useful for knowledge graphs.
 /// Uses Union-Find (disjoint set) for optimal performance — O(E * α(V)) ≈ O(E).
 pub fn weakly_connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
-    let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+    let nodes: Vec<NodeIndex> = {
+        let g = &graph.graph;
+        g.node_indices().collect()
+    };
     let n = nodes.len();
 
     if n == 0 {
@@ -625,7 +635,10 @@ pub fn weakly_connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
     }
 
     // Process all edges — single pass, no adjacency list needed
-    for edge in graph.graph.edge_references() {
+    for edge in {
+        let g = &graph.graph;
+        g.edge_references()
+    } {
         let src_i = node_to_idx[edge.source().index()];
         let tgt_i = node_to_idx[edge.target().index()];
         union(&mut parent, &mut rank, src_i, tgt_i);
@@ -697,10 +710,9 @@ pub fn are_connected(graph: &DirGraph, source: NodeIndex, target: NodeIndex) -> 
 
 /// Calculate the degree (number of connections) for a node
 pub fn node_degree(graph: &DirGraph, node: NodeIndex) -> usize {
-    graph.graph.edges(node).count()
-        + graph
-            .graph
-            .neighbors_directed(node, petgraph::Direction::Incoming)
+    let g = &graph.graph;
+    g.edges(node).count()
+        + g.neighbors_directed(node, petgraph::Direction::Incoming)
             .count()
 }
 
@@ -737,7 +749,10 @@ pub fn betweenness_centrality(
 ) -> Vec<CentralityResult> {
     use std::collections::VecDeque;
 
-    let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+    let nodes: Vec<NodeIndex> = {
+        let g = &graph.graph;
+        g.node_indices().collect()
+    };
     let n = nodes.len();
 
     if n <= 2 {
@@ -762,7 +777,10 @@ pub fn betweenness_centrality(
     // communities are detected regardless of edge direction.
     let interned_ct = intern_connection_types(connection_types);
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for edge in graph.graph.edge_references() {
+    for edge in {
+        let g = &graph.graph;
+        g.edge_references()
+    } {
         if let Some(ref types) = interned_ct {
             if !types.iter().any(|t| *t == edge.weight().connection_type) {
                 continue;
@@ -1009,7 +1027,10 @@ pub fn pagerank(
     connection_types: Option<&[String]>,
     deadline: Option<Instant>,
 ) -> Vec<CentralityResult> {
-    let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+    let nodes: Vec<NodeIndex> = {
+        let g = &graph.graph;
+        g.node_indices().collect()
+    };
     let n = nodes.len();
 
     if n == 0 {
@@ -1029,7 +1050,10 @@ pub fn pagerank(
     let interned_ct = intern_connection_types(connection_types);
     let mut in_adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut out_degrees: Vec<usize> = vec![0; n];
-    for edge in graph.graph.edge_references() {
+    for edge in {
+        let g = &graph.graph;
+        g.edge_references()
+    } {
         if let Some(ref types) = interned_ct {
             if !types.iter().any(|t| *t == edge.weight().connection_type) {
                 continue;
@@ -1157,7 +1181,10 @@ pub fn degree_centrality(
     connection_types: Option<&[String]>,
     _deadline: Option<Instant>,
 ) -> Vec<CentralityResult> {
-    let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+    let nodes: Vec<NodeIndex> = {
+        let g = &graph.graph;
+        g.node_indices().collect()
+    };
     let n = nodes.len();
 
     if n == 0 {
@@ -1174,7 +1201,10 @@ pub fn degree_centrality(
     let interned_ct = intern_connection_types(connection_types);
     let bound = graph.graph.node_bound();
     let mut degrees = vec![0usize; bound];
-    for edge in graph.graph.edge_references() {
+    for edge in {
+        let g = &graph.graph;
+        g.edge_references()
+    } {
         if let Some(ref types) = interned_ct {
             if !types.iter().any(|t| *t == edge.weight().connection_type) {
                 continue;
@@ -1218,7 +1248,10 @@ pub fn closeness_centrality(
     connection_types: Option<&[String]>,
     deadline: Option<Instant>,
 ) -> Vec<CentralityResult> {
-    let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+    let nodes: Vec<NodeIndex> = {
+        let g = &graph.graph;
+        g.node_indices().collect()
+    };
     let n = nodes.len();
 
     if n == 0 {
@@ -1236,7 +1269,10 @@ pub fn closeness_centrality(
     // we BFS via incoming edges (convention: d(v, u) = how easy for v to reach u)
     let interned_ct = intern_connection_types(connection_types);
     let mut adj_incoming: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for edge in graph.graph.edge_references() {
+    for edge in {
+        let g = &graph.graph;
+        g.edge_references()
+    } {
         if let Some(ref types) = interned_ct {
             if !types.iter().any(|t| *t == edge.weight().connection_type) {
                 continue;
@@ -1473,7 +1509,10 @@ pub fn louvain_communities(
     connection_types: Option<&[String]>,
     deadline: Option<Instant>,
 ) -> CommunityResult {
-    let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+    let nodes: Vec<NodeIndex> = {
+        let g = &graph.graph;
+        g.node_indices().collect()
+    };
     let n = nodes.len();
 
     if n == 0 {
@@ -1496,7 +1535,10 @@ pub fn louvain_communities(
     let interned_ct = intern_connection_types(connection_types);
     let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
     let mut total_weight = 0.0f64;
-    for edge in graph.graph.edge_references() {
+    for edge in {
+        let g = &graph.graph;
+        g.edge_references()
+    } {
         if let Some(ref types) = interned_ct {
             if !types.iter().any(|t| *t == edge.weight().connection_type) {
                 continue;
@@ -1686,7 +1728,10 @@ pub fn label_propagation(
     connection_types: Option<&[String]>,
     deadline: Option<Instant>,
 ) -> CommunityResult {
-    let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+    let nodes: Vec<NodeIndex> = {
+        let g = &graph.graph;
+        g.node_indices().collect()
+    };
     let n = nodes.len();
 
     if n == 0 {
@@ -1707,7 +1752,10 @@ pub fn label_propagation(
     // Pre-build undirected adjacency list (both directions)
     let interned_ct = intern_connection_types(connection_types);
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for edge in graph.graph.edge_references() {
+    for edge in {
+        let g = &graph.graph;
+        g.edge_references()
+    } {
         if let Some(ref types) = interned_ct {
             if !types.iter().any(|t| *t == edge.weight().connection_type) {
                 continue;
@@ -1827,7 +1875,8 @@ fn edge_weight(
     weight_property: Option<&str>,
 ) -> f64 {
     if let Some(prop) = weight_property {
-        if let Some(edge_data) = graph.graph.edge_weight(edge_id) {
+        let g = &graph.graph;
+        if let Some(edge_data) = g.edge_weight(edge_id) {
             if let Some(val) = edge_data.get_property(prop) {
                 return value_operations::value_to_f64(val).unwrap_or(1.0);
             }
@@ -1853,26 +1902,27 @@ fn compute_modularity(
     let mut q = 0.0f64;
 
     // Compute degree (sum of edge weights) for each node
-    let bound = graph.graph.node_bound();
+    let g = &graph.graph;
+    let bound = g.node_bound();
     let mut degrees: Vec<f64> = vec![0.0; bound];
-    for node_idx in graph.graph.node_indices() {
+    for node_idx in g.node_indices() {
         let i = node_idx.index();
         if !node_exists[i] {
             continue;
         }
-        for edge in graph.graph.edges(node_idx) {
+        for edge in g.edges(node_idx) {
             degrees[i] += edge_weight(graph, edge.id(), weight_property);
         }
-        for edge in graph
-            .graph
-            .edges_directed(node_idx, petgraph::Direction::Incoming)
-        {
+        for edge in g.edges_directed(node_idx, petgraph::Direction::Incoming) {
             degrees[i] += edge_weight(graph, edge.id(), weight_property);
         }
     }
 
     // Sum over all edges
-    for edge in graph.graph.edge_references() {
+    for edge in {
+        let g = &graph.graph;
+        g.edge_references()
+    } {
         let u = edge.source().index();
         let v = edge.target().index();
         let w = edge_weight(graph, edge.id(), weight_property);

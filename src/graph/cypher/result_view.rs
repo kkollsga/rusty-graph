@@ -259,13 +259,14 @@ impl ResultView {
         };
 
         // Gather connection summaries per node, filtering temporal connections
+        let g = &graph.graph;
         let node_connections: Vec<NodeConnections> = node_indices
             .iter()
             .map(|&idx| {
                 let mut conns = Vec::with_capacity(16);
 
                 // Outgoing: this node → target
-                for edge in graph.graph.edges_directed(idx, Direction::Outgoing) {
+                for edge in g.edges_directed(idx, Direction::Outgoing) {
                     if conns.len() >= MAX_CONNS_PER_NODE {
                         break;
                     }
@@ -288,7 +289,7 @@ impl ResultView {
                 }
 
                 // Incoming: source → this node
-                for edge in graph.graph.edges_directed(idx, Direction::Incoming) {
+                for edge in g.edges_directed(idx, Direction::Incoming) {
                     if conns.len() >= MAX_CONNS_PER_NODE {
                         break;
                     }

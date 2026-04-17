@@ -50,8 +50,8 @@ plan: `todo.md` at repo root.
 - **Reads go on `GraphRead`, mutations on `GraphWrite: GraphRead`.** Add new storage ops to the trait first, not as inherent `GraphBackend` methods. Both traits live in `src/graph/storage/mod.rs`.
 - **Transactions stay on `DirGraph`.** OCC `version`, `read_only`, `schema_locked`, and validation helpers are not trait surface — see ARCHITECTURE.md.
 - **No shims / no `#[deprecated]`.** Obsoleted code gets deleted in the same PR as its replacement. Clean break for 0.8.0.
-- **`&impl GraphRead` / `&mut impl GraphWrite` in hot loops, `&dyn …` at boundaries.** Monomorphise tight scans; tolerate vtable cost only where API shape demands it.
-- **Parity oracles**: `tests/test_storage_parity.py`, `tests/test_phase1_parity.py`, `tests/test_phase2_parity.py`. Gated behind `pytest -m parity`. Must stay green after any backend-touching change.
+- **`&impl GraphRead` / `&mut impl GraphWrite` everywhere.** Phase 3 added GATs to every iterator-returning method on `GraphRead`, which makes the trait non-object-safe. `&dyn GraphRead` does not compile; use `&impl GraphRead` (monomorphised) for every consumer. Iterator-returning methods must declare an associated type (`type FooIter<'a>: Iterator<…> where Self: 'a;`).
+- **Parity oracles**: `tests/test_storage_parity.py`, `tests/test_phase1_parity.py`, `tests/test_phase2_parity.py`, `tests/test_phase3_parity.py`. Gated behind `pytest -m parity`. Must stay green after any backend-touching change.
 
 ## When Changing a `#[pymethods]` Function
 

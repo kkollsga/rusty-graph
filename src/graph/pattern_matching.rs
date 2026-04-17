@@ -1373,15 +1373,14 @@ impl<'a> PatternExecutor<'a> {
                 return Ok(vec![]);
             }
             // No id property — scan all nodes with property filter.
-            Ok(self
-                .graph
-                .graph
-                .node_indices()
+            let g = &self.graph.graph;
+            Ok(g.node_indices()
                 .filter(|&idx| self.node_matches_properties(idx, props))
                 .collect())
         } else {
             // No type, no properties — all nodes
-            Ok(self.graph.graph.node_indices().collect())
+            let g = &self.graph.graph;
+            Ok(g.node_indices().collect())
         }
     }
 
