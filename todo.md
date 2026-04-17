@@ -148,9 +148,10 @@ report-out is written, committed alongside the phase's code changes, and
 the baselines are committed. The next phase's plan-mode step **begins**
 by reading every prior report-out in order.
 
-### Clean-break rules (aggressive — applied every PR, not deferred)
-- **Delete-as-you-go.** The PR that migrates a file to the trait is the same PR that deletes the now-unreachable enum-match code. No follow-up cleanup phase.
-- **No deprecated shims, ever.** When a function is obsoleted, delete it in the same commit. No `#[deprecated]` forwarders, no re-exports, no "kept for compat" comments.
+### Clean-break rules (aggressive — applied every phase, not deferred)
+- **One commit per phase.** A phase produces a single squashed commit (plus the report-out commit) at phase exit. No intra-phase per-file commits cluttering `git log`. Work iteratively in the working tree; commit once at the end with the full phase diff.
+- **Delete-as-you-go.** The phase that migrates files to the trait also deletes the now-unreachable enum-match code. No follow-up cleanup phase.
+- **No deprecated shims, ever.** When a function is obsoleted, delete it in the same phase. No `#[deprecated]` forwarders, no re-exports, no "kept for compat" comments.
 - **No TODO markers that say "migrate later".** If you're tempted to write one, do the migration instead. The only acceptable TODO markers are for genuinely deferred decisions with a named owner.
 - **No feature-gated dual implementations.** Either the old or the new code exists. Not both.
 - **Public Python API stays semantically stable.** Parity tests enforce. Adding new Python methods is fine; changing existing signatures is not.
@@ -494,7 +495,7 @@ migrated file deletes its old enum-match code in the same PR.
 ### Tasks
 - [x] Trait additions: edges_directed / edges_directed_filtered / neighbors_directed / neighbors_undirected / node_data / node_indices / node_bound / is_memory/is_mapped/is_disk / sources_for_conn_type_bounded / lookup_peer_counts / count_edges_grouped_by_peer / count_edges_filtered / iter_peers_filtered / reset_arenas / edge_endpoints / edge_endpoint_keys
 - [x] GAT vs boxed-iterator decision: **enum-wrapped iterators** (`GraphEdges`, `GraphNeighbors`, `GraphNodeIndices` from `graph_iterators.rs`) reused as trait return types — zero GAT lifetime friction this phase. GAT conversion deferred to Phase 3 or a later benchmark-driven prompt.
-- [x] **Migrate-and-delete** one file per PR — old enum-match code removed same commit:
+- [x] **Migrate-and-delete** every read-path file in one phase commit — old enum-match code removed in the same commit:
   - [x] `pattern_matching.rs`
   - [x] `introspection.rs`
   - [x] `cypher/executor.rs` (read paths)
@@ -502,7 +503,7 @@ migrated file deletes its old enum-match code in the same PR.
   - [x] `data_retrieval.rs`
   - [x] `statistics_methods.rs`
   - [x] `graph_algorithms.rs` (read paths)
-- [x] Per-PR grep gate: `rg 'GraphBackend::[A-Z]'` in the touched file → 0 hits
+- [x] End-of-phase grep gate: `rg 'GraphBackend::[A-Z]'` in every touched file → 0 hits
 
 **Exit criteria**: testing gate passes; every read-path file migrated AND cleaned; in-memory benchmark delta < 2 %.
 
@@ -590,7 +591,7 @@ migrated file deletes its old enum-match code in the same PR.
 ### Tasks
 - [ ] `trait GraphWrite: GraphRead`
 - [ ] Implement for each backend; preserve OCC + read-only txns + schema locking
-- [ ] **Migrate-and-delete** write-path files + Cypher CREATE / SET / DELETE / MERGE paths
+- [ ] **Migrate-and-delete** every write-path file + Cypher CREATE / SET / DELETE / MERGE paths in one phase commit
 - [ ] Transaction boundary decision (trait or concrete type) documented
 
 **Exit criteria**: testing gate passes; every write-path file migrated AND cleaned; mutation benchmarks within thresholds.
@@ -618,7 +619,7 @@ migrated file deletes its old enum-match code in the same PR.
 ### Tasks
 - [ ] `trait GraphTraverse: GraphRead` with GAT iterators
 - [ ] Generic helpers (BfsIter, ShortestPathIter) over `&impl GraphTraverse`
-- [ ] **Migrate-and-delete** algorithm code, fluent API internals, pattern-matching multi-hop expansion
+- [ ] **Migrate-and-delete** algorithm code, fluent API internals, and pattern-matching multi-hop expansion in one phase commit
 
 **Exit criteria**: testing gate passes; traversal code no longer touches `GraphBackend` directly; old traversal helpers deleted.
 
@@ -642,7 +643,7 @@ migrated file deletes its old enum-match code in the same PR.
 
 ### Tasks
 - [ ] `trait GraphIo` — save / load / save_incremental / load_incremental / format version enum
-- [ ] **Migrate-and-delete** `io_operations.rs`, ntriples loader, CSV loader
+- [ ] **Migrate-and-delete** `io_operations.rs`, ntriples loader, and CSV loader in one phase commit
 - [ ] Golden-hash test against checked-in digests
 
 **Exit criteria**: testing gate passes; byte-level golden hash test for each format version; io code backend-agnostic where the format allows.
