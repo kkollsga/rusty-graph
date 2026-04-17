@@ -1,7 +1,6 @@
 // src/graph/traversal_methods.rs
 use crate::datatypes::values::FilterCondition;
 use crate::datatypes::values::Value;
-use crate::graph::filtering_methods;
 use crate::graph::schema::{
     CurrentSelection, DirGraph, InternedKey, NodeData, SelectionOperation, SpatialConfig,
     TemporalConfig,
@@ -97,7 +96,7 @@ fn edge_matches_conditions(
     conditions.iter().all(|(field, condition)| {
         let ik = InternedKey::from_str(field);
         match properties.iter().find(|(k, _)| *k == ik).map(|(_, v)| v) {
-            Some(value) => filtering_methods::matches_condition(value, condition),
+            Some(value) => crate::graph::query::filtering_methods::matches_condition(value, condition),
             None => {
                 // Missing field is treated as null
                 matches!(condition, FilterCondition::IsNull)
@@ -526,7 +525,7 @@ fn make_traversal_full(
         let target_vec: Vec<NodeIndex> = targets.into_iter().collect();
 
         // Apply filtering and sorting in one pass
-        let processed_nodes = filtering_methods::process_nodes(
+        let processed_nodes = crate::graph::query::filtering_methods::process_nodes(
             graph,
             target_vec,
             filter_target,
@@ -795,7 +794,7 @@ fn insert_matches_into_selection(
     ))];
 
     for (parent, children) in matches {
-        let processed = filtering_methods::process_nodes(
+        let processed = crate::graph::query::filtering_methods::process_nodes(
             graph,
             children,
             filter_target,

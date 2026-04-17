@@ -12,7 +12,6 @@ use super::ast::{is_window_expression, Expression, OrderItem, ReturnClause};
 use super::executor::{return_item_column_name, CypherExecutor, RAYON_THRESHOLD};
 use super::result::{Bindings, ResultRow, ResultSet};
 use crate::datatypes::values::Value;
-use crate::graph::{filtering_methods, value_operations};
 
 impl CypherExecutor<'_> {
     /// RETURN with window functions: project non-window items, then compute window values
@@ -148,7 +147,7 @@ impl CypherExecutor<'_> {
         let sort_cmp = |a: usize, b: usize| -> std::cmp::Ordering {
             for (i, item) in order_by.iter().enumerate() {
                 if let Some(ord) =
-                    filtering_methods::compare_values(&sort_keys[a][i], &sort_keys[b][i])
+                    crate::graph::query::filtering_methods::compare_values(&sort_keys[a][i], &sort_keys[b][i])
                 {
                     let ord = if item.ascending { ord } else { ord.reverse() };
                     if ord != std::cmp::Ordering::Equal {
@@ -178,7 +177,7 @@ impl CypherExecutor<'_> {
                         key_buf.push('\x1F');
                     }
                     let val = self.evaluate_expression(expr, row).unwrap_or(Value::Null);
-                    value_operations::format_value_compact_into(&mut key_buf, &val);
+                    crate::graph::query::value_operations::format_value_compact_into(&mut key_buf, &val);
                 }
                 if let Some(&pidx) = part_map.get(&key_buf) {
                     parts[pidx].push(i);

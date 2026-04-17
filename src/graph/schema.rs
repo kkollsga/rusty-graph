@@ -4149,12 +4149,12 @@ pub type Graph = GraphBackend;
 use crate::graph::storage::{GraphRead, GraphWrite};
 
 impl GraphRead for GraphBackend {
-    type NodeIndicesIter<'a> = crate::graph::graph_iterators::GraphNodeIndices<'a>;
-    type EdgeIndicesIter<'a> = crate::graph::graph_iterators::GraphEdgeIndices<'a>;
-    type EdgesIter<'a> = crate::graph::graph_iterators::GraphEdges<'a>;
-    type EdgeReferencesIter<'a> = crate::graph::graph_iterators::GraphEdgeReferences<'a>;
-    type EdgesConnectingIter<'a> = crate::graph::graph_iterators::GraphEdgesConnecting<'a>;
-    type NeighborsIter<'a> = crate::graph::graph_iterators::GraphNeighbors<'a>;
+    type NodeIndicesIter<'a> = crate::graph::query::graph_iterators::GraphNodeIndices<'a>;
+    type EdgeIndicesIter<'a> = crate::graph::query::graph_iterators::GraphEdgeIndices<'a>;
+    type EdgesIter<'a> = crate::graph::query::graph_iterators::GraphEdges<'a>;
+    type EdgeReferencesIter<'a> = crate::graph::query::graph_iterators::GraphEdgeReferences<'a>;
+    type EdgesConnectingIter<'a> = crate::graph::query::graph_iterators::GraphEdgesConnecting<'a>;
+    type NeighborsIter<'a> = crate::graph::query::graph_iterators::GraphNeighbors<'a>;
 
     #[inline]
     fn node_count(&self) -> usize {
@@ -4274,7 +4274,7 @@ impl GraphRead for GraphBackend {
     }
 
     #[inline]
-    fn node_indices(&self) -> crate::graph::graph_iterators::GraphNodeIndices<'_> {
+    fn node_indices(&self) -> crate::graph::query::graph_iterators::GraphNodeIndices<'_> {
         match self {
             Self::Memory(g) => GraphRead::node_indices(g),
             Self::Mapped(g) => GraphRead::node_indices(g),
@@ -4284,7 +4284,7 @@ impl GraphRead for GraphBackend {
     }
 
     #[inline]
-    fn edge_indices(&self) -> crate::graph::graph_iterators::GraphEdgeIndices<'_> {
+    fn edge_indices(&self) -> crate::graph::query::graph_iterators::GraphEdgeIndices<'_> {
         match self {
             Self::Memory(g) => GraphRead::edge_indices(g),
             Self::Mapped(g) => GraphRead::edge_indices(g),
@@ -4294,7 +4294,7 @@ impl GraphRead for GraphBackend {
     }
 
     #[inline]
-    fn edge_references(&self) -> crate::graph::graph_iterators::GraphEdgeReferences<'_> {
+    fn edge_references(&self) -> crate::graph::query::graph_iterators::GraphEdgeReferences<'_> {
         match self {
             Self::Memory(g) => GraphRead::edge_references(g),
             Self::Mapped(g) => GraphRead::edge_references(g),
@@ -4318,7 +4318,7 @@ impl GraphRead for GraphBackend {
         &self,
         idx: NodeIndex,
         dir: petgraph::Direction,
-    ) -> crate::graph::graph_iterators::GraphEdges<'_> {
+    ) -> crate::graph::query::graph_iterators::GraphEdges<'_> {
         match self {
             Self::Memory(g) => GraphRead::edges_directed(g, idx, dir),
             Self::Mapped(g) => GraphRead::edges_directed(g, idx, dir),
@@ -4328,7 +4328,7 @@ impl GraphRead for GraphBackend {
     }
 
     #[inline]
-    fn edges(&self, idx: NodeIndex) -> crate::graph::graph_iterators::GraphEdges<'_> {
+    fn edges(&self, idx: NodeIndex) -> crate::graph::query::graph_iterators::GraphEdges<'_> {
         match self {
             Self::Memory(g) => GraphRead::edges(g, idx),
             Self::Mapped(g) => GraphRead::edges(g, idx),
@@ -4343,7 +4343,7 @@ impl GraphRead for GraphBackend {
         idx: NodeIndex,
         dir: petgraph::Direction,
         conn_type_filter: Option<InternedKey>,
-    ) -> crate::graph::graph_iterators::GraphEdges<'_> {
+    ) -> crate::graph::query::graph_iterators::GraphEdges<'_> {
         match self {
             Self::Memory(g) => GraphRead::edges_directed_filtered(g, idx, dir, conn_type_filter),
             Self::Mapped(g) => GraphRead::edges_directed_filtered(g, idx, dir, conn_type_filter),
@@ -4361,7 +4361,7 @@ impl GraphRead for GraphBackend {
         &self,
         a: NodeIndex,
         b: NodeIndex,
-    ) -> crate::graph::graph_iterators::GraphEdgesConnecting<'_> {
+    ) -> crate::graph::query::graph_iterators::GraphEdgesConnecting<'_> {
         match self {
             Self::Memory(g) => GraphRead::edges_connecting(g, a, b),
             Self::Mapped(g) => GraphRead::edges_connecting(g, a, b),
@@ -4417,7 +4417,7 @@ impl GraphRead for GraphBackend {
         &self,
         idx: NodeIndex,
         dir: petgraph::Direction,
-    ) -> crate::graph::graph_iterators::GraphNeighbors<'_> {
+    ) -> crate::graph::query::graph_iterators::GraphNeighbors<'_> {
         match self {
             Self::Memory(g) => GraphRead::neighbors_directed(g, idx, dir),
             Self::Mapped(g) => GraphRead::neighbors_directed(g, idx, dir),
@@ -4430,7 +4430,7 @@ impl GraphRead for GraphBackend {
     fn neighbors_undirected(
         &self,
         idx: NodeIndex,
-    ) -> crate::graph::graph_iterators::GraphNeighbors<'_> {
+    ) -> crate::graph::query::graph_iterators::GraphNeighbors<'_> {
         match self {
             Self::Memory(g) => GraphRead::neighbors_undirected(g, idx),
             Self::Mapped(g) => GraphRead::neighbors_undirected(g, idx),

@@ -4,7 +4,6 @@
 use crate::datatypes::values::Value;
 use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::GraphRead;
-use crate::graph::value_operations;
 use petgraph::algo::kosaraju_scc;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
@@ -1878,7 +1877,7 @@ fn edge_weight(
         let g = &graph.graph;
         if let Some(edge_data) = g.edge_weight(edge_id) {
             if let Some(val) = edge_data.get_property(prop) {
-                return value_operations::value_to_f64(val).unwrap_or(1.0);
+                return crate::graph::query::value_operations::value_to_f64(val).unwrap_or(1.0);
             }
         }
     }

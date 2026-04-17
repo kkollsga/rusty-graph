@@ -1,8 +1,8 @@
-// src/graph/calculations.rs
-use super::equation_parser::{AggregateType, Evaluator, Expr, Parser};
+// src/graph/query/calculations.rs
+use crate::graph::equation_parser::{AggregateType, Evaluator, Expr, Parser};
+use crate::graph::maintain_graph;
+use crate::graph::query::statistics_methods::{get_parent_child_pairs, ParentChildPair};
 use crate::graph::storage::lookups::TypeLookup;
-use super::maintain_graph;
-use super::statistics_methods::{get_parent_child_pairs, ParentChildPair};
 use crate::datatypes::values::Value;
 use crate::graph::reporting::CalculationOperationReport; // Remove unused OperationReport import
 use crate::graph::schema::{CurrentSelection, DirGraph, NodeData, StringInterner};

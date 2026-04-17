@@ -4,7 +4,7 @@
 // Architecture:
 //   Query String -> Tokenizer -> Parser -> AST -> Planner -> Executor -> Result
 //
-// The MATCH clause delegates pattern parsing to pattern_matching::parse_pattern()
+// The MATCH clause delegates pattern parsing to crate::graph::query::pattern_matching::parse_pattern()
 // WHERE/RETURN/ORDER BY etc. are handled by the Cypher-level parser and executor.
 
 pub mod ast;
@@ -363,7 +363,7 @@ pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result:
 
 /// Collect node types from a MatchClause's patterns.
 fn collect_node_types(m: &MatchClause) -> Vec<String> {
-    use crate::graph::pattern_matching::PatternElement;
+    use crate::graph::query::pattern_matching::PatternElement;
     let mut types = Vec::new();
     for pattern in &m.patterns {
         for element in &pattern.elements {

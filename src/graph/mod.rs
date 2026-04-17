@@ -1,7 +1,7 @@
 // src/graph/mod.rs
 use crate::datatypes::values::{FilterCondition, Value};
 use crate::datatypes::{py_in, py_out};
-use crate::graph::calculations::StatResult;
+use crate::graph::query::calculations::StatResult;
 use crate::graph::reporting::{OperationReport, OperationReports};
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
@@ -13,34 +13,26 @@ use std::sync::Arc;
 
 pub mod batch_operations;
 pub mod bug_report;
-pub mod calculations;
 pub mod clustering;
 pub mod cypher;
-pub mod data_retrieval;
 pub mod debugging;
 pub mod equation_parser;
 pub mod export;
-pub mod filtering_methods;
 pub mod graph_algorithms;
-#[allow(dead_code)]
-pub mod graph_iterators;
 pub mod introspection;
 pub mod io_operations;
 pub mod maintain_graph;
 pub mod ntriples;
-pub mod pattern_matching;
+pub mod query;
 pub mod reporting;
 pub mod schema;
 pub mod schema_validation;
 pub mod set_operations;
 pub mod spatial;
-pub mod statistics_methods;
 pub mod storage;
 pub mod subgraph;
 pub mod temporal;
 pub mod timeseries;
-pub mod traversal_methods;
-pub mod value_operations;
 pub mod vector_search;
 
 mod pymethods_algorithms;
@@ -991,8 +983,8 @@ pub(super) fn community_results_to_py(
 ///
 /// String shorthand: `method='contains'` → MethodConfig with defaults.
 /// Dict form: `method={'type': 'distance', 'max_m': 5000, 'resolve': 'centroid'}`
-fn parse_method_param(val: &Bound<'_, PyAny>) -> PyResult<traversal_methods::MethodConfig> {
-    use traversal_methods::MethodConfig;
+fn parse_method_param(val: &Bound<'_, PyAny>) -> PyResult<crate::graph::query::traversal_methods::MethodConfig> {
+    use crate::graph::query::traversal_methods::MethodConfig;
 
     // Try string first
     if let Ok(s) = val.extract::<String>() {
@@ -1082,13 +1074,13 @@ fn compare_inner(
     inner: &Arc<DirGraph>,
     selection: &mut CowSelection,
     target_type: Option<&str>,
-    config: &traversal_methods::MethodConfig,
+    config: &crate::graph::query::traversal_methods::MethodConfig,
     conditions: Option<&HashMap<String, FilterCondition>>,
     sort_fields: Option<&Vec<(String, bool)>>,
     limit: Option<usize>,
     estimated: usize,
 ) -> PyResult<usize> {
-    traversal_methods::make_comparison_traversal(
+    crate::graph::query::traversal_methods::make_comparison_traversal(
         inner,
         selection,
         target_type,
@@ -2254,7 +2246,7 @@ impl KnowledgeGraph {
             None
         };
 
-        filtering_methods::filter_nodes(
+        crate::graph::query::filtering_methods::filter_nodes(
             &self.inner,
             &mut new_kg.selection,
             conditions,
@@ -2317,7 +2309,7 @@ impl KnowledgeGraph {
             None => None,
         };
 
-        filtering_methods::filter_nodes(
+        crate::graph::query::filtering_methods::filter_nodes(
             &self.inner,
             &mut new_kg.selection,
             filter_conditions,
@@ -2374,7 +2366,7 @@ impl KnowledgeGraph {
             None => None,
         };
 
-        filtering_methods::filter_nodes_any(
+        crate::graph::query::filtering_methods::filter_nodes_any(
             &self.inner,
             &mut new_kg.selection,
             &condition_sets,
@@ -2402,7 +2394,7 @@ impl KnowledgeGraph {
             None
         };
 
-        filtering_methods::filter_orphan_nodes(
+        crate::graph::query::filtering_methods::filter_orphan_nodes(
             &self.inner,
             &mut new_kg.selection,
             include,
@@ -2419,14 +2411,14 @@ impl KnowledgeGraph {
         let mut new_kg = self.clone();
         let sort_fields = py_in::parse_sort_fields(sort, ascending)?;
 
-        filtering_methods::sort_nodes(&self.inner, &mut new_kg.selection, sort_fields)
+        crate::graph::query::filtering_methods::sort_nodes(&self.inner, &mut new_kg.selection, sort_fields)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
     }
 
     fn limit(&mut self, max_per_group: usize) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        filtering_methods::limit_nodes_per_group(&self.inner, &mut new_kg.selection, max_per_group)
+        crate::graph::query::filtering_methods::limit_nodes_per_group(&self.inner, &mut new_kg.selection, max_per_group)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         Ok(new_kg)
@@ -2437,7 +2429,7 @@ impl KnowledgeGraph {
     ///   graph.sort('name').offset(20).limit(10)
     fn offset(&mut self, n: usize) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        filtering_methods::offset_nodes(&self.inner, &mut new_kg.selection, n)
+        crate::graph::query::filtering_methods::offset_nodes(&self.inner, &mut new_kg.selection, n)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
     }
@@ -2463,7 +2455,7 @@ impl KnowledgeGraph {
             }
         };
 
-        filtering_methods::filter_by_connection(
+        crate::graph::query::filtering_methods::filter_by_connection(
             &self.inner,
             &mut new_kg.selection,
             connection_type,
@@ -2777,7 +2769,7 @@ impl KnowledgeGraph {
         flatten_single_parent: Option<bool>,
         limit: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
-        let nodes = data_retrieval::get_nodes(&self.inner, &self.selection, None, None, limit);
+        let nodes = crate::graph::query::data_retrieval::get_nodes(&self.inner, &self.selection, None, None, limit);
         Python::attach(|py| {
             py_out::level_nodes_to_pydict(
                 py,
@@ -2970,7 +2962,7 @@ impl KnowledgeGraph {
     ///     ```
     #[pyo3(signature = (columns=None, limit=200))]
     fn show(&self, columns: Option<Vec<String>>, limit: usize) -> PyResult<String> {
-        use crate::graph::value_operations::format_value_compact;
+        use crate::graph::query::value_operations::format_value_compact;
 
         let columns = columns.unwrap_or_else(|| vec!["id".to_string(), "title".to_string()]);
         let level_count = self.selection.get_level_count();
@@ -4036,7 +4028,7 @@ impl KnowledgeGraph {
         include_node_properties: Option<bool>,
         flatten_single_parent: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
-        let connections = data_retrieval::get_connections(
+        let connections = crate::graph::query::data_retrieval::get_connections(
             &self.inner,
             &self.selection,
             None,
@@ -4060,7 +4052,7 @@ impl KnowledgeGraph {
         indices: Option<Vec<usize>>,
         flatten_single_parent: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
-        let values = data_retrieval::get_property_values(
+        let values = crate::graph::query::data_retrieval::get_property_values(
             &self.inner,
             &self.selection,
             None,
@@ -4108,7 +4100,7 @@ impl KnowledgeGraph {
         flatten_single_parent: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let property_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
-        let values = data_retrieval::get_property_values(
+        let values = crate::graph::query::data_retrieval::get_property_values(
             &self.inner,
             &self.selection,
             None,
@@ -4131,7 +4123,7 @@ impl KnowledgeGraph {
         max_length: Option<usize>,
         keep_selection: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
-        let values = data_retrieval::get_unique_values(
+        let values = crate::graph::query::data_retrieval::get_unique_values(
             &self.inner,
             &self.selection,
             &property,
@@ -4141,7 +4133,7 @@ impl KnowledgeGraph {
         );
 
         if let Some(target_property) = store_as {
-            let nodes = data_retrieval::format_unique_values_for_storage(&values, max_length);
+            let nodes = crate::graph::query::data_retrieval::format_unique_values_for_storage(&values, max_length);
 
             let graph = get_graph_mut(&mut self.inner);
 
@@ -4292,7 +4284,7 @@ impl KnowledgeGraph {
             self.inner
                 .temporal_edge_configs
                 .get(&connection_type)
-                .map(|configs| traversal_methods::TemporalEdgeFilter::At(configs.clone(), date))
+                .map(|configs| crate::graph::query::traversal_methods::TemporalEdgeFilter::At(configs.clone(), date))
         } else if let Some((start_str, end_str)) = &during {
             let (start, _) = timeseries::parse_date_query(start_str)
                 .map_err(pyo3::exceptions::PyValueError::new_err)?;
@@ -4302,7 +4294,7 @@ impl KnowledgeGraph {
                 .temporal_edge_configs
                 .get(&connection_type)
                 .map(|configs| {
-                    traversal_methods::TemporalEdgeFilter::During(configs.clone(), start, end)
+                    crate::graph::query::traversal_methods::TemporalEdgeFilter::During(configs.clone(), start, end)
                 })
         } else {
             // Auto: use config + temporal_context
@@ -4314,24 +4306,24 @@ impl KnowledgeGraph {
                     .get(&connection_type)
                     .map(|configs| {
                         let today = chrono::Local::now().date_naive();
-                        traversal_methods::TemporalEdgeFilter::At(configs.clone(), today)
+                        crate::graph::query::traversal_methods::TemporalEdgeFilter::At(configs.clone(), today)
                     }),
                 TemporalContext::At(d) => self
                     .inner
                     .temporal_edge_configs
                     .get(&connection_type)
-                    .map(|configs| traversal_methods::TemporalEdgeFilter::At(configs.clone(), *d)),
+                    .map(|configs| crate::graph::query::traversal_methods::TemporalEdgeFilter::At(configs.clone(), *d)),
                 TemporalContext::During(start, end) => self
                     .inner
                     .temporal_edge_configs
                     .get(&connection_type)
                     .map(|configs| {
-                        traversal_methods::TemporalEdgeFilter::During(configs.clone(), *start, *end)
+                        crate::graph::query::traversal_methods::TemporalEdgeFilter::During(configs.clone(), *start, *end)
                     }),
             }
         };
 
-        traversal_methods::make_traversal(
+        crate::graph::query::traversal_methods::make_traversal(
             &self.inner,
             &mut new_kg.selection,
             connection_type.clone(),
@@ -4585,7 +4577,7 @@ impl KnowledgeGraph {
                 None => None,
             };
 
-            filtering_methods::filter_nodes(
+            crate::graph::query::filtering_methods::filter_nodes(
                 &self.inner,
                 &mut filtered_kg.selection,
                 conditions,
@@ -4596,11 +4588,11 @@ impl KnowledgeGraph {
         } else if let Some(spec) = sort {
             let sort_fields = py_in::parse_sort_fields(spec, None)?;
 
-            filtering_methods::sort_nodes(&self.inner, &mut filtered_kg.selection, sort_fields)
+            crate::graph::query::filtering_methods::sort_nodes(&self.inner, &mut filtered_kg.selection, sort_fields)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
             if let Some(max) = limit {
-                filtering_methods::limit_nodes_per_group(
+                crate::graph::query::filtering_methods::limit_nodes_per_group(
                     &self.inner,
                     &mut filtered_kg.selection,
                     max,
@@ -4608,12 +4600,12 @@ impl KnowledgeGraph {
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
             }
         } else if let Some(max) = limit {
-            filtering_methods::limit_nodes_per_group(&self.inner, &mut filtered_kg.selection, max)
+            crate::graph::query::filtering_methods::limit_nodes_per_group(&self.inner, &mut filtered_kg.selection, max)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         }
 
         // Generate the property lists with titles already included
-        let property_groups = traversal_methods::get_children_properties(
+        let property_groups = crate::graph::query::traversal_methods::get_children_properties(
             &filtered_kg.inner,
             &filtered_kg.selection,
             property_name,
@@ -4622,13 +4614,13 @@ impl KnowledgeGraph {
         // If store_as is not provided, return the properties as a dictionary
         if store_as.is_none() {
             // Format for dictionary display
-            let dict_pairs = traversal_methods::format_for_dictionary(&property_groups, max_length);
+            let dict_pairs = crate::graph::query::traversal_methods::format_for_dictionary(&property_groups, max_length);
 
             return Python::attach(|py| py_out::string_pairs_to_pydict(py, &dict_pairs));
         }
 
         // Format for storage
-        let nodes = traversal_methods::format_for_storage(&property_groups, max_length);
+        let nodes = crate::graph::query::traversal_methods::format_for_storage(&property_groups, max_length);
 
         let graph = get_graph_mut(&mut self.inner);
 
@@ -4666,7 +4658,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         // group_by: compute statistics grouped by a property value
         if let Some(group_prop) = group_by {
-            let nodes = statistics_methods::collect_selected_nodes(&self.selection, level_index);
+            let nodes = crate::graph::query::statistics_methods::collect_selected_nodes(&self.selection, level_index);
             let mut groups: HashMap<String, Vec<f64>> = HashMap::new();
             for idx in nodes {
                 if let Some(node) = self.inner.get_node(idx) {
@@ -4723,8 +4715,8 @@ impl KnowledgeGraph {
             });
         }
 
-        let pairs = statistics_methods::get_parent_child_pairs(&self.selection, level_index);
-        let stats = statistics_methods::calculate_property_stats(&self.inner, &pairs, property);
+        let pairs = crate::graph::query::statistics_methods::get_parent_child_pairs(&self.selection, level_index);
+        let stats = crate::graph::query::statistics_methods::calculate_property_stats(&self.inner, &pairs, property);
         py_out::convert_stats_for_python(stats)
     }
 
@@ -4741,7 +4733,7 @@ impl KnowledgeGraph {
         if let Some(target_property) = store_as {
             let graph = get_graph_mut(&mut self.inner);
 
-            let process_result = calculations::process_equation(
+            let process_result = crate::graph::query::calculations::process_equation(
                 graph,
                 &self.selection,
                 expression,
@@ -4751,7 +4743,7 @@ impl KnowledgeGraph {
             );
 
             match process_result {
-                Ok(calculations::EvaluationResult::Stored(report)) => {
+                Ok(crate::graph::query::calculations::EvaluationResult::Stored(report)) => {
                     let mut new_kg = KnowledgeGraph {
                         inner: self.inner.clone(),
                         selection: if keep_selection.unwrap_or(false) {
@@ -4784,7 +4776,7 @@ impl KnowledgeGraph {
             }
         } else {
             // Just computing without storing - no need to modify graph
-            let process_result = calculations::process_equation(
+            let process_result = crate::graph::query::calculations::process_equation(
                 &mut (*self.inner).clone(), // Create a temporary clone just for calculation
                 &self.selection,
                 expression,
@@ -4795,7 +4787,7 @@ impl KnowledgeGraph {
 
             // Handle regular errors with descriptive messages
             match process_result {
-                Ok(calculations::EvaluationResult::Computed(results)) => {
+                Ok(crate::graph::query::calculations::EvaluationResult::Computed(results)) => {
                     // Check for errors
                     let error_count = results.iter().filter(|r| r.error_msg.is_some()).count();
                     if error_count == results.len() && !results.is_empty() {
@@ -4848,7 +4840,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         // group_by property: count nodes grouped by a property value
         if let Some(property) = group_by {
-            let nodes = statistics_methods::collect_selected_nodes(&self.selection, level_index);
+            let nodes = crate::graph::query::statistics_methods::collect_selected_nodes(&self.selection, level_index);
             let mut groups: HashMap<String, usize> = HashMap::new();
             for idx in nodes {
                 if let Some(node) = self.inner.get_node(idx) {
@@ -4886,7 +4878,7 @@ impl KnowledgeGraph {
         if let Some(target_property) = store_as {
             let graph = get_graph_mut(&mut self.inner);
 
-            let result = match calculations::store_count_results(
+            let result = match crate::graph::query::calculations::store_count_results(
                 graph,
                 &self.selection,
                 level_index,
@@ -4919,11 +4911,11 @@ impl KnowledgeGraph {
         } else if use_grouping {
             // Return counts grouped by parent
             let counts =
-                calculations::count_nodes_by_parent(&self.inner, &self.selection, level_index);
+                crate::graph::query::calculations::count_nodes_by_parent(&self.inner, &self.selection, level_index);
             py_out::convert_computation_results_for_python(counts)
         } else {
             // Simple flat count
-            let count = calculations::count_nodes_in_level(&self.selection, level_index);
+            let count = crate::graph::query::calculations::count_nodes_in_level(&self.selection, level_index);
             Python::attach(|py| count.into_py_any(py))
         }
     }
@@ -6028,12 +6020,12 @@ impl KnowledgeGraph {
         max_matches: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
         // Parse the pattern
-        let parsed = pattern_matching::parse_pattern(pattern).map_err(|e| {
+        let parsed = crate::graph::query::pattern_matching::parse_pattern(pattern).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Pattern syntax error: {}", e))
         })?;
 
         // Execute the pattern
-        let executor = pattern_matching::PatternExecutor::new(&self.inner, max_matches);
+        let executor = crate::graph::query::pattern_matching::PatternExecutor::new(&self.inner, max_matches);
         let matches = executor.execute(&parsed).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Pattern execution error: {}",
