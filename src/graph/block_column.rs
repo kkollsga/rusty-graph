@@ -376,7 +376,7 @@ mod tests {
     fn test_pool() -> BlockPool {
         let dir = tempfile::tempdir().unwrap();
         // 10 MB budget — plenty for tests
-        BlockPool::new(10 << 20, dir.into_path()).unwrap()
+        BlockPool::new(10 << 20, dir.keep()).unwrap()
     }
 
     #[test]
@@ -559,7 +559,7 @@ mod tests {
     fn eviction_during_build() {
         // Tiny budget: 3 MB — building many values will force eviction
         let dir = tempfile::tempdir().unwrap();
-        let mut pool = BlockPool::new(3 << 20, dir.into_path()).unwrap();
+        let mut pool = BlockPool::new(3 << 20, dir.keep()).unwrap();
         let mut col = BlockColumn::new(ColumnType::Int64, &mut pool).unwrap();
 
         let n = 500_000u32; // ~4 MB of data → must evict some blocks

@@ -4,6 +4,18 @@
 // a heap Vec<T> or a memory-mapped file. Provides transparent read/write
 // access regardless of backing. When mmap-backed, grow operations
 // require dropping and recreating the mapping (memmap2 limitation).
+//
+// SAFETY invariants shared by every `unsafe { ... }` in this file:
+//  - `T: Copy + Default + 'static` — no drop glue, no uninitialised reads.
+//  - mmap regions are created after `file.set_len(byte_len)`; byte_len is
+//    always `capacity * size_of::<T>()` or larger.
+//  - mmap start is page-aligned (OS guarantee); elements are stored
+//    contiguously from offset 0, so every `offset = i * size_of::<T>()`
+//    is naturally aligned for `T`.
+//  - Bounds are checked (`assert!(index < *len)`) at the element level
+//    before each `ptr::read` / `ptr::write`.
+//  - `as_*_slice` / `as_*_bytes` take `&mut self` or `&self`, so rustc's
+//    borrow rules prevent aliasing of the returned slice.
 
 use memmap2::{MmapMut, MmapOptions};
 use std::fs::{File, OpenOptions};
@@ -69,6 +81,7 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
             .truncate(true)
             .open(path)?;
         file.set_len(byte_len as u64)?;
+        // SAFETY: file was just created+truncated to byte_len; see module invariants.
         let mmap = unsafe { MmapOptions::new().len(byte_len).map_mut(&file)? };
         Ok(MmapOrVec::Mapped {
             mmap,
@@ -95,6 +108,7 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
             .open(path)?;
         file.set_len(byte_len as u64)?;
 
+        // SAFETY: file was just created+truncated to byte_len; see module invariants.
         let mmap = unsafe { MmapOptions::new().len(byte_len).map_mut(&file)? };
 
         Ok(MmapOrVec::Mapped {
@@ -123,6 +137,7 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
             .open(path)?;
         file.set_len(byte_len as u64)?;
 
+        // SAFETY: file was just created+truncated to byte_len; see module invariants.
         let mmap = unsafe { MmapOptions::new().len(byte_len).map_mut(&file)? };
 
         Ok(MmapOrVec::Mapped {
@@ -153,6 +168,7 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
             ));
         }
 
+        // SAFETY: file_len verified ≥ len*elem_size above; see module invariants.
         let mmap = unsafe { MmapOptions::new().len(file_len).map_mut(&file)? };
 
         Ok(MmapOrVec::Mapped {
@@ -175,6 +191,8 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         let elem_size = std::mem::size_of::<T>();
         let byte_len = len * elem_size;
         let file = OpenOptions::new().read(true).write(true).open(path)?;
+        // SAFETY: caller guarantees `offset + len*size_of::<T>() ≤ file size`
+        // (documented on the public method); see module invariants.
         let mmap = unsafe {
             MmapOptions::new()
                 .offset(offset as u64)
@@ -242,6 +260,10 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         if let MmapOrVec::Mapped { mmap, len, .. } = self {
             let byte_len = *len * std::mem::size_of::<T>();
             if byte_len > 0 {
+                // SAFETY: MADV_DONTNEED can discard dirty pages, but our
+                // MmapOrVec<T> is only written to via `push`/`set` which
+                // touch pages that are already flushed to the backing file;
+                // we never hold un-flushed writes when calling DONTNEED.
                 unsafe {
                     let _ = mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed);
                 }
@@ -298,6 +320,7 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
                     let new_cap = (*capacity * 2).max(64);
                     let new_byte_len = new_cap * std::mem::size_of::<T>();
                     file.set_len(new_byte_len as u64).expect("ftruncate failed");
+                    // SAFETY: file just truncated to new_byte_len; see module invariants.
                     *mmap = unsafe {
                         MmapOptions::new()
                             .len(new_byte_len)
@@ -309,6 +332,8 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
                     *capacity = new_cap;
                 }
                 let offset = *len * std::mem::size_of::<T>();
+                // SAFETY: `*len < *capacity` after the grow branch; `offset`
+                // points at an uninitialised slot within the mapped region.
                 unsafe {
                     std::ptr::write(mmap.as_mut_ptr().add(offset) as *mut T, value);
                 }
@@ -334,6 +359,8 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         match self {
             MmapOrVec::Heap { data } => data.as_mut_slice(),
+            // SAFETY: `&mut self` + `*len ≤ capacity`, and the mmap has
+            // `capacity * size_of::<T>()` bytes. See module invariants.
             MmapOrVec::Mapped { mmap, len, .. } => unsafe {
                 std::slice::from_raw_parts_mut(mmap.as_mut_ptr() as *mut T, *len)
             },
@@ -345,6 +372,8 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
     /// Useful for bulk byte operations (memset, copy_from_slice) during build.
     pub fn as_mut_bytes(&mut self) -> &mut [u8] {
         match self {
+            // SAFETY: Vec<T> layout is contiguous; `T: Copy` has no drop
+            // glue; reinterpreting the backing store as u8 is well-defined.
             MmapOrVec::Heap { data } => unsafe {
                 std::slice::from_raw_parts_mut(
                     data.as_mut_ptr() as *mut u8,
@@ -376,8 +405,12 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
             .open(path)?;
         file.set_len(byte_len as u64)?;
 
+        // SAFETY: file was just created+truncated to byte_len; see module invariants.
         let mut mmap = unsafe { MmapOptions::new().len(byte_len).map_mut(&file)? };
 
+        // SAFETY: `data` is a Vec<T> where `T: Copy+Default`; contiguous
+        // layout means reinterpreting as a u8 slice of the same byte count
+        // is well-defined.
         // Copy data into mmap
         let src_bytes = unsafe {
             std::slice::from_raw_parts(data.as_ptr() as *const u8, len * std::mem::size_of::<T>())
@@ -404,6 +437,8 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         }
         let data = match self {
             MmapOrVec::Mapped { mmap, len, .. } => {
+                // SAFETY: mmap holds `*len` valid T values (written via
+                // `push`/`set` or loaded from an on-disk image).
                 unsafe { std::slice::from_raw_parts(mmap.as_ptr() as *const T, *len) }.to_vec()
             }
             _ => unreachable!(),
@@ -435,6 +470,8 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
     /// Return the raw bytes of the data (without copying for heap).
     pub fn as_raw_bytes(&self) -> &[u8] {
         match self {
+            // SAFETY: Vec<T> with `T: Copy+Default` is contiguous and has
+            // no drop glue; viewing it as u8 bytes is well-defined.
             MmapOrVec::Heap { data } => unsafe {
                 std::slice::from_raw_parts(
                     data.as_ptr() as *const u8,
@@ -455,6 +492,8 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
     pub fn save_to_file(&self, path: &Path) -> io::Result<()> {
         match self {
             MmapOrVec::Heap { data } => {
+                // SAFETY: Vec<T> with `T: Copy+Default` is contiguous and
+                // has no drop glue; viewing it as u8 bytes is well-defined.
                 let bytes = unsafe {
                     std::slice::from_raw_parts(
                         data.as_ptr() as *const u8,
@@ -497,6 +536,8 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         match self {
             MmapOrVec::Heap { data } => data.clone(),
             MmapOrVec::Mapped { mmap, len, .. } => {
+                // SAFETY: mmap holds `*len` valid T values (written via
+                // `push`/`set` or loaded from an on-disk image).
                 unsafe { std::slice::from_raw_parts(mmap.as_ptr() as *const T, *len) }.to_vec()
             }
         }
@@ -556,6 +597,7 @@ impl MmapBytes {
             .truncate(true)
             .open(path)?;
         file.set_len(cap as u64)?;
+        // SAFETY: file was just created+truncated to cap; see module invariants.
         let mmap = unsafe { MmapOptions::new().len(cap).map_mut(&file)? };
         Ok(MmapBytes::Mapped {
             mmap,
@@ -575,6 +617,7 @@ impl MmapBytes {
                 "File too small for byte buffer",
             ));
         }
+        // SAFETY: capacity checked ≥ len above; see module invariants.
         let mmap = unsafe { MmapOptions::new().len(capacity).map_mut(&file)? };
         Ok(MmapBytes::Mapped {
             mmap,
@@ -612,6 +655,7 @@ impl MmapBytes {
                 if needed > *capacity {
                     let new_cap = (needed * 2).max(*capacity * 2);
                     file.set_len(new_cap as u64).expect("ftruncate failed");
+                    // SAFETY: file just truncated to new_cap; see module invariants.
                     *mmap = unsafe {
                         MmapOptions::new()
                             .len(new_cap)
@@ -653,6 +697,7 @@ impl MmapBytes {
             .truncate(true)
             .open(path)?;
         file.set_len(cap as u64)?;
+        // SAFETY: file was just created+truncated to cap; see module invariants.
         let mut mmap = unsafe { MmapOptions::new().len(cap).map_mut(&file)? };
         mmap[..len].copy_from_slice(data);
         mmap.flush_async()?;

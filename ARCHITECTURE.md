@@ -1,8 +1,10 @@
-# KGLite — architecture (as of Phase 0 of the 0.8.0 refactor)
+# KGLite — architecture (as of end of Phase 6 of the 0.8.0 refactor)
 
 This document is the living spec for how storage is layered in kglite.
 It's updated as each phase of the 0.8.0 refactor lands. See `todo.md`
-for the full plan.
+for the full plan. Phase 7 (structural reorg + audit) is in progress;
+the Target structure block below will be re-checked once the reorg
+lands.
 
 ## TL;DR
 
@@ -23,9 +25,9 @@ for the full plan.
 ┌──────────────────┐   ┌──────────────────┐   ┌────────────────────┐
 │ GraphBackend::   │   │ GraphBackend::   │   │ GraphBackend::     │
 │ Memory(          │   │ Mapped(          │   │ Disk(              │
-│   MemoryGraph)   │   │   MappedGraph    │   │   Box<DiskGraph>)  │
-│                  │   │   = MemoryGraph  │   │                    │
-│                  │   │   (alias today)  │   │                    │
+│   MemoryGraph)   │   │   MappedGraph)   │   │   Box<DiskGraph>)  │
+│                  │   │   (distinct      │   │                    │
+│                  │   │    struct, P5)   │   │                    │
 └────────┬─────────┘   └────────┬─────────┘   └──────────┬─────────┘
          │                      │                        │
          ▼                      ▼                        ▼
@@ -76,10 +78,21 @@ pub trait GraphWrite: GraphRead {
 }
 ```
 
-Implemented today for `GraphBackend` in `schema.rs`. Per-backend impls
-arrive when the `MappedGraph` type alias is promoted to a distinct
-struct (still deferred at end of Phase 2 — no write path needed
-backend-specific divergence).
+Implemented today for `GraphBackend` in `schema.rs` as a 4-arm
+dispatcher (`Memory` / `Mapped` / `Disk` / `Recording`). Per-backend
+`impl GraphRead` / `impl GraphWrite` land in `src/graph/storage/impls.rs`
+(Phase 5) — `MappedGraph` was promoted from a type alias to a distinct
+struct at the same time, and each backend now owns its own trait impl.
+
+### Recording backend (Phase 6)
+
+`GraphBackend::Recording(Box<RecordingGraph<GraphBackend>>)` is a
+validation wrapper that forwards every `GraphRead` call to an inner
+backend while logging the method name. Rust-only (no Python
+constructor reaches it); the cross-mode parity matrix for it lives in
+`src/graph/storage/recording.rs::tests`. Proves the refactor is
+actually open/closed — adding a new backend is a 3-src-file change
+(own file, the enum, the dispatcher).
 
 ### Transactions stay on DirGraph (Phase 2 decision)
 

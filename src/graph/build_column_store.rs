@@ -294,7 +294,7 @@ mod tests {
 
     fn test_pool() -> BlockPool {
         let dir = tempfile::tempdir().unwrap();
-        BlockPool::new(10 << 20, dir.into_path()).unwrap()
+        BlockPool::new(10 << 20, dir.keep()).unwrap()
     }
 
     fn test_interner() -> StringInterner {

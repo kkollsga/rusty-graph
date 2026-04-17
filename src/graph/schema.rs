@@ -98,6 +98,10 @@ impl<'de> Deserialize<'de> for InternedKey {
                 let key = InternedKey::from_str(v);
                 DESERIALIZE_INTERNER.with(|cell| {
                     if let Some(ptr) = cell.get() {
+                        // SAFETY: ptr is set by SerdeInternerGuard which
+                        // ensures the &mut reference outlives the
+                        // deserialize call (the guard lives on the
+                        // caller's stack, same pattern as Serialize above).
                         let interner = unsafe { &mut *ptr };
                         interner.register(key, v);
                     }

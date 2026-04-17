@@ -1869,6 +1869,10 @@ impl ColumnStore {
             let mut data = Vec::with_capacity(len);
             for i in 0..len {
                 let offset = i * elem_size;
+                // SAFETY: `bytes.len() >= len * elem_size` (caller contract
+                // in the .kgl v3 packed-column reader); `T: Copy+Default`
+                // has no drop glue and no alignment requirement stronger
+                // than the natural `elem_size` offset.
                 let val = unsafe { std::ptr::read(bytes.as_ptr().add(offset) as *const T) };
                 data.push(val);
             }

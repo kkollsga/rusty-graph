@@ -1034,6 +1034,9 @@ pub fn load_ntriples(
                     .write(true)
                     .open(&mmap_path)
                     .map_err(|e| format!("open columns.bin: {}", e))?;
+                // SAFETY: columns.bin was just written by a prior save pass;
+                // we re-open + mmap the existing file read-write. No other
+                // handle is writing to it concurrently.
                 let mmap = unsafe {
                     memmap2::MmapMut::map_mut(&file)
                         .map_err(|e| format!("mmap columns.bin: {}", e))?
@@ -1782,6 +1785,8 @@ fn build_columns_direct(
             .truncate(true)
             .open(&mmap_path)?;
         file.set_len(total_bytes as u64)?;
+        // SAFETY: file was just created+truncated to total_bytes; mmap
+        // region matches the on-disk length.
         let mut mmap = unsafe { MmapMut::map_mut(&file)? };
 
         if verbose {
@@ -1820,6 +1825,8 @@ fn build_columns_direct(
             .open(&p)
             .unwrap();
         f.set_len(1).unwrap();
+        // SAFETY: placeholder file just created+truncated to 1 byte; the
+        // caller replaces this with a real-sized mmap once sizes are known.
         unsafe { MmapMut::map_mut(&f).unwrap() }
     });
 
@@ -2226,6 +2233,8 @@ fn build_columns_direct(
             .read(true)
             .write(true)
             .open(&mmap_path)?;
+        // SAFETY: file was just ftruncated to include the overflow region;
+        // re-mmapping the full length is safe.
         mmap = unsafe { MmapMut::map_mut(&file)? };
 
         // Write overflow data and record regions

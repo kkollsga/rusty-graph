@@ -534,6 +534,10 @@ impl DiskGraph {
             return None;
         }
 
+        // SAFETY: `node_arena` is UnsafeCell<Vec<NodeData>>; it is only
+        // accessed from this `&self` path and `reset_arenas` (`&mut self`).
+        // We rely on the KGLite single-threaded contract (the graph is
+        // accessed behind a Python-level Mutex / GIL) to serialise reads.
         let arena = unsafe { &mut *self.node_arena.get() };
         let pos = arena.len();
 
@@ -755,6 +759,9 @@ impl DiskGraph {
         let ptr = &*boxed as *const EdgeData;
         let mut arena = self.edge_arena.lock().unwrap();
         arena.push(boxed);
+        // SAFETY: `boxed: Box<EdgeData>` gives a stable heap pointer; the
+        // arena keeps it alive until `clear_arenas` (`&mut self`); our
+        // `&self` borrow prevents that. See block comment above.
         unsafe { &*ptr }
     }
 
@@ -1132,6 +1139,10 @@ impl DiskGraph {
     /// Only call when no references from prior `node_weight()` /
     /// `materialize_edge()` calls are alive — i.e. between top-level queries.
     pub fn reset_arenas(&self) {
+        // SAFETY: reset is only called between top-level queries; the
+        // method doc requires no live references from prior `node_weight()`
+        // / `materialize_edge()` calls, which KGLite's single-threaded
+        // query loop guarantees.
         let node_arena = unsafe { &mut *self.node_arena.get() };
         node_arena.clear();
         self.edge_arena.lock().unwrap().clear();
@@ -2640,12 +2651,16 @@ impl DiskGraph {
 
         // Write exact-size raw byte files, then re-mmap with the known length.
         let write_u64 = |path: &Path, data: &[u64]| -> std::io::Result<()> {
+            // SAFETY: `&[u64]` is contiguous POD; reinterpreting as u8 bytes
+            // for a serialize-to-disk write is well-defined (the on-disk
+            // reader mmaps the file as u64 on the same host / endianness).
             let bytes = unsafe {
                 std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
             };
             std::fs::write(path, bytes)
         };
         let write_u32 = |path: &Path, data: &[u32]| -> std::io::Result<()> {
+            // SAFETY: same as `write_u64` above — POD slice → u8 view.
             let bytes = unsafe {
                 std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
             };

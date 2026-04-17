@@ -383,7 +383,7 @@ mod tests {
 
     fn test_pool(budget: usize) -> BlockPool {
         let dir = tempfile::tempdir().unwrap();
-        BlockPool::new(budget, dir.into_path()).unwrap()
+        BlockPool::new(budget, dir.keep()).unwrap()
     }
 
     #[test]
