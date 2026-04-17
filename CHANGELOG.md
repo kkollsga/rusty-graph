@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] — internal-only storage-architecture refactor
+
+**No Python API signature changes.** `kglite/__init__.pyi` is
+byte-identical to v0.7.17. Users upgrading from 0.7.x will see no
+behavioural differences other than the three disk-mode bug fixes and
+the determinism improvements noted below.
+
 ### Fixed
 - **Disk-mode `add_nodes(conflict_handling="update")` now applies
   property updates.** Previously on disk graphs, re-inserting an
@@ -44,6 +51,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (HashMap<String, String>) now emit in lexicographic order, hardening
   the v3 golden-hash invariant for fixtures richer than single-element
   sets. Existing `.kgl` files load unchanged.
+- **Internal reorganization — `src/graph/` split into 8 domain
+  subdirectories.** Code previously flat in `src/graph/` now lives
+  under `algorithms/`, `cypher/`, `features/`, `introspection/`,
+  `io/`, `mutation/`, `pyapi/`, `query/`, and `storage/`. `storage/`
+  further splits into `memory/`, `mapped/`, and `disk/` per-backend
+  folders. Pure file moves via `git mv` (rename similarity 97–100%;
+  git blame preserved). No Python-facing behaviour change. See
+  `ARCHITECTURE.md` for the final target layout.
+- **`MappedGraph` promoted to a distinct struct** (was a type alias
+  for `MemoryGraph` pre-Phase 5). Per-backend `impl GraphRead` /
+  `impl GraphWrite` land in `src/graph/storage/impls.rs`, setting up
+  future backend-specific optimizations without breaking callers.
+- **`RecordingGraph<G>` ships as a Rust-only validation wrapper.**
+  Generic over any `G: GraphRead`, logs every read-path method call.
+  Used internally to prove the architecture is actually open/closed —
+  adding a new backend is a 3-src-file change. Not exposed to Python.
+  See `docs/adding-a-storage-backend.md` for the worked example.
+- **Unsafe-block hygiene.** All 40 `unsafe { ... }` blocks in `src/`
+  now carry `// SAFETY:` justifications (Phase 7 added 29 on top of
+  the 11 that pre-existed). A module-level invariants block at the
+  top of `src/graph/storage/mapped/mmap_vec.rs` documents the shared
+  mmap safety contract.
+- **Deprecated `TempDir::into_path()` calls** migrated to
+  `TempDir::keep()` per tempfile 3.14+ API.
+
+### Known issues carried from 0.7.x
+
+- Loading a 0.8.0 `.kgl` file in a 0.7.17 process will fail. The on-disk format is byte-compatible in the v3-accepting direction (old files load in 0.8.0), but the canonicalised output produced by 0.8.0 saves is stricter than what 0.7.17 emitted, and columns may appear in a different order. Save once with 0.8.0 and the file is forward-stable.
 
 ## [0.7.17] — 2026-04-17
 
