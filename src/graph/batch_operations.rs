@@ -1,8 +1,7 @@
 // src/graph/batch_operations.rs
 use crate::datatypes::Value;
-use crate::graph::schema::{
-    DirGraph, EdgeData, GraphBackend, InternedKey, NodeData, PropertyStorage,
-};
+use crate::graph::schema::{DirGraph, EdgeData, InternedKey, NodeData, PropertyStorage};
+use crate::graph::storage::GraphWrite;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -225,7 +224,7 @@ impl BatchProcessor {
                 // Detach existing nodes — record their (NodeIndex, row_id) for pass 2
                 if let Some(indices) = graph.type_indices.get(node_type) {
                     for &idx in indices {
-                        if let Some(node) = graph.graph.node_weight_mut(idx) {
+                        if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, idx) {
                             if let PropertyStorage::Columnar { row_id, .. } = &node.properties {
                                 let rid = *row_id;
                                 node.properties = PropertyStorage::Map(HashMap::new());
@@ -341,7 +340,7 @@ impl BatchProcessor {
                 None
             };
 
-            let node_idx = graph.graph.add_node(node_data);
+            let node_idx = GraphWrite::add_node(&mut graph.graph, node_data);
 
             if let Some(row_id) = mapped_row_id {
                 deferred_columnar.push((node_idx, creation.node_type.clone(), row_id));
@@ -451,7 +450,7 @@ impl BatchProcessor {
                 None
             };
 
-            let node_idx = graph.graph.add_node(node_data);
+            let node_idx = GraphWrite::add_node(&mut graph.graph, node_data);
 
             if let Some(row_id) = mapped_row_id {
                 deferred_columnar.push((node_idx, creation.node_type.clone(), row_id));
@@ -484,15 +483,13 @@ impl BatchProcessor {
             // keeps the slot-index value assigned by add_node().
             for (node_idx, node_type, row_id) in deferred_columnar {
                 let arc_store = graph.column_stores.get(&node_type).unwrap().clone();
-                if let Some(node) = graph.graph.node_weight_mut(node_idx) {
+                if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
                     node.properties = PropertyStorage::Columnar {
                         store: arc_store,
                         row_id,
                     };
                 }
-                if let GraphBackend::Disk(ref mut dg) = graph.graph {
-                    dg.update_row_id(node_idx, row_id);
-                }
+                GraphWrite::update_row_id(&mut graph.graph, node_idx, row_id);
             }
         }
 
@@ -513,7 +510,7 @@ impl BatchProcessor {
                 })
                 .collect();
 
-            if let Some(node) = graph.graph.node_weight_mut(update.node_idx) {
+            if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, update.node_idx) {
                 match update.conflict_mode {
                     ConflictHandling::Skip => unreachable!(), // handled above
                     ConflictHandling::Replace => {
@@ -725,15 +722,18 @@ impl ConnectionBatchProcessor {
                     }
                     ConflictHandling::Replace => {
                         // Remove the existing edge and create a new one
-                        graph.graph.remove_edge(edge_idx);
+                        GraphWrite::remove_edge(&mut graph.graph, edge_idx);
                         let edge_data = EdgeData::new(
                             connection_type.to_string(),
                             conn.properties,
                             &mut graph.interner,
                         );
-                        graph
-                            .graph
-                            .add_edge(conn.source_idx, conn.target_idx, edge_data);
+                        GraphWrite::add_edge(
+                            &mut graph.graph,
+                            conn.source_idx,
+                            conn.target_idx,
+                            edge_data,
+                        );
                         stats.connections_created += 1;
                     }
                     ConflictHandling::Update => {
@@ -750,7 +750,7 @@ impl ConnectionBatchProcessor {
                         if let Some(EdgeData {
                             properties: edge_props,
                             ..
-                        }) = graph.graph.edge_weight_mut(edge_idx)
+                        }) = GraphWrite::edge_weight_mut(&mut graph.graph, edge_idx)
                         {
                             // Merge properties, preferring new values
                             for (k, v) in interned_props {
@@ -779,7 +779,7 @@ impl ConnectionBatchProcessor {
                         if let Some(EdgeData {
                             properties: edge_props,
                             ..
-                        }) = graph.graph.edge_weight_mut(edge_idx)
+                        }) = GraphWrite::edge_weight_mut(&mut graph.graph, edge_idx)
                         {
                             // Merge properties, preserving existing values
                             for (k, v) in interned_props {
@@ -803,7 +803,7 @@ impl ConnectionBatchProcessor {
                         if let Some(EdgeData {
                             properties: edge_props,
                             ..
-                        }) = graph.graph.edge_weight_mut(edge_idx)
+                        }) = GraphWrite::edge_weight_mut(&mut graph.graph, edge_idx)
                         {
                             for (k, v) in interned_props {
                                 if let Some((_, existing)) =
@@ -825,9 +825,12 @@ impl ConnectionBatchProcessor {
                     conn.properties,
                     &mut graph.interner,
                 );
-                graph
-                    .graph
-                    .add_edge(conn.source_idx, conn.target_idx, edge_data);
+                GraphWrite::add_edge(
+                    &mut graph.graph,
+                    conn.source_idx,
+                    conn.target_idx,
+                    edge_data,
+                );
                 stats.connections_created += 1;
             }
         }

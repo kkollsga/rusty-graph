@@ -247,6 +247,61 @@ pub trait GraphRead {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// GraphWrite — unified mutation interface over storage backends
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Write-side interface shared by every storage backend.
+///
+/// Phase 2 of the 0.8.0 refactor (see `todo.md`). Pulls together the
+/// mutation methods that were inherent on
+/// [`crate::graph::schema::GraphBackend`] so write-path files can
+/// dispatch through the trait instead of matching on the backend
+/// variant.
+///
+/// Transaction bookkeeping (OCC `version`, `read_only`,
+/// `schema_locked`) lives on [`crate::graph::schema::DirGraph`], not
+/// on this trait — no backend has its own OCC state, and validation
+/// against the schema metadata sits architecturally above storage.
+/// Documented decision: keep transactions on DirGraph.
+///
+/// Dispatch guidance matches [`GraphRead`]: `&mut impl GraphWrite`
+/// in hot mutation loops, `&mut dyn GraphWrite` at wider API
+/// boundaries.
+#[allow(dead_code)] // phase-2 consumers migrate file-by-file after this PR
+pub trait GraphWrite: GraphRead {
+    /// Mutable borrow of the full NodeData. Escape hatch for property
+    /// mutation — prefer higher-level helpers (`NodeData::set_property`,
+    /// `NodeData::remove_property`) where available.
+    fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData>;
+
+    /// Mutable borrow of the full EdgeData.
+    fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData>;
+
+    /// Insert a new node, returning its assigned index.
+    fn add_node(&mut self, data: NodeData) -> NodeIndex;
+
+    /// Remove a node, returning its NodeData if present. On the disk
+    /// backend this writes a tombstone; on memory/mapped the
+    /// StableDiGraph entry is removed in-place.
+    fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData>;
+
+    /// Insert a directed edge from `a` to `b`.
+    fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex;
+
+    /// Remove an edge, returning its EdgeData if present.
+    fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData>;
+
+    /// Disk-only: after a columnar-properties row is materialised for a
+    /// newly-added node, persist the per-type `row_id` back to the
+    /// disk slot so subsequent reads find the correct columnar row.
+    /// No-op on memory/mapped (their slot storage carries no separate
+    /// row_id field). Invariant: callers must invoke this only after
+    /// they have already assigned `PropertyStorage::Columnar { row_id }`
+    /// to the node's `NodeData`; otherwise disk reads will drift.
+    fn update_row_id(&mut self, _node_idx: NodeIndex, _row_id: u32) {}
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Newtype backends
 // ──────────────────────────────────────────────────────────────────────────
 

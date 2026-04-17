@@ -41,24 +41,52 @@ for the full plan.
 └──────────────────┘   └──────────────────┘   └────────────────────┘
 ```
 
-### Trait layer (Phase 0.3 onwards)
+### Trait layer (Phase 0.3 → Phase 2)
+
+`GraphRead` (Phase 0.3, expanded in Phase 1) covers reads — counts,
+per-node property access, iteration, neighbour lookup, backend
+identity, and the disk-only helpers the hot Cypher path needs (peer
+histograms, edge-count caches, connection-type source-node indexes).
+
+`GraphWrite: GraphRead` (Phase 2) covers mutations:
 
 ```rust
-pub trait GraphRead {
-    fn node_count(&self) -> usize;
-    fn edge_count(&self) -> usize;
-    fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey>;
-    fn get_node_property(&self, idx: NodeIndex, key: InternedKey) -> Option<Value>;
-    fn get_node_id(&self, idx: NodeIndex) -> Option<Value>;
-    fn get_node_title(&self, idx: NodeIndex) -> Option<Value>;
-    fn str_prop_eq(&self, idx: NodeIndex, key: InternedKey, target: &str) -> Option<bool>;
+pub trait GraphWrite: GraphRead {
+    fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData>;
+    fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData>;
+    fn add_node(&mut self, data: NodeData) -> NodeIndex;
+    fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData>;
+    fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex;
+    fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData>;
+
+    /// Disk-only: persist a new columnar row_id back to the slot.
+    /// No-op on memory/mapped.
+    fn update_row_id(&mut self, _node_idx: NodeIndex, _row_id: u32) {}
 }
 ```
 
 Implemented today for `GraphBackend` in `schema.rs`. Per-backend impls
-(`impl GraphRead for MemoryGraph` etc.) arrive in Phase 1 when the
-newtype for `MappedGraph` stops being a type alias and the backends'
-property handling genuinely diverges.
+arrive when the `MappedGraph` type alias is promoted to a distinct
+struct (still deferred at end of Phase 2 — no write path needed
+backend-specific divergence).
+
+### Transactions stay on DirGraph (Phase 2 decision)
+
+Transactions (OCC `version` counter, `read_only` / `schema_locked`
+flags) live on the concrete `DirGraph`, not on any trait. Rationale:
+
+- No backend has per-backend OCC state; `version` is a `DirGraph`
+  field incremented by mutations.
+- `schema_locked` and validation helpers in `schema_validation.rs`
+  operate on DirGraph metadata maps (`node_type_metadata`,
+  `type_schemas`, `schema_definition`) — none of which belong to
+  `GraphBackend`.
+- Adding a `GraphTransaction` trait would only duplicate what
+  `DirGraph::begin` / `commit` already provide; PyO3 txn boundaries
+  in `src/graph/mod.rs` take `&mut self` on the full DirGraph.
+
+This keeps the `storage/` trait layer focused on per-backend data
+operations, not cross-cutting bookkeeping.
 
 ## Target structure
 
@@ -104,4 +132,5 @@ src/graph/
 - Does `Value::String` become `Cow<'static, str>` / `Arc<str>`?
   → Deferred; touches everything, not required for the refactor
 - Does `Transaction` become a trait?
-  → Decided in Phase 2 when mutation interactions surface
+  → Decided in Phase 2: **no** — transactions stay on `DirGraph` (see
+    "Transactions stay on DirGraph" above)

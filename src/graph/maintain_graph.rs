@@ -7,6 +7,7 @@ use crate::graph::lookups::{CombinedTypeLookup, TypeLookup};
 use crate::graph::reporting::{ConnectionOperationReport, NodeOperationReport};
 use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, TypeSchema};
 use crate::graph::spatial;
+use crate::graph::storage::GraphWrite;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -1130,7 +1131,7 @@ pub fn add_properties(
             .into_iter()
             .map(|(k, v)| (graph.interner.get_or_intern(&k), v))
             .collect();
-        if let Some(node) = graph.graph.node_weight_mut(node_idx) {
+        if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
             let count = interned_props.len();
             for (ik, v) in interned_props {
                 node.properties.insert(ik, v);
@@ -1459,7 +1460,7 @@ fn add_properties_aggregate(
             .into_iter()
             .map(|(k, v)| (graph.interner.get_or_intern(&k), v))
             .collect();
-        if let Some(node) = graph.graph.node_weight_mut(node_idx) {
+        if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
             let count = interned_props.len();
             for (ik, v) in interned_props {
                 node.properties.insert(ik, v);

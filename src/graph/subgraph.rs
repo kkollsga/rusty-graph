@@ -2,6 +2,7 @@
 //! Subgraph extraction and selection expansion operations
 
 use crate::graph::schema::{CurrentSelection, DirGraph, EdgeData};
+use crate::graph::storage::GraphWrite;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 
@@ -88,7 +89,7 @@ pub fn extract_subgraph(
     for &old_idx in &nodes {
         if let Some(node_data) = source.graph.node_weight(old_idx) {
             // Add to new graph (single clone instead of double)
-            let new_idx = new_graph.graph.add_node(node_data.clone());
+            let new_idx = GraphWrite::add_node(&mut new_graph.graph, node_data.clone());
             index_map.insert(old_idx, new_idx);
 
             // Update type indices
@@ -116,7 +117,7 @@ pub fn extract_subgraph(
                         edge.weight().connection_type,
                         edge.weight().properties.clone(),
                     );
-                    new_graph.graph.add_edge(new_source, new_target, edge_data);
+                    GraphWrite::add_edge(&mut new_graph.graph, new_source, new_target, edge_data);
                 }
             }
         }

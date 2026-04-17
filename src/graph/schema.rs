@@ -4577,7 +4577,7 @@ pub type Graph = GraphBackend;
 // `GraphBackend` methods; Phase 1 migrates more consumers + adds
 // per-backend impls when MappedGraph promotes from a type alias.
 
-use crate::graph::storage::GraphRead;
+use crate::graph::storage::{GraphRead, GraphWrite};
 
 impl GraphRead for GraphBackend {
     #[inline]
@@ -4775,6 +4775,45 @@ impl GraphRead for GraphBackend {
     #[inline]
     fn reset_arenas(&self) {
         GraphBackend::reset_arenas(self);
+    }
+}
+
+impl GraphWrite for GraphBackend {
+    #[inline]
+    fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
+        GraphBackend::node_weight_mut(self, idx)
+    }
+
+    #[inline]
+    fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
+        GraphBackend::edge_weight_mut(self, idx)
+    }
+
+    #[inline]
+    fn add_node(&mut self, data: NodeData) -> NodeIndex {
+        GraphBackend::add_node(self, data)
+    }
+
+    #[inline]
+    fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData> {
+        GraphBackend::remove_node(self, idx)
+    }
+
+    #[inline]
+    fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
+        GraphBackend::add_edge(self, a, b, data)
+    }
+
+    #[inline]
+    fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData> {
+        GraphBackend::remove_edge(self, idx)
+    }
+
+    #[inline]
+    fn update_row_id(&mut self, node_idx: NodeIndex, row_id: u32) {
+        if let GraphBackend::Disk(dg) = self {
+            dg.update_row_id(node_idx, row_id);
+        }
     }
 }
 

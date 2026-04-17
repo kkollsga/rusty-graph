@@ -47,10 +47,11 @@ Before starting any performance-related code changes:
 Live architecture doc: `ARCHITECTURE.md` at repo root. Full refactor
 plan: `todo.md` at repo root.
 
-- **Add new storage ops on `GraphRead` first**, not as inherent `GraphBackend` methods. The trait lives in `src/graph/storage/mod.rs`.
+- **Reads go on `GraphRead`, mutations on `GraphWrite: GraphRead`.** Add new storage ops to the trait first, not as inherent `GraphBackend` methods. Both traits live in `src/graph/storage/mod.rs`.
+- **Transactions stay on `DirGraph`.** OCC `version`, `read_only`, `schema_locked`, and validation helpers are not trait surface — see ARCHITECTURE.md.
 - **No shims / no `#[deprecated]`.** Obsoleted code gets deleted in the same PR as its replacement. Clean break for 0.8.0.
-- **`&impl GraphRead` in hot loops, `&dyn GraphRead` at boundaries.** Monomorphise tight scans; tolerate vtable cost only where API shape demands it.
-- **Parity oracle**: `tests/test_storage_parity.py`. Gated behind `pytest -m parity`. Must stay green after any backend-touching change.
+- **`&impl GraphRead` / `&mut impl GraphWrite` in hot loops, `&dyn …` at boundaries.** Monomorphise tight scans; tolerate vtable cost only where API shape demands it.
+- **Parity oracles**: `tests/test_storage_parity.py`, `tests/test_phase1_parity.py`, `tests/test_phase2_parity.py`. Gated behind `pytest -m parity`. Must stay green after any backend-touching change.
 
 ## When Changing a `#[pymethods]` Function
 

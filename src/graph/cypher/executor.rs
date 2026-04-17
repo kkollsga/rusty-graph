@@ -14,7 +14,7 @@ use crate::graph::pattern_matching::{
 use crate::graph::schema::{DirGraph, EdgeData, InternedKey, NodeData, TypeSchema};
 use crate::graph::schema_validation;
 use crate::graph::spatial;
-use crate::graph::storage::GraphRead;
+use crate::graph::storage::{GraphRead, GraphWrite};
 use crate::graph::timeseries;
 use crate::graph::value_operations;
 use crate::graph::vector_search as vs;
@@ -8611,9 +8611,12 @@ fn execute_create(
                         edge_props,
                         &mut graph.interner,
                     );
-                    let edge_index = graph
-                        .graph
-                        .add_edge(actual_source, actual_target, edge_data);
+                    let edge_index = GraphWrite::add_edge(
+                        &mut graph.graph,
+                        actual_source,
+                        actual_target,
+                        edge_data,
+                    );
 
                     // Bind edge variable if named
                     if let Some(ref var) = edge_pat.variable {
@@ -8715,7 +8718,7 @@ fn create_node(
         &schema,
     );
 
-    let node_idx = graph.graph.add_node(node_data);
+    let node_idx = GraphWrite::add_node(&mut graph.graph, node_data);
 
     // Update type_indices
     graph
@@ -8858,7 +8861,7 @@ fn execute_set(
                     let value_for_index = value.clone();
 
                     // Apply the mutation (split borrows: graph.graph + graph.interner)
-                    if let Some(node) = graph.graph.node_weight_mut(*node_idx) {
+                    if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, *node_idx) {
                         match property.as_str() {
                             "title" => {
                                 node.title = value;
@@ -8987,7 +8990,7 @@ fn execute_delete(
     let mut deleted_edges: HashSet<petgraph::graph::EdgeIndex> = HashSet::new();
     for (_var, edge_index) in &edge_vars_to_delete {
         if deleted_edges.insert(*edge_index) {
-            graph.graph.remove_edge(*edge_index);
+            GraphWrite::remove_edge(&mut graph.graph, *edge_index);
             stats.relationships_deleted += 1;
         }
     }
@@ -9008,7 +9011,7 @@ fn execute_delete(
                 .collect();
             for edge_idx in incident {
                 if deleted_edges.insert(edge_idx) {
-                    graph.graph.remove_edge(edge_idx);
+                    GraphWrite::remove_edge(&mut graph.graph, edge_idx);
                     stats.relationships_deleted += 1;
                 }
             }
@@ -9030,7 +9033,7 @@ fn execute_delete(
 
     // Phase 6: delete nodes
     for &node_idx in &nodes_to_delete {
-        graph.graph.remove_node(node_idx);
+        GraphWrite::remove_node(&mut graph.graph, node_idx);
         graph.timeseries_store.remove(&node_idx.index());
         stats.nodes_deleted += 1;
     }
