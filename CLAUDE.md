@@ -42,6 +42,16 @@ Before starting any performance-related code changes:
 - Private helpers go in non-`#[pymethods]` `impl KnowledgeGraph` block.
 - Value conversion: `py_out::value_to_py()` and `py_out::nodeinfo_to_pydict()`.
 
+## Storage-backend work (0.8.0 refactor)
+
+Live architecture doc: `ARCHITECTURE.md` at repo root. Full refactor
+plan: `todo.md` at repo root.
+
+- **Add new storage ops on `GraphRead` first**, not as inherent `GraphBackend` methods. The trait lives in `src/graph/storage/mod.rs`.
+- **No shims / no `#[deprecated]`.** Obsoleted code gets deleted in the same PR as its replacement. Clean break for 0.8.0.
+- **`&impl GraphRead` in hot loops, `&dyn GraphRead` at boundaries.** Monomorphise tight scans; tolerate vtable cost only where API shape demands it.
+- **Parity oracle**: `tests/test_storage_parity.py`. Gated behind `pytest -m parity`. Must stay green after any backend-touching change.
+
 ## When Changing a `#[pymethods]` Function
 
 1. `src/graph/mod.rs` — implementation
