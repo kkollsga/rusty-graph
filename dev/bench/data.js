@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776406439982,
+  "lastUpdate": 1776427112359,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -7000,6 +7000,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.000017600329166331525",
             "extra": "mean: 1.1126428812579205 msec\nrounds: 859"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "c5a05aac1036c349552cdffe94a366d7e6eb4a94",
+          "message": "docs: Phase 1 report-out in todo.md\n\nCloses Phase 1. Records what shipped (7 commits on main), benchmark\ndeltas vs Phase 0, surprises found during investigation (grep gate\nalmost already met; connection_type_metadata lives on DirGraph;\nedge_references/edges/edge_weight still inherent-only), design\ndecisions (enum-wrapped iterators not GATs, node_data escape hatch,\ndisk-only trait helpers keep Option/fallback contract, MappedGraph\nstays aliased), debt carried forward (inherent methods still on\nGraphBackend for non-Phase-1 callers; trait missing edge_references\nand friends; consumers not reshaped to &impl GraphRead yet), and\nPhase 2 prerequisites (GraphWrite trait; mutation surface; OCC\nsemantics decision).\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-17T13:53:00+02:00",
+          "tree_id": "788b0f664463b9795a9ff01aa3379ffe5f6abd4a",
+          "url": "https://github.com/kkollsga/kglite/commit/c5a05aac1036c349552cdffe94a366d7e6eb4a94"
+        },
+        "date": 1776427112042,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1126.6652303941305,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000998504881442839",
+            "extra": "mean: 887.5750959760953 usec\nrounds: 323"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 746.801336221305,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0003070192313239983",
+            "extra": "mean: 1.3390442029199354 msec\nrounds: 685"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 12532.172789247332,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000037355486115081",
+            "extra": "mean: 79.79462275352644 usec\nrounds: 5731"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1640.4220504932816,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00014528297975490706",
+            "extra": "mean: 609.5992185055644 usec\nrounds: 897"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 667251.5886848484,
+            "unit": "iter/sec",
+            "range": "stddev: 4.417407837387475e-7",
+            "extra": "mean: 1.4986850791483286 usec\nrounds: 70767"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 133491.83737453198,
+            "unit": "iter/sec",
+            "range": "stddev: 9.870967323322663e-7",
+            "extra": "mean: 7.49109473408734 usec\nrounds: 14926"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2304.890461704045,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000011242004776263684",
+            "extra": "mean: 433.86009730834803 usec\nrounds: 3566"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1638.614099533585,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000195454968775798",
+            "extra": "mean: 610.2718146295946 usec\nrounds: 1203"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 13709.517752571568,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000032943126072650837",
+            "extra": "mean: 72.94202597406641 usec\nrounds: 9856"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 825.668443880499,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000019628750505958943",
+            "extra": "mean: 1.2111399041728816 msec\nrounds: 647"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 845.0652910765692,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00001988227763278138",
+            "extra": "mean: 1.1833405188444692 msec\nrounds: 796"
           }
         ]
       }
