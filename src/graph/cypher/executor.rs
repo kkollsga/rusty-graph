@@ -4,8 +4,6 @@
 use super::ast::*;
 use super::result::*;
 use crate::datatypes::values::Value;
-use crate::graph::clustering;
-use crate::graph::graph_algorithms;
 use crate::graph::query::pattern_matching::{
     EdgeDirection, MatchBinding, Pattern, PatternElement, PatternExecutor, PatternMatch,
     PropertyMatcher,
@@ -15,7 +13,7 @@ use crate::graph::schema_validation;
 use crate::graph::spatial;
 use crate::graph::storage::{GraphRead, GraphWrite};
 use crate::graph::timeseries;
-use crate::graph::vector_search as vs;
+use crate::graph::algorithms::vector_search as vs;
 use chrono::Datelike;
 use geo::BoundingRect;
 use petgraph::graph::NodeIndex;
@@ -1013,7 +1011,7 @@ impl<'a> CypherExecutor<'a> {
                 let path_result = match edge_direction {
                     EdgeDirection::Both => {
                         // Undirected BFS — same behavior as fluent API shortest_path()
-                        graph_algorithms::shortest_path(
+                        crate::graph::algorithms::graph_algorithms::shortest_path(
                             self.graph,
                             source_idx,
                             target_idx,
@@ -1024,7 +1022,7 @@ impl<'a> CypherExecutor<'a> {
                     }
                     EdgeDirection::Outgoing => {
                         // Directed BFS — only follow outgoing edges
-                        graph_algorithms::shortest_path_directed(
+                        crate::graph::algorithms::graph_algorithms::shortest_path_directed(
                             self.graph,
                             source_idx,
                             target_idx,
@@ -1035,7 +1033,7 @@ impl<'a> CypherExecutor<'a> {
                     }
                     EdgeDirection::Incoming => {
                         // Reverse source/target and follow outgoing, then reverse path
-                        graph_algorithms::shortest_path_directed(
+                        crate::graph::algorithms::graph_algorithms::shortest_path_directed(
                             self.graph,
                             target_idx,
                             source_idx,
@@ -1067,7 +1065,7 @@ impl<'a> CypherExecutor<'a> {
                     // Format: [(node, conn_type_leading_to_node), ...] — excludes source.
                     // Source is stored separately in PathBinding.source.
                     let connections =
-                        graph_algorithms::get_path_connections(self.graph, &path_result.path);
+                        crate::graph::algorithms::graph_algorithms::get_path_connections(self.graph, &path_result.path);
                     let path_nodes: Vec<(NodeIndex, String)> = path_result
                         .path
                         .iter()
@@ -7808,7 +7806,7 @@ impl<'a> CypherExecutor<'a> {
                 let max_iter = call_param_usize(&params, "max_iterations", 100);
                 let tolerance = call_param_f64(&params, "tolerance", 1e-6);
                 let conn = call_param_string_list(&params, "connection_types");
-                let results = graph_algorithms::pagerank(
+                let results = crate::graph::algorithms::graph_algorithms::pagerank(
                     self.graph,
                     damping,
                     max_iter,
@@ -7822,7 +7820,7 @@ impl<'a> CypherExecutor<'a> {
                 let normalized = call_param_bool(&params, "normalized", true);
                 let sample_size = call_param_opt_usize(&params, "sample_size");
                 let conn = call_param_string_list(&params, "connection_types");
-                let results = graph_algorithms::betweenness_centrality(
+                let results = crate::graph::algorithms::graph_algorithms::betweenness_centrality(
                     self.graph,
                     normalized,
                     sample_size,
@@ -7834,7 +7832,7 @@ impl<'a> CypherExecutor<'a> {
             "degree" | "degree_centrality" => {
                 let normalized = call_param_bool(&params, "normalized", true);
                 let conn = call_param_string_list(&params, "connection_types");
-                let results = graph_algorithms::degree_centrality(
+                let results = crate::graph::algorithms::graph_algorithms::degree_centrality(
                     self.graph,
                     normalized,
                     conn.as_deref(),
@@ -7846,7 +7844,7 @@ impl<'a> CypherExecutor<'a> {
                 let normalized = call_param_bool(&params, "normalized", true);
                 let sample_size = call_param_opt_usize(&params, "sample_size");
                 let conn = call_param_string_list(&params, "connection_types");
-                let results = graph_algorithms::closeness_centrality(
+                let results = crate::graph::algorithms::graph_algorithms::closeness_centrality(
                     self.graph,
                     normalized,
                     sample_size,
@@ -7859,7 +7857,7 @@ impl<'a> CypherExecutor<'a> {
                 let resolution = call_param_f64(&params, "resolution", 1.0);
                 let weight_prop = call_param_opt_string(&params, "weight_property");
                 let conn = call_param_string_list(&params, "connection_types");
-                let result = graph_algorithms::louvain_communities(
+                let result = crate::graph::algorithms::graph_algorithms::louvain_communities(
                     self.graph,
                     weight_prop.as_deref(),
                     resolution,
@@ -7871,7 +7869,7 @@ impl<'a> CypherExecutor<'a> {
             "label_propagation" => {
                 let max_iter = call_param_usize(&params, "max_iterations", 100);
                 let conn = call_param_string_list(&params, "connection_types");
-                let result = graph_algorithms::label_propagation(
+                let result = crate::graph::algorithms::graph_algorithms::label_propagation(
                     self.graph,
                     max_iter,
                     conn.as_deref(),
@@ -7880,7 +7878,7 @@ impl<'a> CypherExecutor<'a> {
                 self.community_to_rows(&result.assignments, &clause.yield_items)
             }
             "connected_components" | "weakly_connected_components" => {
-                let components = graph_algorithms::weakly_connected_components(self.graph);
+                let components = crate::graph::algorithms::graph_algorithms::weakly_connected_components(self.graph);
                 let mut rows = Vec::new();
                 for (comp_id, nodes) in components.iter().enumerate() {
                     for &node_idx in nodes {
@@ -8099,15 +8097,15 @@ impl<'a> CypherExecutor<'a> {
             }
 
             if normalize {
-                clustering::normalize_features(&mut features);
+                crate::graph::algorithms::clustering::normalize_features(&mut features);
             }
 
             let cluster_assignments = match method.as_str() {
                 "dbscan" => {
-                    let dm = clustering::euclidean_distance_matrix(&features);
-                    clustering::dbscan(&dm, eps, min_points)
+                    let dm = crate::graph::algorithms::clustering::euclidean_distance_matrix(&features);
+                    crate::graph::algorithms::clustering::dbscan(&dm, eps, min_points)
                 }
-                "kmeans" => clustering::kmeans(&features, k, max_iterations),
+                "kmeans" => crate::graph::algorithms::clustering::kmeans(&features, k, max_iterations),
                 _ => unreachable!(),
             };
 
@@ -8156,14 +8154,14 @@ impl<'a> CypherExecutor<'a> {
 
             let cluster_assignments = match method.as_str() {
                 "dbscan" => {
-                    let dm = clustering::haversine_distance_matrix(&points);
-                    clustering::dbscan(&dm, eps, min_points)
+                    let dm = crate::graph::algorithms::clustering::haversine_distance_matrix(&points);
+                    crate::graph::algorithms::clustering::dbscan(&dm, eps, min_points)
                 }
                 "kmeans" => {
                     // For spatial k-means, convert to feature vectors [lat, lon]
                     let features: Vec<Vec<f64>> =
                         points.iter().map(|(lat, lon)| vec![*lat, *lon]).collect();
-                    clustering::kmeans(&features, k, max_iterations)
+                    crate::graph::algorithms::clustering::kmeans(&features, k, max_iterations)
                 }
                 _ => unreachable!(),
             };
@@ -8200,7 +8198,7 @@ impl<'a> CypherExecutor<'a> {
     /// Convert centrality results to ResultRows with node bindings + score.
     fn centrality_to_rows(
         &self,
-        results: &[graph_algorithms::CentralityResult],
+        results: &[crate::graph::algorithms::graph_algorithms::CentralityResult],
         yield_items: &[YieldItem],
     ) -> Vec<ResultRow> {
         results
@@ -8228,7 +8226,7 @@ impl<'a> CypherExecutor<'a> {
     /// Convert community assignments to ResultRows with node bindings + community id.
     fn community_to_rows(
         &self,
-        assignments: &[graph_algorithms::CommunityAssignment],
+        assignments: &[crate::graph::algorithms::graph_algorithms::CommunityAssignment],
         yield_items: &[YieldItem],
     ) -> Vec<ResultRow> {
         assignments

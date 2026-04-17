@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::schema;
 use super::storage::GraphRead;
-use super::{io_operations, vector_search, KnowledgeGraph};
+use super::{io_operations, KnowledgeGraph};
 
 #[pymethods]
 impl KnowledgeGraph {
@@ -182,10 +182,10 @@ impl KnowledgeGraph {
             }
         };
         let metric = match effective_metric.as_str() {
-            "cosine" => vector_search::DistanceMetric::Cosine,
-            "dot_product" => vector_search::DistanceMetric::DotProduct,
-            "euclidean" => vector_search::DistanceMetric::Euclidean,
-            "poincare" => vector_search::DistanceMetric::Poincare,
+            "cosine" => crate::graph::algorithms::vector_search::DistanceMetric::Cosine,
+            "dot_product" => crate::graph::algorithms::vector_search::DistanceMetric::DotProduct,
+            "euclidean" => crate::graph::algorithms::vector_search::DistanceMetric::Euclidean,
+            "poincare" => crate::graph::algorithms::vector_search::DistanceMetric::Poincare,
             other => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "Unknown metric '{}'. Use 'cosine', 'dot_product', 'euclidean', or 'poincare'.",
@@ -198,7 +198,7 @@ impl KnowledgeGraph {
         let selection = self.selection.clone();
         let results = py
             .detach(|| {
-                vector_search::vector_search(
+                crate::graph::algorithms::vector_search::vector_search(
                     &inner,
                     &selection,
                     &embedding_property,

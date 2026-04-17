@@ -8,7 +8,6 @@ use crate::graph::schema::{
 use crate::graph::spatial;
 use crate::graph::storage::GraphRead;
 use crate::graph::temporal;
-use crate::graph::vector_search;
 use chrono::NaiveDate;
 use geo::geometry::Geometry;
 use petgraph::graph::NodeIndex;
@@ -610,10 +609,10 @@ pub fn make_comparison_traversal(
                 .ok_or("method 'text_score' requires 'property'")?;
             let thresh = config.threshold.unwrap_or(0.0);
             let dist_metric = match config.metric.as_deref() {
-                Some("dot_product") => vector_search::DistanceMetric::DotProduct,
-                Some("euclidean") => vector_search::DistanceMetric::Euclidean,
-                Some("poincare") => vector_search::DistanceMetric::Poincare,
-                _ => vector_search::DistanceMetric::Cosine,
+                Some("dot_product") => crate::graph::algorithms::vector_search::DistanceMetric::DotProduct,
+                Some("euclidean") => crate::graph::algorithms::vector_search::DistanceMetric::Euclidean,
+                Some("poincare") => crate::graph::algorithms::vector_search::DistanceMetric::Poincare,
+                _ => crate::graph::algorithms::vector_search::DistanceMetric::Cosine,
             };
             semantic_score_traversal(
                 graph,
@@ -1251,7 +1250,7 @@ fn semantic_score_traversal(
     target_type: &str,
     embedding_property: &str,
     threshold: f64,
-    metric: vector_search::DistanceMetric,
+    metric: crate::graph::algorithms::vector_search::DistanceMetric,
     filter_target: Option<&HashMap<String, FilterCondition>>,
     sort_target: Option<&Vec<(String, bool)>>,
     max_nodes: Option<usize>,
@@ -1281,10 +1280,10 @@ fn semantic_score_traversal(
         })?;
 
     let similarity_fn = match metric {
-        vector_search::DistanceMetric::Cosine => vector_search::cosine_similarity,
-        vector_search::DistanceMetric::DotProduct => vector_search::dot_product,
-        vector_search::DistanceMetric::Euclidean => vector_search::neg_euclidean_distance,
-        vector_search::DistanceMetric::Poincare => vector_search::neg_poincare_distance,
+        crate::graph::algorithms::vector_search::DistanceMetric::Cosine => crate::graph::algorithms::vector_search::cosine_similarity,
+        crate::graph::algorithms::vector_search::DistanceMetric::DotProduct => crate::graph::algorithms::vector_search::dot_product,
+        crate::graph::algorithms::vector_search::DistanceMetric::Euclidean => crate::graph::algorithms::vector_search::neg_euclidean_distance,
+        crate::graph::algorithms::vector_search::DistanceMetric::Poincare => crate::graph::algorithms::vector_search::neg_poincare_distance,
     };
     let threshold_f32 = threshold as f32;
 
@@ -1341,7 +1340,7 @@ fn cluster_traversal(
     eps: Option<f64>,
     min_samples: Option<usize>,
 ) -> Result<(), String> {
-    use crate::graph::clustering;
+    
 
     let level_idx = selection.get_level_count().saturating_sub(1);
     let level = selection
@@ -1408,7 +1407,7 @@ fn cluster_traversal(
     let assignments = match algorithm {
         "kmeans" => {
             let k_val = k.ok_or("method='cluster' with algorithm='kmeans' requires k parameter")?;
-            clustering::kmeans(&feature_matrix, k_val, 100)
+            crate::graph::algorithms::clustering::kmeans(&feature_matrix, k_val, 100)
         }
         "dbscan" => {
             let eps_val =
@@ -1438,13 +1437,13 @@ fn cluster_traversal(
                     .iter()
                     .map(|row| (row[lat_idx], row[lon_idx]))
                     .collect();
-                clustering::haversine_distance_matrix(&coords)
+                crate::graph::algorithms::clustering::haversine_distance_matrix(&coords)
             } else {
                 let mut feat_clone = feature_matrix.clone();
-                clustering::normalize_features(&mut feat_clone);
-                clustering::euclidean_distance_matrix(&feat_clone)
+                crate::graph::algorithms::clustering::normalize_features(&mut feat_clone);
+                crate::graph::algorithms::clustering::euclidean_distance_matrix(&feat_clone)
             };
-            clustering::dbscan(&distances, eps_val, min_pts)
+            crate::graph::algorithms::clustering::dbscan(&distances, eps_val, min_pts)
         }
         _ => {
             return Err(format!(

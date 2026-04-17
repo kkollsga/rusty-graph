@@ -11,14 +11,13 @@ use pyo3::{Bound, IntoPyObjectExt};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub mod algorithms;
 pub mod batch_operations;
 pub mod bug_report;
-pub mod clustering;
 pub mod cypher;
 pub mod debugging;
 pub mod equation_parser;
 pub mod export;
-pub mod graph_algorithms;
 pub mod introspection;
 pub mod io_operations;
 pub mod maintain_graph;
@@ -33,7 +32,6 @@ pub mod storage;
 pub mod subgraph;
 pub mod temporal;
 pub mod timeseries;
-pub mod vector_search;
 
 mod pymethods_algorithms;
 mod pymethods_export;
@@ -876,7 +874,7 @@ pub(super) fn get_graph_mut(arc: &mut Arc<DirGraph>) -> &mut DirGraph {
 pub(super) fn centrality_results_to_py_dict(
     py: Python<'_>,
     graph: &DirGraph,
-    results: Vec<graph_algorithms::CentralityResult>,
+    results: Vec<crate::graph::algorithms::graph_algorithms::CentralityResult>,
     top_k: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let limit = top_k.unwrap_or(results.len());
@@ -897,7 +895,7 @@ pub(super) fn centrality_results_to_py_dict(
 pub(super) fn centrality_results_to_dataframe(
     py: Python<'_>,
     graph: &DirGraph,
-    results: Vec<graph_algorithms::CentralityResult>,
+    results: Vec<crate::graph::algorithms::graph_algorithms::CentralityResult>,
     top_k: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let limit = top_k.unwrap_or(results.len());
@@ -937,7 +935,7 @@ pub(super) fn centrality_results_to_dataframe(
 pub(super) fn community_results_to_py(
     py: Python<'_>,
     graph: &DirGraph,
-    result: graph_algorithms::CommunityResult,
+    result: crate::graph::algorithms::graph_algorithms::CommunityResult,
 ) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
 

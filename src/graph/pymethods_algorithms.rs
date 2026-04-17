@@ -10,7 +10,7 @@ use super::reporting::OperationReports;
 use super::schema::{CowSelection, PlanStep};
 use super::{
     centrality_results_to_dataframe, centrality_results_to_py_dict, community_results_to_py,
-    cypher, graph_algorithms, subgraph, KnowledgeGraph, TemporalContext,
+    cypher, subgraph, KnowledgeGraph, TemporalContext,
 };
 use crate::graph::storage::lookups;
 
@@ -78,7 +78,7 @@ impl KnowledgeGraph {
         // Find shortest path
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
-        let result = graph_algorithms::shortest_path(
+        let result = crate::graph::algorithms::graph_algorithms::shortest_path(
             &self.inner,
             source_idx,
             target_idx,
@@ -94,7 +94,7 @@ impl KnowledgeGraph {
                 // Build path info list
                 let path_list = PyList::empty(py);
                 for &node_idx in &path_result.path {
-                    if let Some(info) = graph_algorithms::get_node_info(&self.inner, node_idx) {
+                    if let Some(info) = crate::graph::algorithms::graph_algorithms::get_node_info(&self.inner, node_idx) {
                         let node_dict = PyDict::new(py);
                         node_dict.set_item("type", &info.node_type)?;
                         node_dict.set_item("title", &info.title)?;
@@ -106,7 +106,7 @@ impl KnowledgeGraph {
 
                 // Build connections list
                 let connections =
-                    graph_algorithms::get_path_connections(&self.inner, &path_result.path);
+                    crate::graph::algorithms::graph_algorithms::get_path_connections(&self.inner, &path_result.path);
                 let conn_list = PyList::empty(py);
                 for conn in connections {
                     match conn {
@@ -167,7 +167,7 @@ impl KnowledgeGraph {
             })?;
 
         // Find shortest path cost only (no path reconstruction — faster)
-        Ok(graph_algorithms::shortest_path_cost(
+        Ok(crate::graph::algorithms::graph_algorithms::shortest_path_cost(
             &self.inner,
             source_idx,
             target_idx,
@@ -220,7 +220,7 @@ impl KnowledgeGraph {
             index_pairs.push((src_idx, tgt_idx));
         }
 
-        let results = graph_algorithms::shortest_path_cost_batch(&self.inner, &index_pairs);
+        let results = crate::graph::algorithms::graph_algorithms::shortest_path_cost_batch(&self.inner, &index_pairs);
 
         let result_list = PyList::empty(py);
         for result in results {
@@ -286,7 +286,7 @@ impl KnowledgeGraph {
         // Find shortest path
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
-        match graph_algorithms::shortest_path(
+        match crate::graph::algorithms::graph_algorithms::shortest_path(
             &self.inner,
             source_idx,
             target_idx,
@@ -366,7 +366,7 @@ impl KnowledgeGraph {
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         // Find shortest path and return raw indices
-        match graph_algorithms::shortest_path(
+        match crate::graph::algorithms::graph_algorithms::shortest_path(
             &self.inner,
             source_idx,
             target_idx,
@@ -444,7 +444,7 @@ impl KnowledgeGraph {
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         // Find all paths
-        let paths = graph_algorithms::all_paths(
+        let paths = crate::graph::algorithms::graph_algorithms::all_paths(
             &self.inner,
             source_idx,
             target_idx,
@@ -463,7 +463,7 @@ impl KnowledgeGraph {
             // Build path info list
             let path_list = PyList::empty(py);
             for &node_idx in &path {
-                if let Some(info) = graph_algorithms::get_node_info(&self.inner, node_idx) {
+                if let Some(info) = crate::graph::algorithms::graph_algorithms::get_node_info(&self.inner, node_idx) {
                     let node_dict = PyDict::new(py);
                     node_dict.set_item("type", &info.node_type)?;
                     node_dict.set_item("title", &info.title)?;
@@ -474,7 +474,7 @@ impl KnowledgeGraph {
             path_dict.set_item("path", path_list)?;
 
             // Build connections list
-            let connections = graph_algorithms::get_path_connections(&self.inner, &path);
+            let connections = crate::graph::algorithms::graph_algorithms::get_path_connections(&self.inner, &path);
             let conn_list = PyList::empty(py);
             for conn in connections {
                 match conn {
@@ -510,9 +510,9 @@ impl KnowledgeGraph {
         let weak = weak.unwrap_or(true);
 
         let components = if weak {
-            graph_algorithms::weakly_connected_components(&self.inner)
+            crate::graph::algorithms::graph_algorithms::weakly_connected_components(&self.inner)
         } else {
-            graph_algorithms::connected_components(&self.inner)
+            crate::graph::algorithms::graph_algorithms::connected_components(&self.inner)
         };
 
         if titles_only.unwrap_or(false) {
@@ -608,7 +608,7 @@ impl KnowledgeGraph {
             ))
         })?;
 
-        Ok(graph_algorithms::are_connected(
+        Ok(crate::graph::algorithms::graph_algorithms::are_connected(
             &self.inner,
             source_idx,
             target_idx,
@@ -632,8 +632,8 @@ impl KnowledgeGraph {
         })?;
 
         for node_idx in level.iter_node_indices() {
-            if let Some(info) = graph_algorithms::get_node_info(&self.inner, node_idx) {
-                let degree = graph_algorithms::node_degree(&self.inner, node_idx);
+            if let Some(info) = crate::graph::algorithms::graph_algorithms::get_node_info(&self.inner, node_idx) {
+                let degree = crate::graph::algorithms::graph_algorithms::node_degree(&self.inner, node_idx);
                 result_dict.set_item(&info.title, degree)?;
             }
         }
@@ -687,7 +687,7 @@ impl KnowledgeGraph {
 
         let inner = Arc::clone(&self.inner);
         let results = py.detach(move || {
-            graph_algorithms::betweenness_centrality(
+            crate::graph::algorithms::graph_algorithms::betweenness_centrality(
                 &inner,
                 normalized,
                 sample_size,
@@ -752,7 +752,7 @@ impl KnowledgeGraph {
 
         let inner = Arc::clone(&self.inner);
         let results = py.detach(move || {
-            graph_algorithms::pagerank(
+            crate::graph::algorithms::graph_algorithms::pagerank(
                 &inner,
                 damping,
                 max_iter,
@@ -810,7 +810,7 @@ impl KnowledgeGraph {
 
         let inner = Arc::clone(&self.inner);
         let results = py.detach(move || {
-            graph_algorithms::degree_centrality(
+            crate::graph::algorithms::graph_algorithms::degree_centrality(
                 &inner,
                 normalized,
                 connection_types.as_deref(),
@@ -872,7 +872,7 @@ impl KnowledgeGraph {
 
         let inner = Arc::clone(&self.inner);
         let results = py.detach(move || {
-            graph_algorithms::closeness_centrality(
+            crate::graph::algorithms::graph_algorithms::closeness_centrality(
                 &inner,
                 normalized,
                 sample_size,
@@ -918,7 +918,7 @@ impl KnowledgeGraph {
         let res = resolution.unwrap_or(1.0);
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
-        let result = graph_algorithms::louvain_communities(
+        let result = crate::graph::algorithms::graph_algorithms::louvain_communities(
             &self.inner,
             weight_property.as_deref(),
             res,
@@ -949,7 +949,7 @@ impl KnowledgeGraph {
         let max_iter = max_iterations.unwrap_or(100);
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
-        let result = graph_algorithms::label_propagation(
+        let result = crate::graph::algorithms::graph_algorithms::label_propagation(
             &self.inner,
             max_iter,
             connection_types.as_deref(),
