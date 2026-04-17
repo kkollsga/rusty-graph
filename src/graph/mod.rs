@@ -14,7 +14,7 @@ use std::sync::Arc;
 pub mod algorithms;
 pub mod batch_operations;
 pub mod cypher;
-pub mod equation_parser;
+pub mod features;
 pub mod introspection;
 pub mod io;
 pub mod maintain_graph;
@@ -22,11 +22,8 @@ pub mod query;
 pub mod schema;
 pub mod schema_validation;
 pub mod set_operations;
-pub mod spatial;
 pub mod storage;
 pub mod subgraph;
-pub mod temporal;
-pub mod timeseries;
 
 mod pymethods_algorithms;
 mod pymethods_export;
@@ -826,7 +823,7 @@ fn parse_inline_timeseries(ts_dict: &Bound<'_, PyDict>) -> PyResult<InlineTimese
     // Parse 'resolution' key (optional)
     let resolution = if let Some(val) = ts_dict.get_item("resolution")? {
         let r: String = val.extract()?;
-        timeseries::validate_resolution(&r)
+        crate::graph::features::timeseries::validate_resolution(&r)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Some(r)
     } else {
@@ -1367,7 +1364,7 @@ impl KnowledgeGraph {
                             .call_method0("tolist")?
                             .extract()?;
                         raw.iter()
-                            .map(|s| timeseries::parse_date_query(s).map(|(d, _)| d))
+                            .map(|s| crate::graph::features::timeseries::parse_date_query(s).map(|(d, _)| d))
                             .collect::<Result<Vec<_>, _>>()
                             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
                     }
@@ -1391,7 +1388,7 @@ impl KnowledgeGraph {
                                 } else {
                                     1
                                 };
-                                timeseries::date_from_ymd(year, month, day)
+                                crate::graph::features::timeseries::date_from_ymd(year, month, day)
                             })
                             .collect::<Result<Vec<_>, _>>()
                             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
@@ -1400,7 +1397,7 @@ impl KnowledgeGraph {
 
                 // Resolve resolution
                 let resolved_resolution = if let Some(ref r) = ts_cfg.resolution {
-                    timeseries::validate_resolution(r)
+                    crate::graph::features::timeseries::validate_resolution(r)
                         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
                     r.clone()
                 } else {
@@ -1466,7 +1463,7 @@ impl KnowledgeGraph {
 
                     graph.timeseries_store.insert(
                         node_idx.index(),
-                        timeseries::NodeTimeseries { keys, channels },
+                        crate::graph::features::timeseries::NodeTimeseries { keys, channels },
                     );
                     ts_nodes_loaded += 1;
                 }
@@ -1487,7 +1484,7 @@ impl KnowledgeGraph {
 
                 graph.timeseries_configs.insert(
                     node_type.clone(),
-                    timeseries::TimeseriesConfig {
+                    crate::graph::features::timeseries::TimeseriesConfig {
                         resolution: resolved_resolution,
                         channels: merged_channels,
                         units: merged_units,
@@ -2183,15 +2180,15 @@ impl KnowledgeGraph {
         new_kg.temporal_context = match (date_str, end_str) {
             (Some("all"), _) => TemporalContext::All,
             (Some(start), Some(end)) => {
-                let (start_date, _) = timeseries::parse_date_query(start)
+                let (start_date, _) = crate::graph::features::timeseries::parse_date_query(start)
                     .map_err(pyo3::exceptions::PyValueError::new_err)?;
-                let (end_date, end_precision) = timeseries::parse_date_query(end)
+                let (end_date, end_precision) = crate::graph::features::timeseries::parse_date_query(end)
                     .map_err(pyo3::exceptions::PyValueError::new_err)?;
-                let expanded_end = timeseries::expand_end(end_date, end_precision);
+                let expanded_end = crate::graph::features::timeseries::expand_end(end_date, end_precision);
                 TemporalContext::During(start_date, expanded_end)
             }
             (Some(s), None) => {
-                let (date, _) = timeseries::parse_date_query(s)
+                let (date, _) = crate::graph::features::timeseries::parse_date_query(s)
                     .map_err(pyo3::exceptions::PyValueError::new_err)?;
                 TemporalContext::At(date)
             }
@@ -2256,7 +2253,7 @@ impl KnowledgeGraph {
                     for nodes in level.selections.values_mut() {
                         nodes.retain(|&idx| {
                             if let Some(node) = self.inner.graph.node_weight(idx) {
-                                temporal::node_passes_context(node, config, &self.temporal_context)
+                                crate::graph::features::temporal::node_passes_context(node, config, &self.temporal_context)
                             } else {
                                 false
                             }
@@ -2491,7 +2488,7 @@ impl KnowledgeGraph {
         // Resolve the reference date
         let ref_date = match date {
             Some(d) => {
-                let (parsed, _) = timeseries::parse_date_query(d)
+                let (parsed, _) = crate::graph::features::timeseries::parse_date_query(d)
                     .map_err(pyo3::exceptions::PyValueError::new_err)?;
                 parsed
             }
@@ -2522,7 +2519,7 @@ impl KnowledgeGraph {
             for (_parent, children) in level.selections.iter_mut() {
                 children.retain(|&idx| {
                     if let Some(node) = self.inner.graph.node_weight(idx) {
-                        temporal::node_is_temporally_valid(node, &config, &ref_date)
+                        crate::graph::features::temporal::node_is_temporally_valid(node, &config, &ref_date)
                     } else {
                         false
                     }
@@ -2574,9 +2571,9 @@ impl KnowledgeGraph {
             .unwrap_or_else(|| "date_to".to_string());
 
         // Parse dates
-        let (start_parsed, _) = timeseries::parse_date_query(start_date)
+        let (start_parsed, _) = crate::graph::features::timeseries::parse_date_query(start_date)
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        let (end_parsed, _) = timeseries::parse_date_query(end_date)
+        let (end_parsed, _) = crate::graph::features::timeseries::parse_date_query(end_date)
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
 
         // Use temporal helper for NULL-aware overlap check
@@ -2600,7 +2597,7 @@ impl KnowledgeGraph {
             for (_parent, children) in level.selections.iter_mut() {
                 children.retain(|&idx| {
                     if let Some(node) = self.inner.graph.node_weight(idx) {
-                        temporal::node_overlaps_range(node, &config, &start_parsed, &end_parsed)
+                        crate::graph::features::temporal::node_overlaps_range(node, &config, &start_parsed, &end_parsed)
                     } else {
                         false
                     }
@@ -4272,16 +4269,16 @@ impl KnowledgeGraph {
         let temporal_filter = if temporal == Some(false) {
             None
         } else if let Some(at_str) = at {
-            let (date, _) = timeseries::parse_date_query(at_str)
+            let (date, _) = crate::graph::features::timeseries::parse_date_query(at_str)
                 .map_err(pyo3::exceptions::PyValueError::new_err)?;
             self.inner
                 .temporal_edge_configs
                 .get(&connection_type)
                 .map(|configs| crate::graph::query::traversal_methods::TemporalEdgeFilter::At(configs.clone(), date))
         } else if let Some((start_str, end_str)) = &during {
-            let (start, _) = timeseries::parse_date_query(start_str)
+            let (start, _) = crate::graph::features::timeseries::parse_date_query(start_str)
                 .map_err(pyo3::exceptions::PyValueError::new_err)?;
-            let (end, _) = timeseries::parse_date_query(end_str)
+            let (end, _) = crate::graph::features::timeseries::parse_date_query(end_str)
                 .map_err(pyo3::exceptions::PyValueError::new_err)?;
             self.inner
                 .temporal_edge_configs

@@ -21,7 +21,7 @@ use crate::graph::schema::{
     StripPropertiesGuard, TemporalConfig,
 };
 use crate::graph::storage::{GraphRead, GraphWrite};
-use crate::graph::timeseries::{NodeTimeseries, TimeseriesConfig};
+use crate::graph::features::timeseries::{NodeTimeseries, TimeseriesConfig};
 use crate::graph::{KnowledgeGraph, TemporalContext};
 use bincode::Options;
 use flate2::read::GzDecoder;

@@ -1,5 +1,5 @@
 // src/graph/query/calculations.rs
-use crate::graph::equation_parser::{AggregateType, Evaluator, Expr, Parser};
+use crate::graph::features::equation_parser::{AggregateType, Evaluator, Expr, Parser};
 use crate::graph::maintain_graph;
 use crate::graph::query::statistics_methods::{get_parent_child_pairs, ParentChildPair};
 use crate::graph::storage::lookups::TypeLookup;

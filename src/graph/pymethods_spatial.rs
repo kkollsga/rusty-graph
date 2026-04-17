@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use super::schema::{CowSelection, DirGraph, PlanStep, SelectionOperation, SpatialConfig};
-use super::{get_graph_mut, spatial, KnowledgeGraph};
+use super::{get_graph_mut, KnowledgeGraph};
 
 /// Extract a WKT string from a Python argument.
 /// Accepts either a plain str or any object with a `.wkt` property
@@ -156,7 +156,7 @@ impl KnowledgeGraph {
             resolve_lat_lon_fields(&self.inner, &self.selection, lat_field, lon_field);
         let geom_fb = resolve_geom_fallback(&self.inner, &self.selection);
 
-        let matching_nodes = spatial::within_bounds(
+        let matching_nodes = crate::graph::features::spatial::within_bounds(
             &self.inner,
             &self.selection,
             lat_field,
@@ -231,7 +231,7 @@ impl KnowledgeGraph {
             resolve_lat_lon_fields(&self.inner, &self.selection, lat_field, lon_field);
         let geom_fb = resolve_geom_fallback(&self.inner, &self.selection);
 
-        let matching_nodes = spatial::near_point(
+        let matching_nodes = crate::graph::features::spatial::near_point(
             &self.inner,
             &self.selection,
             lat_field,
@@ -301,7 +301,7 @@ impl KnowledgeGraph {
             resolve_lat_lon_fields(&self.inner, &self.selection, lat_field, lon_field);
         let geom_fb = resolve_geom_fallback(&self.inner, &self.selection);
 
-        let matching_nodes = spatial::near_point_m(
+        let matching_nodes = crate::graph::features::spatial::near_point_m(
             &self.inner,
             &self.selection,
             lat_field,
@@ -365,7 +365,7 @@ impl KnowledgeGraph {
         let geometry_field = resolve_geometry_field(&self.inner, &self.selection, geometry_field);
 
         let matching_nodes =
-            spatial::contains_point(&self.inner, &self.selection, geometry_field, lat, lon)
+            crate::graph::features::spatial::contains_point(&self.inner, &self.selection, geometry_field, lat, lon)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Create new selection with matching nodes
@@ -423,7 +423,7 @@ impl KnowledgeGraph {
         let geometry_field = resolve_geometry_field(&self.inner, &self.selection, geometry_field);
 
         let matching_nodes =
-            spatial::intersects_geometry(&self.inner, &self.selection, geometry_field, &wkt_string)
+            crate::graph::features::spatial::intersects_geometry(&self.inner, &self.selection, geometry_field, &wkt_string)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         // Create new selection with matching nodes
@@ -477,7 +477,7 @@ impl KnowledgeGraph {
             resolve_lat_lon_fields(&self.inner, &self.selection, lat_field, lon_field);
         let geom_fb = resolve_geom_fallback(&self.inner, &self.selection);
 
-        match spatial::get_bounds(&self.inner, &self.selection, lat_field, lon_field, geom_fb) {
+        match crate::graph::features::spatial::get_bounds(&self.inner, &self.selection, lat_field, lon_field, geom_fb) {
             Some((min_lat, max_lat, min_lon, max_lon)) => {
                 if as_shapely {
                     make_shapely_box(py, min_lat, max_lat, min_lon, max_lon)
@@ -524,7 +524,7 @@ impl KnowledgeGraph {
             resolve_lat_lon_fields(&self.inner, &self.selection, lat_field, lon_field);
         let geom_fb = resolve_geom_fallback(&self.inner, &self.selection);
 
-        match spatial::calculate_centroid(
+        match crate::graph::features::spatial::calculate_centroid(
             &self.inner,
             &self.selection,
             lat_field,
@@ -573,7 +573,7 @@ impl KnowledgeGraph {
         as_shapely: bool,
     ) -> PyResult<Py<PyAny>> {
         let wkt_str = extract_wkt(wkt_string)?;
-        match spatial::wkt_centroid(&wkt_str) {
+        match crate::graph::features::spatial::wkt_centroid(&wkt_str) {
             Ok((lat, lon)) => {
                 if as_shapely {
                     make_shapely_point(py, lat, lon)

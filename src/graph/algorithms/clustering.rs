@@ -3,7 +3,6 @@
 // General-purpose clustering algorithms for numeric feature vectors.
 // Used by CALL cluster() in the Cypher executor.
 
-use crate::graph::spatial;
 
 /// A clustering assignment: original index in input array → cluster label.
 pub struct ClusterAssignment {
@@ -34,7 +33,7 @@ pub fn haversine_distance_matrix(points: &[(f64, f64)]) -> Vec<Vec<f64>> {
     let mut dist = vec![vec![0.0; n]; n];
     for i in 0..n {
         for j in (i + 1)..n {
-            let d = spatial::geodesic_distance(points[i].0, points[i].1, points[j].0, points[j].1);
+            let d = crate::graph::features::spatial::geodesic_distance(points[i].0, points[i].1, points[j].0, points[j].1);
             dist[i][j] = d;
             dist[j][i] = d;
         }

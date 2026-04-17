@@ -6,7 +6,6 @@ use crate::graph::batch_operations::{
 use crate::graph::storage::lookups::{CombinedTypeLookup, TypeLookup};
 use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOperationReport};
 use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, TypeSchema};
-use crate::graph::spatial;
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
@@ -1214,29 +1213,29 @@ fn compute_spatial_property(
         "distance" => {
             let (lat1, lon1) = resolve_location(leaf_node, leaf_spatial)?;
             let (lat2, lon2) = resolve_location(ancestor_node, ancestor_spatial)?;
-            Some(Value::Float64(spatial::geodesic_distance(
+            Some(Value::Float64(crate::graph::features::spatial::geodesic_distance(
                 lat1, lon1, lat2, lon2,
             )))
         }
         "area" => {
             let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
-            spatial::geometry_area_m2(&geom).ok().map(Value::Float64)
+            crate::graph::features::spatial::geometry_area_m2(&geom).ok().map(Value::Float64)
         }
         "perimeter" => {
             let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
-            spatial::geometry_perimeter_m(&geom)
+            crate::graph::features::spatial::geometry_perimeter_m(&geom)
                 .ok()
                 .map(Value::Float64)
         }
         "centroid_lat" => {
             let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
-            spatial::geometry_centroid(&geom)
+            crate::graph::features::spatial::geometry_centroid(&geom)
                 .ok()
                 .map(|(lat, _)| Value::Float64(lat))
         }
         "centroid_lon" => {
             let geom = resolve_geometry(ancestor_node, ancestor_spatial)?;
-            spatial::geometry_centroid(&geom)
+            crate::graph::features::spatial::geometry_centroid(&geom)
                 .ok()
                 .map(|(_, lon)| Value::Float64(lon))
         }
@@ -1262,8 +1261,8 @@ fn resolve_location(
     }
     if let Some(ref geom_f) = sc.geometry {
         if let Some(Value::String(wkt)) = node.get_property(geom_f).as_deref() {
-            if let Ok(geom) = spatial::parse_wkt(wkt) {
-                return spatial::geometry_centroid(&geom).ok();
+            if let Ok(geom) = crate::graph::features::spatial::parse_wkt(wkt) {
+                return crate::graph::features::spatial::geometry_centroid(&geom).ok();
             }
         }
     }
@@ -1277,7 +1276,7 @@ fn resolve_geometry(
     let sc = spatial_config?;
     let geom_field = sc.geometry.as_deref()?;
     match node.get_property(geom_field).as_deref() {
-        Some(Value::String(wkt)) => spatial::parse_wkt(wkt).ok(),
+        Some(Value::String(wkt)) => crate::graph::features::spatial::parse_wkt(wkt).ok(),
         _ => None,
     }
 }

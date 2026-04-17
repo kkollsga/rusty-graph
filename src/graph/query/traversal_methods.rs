@@ -5,9 +5,7 @@ use crate::graph::schema::{
     CurrentSelection, DirGraph, InternedKey, NodeData, SelectionOperation, SpatialConfig,
     TemporalConfig,
 };
-use crate::graph::spatial;
 use crate::graph::storage::GraphRead;
-use crate::graph::temporal;
 use chrono::NaiveDate;
 use geo::geometry::Geometry;
 use petgraph::graph::NodeIndex;
@@ -109,10 +107,10 @@ fn edge_matches_conditions(
 fn edge_passes_temporal(properties: &[(InternedKey, Value)], filter: &TemporalEdgeFilter) -> bool {
     match filter {
         TemporalEdgeFilter::At(configs, date) => {
-            temporal::is_temporally_valid_multi(properties, configs, date)
+            crate::graph::features::temporal::is_temporally_valid_multi(properties, configs, date)
         }
         TemporalEdgeFilter::During(configs, start, end) => {
-            temporal::overlaps_range_multi(properties, configs, start, end)
+            crate::graph::features::temporal::overlaps_range_multi(properties, configs, start, end)
         }
     }
 }
@@ -660,7 +658,7 @@ fn resolve_geometry_field<'a>(
 /// Extract a parsed WKT geometry from a node's properties.
 fn node_geometry(node: &NodeData, geom_field: &str) -> Option<Geometry<f64>> {
     match node.get_property(geom_field).as_deref() {
-        Some(Value::String(wkt)) => spatial::parse_wkt(wkt).ok(),
+        Some(Value::String(wkt)) => crate::graph::features::spatial::parse_wkt(wkt).ok(),
         _ => None,
     }
 }
@@ -676,7 +674,7 @@ fn node_lat_lon(node: &NodeData, spatial_config: Option<&SpatialConfig>) -> Opti
     // Fallback to geometry centroid
     if let Some(ref geom_f) = sc.geometry {
         if let Some(geom) = node_geometry(node, geom_f) {
-            return spatial::geometry_centroid(&geom).ok();
+            return crate::graph::features::spatial::geometry_centroid(&geom).ok();
         }
     }
     None
@@ -701,7 +699,7 @@ fn resolve_node_point(
             let geom_field = geometry_field_override
                 .or_else(|| spatial_config.and_then(|sc| sc.geometry.as_deref()))?;
             let geom = node_geometry(node, geom_field)?;
-            spatial::geometry_centroid(&geom).ok()
+            crate::graph::features::spatial::geometry_centroid(&geom).ok()
         }
         None => {
             // Default: location → geometry centroid fallback
@@ -865,7 +863,7 @@ fn spatial_contains_traversal(
                 // resolve='geometry': polygon-in-polygon containment
                 if let Some(tgt_geom) = resolve_node_geom(tgt_node, target_spatial, geometry_field)
                 {
-                    if spatial::geometry_contains_geometry(&src_geom, &tgt_geom) {
+                    if crate::graph::features::spatial::geometry_contains_geometry(&src_geom, &tgt_geom) {
                         matched.push(tgt_idx);
                     }
                 }
@@ -885,7 +883,7 @@ fn spatial_contains_traversal(
                         }
                     }
                     let pt = geo::geometry::Point::new(lon, lat);
-                    if spatial::geometry_contains_point(&src_geom, &pt) {
+                    if crate::graph::features::spatial::geometry_contains_point(&src_geom, &pt) {
                         matched.push(tgt_idx);
                     }
                 }
@@ -964,7 +962,7 @@ fn spatial_intersects_traversal(
                 None => continue,
             };
             if let Some(tgt_geom) = node_geometry(tgt_node, tgt_geom_field) {
-                if spatial::geometries_intersect(&src_geom, &tgt_geom) {
+                if crate::graph::features::spatial::geometries_intersect(&src_geom, &tgt_geom) {
                     matched.push(tgt_idx);
                 }
             }
@@ -1098,7 +1096,7 @@ fn distance_point_mode(
 
         let mut matched = Vec::new();
         for tgt in &target_locs {
-            let dist = spatial::geodesic_distance(src_lat, src_lon, tgt.lat, tgt.lon);
+            let dist = crate::graph::features::spatial::geodesic_distance(src_lat, src_lon, tgt.lat, tgt.lon);
             if dist <= max_distance_m {
                 matched.push(tgt.idx);
             }
@@ -1179,10 +1177,10 @@ fn distance_closest_mode(
                     // Both have geometry: use point_to_geometry for better approximation
                     // (try both directions, take minimum)
                     let d1 = src_point.and_then(|(lat, lon)| {
-                        spatial::point_to_geometry_distance_m(lat, lon, tg).ok()
+                        crate::graph::features::spatial::point_to_geometry_distance_m(lat, lon, tg).ok()
                     });
                     let d2 = tgt_point.and_then(|(lat, lon)| {
-                        spatial::point_to_geometry_distance_m(lat, lon, sg).ok()
+                        crate::graph::features::spatial::point_to_geometry_distance_m(lat, lon, sg).ok()
                     });
                     match (d1, d2) {
                         (Some(a), Some(b)) => Some(a.min(b)),
@@ -1190,27 +1188,27 @@ fn distance_closest_mode(
                         (None, Some(b)) => Some(b),
                         (None, None) => {
                             // Last resort: centroid-to-centroid
-                            spatial::geometry_to_geometry_distance_m(sg, tg).ok()
+                            crate::graph::features::spatial::geometry_to_geometry_distance_m(sg, tg).ok()
                         }
                     }
                 }
                 (Some(sg), None) => {
                     // Source has geometry, target is a point
                     tgt_point.and_then(|(lat, lon)| {
-                        spatial::point_to_geometry_distance_m(lat, lon, sg).ok()
+                        crate::graph::features::spatial::point_to_geometry_distance_m(lat, lon, sg).ok()
                     })
                 }
                 (None, Some(tg)) => {
                     // Source is a point, target has geometry
                     src_point.and_then(|(lat, lon)| {
-                        spatial::point_to_geometry_distance_m(lat, lon, tg).ok()
+                        crate::graph::features::spatial::point_to_geometry_distance_m(lat, lon, tg).ok()
                     })
                 }
                 (None, None) => {
                     // Both are points — fallback to geodesic
                     match (src_point, tgt_point) {
                         (Some((lat1, lon1)), Some((lat2, lon2))) => {
-                            Some(spatial::geodesic_distance(lat1, lon1, lat2, lon2))
+                            Some(crate::graph::features::spatial::geodesic_distance(lat1, lon1, lat2, lon2))
                         }
                         _ => None,
                     }

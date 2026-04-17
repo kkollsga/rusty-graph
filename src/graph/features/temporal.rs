@@ -177,9 +177,9 @@ pub fn overlaps_range_multi(
 pub fn node_passes_context(
     node: &NodeData,
     config: &TemporalConfig,
-    context: &super::TemporalContext,
+    context: &crate::graph::TemporalContext,
 ) -> bool {
-    use super::TemporalContext;
+    use crate::graph::TemporalContext;
     match context {
         TemporalContext::All => true,
         TemporalContext::Today => {

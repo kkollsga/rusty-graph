@@ -10,9 +10,7 @@ use crate::graph::query::pattern_matching::{
 };
 use crate::graph::schema::{DirGraph, EdgeData, InternedKey, NodeData, TypeSchema};
 use crate::graph::schema_validation;
-use crate::graph::spatial;
 use crate::graph::storage::{GraphRead, GraphWrite};
-use crate::graph::timeseries;
 use crate::graph::algorithms::vector_search as vs;
 use chrono::Datelike;
 use geo::BoundingRect;
@@ -3111,7 +3109,7 @@ impl<'a> CypherExecutor<'a> {
 
                 // Full polygon test
                 let pt = geo::Point::new(lon, lat);
-                let result = spatial::geometry_contains_point(&geom, &pt);
+                let result = crate::graph::features::spatial::geometry_contains_point(&geom, &pt);
                 if spec.negated {
                     !result
                 } else {
@@ -3161,7 +3159,7 @@ impl<'a> CypherExecutor<'a> {
                     Some(v) => v,
                     None => return false,
                 };
-                let dist = spatial::geodesic_distance(lat, lon, spec.center_lat, spec.center_lon);
+                let dist = crate::graph::features::spatial::geodesic_distance(lat, lon, spec.center_lat, spec.center_lon);
                 if spec.less_than {
                     if spec.inclusive {
                         dist <= spec.threshold
@@ -4856,7 +4854,7 @@ impl<'a> CypherExecutor<'a> {
                 return Some(ResolvedSpatial::Point(lat, lon));
             }
             if let Some((geom, _bbox)) = &data.geometry {
-                if let Ok((lat, lon)) = spatial::geometry_centroid(geom) {
+                if let Ok((lat, lon)) = crate::graph::features::spatial::geometry_centroid(geom) {
                     return Some(ResolvedSpatial::Point(lat, lon));
                 }
             }
@@ -5015,7 +5013,7 @@ impl<'a> CypherExecutor<'a> {
             }
         }
         // Slow path: parse + write lock
-        let geom = Arc::new(spatial::parse_wkt(wkt)?);
+        let geom = Arc::new(crate::graph::features::spatial::parse_wkt(wkt)?);
         {
             let mut cache = self.graph.wkt_cache.write().unwrap();
             cache.insert(wkt.to_string(), Arc::clone(&geom));
@@ -5065,7 +5063,7 @@ impl<'a> CypherExecutor<'a> {
                 match val {
                     Value::String(s) => {
                         // Return Null on invalid input instead of crashing (BUG-09)
-                        match timeseries::parse_date_query(&s) {
+                        match crate::graph::features::timeseries::parse_date_query(&s) {
                             Ok((d, _)) => Ok(Value::DateTime(d)),
                             Err(_) => Ok(Value::Null),
                         }
@@ -5087,13 +5085,13 @@ impl<'a> CypherExecutor<'a> {
                         // Try parsing as ISO datetime with T separator
                         if s.contains('T') {
                             let date_part = s.split('T').next().unwrap_or("");
-                            match timeseries::parse_date_query(date_part) {
+                            match crate::graph::features::timeseries::parse_date_query(date_part) {
                                 Ok((d, _)) => Ok(Value::DateTime(d)),
                                 Err(_) => Ok(Value::Null),
                             }
                         } else {
                             // Fallback: try as plain date
-                            match timeseries::parse_date_query(&s) {
+                            match crate::graph::features::timeseries::parse_date_query(&s) {
                                 Ok((d, _)) => Ok(Value::DateTime(d)),
                                 Err(_) => Ok(Value::Null),
                             }
@@ -5464,7 +5462,7 @@ impl<'a> CypherExecutor<'a> {
                         (
                             Some(ResolvedSpatial::Point(lat1, lon1)),
                             Some(ResolvedSpatial::Point(lat2, lon2)),
-                        ) => Ok(Value::Float64(spatial::geodesic_distance(
+                        ) => Ok(Value::Float64(crate::graph::features::spatial::geodesic_distance(
                             lat1, lon1, lat2, lon2,
                         ))),
                         (
@@ -5474,13 +5472,13 @@ impl<'a> CypherExecutor<'a> {
                         | (
                             Some(ResolvedSpatial::Geometry(g, _)),
                             Some(ResolvedSpatial::Point(lat, lon)),
-                        ) => Ok(Value::Float64(spatial::point_to_geometry_distance_m(
+                        ) => Ok(Value::Float64(crate::graph::features::spatial::point_to_geometry_distance_m(
                             lat, lon, &g,
                         )?)),
                         (
                             Some(ResolvedSpatial::Geometry(g1, _)),
                             Some(ResolvedSpatial::Geometry(g2, _)),
-                        ) => Ok(Value::Float64(spatial::geometry_to_geometry_distance_m(
+                        ) => Ok(Value::Float64(crate::graph::features::spatial::geometry_to_geometry_distance_m(
                             &g1, &g2,
                         )?)),
                         // One or both sides have no spatial data (e.g. node
@@ -5502,7 +5500,7 @@ impl<'a> CypherExecutor<'a> {
                     let lon2 =
                         crate::graph::query::value_operations::value_to_f64(&self.evaluate_expression(&args[3], row)?)
                             .ok_or("distance(): args must be numeric")?;
-                    Ok(Value::Float64(spatial::geodesic_distance(
+                    Ok(Value::Float64(crate::graph::features::spatial::geodesic_distance(
                         lat1, lon1, lat2, lon2,
                     )))
                 }
@@ -5546,7 +5544,7 @@ impl<'a> CypherExecutor<'a> {
                             }
                         }
                         let pt = geo::Point::new(*lon, *lat);
-                        Ok(Value::Boolean(spatial::geometry_contains_point(geom, &pt)))
+                        Ok(Value::Boolean(crate::graph::features::spatial::geometry_contains_point(geom, &pt)))
                     }
                     ResolvedSpatial::Geometry(g2, bbox2) => {
                         // Bbox pre-filter: if bboxes don't overlap, containment is impossible
@@ -5559,7 +5557,7 @@ impl<'a> CypherExecutor<'a> {
                                 return Ok(Value::Boolean(false));
                             }
                         }
-                        Ok(Value::Boolean(spatial::geometry_contains_geometry(
+                        Ok(Value::Boolean(crate::graph::features::spatial::geometry_contains_geometry(
                             geom, g2,
                         )))
                     }
@@ -5591,7 +5589,7 @@ impl<'a> CypherExecutor<'a> {
                                 return Ok(Value::Boolean(false));
                             }
                         }
-                        spatial::geometries_intersect(g1, g2)
+                        crate::graph::features::spatial::geometries_intersect(g1, g2)
                     }
                     (ResolvedSpatial::Point(lat, lon), ResolvedSpatial::Geometry(g, bbox)) => {
                         // Bbox pre-filter for point-vs-geometry
@@ -5605,7 +5603,7 @@ impl<'a> CypherExecutor<'a> {
                             }
                         }
                         let pt = geo::Geometry::Point(geo::Point::new(*lon, *lat));
-                        spatial::geometries_intersect(&pt, g)
+                        crate::graph::features::spatial::geometries_intersect(&pt, g)
                     }
                     (ResolvedSpatial::Geometry(g, bbox), ResolvedSpatial::Point(lat, lon)) => {
                         if let Some(bb) = bbox {
@@ -5618,7 +5616,7 @@ impl<'a> CypherExecutor<'a> {
                             }
                         }
                         let pt = geo::Geometry::Point(geo::Point::new(*lon, *lat));
-                        spatial::geometries_intersect(g, &pt)
+                        crate::graph::features::spatial::geometries_intersect(g, &pt)
                     }
                     (ResolvedSpatial::Point(lat1, lon1), ResolvedSpatial::Point(lat2, lon2)) => {
                         lat1 == lat2 && lon1 == lon2
@@ -5639,7 +5637,7 @@ impl<'a> CypherExecutor<'a> {
                         lon: *lon,
                     }),
                     ResolvedSpatial::Geometry(g, _) => {
-                        let (lat, lon) = spatial::geometry_centroid(g)?;
+                        let (lat, lon) = crate::graph::features::spatial::geometry_centroid(g)?;
                         Ok(Value::Point { lat, lon })
                     }
                 }
@@ -5653,7 +5651,7 @@ impl<'a> CypherExecutor<'a> {
                     .ok_or("area(): arg must resolve to a polygon geometry")?;
                 match &resolved {
                     ResolvedSpatial::Geometry(g, _) => {
-                        Ok(Value::Float64(spatial::geometry_area_m2(g)?))
+                        Ok(Value::Float64(crate::graph::features::spatial::geometry_area_m2(g)?))
                     }
                     ResolvedSpatial::Point(_, _) => {
                         Err("area(): arg must be a polygon geometry, not a point".into())
@@ -5669,7 +5667,7 @@ impl<'a> CypherExecutor<'a> {
                     .ok_or("perimeter(): arg must resolve to a geometry")?;
                 match &resolved {
                     ResolvedSpatial::Geometry(g, _) => {
-                        Ok(Value::Float64(spatial::geometry_perimeter_m(g)?))
+                        Ok(Value::Float64(crate::graph::features::spatial::geometry_perimeter_m(g)?))
                     }
                     ResolvedSpatial::Point(_, _) => {
                         Err("perimeter(): arg must be a geometry, not a point".into())
@@ -5807,7 +5805,7 @@ impl<'a> CypherExecutor<'a> {
                 let (ts, channel, _config) = self.resolve_timeseries_channel(&args[0], row)?;
                 let date_arg = self.resolve_ts_date_arg(&args[1], row)?;
                 match date_arg {
-                    Some((date, _prec)) => match timeseries::find_key_index(&ts.keys, date) {
+                    Some((date, _prec)) => match crate::graph::features::timeseries::find_key_index(&ts.keys, date) {
                         Some(idx) => {
                             let v = channel[idx];
                             if v.is_finite() {
@@ -5832,9 +5830,9 @@ impl<'a> CypherExecutor<'a> {
                 let (lo, hi) = self.resolve_ts_range(ts, &args[1..], row)?;
                 let slice = &channel[lo..hi];
                 match name {
-                    "ts_sum" => Ok(Value::Float64(timeseries::ts_sum(slice))),
+                    "ts_sum" => Ok(Value::Float64(crate::graph::features::timeseries::ts_sum(slice))),
                     "ts_avg" => {
-                        let v = timeseries::ts_avg(slice);
+                        let v = crate::graph::features::timeseries::ts_avg(slice);
                         if v.is_nan() {
                             Ok(Value::Null)
                         } else {
@@ -5842,7 +5840,7 @@ impl<'a> CypherExecutor<'a> {
                         }
                     }
                     "ts_min" => {
-                        let v = timeseries::ts_min(slice);
+                        let v = crate::graph::features::timeseries::ts_min(slice);
                         if v.is_infinite() {
                             Ok(Value::Null)
                         } else {
@@ -5850,14 +5848,14 @@ impl<'a> CypherExecutor<'a> {
                         }
                     }
                     "ts_max" => {
-                        let v = timeseries::ts_max(slice);
+                        let v = crate::graph::features::timeseries::ts_max(slice);
                         if v.is_infinite() {
                             Ok(Value::Null)
                         } else {
                             Ok(Value::Float64(v))
                         }
                     }
-                    "ts_count" => Ok(Value::Int64(timeseries::ts_count(slice) as i64)),
+                    "ts_count" => Ok(Value::Int64(crate::graph::features::timeseries::ts_count(slice) as i64)),
                     _ => unreachable!(),
                 }
             }
@@ -5891,13 +5889,13 @@ impl<'a> CypherExecutor<'a> {
                 let a1 = self.resolve_ts_date_arg(&args[1], row)?;
                 let a2 = self.resolve_ts_date_arg(&args[2], row)?;
                 let v1 = a1.and_then(|(date, prec)| {
-                    let end = timeseries::expand_end(date, prec);
-                    let (lo, hi) = timeseries::find_range(&ts.keys, Some(date), Some(end));
+                    let end = crate::graph::features::timeseries::expand_end(date, prec);
+                    let (lo, hi) = crate::graph::features::timeseries::find_range(&ts.keys, Some(date), Some(end));
                     if lo < hi { Some(channel[lo]) } else { None }.filter(|v| v.is_finite())
                 });
                 let v2 = a2.and_then(|(date, prec)| {
-                    let end = timeseries::expand_end(date, prec);
-                    let (lo, hi) = timeseries::find_range(&ts.keys, Some(date), Some(end));
+                    let end = crate::graph::features::timeseries::expand_end(date, prec);
+                    let (lo, hi) = crate::graph::features::timeseries::find_range(&ts.keys, Some(date), Some(end));
                     if lo < hi { Some(channel[lo]) } else { None }.filter(|v| v.is_finite())
                 });
                 match (v1, v2) {
@@ -6289,9 +6287,9 @@ impl<'a> CypherExecutor<'a> {
         row: &ResultRow,
     ) -> Result<
         (
-            &'b timeseries::NodeTimeseries,
+            &'b crate::graph::features::timeseries::NodeTimeseries,
             &'b [f64],
-            &'b timeseries::TimeseriesConfig,
+            &'b crate::graph::features::timeseries::TimeseriesConfig,
         ),
         String,
     > {
@@ -6344,16 +6342,16 @@ impl<'a> CypherExecutor<'a> {
         &self,
         expr: &Expression,
         row: &ResultRow,
-    ) -> Result<Option<(chrono::NaiveDate, timeseries::DatePrecision)>, String> {
+    ) -> Result<Option<(chrono::NaiveDate, crate::graph::features::timeseries::DatePrecision)>, String> {
         let v = self.evaluate_expression(expr, row)?;
         match &v {
-            Value::String(s) => timeseries::parse_date_query(s).map(Some),
+            Value::String(s) => crate::graph::features::timeseries::parse_date_query(s).map(Some),
             Value::Int64(year) => {
                 let date = chrono::NaiveDate::from_ymd_opt(*year as i32, 1, 1)
                     .ok_or_else(|| format!("ts_*() invalid year: {}", year))?;
-                Ok(Some((date, timeseries::DatePrecision::Year)))
+                Ok(Some((date, crate::graph::features::timeseries::DatePrecision::Year)))
             }
-            Value::DateTime(date) => Ok(Some((*date, timeseries::DatePrecision::Day))),
+            Value::DateTime(date) => Ok(Some((*date, crate::graph::features::timeseries::DatePrecision::Day))),
             Value::Null => Ok(None),
             _ => Err(format!(
                 "ts_*() date argument must be a string, integer, date, or null, got {:?}",
@@ -6365,7 +6363,7 @@ impl<'a> CypherExecutor<'a> {
     /// Resolve 0-2 range arguments into a `(start_idx, end_idx)` slice range.
     fn resolve_ts_range(
         &self,
-        ts: &timeseries::NodeTimeseries,
+        ts: &crate::graph::features::timeseries::NodeTimeseries,
         range_args: &[Expression],
         row: &ResultRow,
     ) -> Result<(usize, usize), String> {
@@ -6379,14 +6377,14 @@ impl<'a> CypherExecutor<'a> {
             // Two-arg range: [start, end]
             let second = self.resolve_ts_date_arg(&range_args[1], row)?;
             let start = first.map(|(d, _)| d);
-            let end = second.map(|(d, prec)| timeseries::expand_end(d, prec));
-            Ok(timeseries::find_range(&ts.keys, start, end))
+            let end = second.map(|(d, prec)| crate::graph::features::timeseries::expand_end(d, prec));
+            Ok(crate::graph::features::timeseries::find_range(&ts.keys, start, end))
         } else {
             // Single arg: expand to full precision range
             match first {
                 Some((date, prec)) => {
-                    let end = timeseries::expand_end(date, prec);
-                    Ok(timeseries::find_range(&ts.keys, Some(date), Some(end)))
+                    let end = crate::graph::features::timeseries::expand_end(date, prec);
+                    Ok(crate::graph::features::timeseries::find_range(&ts.keys, Some(date), Some(end)))
                 }
                 None => Ok((0, ts.keys.len())), // null = no bounds
             }
@@ -8135,7 +8133,7 @@ impl<'a> CypherExecutor<'a> {
                         let geom_fallback = config.geometry.as_deref();
 
                         if let Some((lat, lon)) =
-                            spatial::node_location(node, lat_f, lon_f, geom_fallback)
+                            crate::graph::features::spatial::node_location(node, lat_f, lon_f, geom_fallback)
                         {
                             points.push((lat, lon));
                             valid_indices.push(i);

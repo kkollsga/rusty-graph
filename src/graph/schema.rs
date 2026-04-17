@@ -1587,12 +1587,12 @@ pub struct DirGraph {
     /// Timeseries configuration per node type: type_name → TimeseriesConfig.
     /// Declares composite key labels and known channels for auto-resolution.
     #[serde(default)]
-    pub(crate) timeseries_configs: HashMap<String, super::timeseries::TimeseriesConfig>,
+    pub(crate) timeseries_configs: HashMap<String, crate::graph::features::timeseries::TimeseriesConfig>,
     /// Per-node timeseries storage: NodeIndex.index() → NodeTimeseries.
     /// Stored separately from NodeData.properties (like embeddings).
     /// Persisted as a separate section in v2 .kgl files.
     #[serde(skip)]
-    pub(crate) timeseries_store: HashMap<usize, super::timeseries::NodeTimeseries>,
+    pub(crate) timeseries_store: HashMap<usize, crate::graph::features::timeseries::NodeTimeseries>,
     /// Temporal configuration per node type: type_name → TemporalConfig.
     /// Nodes of this type are auto-filtered by validity period in select().
     #[serde(default)]
@@ -1756,7 +1756,7 @@ impl DirGraph {
     pub fn get_node_timeseries(
         &self,
         node_index: usize,
-    ) -> Option<&super::timeseries::NodeTimeseries> {
+    ) -> Option<&crate::graph::features::timeseries::NodeTimeseries> {
         self.timeseries_store.get(&node_index)
     }
 
