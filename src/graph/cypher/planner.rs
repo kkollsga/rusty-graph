@@ -5,6 +5,7 @@ use super::ast::*;
 use crate::datatypes::values::Value;
 use crate::graph::pattern_matching::{PatternElement, PropertyMatcher};
 use crate::graph::schema::DirGraph;
+use crate::graph::storage::GraphRead;
 use std::collections::HashMap;
 
 /// Optimize a parsed Cypher query before execution.
@@ -850,7 +851,7 @@ fn estimate_node_selectivity(
         .as_ref()
         .and_then(|t| graph.type_indices.get(t))
         .map(|idx| idx.len())
-        .unwrap_or(graph.graph.node_count());
+        .unwrap_or(GraphRead::node_count(&graph.graph));
 
     match &np.properties {
         None => type_count,
