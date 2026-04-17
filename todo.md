@@ -419,6 +419,59 @@ all three and asserts equivalence.
 
 **Exit criteria for Phase 0**: testing gate passes; `Mapped` variant shipped; `GraphRead` trait with 2 real consumers; old code paths for those 2 consumers deleted; all crunch-point tests (foundation + pre-stage for Phases 1–5) authored and green; parity baseline committed.
 
+### Phase 0 Report-out (written at phase exit — read this before Phase 1)
+
+**Completed** (commits on `main`, local only — user pushes):
+- `3cc55ca test: 10-query parity oracle across storage modes` — `tests/test_storage_parity.py` gated behind `pytest -m parity`. 14 tests, runs in ~0.2 s. Full Phase 0.1 oracle matrix from the todo.md list is **not** yet authored — shipped the minimal 10-query oracle the user specifically approved. Expand in Phase 1.
+- `7f86e6e refactor: GraphBackend::{Memory, Mapped, Disk} + delete StorageMode` — Phase 0.2.
+- `7729472 refactor: introduce GraphRead trait + migrate 2 call sites` — Phase 0.3.
+- `9c148fc docs: ARCHITECTURE.md + CLAUDE.md storage-refactor pointers` — Phase 0.4.
+
+**Baselines captured** (pre-Phase 0.2 `TestStorageModeMatrix` numbers):
+- In-memory `WHERE string_prop =` at 10k nodes: `multi_predicate_10000_memory: 0.65 ms`
+- `find_20x_10000_memory: 5.28 ms` / `mapped: 8.72 ms` / `disk: 9.92 ms`
+- `describe_10000_memory: 2.81 ms` / `mapped: 2.28 ms` / `disk: 5.02 ms`
+- `pagerank_10000_memory: 5.27 ms` / `mapped: 4.39 ms` / `disk: 4.35 ms`
+- Full set in the git log for commit `7f86e6e` body. Post-0.3 numbers are within noise of these (single-run noise dominates; need N=20 statistical compare for Phase 7).
+
+**Surprises found during investigation:**
+1. `GraphBackend` had only 2 variants (`InMemory`, `Disk`) but `StorageMode` was a parallel 3-variant enum (`Default`, `Mapped`, `Disk`) on `DirGraph`. Mapped mode was emergent from `InMemory + storage_mode=Mapped + memory_limit=0`. This was exactly the layering straddle the refactor targets. Phase 0.2 deleted `StorageMode` entirely — the variant is now the source of truth.
+2. The todo.md's planned fix to `node_matches_properties_columnar`'s gate (`is_disk() || is_mapped()`) was **wrong**. Investigation showed mapped's NodeData lives in petgraph (via the newtype wrapping StableDiGraph), so the in-memory branch is correct. The `str_prop_eq` fast path added in the earlier pre-refactor work already handles mapped's columnar property reads. **Gate left as `is_disk()` only.** Any future phase revisiting this should skip this re-investigation.
+3. Scope of mechanical change was larger than initially counted: 114 `GraphBackend::` match sites + 30 `StorageMode` references. The Python-script-adds-Mapped-arms approach I tried first broke on multi-line closure bodies. Solution was to make `MappedGraph` a **type alias for `MemoryGraph`** today, so match arms can use `Self::Memory(g) | Self::Mapped(g)` — same branch count as before. This pushed the "distinct types" discussion to Phase 1.
+
+**Decisions made:**
+- `MappedGraph = MemoryGraph` (type alias) for now. Distinct struct when Phase 1+ needs per-backend trait impls. **Default: keep as alias** unless concrete divergence requires promotion.
+- `GraphRead` trait surface is intentionally minimal (7 methods). Phase 1 adds iteration/neighbor/metadata; Phase 2 adds mutations.
+- `str_prop_eq` is the inaugural trait method; inherent `GraphBackend::node_prop_str_eq` deleted (clean break, no shim).
+- Dispatch rule: `&impl GraphRead` for hot loops, `&dyn GraphRead` at boundaries. Documented in ARCHITECTURE.md and CLAUDE.md.
+
+**Debt introduced:**
+- Only 2 PoC migrations done — `sample_unique_values` and `pattern_matching::node_matches_properties_columnar::str_prop_eq` call. The other `GraphBackend::get_node_property` / `get_node_id` / `get_node_title` callers (dozens of them) still use the inherent methods. Phase 1 should migrate en masse as files get touched.
+- `GraphRead` trait is currently only implemented on `GraphBackend` (not per-backend). Per-backend impls land in Phase 1.
+- The full Phase 0.1 crunch-point test matrix (Unicode edge cases, mid-batch failure, PageRank numeric parity, fixture `.kgl` load tests, etc.) is **not authored yet** — only the 10-query oracle subset. Each later phase will author the relevant subset before its code changes per the "crunch-point tests authored in the phase they guard" pattern.
+
+**Scope changes:**
+- Added: `StorageMode` enum deletion (not in original todo.md — discovered during 0.2 investigation, essential for clean break).
+- Deferred: full parity suite authoring → spread across later phases.
+- Removed: the false gate fix for `node_matches_properties_columnar` (see Surprises #2).
+
+**Next-phase prerequisites (Phase 1):**
+- Phase 1 expands `GraphRead` with edge iteration, neighbor lookup, type-index access, and schema metadata. Today `GraphRead` only covers per-node reads.
+- To migrate `compute_join_candidates` fully (beyond the `sample_unique_values` helper), need `nodes_of_type` on the trait. That's Phase 1.
+- The MappedGraph type alias **may** promote to a distinct struct in Phase 1 if per-backend trait impls are needed. Decision point: when the first Phase-1 method has a backend-specific implementation.
+- Edge iteration is expected to be the first GAT-lifetime pain point. Budget time for that.
+- Ship 0.7.18 if Phase 0 is deemed independently useful (user's call); otherwise bundle into 0.8.0. Not yet decided.
+
+**Files touched:**
+- `tests/test_storage_parity.py` (new), `pyproject.toml` (parity marker)
+- `src/graph/storage/mod.rs` (new — newtypes + GraphRead trait)
+- `src/graph/schema.rs` (enum rename, StorageMode deletion, trait impl)
+- `src/graph/mod.rs` (KG::new dispatch, is_disk usage)
+- `src/graph/pattern_matching.rs` (trait-method call)
+- `src/graph/introspection.rs` (sample_unique_values migration)
+- `src/graph/ntriples.rs`, `src/graph/batch_operations.rs`, `src/graph/io_operations.rs`, `src/graph/graph_algorithms.rs` (StorageMode removal, is_mapped/is_disk usage)
+- `ARCHITECTURE.md` (new), `CLAUDE.md` (storage section)
+
 ---
 
 ## Phase 1 — Complete the read API 🔜
