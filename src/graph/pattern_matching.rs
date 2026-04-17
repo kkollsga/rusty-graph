@@ -1585,6 +1585,30 @@ impl<'a> PatternExecutor<'a> {
                 let resolved = self
                     .graph
                     .resolve_alias(node.node_type_str(&self.graph.interner), key);
+
+                // Zero-alloc fast path for `Equals(String)` on a user property.
+                // For columnar storage this bypasses cloning bytes out of the
+                // mmap into an owned String; for Map/Compact it avoids an
+                // unnecessary Value comparison.
+                if resolved != "name"
+                    && resolved != "title"
+                    && resolved != "id"
+                    && resolved != "type"
+                    && resolved != "node_type"
+                    && resolved != "label"
+                {
+                    if let PropertyMatcher::Equals(Value::String(target)) = matcher {
+                        match node
+                            .properties
+                            .str_prop_eq(InternedKey::from_str(resolved), target)
+                        {
+                            Some(true) => continue,
+                            Some(false) => return false,
+                            None => return false,
+                        }
+                    }
+                }
+
                 let value: Option<Cow<'_, Value>> = if resolved == "name" || resolved == "title" {
                     Some(node.title())
                 } else if resolved == "id" {
@@ -1630,6 +1654,28 @@ impl<'a> PatternExecutor<'a> {
 
         for (key, matcher) in props {
             let resolved = self.graph.resolve_alias(type_str, key);
+
+            // Zero-alloc fast path: literal-string equality against a user
+            // property skips materialising `Value::String(owned)` per node.
+            // Critical on mapped-mode graphs where `get_node_property` clones
+            // bytes out of the mmap for every string read.
+            if resolved != "name"
+                && resolved != "title"
+                && resolved != "id"
+                && resolved != "type"
+                && resolved != "node_type"
+                && resolved != "label"
+            {
+                if let PropertyMatcher::Equals(Value::String(target)) = matcher {
+                    let k = InternedKey::from_str(resolved);
+                    match self.graph.graph.node_prop_str_eq(idx, k, target) {
+                        Some(true) => continue,
+                        Some(false) => return false,
+                        None => return false,
+                    }
+                }
+            }
+
             let value: Option<Cow<'_, Value>> = if resolved == "name" || resolved == "title" {
                 self.graph.graph.get_node_title(idx).map(Cow::Owned)
             } else if resolved == "id" {

@@ -1137,6 +1137,41 @@ impl ColumnStore {
         self.get_overflow_property(row_id, key)
     }
 
+    /// Zero-allocation string equality check for (row_id, key) against `target`.
+    /// Returns `None` if the property is missing/null for this row, otherwise
+    /// `Some(bool)`. Avoids the `String::from_utf8_unchecked(bytes.to_vec())`
+    /// that a full `get()` would trigger for mmap-backed string columns —
+    /// significant on mapped graphs where string property scans are the
+    /// main perf gap vs in-memory mode.
+    pub fn str_prop_eq(&self, row_id: u32, key: InternedKey, target: &str) -> Option<bool> {
+        if let Some(ref ms) = self.mmap_store {
+            return ms.str_prop_eq(row_id, key, target);
+        }
+        if row_id >= self.row_count
+            || self
+                .tombstones
+                .get(row_id as usize)
+                .copied()
+                .unwrap_or(false)
+        {
+            return None;
+        }
+        if let Some(slot) = self.schema.slot(key) {
+            if let Some(col) = self.columns.get(slot as usize) {
+                if let Some(s) = col.get_str(row_id) {
+                    return Some(s == target);
+                }
+                // Column present but not a Str variant, or null.
+                // Fall back to value-based compare for mixed columns.
+                if let Some(v) = col.get(row_id) {
+                    return Some(matches!(v, Value::String(ref s) if s == target));
+                }
+            }
+        }
+        self.get_overflow_property(row_id, key)
+            .map(|v| matches!(v, Value::String(ref s) if s == target))
+    }
+
     /// Resolve a property name to a column slot index.
     #[inline]
     pub fn slot(&self, key: InternedKey) -> Option<u16> {

@@ -518,6 +518,27 @@ impl PropertyStorage {
         self.get(key).is_some()
     }
 
+    /// Zero-allocation string equality for a property against `target`.
+    ///
+    /// For columnar storage this bypasses the `Value::String(s.to_string())`
+    /// materialisation in `get()`, which dominates string-equality scans on
+    /// mapped graphs. For the non-columnar variants the cost is already
+    /// borrowable, so we just wrap the existing `get`.
+    #[inline]
+    pub fn str_prop_eq(&self, key: InternedKey, target: &str) -> Option<bool> {
+        match self {
+            PropertyStorage::Map(map) => map
+                .get(&key)
+                .map(|v| matches!(v, Value::String(s) if s == target)),
+            PropertyStorage::Compact { schema, values } => schema
+                .slot(key)
+                .and_then(|slot| values.get(slot as usize))
+                .filter(|v| !matches!(v, Value::Null))
+                .map(|v| matches!(v, Value::String(s) if s == target)),
+            PropertyStorage::Columnar { store, row_id } => store.str_prop_eq(*row_id, key, target),
+        }
+    }
+
     /// Insert or update a property. For Compact, extends schema via Arc::make_mut if key is new.
     pub fn insert(&mut self, key: InternedKey, value: Value) {
         match self {
@@ -4016,6 +4037,25 @@ impl GraphBackend {
                 .node_weight(idx)
                 .and_then(|nd| nd.properties.get_value(key)),
             GraphBackend::Disk(dg) => dg.get_node_property(idx, key),
+        }
+    }
+
+    /// Zero-allocation string equality for a property against `target`.
+    /// Returns `None` if the property is missing/null. Used by the Cypher
+    /// executor to short-circuit `WHERE n.strProp = 'literal'` scans on
+    /// mapped graphs without materialising an owned `String` per node.
+    #[inline]
+    pub fn node_prop_str_eq(&self, idx: NodeIndex, key: InternedKey, target: &str) -> Option<bool> {
+        match self {
+            GraphBackend::InMemory(g) => g
+                .node_weight(idx)
+                .and_then(|nd| nd.properties.str_prop_eq(key, target)),
+            GraphBackend::Disk(_) => {
+                // Disk path keeps the allocating route for now; the win is
+                // mapped-mode-specific. Equality still works correctly.
+                self.get_node_property(idx, key)
+                    .map(|v| matches!(v, Value::String(ref s) if s == target))
+            }
         }
     }
 
