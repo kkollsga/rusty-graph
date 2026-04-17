@@ -3,6 +3,7 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{DirGraph, InternedKey};
+use crate::graph::storage::GraphRead;
 use crate::graph::value_operations;
 use petgraph::algo::kosaraju_scc;
 use petgraph::graph::NodeIndex;
@@ -565,7 +566,7 @@ fn find_all_paths_recursive(
 pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
     // For disk mode, fall back to weakly_connected_components since
     // kosaraju_scc requires petgraph trait bounds.
-    if graph.graph.is_disk() {
+    if GraphRead::is_disk(&graph.graph) {
         return weakly_connected_components(graph);
     }
     kosaraju_scc(graph.graph.as_stable_digraph())
