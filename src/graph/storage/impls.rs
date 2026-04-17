@@ -19,7 +19,8 @@ use crate::graph::core::graph_iterators::{
     GraphNodeIndices,
 };
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
-use crate::graph::storage::disk::disk_graph::{DiskGraph, TOMBSTONE_EDGE};
+use crate::graph::storage::disk::csr::TOMBSTONE_EDGE;
+use crate::graph::storage::disk::disk_graph::DiskGraph;
 use crate::graph::storage::{GraphRead, GraphWrite, MappedGraph, MemoryGraph};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::{EdgeRef, IntoEdgeReferences, NodeIndexable};

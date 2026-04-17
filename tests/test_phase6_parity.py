@@ -44,11 +44,19 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ENUM_MATCH_WHITELIST = {
     # Trait / enum declarations + the 4-arm dispatcher — required.
     "storage/mod.rs": "GraphRead / GraphWrite trait surface",
-    "schema.rs": "GraphBackend enum + dispatcher impls",
-    # PyO3 boundary moved from mod.rs → pyapi/kg_methods.rs in Phase 8.
-    "pyapi/kg_methods.rs": "PyO3 boundary (KnowledgeGraph class registration)",
-    # Disk-internal boundary — unchanged since Phase 5.
-    "io/ntriples.rs": "disk-internal bulk-build (ntriples loader)",
+    # Phase 9 moved the GraphBackend enum + dispatcher from schema.rs into
+    # its own file under storage/.
+    "storage/backend.rs": "GraphBackend enum + dispatcher impls",
+    # Phase 9 extracted DirGraph from schema.rs into graph/dir_graph.rs.
+    "dir_graph.rs": "DirGraph index maintenance (petgraph-only fast paths)",
+    # PyO3 boundary — Phase 9 split kg_methods.rs into 4 per-concern files.
+    "pyapi/kg_core.rs": "PyO3 boundary (KnowledgeGraph storage-mode toggles)",
+    "pyapi/kg_mutation.rs": "PyO3 boundary (KnowledgeGraph mutation + storage swap)",
+    "pyapi/kg_introspection.rs": "PyO3 boundary (KnowledgeGraph introspection)",
+    "pyapi/kg_fluent.rs": "PyO3 boundary (KnowledgeGraph fluent chain)",
+    # Disk-internal boundary.
+    "io/ntriples/loader.rs": "disk-internal bulk-build (ntriples loader)",
+    "io/ntriples/writer.rs": "disk-internal bulk-build (ntriples edge writer)",
     "io/io_operations.rs": "disk-internal .kgl load_disk_dir path",
     "mutation/batch_operations.rs": "disk-internal update-path row_id lookup",
 }

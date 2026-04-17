@@ -16,6 +16,7 @@
 //! [`GraphWrite`] first, implement per-backend, and let the
 //! `GraphBackend` dispatcher route to them — never the other way.
 
+pub mod backend;
 pub mod disk;
 pub mod interner;
 pub mod lookups;
@@ -496,4 +497,10 @@ impl<'de> serde::Deserialize<'de> for MappedGraph {
 pub mod impls;
 pub mod recording;
 
+// Phase-6 recording backend — re-exported so downstream consumers (and
+// the Phase-6 parity test) can construct it without reaching into
+// `storage::recording::`. DO NOT REMOVE despite unused-import warnings;
+// `tests/test_phase6_parity.py::test_recording_graph_symbol_exported`
+// asserts this exact line survives.
+#[allow(unused_imports)]
 pub use recording::RecordingGraph;

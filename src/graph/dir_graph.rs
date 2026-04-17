@@ -1,0 +1,2133 @@
+//! DirGraph — transactional container for the in-memory graph.
+//!
+//! Owns the `StableDiGraph` + all type/property/composite/range indexes,
+//! OCC `version`, `schema_locked`, spatial / temporal / timeseries configs,
+//! embedding stores, connection-type metadata, and schema definitions.
+
+use crate::datatypes::values::Value;
+use crate::graph::schema::{
+    CompositeIndexKey, CompositeValue, ConnectionTypeInfo, ConnectivityTriple, EdgeData,
+    EmbeddingStore, Graph, GraphBackend, IndexKey, InternedKey, NodeData, PropertyStorage,
+    SaveMetadata, SchemaDefinition, SpatialConfig, StringInterner, TemporalConfig, TypeIdIndex,
+    TypeSchema,
+};
+use crate::graph::storage::{GraphRead, GraphWrite, MemoryGraph};
+use petgraph::graph::{EdgeIndex, NodeIndex};
+use petgraph::stable_graph::StableDiGraph;
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
+
+/// Core graph storage: a directed graph (petgraph `StableDiGraph`) with fast
+/// type-based indexing and optional property/composite/range/spatial indexes.
+///
+/// Fields include `type_indices` for O(1) node-type lookup, `property_indices`
+/// for indexed equality filters, connection-type metadata, schema definitions,
+/// and optional embedding stores for vector similarity search.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DirGraph {
+    pub(crate) graph: Graph,
+    /// Skipped during serialization — rebuilt from graph on load via `rebuild_type_indices()`.
+    #[serde(skip)]
+    pub(crate) type_indices: HashMap<String, Vec<NodeIndex>>,
+    /// Optional schema definition for validation
+    #[serde(default)]
+    pub(crate) schema_definition: Option<SchemaDefinition>,
+    /// Single-property indexes for fast lookups: (node_type, property) -> value -> [node_indices]
+    /// Skipped during serialization — rebuilt from `property_index_keys` on load.
+    #[serde(skip)]
+    pub(crate) property_indices: HashMap<IndexKey, HashMap<Value, Vec<NodeIndex>>>,
+    /// Composite indexes for multi-field queries: (node_type, [properties]) -> composite_value -> [node_indices]
+    /// Skipped during serialization — rebuilt from `composite_index_keys` on load.
+    #[serde(skip)]
+    pub(crate) composite_indices:
+        HashMap<CompositeIndexKey, HashMap<CompositeValue, Vec<NodeIndex>>>,
+    /// Persisted list of property index keys so indexes can be rebuilt on load
+    #[serde(default)]
+    pub(crate) property_index_keys: Vec<IndexKey>,
+    /// Persisted list of composite index keys so indexes can be rebuilt on load
+    #[serde(default)]
+    pub(crate) composite_index_keys: Vec<CompositeIndexKey>,
+    /// B-Tree range indexes for ordered lookups: (node_type, property) -> BTreeMap<Value, [NodeIndex]>
+    /// Skipped during serialization — rebuilt from `range_index_keys` on load.
+    #[serde(skip)]
+    pub(crate) range_indices: HashMap<IndexKey, std::collections::BTreeMap<Value, Vec<NodeIndex>>>,
+    /// Persisted list of range index keys so indexes can be rebuilt on load
+    #[serde(default)]
+    pub(crate) range_index_keys: Vec<IndexKey>,
+    /// Fast O(1) lookup by node ID: node_type -> TypeIdIndex
+    /// Lazily built on first use for each node type, skipped during serialization.
+    /// Uses compact u32 HashMap when all IDs are UniqueId (e.g., Wikidata mapped mode).
+    #[serde(skip)]
+    pub(crate) id_indices: HashMap<String, TypeIdIndex>,
+    /// Fast O(1) lookup for connection types (interned). Populated on first edge access.
+    #[serde(skip)]
+    pub(crate) connection_types: std::collections::HashSet<InternedKey>,
+    /// Node type metadata: node_type → { property_name → type_string }
+    /// Replaces SchemaNode graph nodes — persisted via serde/bincode.
+    #[serde(default)]
+    pub(crate) node_type_metadata: HashMap<String, HashMap<String, String>>,
+    /// Connection type metadata: connection_type → ConnectionTypeInfo
+    /// Replaces SchemaNode graph nodes for connections — persisted via serde/bincode.
+    #[serde(default)]
+    pub(crate) connection_type_metadata: HashMap<String, ConnectionTypeInfo>,
+    /// Version and library info stamped at save time.
+    /// Old files without this field deserialize to SaveMetadata::default() (format_version=0).
+    #[serde(default)]
+    pub(crate) save_metadata: SaveMetadata,
+    /// Original ID field name per node type (e.g. "Person" → "npdid").
+    /// Stored when the user-supplied unique_id_field differs from "id".
+    /// Used for alias resolution: querying by original column name maps to the `id` field.
+    #[serde(default)]
+    pub(crate) id_field_aliases: HashMap<String, String>,
+    /// Original title field name per node type (e.g. "Person" → "prospect_name").
+    /// Stored when the user-supplied node_title_field differs from "title".
+    /// Used for alias resolution: querying by original column name maps to the `title` field.
+    #[serde(default)]
+    pub(crate) title_field_aliases: HashMap<String, String>,
+    /// Parent type for supporting node types: child_type → parent_type.
+    /// If a type has an entry here, it is a "supporting" type that belongs to the parent.
+    /// Types without an entry are "core" types (shown in describe() inventory).
+    #[serde(default)]
+    pub(crate) parent_types: HashMap<String, String>,
+    /// Auto-vacuum threshold: if Some(t), vacuum() is triggered automatically after
+    /// DELETE operations when fragmentation_ratio exceeds t and tombstones > 100.
+    /// Default: Some(0.3). Set to None to disable.
+    #[serde(default = "default_auto_vacuum_threshold")]
+    pub(crate) auto_vacuum_threshold: Option<f64>,
+    /// Spatial configuration per node type: type_name → SpatialConfig.
+    /// Declares which properties hold lat/lon or WKT data for auto-resolution.
+    #[serde(default)]
+    pub(crate) spatial_configs: HashMap<String, SpatialConfig>,
+    /// Graph-level WKT geometry cache — persists across queries.
+    /// Uses Arc<Geometry> to avoid cloning heavy geometry objects.
+    /// RwLock allows concurrent reads from parallel row evaluation.
+    #[serde(skip)]
+    pub(crate) wkt_cache: Arc<RwLock<HashMap<String, Arc<geo::Geometry<f64>>>>>,
+    /// Lazy edge-type count cache — avoids O(E) rescan for FusedCountEdgesByType.
+    /// Invalidated on edge mutations (add/remove).
+    #[serde(skip)]
+    pub(crate) edge_type_counts_cache: Arc<RwLock<Option<HashMap<String, usize>>>>,
+    /// Cached type connectivity: (source_type, connection_type, target_type) → count.
+    /// Computed by `rebuild_caches()`, persisted in metadata, restored on load.
+    /// Invalidated on edge mutations alongside edge_type_counts_cache.
+    #[serde(skip)]
+    pub(crate) type_connectivity_cache: Arc<RwLock<Option<Vec<ConnectivityTriple>>>>,
+    /// Columnar embedding storage: (node_type, property_name) -> EmbeddingStore.
+    /// Stored separately from NodeData.properties — invisible to normal node API.
+    /// Persisted as a separate section in v2 .kgl files.
+    #[serde(skip)]
+    pub(crate) embeddings: HashMap<(String, String), EmbeddingStore>,
+    /// Timeseries configuration per node type: type_name → TimeseriesConfig.
+    /// Declares composite key labels and known channels for auto-resolution.
+    #[serde(default)]
+    pub(crate) timeseries_configs:
+        HashMap<String, crate::graph::features::timeseries::TimeseriesConfig>,
+    /// Per-node timeseries storage: NodeIndex.index() → NodeTimeseries.
+    /// Stored separately from NodeData.properties (like embeddings).
+    /// Persisted as a separate section in v2 .kgl files.
+    #[serde(skip)]
+    pub(crate) timeseries_store: HashMap<usize, crate::graph::features::timeseries::NodeTimeseries>,
+    /// Temporal configuration per node type: type_name → TemporalConfig.
+    /// Nodes of this type are auto-filtered by validity period in select().
+    #[serde(default)]
+    pub(crate) temporal_node_configs: HashMap<String, TemporalConfig>,
+    /// Temporal configurations per connection type: connection_type → Vec<TemporalConfig>.
+    /// Multiple configs per type support shared connection type names across source types
+    /// (e.g., HAS_LICENSEE used by Field, Licence, BusinessArrangement with different field names).
+    /// Edges of this type are auto-filtered by validity period in traverse().
+    #[serde(default)]
+    pub(crate) temporal_edge_configs: HashMap<String, Vec<TemporalConfig>>,
+    /// Per-type columnar property stores. When populated, nodes of these types
+    /// use `PropertyStorage::Columnar` instead of `Compact`.
+    /// Not persisted — rebuilt on load if columnar mode is enabled.
+    #[serde(skip)]
+    pub(crate) column_stores:
+        HashMap<String, Arc<crate::graph::storage::memory::column_store::ColumnStore>>,
+    /// Memory limit for columnar heap storage. If Some(n), `enable_columnar()`
+    /// will spill columns to temp files when total heap_bytes exceeds n.
+    #[serde(skip)]
+    pub(crate) memory_limit: Option<usize>,
+    /// Directory for spill files. Defaults to std::env::temp_dir()/kglite_spill_<pid>.
+    #[serde(skip)]
+    pub(crate) spill_dir: Option<std::path::PathBuf>,
+    /// Temp directories created during load or spill that should be cleaned up on drop.
+    /// Uses Arc so clones share ownership — only the last clone cleans up.
+    #[serde(skip)]
+    pub(crate) temp_dirs: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
+    /// If true, Cypher mutations (CREATE, SET, DELETE, REMOVE, MERGE) are rejected
+    /// and describe() omits mutation documentation.
+    #[serde(skip)]
+    pub(crate) read_only: bool,
+    /// If true, Cypher mutations (CREATE, SET, MERGE) are validated against
+    /// the frozen schema (node_type_metadata + connection_type_metadata).
+    /// Unlike read_only, mutations are still allowed — they just must conform.
+    #[serde(skip)]
+    pub(crate) schema_locked: bool,
+    /// Monotonically increasing version counter — incremented on every mutation.
+    /// Used for optimistic concurrency control in transactions.
+    #[serde(skip, default)]
+    pub(crate) version: u64,
+    /// Property key interner: maps InternedKey(u64) → original string.
+    /// Populated during ingestion (add_nodes, CREATE, SET) and deserialization.
+    /// Skipped during serde — rebuilt on load by the InternedKey Deserialize impl.
+    #[serde(skip)]
+    pub(crate) interner: StringInterner,
+    /// Shared property schemas per node type: type_name → Arc<TypeSchema>.
+    /// Populated during ingestion (add_nodes, CREATE) and compaction (load).
+    #[serde(skip)]
+    pub(crate) type_schemas: HashMap<String, Arc<TypeSchema>>,
+}
+
+fn default_auto_vacuum_threshold() -> Option<f64> {
+    Some(0.3)
+}
+
+impl Drop for DirGraph {
+    fn drop(&mut self) {
+        // Clean up temp directories created during load or columnar spill.
+        // Only the last Arc holder actually removes the dirs.
+        if let Ok(dirs) = self.temp_dirs.lock() {
+            // Only clean up if we're the sole owner (no other clones alive)
+            if Arc::strong_count(&self.temp_dirs) <= 1 {
+                for dir in dirs.iter() {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+            }
+        }
+    }
+}
+
+impl DirGraph {
+    pub fn new() -> Self {
+        DirGraph {
+            graph: Graph::new(),
+            type_indices: HashMap::new(),
+            schema_definition: None,
+            property_indices: HashMap::new(),
+            composite_indices: HashMap::new(),
+            property_index_keys: Vec::new(),
+            composite_index_keys: Vec::new(),
+            range_indices: HashMap::new(),
+            range_index_keys: Vec::new(),
+            id_indices: HashMap::new(),
+            connection_types: std::collections::HashSet::new(),
+            node_type_metadata: HashMap::new(),
+            connection_type_metadata: HashMap::new(),
+            save_metadata: SaveMetadata::current(),
+            id_field_aliases: HashMap::new(),
+            title_field_aliases: HashMap::new(),
+            parent_types: HashMap::new(),
+            auto_vacuum_threshold: default_auto_vacuum_threshold(),
+            spatial_configs: HashMap::new(),
+            wkt_cache: Arc::new(RwLock::new(HashMap::new())),
+            edge_type_counts_cache: Arc::new(RwLock::new(None)),
+            type_connectivity_cache: Arc::new(RwLock::new(None)),
+            embeddings: HashMap::new(),
+            timeseries_configs: HashMap::new(),
+            timeseries_store: HashMap::new(),
+            temporal_node_configs: HashMap::new(),
+            temporal_edge_configs: HashMap::new(),
+            column_stores: HashMap::new(),
+            memory_limit: None,
+            spill_dir: None,
+            temp_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
+            read_only: false,
+            schema_locked: false,
+            version: 0,
+            interner: StringInterner::new(),
+            type_schemas: HashMap::new(),
+        }
+    }
+
+    /// Create a DirGraph from a pre-existing graph (used by v3 loader).
+    /// All metadata fields start empty and are populated by the caller.
+    pub fn from_graph(graph: Graph) -> Self {
+        DirGraph {
+            graph,
+            type_indices: HashMap::new(),
+            schema_definition: None,
+            property_indices: HashMap::new(),
+            composite_indices: HashMap::new(),
+            property_index_keys: Vec::new(),
+            composite_index_keys: Vec::new(),
+            range_indices: HashMap::new(),
+            range_index_keys: Vec::new(),
+            id_indices: HashMap::new(),
+            connection_types: std::collections::HashSet::new(),
+            node_type_metadata: HashMap::new(),
+            connection_type_metadata: HashMap::new(),
+            save_metadata: SaveMetadata::default(),
+            id_field_aliases: HashMap::new(),
+            title_field_aliases: HashMap::new(),
+            parent_types: HashMap::new(),
+            auto_vacuum_threshold: default_auto_vacuum_threshold(),
+            spatial_configs: HashMap::new(),
+            wkt_cache: Arc::new(RwLock::new(HashMap::new())),
+            edge_type_counts_cache: Arc::new(RwLock::new(None)),
+            type_connectivity_cache: Arc::new(RwLock::new(None)),
+            embeddings: HashMap::new(),
+            timeseries_configs: HashMap::new(),
+            timeseries_store: HashMap::new(),
+            temporal_node_configs: HashMap::new(),
+            temporal_edge_configs: HashMap::new(),
+            column_stores: HashMap::new(),
+            memory_limit: None,
+            spill_dir: None,
+            temp_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
+            read_only: false,
+            schema_locked: false,
+            version: 0,
+            interner: StringInterner::new(),
+            type_schemas: HashMap::new(),
+        }
+    }
+
+    /// Look up spatial config for a node type.
+    pub fn get_spatial_config(&self, node_type: &str) -> Option<&SpatialConfig> {
+        self.spatial_configs.get(node_type)
+    }
+
+    /// Look up timeseries data for a specific node by its index.
+    pub fn get_node_timeseries(
+        &self,
+        node_index: usize,
+    ) -> Option<&crate::graph::features::timeseries::NodeTimeseries> {
+        self.timeseries_store.get(&node_index)
+    }
+
+    /// Look up an embedding store by `(&str, &str)` without allocating owned Strings.
+    /// Falls back to a linear scan of the embeddings map (typically 1-3 entries).
+    #[inline]
+    pub fn embedding_store(&self, node_type: &str, prop_name: &str) -> Option<&EmbeddingStore> {
+        // Embedding maps are tiny (usually 1-5 entries), so linear scan beats allocation
+        self.embeddings
+            .iter()
+            .find(|((nt, pn), _)| nt == node_type && pn == prop_name)
+            .map(|(_, store)| store)
+    }
+
+    /// Build the ID index for a specific node type.
+    /// Called lazily on first lookup for that type.
+    pub fn build_id_index(&mut self, node_type: &str) {
+        if self.id_indices.contains_key(node_type) {
+            return; // Already built
+        }
+
+        // First pass: check if all IDs are UniqueId
+        let mut all_unique_id = true;
+        let mut entries: Vec<(Value, NodeIndex)> = Vec::new();
+
+        if let Some(node_indices) = self.type_indices.get(node_type) {
+            entries.reserve(node_indices.len());
+            for &node_idx in node_indices {
+                if let Some(node) = self.graph.node_weight(node_idx) {
+                    let node_id = node.id().into_owned();
+                    if !matches!(node_id, Value::UniqueId(_)) {
+                        all_unique_id = false;
+                    }
+                    entries.push((node_id, node_idx));
+                }
+            }
+        }
+
+        let index = if all_unique_id && !entries.is_empty() {
+            // Compact: u32 keys only (~8 bytes per entry vs ~60)
+            let map = entries
+                .into_iter()
+                .filter_map(|(id, idx)| {
+                    if let Value::UniqueId(u) = id {
+                        Some((u, idx))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            TypeIdIndex::Integer(map)
+        } else {
+            // General: mixed ID types
+            TypeIdIndex::General(entries.into_iter().collect())
+        };
+
+        self.id_indices.insert(node_type.to_string(), index);
+    }
+
+    /// Build id_index for a type using column stores directly (no node materialization).
+    /// For DiskGraph, reads ids from mmap'd column stores via row_id from node_slots.
+    /// Much faster and uses no arena memory.
+    pub fn build_id_index_from_columns(&mut self, node_type: &str) {
+        if self.id_indices.contains_key(node_type) {
+            return;
+        }
+        let store = match self.column_stores.get(node_type) {
+            Some(s) => s.clone(),
+            None => {
+                // No column store — fall back to standard build
+                self.build_id_index(node_type);
+                return;
+            }
+        };
+        let node_indices = match self.type_indices.get(node_type) {
+            Some(indices) => indices,
+            None => return,
+        };
+
+        let mut all_unique_id = true;
+        let mut entries: Vec<(Value, NodeIndex)> = Vec::with_capacity(node_indices.len());
+
+        // Read ids directly from column store using row_id from node_slots
+        if let GraphBackend::Disk(ref dg) = self.graph {
+            for &node_idx in node_indices {
+                let slot = dg.node_slot(node_idx.index());
+                if slot.is_alive() {
+                    if let Some(id_val) = store.get_id(slot.row_id) {
+                        if !matches!(id_val, Value::UniqueId(_)) {
+                            all_unique_id = false;
+                        }
+                        entries.push((id_val, node_idx));
+                    }
+                }
+            }
+        } else {
+            // InMemory: fall back to standard build
+            self.build_id_index(node_type);
+            return;
+        }
+
+        let index = if all_unique_id && !entries.is_empty() {
+            let map = entries
+                .into_iter()
+                .filter_map(|(id, idx)| {
+                    if let Value::UniqueId(u) = id {
+                        Some((u, idx))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            TypeIdIndex::Integer(map)
+        } else {
+            TypeIdIndex::General(entries.into_iter().collect())
+        };
+
+        self.id_indices.insert(node_type.to_string(), index);
+    }
+
+    /// Look up a node by type and ID value. O(1) after index is built.
+    /// Builds the index lazily if not already built.
+    /// Handles type normalization: Python int may come as Int64 but be stored as UniqueId.
+    pub fn lookup_by_id(&mut self, node_type: &str, id: &Value) -> Option<NodeIndex> {
+        // Build index if needed
+        if !self.id_indices.contains_key(node_type) {
+            self.build_id_index(node_type);
+        }
+
+        self.lookup_by_id_normalized(node_type, id)
+    }
+
+    /// Look up a node by type and ID value without building index.
+    /// Use this for read-only access when index already exists.
+    /// Handles type normalization for integer types.
+    #[allow(dead_code)]
+    pub fn lookup_by_id_readonly(&self, node_type: &str, id: &Value) -> Option<NodeIndex> {
+        self.lookup_by_id_normalized(node_type, id)
+    }
+
+    /// Lookup node by ID with automatic type normalization.
+    /// This handles the Python-Rust type mismatch where Python int -> Int64 but
+    /// DataFrame unique_id columns store as UniqueId(u32).
+    ///
+    /// Falls back to a linear scan of type_indices if the id_index hasn't been
+    /// built yet (e.g., after DELETE invalidates id_indices).
+    pub fn lookup_by_id_normalized(&self, node_type: &str, id: &Value) -> Option<NodeIndex> {
+        if let Some(type_index) = self.id_indices.get(node_type) {
+            // Index exists for this type — trust it (O(1) with normalization).
+            // Don't fall through to linear scan.
+            return type_index.get(id);
+        }
+
+        // Fallback: linear scan through type_indices when id_index is missing
+        // (e.g., after DELETE invalidates id_indices for this type)
+        if let Some(node_indices) = self.type_indices.get(node_type) {
+            for &node_idx in node_indices {
+                if let Some(node) = self.graph.node_weight(node_idx) {
+                    let node_id = node.id();
+                    if &*node_id == id {
+                        return Some(node_idx);
+                    }
+                    // Normalize: check Int64 ↔ UniqueId
+                    match (id, &*node_id) {
+                        (Value::Int64(i), Value::UniqueId(u)) if *i >= 0 && *i as u32 == *u => {
+                            return Some(node_idx);
+                        }
+                        (Value::UniqueId(u), Value::Int64(i)) if *i >= 0 && *u == *i as u32 => {
+                            return Some(node_idx);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Invalidate the ID index for a node type (call when nodes are added/removed)
+    #[allow(dead_code)]
+    pub fn invalidate_id_index(&mut self, node_type: &str) {
+        self.id_indices.remove(node_type);
+    }
+
+    /// Clear all ID indices (call after bulk operations)
+    #[allow(dead_code)]
+    pub fn clear_id_indices(&mut self) {
+        self.id_indices.clear();
+    }
+
+    /// Set the schema definition for this graph
+    pub fn set_schema(&mut self, schema: SchemaDefinition) {
+        self.schema_definition = Some(schema);
+    }
+
+    /// Get the schema definition if one is set
+    pub fn get_schema(&self) -> Option<&SchemaDefinition> {
+        self.schema_definition.as_ref()
+    }
+
+    /// Clear the schema definition
+    pub fn clear_schema(&mut self) {
+        self.schema_definition = None;
+    }
+
+    pub fn has_connection_type(&self, connection_type: &str) -> bool {
+        // Fast path: check the interned connection_types cache (O(1))
+        if !self.connection_types.is_empty() {
+            return self
+                .connection_types
+                .contains(&InternedKey::from_str(connection_type));
+        }
+        // Check metadata
+        if self.connection_type_metadata.contains_key(connection_type) {
+            return true;
+        }
+        // If metadata is empty (e.g. disk graph without full metadata),
+        // check the interner — if the string was interned, it likely exists as
+        // a connection type. This avoids false negatives that would cause
+        // edge-type-filtered queries to return 0 results.
+        if self.connection_type_metadata.is_empty() {
+            return self
+                .interner
+                .try_resolve(InternedKey::from_str(connection_type))
+                .is_some();
+        }
+        false
+    }
+
+    /// Register a connection type (interned) for O(1) lookups.
+    /// Called when edges are added to the graph.
+    pub fn register_connection_type(&mut self, connection_type: String) {
+        let key = self.interner.get_or_intern(&connection_type);
+        self.connection_types.insert(key);
+    }
+
+    /// Build the connection types cache.
+    /// Called after deserialization or when cache is needed.
+    /// Fast path: populate from connection_type_metadata (O(types), no edge scan).
+    /// Fallback: scan all edges (O(edges)) if metadata is empty.
+    pub fn build_connection_types_cache(&mut self) {
+        if !self.connection_types.is_empty() {
+            return; // Already built
+        }
+
+        // Fast path: metadata is serialized — use it instead of scanning edges
+        if !self.connection_type_metadata.is_empty() {
+            for key in self.connection_type_metadata.keys() {
+                self.connection_types
+                    .insert(self.interner.get_or_intern(key));
+            }
+            return;
+        }
+
+        // Fallback: scan all edges (pre-metadata graphs)
+        for edge in self.graph.edge_weights() {
+            self.connection_types.insert(edge.connection_type);
+        }
+    }
+
+    /// Compute edge counts grouped by connection type. Lazily cached.
+    pub fn get_edge_type_counts(&self) -> HashMap<String, usize> {
+        // Fast path: return cached result
+        {
+            let read = self.edge_type_counts_cache.read().unwrap();
+            if let Some(ref cached) = *read {
+                return cached.clone();
+            }
+        }
+        // Slow path: compute O(E) and cache.
+        // Uses edge_endpoint_keys() (mmap reads, zero heap per edge) instead of
+        // edge_weights() (which materializes EdgeData → OOM on extreme-scale disk graphs).
+        let mut counts: HashMap<InternedKey, usize> = HashMap::new();
+        for (_src, _tgt, conn_key) in self.graph.edge_endpoint_keys() {
+            *counts.entry(conn_key).or_insert(0) += 1;
+        }
+        // Resolve to strings
+        let string_counts: HashMap<String, usize> = counts
+            .into_iter()
+            .map(|(k, v)| (self.interner.resolve(k).to_string(), v))
+            .collect();
+        let mut write = self.edge_type_counts_cache.write().unwrap();
+        *write = Some(string_counts.clone());
+        string_counts
+    }
+
+    /// Invalidate edge caches (call after edge mutations).
+    pub(crate) fn invalidate_edge_type_counts_cache(&self) {
+        *self.edge_type_counts_cache.write().unwrap() = None;
+        *self.type_connectivity_cache.write().unwrap() = None;
+    }
+
+    /// Check if edge type count cache is populated (avoids O(E) scan).
+    pub fn has_edge_type_counts_cache(&self) -> bool {
+        self.edge_type_counts_cache.read().unwrap().is_some()
+    }
+
+    /// Check if type connectivity cache is populated.
+    pub fn has_type_connectivity_cache(&self) -> bool {
+        self.type_connectivity_cache.read().unwrap().is_some()
+    }
+
+    /// Get the type connectivity triples (if cached).
+    pub fn get_type_connectivity(&self) -> Option<Vec<ConnectivityTriple>> {
+        self.type_connectivity_cache.read().unwrap().clone()
+    }
+
+    /// Set the type connectivity cache.
+    pub fn set_type_connectivity(&self, triples: Vec<ConnectivityTriple>) {
+        *self.type_connectivity_cache.write().unwrap() = Some(triples);
+    }
+
+    // ========================================================================
+    // Type Metadata Methods (replaces SchemaNode graph nodes)
+    // ========================================================================
+
+    /// Get metadata for a node type (property names → type strings).
+    pub fn get_node_type_metadata(&self, node_type: &str) -> Option<&HashMap<String, String>> {
+        self.node_type_metadata.get(node_type)
+    }
+
+    /// Get metadata for a connection type.
+    #[allow(dead_code)]
+    pub fn get_connection_type_info(&self, conn_type: &str) -> Option<&ConnectionTypeInfo> {
+        self.connection_type_metadata.get(conn_type)
+    }
+
+    /// Upsert node type metadata — merges new property types into existing.
+    pub fn upsert_node_type_metadata(&mut self, node_type: &str, props: HashMap<String, String>) {
+        let entry = self
+            .node_type_metadata
+            .entry(node_type.to_string())
+            .or_default();
+        for (k, v) in props {
+            entry.insert(k, v);
+        }
+    }
+
+    /// Upsert connection type metadata — merges property types and accumulates type pairs.
+    pub fn upsert_connection_type_metadata(
+        &mut self,
+        conn_type: &str,
+        source_type: &str,
+        target_type: &str,
+        prop_types: HashMap<String, String>,
+    ) {
+        let entry = self
+            .connection_type_metadata
+            .entry(conn_type.to_string())
+            .or_insert_with(|| ConnectionTypeInfo {
+                source_types: HashSet::new(),
+                target_types: HashSet::new(),
+                property_types: HashMap::new(),
+            });
+        entry.source_types.insert(source_type.to_string());
+        entry.target_types.insert(target_type.to_string());
+        for (k, v) in prop_types {
+            entry.property_types.insert(k, v);
+        }
+    }
+
+    pub fn has_node_type(&self, node_type: &str) -> bool {
+        self.type_indices.contains_key(node_type) || self.node_type_metadata.contains_key(node_type)
+    }
+
+    /// Get all node types that exist in the graph.
+    pub fn get_node_types(&self) -> Vec<String> {
+        let mut types: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Get types from type_indices
+        for node_type in self.type_indices.keys() {
+            types.insert(node_type.clone());
+        }
+
+        // Also include types from metadata (may have metadata but no live nodes)
+        for node_type in self.node_type_metadata.keys() {
+            types.insert(node_type.clone());
+        }
+
+        types.into_iter().collect()
+    }
+
+    /// Resolve a property name through field aliases.
+    /// If the property matches the original ID or title field name for this node type,
+    /// returns the canonical name ("id" or "title"). Otherwise returns the property unchanged.
+    pub fn resolve_alias<'a>(&'a self, node_type: &str, property: &'a str) -> &'a str {
+        if self.id_field_aliases.is_empty() && self.title_field_aliases.is_empty() {
+            return property;
+        }
+        if let Some(alias) = self.id_field_aliases.get(node_type) {
+            if alias == property {
+                return "id";
+            }
+        }
+        if let Some(alias) = self.title_field_aliases.get(node_type) {
+            if alias == property {
+                return "title";
+            }
+        }
+        property
+    }
+
+    pub fn get_node(&self, index: NodeIndex) -> Option<&NodeData> {
+        self.graph.node_weight(index)
+    }
+
+    pub fn get_node_mut(&mut self, index: NodeIndex) -> Option<&mut NodeData> {
+        self.graph.node_weight_mut(index)
+    }
+
+    pub fn _get_connection(&self, index: EdgeIndex) -> Option<&EdgeData> {
+        self.graph.edge_weight(index)
+    }
+
+    pub fn _get_connection_mut(&mut self, index: EdgeIndex) -> Option<&mut EdgeData> {
+        self.graph.edge_weight_mut(index)
+    }
+
+    // ========================================================================
+    // Index Management Methods
+    // ========================================================================
+
+    /// Create an index on a property for a specific node type.
+    /// Returns the number of entries indexed.
+    pub fn create_index(&mut self, node_type: &str, property: &str) -> usize {
+        let key = (node_type.to_string(), property.to_string());
+
+        // Build the index
+        let mut index: HashMap<Value, Vec<NodeIndex>> = HashMap::new();
+
+        if let Some(node_indices) = self.type_indices.get(node_type) {
+            for &idx in node_indices {
+                if let Some(node) = self.graph.node_weight(idx) {
+                    if let Some(value) = node.get_property(property) {
+                        index.entry(value.into_owned()).or_default().push(idx);
+                    }
+                }
+            }
+        }
+
+        let count = index.len();
+        self.property_indices.insert(key, index);
+        count
+    }
+
+    /// Drop an index on a property for a specific node type.
+    /// Returns true if the index existed and was removed.
+    pub fn drop_index(&mut self, node_type: &str, property: &str) -> bool {
+        let key = (node_type.to_string(), property.to_string());
+        self.property_indices.remove(&key).is_some()
+    }
+
+    /// Check if an index exists for a given node type and property.
+    pub fn has_index(&self, node_type: &str, property: &str) -> bool {
+        let key = (node_type.to_string(), property.to_string());
+        self.property_indices.contains_key(&key)
+    }
+
+    /// Get all existing indexes as a list of (node_type, property) tuples.
+    pub fn list_indexes(&self) -> Vec<(String, String)> {
+        self.property_indices.keys().cloned().collect()
+    }
+
+    /// Look up nodes by property value using an index.
+    /// Returns None if no index exists, otherwise returns matching node indices.
+    pub fn lookup_by_index(
+        &self,
+        node_type: &str,
+        property: &str,
+        value: &Value,
+    ) -> Option<Vec<NodeIndex>> {
+        let key = (node_type.to_string(), property.to_string());
+        self.property_indices
+            .get(&key)
+            .and_then(|idx| idx.get(value))
+            .cloned()
+    }
+
+    /// Get statistics about an index.
+    pub fn get_index_stats(&self, node_type: &str, property: &str) -> Option<IndexStats> {
+        let key = (node_type.to_string(), property.to_string());
+        self.property_indices.get(&key).map(|idx| {
+            let total_entries: usize = idx.values().map(|v| v.len()).sum();
+            IndexStats {
+                unique_values: idx.len(),
+                total_entries,
+                avg_entries_per_value: if idx.is_empty() {
+                    0.0
+                } else {
+                    total_entries as f64 / idx.len() as f64
+                },
+            }
+        })
+    }
+
+    // ========================================================================
+    // Range Index Methods (B-Tree)
+    // ========================================================================
+
+    /// Create a range index (B-Tree) on a property for a specific node type.
+    /// Enables efficient range queries (>, >=, <, <=, BETWEEN).
+    /// Returns the number of unique values indexed.
+    pub fn create_range_index(&mut self, node_type: &str, property: &str) -> usize {
+        let key = (node_type.to_string(), property.to_string());
+        let mut index: std::collections::BTreeMap<Value, Vec<NodeIndex>> =
+            std::collections::BTreeMap::new();
+
+        if let Some(node_indices) = self.type_indices.get(node_type) {
+            for &idx in node_indices {
+                if let Some(node) = self.graph.node_weight(idx) {
+                    if let Some(value) = node.get_property(property) {
+                        index.entry(value.into_owned()).or_default().push(idx);
+                    }
+                }
+            }
+        }
+
+        let count = index.len();
+        self.range_indices.insert(key, index);
+        count
+    }
+
+    /// Drop a range index. Returns true if it existed.
+    pub fn drop_range_index(&mut self, node_type: &str, property: &str) -> bool {
+        let key = (node_type.to_string(), property.to_string());
+        self.range_indices.remove(&key).is_some()
+    }
+
+    /// Check if a range index exists.
+    #[allow(dead_code)]
+    pub fn has_range_index(&self, node_type: &str, property: &str) -> bool {
+        let key = (node_type.to_string(), property.to_string());
+        self.range_indices.contains_key(&key)
+    }
+
+    /// Range lookup: returns node indices where property value falls in the given range.
+    pub fn lookup_range(
+        &self,
+        node_type: &str,
+        property: &str,
+        lower: std::ops::Bound<&Value>,
+        upper: std::ops::Bound<&Value>,
+    ) -> Option<Vec<NodeIndex>> {
+        let key = (node_type.to_string(), property.to_string());
+        self.range_indices.get(&key).map(|btree| {
+            btree
+                .range((lower, upper))
+                .flat_map(|(_, indices)| indices.iter().copied())
+                .collect()
+        })
+    }
+
+    // ========================================================================
+    // Composite Index Methods
+    // ========================================================================
+
+    /// Create a composite index on multiple properties for a specific node type.
+    /// Composite indexes enable efficient lookups on multiple fields at once.
+    ///
+    /// Returns the number of unique value combinations indexed.
+    ///
+    /// Example: create_composite_index("Person", &["city", "age"]) allows efficient
+    /// queries like filter({'city': 'Oslo', 'age': 30}).
+    pub fn create_composite_index(&mut self, node_type: &str, properties: &[&str]) -> usize {
+        let key = (
+            node_type.to_string(),
+            properties.iter().map(|s| s.to_string()).collect(),
+        );
+
+        // Build the composite index
+        let mut index: HashMap<CompositeValue, Vec<NodeIndex>> = HashMap::new();
+
+        if let Some(node_indices) = self.type_indices.get(node_type) {
+            for &idx in node_indices {
+                if let Some(node) = self.graph.node_weight(idx) {
+                    // Extract values for all properties in order
+                    let values: Vec<Value> = properties
+                        .iter()
+                        .map(|p| {
+                            node.get_property(p)
+                                .map(Cow::into_owned)
+                                .unwrap_or(Value::Null)
+                        })
+                        .collect();
+
+                    // Only index if at least one value is non-null
+                    if values.iter().any(|v| !matches!(v, Value::Null)) {
+                        index.entry(CompositeValue(values)).or_default().push(idx);
+                    }
+                }
+            }
+        }
+
+        let count = index.len();
+        self.composite_indices.insert(key, index);
+        count
+    }
+
+    /// Drop a composite index.
+    /// Returns true if the index existed and was removed.
+    pub fn drop_composite_index(&mut self, node_type: &str, properties: &[String]) -> bool {
+        let key = (node_type.to_string(), properties.to_vec());
+        self.composite_indices.remove(&key).is_some()
+    }
+
+    /// Check if a composite index exists.
+    pub fn has_composite_index(&self, node_type: &str, properties: &[String]) -> bool {
+        let key = (node_type.to_string(), properties.to_vec());
+        self.composite_indices.contains_key(&key)
+    }
+
+    /// Get all existing composite indexes.
+    pub fn list_composite_indexes(&self) -> Vec<(String, Vec<String>)> {
+        self.composite_indices.keys().cloned().collect()
+    }
+
+    /// Look up nodes by composite values using a composite index.
+    /// Properties must match the order used when creating the index.
+    pub fn lookup_by_composite_index(
+        &self,
+        node_type: &str,
+        properties: &[String],
+        values: &[Value],
+    ) -> Option<Vec<NodeIndex>> {
+        let key = (node_type.to_string(), properties.to_vec());
+        let composite_value = CompositeValue(values.to_vec());
+
+        self.composite_indices
+            .get(&key)
+            .and_then(|idx| idx.get(&composite_value))
+            .cloned()
+    }
+
+    /// Get statistics about a composite index.
+    pub fn get_composite_index_stats(
+        &self,
+        node_type: &str,
+        properties: &[String],
+    ) -> Option<IndexStats> {
+        let key = (node_type.to_string(), properties.to_vec());
+        self.composite_indices.get(&key).map(|idx| {
+            let total_entries: usize = idx.values().map(|v| v.len()).sum();
+            IndexStats {
+                unique_values: idx.len(),
+                total_entries,
+                avg_entries_per_value: if idx.is_empty() {
+                    0.0
+                } else {
+                    total_entries as f64 / idx.len() as f64
+                },
+            }
+        })
+    }
+
+    /// Find a composite index that can be used for a given set of filter properties.
+    /// Returns the index key and whether all filter properties are covered.
+    pub fn find_matching_composite_index(
+        &self,
+        node_type: &str,
+        filter_properties: &[String],
+    ) -> Option<(CompositeIndexKey, bool)> {
+        // Sort filter properties for comparison
+        let mut sorted_filter: Vec<String> = filter_properties.to_vec();
+        sorted_filter.sort();
+
+        for key in self.composite_indices.keys() {
+            if key.0 == node_type {
+                let mut sorted_index: Vec<String> = key.1.clone();
+                sorted_index.sort();
+
+                // Check if index properties are a subset of or equal to filter properties
+                // For exact match, the index must cover exactly the filter fields
+                if sorted_index == sorted_filter {
+                    return Some((key.clone(), true)); // Exact match
+                }
+
+                // Check if index is a prefix of filter (can be used for partial filtering)
+                if sorted_filter.starts_with(&sorted_index)
+                    || sorted_index.iter().all(|p| sorted_filter.contains(p))
+                {
+                    return Some((key.clone(), false)); // Partial match
+                }
+            }
+        }
+        None
+    }
+
+    // ========================================================================
+    // Incremental Index Maintenance (called by Cypher mutations)
+    // ========================================================================
+
+    /// Update property, composite, and range indices after a new node is added.
+    /// Only updates indices that already exist for this node_type.
+    pub fn update_property_indices_for_add(&mut self, node_type: &str, node_idx: NodeIndex) {
+        // Collect single-property index updates (immutable borrow of self.graph)
+        let prop_updates: Vec<(IndexKey, Value)> = {
+            let node = match self.graph.node_weight(node_idx) {
+                Some(n) => n,
+                None => return,
+            };
+            self.property_indices
+                .keys()
+                .chain(self.range_indices.keys())
+                .filter(|(nt, _)| nt == node_type)
+                .filter_map(|key| {
+                    node.get_property(&key.1)
+                        .map(|v| (key.clone(), v.into_owned()))
+                })
+                .collect()
+        };
+        for (key, value) in &prop_updates {
+            if let Some(value_map) = self.property_indices.get_mut(key) {
+                value_map.entry(value.clone()).or_default().push(node_idx);
+            }
+            if let Some(btree) = self.range_indices.get_mut(key) {
+                btree.entry(value.clone()).or_default().push(node_idx);
+            }
+        }
+
+        // Collect composite index updates
+        let comp_updates: Vec<(CompositeIndexKey, CompositeValue)> = {
+            let node = match self.graph.node_weight(node_idx) {
+                Some(n) => n,
+                None => return,
+            };
+            self.composite_indices
+                .keys()
+                .filter(|(nt, _)| nt == node_type)
+                .filter_map(|key| {
+                    let vals: Vec<Value> = key
+                        .1
+                        .iter()
+                        .map(|p| {
+                            node.get_property(p)
+                                .map(Cow::into_owned)
+                                .unwrap_or(Value::Null)
+                        })
+                        .collect();
+                    if vals.iter().any(|v| !matches!(v, Value::Null)) {
+                        Some((key.clone(), CompositeValue(vals)))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        for (key, comp_val) in comp_updates {
+            if let Some(comp_map) = self.composite_indices.get_mut(&key) {
+                comp_map.entry(comp_val).or_default().push(node_idx);
+            }
+        }
+    }
+
+    /// Update property, range, and composite indices after a property value is changed.
+    /// Removes node from the old value bucket and adds to the new value bucket.
+    pub fn update_property_indices_for_set(
+        &mut self,
+        node_type: &str,
+        node_idx: NodeIndex,
+        property: &str,
+        old_value: Option<&Value>,
+        new_value: &Value,
+    ) {
+        let key = (node_type.to_string(), property.to_string());
+        // Update hash index
+        if let Some(value_map) = self.property_indices.get_mut(&key) {
+            if let Some(old_val) = old_value {
+                if let Some(indices) = value_map.get_mut(old_val) {
+                    indices.retain(|&idx| idx != node_idx);
+                    if indices.is_empty() {
+                        value_map.remove(old_val);
+                    }
+                }
+            }
+            value_map
+                .entry(new_value.clone())
+                .or_default()
+                .push(node_idx);
+        }
+        // Update range index
+        if let Some(btree) = self.range_indices.get_mut(&key) {
+            if let Some(old_val) = old_value {
+                if let Some(indices) = btree.get_mut(old_val) {
+                    indices.retain(|&idx| idx != node_idx);
+                    if indices.is_empty() {
+                        btree.remove(old_val);
+                    }
+                }
+            }
+            btree.entry(new_value.clone()).or_default().push(node_idx);
+        }
+
+        // Update any composite indices that include this property
+        self.update_composite_indices_for_property_change(node_type, node_idx, property);
+    }
+
+    /// Update property, range, and composite indices after a property is removed.
+    pub fn update_property_indices_for_remove(
+        &mut self,
+        node_type: &str,
+        node_idx: NodeIndex,
+        property: &str,
+        old_value: &Value,
+    ) {
+        let key = (node_type.to_string(), property.to_string());
+        if let Some(value_map) = self.property_indices.get_mut(&key) {
+            if let Some(indices) = value_map.get_mut(old_value) {
+                indices.retain(|&idx| idx != node_idx);
+                if indices.is_empty() {
+                    value_map.remove(old_value);
+                }
+            }
+        }
+        if let Some(btree) = self.range_indices.get_mut(&key) {
+            if let Some(indices) = btree.get_mut(old_value) {
+                indices.retain(|&idx| idx != node_idx);
+                if indices.is_empty() {
+                    btree.remove(old_value);
+                }
+            }
+        }
+
+        // Update any composite indices that include this property
+        self.update_composite_indices_for_property_change(node_type, node_idx, property);
+    }
+
+    /// Re-index a single node in all composite indices that include the changed property.
+    /// Reads current node properties to build the new composite value.
+    fn update_composite_indices_for_property_change(
+        &mut self,
+        node_type: &str,
+        node_idx: NodeIndex,
+        changed_property: &str,
+    ) {
+        let comp_keys: Vec<CompositeIndexKey> = self
+            .composite_indices
+            .keys()
+            .filter(|(nt, props)| nt == node_type && props.contains(&changed_property.to_string()))
+            .cloned()
+            .collect();
+
+        if comp_keys.is_empty() {
+            return;
+        }
+
+        // Read current node properties once
+        let current_props: HashMap<String, Value> = match self.graph.node_weight(node_idx) {
+            Some(node) => node.properties_cloned(&self.interner),
+            None => return,
+        };
+
+        for key in comp_keys {
+            if let Some(comp_map) = self.composite_indices.get_mut(&key) {
+                // Remove node from all existing composite buckets
+                for indices in comp_map.values_mut() {
+                    indices.retain(|&idx| idx != node_idx);
+                }
+                // Remove empty buckets
+                comp_map.retain(|_, v| !v.is_empty());
+
+                // Build new composite value from current properties
+                let new_values: Vec<Value> = key
+                    .1
+                    .iter()
+                    .map(|p| current_props.get(p).cloned().unwrap_or(Value::Null))
+                    .collect();
+                if new_values.iter().any(|v| !matches!(v, Value::Null)) {
+                    comp_map
+                        .entry(CompositeValue(new_values))
+                        .or_default()
+                        .push(node_idx);
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Serialization helpers
+    // ========================================================================
+
+    /// Snapshot which property/composite indexes exist so they survive serialization.
+    /// Called automatically before save.
+    /// Sync node_type_metadata to match actual column store contents.
+    /// Removes properties from metadata that have no data in any column store.
+    /// Called before save to ensure metadata consistency.
+    pub fn populate_index_keys(&mut self) {
+        self.property_index_keys = self.property_indices.keys().cloned().collect();
+        self.composite_index_keys = self.composite_indices.keys().cloned().collect();
+        self.range_index_keys = self.range_indices.keys().cloned().collect();
+    }
+
+    /// Rebuild property and composite indexes from the persisted key lists.
+    /// Called automatically after load.
+    pub fn rebuild_indices_from_keys(&mut self) {
+        let prop_keys: Vec<IndexKey> = std::mem::take(&mut self.property_index_keys);
+        for (node_type, property) in &prop_keys {
+            self.create_index(node_type, property);
+        }
+        self.property_index_keys = prop_keys;
+
+        let comp_keys: Vec<CompositeIndexKey> = std::mem::take(&mut self.composite_index_keys);
+        for (node_type, properties) in &comp_keys {
+            let prop_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
+            self.create_composite_index(node_type, &prop_refs);
+        }
+        self.composite_index_keys = comp_keys;
+
+        let range_keys: Vec<IndexKey> = std::mem::take(&mut self.range_index_keys);
+        for (node_type, property) in &range_keys {
+            self.create_range_index(node_type, property);
+        }
+        self.range_index_keys = range_keys;
+    }
+
+    // ========================================================================
+    // Graph Maintenance: reindex, vacuum, graph_info
+    // ========================================================================
+
+    /// Rebuild all indexes from the current graph state.
+    ///
+    /// Reconstructs type_indices, property_indices, and composite_indices by
+    /// scanning all live nodes. Clears lazy caches (id_indices, connection_types)
+    /// so they rebuild on next access.
+    ///
+    /// Use after bulk mutations to ensure index consistency, or when you suspect
+    /// indexes have drifted from the actual graph state.
+    /// Rebuild type_indices from the live graph.
+    /// Called after deserialization (type_indices is `#[serde(skip)]`) and by `reindex()`.
+    pub fn rebuild_type_indices(&mut self) {
+        let type_count = self.node_type_metadata.len().max(4);
+        let avg_per_type = self.graph.node_count() / type_count.max(1);
+        let mut new_type_indices: HashMap<String, Vec<NodeIndex>> =
+            HashMap::with_capacity(type_count);
+        for node_idx in self.graph.node_indices() {
+            if let Some(node) = self.graph.node_weight(node_idx) {
+                let type_str = node.node_type_str(&self.interner).to_string();
+                new_type_indices
+                    .entry(type_str)
+                    .or_insert_with(|| Vec::with_capacity(avg_per_type))
+                    .push(node_idx);
+            }
+        }
+        self.type_indices = new_type_indices;
+    }
+
+    /// Convert all node properties from PropertyStorage::Map to PropertyStorage::Compact.
+    /// Called after deserialization to convert the transient Map storage to dense slot-vec.
+    /// Builds TypeSchemas per node type and stores them in `self.type_schemas`.
+    #[allow(dead_code)]
+    pub fn compact_properties(&mut self) {
+        // Phase 1: Build TypeSchemas from node_type_metadata (O(types), not O(N×P))
+        let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
+        for (node_type, props) in &self.node_type_metadata {
+            let keys = props.keys().map(|name| self.interner.get_or_intern(name));
+            schemas.insert(node_type.clone(), TypeSchema::from_keys(keys));
+        }
+
+        // Fallback: if metadata is empty (pre-metadata graph), scan nodes
+        if schemas.is_empty() {
+            for node_idx in self.graph.node_indices() {
+                if let Some(node) = self.graph.node_weight(node_idx) {
+                    let type_str = node.node_type_str(&self.interner).to_string();
+                    let schema = schemas.entry(type_str).or_insert_with(TypeSchema::new);
+                    if let PropertyStorage::Map(map) = &node.properties {
+                        for &key in map.keys() {
+                            schema.add_key(key);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Wrap in Arc and store
+        let arc_schemas: HashMap<String, Arc<TypeSchema>> =
+            schemas.into_iter().map(|(t, s)| (t, Arc::new(s))).collect();
+
+        // Phase 3: Convert each node's Map → Compact
+        // Collect indices first to avoid borrowing conflict.
+        let node_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
+        for node_idx in node_indices {
+            let node = self.graph.node_weight_mut(node_idx).unwrap();
+            if let PropertyStorage::Map(_) = &node.properties {
+                let type_str = node.node_type_str(&self.interner);
+                if let Some(schema) = arc_schemas.get(type_str) {
+                    let old = std::mem::replace(
+                        &mut node.properties,
+                        PropertyStorage::Compact {
+                            schema: Arc::clone(schema),
+                            values: Vec::new(),
+                        },
+                    );
+                    if let PropertyStorage::Map(map) = old {
+                        node.properties = PropertyStorage::from_compact(map, schema);
+                    }
+                }
+            }
+        }
+
+        self.type_schemas = arc_schemas;
+    }
+
+    /// Combined rebuild_type_indices + compact_properties in a single pass.
+    /// Used after deserialization when both need to run.
+    pub fn rebuild_type_indices_and_compact(&mut self) {
+        // Build TypeSchemas from metadata (O(types))
+        let mut schemas: HashMap<String, TypeSchema> = HashMap::new();
+        for (node_type, props) in &self.node_type_metadata {
+            let keys = props.keys().map(|name| self.interner.get_or_intern(name));
+            schemas.insert(node_type.clone(), TypeSchema::from_keys(keys));
+        }
+
+        // Fallback: if metadata is empty (loaded from file), scan nodes
+        if schemas.is_empty() {
+            for node_idx in self.graph.node_indices() {
+                if let Some(node) = self.graph.node_weight(node_idx) {
+                    let type_str = node.node_type_str(&self.interner).to_string();
+                    let schema = schemas.entry(type_str).or_insert_with(TypeSchema::new);
+                    if let PropertyStorage::Map(map) = &node.properties {
+                        for &key in map.keys() {
+                            schema.add_key(key);
+                        }
+                    }
+                }
+            }
+        }
+
+        let arc_schemas: HashMap<String, Arc<TypeSchema>> =
+            schemas.into_iter().map(|(t, s)| (t, Arc::new(s))).collect();
+
+        // Single pass: build type_indices AND convert Map → Compact
+        let type_count = arc_schemas.len().max(4);
+        let avg_per_type = self.graph.node_count() / type_count.max(1);
+        let mut new_type_indices: HashMap<String, Vec<NodeIndex>> =
+            HashMap::with_capacity(type_count);
+
+        let node_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
+        for node_idx in node_indices {
+            let node = self.graph.node_weight_mut(node_idx).unwrap();
+
+            // Rebuild type_indices
+            let type_str = node.node_type_str(&self.interner).to_string();
+            new_type_indices
+                .entry(type_str)
+                .or_insert_with(|| Vec::with_capacity(avg_per_type))
+                .push(node_idx);
+
+            // Convert Map → Compact
+            if let PropertyStorage::Map(_) = &node.properties {
+                let type_str = node.node_type_str(&self.interner);
+                if let Some(schema) = arc_schemas.get(type_str) {
+                    let old = std::mem::replace(
+                        &mut node.properties,
+                        PropertyStorage::Compact {
+                            schema: Arc::clone(schema),
+                            values: Vec::new(),
+                        },
+                    );
+                    if let PropertyStorage::Map(map) = old {
+                        node.properties = PropertyStorage::from_compact(map, schema);
+                    }
+                }
+            }
+        }
+
+        self.type_indices = new_type_indices;
+        self.type_schemas = arc_schemas;
+    }
+
+    /// Convert the graph to disk-backed storage mode.
+    /// Enables columnar storage first, then builds CSR edge arrays on disk.
+    /// Nodes stay in memory (~40 bytes each), edges are mmap'd.
+    pub fn enable_disk_mode(&mut self) -> Result<(), String> {
+        // Ensure columnar storage for compact node representation
+        if !self.is_columnar() {
+            self.enable_columnar();
+        }
+
+        // Create a temp directory for CSR files
+        let data_dir = std::env::temp_dir().join(format!(
+            "kglite_disk_{}_{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+
+        // Extract the StableDiGraph and build DiskGraph
+        let disk_graph = match &mut self.graph {
+            GraphBackend::Memory(g) => {
+                crate::graph::storage::disk::disk_graph::DiskGraph::from_stable_digraph(
+                    g.inner_mut(),
+                    &data_dir,
+                )
+            }
+            GraphBackend::Mapped(g) => {
+                crate::graph::storage::disk::disk_graph::DiskGraph::from_stable_digraph(
+                    g.inner_mut(),
+                    &data_dir,
+                )
+            }
+            GraphBackend::Disk(_) => return Err("Already in disk mode".to_string()),
+            GraphBackend::Recording(_) => {
+                return Err(
+                    "enable_disk_mode not supported while wrapped in RecordingGraph".to_string(),
+                )
+            }
+        }
+        .map_err(|e| format!("Failed to create DiskGraph: {}", e))?;
+
+        // Register temp dir for cleanup
+        if let Ok(mut dirs) = self.temp_dirs.lock() {
+            dirs.push(data_dir);
+        }
+
+        self.graph = GraphBackend::Disk(Box::new(disk_graph));
+        Ok(())
+    }
+
+    /// Sync column store references from DirGraph to DiskGraph.
+    /// Called after enable_columnar(), add_nodes(), and load.
+    pub fn sync_disk_column_stores(&mut self) {
+        if let GraphBackend::Disk(ref mut dg) = self.graph {
+            let mut stores = HashMap::new();
+            for (type_name, store) in &self.column_stores {
+                let key = InternedKey::from_str(type_name);
+                stores.insert(key, Arc::clone(store));
+            }
+            dg.set_column_stores(stores);
+        }
+    }
+
+    /// Build CSR from pending edges if in disk mode. No-op otherwise.
+    /// Called after add_connections, before queries, and before save.
+    pub fn ensure_disk_edges_built(&mut self) {
+        if let GraphBackend::Disk(ref mut dg) = self.graph {
+            dg.build_csr_from_pending();
+            // Don't compact here — overflow-merge is O(E), so calling it
+            // after every add_connections batch would make multi-batch
+            // builds quadratic. Queries still see overflow edges via the
+            // merged DiskEdges iterator. Aggregate caches (conn_type_index
+            // / peer_count_histogram) are refreshed at save time by
+            // `save_disk` when overflow is present.
+        }
+    }
+
+    /// Compact a disk-mode graph: merge overflow edges back into CSR arrays.
+    /// Returns the number of overflow edges that were merged.
+    /// No-op if there are no overflow edges.
+    pub fn compact_disk(&mut self) -> Result<usize, String> {
+        match &mut self.graph {
+            GraphBackend::Disk(ref mut dg) => Ok(dg.compact()),
+            _ => Err("compact requires disk mode".to_string()),
+        }
+    }
+
+    /// Save a disk-mode graph to a directory. The directory IS the graph.
+    /// Persists CSR files, node data, edge properties, column stores, and metadata.
+    pub fn save_disk(&mut self, path: &str) -> Result<(), String> {
+        // Build CSR from pending edges if not yet built.
+        self.ensure_disk_edges_built();
+        // Merge overflow edges back so conn_type_index and
+        // peer_count_histogram reflect every live edge. Skipped during
+        // builds; done here as a one-shot so users only pay the cost at
+        // save time, not per add_connections batch.
+        if let GraphBackend::Disk(ref mut dg) = self.graph {
+            if dg.has_overflow() {
+                dg.compact();
+            }
+        }
+
+        let dir = std::path::Path::new(path);
+        let dg = match &self.graph {
+            GraphBackend::Disk(dg) => dg,
+            _ => return Err("save_disk requires disk mode".to_string()),
+        };
+
+        // Save DiskGraph files (CSR, nodes, edge properties, metadata)
+        dg.save_to_dir(dir, &self.interner)
+            .map_err(|e| format!("DiskGraph save failed: {}", e))?;
+
+        // Save DirGraph metadata as JSON
+        let meta = crate::graph::io::io_operations::build_disk_metadata(self);
+        let meta_json = serde_json::to_string_pretty(&meta)
+            .map_err(|e| format!("Metadata serialization failed: {}", e))?;
+        std::fs::write(dir.join("metadata.json"), meta_json)
+            .map_err(|e| format!("Failed to write metadata: {}", e))?;
+
+        // Save interner as JSON map { hash_u64_string: original_string }
+        let interner_map: HashMap<String, String> = self
+            .interner
+            .iter()
+            .map(|(k, v)| (k.as_u64().to_string(), v.to_string()))
+            .collect();
+        let interner_json = serde_json::to_string(&interner_map)
+            .map_err(|e| format!("Interner serialization failed: {}", e))?;
+        std::fs::write(dir.join("interner.json"), interner_json)
+            .map_err(|e| format!("Failed to write interner: {}", e))?;
+
+        // Save column stores (per type)
+        let columns_dir = dir.join("columns");
+        std::fs::create_dir_all(&columns_dir)
+            .map_err(|e| format!("Failed to create columns dir: {}", e))?;
+        for (type_name, store) in &self.column_stores {
+            let type_dir = columns_dir.join(type_name);
+            std::fs::create_dir_all(&type_dir)
+                .map_err(|e| format!("Failed to create type dir: {}", e))?;
+            let packed = store
+                .write_packed(&self.interner)
+                .map_err(|e| format!("Column pack failed: {}", e))?;
+            let compressed = zstd::encode_all(packed.as_slice(), 3)
+                .map_err(|e| format!("Column compression failed: {}", e))?;
+            std::fs::write(type_dir.join("columns.zst"), compressed)
+                .map_err(|e| format!("Failed to write columns: {}", e))?;
+        }
+
+        // Save type_indices and id_indices (previously only written by N-Triples builder)
+        {
+            let ti_bytes = bincode::serialize(&self.type_indices)
+                .map_err(|e| format!("type_indices serialization failed: {}", e))?;
+            let ti_compressed = zstd::encode_all(ti_bytes.as_slice(), 3)
+                .map_err(|e| format!("type_indices compression failed: {}", e))?;
+            std::fs::write(dir.join("type_indices.bin.zst"), ti_compressed)
+                .map_err(|e| format!("Failed to write type_indices: {}", e))?;
+
+            let ii_bytes = bincode::serialize(&self.id_indices)
+                .map_err(|e| format!("id_indices serialization failed: {}", e))?;
+            let ii_compressed = zstd::encode_all(ii_bytes.as_slice(), 3)
+                .map_err(|e| format!("id_indices compression failed: {}", e))?;
+            std::fs::write(dir.join("id_indices.bin.zst"), ii_compressed)
+                .map_err(|e| format!("Failed to write id_indices: {}", e))?;
+        }
+
+        // Save embeddings if any (matches write_graph_v3 behavior for in-memory saves)
+        if !self.embeddings.is_empty() {
+            let emb_bytes = bincode::serialize(&self.embeddings)
+                .map_err(|e| format!("embeddings serialization failed: {}", e))?;
+            let emb_compressed = zstd::encode_all(emb_bytes.as_slice(), 3)
+                .map_err(|e| format!("embeddings compression failed: {}", e))?;
+            std::fs::write(dir.join("embeddings.bin.zst"), emb_compressed)
+                .map_err(|e| format!("Failed to write embeddings: {}", e))?;
+        }
+
+        // Save timeseries_store if any
+        if !self.timeseries_store.is_empty() {
+            let ts_bytes = bincode::serialize(&self.timeseries_store)
+                .map_err(|e| format!("timeseries serialization failed: {}", e))?;
+            let ts_compressed = zstd::encode_all(ts_bytes.as_slice(), 3)
+                .map_err(|e| format!("timeseries compression failed: {}", e))?;
+            std::fs::write(dir.join("timeseries.bin.zst"), ts_compressed)
+                .map_err(|e| format!("Failed to write timeseries: {}", e))?;
+        }
+
+        Ok(())
+    }
+
+    /// Temporarily convert Disk backend to InMemory for serialization.
+    /// Rebuilds a StableDiGraph from the DiskGraph's nodes and CSR edges.
+    #[allow(dead_code)]
+    pub fn rebuild_for_save(&mut self) -> Result<(), String> {
+        let node_bound = self.graph.node_bound();
+        let edge_count = self.graph.edge_count();
+        let node_count = self.graph.node_count();
+
+        let mut g = StableDiGraph::with_capacity(node_count, edge_count);
+
+        // Re-add nodes in index order, preserving NodeIndex values
+        let mut index_map = HashMap::with_capacity(node_count);
+        for i in 0..node_bound {
+            let idx = NodeIndex::new(i);
+            if let Some(node) = self.graph.node_weight(idx) {
+                let new_idx = g.add_node(node.clone());
+                index_map.insert(idx, new_idx);
+            }
+        }
+
+        // Re-add edges with remapped indices
+        for edge_ref in self.graph.edge_references() {
+            if let (Some(&new_src), Some(&new_tgt)) = (
+                index_map.get(&edge_ref.source()),
+                index_map.get(&edge_ref.target()),
+            ) {
+                let edge_data = EdgeData {
+                    connection_type: edge_ref.weight().connection_type,
+                    properties: edge_ref.weight().properties.clone(),
+                };
+                g.add_edge(new_src, new_tgt, edge_data);
+            }
+        }
+
+        self.graph = GraphBackend::Memory(MemoryGraph(g));
+        Ok(())
+    }
+
+    /// Convert all node properties from Compact to Columnar storage.
+    /// Properties are moved into per-type `ColumnStore` instances.
+    /// This reduces memory usage by eliminating per-node `Value` enum overhead
+    /// for homogeneous typed columns.
+    pub fn enable_columnar(&mut self) {
+        use crate::graph::storage::memory::column_store::ColumnStore;
+
+        // Ensure properties are compacted first
+        if self.type_schemas.is_empty() {
+            self.compact_properties();
+        }
+
+        // Build a ColumnStore per node type
+        let mut stores: HashMap<String, ColumnStore> = HashMap::new();
+        // Track row_id assignment per type
+        let mut row_ids: HashMap<String, HashMap<NodeIndex, u32>> = HashMap::new();
+
+        // Clean type_indices: remove entries for deleted/tombstoned nodes
+        for indices in self.type_indices.values_mut() {
+            indices.retain(|&idx| self.graph.node_weight(idx).is_some());
+        }
+
+        // First pass: create stores and push rows
+        for (node_type, indices) in &self.type_indices {
+            let schema = match self.type_schemas.get(node_type) {
+                Some(s) => Arc::clone(s),
+                None => continue,
+            };
+            let meta = self
+                .node_type_metadata
+                .get(node_type)
+                .cloned()
+                .unwrap_or_default();
+
+            let mut store = ColumnStore::new(schema, &meta, &self.interner);
+            let mut type_row_ids = HashMap::with_capacity(indices.len());
+
+            for &idx in indices {
+                if let Some(node) = self.graph.node_weight(idx) {
+                    // Push id/title for every node. For Columnar nodes, read from
+                    // the old column store. For Compact/Map nodes, use node.id/title.
+                    // Always push id and title. For Columnar nodes, try old store first,
+                    // fall back to node fields. For Compact/Map, use node fields directly.
+                    let id_val = if let PropertyStorage::Columnar {
+                        store: old_store,
+                        row_id: old_row,
+                    } = &node.properties
+                    {
+                        old_store
+                            .get_id(*old_row)
+                            .unwrap_or_else(|| node.id.clone())
+                    } else {
+                        node.id.clone()
+                    };
+                    let title_val = if let PropertyStorage::Columnar {
+                        store: old_store,
+                        row_id: old_row,
+                    } = &node.properties
+                    {
+                        old_store
+                            .get_title(*old_row)
+                            .unwrap_or_else(|| node.title.clone())
+                    } else {
+                        node.title.clone()
+                    };
+
+                    store.push_id(&id_val);
+                    store.push_title(&title_val);
+
+                    // Collect properties from current storage
+                    let pairs: Vec<(InternedKey, Value)> = match &node.properties {
+                        PropertyStorage::Compact { schema, values } => schema
+                            .slots
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, &ik)| {
+                                values.get(i).and_then(|v| {
+                                    if matches!(v, Value::Null) {
+                                        None
+                                    } else {
+                                        Some((ik, v.clone()))
+                                    }
+                                })
+                            })
+                            .collect(),
+                        PropertyStorage::Map(map) => {
+                            map.iter().map(|(&k, v)| (k, v.clone())).collect()
+                        }
+                        PropertyStorage::Columnar {
+                            store: old_store,
+                            row_id,
+                        } => old_store.row_properties(*row_id),
+                    };
+
+                    let row_id = store.push_row(&pairs);
+                    type_row_ids.insert(idx, row_id);
+                }
+            }
+
+            stores.insert(node_type.clone(), store);
+            row_ids.insert(node_type.clone(), type_row_ids);
+        }
+
+        // Spill to disk if over memory limit
+        if let Some(limit) = self.memory_limit {
+            let total: usize = stores.values().map(|s| s.heap_bytes()).sum();
+            if total > limit {
+                let spill_dir = self.spill_dir.clone().unwrap_or_else(|| {
+                    std::env::temp_dir().join(format!(
+                        "kglite_spill_{}_{:x}",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos()
+                    ))
+                });
+                // Register spill dir for cleanup on drop
+                if let Ok(mut dirs) = self.temp_dirs.lock() {
+                    dirs.push(spill_dir.clone());
+                }
+                // Spill stores from largest to smallest until under limit
+                let mut by_size: Vec<_> = stores
+                    .iter()
+                    .map(|(t, s)| (t.clone(), s.heap_bytes()))
+                    .collect();
+                by_size.sort_by_key(|s| std::cmp::Reverse(s.1));
+                let mut remaining = total;
+                for (type_name, bytes) in by_size {
+                    if remaining <= limit {
+                        break;
+                    }
+                    let type_dir = spill_dir.join(&type_name);
+                    if let Some(store) = stores.get_mut(&type_name) {
+                        if store
+                            .materialize_to_files(&type_dir, &self.interner)
+                            .is_ok()
+                        {
+                            remaining -= bytes;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Wrap stores in Arc
+        let arc_stores: HashMap<String, Arc<ColumnStore>> =
+            stores.into_iter().map(|(t, s)| (t, Arc::new(s))).collect();
+
+        // Second pass: replace PropertyStorage in each node
+        for (node_type, type_row_ids) in &row_ids {
+            if let Some(store) = arc_stores.get(node_type) {
+                for (&idx, &row_id) in type_row_ids {
+                    if let Some(node) = self.graph.node_weight_mut(idx) {
+                        node.properties = PropertyStorage::Columnar {
+                            store: Arc::clone(store),
+                            row_id,
+                        };
+                    }
+                }
+            }
+        }
+
+        self.column_stores = arc_stores;
+    }
+
+    /// Convert all Columnar properties back to Compact.
+    /// Used before serialization to produce backward-compatible .kgl files.
+    pub fn disable_columnar(&mut self) {
+        let node_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
+        for node_idx in node_indices {
+            let node = self.graph.node_weight_mut(node_idx).unwrap();
+            if let PropertyStorage::Columnar { store, row_id } = &node.properties {
+                let pairs = store.row_properties(*row_id);
+                let type_str = node.node_type_str(&self.interner);
+                if let Some(schema) = self.type_schemas.get(type_str) {
+                    node.properties = PropertyStorage::from_compact(pairs, schema);
+                } else {
+                    // Fallback to Map
+                    let map: HashMap<InternedKey, Value> = pairs.into_iter().collect();
+                    node.properties = PropertyStorage::Map(map);
+                }
+            }
+        }
+        self.column_stores.clear();
+    }
+
+    /// Returns true if any nodes are using columnar storage.
+    pub fn is_columnar(&self) -> bool {
+        !self.column_stores.is_empty()
+    }
+
+    /// Ensure a ColumnStore exists for `node_type` with a schema covering all
+    /// the keys in `type_schemas[node_type]`. If the schema has grown since the
+    /// store was created, the store is rebuilt (existing data migrated).
+    /// Call `ensure_type_schema_keys()` first to register new keys.
+    pub fn ensure_column_store_for_push(
+        &mut self,
+        node_type: &str,
+    ) -> &mut crate::graph::storage::memory::column_store::ColumnStore {
+        use crate::graph::storage::memory::column_store::ColumnStore;
+
+        let current_schema = self
+            .type_schemas
+            .get(node_type)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(TypeSchema::new()));
+
+        let need_create = if let Some(existing) = self.column_stores.get(node_type) {
+            // Rebuild if the TypeSchema has more keys than the store's schema
+            existing.schema().len() < current_schema.len()
+        } else {
+            true
+        };
+
+        if need_create {
+            let meta = self
+                .node_type_metadata
+                .get(node_type)
+                .cloned()
+                .unwrap_or_default();
+
+            if let Some(old_arc) = self.column_stores.remove(node_type) {
+                // Migrate existing data to new store with extended schema
+                let old_store = Arc::try_unwrap(old_arc).unwrap_or_else(|a| (*a).clone());
+                let mut new_store = ColumnStore::new(current_schema, &meta, &self.interner);
+                // Re-push all existing rows (including id/title columns)
+                for row_id in 0..old_store.row_count() {
+                    if let Some(id_val) = old_store.get_id(row_id) {
+                        new_store.push_id(&id_val);
+                    }
+                    if let Some(title_val) = old_store.get_title(row_id) {
+                        new_store.push_title(&title_val);
+                    }
+                    let props = old_store.row_properties(row_id);
+                    new_store.push_row(&props);
+                }
+                self.column_stores
+                    .insert(node_type.to_string(), Arc::new(new_store));
+            } else {
+                let store = ColumnStore::new(current_schema, &meta, &self.interner);
+                self.column_stores
+                    .insert(node_type.to_string(), Arc::new(store));
+            }
+        }
+
+        Arc::make_mut(self.column_stores.get_mut(node_type).unwrap())
+    }
+
+    /// Ensure the TypeSchema for `node_type` contains all the given keys.
+    /// Creates the schema if it doesn't exist, extends it if it does.
+    pub fn ensure_type_schema_keys(&mut self, node_type: &str, keys: &[InternedKey]) {
+        let schema = self
+            .type_schemas
+            .entry(node_type.to_string())
+            .or_insert_with(|| Arc::new(TypeSchema::new()));
+        let s = Arc::make_mut(schema);
+        for &key in keys {
+            s.add_key(key);
+        }
+    }
+
+    /// Check heap usage of column stores and spill largest to disk if over limit.
+    /// No-op if memory_limit is None or the backend is memory-mode.
+    pub fn maybe_spill_columns(&mut self) {
+        let limit = match self.memory_limit {
+            Some(l) => l,
+            None => return,
+        };
+        let total: usize = self.column_stores.values().map(|s| s.heap_bytes()).sum();
+        if total <= limit {
+            return;
+        }
+
+        let spill_dir = self.spill_dir.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(format!(
+                "kglite_spill_{}_{:x}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ))
+        });
+        // Cache spill_dir for future calls
+        if self.spill_dir.is_none() {
+            self.spill_dir = Some(spill_dir.clone());
+        }
+        // Register for cleanup on drop
+        if let Ok(mut dirs) = self.temp_dirs.lock() {
+            if !dirs.contains(&spill_dir) {
+                dirs.push(spill_dir.clone());
+            }
+        }
+
+        // Spill largest stores first until under limit
+        let mut by_size: Vec<_> = self
+            .column_stores
+            .iter()
+            .map(|(t, s)| (t.clone(), s.heap_bytes()))
+            .collect();
+        by_size.sort_by_key(|s| std::cmp::Reverse(s.1));
+        let mut remaining = total;
+        for (type_name, bytes) in by_size {
+            if remaining <= limit {
+                break;
+            }
+            let type_dir = spill_dir.join(&type_name);
+            let store = Arc::make_mut(self.column_stores.get_mut(&type_name).unwrap());
+            if store
+                .materialize_to_files(&type_dir, &self.interner)
+                .is_ok()
+            {
+                remaining -= bytes;
+            }
+        }
+    }
+
+    pub fn reindex(&mut self) {
+        // 1. Rebuild type_indices from scratch
+        self.rebuild_type_indices();
+
+        // 2. Clear lazy caches — they'll rebuild on next access
+        self.id_indices.clear();
+        self.connection_types.clear();
+
+        // 3. Rebuild existing property_indices (preserve which indexes exist)
+        let property_keys: Vec<IndexKey> = self.property_indices.keys().cloned().collect();
+        for (node_type, property) in property_keys {
+            self.create_index(&node_type, &property);
+        }
+
+        // 4. Rebuild existing composite_indices (preserve which indexes exist)
+        let composite_keys: Vec<CompositeIndexKey> =
+            self.composite_indices.keys().cloned().collect();
+        for (node_type, properties) in composite_keys {
+            let prop_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
+            self.create_composite_index(&node_type, &prop_refs);
+        }
+
+        // 5. Rebuild existing range_indices (preserve which indexes exist)
+        let range_keys: Vec<IndexKey> = self.range_indices.keys().cloned().collect();
+        for (node_type, property) in range_keys {
+            self.create_range_index(&node_type, &property);
+        }
+    }
+
+    /// Compact the graph by removing tombstones left by deleted nodes/edges.
+    ///
+    /// With StableDiGraph, deletions leave holes (tombstones) in the internal
+    /// storage. Over time, this wastes memory and degrades iteration performance.
+    /// vacuum() rebuilds the graph with contiguous indices, then rebuilds all indexes.
+    ///
+    /// Returns a mapping from old NodeIndex → new NodeIndex so callers can
+    /// update any external references (e.g., selections).
+    ///
+    /// No-op if there are no tombstones (node_count == node_bound).
+    pub fn vacuum(&mut self) -> HashMap<NodeIndex, NodeIndex> {
+        let old_node_count = self.graph.node_count();
+        let old_node_bound = self.graph.node_bound();
+
+        // No petgraph tombstones — but columnar stores may still have orphaned rows
+        // (e.g., all nodes deleted → petgraph is empty but column data remains).
+        if old_node_count == old_node_bound {
+            let columnar_orphaned = self.column_stores.iter().any(|(t, s)| {
+                let live = self.type_indices.get(t).map(|v| v.len()).unwrap_or(0);
+                (s.row_count() as usize) > live
+            });
+            if columnar_orphaned {
+                let saved_limit = self.memory_limit.take();
+                self.disable_columnar();
+                self.enable_columnar();
+                self.memory_limit = saved_limit;
+            }
+            return HashMap::new();
+        }
+
+        // Build new graph with contiguous indices
+        let mut new_graph = StableDiGraph::with_capacity(old_node_count, self.graph.edge_count());
+        let mut old_to_new: HashMap<NodeIndex, NodeIndex> = HashMap::with_capacity(old_node_count);
+
+        // Copy all live nodes, recording index mapping
+        for old_idx in self.graph.node_indices() {
+            let node_data = self.graph[old_idx].clone();
+            let new_idx = new_graph.add_node(node_data);
+            old_to_new.insert(old_idx, new_idx);
+        }
+
+        // Copy all live edges with remapped endpoints
+        for old_edge_idx in self.graph.edge_indices() {
+            if let Some((src, tgt)) = self.graph.edge_endpoints(old_edge_idx) {
+                let edge_data = self.graph[old_edge_idx].clone();
+                let new_src = old_to_new[&src];
+                let new_tgt = old_to_new[&tgt];
+                new_graph.add_edge(new_src, new_tgt, edge_data);
+            }
+        }
+
+        // Replace graph storage
+        self.graph = GraphBackend::Memory(MemoryGraph(new_graph));
+
+        // Remap embedding stores to use new node indices
+        for store in self.embeddings.values_mut() {
+            let mut new_node_to_slot = HashMap::with_capacity(store.node_to_slot.len());
+            let mut new_slot_to_node = Vec::with_capacity(store.slot_to_node.len());
+            let mut new_data = Vec::with_capacity(store.data.len());
+
+            for (&old_node_raw, &slot) in &store.node_to_slot {
+                let old_idx = NodeIndex::new(old_node_raw);
+                if let Some(&new_idx) = old_to_new.get(&old_idx) {
+                    let new_slot = new_slot_to_node.len();
+                    new_node_to_slot.insert(new_idx.index(), new_slot);
+                    new_slot_to_node.push(new_idx.index());
+                    let start = slot * store.dimension;
+                    let end = start + store.dimension;
+                    new_data.extend_from_slice(&store.data[start..end]);
+                }
+                // Deleted nodes (not in old_to_new) are dropped
+            }
+
+            store.node_to_slot = new_node_to_slot;
+            store.slot_to_node = new_slot_to_node;
+            store.data = new_data;
+        }
+
+        // Rebuild all indexes from the compacted graph
+        self.reindex();
+
+        // Rebuild columnar stores if active — old stores have orphaned rows
+        // from deleted nodes. The disable/enable cycle reads only live nodes,
+        // producing fresh ColumnStores with no dead rows.
+        if !self.column_stores.is_empty() {
+            let saved_limit = self.memory_limit.take();
+            self.disable_columnar();
+            self.enable_columnar();
+            self.memory_limit = saved_limit;
+        }
+
+        old_to_new
+    }
+
+    /// Check if auto-vacuum should run and trigger it if so.
+    ///
+    /// Called after DELETE operations. Only vacuums if:
+    /// - `auto_vacuum_threshold` is Some(threshold)
+    /// - Tombstones exceed 100 (avoid overhead on tiny graphs)
+    /// - `fragmentation_ratio` exceeds the threshold
+    ///
+    /// Returns true if vacuum was triggered.
+    pub fn check_auto_vacuum(&mut self) -> bool {
+        let threshold = match self.auto_vacuum_threshold {
+            Some(t) => t,
+            None => return false,
+        };
+
+        let node_count = self.graph.node_count();
+        let node_bound = self.graph.node_bound();
+        let tombstones = node_bound - node_count;
+
+        if tombstones <= 100 {
+            return false;
+        }
+
+        let ratio = tombstones as f64 / node_bound as f64;
+        if ratio > threshold {
+            self.vacuum();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Return diagnostic information about graph storage health.
+    ///
+    /// Useful for deciding when to call vacuum():
+    /// - `tombstones` > 0 means deleted nodes left holes
+    /// - `fragmentation_ratio` approaching 1.0 means most storage is wasted
+    /// - A ratio above 0.3 is a good threshold for calling vacuum()
+    pub fn graph_info(&self) -> GraphInfo {
+        let node_count = self.graph.node_count();
+        let node_bound = self.graph.node_bound();
+        let edge_count = self.graph.edge_count();
+        let node_tombstones = node_bound - node_count;
+
+        GraphInfo {
+            node_count,
+            node_capacity: node_bound,
+            node_tombstones,
+            edge_count,
+            fragmentation_ratio: if node_bound == 0 {
+                0.0
+            } else {
+                node_tombstones as f64 / node_bound as f64
+            },
+            type_count: self.type_indices.len(),
+            property_index_count: self.property_indices.len(),
+            composite_index_count: self.composite_indices.len(),
+            columnar_total_rows: self
+                .column_stores
+                .values()
+                .map(|s| s.row_count() as usize)
+                .sum(),
+            columnar_live_rows: self
+                .column_stores
+                .keys()
+                .map(|t| self.type_indices.get(t).map(|v| v.len()).unwrap_or(0))
+                .sum(),
+        }
+    }
+}
+
+/// Statistics about a property index
+#[derive(Debug, Clone)]
+pub struct IndexStats {
+    pub unique_values: usize,
+    pub total_entries: usize,
+    pub avg_entries_per_value: f64,
+}
+
+/// Diagnostic information about graph storage health.
+#[derive(Debug, Clone)]
+pub struct GraphInfo {
+    /// Number of live nodes in the graph
+    pub node_count: usize,
+    /// Upper bound of node indices (includes tombstones from deletions)
+    pub node_capacity: usize,
+    /// Number of tombstone slots (node_capacity - node_count)
+    pub node_tombstones: usize,
+    /// Number of live edges in the graph
+    pub edge_count: usize,
+    /// Ratio of wasted storage (0.0 = clean, approaching 1.0 = heavily fragmented)
+    pub fragmentation_ratio: f64,
+    /// Number of distinct node types
+    pub type_count: usize,
+    /// Number of single-property indexes
+    pub property_index_count: usize,
+    /// Number of composite indexes
+    pub composite_index_count: usize,
+    /// Total rows across all columnar stores (including orphaned from deletions)
+    pub columnar_total_rows: usize,
+    /// Rows backed by live nodes (columnar_total_rows - columnar_live_rows = orphaned)
+    pub columnar_live_rows: usize,
+}

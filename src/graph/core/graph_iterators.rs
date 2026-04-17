@@ -7,9 +7,8 @@
 // that trait can call .source(), .target(), .weight(), .id() unchanged.
 
 use crate::graph::schema::{EdgeData, NodeData};
-use crate::graph::storage::disk::disk_graph::{
-    CsrEdge, DiskGraph, DiskNodeSlot, EdgeEndpoints, TOMBSTONE_EDGE,
-};
+use crate::graph::storage::disk::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints, TOMBSTONE_EDGE};
+use crate::graph::storage::disk::disk_graph::DiskGraph;
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
@@ -472,7 +471,7 @@ pub enum GraphEdgeIndices<'a> {
 
 /// Iterates valid edge indices by scanning edge_endpoints for non-tombstones.
 pub struct DiskEdgeIndices<'a> {
-    endpoints: &'a MmapOrVec<crate::graph::storage::disk::disk_graph::EdgeEndpoints>,
+    endpoints: &'a MmapOrVec<crate::graph::storage::disk::csr::EdgeEndpoints>,
     pos: u32,
     total: u32,
 }
@@ -480,7 +479,7 @@ pub struct DiskEdgeIndices<'a> {
 impl<'a> DiskEdgeIndices<'a> {
     pub fn new(
         total: u32,
-        endpoints: &'a MmapOrVec<crate::graph::storage::disk::disk_graph::EdgeEndpoints>,
+        endpoints: &'a MmapOrVec<crate::graph::storage::disk::csr::EdgeEndpoints>,
     ) -> Self {
         DiskEdgeIndices {
             endpoints,

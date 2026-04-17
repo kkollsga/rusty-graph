@@ -47,25 +47,17 @@ tag).
 ### God-file exceptions (enforced in `tests/test_phase7_parity.py`)
 
 Each entry has a written rationale + 0.9.0+ follow-up plan. Short
-version:
+version.
 
-| File | Lines | Reason |
-|---|---|---|
-| `cypher/executor.rs` | 12,156 | Single `impl CypherExecutor` block; split seams are artificial. 0.9.0 planned split: `cypher/executor/{mutations, expression_eval, value_ops}`. |
-| `mod.rs` | 6,758 | KnowledgeGraph `#[pymethods]` core (105 methods). Stage 2.1 already moved `pymethods_*` subsets to `pyapi/`. Further carving to `pyapi/{mod, algorithms, export, indexes}` is 0.9.0 — PyO3 class-registration considerations make the split non-trivial. |
-| `schema.rs` | 5,141 | DirGraph + shared schema types. Phase 7 Stage 2.2 extracted `InternedKey + StringInterner` → `storage/interner.rs`. Further extraction (GraphBackend → `storage/backend.rs`; NodeData/EdgeData/PropertyStorage/configs → `storage/schema.rs`; DirGraph → `graph/dir_graph.rs`) is 0.9.0. |
-| `introspection.rs` | 4,204 | Schema introspection core. Natural theme splits available (describe, schema_overview, reporting, hints, connectivity). 0.9.0. |
-| `cypher/planner.rs` | 3,552 | Fusion passes share helpers. 0.9.0 split along fusion-family boundaries. |
-| `storage/disk/disk_graph.rs` | 3,276 | Coherent single-backend struct with tight internal coupling. 0.9.0 candidate for `{csr, column_store, blocks, builder}` split. |
-| `io/ntriples.rs` | 3,022 | Parser is small; bulk-load + column builders dominate. 0.9.0 split: parser → `io/ntriples.rs`, bulk-load → `storage/disk/builder.rs`. |
-| `cypher/parser.rs` | 2,920 | Recursive-descent parser — single-impl monolith is idiomatic. Accepted. |
-| `query/pattern_matching.rs` | 2,610 | Barely over cap; parser + executor tightly coupled. 0.9.0 candidate for Parser-impl boundary split. |
+**Phase 9 emptied the list.** Every `.rs` under `src/graph/` now sits at
+or under the 2,500-line hard cap. `GOD_FILE_EXCEPTIONS = {}` in
+`tests/test_phase7_parity.py` and `test_god_file_gate` passes over the
+full tree with zero exceptions.
 
-These 9 exceptions are enforced as a **closed list** in
-`GOD_FILE_EXCEPTIONS`; adding a 10th requires updating the test and
-justifying the addition in a commit message. `test_exception_list_still_applies`
-ensures entries stay honest — if a file drops under the cap via a
-future split, the test fails until the exception is removed.
+The 9 files that were on the exception list before Phase 9 have each
+been split into themed submodules (under `src/graph/{core, io, pyapi,
+introspection, languages/cypher, storage/disk}/`). The largest file in
+the crate post-Phase-9 is `io/ntriples/loader.rs` at 2,412 lines.
 
 ---
 

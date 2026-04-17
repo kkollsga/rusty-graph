@@ -1,0 +1,1055 @@
+//! KnowledgeGraph #[pymethods]: node + connection ingestion.
+//!
+//! Part of the Phase 9 split of the kg_methods.rs monolith (5,419 lines
+//! single pymethods block). PyO3 merges multiple `#[pymethods] impl`
+//! blocks at class-registration time, so the split is purely structural —
+//! no runtime impact.
+
+use crate::datatypes::py_in;
+use crate::datatypes::values::Value;
+use crate::graph::introspection::reporting::{OperationReport, OperationReports};
+use crate::graph::languages::cypher;
+use crate::graph::schema::{self, CowSelection, DirGraph};
+use crate::graph::storage::GraphRead;
+use crate::graph::{
+    get_graph_mut, parse_inline_timeseries, parse_spatial_column_types,
+    parse_temporal_column_types, resolve_noderefs, EmbeddingColumnData, KnowledgeGraph,
+    TemporalContext, TimeSpec,
+};
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
+use pyo3::Bound;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+#[pymethods]
+impl KnowledgeGraph {
+    #[new]
+    #[pyo3(signature = (*, storage=None, path=None))]
+    fn new(storage: Option<&str>, path: Option<&str>) -> PyResult<Self> {
+        let mut graph = DirGraph::new();
+
+        if let Some(mode) = storage {
+            match mode {
+                "mapped" => {
+                    // Mapped mode: switch the backend variant and force
+                    // columnar property storage to spill to mmap on build.
+                    graph.graph = schema::GraphBackend::Mapped(schema::MappedGraph::new());
+                    graph.memory_limit = Some(0);
+                }
+                "disk" => {
+                    let dir = path.ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "storage='disk' requires a path parameter, e.g. \
+                             KnowledgeGraph(storage='disk', path='./my_graph')",
+                        )
+                    })?;
+                    let data_dir = std::path::Path::new(dir);
+                    let dg =
+                        crate::graph::storage::disk::disk_graph::DiskGraph::new_at_path(data_dir)
+                            .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
+                                "Failed to create disk graph at '{}': {}",
+                                dir, e
+                            ))
+                        })?;
+                    graph.graph = schema::GraphBackend::Disk(Box::new(dg));
+                }
+                other => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Unknown storage mode '{}'. Expected 'mapped', 'disk', or None.",
+                        other
+                    )));
+                }
+            }
+        }
+
+        Ok(KnowledgeGraph {
+            inner: Arc::new(graph),
+            selection: CowSelection::new(),
+            reports: OperationReports::new(),
+            last_mutation_stats: None,
+            embedder: None,
+            temporal_context: TemporalContext::default(),
+            default_timeout_ms: None,
+            default_max_rows: None,
+        })
+    }
+
+    /// Add nodes from a pandas DataFrame.
+    ///
+    /// Args:
+    ///     data: DataFrame containing node data.
+    ///     node_type: Label for this set of nodes (e.g. 'Person').
+    ///     unique_id_field: Column used as unique identifier. String and integer IDs
+    ///         are auto-detected from the DataFrame dtype.
+    ///     node_title_field: Column used as display title. Defaults to unique_id_field.
+    ///     columns: Whitelist of columns to include. None = all.
+    ///     conflict_handling: 'update' (default), 'replace', 'skip', or 'preserve'.
+    ///     skip_columns: Columns to exclude from properties.
+    ///     column_types: Override column type detection: {'col': 'string'|'integer'|'float'|'datetime'|'uniqueid'}.
+    ///
+    /// Returns:
+    ///     dict with 'nodes_created', 'nodes_updated', 'nodes_skipped',
+    ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
+    #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_nodes(
+        &mut self,
+        data: &Bound<'_, PyAny>,
+        node_type: String,
+        unique_id_field: String,
+        node_title_field: Option<String>,
+        columns: Option<&Bound<'_, PyList>>,
+        conflict_handling: Option<String>,
+        skip_columns: Option<&Bound<'_, PyList>>,
+        column_types: Option<&Bound<'_, PyDict>>,
+        timeseries: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        // Parse inline timeseries config (if provided)
+        let ts_config = timeseries.map(|d| parse_inline_timeseries(d)).transpose()?;
+        // Detect embedding columns from column_types before DataFrame conversion
+        let mut embedding_columns: Vec<String> = Vec::new();
+        if let Some(type_dict) = column_types {
+            for (key, value) in type_dict.iter() {
+                let col_name: String = key.extract()?;
+                let type_str: String = value.extract()?;
+                if type_str.to_lowercase() == "embedding" {
+                    embedding_columns.push(col_name);
+                }
+            }
+        }
+
+        // Get all columns from the dataframe
+        let df_cols = data.getattr("columns")?;
+        let all_columns: Vec<String> = df_cols.extract()?;
+
+        // Create default columns array
+        let mut default_cols = vec![unique_id_field.as_str()];
+        if let Some(ref title_field) = node_title_field {
+            default_cols.push(title_field);
+        }
+
+        // Use enforce_columns=false for add_nodes
+        let enforce_columns = Some(false);
+
+        // Get the filtered columns
+        let mut column_list = py_in::ensure_columns(
+            &all_columns,
+            &default_cols,
+            columns,
+            skip_columns,
+            enforce_columns,
+        )?;
+
+        // Remove embedding columns from the regular column list
+        if !embedding_columns.is_empty() {
+            column_list.retain(|c| !embedding_columns.contains(c));
+        }
+
+        // Remove timeseries columns (time + channel cols) from the regular column list
+        if let Some(ref ts_cfg) = ts_config {
+            let ts_cols = ts_cfg.all_columns();
+            column_list.retain(|c| !ts_cols.contains(c));
+        }
+
+        // Extract embedding data before DataFrame conversion
+        let embedding_data: EmbeddingColumnData = if !embedding_columns.is_empty() {
+            let id_series = data.get_item(&unique_id_field)?;
+            let nrows: usize = data.getattr("shape")?.get_item(0)?.extract()?;
+            let mut result = Vec::new();
+
+            for emb_col in &embedding_columns {
+                let series = data.get_item(emb_col)?;
+                let mut pairs = Vec::with_capacity(nrows);
+
+                for i in 0..nrows {
+                    let id_val = py_in::py_value_to_value(&id_series.get_item(i)?)?;
+                    let emb_val: Vec<f32> = series.get_item(i)?.extract()?;
+                    pairs.push((id_val, emb_val));
+                }
+
+                result.push((emb_col.clone(), pairs));
+            }
+
+            result
+        } else {
+            Vec::new()
+        };
+
+        // Parse spatial column_types entries and produce a cleaned dict
+        let py = data.py();
+        let (spatial_cfg, cleaned_types) = if let Some(type_dict) = column_types {
+            let (cfg, cleaned) = parse_spatial_column_types(py, type_dict)?;
+            (cfg, Some(cleaned))
+        } else {
+            (None, None)
+        };
+
+        // Parse temporal column_types (validFrom/validTo → datetime)
+        let (temporal_cfg, cleaned_types) = if let Some(ref cleaned) = cleaned_types {
+            let (tcfg, final_cleaned) = parse_temporal_column_types(py, cleaned.bind(py))?;
+            (tcfg, Some(final_cleaned))
+        } else {
+            (None, cleaned_types)
+        };
+
+        // Use cleaned column_types for DataFrame conversion (spatial+temporal types replaced with natural types)
+        let effective_types = cleaned_types.as_ref().map(|d| d.bind(py).clone());
+
+        // When timeseries is present, deduplicate rows (keep first per unique_id) for static props
+        let data_for_nodes: std::borrow::Cow<'_, Bound<'_, PyAny>> = if ts_config.is_some() {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("subset", vec![&unique_id_field])?;
+            kwargs.set_item("keep", "first")?;
+            let deduped = data.call_method("drop_duplicates", (), Some(&kwargs))?;
+            std::borrow::Cow::Owned(deduped)
+        } else {
+            std::borrow::Cow::Borrowed(data)
+        };
+
+        let df_result = py_in::pandas_to_dataframe(
+            &data_for_nodes,
+            std::slice::from_ref(&unique_id_field),
+            &column_list,
+            effective_types.as_ref(),
+        )?;
+
+        let graph = get_graph_mut(&mut self.inner);
+
+        let uid_field_clone = unique_id_field.clone();
+        let result = crate::graph::mutation::maintain_graph::add_nodes(
+            graph,
+            df_result,
+            node_type.clone(),
+            unique_id_field,
+            node_title_field,
+            conflict_handling,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+        // Merge spatial config into graph
+        if let Some(cfg) = spatial_cfg {
+            graph.spatial_configs.insert(node_type.clone(), cfg);
+        }
+
+        // Merge temporal config into graph
+        if let Some(cfg) = temporal_cfg {
+            graph.temporal_node_configs.insert(node_type.clone(), cfg);
+        }
+
+        // Store embeddings for the created nodes
+        if !embedding_data.is_empty() {
+            graph.build_id_index(&node_type);
+            for (emb_col, pairs) in &embedding_data {
+                let dimension = pairs.first().map(|(_, v)| v.len()).unwrap_or(0);
+                if dimension == 0 {
+                    continue;
+                }
+
+                let store_key = if emb_col.ends_with("_emb") {
+                    emb_col.clone()
+                } else {
+                    format!("{}_emb", emb_col)
+                };
+
+                let mut store = schema::EmbeddingStore::new(dimension);
+                store.data.reserve(pairs.len() * dimension);
+                for (id_val, vec) in pairs {
+                    if vec.len() != dimension {
+                        continue; // skip mismatched dimensions
+                    }
+                    if let Some(node_idx) = graph.lookup_by_id(&node_type, id_val) {
+                        store.set_embedding(node_idx.index(), vec);
+                    }
+                }
+                if store.len() > 0 {
+                    graph
+                        .embeddings
+                        .insert((node_type.clone(), store_key), store);
+                }
+            }
+        }
+
+        // Process inline timeseries from the ORIGINAL DataFrame
+        if let Some(ts_cfg) = ts_config {
+            let n_rows: usize = data.getattr("shape")?.get_item(0)?.extract()?;
+            if n_rows > 0 {
+                // Read FK column (same as unique_id_field)
+                let fk_col: Vec<Py<PyAny>> = data
+                    .get_item(&uid_field_clone)?
+                    .call_method0("tolist")?
+                    .extract()?;
+
+                // Read time keys as NaiveDate
+                let time_keys: Vec<chrono::NaiveDate> = match &ts_cfg.time {
+                    TimeSpec::StringColumn(col_name) => {
+                        let raw: Vec<String> = data
+                            .get_item(col_name)?
+                            .call_method1("astype", ("str",))?
+                            .call_method0("tolist")?
+                            .extract()?;
+                        raw.iter()
+                            .map(|s| {
+                                crate::graph::features::timeseries::parse_date_query(s)
+                                    .map(|(d, _)| d)
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
+                    }
+                    TimeSpec::SeparateColumns(col_names) => {
+                        let mut int_cols: Vec<Vec<i64>> = Vec::with_capacity(col_names.len());
+                        for cn in col_names {
+                            let col: Vec<i64> =
+                                data.get_item(cn)?.call_method0("tolist")?.extract()?;
+                            int_cols.push(col);
+                        }
+                        (0..n_rows)
+                            .map(|i| {
+                                let year = int_cols[0][i] as i32;
+                                let month = if int_cols.len() > 1 {
+                                    int_cols[1][i] as u32
+                                } else {
+                                    1
+                                };
+                                let day = if int_cols.len() > 2 {
+                                    int_cols[2][i] as u32
+                                } else {
+                                    1
+                                };
+                                crate::graph::features::timeseries::date_from_ymd(year, month, day)
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
+                    }
+                };
+
+                // Resolve resolution
+                let resolved_resolution = if let Some(ref r) = ts_cfg.resolution {
+                    crate::graph::features::timeseries::validate_resolution(r)
+                        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+                    r.clone()
+                } else {
+                    // Auto-detect from time spec
+                    match &ts_cfg.time {
+                        TimeSpec::SeparateColumns(cols) => match cols.len() {
+                            1 => "year".to_string(),
+                            2 => "month".to_string(),
+                            _ => "day".to_string(),
+                        },
+                        TimeSpec::StringColumn(_) => "month".to_string(),
+                    }
+                };
+
+                // Read channel columns
+                let mut value_cols: Vec<(String, Vec<f64>)> =
+                    Vec::with_capacity(ts_cfg.channels.len());
+                for ch_name in &ts_cfg.channels {
+                    let col: Vec<f64> =
+                        data.get_item(ch_name)?.call_method0("tolist")?.extract()?;
+                    value_cols.push((ch_name.clone(), col));
+                }
+
+                // Group row indices by FK value
+                let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+                for (i, fk_val) in fk_col.iter().enumerate() {
+                    let key = fk_val.bind(py).str()?.to_string();
+                    groups.entry(key).or_default().push(i);
+                }
+
+                graph.build_id_index(&node_type);
+
+                let mut ts_nodes_loaded = 0usize;
+                for (fk_str, row_indices) in &groups {
+                    // Look up node by FK value (try string, then int)
+                    let node_idx = {
+                        let id_str = Value::String(fk_str.clone());
+                        if let Some(idx) = graph.lookup_by_id_normalized(&node_type, &id_str) {
+                            idx
+                        } else if let Ok(n) = fk_str.parse::<i64>() {
+                            let id_int = Value::Int64(n);
+                            if let Some(idx) = graph.lookup_by_id_normalized(&node_type, &id_int) {
+                                idx
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    };
+
+                    // Sort by time key
+                    let mut sorted = row_indices.clone();
+                    sorted.sort_by(|&a, &b| time_keys[a].cmp(&time_keys[b]));
+
+                    // Build NodeTimeseries with NaiveDate keys
+                    let keys: Vec<chrono::NaiveDate> =
+                        sorted.iter().map(|&i| time_keys[i]).collect();
+                    let channels: HashMap<String, Vec<f64>> = value_cols
+                        .iter()
+                        .map(|(name, col)| (name.clone(), sorted.iter().map(|&i| col[i]).collect()))
+                        .collect();
+
+                    graph.timeseries_store.insert(
+                        node_idx.index(),
+                        crate::graph::features::timeseries::NodeTimeseries { keys, channels },
+                    );
+                    ts_nodes_loaded += 1;
+                }
+
+                // Update TimeseriesConfig (merge with any existing)
+                let existing = graph.timeseries_configs.get(&node_type);
+                let mut merged_channels = existing.map(|c| c.channels.clone()).unwrap_or_default();
+                for ch in &ts_cfg.channels {
+                    if !merged_channels.contains(ch) {
+                        merged_channels.push(ch.clone());
+                    }
+                }
+                let mut merged_units = existing.map(|c| c.units.clone()).unwrap_or_default();
+                for (k, v) in ts_cfg.units {
+                    merged_units.insert(k, v);
+                }
+                let bin_type = existing.and_then(|c| c.bin_type.clone());
+
+                graph.timeseries_configs.insert(
+                    node_type.clone(),
+                    crate::graph::features::timeseries::TimeseriesConfig {
+                        resolution: resolved_resolution,
+                        channels: merged_channels,
+                        units: merged_units,
+                        bin_type,
+                    },
+                );
+
+                // Log timeseries loading info
+                if ts_nodes_loaded == 0 && !groups.is_empty() {
+                    let msg = std::ffi::CString::new(format!(
+                        "add_nodes: timeseries data found for {} groups but no matching nodes were created",
+                        groups.len()
+                    ))
+                    .unwrap_or_default();
+                    let _ = PyErr::warn(
+                        py,
+                        py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+                        msg.as_c_str(),
+                        1,
+                    );
+                }
+            }
+        }
+
+        self.selection.clear();
+
+        // Disk mode: sync column stores to DiskGraph after batch processing
+        if graph.graph.is_disk() {
+            graph.sync_disk_column_stores();
+        }
+
+        // Store the report
+        self.add_report(OperationReport::NodeOperation(result.clone()));
+
+        // Convert the report to a Python dictionary
+        Python::attach(|py| {
+            let report_dict = PyDict::new(py);
+            report_dict.set_item("operation", &result.operation_type)?;
+            report_dict.set_item("timestamp", result.timestamp.to_rfc3339())?;
+            report_dict.set_item("nodes_created", result.nodes_created)?;
+            report_dict.set_item("nodes_updated", result.nodes_updated)?;
+            report_dict.set_item("nodes_skipped", result.nodes_skipped)?;
+            report_dict.set_item("processing_time_ms", result.processing_time_ms)?;
+
+            // has_errors is true when there are errors OR rows were skipped
+            let has_errors = !result.errors.is_empty() || result.nodes_skipped > 0;
+            if !result.errors.is_empty() {
+                report_dict.set_item("errors", &result.errors)?;
+            }
+            report_dict.set_item("has_errors", has_errors)?;
+
+            // Emit Python warning if rows were skipped
+            if result.nodes_skipped > 0 {
+                let total = result.nodes_created + result.nodes_updated + result.nodes_skipped;
+                let detail = result.errors.join("; ");
+                let msg = std::ffi::CString::new(format!(
+                    "add_nodes: {} of {} rows skipped. {}",
+                    result.nodes_skipped, total, detail
+                ))
+                .unwrap_or_default();
+                let _ = PyErr::warn(
+                    py,
+                    py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+                    msg.as_c_str(),
+                    1,
+                );
+            }
+
+            Ok(report_dict.into())
+        })
+    }
+
+    /// Add connections (edges) between existing nodes.
+    ///
+    /// Two modes — supply **either** `data` (a pandas DataFrame) **or** `query`
+    /// (a Cypher string whose RETURN columns provide source/target IDs):
+    ///
+    /// ```python
+    /// # From DataFrame (existing API):
+    /// graph.add_connections(df, "KNOWS", "Person", "src_id", "Person", "tgt_id")
+    ///
+    /// # From Cypher query (new):
+    /// graph.add_connections(
+    ///     None, "ENCLOSES", "Play", "play_id", "StructuralElement", "struct_id",
+    ///     query="MATCH (p:Play), (s:StructuralElement) WHERE contains(p, s) "
+    ///           "RETURN DISTINCT p.id AS play_id, s.id AS struct_id",
+    /// )
+    ///
+    /// # With extra static properties stamped onto every edge:
+    /// graph.add_connections(
+    ///     None, "HC_IN_FORMATION", "Discovery", "src", "Stratigraphy", "tgt",
+    ///     query="MATCH ... RETURN d.id AS src, s.id AS tgt",
+    ///     extra_properties={"hc_rank": 1},
+    /// )
+    /// ```
+    ///
+    /// Args:
+    ///     data: DataFrame containing connection data, or None when using query.
+    ///     connection_type: Label for this connection type (e.g. 'KNOWS').
+    ///     source_type: Node type of the source nodes.
+    ///     source_id_field: Column containing source node IDs.
+    ///     target_type: Node type of the target nodes.
+    ///     target_id_field: Column containing target node IDs.
+    ///     source_title_field: Optional column to update source node titles.
+    ///     target_title_field: Optional column to update target node titles.
+    ///     columns: Whitelist of columns to include as edge properties (data mode only).
+    ///     skip_columns: Columns to exclude from edge properties (data mode only).
+    ///     conflict_handling: 'update' (default), 'replace', 'skip', or 'preserve'.
+    ///     column_types: Override column type detection (data mode only).
+    ///     query: Cypher query string (alternative to data). Must be a read-only
+    ///         query that RETURNs columns matching source_id_field and target_id_field.
+    ///     extra_properties: Dict of static properties to add to every edge created
+    ///         from the query results (query mode only).
+    ///
+    /// Returns:
+    ///     dict with 'connections_created', 'connections_skipped',
+    ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
+    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_connections(
+        &mut self,
+        data: Option<&Bound<'_, PyAny>>,
+        connection_type: String,
+        source_type: String,
+        source_id_field: String,
+        target_type: String,
+        target_id_field: String,
+        source_title_field: Option<String>,
+        target_title_field: Option<String>,
+        columns: Option<&Bound<'_, PyList>>,
+        skip_columns: Option<&Bound<'_, PyList>>,
+        conflict_handling: Option<String>,
+        column_types: Option<&Bound<'_, PyDict>>,
+        query: Option<String>,
+        extra_properties: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        use crate::datatypes::values::DataFrame as KgDataFrame;
+
+        // Validate: exactly one of data or query must be provided
+        let has_data = data.as_ref().map(|d| !d.is_none()).unwrap_or(false);
+
+        if has_data && query.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Cannot specify both 'data' and 'query'. Use one or the other.",
+            ));
+        }
+        if !has_data && query.is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Must specify either 'data' (DataFrame) or 'query' (Cypher query string).",
+            ));
+        }
+        if has_data && extra_properties.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "extra_properties is only supported with query mode, not data mode.",
+            ));
+        }
+        if query.is_some() {
+            if columns.is_some() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "'columns' is only supported with data mode, not query mode.",
+                ));
+            }
+            if skip_columns.is_some() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "'skip_columns' is only supported with data mode, not query mode.",
+                ));
+            }
+            if column_types.is_some() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "'column_types' is only supported with data mode, not query mode.",
+                ));
+            }
+        }
+
+        // ── Query path: run Cypher, convert to internal DataFrame ──
+        if let Some(query_str) = query {
+            // Parse the cypher query
+            let parsed = cypher::parse_cypher(&query_str).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Cypher syntax error in query: {}",
+                    e
+                ))
+            })?;
+
+            // Reject mutation queries — add_connections query must be read-only
+            if cypher::is_mutation_query(&parsed) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "The 'query' parameter must be a read-only query (MATCH...RETURN). \
+                     CREATE/SET/DELETE/MERGE are not allowed here.",
+                ));
+            }
+
+            // Execute read-only: clone Arc, execute without holding mutable borrow
+            let inner_clone = self.inner.clone();
+            let empty_params = HashMap::new();
+            let cypher_result = {
+                let executor =
+                    cypher::CypherExecutor::with_params(&inner_clone, &empty_params, None);
+                executor.execute(&parsed)
+            }
+            .map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Cypher execution error in add_connections query: {}",
+                    e
+                ))
+            })?;
+
+            // Resolve NodeRef values to actual IDs/titles
+            let mut rows = cypher_result.rows;
+            resolve_noderefs(&inner_clone.graph, &mut rows);
+
+            // Convert row-oriented Cypher result to columnar DataFrame
+            let mut df_result = KgDataFrame::from_cypher_rows(cypher_result.columns, rows)
+                .map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Failed to convert query results to DataFrame: {}",
+                        e
+                    ))
+                })?;
+
+            // Apply extra_properties as constant columns
+            if let Some(props_dict) = extra_properties {
+                for (key, val) in props_dict.iter() {
+                    let col_name: String = key.extract()?;
+                    let value = py_in::py_value_to_value(&val)?;
+                    df_result
+                        .add_constant_column(col_name.clone(), value)
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Failed to add extra_property '{}': {}",
+                                col_name, e
+                            ))
+                        })?;
+                }
+            }
+
+            // Drop the Arc clone so Arc::make_mut in get_graph_mut doesn't
+            // need to deep-copy the entire graph (refcount goes back to 1).
+            drop(inner_clone);
+
+            let graph = get_graph_mut(&mut self.inner);
+
+            let result = crate::graph::mutation::maintain_graph::add_connections(
+                graph,
+                df_result,
+                connection_type.clone(),
+                source_type,
+                source_id_field,
+                target_type,
+                target_id_field,
+                source_title_field,
+                target_title_field,
+                conflict_handling,
+            )
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+            self.selection.clear();
+            self.add_report(OperationReport::ConnectionOperation(result.clone()));
+
+            return Self::connection_report_to_py(&result, &connection_type);
+        }
+
+        // ── Data path: existing pandas DataFrame logic ──
+        let data = data.unwrap(); // Safe: validated above that has_data is true
+
+        // Get all columns from the dataframe
+        let df_cols = data.getattr("columns")?;
+        let all_columns: Vec<String> = df_cols.extract()?;
+
+        // Create default columns array
+        let mut default_cols = vec![source_id_field.as_str(), target_id_field.as_str()];
+        if let Some(ref src_title) = source_title_field {
+            default_cols.push(src_title);
+        }
+        if let Some(ref tgt_title) = target_title_field {
+            default_cols.push(tgt_title);
+        }
+
+        // Auto-include columns mentioned in column_types (e.g. temporal date columns)
+        let mut column_type_cols: Vec<String> = Vec::new();
+        if let Some(type_dict) = column_types {
+            for key in type_dict.keys() {
+                let col_name: String = key.extract()?;
+                column_type_cols.push(col_name);
+            }
+        }
+        for col in &column_type_cols {
+            default_cols.push(col.as_str());
+        }
+
+        // Use enforce_columns=true for add_connections
+        let enforce_columns = Some(true);
+
+        // Get the filtered columns
+        let column_list = py_in::ensure_columns(
+            &all_columns,
+            &default_cols,
+            columns,
+            skip_columns,
+            enforce_columns,
+        )?;
+
+        // Parse temporal column_types (validFrom/validTo → datetime)
+        let py = data.py();
+        let (temporal_cfg, cleaned_types) = if let Some(type_dict) = column_types {
+            let (tcfg, cleaned) = parse_temporal_column_types(py, type_dict)?;
+            (tcfg, Some(cleaned))
+        } else {
+            (None, None)
+        };
+        let effective_types = cleaned_types.as_ref().map(|d| d.bind(py).clone());
+
+        let df_result = py_in::pandas_to_dataframe(
+            data,
+            &[source_id_field.clone(), target_id_field.clone()],
+            &column_list,
+            effective_types.as_ref(),
+        )?;
+
+        let graph = get_graph_mut(&mut self.inner);
+
+        let result = crate::graph::mutation::maintain_graph::add_connections(
+            graph,
+            df_result,
+            connection_type.clone(),
+            source_type,
+            source_id_field,
+            target_type,
+            target_id_field,
+            source_title_field,
+            target_title_field,
+            conflict_handling,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+        // Merge temporal config into graph (auto-detected from validFrom/validTo column types)
+        if let Some(cfg) = temporal_cfg {
+            graph
+                .temporal_edge_configs
+                .entry(connection_type.clone())
+                .or_default()
+                .push(cfg);
+        }
+
+        self.selection.clear();
+
+        // Disk mode: build CSR from pending edges so queries work immediately
+        let graph = get_graph_mut(&mut self.inner);
+        graph.ensure_disk_edges_built();
+
+        self.add_report(OperationReport::ConnectionOperation(result.clone()));
+
+        Self::connection_report_to_py(&result, &connection_type)
+    }
+
+    // ========================================================================
+    // Connector API Methods (Bulk Loading)
+    // ========================================================================
+
+    /// Get the set of node types that exist in the graph.
+    ///
+    /// Returns:
+    ///     List of node type names (excludes internal SchemaNode type)
+    ///
+    /// Example:
+    ///     ```python
+    ///     graph.add_nodes(df, 'Person', 'id', 'name')
+    ///     graph.add_nodes(df2, 'Company', 'id', 'name')
+    ///     print(graph.node_types)  # ['Person', 'Company']
+    ///     ```
+    #[getter]
+    fn node_types(&self) -> Vec<String> {
+        self.inner.get_node_types()
+    }
+
+    /// Add multiple node types at once from a list of node specifications.
+    ///
+    /// This enables bulk loading of nodes from data sources that provide
+    /// standardized node specifications.
+    ///
+    /// Args:
+    ///     nodes: List of dicts, each containing:
+    ///         - 'node_type': str - The type/label for these nodes
+    ///         - 'unique_id_field': str - Column name for unique ID
+    ///         - 'node_title_field': str - Column name for display title
+    ///         - 'data': DataFrame - The node data
+    ///
+    /// Returns:
+    ///     Dict mapping node_type to count of nodes added
+    ///
+    /// Example:
+    ///     ```python
+    ///     nodes = [
+    ///         {'node_type': 'Person', 'unique_id_field': 'id',
+    ///          'node_title_field': 'name', 'data': people_df},
+    ///         {'node_type': 'Company', 'unique_id_field': 'id',
+    ///          'node_title_field': 'name', 'data': companies_df},
+    ///     ]
+    ///     stats = graph.add_nodes_bulk(nodes)
+    ///     # {'Person': 100, 'Company': 50}
+    ///     ```
+    fn add_nodes_bulk(&mut self, py: Python<'_>, nodes: &Bound<'_, PyList>) -> PyResult<Py<PyAny>> {
+        let result_dict = PyDict::new(py);
+
+        for item in nodes.iter() {
+            let spec = item.cast::<PyDict>()?;
+
+            let node_type: String = spec
+                .get_item("node_type")?
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                        "Missing 'node_type' in node spec",
+                    )
+                })?
+                .extract()?;
+            let unique_id_field: String = spec
+                .get_item("unique_id_field")?
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                        "Missing 'unique_id_field' in node spec",
+                    )
+                })?
+                .extract()?;
+            let node_title_field: String = spec
+                .get_item("node_title_field")?
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                        "Missing 'node_title_field' in node spec",
+                    )
+                })?
+                .extract()?;
+            let data = spec.get_item("data")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyKeyError, _>("Missing 'data' in node spec")
+            })?;
+
+            // Get columns from dataframe
+            let df_cols = data.getattr("columns")?;
+            let all_columns: Vec<String> = df_cols.extract()?;
+
+            let df_result = py_in::pandas_to_dataframe(
+                &data,
+                std::slice::from_ref(&unique_id_field),
+                &all_columns,
+                None,
+            )?;
+
+            let graph = get_graph_mut(&mut self.inner);
+
+            let report = crate::graph::mutation::maintain_graph::add_nodes(
+                graph,
+                df_result,
+                node_type.clone(),
+                unique_id_field,
+                Some(node_title_field),
+                None,
+            )
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+            result_dict.set_item(&node_type, report.nodes_created + report.nodes_updated)?;
+        }
+
+        self.selection.clear();
+        Ok(result_dict.into())
+    }
+
+    /// Add multiple connection types at once from a list of connection specifications.
+    ///
+    /// This enables bulk loading of connections from data sources that provide
+    /// standardized connection specifications with 'source_id' and 'target_id' columns.
+    ///
+    /// Args:
+    ///     connections: List of dicts, each containing:
+    ///         - 'source_type': str - Node type of source nodes
+    ///         - 'target_type': str - Node type of target nodes
+    ///         - 'connection_name': str - The connection/edge type
+    ///         - 'data': DataFrame - Must have 'source_id' and 'target_id' columns
+    ///
+    /// Returns:
+    ///     Dict mapping connection_name to count of connections added
+    ///
+    /// Example:
+    ///     ```python
+    ///     connections = [
+    ///         {'source_type': 'Person', 'target_type': 'Company',
+    ///          'connection_name': 'WORKS_AT', 'data': works_df},
+    ///         {'source_type': 'Person', 'target_type': 'Person',
+    ///          'connection_name': 'KNOWS', 'data': knows_df},
+    ///     ]
+    ///     stats = graph.add_connections_bulk(connections)
+    ///     # {'WORKS_AT': 500, 'KNOWS': 1200}
+    ///     ```
+    fn add_connections_bulk(
+        &mut self,
+        py: Python<'_>,
+        connections: &Bound<'_, PyList>,
+    ) -> PyResult<Py<PyAny>> {
+        self.add_connections_internal(py, connections, false)
+    }
+
+    /// Add connections, automatically filtering to only those where
+    /// both source and target node types exist in the graph.
+    ///
+    /// This enables data sources to provide ALL possible connections,
+    /// and kglite selects only the valid ones based on loaded node types.
+    ///
+    /// Args:
+    ///     connections: List of dicts, each containing:
+    ///         - 'source_type': str - Node type of source nodes
+    ///         - 'target_type': str - Node type of target nodes
+    ///         - 'connection_name': str - The connection/edge type
+    ///         - 'data': DataFrame - Must have 'source_id' and 'target_id' columns
+    ///
+    /// Returns:
+    ///     Dict mapping connection_name to count of connections added
+    ///     (only includes connections that were actually loaded)
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Data source provides all possible connections
+    ///     all_connections = data_source.get_all_connections()
+    ///
+    ///     # Graph only has Person and Company loaded
+    ///     # This will skip connections involving other node types
+    ///     stats = graph.add_connections_from_source(all_connections)
+    ///     ```
+    fn add_connections_from_source(
+        &mut self,
+        py: Python<'_>,
+        connections: &Bound<'_, PyList>,
+    ) -> PyResult<Py<PyAny>> {
+        self.add_connections_internal(py, connections, true)
+    }
+
+    /// Internal helper for bulk connection loading
+    fn add_connections_internal(
+        &mut self,
+        py: Python<'_>,
+        connections: &Bound<'_, PyList>,
+        filter_to_loaded: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let result_dict = PyDict::new(py);
+        let loaded_types: std::collections::HashSet<String> = if filter_to_loaded {
+            self.inner.get_node_types().into_iter().collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
+        for item in connections.iter() {
+            let spec = item.cast::<PyDict>()?;
+
+            let source_type: String = spec
+                .get_item("source_type")?
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                        "Missing 'source_type' in connection spec",
+                    )
+                })?
+                .extract()?;
+            let target_type: String = spec
+                .get_item("target_type")?
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                        "Missing 'target_type' in connection spec",
+                    )
+                })?
+                .extract()?;
+            let connection_name: String = spec
+                .get_item("connection_name")?
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                        "Missing 'connection_name' in connection spec",
+                    )
+                })?
+                .extract()?;
+            let data = spec.get_item("data")?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyKeyError, _>("Missing 'data' in connection spec")
+            })?;
+
+            // Skip if filtering and types not loaded
+            if filter_to_loaded
+                && (!loaded_types.contains(&source_type) || !loaded_types.contains(&target_type))
+            {
+                continue;
+            }
+
+            // Standardized column names for connector API
+            let source_id_field = "source_id".to_string();
+            let target_id_field = "target_id".to_string();
+
+            // Get columns from dataframe
+            let df_cols = data.getattr("columns")?;
+            let all_columns: Vec<String> = df_cols.extract()?;
+
+            // Verify required columns exist
+            if !all_columns.contains(&source_id_field) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Connection spec for '{}' missing required 'source_id' column. Available: [{}]",
+                    connection_name,
+                    all_columns.join(", ")
+                )));
+            }
+            if !all_columns.contains(&target_id_field) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Connection spec for '{}' missing required 'target_id' column. Available: [{}]",
+                    connection_name,
+                    all_columns.join(", ")
+                )));
+            }
+
+            let df_result = py_in::pandas_to_dataframe(
+                &data,
+                &[source_id_field.clone(), target_id_field.clone()],
+                &all_columns,
+                None,
+            )?;
+
+            let graph = get_graph_mut(&mut self.inner);
+
+            let report = crate::graph::mutation::maintain_graph::add_connections(
+                graph,
+                df_result,
+                connection_name.clone(),
+                source_type,
+                source_id_field,
+                target_type,
+                target_id_field,
+                None, // source_title_field
+                None, // target_title_field
+                None, // conflict_handling
+            )
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+            result_dict.set_item(&connection_name, report.connections_created)?;
+        }
+
+        self.selection.clear();
+        Ok(result_dict.into())
+    }
+}

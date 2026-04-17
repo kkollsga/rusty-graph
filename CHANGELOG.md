@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (internal, not user-visible)
+
+- **Every `.rs` under `src/graph/` is now at or under the 2,500-line
+  hard cap.** Phase 9 split 9 god files (12,144-line `executor.rs`
+  down through the 2,610-line `pattern_matching.rs`) into themed
+  submodules. `GOD_FILE_EXCEPTIONS` is empty; `test_god_file_gate`
+  passes unconditionally.
+- No Python-facing behaviour change. `kglite/__init__.pyi` unchanged.
+
 ## [0.8.0] — internal-only storage-architecture refactor
 
 **No Python API signature changes.** `kglite/__init__.pyi` is

@@ -1,0 +1,1362 @@
+//! KnowledgeGraph #[pymethods]: caches + schema + cypher + transactions.
+//!
+//! Part of the Phase 9 split of the kg_methods.rs monolith (5,419 lines
+//! single pymethods block). PyO3 merges multiple `#[pymethods] impl`
+//! blocks at class-registration time, so the split is purely structural —
+//! no runtime impact.
+
+use crate::datatypes::values::Value;
+use crate::datatypes::{py_in, py_out};
+use crate::graph::introspection::{self, reporting::OperationReport};
+use crate::graph::io;
+use crate::graph::languages::cypher;
+use crate::graph::pyapi::transaction::Transaction;
+use crate::graph::schema::{
+    self, ConnectionSchemaDefinition, NodeSchemaDefinition, SchemaDefinition,
+};
+use crate::graph::storage::GraphRead;
+use crate::graph::{get_graph_mut, resolve_noderefs, KnowledgeGraph};
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
+use pyo3::{Bound, IntoPyObjectExt};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+#[pymethods]
+impl KnowledgeGraph {
+    // ================================================================
+    // Schema Introspection
+    // ================================================================
+
+    /// Force recomputation of internal caches (edge type counts,
+    /// type connectivity, connection endpoint types).
+    ///
+    /// Performs a single O(E) pass to compute type connectivity triples,
+    /// then derives edge type counts and connection endpoint types from
+    /// the triples (no additional edge scans).
+    ///
+    /// Call once after bulk mutations to warm the cache before ``save()``
+    /// or ``describe()``. The caches are persisted by ``save()`` and
+    /// restored by ``load()``, so this only needs to be called once
+    /// after building or mutating a graph.
+    fn rebuild_caches(&mut self) {
+        // On disk graphs, also rebuild the per-(conn_type, peer) edge-count
+        // histogram so the Cypher planner's fast path for unanchored
+        // aggregate queries works. Legacy disk graphs built before v0.7.13
+        // won't have the histogram files — this call creates them.
+        {
+            let graph = get_graph_mut(&mut self.inner);
+            if let schema::GraphBackend::Disk(ref mut dg) = graph.graph {
+                dg.rebuild_peer_count_histogram();
+            }
+        }
+
+        // Single O(E) pass: compute type connectivity triples
+        // Uses edge_endpoint_keys() — mmap reads only, no heap allocation per edge.
+        let triples = introspection::compute_type_connectivity(&self.inner);
+
+        // Derive edge type counts + endpoint types from triples (no extra scan)
+        let derived = introspection::derive_edge_counts_from_triples(&triples);
+
+        // Populate edge type counts cache
+        *self.inner.edge_type_counts_cache.write().unwrap() = Some(derived.counts);
+
+        // Backfill connection_type_metadata with discovered endpoint types
+        let graph = get_graph_mut(&mut self.inner);
+        for (conn_type, (src_types, tgt_types)) in derived.endpoints {
+            let info = graph.connection_type_metadata.entry(conn_type).or_default();
+            if info.source_types.is_empty() {
+                info.source_types = src_types;
+            }
+            if info.target_types.is_empty() {
+                info.target_types = tgt_types;
+            }
+        }
+
+        // Store type connectivity triples
+        self.inner.set_type_connectivity(triples);
+    }
+
+    /// Return a full schema overview of the graph.
+    fn schema(&self) -> PyResult<Py<PyAny>> {
+        let overview = introspection::compute_schema(&self.inner);
+        Python::attach(|py| {
+            let result = PyDict::new(py);
+
+            // node_types
+            let node_types_dict = PyDict::new(py);
+            for (nt, info) in &overview.node_types {
+                let type_dict = PyDict::new(py);
+                type_dict.set_item("count", info.count)?;
+                let props_dict = PyDict::new(py);
+                for (k, v) in &info.properties {
+                    props_dict.set_item(k.as_str(), v.as_str())?;
+                }
+                type_dict.set_item("properties", props_dict)?;
+                node_types_dict.set_item(nt.as_str(), type_dict)?;
+            }
+            result.set_item("node_types", node_types_dict)?;
+
+            // connection_types
+            let conn_dict = PyDict::new(py);
+            for ct in &overview.connection_types {
+                let ct_dict = PyDict::new(py);
+                ct_dict.set_item("count", ct.count)?;
+                ct_dict.set_item("source_types", &ct.source_types)?;
+                ct_dict.set_item("target_types", &ct.target_types)?;
+                conn_dict.set_item(ct.connection_type.as_str(), ct_dict)?;
+            }
+            result.set_item("connection_types", conn_dict)?;
+
+            result.set_item("indexes", &overview.indexes)?;
+            result.set_item("node_count", overview.node_count)?;
+            result.set_item("edge_count", overview.edge_count)?;
+
+            Ok(result.into())
+        })
+    }
+
+    /// Return all connection types with counts and endpoint type sets.
+    #[pyo3(name = "connection_types")]
+    fn connection_types_info(&self) -> PyResult<Py<PyAny>> {
+        let stats = introspection::compute_connection_type_stats(&self.inner);
+        Python::attach(|py| {
+            let result_list = PyList::empty(py);
+            for ct in &stats {
+                let ct_dict = PyDict::new(py);
+                ct_dict.set_item("type", ct.connection_type.as_str())?;
+                ct_dict.set_item("count", ct.count)?;
+                ct_dict.set_item("source_types", &ct.source_types)?;
+                ct_dict.set_item("target_types", &ct.target_types)?;
+                result_list.append(ct_dict)?;
+            }
+            Ok(result_list.into())
+        })
+    }
+
+    /// Return property statistics for a node type.
+    #[pyo3(signature = (node_type, max_values=20))]
+    fn properties(&self, node_type: &str, max_values: usize) -> PyResult<Py<PyAny>> {
+        // Sample large types for faster response; exact stats for small types
+        let count = self
+            .inner
+            .type_indices
+            .get(node_type)
+            .map(|v| v.len())
+            .unwrap_or(0);
+        let sample = if count > 1000 { Some(500) } else { None };
+        let stats =
+            introspection::compute_property_stats(&self.inner, node_type, max_values, sample)
+                .map_err(PyErr::new::<pyo3::exceptions::PyKeyError, _>)?;
+        Python::attach(|py| {
+            let result = PyDict::new(py);
+            for prop in &stats {
+                let prop_dict = PyDict::new(py);
+                prop_dict.set_item("type", prop.type_string.as_str())?;
+                prop_dict.set_item("non_null", prop.non_null)?;
+                prop_dict.set_item("unique", prop.unique)?;
+                if let Some(ref vals) = prop.values {
+                    let py_vals = PyList::empty(py);
+                    for v in vals {
+                        py_vals.append(py_out::value_to_py(py, v)?)?;
+                    }
+                    prop_dict.set_item("values", py_vals)?;
+                }
+                result.set_item(prop.property_name.as_str(), prop_dict)?;
+            }
+            Ok(result.into())
+        })
+    }
+
+    /// Return connection topology for a node type (outgoing and incoming).
+    fn neighbors_schema(&self, node_type: &str) -> PyResult<Py<PyAny>> {
+        let ns = introspection::compute_neighbors_schema(&self.inner, node_type)
+            .map_err(PyErr::new::<pyo3::exceptions::PyKeyError, _>)?;
+        Python::attach(|py| {
+            let result = PyDict::new(py);
+
+            let out_list = PyList::empty(py);
+            for nc in &ns.outgoing {
+                let d = PyDict::new(py);
+                d.set_item("connection_type", nc.connection_type.as_str())?;
+                d.set_item("target_type", nc.other_type.as_str())?;
+                d.set_item("count", nc.count)?;
+                out_list.append(d)?;
+            }
+            result.set_item("outgoing", out_list)?;
+
+            let in_list = PyList::empty(py);
+            for nc in &ns.incoming {
+                let d = PyDict::new(py);
+                d.set_item("connection_type", nc.connection_type.as_str())?;
+                d.set_item("source_type", nc.other_type.as_str())?;
+                d.set_item("count", nc.count)?;
+                in_list.append(d)?;
+            }
+            result.set_item("incoming", in_list)?;
+
+            Ok(result.into())
+        })
+    }
+
+    /// Return a quick sample of nodes.
+    ///
+    /// Can be called as:
+    ///   - ``sample("Person")`` — sample 5 nodes of the given type
+    ///   - ``sample("Person", 10)`` — sample 10 nodes of the given type
+    ///   - ``sample(3)`` — sample 3 nodes from the current selection
+    ///   - ``sample()`` — sample 5 nodes from the current selection
+    #[pyo3(signature = (node_type_or_n=None, n=None))]
+    fn sample(
+        &self,
+        node_type_or_n: Option<&Bound<'_, PyAny>>,
+        n: Option<usize>,
+    ) -> PyResult<Py<PyAny>> {
+        let default_n = 5usize;
+
+        // Parse first arg: could be str (node_type) or int (n)
+        let (node_type, count) = match node_type_or_n {
+            Some(arg) => {
+                if let Ok(s) = arg.extract::<String>() {
+                    (Some(s), n.unwrap_or(default_n))
+                } else if let Ok(i) = arg.extract::<usize>() {
+                    (None, i)
+                } else {
+                    return Err(pyo3::exceptions::PyTypeError::new_err(
+                        "sample() first argument must be a node type (str) or count (int)",
+                    ));
+                }
+            }
+            None => (None, n.unwrap_or(default_n)),
+        };
+
+        if let Some(nt) = node_type {
+            let type_indices = self.inner.type_indices.get(&nt).ok_or_else(|| {
+                pyo3::exceptions::PyKeyError::new_err(format!("Node type '{}' not found", nt))
+            })?;
+            let indices: Vec<_> = type_indices.iter().copied().take(count).collect();
+            let view = crate::graph::pyapi::result_view::ResultView::from_nodes_with_graph(
+                &self.inner,
+                &indices,
+                &self.temporal_context,
+            );
+            return Python::attach(|py| Py::new(py, view).map(|v| v.into_any()));
+        }
+
+        // Selection-based: sample from current selection
+        let level_count = self.selection.get_level_count();
+        if level_count == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "sample() requires either a selection or a node_type argument",
+            ));
+        }
+        let last = level_count - 1;
+        let level = self
+            .selection
+            .get_level(last)
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Empty selection"))?;
+        let all_indices = level.get_all_nodes();
+        let indices: Vec<_> = all_indices.into_iter().take(count).collect();
+        let view = crate::graph::pyapi::result_view::ResultView::from_nodes_with_graph(
+            &self.inner,
+            &indices,
+            &self.temporal_context,
+        );
+        Python::attach(|py| Py::new(py, view).map(|v| v.into_any()))
+    }
+
+    /// Return a unified list of all indexes (single-property and composite).
+    fn indexes(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            let result_list = PyList::empty(py);
+
+            for (node_type, property) in self.inner.property_indices.keys() {
+                let d = PyDict::new(py);
+                d.set_item("node_type", node_type.as_str())?;
+                d.set_item("property", property.as_str())?;
+                d.set_item("type", "equality")?;
+                result_list.append(d)?;
+            }
+
+            for (node_type, properties) in self.inner.composite_indices.keys() {
+                let d = PyDict::new(py);
+                d.set_item("node_type", node_type.as_str())?;
+                d.set_item("properties", properties)?;
+                d.set_item("type", "composite")?;
+                result_list.append(d)?;
+            }
+
+            Ok(result_list.into())
+        })
+    }
+
+    fn clear(&mut self) -> PyResult<()> {
+        self.selection.clear();
+        Ok(())
+    }
+
+    /// Load an N-Triples file (supports .bz2, .gz, plain) into the graph.
+    /// Designed for Wikidata truthy dumps but works with any N-Triples file.
+    #[pyo3(signature = (path, *, predicates=None, languages=None, node_types=None, predicate_labels=None, max_entities=None, verbose=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn load_ntriples(
+        &mut self,
+        path: &str,
+        predicates: Option<Vec<String>>,
+        languages: Option<Vec<String>>,
+        node_types: Option<&Bound<'_, PyDict>>,
+        predicate_labels: Option<&Bound<'_, PyDict>>,
+        max_entities: Option<usize>,
+        verbose: bool,
+    ) -> PyResult<Py<PyAny>> {
+        use std::collections::HashSet;
+
+        let config = crate::graph::io::ntriples::NTriplesConfig {
+            predicates: predicates.map(|v| v.into_iter().collect::<HashSet<_>>()),
+            languages: languages.map(|v| v.into_iter().collect::<HashSet<_>>()),
+            node_types: node_types
+                .map(|d| {
+                    d.iter()
+                        .filter_map(|(k, v)| {
+                            Some((k.extract::<String>().ok()?, v.extract::<String>().ok()?))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            predicate_labels: predicate_labels
+                .map(|d| {
+                    d.iter()
+                        .filter_map(|(k, v)| {
+                            Some((k.extract::<String>().ok()?, v.extract::<String>().ok()?))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            max_entities,
+            verbose,
+            auto_type: true,
+        };
+
+        let graph = Arc::make_mut(&mut self.inner);
+        let stats = crate::graph::io::ntriples::load_ntriples(graph, path, &config)
+            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
+
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            dict.set_item("entities", stats.entities_created)?;
+            dict.set_item("edges", stats.edges_created)?;
+            dict.set_item("edges_skipped", stats.edges_skipped)?;
+            dict.set_item("triples_scanned", stats.triples_scanned)?;
+            dict.set_item("seconds", stats.seconds)?;
+            Ok(dict.into())
+        })
+    }
+
+    fn save(&mut self, py: Python<'_>, path: &str) -> PyResult<()> {
+        // Disk mode: save as directory (the folder IS the graph)
+        if self.inner.graph.is_disk() {
+            let graph = Arc::make_mut(&mut self.inner);
+            return graph
+                .save_disk(path)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()));
+        }
+
+        // Prep phase (quick): stamp metadata, snapshot index keys
+        io::io_operations::prepare_save(&mut self.inner);
+
+        // Consolidate ALL node properties into column stores (v3 requires columnar).
+        // Always rebuild: after load+add, some nodes may have Compact storage;
+        // after load+update, COW clones diverge from graph.column_stores.
+        // enable_columnar() handles all cases (fresh, mixed, and mapped mode).
+        {
+            let graph = Arc::make_mut(&mut self.inner);
+            graph.enable_columnar();
+        }
+
+        // Heavy phase: serialize, compress, write — release GIL for other Python threads
+        let inner = self.inner.clone();
+        let path_owned = path.to_string();
+        py.detach(move || io::io_operations::write_graph_v3(&inner, &path_owned))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))
+    }
+
+    /// Compact a disk-mode graph: merge overflow edges back into CSR arrays.
+    /// Returns the number of overflow edges that were merged.
+    /// Overflow edges accumulate when edges are added after the initial CSR build
+    /// (e.g., after loading a graph and adding new connections).
+    /// Compaction rebuilds the CSR to include all overflow edges, restoring
+    /// optimal query performance.
+    /// No-op if there are no overflow edges or the graph is not in disk mode.
+    fn compact(&mut self) -> PyResult<usize> {
+        if !self.inner.graph.is_disk() {
+            return Ok(0);
+        }
+        let graph = Arc::make_mut(&mut self.inner);
+        graph
+            .compact_disk()
+            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
+    }
+
+    /// Set a default query timeout (milliseconds) applied to all cypher() calls.
+    /// Pass None to disable (default). Per-query timeout_ms overrides this.
+    #[pyo3(signature = (timeout_ms=None))]
+    fn set_default_timeout(&mut self, timeout_ms: Option<u64>) {
+        self.default_timeout_ms = timeout_ms;
+    }
+
+    /// Get the current default query timeout in milliseconds, or None.
+    fn get_default_timeout(&self) -> Option<u64> {
+        self.default_timeout_ms
+    }
+
+    /// Set a default max rows limit applied to all cypher() calls.
+    /// Queries producing more intermediate rows than this will error.
+    /// Pass None to disable (default). Per-query max_rows overrides this.
+    #[pyo3(signature = (max_rows=None))]
+    fn set_default_max_rows(&mut self, max_rows: Option<usize>) {
+        self.default_max_rows = max_rows;
+    }
+
+    /// Get the current default max rows limit, or None.
+    fn get_default_max_rows(&self) -> Option<usize> {
+        self.default_max_rows
+    }
+
+    /// Get the most recent operation report as a Python dictionary
+    fn last_report(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            if let Some(report) = self.reports.get_last_report() {
+                match report {
+                    OperationReport::NodeOperation(node_report) => {
+                        let report_dict = PyDict::new(py);
+                        report_dict.set_item("operation", &node_report.operation_type)?;
+                        report_dict.set_item("timestamp", node_report.timestamp.to_rfc3339())?;
+                        report_dict.set_item("nodes_created", node_report.nodes_created)?;
+                        report_dict.set_item("nodes_updated", node_report.nodes_updated)?;
+                        report_dict.set_item("nodes_skipped", node_report.nodes_skipped)?;
+                        report_dict
+                            .set_item("processing_time_ms", node_report.processing_time_ms)?;
+
+                        // Add errors array if there are any
+                        if !node_report.errors.is_empty() {
+                            report_dict.set_item("errors", &node_report.errors)?;
+                            report_dict.set_item("has_errors", true)?;
+                        } else {
+                            report_dict.set_item("has_errors", false)?;
+                        }
+
+                        Ok(report_dict.into())
+                    }
+                    OperationReport::ConnectionOperation(conn_report) => {
+                        let report_dict = PyDict::new(py);
+                        report_dict.set_item("operation", &conn_report.operation_type)?;
+                        report_dict.set_item("timestamp", conn_report.timestamp.to_rfc3339())?;
+                        report_dict
+                            .set_item("connections_created", conn_report.connections_created)?;
+                        report_dict
+                            .set_item("connections_skipped", conn_report.connections_skipped)?;
+                        report_dict.set_item(
+                            "property_fields_tracked",
+                            conn_report.property_fields_tracked,
+                        )?;
+                        report_dict
+                            .set_item("processing_time_ms", conn_report.processing_time_ms)?;
+
+                        // Add errors array if there are any
+                        if !conn_report.errors.is_empty() {
+                            report_dict.set_item("errors", &conn_report.errors)?;
+                            report_dict.set_item("has_errors", true)?;
+                        } else {
+                            report_dict.set_item("has_errors", false)?;
+                        }
+
+                        Ok(report_dict.into())
+                    }
+                    OperationReport::CalculationOperation(calc_report) => {
+                        let report_dict = PyDict::new(py);
+                        report_dict.set_item("operation", &calc_report.operation_type)?;
+                        report_dict.set_item("timestamp", calc_report.timestamp.to_rfc3339())?;
+                        report_dict.set_item("expression", &calc_report.expression)?;
+                        report_dict.set_item("nodes_processed", calc_report.nodes_processed)?;
+                        report_dict.set_item("nodes_updated", calc_report.nodes_updated)?;
+                        report_dict.set_item("nodes_with_errors", calc_report.nodes_with_errors)?;
+                        report_dict
+                            .set_item("processing_time_ms", calc_report.processing_time_ms)?;
+                        report_dict.set_item("is_aggregation", calc_report.is_aggregation)?;
+
+                        // Add errors array if there are any
+                        if !calc_report.errors.is_empty() {
+                            report_dict.set_item("errors", &calc_report.errors)?;
+                            report_dict.set_item("has_errors", true)?;
+                        } else {
+                            report_dict.set_item("has_errors", false)?;
+                        }
+
+                        Ok(report_dict.into())
+                    }
+                }
+            } else {
+                let empty_dict = PyDict::new(py);
+                Ok(empty_dict.into())
+            }
+        })
+    }
+
+    /// Get the last operation index (a sequential ID of operations performed)
+    fn operation_index(&self) -> usize {
+        self.reports.get_last_operation_index()
+    }
+
+    /// Get all report history as a list of dictionaries
+    fn report_history(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
+            // Create an empty list with PyList::empty
+            let report_list = PyList::empty(py);
+
+            for report in self.reports.get_all_reports() {
+                let report_dict = match report {
+                    OperationReport::NodeOperation(node_report) => {
+                        let dict = PyDict::new(py);
+                        dict.set_item("operation", &node_report.operation_type)?;
+                        dict.set_item("timestamp", node_report.timestamp.to_rfc3339())?;
+                        dict.set_item("nodes_created", node_report.nodes_created)?;
+                        dict.set_item("nodes_updated", node_report.nodes_updated)?;
+                        dict.set_item("nodes_skipped", node_report.nodes_skipped)?;
+                        dict.set_item("processing_time_ms", node_report.processing_time_ms)?;
+
+                        // Add errors array if there are any
+                        if !node_report.errors.is_empty() {
+                            dict.set_item("errors", &node_report.errors)?;
+                            dict.set_item("has_errors", true)?;
+                        } else {
+                            dict.set_item("has_errors", false)?;
+                        }
+
+                        dict
+                    }
+                    OperationReport::ConnectionOperation(conn_report) => {
+                        let dict = PyDict::new(py);
+                        dict.set_item("operation", &conn_report.operation_type)?;
+                        dict.set_item("timestamp", conn_report.timestamp.to_rfc3339())?;
+                        dict.set_item("connections_created", conn_report.connections_created)?;
+                        dict.set_item("connections_skipped", conn_report.connections_skipped)?;
+                        dict.set_item(
+                            "property_fields_tracked",
+                            conn_report.property_fields_tracked,
+                        )?;
+                        dict.set_item("processing_time_ms", conn_report.processing_time_ms)?;
+
+                        // Add errors array if there are any
+                        if !conn_report.errors.is_empty() {
+                            dict.set_item("errors", &conn_report.errors)?;
+                            dict.set_item("has_errors", true)?;
+                        } else {
+                            dict.set_item("has_errors", false)?;
+                        }
+
+                        dict
+                    }
+                    OperationReport::CalculationOperation(calc_report) => {
+                        let dict = PyDict::new(py);
+                        dict.set_item("operation", &calc_report.operation_type)?;
+                        dict.set_item("timestamp", calc_report.timestamp.to_rfc3339())?;
+                        dict.set_item("expression", &calc_report.expression)?;
+                        dict.set_item("nodes_processed", calc_report.nodes_processed)?;
+                        dict.set_item("nodes_updated", calc_report.nodes_updated)?;
+                        dict.set_item("nodes_with_errors", calc_report.nodes_with_errors)?;
+                        dict.set_item("processing_time_ms", calc_report.processing_time_ms)?;
+                        dict.set_item("is_aggregation", calc_report.is_aggregation)?;
+
+                        // Add errors array if there are any
+                        if !calc_report.errors.is_empty() {
+                            dict.set_item("errors", &calc_report.errors)?;
+                            dict.set_item("has_errors", true)?;
+                        } else {
+                            dict.set_item("has_errors", false)?;
+                        }
+
+                        dict
+                    }
+                };
+                report_list.append(report_dict)?;
+            }
+            Ok(report_list.into())
+        })
+    }
+
+    /// Perform union of two selections - combines all nodes from both selections
+    /// Returns a new KnowledgeGraph with the union of both selections
+    fn union(&self, other: &Self) -> PyResult<Self> {
+        let mut new_kg = self.clone();
+        crate::graph::mutation::set_operations::union_selections(
+            &mut new_kg.selection,
+            &other.selection,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        Ok(new_kg)
+    }
+
+    /// Perform intersection of two selections - keeps only nodes present in both
+    /// Returns a new KnowledgeGraph with only nodes that exist in both selections
+    fn intersection(&self, other: &Self) -> PyResult<Self> {
+        let mut new_kg = self.clone();
+        crate::graph::mutation::set_operations::intersection_selections(
+            &mut new_kg.selection,
+            &other.selection,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        Ok(new_kg)
+    }
+
+    /// Perform difference of two selections - keeps nodes in self but not in other
+    /// Returns a new KnowledgeGraph with nodes from self that are not in other
+    fn difference(&self, other: &Self) -> PyResult<Self> {
+        let mut new_kg = self.clone();
+        crate::graph::mutation::set_operations::difference_selections(
+            &mut new_kg.selection,
+            &other.selection,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        Ok(new_kg)
+    }
+
+    /// Perform symmetric difference of two selections - keeps nodes in either but not both
+    /// Returns a new KnowledgeGraph with nodes that are in exactly one of the selections
+    fn symmetric_difference(&self, other: &Self) -> PyResult<Self> {
+        let mut new_kg = self.clone();
+        crate::graph::mutation::set_operations::symmetric_difference_selections(
+            &mut new_kg.selection,
+            &other.selection,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        Ok(new_kg)
+    }
+
+    // ========================================================================
+    // Schema Definition & Validation Methods
+    // ========================================================================
+
+    /// Define the expected schema for the graph
+    ///
+    /// Args:
+    ///     schema_dict: A dictionary defining the schema with the following structure:
+    ///         {
+    ///             'nodes': {
+    ///                 'NodeType': {
+    ///                     'required': ['field1', 'field2'],  # Required fields
+    ///                     'optional': ['field3'],            # Optional fields (for documentation)
+    ///                     'types': {'field1': 'string', 'field2': 'integer'}  # Field types
+    ///                 }
+    ///             },
+    ///             'connections': {
+    ///                 'CONNECTION_TYPE': {
+    ///                     'source': 'SourceNodeType',
+    ///                     'target': 'TargetNodeType',
+    ///                     'cardinality': 'one-to-many',  # Optional
+    ///                     'required_properties': ['prop1'],  # Optional
+    ///                     'property_types': {'prop1': 'float'}  # Optional
+    ///                 }
+    ///             }
+    ///         }
+    ///
+    /// Returns:
+    ///     Self with schema defined
+    fn define_schema(&mut self, schema_dict: &Bound<'_, PyDict>) -> PyResult<Self> {
+        let mut schema = SchemaDefinition::new();
+
+        // Parse node schemas
+        if let Some(nodes_dict) = schema_dict.get_item("nodes")? {
+            if let Ok(nodes) = nodes_dict.cast::<PyDict>() {
+                for (node_type_key, node_schema_val) in nodes.iter() {
+                    let node_type: String = node_type_key.extract()?;
+                    let node_schema_dict = node_schema_val.cast::<PyDict>().map_err(|_| {
+                        PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                            "Schema for node type '{}' must be a dictionary",
+                            node_type
+                        ))
+                    })?;
+
+                    let mut node_schema = NodeSchemaDefinition::default();
+
+                    // Parse required fields
+                    if let Some(required) = node_schema_dict.get_item("required")? {
+                        node_schema.required_fields = required.extract::<Vec<String>>()?;
+                    }
+
+                    // Parse optional fields
+                    if let Some(optional) = node_schema_dict.get_item("optional")? {
+                        node_schema.optional_fields = optional.extract::<Vec<String>>()?;
+                    }
+
+                    // Parse field types
+                    if let Some(types) = node_schema_dict.get_item("types")? {
+                        let types_dict = types.cast::<PyDict>().map_err(|_| {
+                            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                                "types must be a dictionary",
+                            )
+                        })?;
+                        for (field, type_val) in types_dict.iter() {
+                            node_schema
+                                .field_types
+                                .insert(field.extract::<String>()?, type_val.extract::<String>()?);
+                        }
+                    }
+
+                    schema.add_node_schema(node_type, node_schema);
+                }
+            }
+        }
+
+        // Parse connection schemas
+        if let Some(connections_dict) = schema_dict.get_item("connections")? {
+            if let Ok(connections) = connections_dict.cast::<PyDict>() {
+                for (conn_type_key, conn_schema_val) in connections.iter() {
+                    let conn_type: String = conn_type_key.extract()?;
+                    let conn_schema_dict = conn_schema_val.cast::<PyDict>().map_err(|_| {
+                        PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                            "Schema for connection type '{}' must be a dictionary",
+                            conn_type
+                        ))
+                    })?;
+
+                    let source_type: String = conn_schema_dict
+                        .get_item("source")?
+                        .ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                                "Connection '{}' missing required 'source' field",
+                                conn_type
+                            ))
+                        })?
+                        .extract()?;
+
+                    let target_type: String = conn_schema_dict
+                        .get_item("target")?
+                        .ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                                "Connection '{}' missing required 'target' field",
+                                conn_type
+                            ))
+                        })?
+                        .extract()?;
+
+                    let mut conn_schema = ConnectionSchemaDefinition {
+                        source_type,
+                        target_type,
+                        cardinality: None,
+                        required_properties: Vec::new(),
+                        property_types: HashMap::new(),
+                    };
+
+                    // Parse optional cardinality
+                    if let Some(cardinality) = conn_schema_dict.get_item("cardinality")? {
+                        conn_schema.cardinality = Some(cardinality.extract::<String>()?);
+                    }
+
+                    // Parse required_properties
+                    if let Some(required_props) =
+                        conn_schema_dict.get_item("required_properties")?
+                    {
+                        conn_schema.required_properties =
+                            required_props.extract::<Vec<String>>()?;
+                    }
+
+                    // Parse property_types
+                    if let Some(prop_types) = conn_schema_dict.get_item("property_types")? {
+                        let types_dict = prop_types.cast::<PyDict>().map_err(|_| {
+                            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                                "property_types must be a dictionary",
+                            )
+                        })?;
+                        for (field, type_val) in types_dict.iter() {
+                            conn_schema
+                                .property_types
+                                .insert(field.extract::<String>()?, type_val.extract::<String>()?);
+                        }
+                    }
+
+                    schema.add_connection_schema(conn_type, conn_schema);
+                }
+            }
+        }
+
+        get_graph_mut(&mut self.inner).set_schema(schema);
+
+        Ok(self.clone())
+    }
+
+    /// Validate the graph against the defined schema
+    ///
+    /// Args:
+    ///     strict: If True, reports node/connection types that exist in the graph
+    ///             but are not defined in the schema. Default is False.
+    ///
+    /// Returns:
+    ///     A list of validation error dictionaries. Empty list means validation passed.
+    ///     Each error dict contains:
+    ///         - 'error_type': Type of error (e.g., 'missing_required_field', 'type_mismatch')
+    ///         - 'message': Human-readable error message
+    ///         - Additional fields depending on error type
+    #[pyo3(signature = (strict=None))]
+    fn validate_schema(&self, py: Python<'_>, strict: Option<bool>) -> PyResult<Py<PyAny>> {
+        let schema = self.inner.get_schema().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "No schema defined. Call define_schema() first.",
+            )
+        })?;
+
+        let errors = crate::graph::mutation::schema_validation::validate_graph(
+            &self.inner,
+            schema,
+            strict.unwrap_or(false),
+        );
+
+        // Convert errors to Python list of dicts
+        let result = PyList::empty(py);
+        for error in errors {
+            let error_dict = PyDict::new(py);
+
+            match &error {
+                schema::ValidationError::MissingRequiredField {
+                    node_type,
+                    node_title,
+                    field,
+                } => {
+                    error_dict.set_item("error_type", "missing_required_field")?;
+                    error_dict.set_item("node_type", node_type)?;
+                    error_dict.set_item("node_title", node_title)?;
+                    error_dict.set_item("field", field)?;
+                }
+                schema::ValidationError::TypeMismatch {
+                    node_type,
+                    node_title,
+                    field,
+                    expected_type,
+                    actual_type,
+                } => {
+                    error_dict.set_item("error_type", "type_mismatch")?;
+                    error_dict.set_item("node_type", node_type)?;
+                    error_dict.set_item("node_title", node_title)?;
+                    error_dict.set_item("field", field)?;
+                    error_dict.set_item("expected_type", expected_type)?;
+                    error_dict.set_item("actual_type", actual_type)?;
+                }
+                schema::ValidationError::InvalidConnectionEndpoint {
+                    connection_type,
+                    expected_source,
+                    expected_target,
+                    actual_source,
+                    actual_target,
+                } => {
+                    error_dict.set_item("error_type", "invalid_connection_endpoint")?;
+                    error_dict.set_item("connection_type", connection_type)?;
+                    error_dict.set_item("expected_source", expected_source)?;
+                    error_dict.set_item("expected_target", expected_target)?;
+                    error_dict.set_item("actual_source", actual_source)?;
+                    error_dict.set_item("actual_target", actual_target)?;
+                }
+                schema::ValidationError::MissingConnectionProperty {
+                    connection_type,
+                    source_title,
+                    target_title,
+                    property,
+                } => {
+                    error_dict.set_item("error_type", "missing_connection_property")?;
+                    error_dict.set_item("connection_type", connection_type)?;
+                    error_dict.set_item("source_title", source_title)?;
+                    error_dict.set_item("target_title", target_title)?;
+                    error_dict.set_item("property", property)?;
+                }
+                schema::ValidationError::UndefinedNodeType { node_type, count } => {
+                    error_dict.set_item("error_type", "undefined_node_type")?;
+                    error_dict.set_item("node_type", node_type)?;
+                    error_dict.set_item("count", count)?;
+                }
+                schema::ValidationError::UndefinedConnectionType {
+                    connection_type,
+                    count,
+                } => {
+                    error_dict.set_item("error_type", "undefined_connection_type")?;
+                    error_dict.set_item("connection_type", connection_type)?;
+                    error_dict.set_item("count", count)?;
+                }
+            }
+
+            error_dict.set_item("message", error.to_string())?;
+            result.append(error_dict)?;
+        }
+
+        Ok(result.into())
+    }
+
+    /// Check if a schema has been defined for this graph
+    fn has_schema(&self) -> bool {
+        self.inner.get_schema().is_some()
+    }
+
+    /// Clear the schema definition from the graph
+    fn clear_schema(&mut self) -> PyResult<Self> {
+        get_graph_mut(&mut self.inner).clear_schema();
+        Ok(self.clone())
+    }
+
+    /// Get the current schema definition as a dictionary
+    fn schema_definition(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let schema = match self.inner.get_schema() {
+            Some(s) => s,
+            None => return Ok(py.None()),
+        };
+
+        let result = PyDict::new(py);
+
+        // Convert node schemas
+        let nodes_dict = PyDict::new(py);
+        for (node_type, node_schema) in &schema.node_schemas {
+            let schema_dict = PyDict::new(py);
+            schema_dict.set_item("required", &node_schema.required_fields)?;
+            schema_dict.set_item("optional", &node_schema.optional_fields)?;
+
+            let types_dict = PyDict::new(py);
+            for (field, field_type) in &node_schema.field_types {
+                types_dict.set_item(field, field_type)?;
+            }
+            schema_dict.set_item("types", types_dict)?;
+
+            nodes_dict.set_item(node_type, schema_dict)?;
+        }
+        result.set_item("nodes", nodes_dict)?;
+
+        // Convert connection schemas
+        let connections_dict = PyDict::new(py);
+        for (conn_type, conn_schema) in &schema.connection_schemas {
+            let schema_dict = PyDict::new(py);
+            schema_dict.set_item("source", &conn_schema.source_type)?;
+            schema_dict.set_item("target", &conn_schema.target_type)?;
+
+            if let Some(cardinality) = &conn_schema.cardinality {
+                schema_dict.set_item("cardinality", cardinality)?;
+            }
+
+            if !conn_schema.required_properties.is_empty() {
+                schema_dict.set_item("required_properties", &conn_schema.required_properties)?;
+            }
+
+            if !conn_schema.property_types.is_empty() {
+                let types_dict = PyDict::new(py);
+                for (prop, prop_type) in &conn_schema.property_types {
+                    types_dict.set_item(prop, prop_type)?;
+                }
+                schema_dict.set_item("property_types", types_dict)?;
+            }
+
+            connections_dict.set_item(conn_type, schema_dict)?;
+        }
+        result.set_item("connections", connections_dict)?;
+
+        Ok(result.into())
+    }
+
+    // ========================================================================
+    // Pattern Matching Methods
+    // ========================================================================
+
+    /// Match a Cypher-like pattern against the graph.
+    ///
+    /// Supports patterns like:
+    /// - Simple node: `(p:Person)`
+    /// - Single hop: `(p:Person)-[:KNOWS]->(f:Person)`
+    /// - Multi-hop: `(p:Play)-[:HAS_PROSPECT]->(pr:Prospect)-[:BECAME_DISCOVERY]->(d:Discovery)`
+    /// - Property filters: `(p:Person {name: "Alice"})`
+    /// - Edge filters: `(a)-[:KNOWS {since: 2020}]->(b)`
+    /// - Bidirectional: `(a)-[:KNOWS]-(b)` (matches both directions)
+    /// - Incoming: `(a)<-[:KNOWS]-(b)` (matches edges from b to a)
+    ///
+    /// Syntax:
+    /// - Node: `(variable:Type {property: value})`
+    /// - Edge: `-[:TYPE {property: value}]->` or `<-[:TYPE]-` or `-[:TYPE]-`
+    /// - Variable and type are optional: `()`, `(:Type)`, `(var)`
+    ///
+    /// Args:
+    ///     pattern: The Cypher-like pattern string
+    ///     max_matches: Maximum number of matches to return (default: unlimited)
+    ///
+    /// Returns:
+    ///     A list of match dictionaries. Each match contains bindings for
+    ///     named variables in the pattern. Node bindings have 'type', 'title',
+    ///     'id', and 'properties'. Edge bindings have 'source', 'target',
+    ///     'connection_type', and 'properties'.
+    ///
+    /// Example:
+    ///     ```python
+    ///     # Find all plays with their prospects
+    ///     matches = graph.match_pattern('(p:Play)-[:HAS_PROSPECT]->(pr:Prospect)')
+    ///     for m in matches:
+    ///         print(f"Play: {m['p']['title']}, Prospect: {m['pr']['title']}")
+    ///
+    ///     # Find discoveries from specific prospects
+    ///     matches = graph.match_pattern(
+    ///         '(pr:Prospect {status: "Active"})-[:BECAME_DISCOVERY]->(d:Discovery)'
+    ///     )
+    ///
+    ///     # Limit results
+    ///     top_10 = graph.match_pattern('(p:Person)-[:KNOWS]->(f:Person)', max_matches=10)
+    ///     ```
+    #[pyo3(signature = (pattern, max_matches=None))]
+    fn match_pattern(
+        &self,
+        py: Python<'_>,
+        pattern: &str,
+        max_matches: Option<usize>,
+    ) -> PyResult<Py<PyAny>> {
+        // Parse the pattern
+        let parsed = crate::graph::core::pattern_matching::parse_pattern(pattern).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Pattern syntax error: {}", e))
+        })?;
+
+        // Execute the pattern
+        let executor =
+            crate::graph::core::pattern_matching::PatternExecutor::new(&self.inner, max_matches);
+        let matches = executor.execute(&parsed).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Pattern execution error: {}",
+                e
+            ))
+        })?;
+
+        // Convert matches to Python
+        py_out::pattern_matches_to_pylist(py, &matches, &self.inner.interner)
+    }
+
+    /// Execute a Cypher query against the graph.
+    ///
+    /// Supports MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP, WITH,
+    /// OPTIONAL MATCH, UNWIND, UNION, and aggregation functions
+    /// (count, sum, avg, min, max, collect, std).
+    ///
+    /// The MATCH clause uses the same pattern syntax as match_pattern().
+    /// WHERE supports AND/OR/NOT, comparisons (=, <>, <, <=, >, >=),
+    /// IS NULL, IS NOT NULL, IN, STARTS WITH, ENDS WITH, CONTAINS.
+    /// RETURN supports property access (n.prop), aliases (AS), aggregation,
+    /// and DISTINCT.
+    ///
+    /// Args:
+    ///     query: The Cypher query string
+    ///
+    /// Returns:
+    ///     A dict with 'columns' (list of column names) and 'rows'
+    ///     (list of row dicts mapping column name to value).
+    ///
+    /// Example:
+    ///     ```python
+    ///     result = graph.cypher('''
+    ///         MATCH (p:Person)-[:KNOWS]->(f:Person)
+    ///         WHERE p.age > 25
+    ///         RETURN p.name AS person, count(f) AS friends
+    ///         ORDER BY friends DESC
+    ///         LIMIT 10
+    ///     ''')
+    ///     for row in result:
+    ///         print(f"{row['person']}: {row['friends']} friends")
+    ///     ```
+    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_rows=None))]
+    fn cypher(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        query: &str,
+        to_df: bool,
+        params: Option<&Bound<'_, PyDict>>,
+        timeout_ms: Option<u64>,
+        max_rows: Option<usize>,
+    ) -> PyResult<Py<PyAny>> {
+        let self_ref = slf.borrow();
+        let effective_timeout = timeout_ms.or(self_ref.default_timeout_ms);
+        let effective_max_rows = max_rows.or(self_ref.default_max_rows);
+        drop(self_ref);
+        let deadline = effective_timeout
+            .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+
+        // Parse the Cypher query (no borrow needed)
+        let mut parsed = cypher::parse_cypher(query).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Cypher syntax error: {}", e))
+        })?;
+
+        let output_csv = parsed.output_format == cypher::OutputFormat::Csv;
+
+        // Convert params dict to HashMap<String, Value> (before optimize so pushdown can resolve params)
+        let mut param_map = if let Some(params_dict) = params {
+            let mut map = std::collections::HashMap::new();
+            for (key, val) in params_dict.iter() {
+                let key_str: String = key.extract()?;
+                let value = py_in::py_value_to_value(&val)?;
+                map.insert(key_str, value);
+            }
+            map
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        // Rewrite text_score() → vector_score() and collect texts to embed
+        let rewrite = cypher::rewrite_text_score(&mut parsed, &param_map)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+        // Embed collected query texts if any (skip for EXPLAIN)
+        if !rewrite.texts_to_embed.is_empty() && !parsed.explain {
+            let this = slf.borrow();
+            let model = match &this.embedder {
+                Some(m) => m.bind(py).clone(),
+                None => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "text_score() requires a registered embedding model. \
+                         Call g.set_embedder(model) first.",
+                    ))
+                }
+            };
+            Self::try_load_embedder(&model)?;
+
+            let texts: Vec<&str> = rewrite
+                .texts_to_embed
+                .iter()
+                .map(|(_, t)| t.as_str())
+                .collect();
+            let py_texts = PyList::new(py, &texts)?;
+            let embed_result = model.call_method1("embed", (py_texts,));
+            Self::try_unload_embedder(&model);
+            let embeddings_result = embed_result?;
+            let embeddings: Vec<Vec<f32>> = embeddings_result.extract().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "model.embed() must return list[list[float]]",
+                )
+            })?;
+
+            if embeddings.len() != texts.len() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "text_score: model.embed() returned {} vectors for {} texts",
+                    embeddings.len(),
+                    texts.len()
+                )));
+            }
+
+            for (i, (param_name, _)) in rewrite.texts_to_embed.iter().enumerate() {
+                let json = format!(
+                    "[{}]",
+                    embeddings[i]
+                        .iter()
+                        .map(|f| f.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                param_map.insert(param_name.clone(), Value::String(json));
+            }
+        }
+
+        // Optimize (predicate pushdown, etc.) — needs shared borrow of graph
+        {
+            let this = slf.borrow();
+            cypher::optimize(&mut parsed, &this.inner, &param_map);
+        }
+
+        // EXPLAIN: return structured query plan without executing
+        if parsed.explain {
+            let this = slf.borrow();
+            let result = cypher::generate_explain_result(&parsed, &this.inner);
+            let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
+            return Py::new(py, view).map(|v| v.into_any());
+        }
+
+        if cypher::is_mutation_query(&parsed) {
+            // Read-only guard: reject mutations when read_only is enabled
+            {
+                let this = slf.borrow();
+                if this.inner.read_only {
+                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "Graph is in read-only mode — CREATE, SET, DELETE, REMOVE, and MERGE \
+                         are disabled. Use kg.read_only(False) to re-enable mutations.",
+                    ));
+                }
+            }
+            // Mutation path: needs exclusive borrow
+            let mut this = slf.borrow_mut();
+            let graph = get_graph_mut(&mut this.inner);
+            let mut result =
+                cypher::execute_mutable(graph, &parsed, param_map, deadline).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Cypher execution error: {}",
+                        e
+                    ))
+                })?;
+            // Auto-vacuum after deletions
+            if let Some(ref stats) = result.stats {
+                if (stats.nodes_deleted > 0 || stats.relationships_deleted > 0)
+                    && graph.check_auto_vacuum()
+                {
+                    this.selection = schema::CowSelection::new();
+                }
+            }
+            // Store mutation stats
+            if let Some(ref stats) = result.stats {
+                this.last_mutation_stats = Some(stats.clone());
+            }
+            // Resolve NodeRef values to node titles before Python conversion
+            resolve_noderefs(&this.inner.graph, &mut result.rows);
+            // Convert to Python
+            if output_csv {
+                result.to_csv().into_py_any(py)
+            } else if to_df {
+                let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
+                cypher::py_convert::preprocessed_result_to_dataframe(
+                    py,
+                    &result.columns,
+                    &preprocessed,
+                )
+            } else {
+                let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
+                Py::new(py, view).map(|v| v.into_any())
+            }
+        } else {
+            // Read-only path: clone Arc, release borrow, then execute without GIL
+            let inner = {
+                let this = slf.borrow();
+                this.inner.clone()
+            };
+            let result = {
+                let executor = cypher::CypherExecutor::with_params(&inner, &param_map, deadline)
+                    .with_max_rows(effective_max_rows);
+                py.detach(|| executor.execute(&parsed))
+            }
+            .map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Cypher execution error: {}",
+                    e
+                ))
+            })?;
+            let columns = result.columns;
+            let stats = result.stats;
+            let profile = result.profile;
+            // Resolve NodeRef values to node titles before Python conversion
+            let mut rows = result.rows;
+            resolve_noderefs(&inner.graph, &mut rows);
+            if output_csv {
+                let csv_result = cypher::CypherResult {
+                    columns,
+                    rows,
+                    stats,
+                    profile,
+                };
+                csv_result.to_csv().into_py_any(py)
+            } else {
+                let preprocessed = cypher::py_convert::preprocess_values_owned(rows);
+                if to_df {
+                    cypher::py_convert::preprocessed_result_to_dataframe(
+                        py,
+                        &columns,
+                        &preprocessed,
+                    )
+                } else {
+                    let view = crate::graph::pyapi::result_view::ResultView::from_preprocessed(
+                        columns,
+                        preprocessed,
+                        stats,
+                        profile,
+                    );
+                    Py::new(py, view).map(|v| v.into_any())
+                }
+            }
+        }
+    }
+
+    /// Mutation statistics from the last Cypher mutation query (CREATE/SET/DELETE/REMOVE/MERGE).
+    ///
+    /// Returns None if no mutation has been executed yet.
+    #[getter]
+    fn last_mutation_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.last_mutation_stats {
+            Some(stats) => {
+                let dict = PyDict::new(py);
+                dict.set_item("nodes_created", stats.nodes_created)?;
+                dict.set_item("relationships_created", stats.relationships_created)?;
+                dict.set_item("properties_set", stats.properties_set)?;
+                dict.set_item("nodes_deleted", stats.nodes_deleted)?;
+                dict.set_item("relationships_deleted", stats.relationships_deleted)?;
+                dict.set_item("properties_removed", stats.properties_removed)?;
+                Ok(dict.into())
+            }
+            None => Ok(py.None()),
+        }
+    }
+
+    // ========================================================================
+    // Transaction Support
+    // ========================================================================
+
+    /// Begin a transaction — returns a Transaction object with a working copy of the graph.
+    ///
+    /// Creates a snapshot of the current graph state. All mutations within the
+    /// transaction are isolated until ``commit()`` is called. If the transaction
+    /// is rolled back (or dropped without committing), no changes are applied.
+    ///
+    /// **Note:** the snapshot is a full deep-clone of the graph, so creating a
+    /// transaction on a very large graph has a one-time memory cost proportional
+    /// to graph size. Embeddings are *not* cloned (they live outside `DirGraph`).
+    ///
+    /// Can also be used as a context manager:
+    ///
+    /// Example:
+    ///     ```python
+    ///     with graph.begin() as tx:
+    ///         tx.cypher("CREATE (n:Person {name: 'Alice', age: 30})")
+    ///         tx.cypher("CREATE (n:Person {name: 'Bob', age: 25})")
+    ///         # auto-commits on success, auto-rollbacks on exception
+    ///     ```
+    #[pyo3(signature = (timeout_ms=None))]
+    fn begin(slf: Py<Self>, timeout_ms: Option<u64>) -> PyResult<Transaction> {
+        let (working, version) = Python::attach(|py| {
+            let kg = slf.borrow(py);
+            ((*kg.inner).clone(), kg.inner.version)
+        });
+        let deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        Ok(Transaction {
+            owner: slf,
+            working: Some(working),
+            committed: false,
+            read_only: false,
+            snapshot: None,
+            base_version: version,
+            deadline,
+        })
+    }
+
+    /// Begin a read-only transaction — O(1) cost, zero memory overhead.
+    ///
+    /// Returns a Transaction backed by an Arc reference to the current graph
+    /// state. Mutations (CREATE, SET, DELETE, REMOVE, MERGE) are rejected.
+    ///
+    /// Ideal for concurrent read-heavy workloads (e.g. MCP server agents)
+    /// where you want a consistent snapshot without the cost of a full clone.
+    ///
+    /// Can also be used as a context manager:
+    ///
+    /// Example:
+    ///     ```python
+    ///     with graph.begin_read() as tx:
+    ///         result = tx.cypher("MATCH (n:Person) RETURN n.name")
+    ///         # auto-closes on exit (no commit needed)
+    ///     ```
+    #[pyo3(signature = (timeout_ms=None))]
+    fn begin_read(slf: Py<Self>, timeout_ms: Option<u64>) -> PyResult<Transaction> {
+        let (snapshot, version) = Python::attach(|py| {
+            let kg = slf.borrow(py);
+            (Arc::clone(&kg.inner), kg.inner.version)
+        });
+        let deadline =
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        Ok(Transaction {
+            owner: slf,
+            working: None,
+            committed: false,
+            read_only: true,
+            snapshot: Some(snapshot),
+            base_version: version,
+            deadline,
+        })
+    }
+}

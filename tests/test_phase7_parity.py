@@ -36,60 +36,9 @@ SRC_GRAPH = REPO_ROOT / "src" / "graph"
 # carry a rationale + the 0.9.0+ follow-up plan.
 HARD_CAP = 2500
 
-GOD_FILE_EXCEPTIONS = {
-    # Phase 8 renamed cypher/ → languages/cypher/.
-    "languages/cypher/executor.rs": (
-        "Cypher executor (~12k lines). Splitting introduces artificial "
-        "seams in the single `impl CypherExecutor` block. Planned 0.9.0 "
-        "split: executor/{mutations, expression_eval, value_ops}."
-    ),
-    "languages/cypher/planner.rs": (
-        "Query planner (~3.5k lines). Fusion passes share helpers; "
-        "splitting cost is high, immediate benefit low. Planned 0.9.0 "
-        "split along fusion-family boundaries."
-    ),
-    "languages/cypher/parser.rs": (
-        "Cypher recursive-descent parser. Single `impl CypherParser` "
-        "block is idiomatic; artificial seams hurt readability. "
-        "Accepted monolithic."
-    ),
-    # Phase 8 renamed query/ → core/.
-    "core/pattern_matching.rs": (
-        "Pattern matcher (~2.6k lines). Barely over cap; parser + "
-        "executor are tightly coupled. 0.9.0 candidate for split at "
-        "the Parser impl boundary."
-    ),
-    # Phase 8 moved all KnowledgeGraph #[pymethods] here from mod.rs.
-    # mod.rs itself drops under the cap (~1k lines).
-    "pyapi/kg_methods.rs": (
-        "KnowledgeGraph #[pymethods] core (~5.4k lines). ~102 pymethods "
-        "in one file. Phase 8 consolidated all PyO3 boundary code under "
-        "pyapi/. Further 4-way split into kg_{core,mutation,introspection,"
-        "fluent}.rs is scheduled for Phase 9 alongside other god-file "
-        "splits."
-    ),
-    "schema.rs": (
-        "DirGraph + shared schema types (~5.1k lines). Phase 7 Stage 2.2 "
-        "extracted InternedKey + StringInterner to storage/interner.rs. "
-        "Further extraction (GraphBackend → storage/backend.rs; NodeData/"
-        "EdgeData/PropertyStorage/configs → storage/schema.rs; DirGraph → "
-        "graph/dir_graph.rs) is a 0.9.0 follow-up."
-    ),
-    "introspection.rs": (
-        "Schema introspection core (~4.2k lines). Natural theme splits "
-        "available (describe, schema_overview, reporting, hints, "
-        "connectivity). 0.9.0 follow-up."
-    ),
-    "storage/disk/disk_graph.rs": (
-        "DiskGraph CSR + mmap columns (~3.3k lines). Coherent single-"
-        "backend struct with tight internal coupling. 0.9.0 candidate "
-        "for {csr, column_store, blocks, builder} subdivision."
-    ),
-    "io/ntriples.rs": (
-        "N-Triples bulk loader (~3k lines). Parser is small; bulk-load "
-        "orchestration + column builders dominate. 0.9.0 split: parser "
-        "→ io/ntriples.rs, bulk-load → storage/disk/builder.rs."
-    ),
+GOD_FILE_EXCEPTIONS: dict[str, str] = {
+    # Phase 9 emptied this list: every `.rs` under `src/graph/` now sits
+    # at or under the 2,500-line hard cap.
 }
 
 
@@ -167,11 +116,16 @@ def test_mod_rs_purity():
     subdirs = [
         "algorithms",
         "core",
+        "core/pattern_matching",
         "features",
         "introspection",
         "io",
+        "io/ntriples",
         "languages",
         "languages/cypher",
+        "languages/cypher/executor",
+        "languages/cypher/parser",
+        "languages/cypher/planner",
         "languages/fluent",
         "mutation",
         "pyapi",
@@ -196,6 +150,18 @@ def test_mod_rs_purity():
             cap = 800
         elif sub == "languages/cypher":
             cap = 500
+        elif sub == "languages/cypher/executor":
+            # Hosts CypherExecutor struct + constructor + execute()
+            # orchestrator + finalize_result + filter-spec types — the
+            # shared state that every clause-submodule borrows from.
+            cap = 1200
+        elif sub == "languages/cypher/parser":
+            # Hosts CypherParser struct + token helpers + parse_query
+            # orchestrator + public parse_cypher entry + tests.
+            cap = 1000
+        elif sub == "languages/cypher/planner":
+            # Hosts the optimize() orchestrator + mark_* helpers + tests.
+            cap = 400
         else:
             cap = 300
         if len(lines) > cap:

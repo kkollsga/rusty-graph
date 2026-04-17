@@ -1,0 +1,694 @@
+//! Shared executor helpers — expression-to-string, predicate-to-string,
+//! value comparison, arithmetic, type coercion, property resolution, and
+//! CALL parameter extractors.
+
+use super::super::ast::*;
+use super::super::result::*;
+use crate::datatypes::values::Value;
+use crate::graph::schema::{DirGraph, NodeData};
+use crate::graph::storage::GraphRead;
+use std::collections::HashMap;
+use std::sync::RwLock;
+
+// Re-export the ast aggregate helpers so downstream code can refer to them
+// via the executor namespace (backward compatibility with pre-split code).
+pub use super::super::ast::is_aggregate_expression;
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+// is_aggregate_expression and is_window_expression are re-exported above.
+
+/// Augment each row's `projected` with an expression-keyed copy of every
+/// aggregate return item, so HAVING predicates like `count(m) > 1` can
+/// resolve even when the RETURN item is aliased (`count(m) AS c`).
+/// Without this, the aliased aggregate is stored only under `c` and a
+/// HAVING reference to `count(m)` would fall through to scalar dispatch
+/// (which errors for aggregates and gets swallowed by unwrap_or(false)).
+pub(super) fn augment_rows_with_aggregate_keys(rows: &mut [ResultRow], items: &[ReturnItem]) {
+    for item in items {
+        if !is_aggregate_expression(&item.expression) {
+            continue;
+        }
+        let alias_key = return_item_column_name(item);
+        let expr_key = expression_to_string(&item.expression);
+        if alias_key == expr_key {
+            continue;
+        }
+        for row in rows.iter_mut() {
+            if row.projected.contains_key(&expr_key) {
+                continue;
+            }
+            if let Some(val) = row.projected.get(&alias_key).cloned() {
+                row.projected.insert(expr_key.clone(), val);
+            }
+        }
+    }
+}
+
+/// Get the column name for a return item
+pub fn return_item_column_name(item: &ReturnItem) -> String {
+    if let Some(ref alias) = item.alias {
+        alias.clone()
+    } else {
+        expression_to_string(&item.expression)
+    }
+}
+
+/// Convert an expression to its string representation (for column naming)
+pub(super) fn expression_to_string(expr: &Expression) -> String {
+    match expr {
+        Expression::PropertyAccess { variable, property } => format!("{}.{}", variable, property),
+        Expression::Variable(name) => name.clone(),
+        Expression::Literal(val) => format_value_compact(val),
+        Expression::FunctionCall {
+            name,
+            args,
+            distinct,
+        } => {
+            let args_str: Vec<String> = args.iter().map(expression_to_string).collect();
+            if *distinct {
+                format!("{}(DISTINCT {})", name, args_str.join(", "))
+            } else {
+                format!("{}({})", name, args_str.join(", "))
+            }
+        }
+        Expression::Star => "*".to_string(),
+        Expression::Add(l, r) => {
+            format!("{} + {}", expression_to_string(l), expression_to_string(r))
+        }
+        Expression::Subtract(l, r) => {
+            format!("{} - {}", expression_to_string(l), expression_to_string(r))
+        }
+        Expression::Multiply(l, r) => {
+            format!("{} * {}", expression_to_string(l), expression_to_string(r))
+        }
+        Expression::Divide(l, r) => {
+            format!("{} / {}", expression_to_string(l), expression_to_string(r))
+        }
+        Expression::Modulo(l, r) => {
+            format!("{} % {}", expression_to_string(l), expression_to_string(r))
+        }
+        Expression::Concat(l, r) => {
+            format!("{} || {}", expression_to_string(l), expression_to_string(r))
+        }
+        Expression::Negate(inner) => format!("-{}", expression_to_string(inner)),
+        Expression::ListLiteral(items) => {
+            let items_str: Vec<String> = items.iter().map(expression_to_string).collect();
+            format!("[{}]", items_str.join(", "))
+        }
+        Expression::Case { .. } => "CASE".to_string(),
+        Expression::Parameter(name) => format!("${}", name),
+        Expression::ListComprehension {
+            variable,
+            list_expr,
+            filter,
+            map_expr,
+        } => {
+            let mut result = format!("[{} IN {}", variable, expression_to_string(list_expr));
+            if filter.is_some() {
+                result.push_str(" WHERE ...");
+            }
+            if let Some(ref expr) = map_expr {
+                result.push_str(&format!(" | {}", expression_to_string(expr)));
+            }
+            result.push(']');
+            result
+        }
+        Expression::IndexAccess { expr, index } => {
+            format!(
+                "{}[{}]",
+                expression_to_string(expr),
+                expression_to_string(index)
+            )
+        }
+        Expression::ListSlice { expr, start, end } => {
+            let s = start
+                .as_ref()
+                .map_or(String::new(), |e| expression_to_string(e));
+            let e = end
+                .as_ref()
+                .map_or(String::new(), |e| expression_to_string(e));
+            format!("{}[{}..{}]", expression_to_string(expr), s, e)
+        }
+        Expression::MapProjection { variable, items } => {
+            let items_str: Vec<String> = items
+                .iter()
+                .map(|item| match item {
+                    MapProjectionItem::Property(prop) => format!(".{}", prop),
+                    MapProjectionItem::AllProperties => ".*".to_string(),
+                    MapProjectionItem::Alias { key, expr } => {
+                        format!("{}: {}", key, expression_to_string(expr))
+                    }
+                })
+                .collect();
+            format!("{} {{{}}}", variable, items_str.join(", "))
+        }
+        Expression::MapLiteral(entries) => {
+            let items_str: Vec<String> = entries
+                .iter()
+                .map(|(key, expr)| format!("{}: {}", key, expression_to_string(expr)))
+                .collect();
+            format!("{{{}}}", items_str.join(", "))
+        }
+        Expression::IsNull(inner) => format!("{} IS NULL", expression_to_string(inner)),
+        Expression::IsNotNull(inner) => format!("{} IS NOT NULL", expression_to_string(inner)),
+        Expression::QuantifiedList {
+            quantifier,
+            variable,
+            list_expr,
+            ..
+        } => {
+            let qname = match quantifier {
+                ListQuantifier::Any => "any",
+                ListQuantifier::All => "all",
+                ListQuantifier::None => "none",
+                ListQuantifier::Single => "single",
+            };
+            format!(
+                "{}({} IN {} WHERE ...)",
+                qname,
+                variable,
+                expression_to_string(list_expr)
+            )
+        }
+        Expression::WindowFunction {
+            name,
+            partition_by,
+            order_by,
+        } => {
+            let mut s = format!("{}() OVER (", name);
+            if !partition_by.is_empty() {
+                s.push_str("PARTITION BY ");
+                let parts: Vec<String> = partition_by.iter().map(expression_to_string).collect();
+                s.push_str(&parts.join(", "));
+                if !order_by.is_empty() {
+                    s.push(' ');
+                }
+            }
+            if !order_by.is_empty() {
+                s.push_str("ORDER BY ");
+                let parts: Vec<String> = order_by
+                    .iter()
+                    .map(|item| {
+                        let dir = if item.ascending { "" } else { " DESC" };
+                        format!("{}{}", expression_to_string(&item.expression), dir)
+                    })
+                    .collect();
+                s.push_str(&parts.join(", "));
+            }
+            s.push(')');
+            s
+        }
+        Expression::PredicateExpr(pred) => predicate_to_string(pred),
+        Expression::ExprPropertyAccess { expr, property } => {
+            format!("{}.{}", expression_to_string(expr), property)
+        }
+    }
+}
+
+/// Convert a predicate to its string representation (for column naming)
+pub(super) fn predicate_to_string(pred: &Predicate) -> String {
+    match pred {
+        Predicate::Comparison {
+            left,
+            operator,
+            right,
+        } => {
+            let op_str = match operator {
+                ComparisonOp::Equals => "=",
+                ComparisonOp::NotEquals => "<>",
+                ComparisonOp::LessThan => "<",
+                ComparisonOp::LessThanEq => "<=",
+                ComparisonOp::GreaterThan => ">",
+                ComparisonOp::GreaterThanEq => ">=",
+                ComparisonOp::RegexMatch => "=~",
+            };
+            format!(
+                "{} {} {}",
+                expression_to_string(left),
+                op_str,
+                expression_to_string(right)
+            )
+        }
+        Predicate::StartsWith { expr, pattern } => {
+            format!(
+                "{} STARTS WITH {}",
+                expression_to_string(expr),
+                expression_to_string(pattern)
+            )
+        }
+        Predicate::EndsWith { expr, pattern } => {
+            format!(
+                "{} ENDS WITH {}",
+                expression_to_string(expr),
+                expression_to_string(pattern)
+            )
+        }
+        Predicate::Contains { expr, pattern } => {
+            format!(
+                "{} CONTAINS {}",
+                expression_to_string(expr),
+                expression_to_string(pattern)
+            )
+        }
+        Predicate::LabelCheck { variable, label } => format!("{}:{}", variable, label),
+        _ => "predicate(...)".to_string(),
+    }
+}
+
+/// Evaluate a comparison using existing filtering_methods infrastructure
+pub(super) fn evaluate_comparison(
+    left: &Value,
+    op: &ComparisonOp,
+    right: &Value,
+    regex_cache: Option<&RwLock<HashMap<String, regex::Regex>>>,
+) -> Result<bool, String> {
+    // Three-valued logic: comparisons involving Null propagate Null → false
+    // (except IS NULL / IS NOT NULL which are handled elsewhere, and
+    // Equals/NotEquals which handle Null explicitly via values_equal).
+    match op {
+        ComparisonOp::Equals => Ok(crate::graph::core::filtering_methods::values_equal(
+            left, right,
+        )),
+        ComparisonOp::NotEquals => Ok(!crate::graph::core::filtering_methods::values_equal(
+            left, right,
+        )),
+        _ if matches!(left, Value::Null) || matches!(right, Value::Null) => Ok(false),
+        ComparisonOp::LessThan => Ok(crate::graph::core::filtering_methods::compare_values(
+            left, right,
+        ) == Some(std::cmp::Ordering::Less)),
+        ComparisonOp::LessThanEq => Ok(matches!(
+            crate::graph::core::filtering_methods::compare_values(left, right),
+            Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
+        )),
+        ComparisonOp::GreaterThan => Ok(crate::graph::core::filtering_methods::compare_values(
+            left, right,
+        ) == Some(std::cmp::Ordering::Greater)),
+        ComparisonOp::GreaterThanEq => Ok(matches!(
+            crate::graph::core::filtering_methods::compare_values(left, right),
+            Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
+        )),
+        ComparisonOp::RegexMatch => match (left, right) {
+            (Value::String(text), Value::String(pattern)) => {
+                // Try cached regex first
+                if let Some(cache) = regex_cache {
+                    {
+                        let read = cache.read().unwrap();
+                        if let Some(re) = read.get(pattern.as_str()) {
+                            return Ok(re.is_match(text));
+                        }
+                    }
+                    let re = regex::Regex::new(pattern)
+                        .map_err(|e| format!("Invalid regular expression '{}': {}", pattern, e))?;
+                    let result = re.is_match(text);
+                    cache.write().unwrap().insert(pattern.clone(), re);
+                    Ok(result)
+                } else {
+                    match regex::Regex::new(pattern) {
+                        Ok(re) => Ok(re.is_match(text)),
+                        Err(e) => Err(format!("Invalid regular expression '{}': {}", pattern, e)),
+                    }
+                }
+            }
+            _ => Ok(false),
+        },
+    }
+}
+
+/// Resolve a node property, returning an owned Value directly.
+/// Uses `get_property_value()` to avoid Cow wrapping/unwrapping overhead.
+pub(super) fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> Value {
+    let node_type_str = node.node_type_str(&graph.interner);
+    let resolved = graph.resolve_alias(node_type_str, property);
+    match resolved {
+        "id" => node.id().into_owned(),
+        "title" | "name" => node.title().into_owned(),
+        "type" | "node_type" | "label" => Value::String(node_type_str.to_string()),
+        _ => {
+            if let Some(val) = node.get_property_value(resolved) {
+                return val;
+            }
+            // Fall through to spatial virtual properties only if not found
+            if let Some(config) = graph.get_spatial_config(node_type_str) {
+                if resolved == "location" {
+                    if let Some((lat_f, lon_f)) = &config.location {
+                        let lat = crate::graph::core::value_operations::value_to_f64(
+                            node.get_property(lat_f).as_deref().unwrap_or(&Value::Null),
+                        );
+                        let lon = crate::graph::core::value_operations::value_to_f64(
+                            node.get_property(lon_f).as_deref().unwrap_or(&Value::Null),
+                        );
+                        if let (Some(lat), Some(lon)) = (lat, lon) {
+                            return Value::Point { lat, lon };
+                        }
+                    }
+                }
+                if resolved == "geometry" {
+                    if let Some(geom_f) = &config.geometry {
+                        if let Some(val) = node.get_property_value(geom_f) {
+                            return val;
+                        }
+                    }
+                }
+                if let Some((lat_f, lon_f)) = config.points.get(resolved) {
+                    let lat = crate::graph::core::value_operations::value_to_f64(
+                        node.get_property(lat_f).as_deref().unwrap_or(&Value::Null),
+                    );
+                    let lon = crate::graph::core::value_operations::value_to_f64(
+                        node.get_property(lon_f).as_deref().unwrap_or(&Value::Null),
+                    );
+                    if let (Some(lat), Some(lon)) = (lat, lon) {
+                        return Value::Point { lat, lon };
+                    }
+                }
+                if let Some(shape_f) = config.shapes.get(resolved) {
+                    if let Some(val) = node.get_property_value(shape_f) {
+                        return val;
+                    }
+                }
+            }
+            Value::Null
+        }
+    }
+}
+
+/// Resolve a property from an EdgeBinding by looking up the graph
+pub(super) fn resolve_edge_property(graph: &DirGraph, edge: &EdgeBinding, property: &str) -> Value {
+    let g = &graph.graph;
+    if let Some(edge_data) = g.edge_weight(edge.edge_index) {
+        match property {
+            "type" | "connection_type" => {
+                Value::String(edge_data.connection_type_str(&graph.interner).to_string())
+            }
+            _ => edge_data
+                .get_property(property)
+                .cloned()
+                .unwrap_or(Value::Null),
+        }
+    } else {
+        Value::Null
+    }
+}
+
+/// Convert a NodeData to a representative Value (title string)
+pub(super) fn node_to_map_value(node: &NodeData) -> Value {
+    node.title().into_owned()
+}
+
+/// Parse a list value from string format "[a, b, c]".
+/// Splits at top-level commas only — respects brace/bracket/quote nesting so that
+/// JSON objects like `{"id": 1, "name": "Alice"}` are kept intact.
+pub(super) fn parse_list_value(val: &Value) -> Vec<Value> {
+    match val {
+        Value::String(s) => {
+            let trimmed = s.trim();
+            if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+                return vec![];
+            }
+            let inner = &trimmed[1..trimmed.len() - 1];
+            if inner.is_empty() {
+                return vec![];
+            }
+            // Split at top-level commas, respecting nesting
+            let items = split_top_level_commas(inner);
+            items
+                .into_iter()
+                .map(|item| {
+                    let trimmed_item = item.trim();
+                    if let Ok(i) = trimmed_item.parse::<i64>() {
+                        Value::Int64(i)
+                    } else if let Ok(f) = trimmed_item.parse::<f64>() {
+                        Value::Float64(f)
+                    } else if trimmed_item == "true" {
+                        Value::Boolean(true)
+                    } else if trimmed_item == "false" {
+                        Value::Boolean(false)
+                    } else if trimmed_item == "null" {
+                        Value::Null
+                    } else {
+                        let unquoted = trimmed_item.trim_matches(|c| c == '"' || c == '\'');
+                        // Recognise serialised node references from collect()
+                        if let Some(idx_str) = unquoted.strip_prefix("__nref:") {
+                            if let Ok(idx) = idx_str.parse::<u32>() {
+                                return Value::NodeRef(idx);
+                            }
+                        }
+                        Value::String(unquoted.to_string())
+                    }
+                })
+                .collect()
+        }
+        _ => vec![],
+    }
+}
+
+/// Split a string at commas that are not inside braces, brackets, or quotes.
+pub(super) fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut depth = 0i32; // tracks {}, [], ()
+    let mut in_quotes = false;
+    let mut quote_char = '"';
+    let mut start = 0;
+
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '"' | '\'' if !in_quotes => {
+                in_quotes = true;
+                quote_char = ch;
+            }
+            c if in_quotes && c == quote_char => {
+                // Check for escaped quote
+                let bytes = s.as_bytes();
+                if i == 0 || bytes[i - 1] != b'\\' {
+                    in_quotes = false;
+                }
+            }
+            '{' | '[' | '(' if !in_quotes => depth += 1,
+            '}' | ']' | ')' if !in_quotes => depth -= 1,
+            ',' if !in_quotes && depth == 0 => {
+                items.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    items.push(&s[start..]);
+    items
+}
+
+// Delegate to shared value_operations module
+pub(super) fn format_value_compact(val: &Value) -> String {
+    crate::graph::core::value_operations::format_value_compact(val)
+}
+/// JSON-safe value formatting: strings are quoted, others are as-is.
+/// Used for list serialization so py_convert can parse via json.loads.
+pub(super) fn format_value_json(val: &Value) -> String {
+    match val {
+        Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        Value::Null => "null".to_string(),
+        Value::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
+        Value::NodeRef(idx) => format!("\"__nref:{}\"", idx),
+        _ => format_value_compact(val),
+    }
+}
+pub(super) fn value_to_f64(val: &Value) -> Option<f64> {
+    crate::graph::core::value_operations::value_to_f64(val)
+}
+
+/// Auto-coerce non-string types (DateTime, Int64, Float64, Boolean) to String
+/// for use in string functions. Null stays Null.
+pub(super) fn coerce_to_string(val: Value) -> Value {
+    match &val {
+        Value::String(_) | Value::Null => val,
+        _ => Value::String(format_value_compact(&val)),
+    }
+}
+
+/// Parse a JSON-style float list string "[1.0, 2.0, 3.0]" into Vec<f32>.
+pub(super) fn parse_json_float_list(s: &str) -> Result<Vec<f32>, String> {
+    let trimmed = s.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return Err("vector_score(): query vector must be a list like [1.0, 2.0, ...]".into());
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    if inner.is_empty() {
+        return Ok(Vec::new());
+    }
+    inner
+        .split(',')
+        .map(|item| {
+            item.trim()
+                .parse::<f32>()
+                .map_err(|_| format!("vector_score(): cannot parse '{}' as a number", item.trim()))
+        })
+        .collect()
+}
+pub(super) fn arithmetic_add(a: &Value, b: &Value) -> Value {
+    crate::graph::core::value_operations::arithmetic_add(a, b)
+}
+pub(super) fn arithmetic_sub(a: &Value, b: &Value) -> Value {
+    crate::graph::core::value_operations::arithmetic_sub(a, b)
+}
+pub(super) fn arithmetic_mul(a: &Value, b: &Value) -> Value {
+    crate::graph::core::value_operations::arithmetic_mul(a, b)
+}
+pub(super) fn arithmetic_div(a: &Value, b: &Value) -> Value {
+    crate::graph::core::value_operations::arithmetic_div(a, b)
+}
+pub(super) fn arithmetic_mod(a: &Value, b: &Value) -> Value {
+    crate::graph::core::value_operations::arithmetic_mod(a, b)
+}
+pub(super) fn arithmetic_negate(a: &Value) -> Value {
+    crate::graph::core::value_operations::arithmetic_negate(a)
+}
+pub(super) fn to_integer(val: &Value) -> Value {
+    crate::graph::core::value_operations::to_integer(val)
+}
+pub(super) fn as_i64(val: &Value) -> Result<i64, String> {
+    match val {
+        Value::Int64(n) => Ok(*n),
+        Value::Float64(f) => Ok(*f as i64),
+        Value::String(s) => s
+            .parse::<i64>()
+            .map_err(|_| format!("Cannot convert '{}' to integer", s)),
+        _ => Err(format!("Expected integer, got {:?}", val)),
+    }
+}
+pub(super) fn to_float(val: &Value) -> Value {
+    crate::graph::core::value_operations::to_float(val)
+}
+pub(super) fn parse_value_string(s: &str) -> Value {
+    crate::graph::core::value_operations::parse_value_string(s)
+}
+
+/// Split a list string like "[1, 2, [3, 4], 5]" into top-level items,
+/// respecting nested brackets and quoted strings. Returns inner items
+/// as string slices. Empty list "[]" returns empty vec.
+pub(super) fn split_list_top_level(s: &str) -> Vec<&str> {
+    let inner = &s[1..s.len() - 1]; // strip outer []
+    if inner.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut items = Vec::new();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut start = 0;
+
+    for (i, ch) in inner.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => {
+                escape = true;
+            }
+            '"' | '\'' => {
+                in_string = !in_string;
+            }
+            '[' | '{' if !in_string => {
+                depth += 1;
+            }
+            ']' | '}' if !in_string => {
+                depth -= 1;
+            }
+            ',' if !in_string && depth == 0 => {
+                items.push(inner[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    // Last item
+    let last = inner[start..].trim();
+    if !last.is_empty() {
+        items.push(last);
+    }
+    items
+}
+
+// ============================================================================
+// CALL parameter helpers
+// ============================================================================
+
+pub(super) fn call_param_f64(params: &HashMap<String, Value>, key: &str, default: f64) -> f64 {
+    params
+        .get(key)
+        .map(|v| match v {
+            Value::Float64(f) => *f,
+            Value::Int64(i) => *i as f64,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
+pub(super) fn call_param_usize(
+    params: &HashMap<String, Value>,
+    key: &str,
+    default: usize,
+) -> usize {
+    params
+        .get(key)
+        .map(|v| match v {
+            Value::Int64(i) => *i as usize,
+            Value::Float64(f) => *f as usize,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
+pub(super) fn call_param_bool(params: &HashMap<String, Value>, key: &str, default: bool) -> bool {
+    params
+        .get(key)
+        .map(|v| match v {
+            Value::Boolean(b) => *b,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
+pub(super) fn call_param_opt_usize(params: &HashMap<String, Value>, key: &str) -> Option<usize> {
+    params.get(key).and_then(|v| match v {
+        Value::Int64(i) => Some(*i as usize),
+        _ => None,
+    })
+}
+
+pub(super) fn call_param_opt_string(params: &HashMap<String, Value>, key: &str) -> Option<String> {
+    params.get(key).and_then(|v| match v {
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    })
+}
+
+pub(super) fn call_param_string_list(
+    params: &HashMap<String, Value>,
+    key: &str,
+) -> Option<Vec<String>> {
+    params.get(key).and_then(|v| match v {
+        Value::String(s) => {
+            if s.starts_with('[') {
+                // List literal was serialized as JSON string — parse it back
+                let items = parse_list_value(v);
+                if items.is_empty() {
+                    return None;
+                }
+                Some(
+                    items
+                        .into_iter()
+                        .filter_map(|item| match item {
+                            Value::String(s) => Some(s),
+                            _ => None,
+                        })
+                        .collect(),
+                )
+            } else {
+                Some(vec![s.clone()])
+            }
+        }
+        _ => None,
+    })
+}

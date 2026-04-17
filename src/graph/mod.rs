@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 pub mod algorithms;
 pub mod core;
+pub mod dir_graph;
 pub mod features;
 pub mod introspection;
 pub mod io;

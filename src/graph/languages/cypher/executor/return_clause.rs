@@ -1,0 +1,1300 @@
+//! Cypher executor — return_clause methods.
+
+use super::super::ast::*;
+use super::helpers::*;
+use super::*;
+use crate::datatypes::values::Value;
+use chrono::Datelike;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+
+impl<'a> CypherExecutor<'a> {
+    pub(super) fn execute_return(
+        &self,
+        clause: &ReturnClause,
+        result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
+        // Expand RETURN * to individual items for each bound variable (BUG-05)
+        let expanded;
+        let clause = if clause.items.len() == 1
+            && matches!(clause.items[0].expression, Expression::Star)
+            && clause.items[0].alias.is_none()
+        {
+            if let Some(first_row) = result_set.rows.first() {
+                let mut items = Vec::new();
+                // Add projected bindings (from WITH)
+                for key in first_row.projected.keys() {
+                    items.push(ReturnItem {
+                        expression: Expression::Variable(key.clone()),
+                        alias: Some(key.clone()),
+                    });
+                }
+                // Add node bindings
+                for key in first_row.node_bindings.keys() {
+                    if !first_row.projected.contains_key(key) {
+                        items.push(ReturnItem {
+                            expression: Expression::Variable(key.clone()),
+                            alias: Some(key.clone()),
+                        });
+                    }
+                }
+                // Add edge bindings
+                for key in first_row.edge_bindings.keys() {
+                    items.push(ReturnItem {
+                        expression: Expression::Variable(key.clone()),
+                        alias: Some(key.clone()),
+                    });
+                }
+                expanded = ReturnClause {
+                    items,
+                    distinct: clause.distinct,
+                    having: clause.having.clone(),
+                };
+                &expanded
+            } else {
+                clause
+            }
+        } else {
+            clause
+        };
+
+        let has_aggregation = clause
+            .items
+            .iter()
+            .any(|item| is_aggregate_expression(&item.expression));
+        let has_windows = clause
+            .items
+            .iter()
+            .any(|item| is_window_expression(&item.expression));
+
+        let mut result = if has_windows {
+            // Window functions: project non-window items first, then apply window pass
+            self.execute_return_with_windows(clause, result_set)?
+        } else if has_aggregation {
+            self.execute_return_with_aggregation(clause, result_set)?
+        } else {
+            self.execute_return_projection(clause, result_set)?
+        };
+
+        // Apply HAVING filter (post-aggregation)
+        if let Some(ref having) = clause.having {
+            augment_rows_with_aggregate_keys(&mut result.rows, &clause.items);
+            let where_clause = WhereClause {
+                predicate: having.clone(),
+            };
+            result = self.execute_where(&where_clause, result)?;
+        }
+
+        Ok(result)
+    }
+
+    // execute_return_with_windows and apply_window_functions are in window.rs
+
+    /// Simple projection without aggregation
+    pub(super) fn execute_return_projection(
+        &self,
+        clause: &ReturnClause,
+        mut result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
+        let columns: Vec<String> = clause.items.iter().map(return_item_column_name).collect();
+
+        // Fold constant sub-expressions once before row iteration
+        let folded_exprs: Vec<Expression> = clause
+            .items
+            .iter()
+            .map(|item| self.fold_constants_expr(&item.expression))
+            .collect();
+
+        // In-place projection: overwrite each row's `projected` field without
+        // cloning node_bindings / edge_bindings / path_bindings.
+        let project_row = |row: &mut ResultRow| -> Result<(), String> {
+            let mut projected = Bindings::with_capacity(clause.items.len());
+            for (i, item) in clause.items.iter().enumerate() {
+                let key = return_item_column_name(item);
+                let val = self.evaluate_expression(&folded_exprs[i], row)?;
+                projected.insert(key, val);
+            }
+            row.projected = projected;
+            Ok(())
+        };
+
+        if result_set.rows.len() >= RAYON_THRESHOLD {
+            result_set.rows.par_iter_mut().try_for_each(project_row)?;
+        } else {
+            for row in &mut result_set.rows {
+                project_row(row)?;
+            }
+        }
+
+        // Handle DISTINCT
+        if clause.distinct {
+            let mut seen = HashSet::new();
+            result_set.rows.retain(|row| {
+                let key: Vec<Value> = columns
+                    .iter()
+                    .map(|col| row.projected.get(col).cloned().unwrap_or(Value::Null))
+                    .collect();
+                seen.insert(key)
+            });
+        }
+
+        result_set.columns = columns;
+        Ok(result_set)
+    }
+
+    /// RETURN with aggregation (grouping + aggregate functions)
+    pub(super) fn execute_return_with_aggregation(
+        &self,
+        clause: &ReturnClause,
+        result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
+        // Identify grouping keys (non-aggregate expressions) and aggregations
+        let group_key_indices: Vec<usize> = clause
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| !is_aggregate_expression(&item.expression))
+            .map(|(i, _)| i)
+            .collect();
+
+        let columns: Vec<String> = clause.items.iter().map(return_item_column_name).collect();
+
+        // Special case: no grouping keys = aggregate over all rows
+        if group_key_indices.is_empty() {
+            let mut projected = Bindings::with_capacity(clause.items.len());
+            for item in &clause.items {
+                let key = return_item_column_name(item);
+                let val = self.evaluate_aggregate(&item.expression, &result_set.rows)?;
+                projected.insert(key, val);
+            }
+            return Ok(ResultSet {
+                rows: vec![ResultRow::from_projected(projected)],
+                columns,
+            });
+        }
+
+        // Fold constant sub-expressions in grouping key expressions
+        let folded_group_exprs: Vec<Expression> = group_key_indices
+            .iter()
+            .map(|&i| self.fold_constants_expr(&clause.items[i].expression))
+            .collect();
+
+        // Group rows by grouping key values using Value hash directly (no string formatting)
+        self.check_deadline()?;
+        let mut groups: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
+        let mut group_index_map: HashMap<Vec<Value>, usize> = HashMap::new();
+
+        for (row_idx, row) in result_set.rows.iter().enumerate() {
+            let key_values: Vec<Value> = folded_group_exprs
+                .iter()
+                .map(|expr| self.evaluate_expression(expr, row).unwrap_or(Value::Null))
+                .collect();
+
+            if let Some(&group_idx) = group_index_map.get(&key_values) {
+                groups[group_idx].1.push(row_idx);
+            } else {
+                let group_idx = groups.len();
+                group_index_map.insert(key_values.clone(), group_idx);
+                groups.push((key_values, vec![row_idx]));
+            }
+        }
+
+        // Compute results for each group
+        let mut result_rows = Vec::with_capacity(groups.len());
+
+        for (group_key_values, row_indices) in &groups {
+            let group_rows: Vec<&ResultRow> =
+                row_indices.iter().map(|&i| &result_set.rows[i]).collect();
+
+            let mut projected = Bindings::with_capacity(clause.items.len());
+
+            // Add group key values
+            for (ki, &item_idx) in group_key_indices.iter().enumerate() {
+                let key = return_item_column_name(&clause.items[item_idx]);
+                projected.insert(key, group_key_values[ki].clone());
+            }
+
+            // Compute aggregations — try single-pass fusion first
+            if let Some(agg_results) =
+                self.try_fused_numeric_aggregation(clause, &group_key_indices, &group_rows)?
+            {
+                for (key, val) in agg_results {
+                    projected.insert(key, val);
+                }
+            } else {
+                for (item_idx, item) in clause.items.iter().enumerate() {
+                    if group_key_indices.contains(&item_idx) {
+                        continue; // Already added
+                    }
+                    let key = return_item_column_name(item);
+                    let val = self.evaluate_aggregate_with_rows(&item.expression, &group_rows)?;
+                    projected.insert(key, val);
+                }
+            }
+
+            // Preserve node/edge bindings from the first row in the group
+            // for variables that appear in the grouping keys.
+            // This ensures subsequent MATCH/OPTIONAL MATCH clauses can
+            // constrain patterns to the correct nodes.
+            let first_row = &result_set.rows[row_indices[0]];
+            let mut row = ResultRow::from_projected(projected);
+            for &item_idx in &group_key_indices {
+                let expr = &clause.items[item_idx].expression;
+                if let Expression::Variable(var) = expr {
+                    if let Some(&idx) = first_row.node_bindings.get(var) {
+                        row.node_bindings.insert(var.clone(), idx);
+                    }
+                    if let Some(edge) = first_row.edge_bindings.get(var) {
+                        row.edge_bindings.insert(var.clone(), *edge);
+                    }
+                    if let Some(path) = first_row.path_bindings.get(var) {
+                        row.path_bindings.insert(var.clone(), path.clone());
+                    }
+                }
+            }
+            result_rows.push(row);
+        }
+
+        // Handle DISTINCT
+        if clause.distinct {
+            let mut seen = HashSet::new();
+            result_rows.retain(|row| {
+                let key: Vec<Value> = columns
+                    .iter()
+                    .map(|col| row.projected.get(col).cloned().unwrap_or(Value::Null))
+                    .collect();
+                seen.insert(key)
+            });
+        }
+
+        Ok(ResultSet {
+            rows: result_rows,
+            columns,
+        })
+    }
+
+    /// Evaluate aggregate function over all rows in a ResultSet
+    pub(super) fn evaluate_aggregate(
+        &self,
+        expr: &Expression,
+        rows: &[ResultRow],
+    ) -> Result<Value, String> {
+        let refs: Vec<&ResultRow> = rows.iter().collect();
+        self.evaluate_aggregate_with_rows(expr, &refs)
+    }
+
+    /// Evaluate aggregate function over a slice of row references
+    pub(super) fn evaluate_aggregate_with_rows(
+        &self,
+        expr: &Expression,
+        rows: &[&ResultRow],
+    ) -> Result<Value, String> {
+        match expr {
+            Expression::FunctionCall {
+                name,
+                args,
+                distinct,
+            } => match name.as_str() {
+                "count" => {
+                    if args.len() == 1 && matches!(args[0], Expression::Star) {
+                        Ok(Value::Int64(rows.len() as i64))
+                    } else if *distinct {
+                        // For DISTINCT on a node/edge variable, key on the
+                        // binding index directly — typed sets avoid the
+                        // per-row `format!("n:{}", ...)` allocation the
+                        // previous implementation used. For other expression
+                        // forms, key on the Value itself.
+                        let var_name = match &args[0] {
+                            Expression::Variable(v) => Some(v.as_str()),
+                            _ => None,
+                        };
+                        let mut count = 0i64;
+                        let mut seen_nodes: HashSet<usize> = HashSet::new();
+                        let mut seen_edges: HashSet<usize> = HashSet::new();
+                        let mut seen_values: HashSet<Value> = HashSet::new();
+                        for row in rows {
+                            let val = self.evaluate_expression(&args[0], row)?;
+                            if matches!(val, Value::Null) {
+                                continue;
+                            }
+                            if let Some(vn) = var_name {
+                                if let Some(&idx) = row.node_bindings.get(vn) {
+                                    if seen_nodes.insert(idx.index()) {
+                                        count += 1;
+                                    }
+                                    continue;
+                                }
+                                if let Some(eb) = row.edge_bindings.get(vn) {
+                                    if seen_edges.insert(eb.edge_index.index()) {
+                                        count += 1;
+                                    }
+                                    continue;
+                                }
+                            }
+                            if seen_values.insert(val) {
+                                count += 1;
+                            }
+                        }
+                        Ok(Value::Int64(count))
+                    } else {
+                        let mut count = 0i64;
+                        for row in rows {
+                            let val = self.evaluate_expression(&args[0], row)?;
+                            if !matches!(val, Value::Null) {
+                                count += 1;
+                            }
+                        }
+                        Ok(Value::Int64(count))
+                    }
+                }
+                "sum" => {
+                    let values = self.collect_numeric_values(&args[0], rows, *distinct)?;
+                    if values.is_empty() {
+                        Ok(Value::Int64(0))
+                    } else {
+                        let total: f64 = values.iter().sum();
+                        // Preserve Int64 when all source values are integers
+                        let is_int = self.probe_source_type_is_int(&args[0], rows);
+                        if is_int && total.fract() == 0.0 {
+                            Ok(Value::Int64(total as i64))
+                        } else {
+                            Ok(Value::Float64(total))
+                        }
+                    }
+                }
+                "avg" | "mean" | "average" => {
+                    let values = self.collect_numeric_values(&args[0], rows, *distinct)?;
+                    if values.is_empty() {
+                        Ok(Value::Null)
+                    } else {
+                        Ok(Value::Float64(
+                            values.iter().sum::<f64>() / values.len() as f64,
+                        ))
+                    }
+                }
+                "min" => {
+                    let mut min_val: Option<Value> = None;
+                    for row in rows {
+                        let val = self.evaluate_expression(&args[0], row)?;
+                        if matches!(val, Value::Null) {
+                            continue;
+                        }
+                        min_val = Some(match min_val {
+                            None => val,
+                            Some(current) => {
+                                if crate::graph::core::filtering_methods::compare_values(
+                                    &val, &current,
+                                ) == Some(std::cmp::Ordering::Less)
+                                {
+                                    val
+                                } else {
+                                    current
+                                }
+                            }
+                        });
+                    }
+                    Ok(min_val.unwrap_or(Value::Null))
+                }
+                "max" => {
+                    let mut max_val: Option<Value> = None;
+                    for row in rows {
+                        let val = self.evaluate_expression(&args[0], row)?;
+                        if matches!(val, Value::Null) {
+                            continue;
+                        }
+                        max_val = Some(match max_val {
+                            None => val,
+                            Some(current) => {
+                                if crate::graph::core::filtering_methods::compare_values(
+                                    &val, &current,
+                                ) == Some(std::cmp::Ordering::Greater)
+                                {
+                                    val
+                                } else {
+                                    current
+                                }
+                            }
+                        });
+                    }
+                    Ok(max_val.unwrap_or(Value::Null))
+                }
+                "collect" => {
+                    let mut values = Vec::new();
+                    let mut seen = HashSet::new();
+                    for row in rows {
+                        let val = self.evaluate_expression(&args[0], row)?;
+                        if !matches!(val, Value::Null) {
+                            if *distinct {
+                                let key = format_value_compact(&val);
+                                if !seen.insert(key) {
+                                    continue;
+                                }
+                            }
+                            values.push(format_value_json(&val));
+                        }
+                    }
+                    Ok(Value::String(format!("[{}]", values.join(", "))))
+                }
+                "std" | "stdev" => {
+                    let values = self.collect_numeric_values(&args[0], rows, *distinct)?;
+                    if values.len() < 2 {
+                        Ok(Value::Null)
+                    } else {
+                        let mean = values.iter().sum::<f64>() / values.len() as f64;
+                        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                            / (values.len() - 1) as f64;
+                        Ok(Value::Float64(variance.sqrt()))
+                    }
+                }
+                // Non-aggregate function wrapping aggregate args (e.g. size(collect(...)))
+                // Evaluate args through aggregate path, then evaluate the function normally.
+                _ => {
+                    let dummy = ResultRow::new();
+                    let row = rows.first().copied().unwrap_or(&dummy);
+                    let mut resolved_args = Vec::with_capacity(args.len());
+                    for arg in args {
+                        if is_aggregate_expression(arg) {
+                            resolved_args.push(self.evaluate_aggregate_with_rows(arg, rows)?);
+                        } else {
+                            resolved_args.push(self.evaluate_expression(arg, row)?);
+                        }
+                    }
+                    // Build a synthetic row with the resolved values bound to placeholder keys
+                    let mut synth = ResultRow::new();
+                    let placeholder_exprs: Vec<Expression> = (0..resolved_args.len())
+                        .map(|i| {
+                            let key = format!("__agg_arg_{}", i);
+                            synth
+                                .projected
+                                .insert(key.clone(), resolved_args[i].clone());
+                            Expression::Variable(key)
+                        })
+                        .collect();
+                    let synth_call = Expression::FunctionCall {
+                        name: name.clone(),
+                        args: placeholder_exprs,
+                        distinct: *distinct,
+                    };
+                    self.evaluate_expression(&synth_call, &synth)
+                }
+            },
+            // Wrapper expressions that may contain aggregates — recurse before applying
+            Expression::ListSlice {
+                expr: inner,
+                start,
+                end,
+            } => {
+                let list_val = self.evaluate_aggregate_with_rows(inner, rows)?;
+                let items = parse_list_value(&list_val);
+                let len = items.len() as i64;
+                let dummy = ResultRow::new();
+                let row = rows.first().copied().unwrap_or(&dummy);
+
+                let s = if let Some(se) = start {
+                    match self.evaluate_expression(se, row)? {
+                        Value::Int64(i) => (if i < 0 { len + i } else { i }).clamp(0, len) as usize,
+                        Value::Float64(f) => {
+                            let i = f as i64;
+                            (if i < 0 { len + i } else { i }).clamp(0, len) as usize
+                        }
+                        v => return Err(format!("Slice start must be integer, got {:?}", v)),
+                    }
+                } else {
+                    0
+                };
+                let e = if let Some(ee) = end {
+                    match self.evaluate_expression(ee, row)? {
+                        Value::Int64(i) => (if i < 0 { len + i } else { i }).clamp(0, len) as usize,
+                        Value::Float64(f) => {
+                            let i = f as i64;
+                            (if i < 0 { len + i } else { i }).clamp(0, len) as usize
+                        }
+                        v => return Err(format!("Slice end must be integer, got {:?}", v)),
+                    }
+                } else {
+                    len as usize
+                };
+
+                if s >= e {
+                    Ok(Value::String("[]".to_string()))
+                } else {
+                    let sliced = &items[s..e];
+                    let formatted: Vec<String> = sliced.iter().map(format_value_json).collect();
+                    Ok(Value::String(format!("[{}]", formatted.join(", "))))
+                }
+            }
+            Expression::IndexAccess { expr: inner, index } => {
+                let list_val = self.evaluate_aggregate_with_rows(inner, rows)?;
+                let items = parse_list_value(&list_val);
+                let dummy = ResultRow::new();
+                let row = rows.first().copied().unwrap_or(&dummy);
+                let idx_val = self.evaluate_expression(index, row)?;
+                match idx_val {
+                    Value::Int64(idx) => {
+                        let len = items.len() as i64;
+                        let actual = if idx < 0 { len + idx } else { idx };
+                        if actual >= 0 && (actual as usize) < items.len() {
+                            Ok(items[actual as usize].clone())
+                        } else {
+                            Ok(Value::Null)
+                        }
+                    }
+                    _ => Ok(Value::Null),
+                }
+            }
+            Expression::Add(left, right) => {
+                let l = self.evaluate_aggregate_with_rows(left, rows)?;
+                let r = self.evaluate_aggregate_with_rows(right, rows)?;
+                Ok(crate::graph::core::value_operations::arithmetic_add(&l, &r))
+            }
+            Expression::Subtract(left, right) => {
+                let l = self.evaluate_aggregate_with_rows(left, rows)?;
+                let r = self.evaluate_aggregate_with_rows(right, rows)?;
+                Ok(crate::graph::core::value_operations::arithmetic_sub(&l, &r))
+            }
+            Expression::Multiply(left, right) => {
+                let l = self.evaluate_aggregate_with_rows(left, rows)?;
+                let r = self.evaluate_aggregate_with_rows(right, rows)?;
+                Ok(crate::graph::core::value_operations::arithmetic_mul(&l, &r))
+            }
+            Expression::Divide(left, right) => {
+                let l = self.evaluate_aggregate_with_rows(left, rows)?;
+                let r = self.evaluate_aggregate_with_rows(right, rows)?;
+                Ok(crate::graph::core::value_operations::arithmetic_div(&l, &r))
+            }
+            Expression::Modulo(left, right) => {
+                let l = self.evaluate_aggregate_with_rows(left, rows)?;
+                let r = self.evaluate_aggregate_with_rows(right, rows)?;
+                Ok(crate::graph::core::value_operations::arithmetic_mod(&l, &r))
+            }
+            Expression::Concat(left, right) => {
+                let l = self.evaluate_aggregate_with_rows(left, rows)?;
+                let r = self.evaluate_aggregate_with_rows(right, rows)?;
+                Ok(crate::graph::core::value_operations::string_concat(&l, &r))
+            }
+            // Non-aggregate expression in an aggregation context - evaluate with first row
+            _ => {
+                if let Some(row) = rows.first() {
+                    self.evaluate_expression(expr, row)
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+        }
+    }
+
+    /// Collect numeric values from rows for aggregate computation
+    pub(super) fn collect_numeric_values(
+        &self,
+        expr: &Expression,
+        rows: &[&ResultRow],
+        distinct: bool,
+    ) -> Result<Vec<f64>, String> {
+        let mut values = Vec::new();
+        let mut seen = HashSet::new();
+
+        for row in rows {
+            let val = self.evaluate_expression(expr, row)?;
+            if let Some(f) = value_to_f64(&val) {
+                if distinct {
+                    let bits = f.to_bits();
+                    if !seen.insert(bits) {
+                        continue;
+                    }
+                }
+                values.push(f);
+            }
+        }
+
+        Ok(values)
+    }
+
+    /// Check if the first evaluated value of an expression is Int64.
+    pub(super) fn probe_source_type_is_int(&self, expr: &Expression, rows: &[&ResultRow]) -> bool {
+        if let Some(row) = rows.first() {
+            matches!(self.evaluate_expression(expr, row), Ok(Value::Int64(_)))
+        } else {
+            false
+        }
+    }
+
+    /// Single-pass multi-aggregate: when all aggregates in a group are simple
+    /// numeric functions (count/sum/avg/min/max) without DISTINCT, compute all
+    /// of them in one pass over the group rows instead of one pass per aggregate.
+    pub(super) fn try_fused_numeric_aggregation(
+        &self,
+        clause: &ReturnClause,
+        group_key_indices: &[usize],
+        group_rows: &[&ResultRow],
+    ) -> Result<Option<Vec<(String, Value)>>, String> {
+        // Classify each aggregate item
+        #[derive(Clone, Copy)]
+        enum AggKind {
+            CountStar,
+            Count,
+            Sum,
+            Avg,
+            Min,
+            Max,
+        }
+
+        struct AggSpec<'a> {
+            col_name: String,
+            kind: AggKind,
+            expr: &'a Expression,
+        }
+
+        let mut specs: Vec<AggSpec> = Vec::new();
+
+        for (item_idx, item) in clause.items.iter().enumerate() {
+            if group_key_indices.contains(&item_idx) {
+                continue;
+            }
+            match &item.expression {
+                Expression::FunctionCall {
+                    name,
+                    args,
+                    distinct,
+                } => {
+                    if *distinct {
+                        return Ok(None); // DISTINCT needs dedup — bail
+                    }
+                    let kind = match name.as_str() {
+                        "count" => {
+                            if args.len() == 1 && matches!(args[0], Expression::Star) {
+                                AggKind::CountStar
+                            } else {
+                                AggKind::Count
+                            }
+                        }
+                        "sum" => AggKind::Sum,
+                        "avg" | "mean" | "average" => AggKind::Avg,
+                        "min" => AggKind::Min,
+                        "max" => AggKind::Max,
+                        _ => return Ok(None), // collect/std/etc — bail
+                    };
+                    specs.push(AggSpec {
+                        col_name: return_item_column_name(item),
+                        kind,
+                        expr: &args[0],
+                    });
+                }
+                _ => return Ok(None), // Non-function aggregate expression — bail
+            }
+        }
+
+        if specs.is_empty() {
+            return Ok(None);
+        }
+
+        // Accumulators
+        let n = specs.len();
+        let mut counts = vec![0i64; n];
+        let mut sums = vec![0.0f64; n];
+        let mut mins: Vec<Option<Value>> = vec![None; n];
+        let mut maxs: Vec<Option<Value>> = vec![None; n];
+
+        // Deduplicate expressions to avoid evaluating the same one multiple times
+        // Map each spec to an expression index
+        let mut unique_exprs: Vec<&Expression> = Vec::new();
+        let mut spec_expr_idx: Vec<usize> = Vec::with_capacity(n);
+
+        for spec in &specs {
+            if matches!(spec.kind, AggKind::CountStar) {
+                spec_expr_idx.push(usize::MAX); // sentinel — no expression needed
+                continue;
+            }
+            // Check if this expression already exists (by pointer equality for speed)
+            let idx = unique_exprs
+                .iter()
+                .position(|&e| std::ptr::eq(e, spec.expr));
+            if let Some(idx) = idx {
+                spec_expr_idx.push(idx);
+            } else {
+                spec_expr_idx.push(unique_exprs.len());
+                unique_exprs.push(spec.expr);
+            }
+        }
+
+        let mut eval_buf: Vec<Value> = vec![Value::Null; unique_exprs.len()];
+
+        // Single pass over rows
+        for row in group_rows {
+            // Evaluate each unique expression once
+            for (i, expr) in unique_exprs.iter().enumerate() {
+                eval_buf[i] = self.evaluate_expression(expr, row)?;
+            }
+
+            // Update all accumulators
+            for (si, spec) in specs.iter().enumerate() {
+                match spec.kind {
+                    AggKind::CountStar => {
+                        counts[si] += 1;
+                    }
+                    AggKind::Count => {
+                        let val = &eval_buf[spec_expr_idx[si]];
+                        if !matches!(val, Value::Null) {
+                            counts[si] += 1;
+                        }
+                    }
+                    AggKind::Sum | AggKind::Avg => {
+                        let val = &eval_buf[spec_expr_idx[si]];
+                        if let Some(f) = value_to_f64(val) {
+                            sums[si] += f;
+                            counts[si] += 1;
+                        }
+                    }
+                    AggKind::Min => {
+                        let val = &eval_buf[spec_expr_idx[si]];
+                        if !matches!(val, Value::Null) {
+                            mins[si] = Some(match mins[si].take() {
+                                None => val.clone(),
+                                Some(current) => {
+                                    if crate::graph::core::filtering_methods::compare_values(
+                                        val, &current,
+                                    ) == Some(std::cmp::Ordering::Less)
+                                    {
+                                        val.clone()
+                                    } else {
+                                        current
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    AggKind::Max => {
+                        let val = &eval_buf[spec_expr_idx[si]];
+                        if !matches!(val, Value::Null) {
+                            maxs[si] = Some(match maxs[si].take() {
+                                None => val.clone(),
+                                Some(current) => {
+                                    if crate::graph::core::filtering_methods::compare_values(
+                                        val, &current,
+                                    ) == Some(std::cmp::Ordering::Greater)
+                                    {
+                                        val.clone()
+                                    } else {
+                                        current
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Produce results
+        let mut results = Vec::with_capacity(n);
+        for (si, spec) in specs.iter().enumerate() {
+            let val = match spec.kind {
+                AggKind::CountStar | AggKind::Count => Value::Int64(counts[si]),
+                AggKind::Sum => {
+                    if counts[si] == 0 {
+                        Value::Int64(0)
+                    } else {
+                        // Probe first value to determine if input was integer
+                        let is_int = group_rows.first().is_some_and(|row| {
+                            matches!(
+                                self.evaluate_expression(spec.expr, row),
+                                Ok(Value::Int64(_))
+                            )
+                        });
+                        if is_int && sums[si].fract() == 0.0 {
+                            Value::Int64(sums[si] as i64)
+                        } else {
+                            Value::Float64(sums[si])
+                        }
+                    }
+                }
+                AggKind::Avg => {
+                    if counts[si] == 0 {
+                        Value::Null
+                    } else {
+                        Value::Float64(sums[si] / counts[si] as f64)
+                    }
+                }
+                AggKind::Min => mins[si].take().unwrap_or(Value::Null),
+                AggKind::Max => maxs[si].take().unwrap_or(Value::Null),
+            };
+            results.push((spec.col_name.clone(), val));
+        }
+
+        Ok(Some(results))
+    }
+
+    // ========================================================================
+    // WITH
+    // ========================================================================
+
+    pub(super) fn execute_with(
+        &self,
+        clause: &WithClause,
+        result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
+        // WITH is essentially RETURN that continues the pipeline
+        let return_clause = ReturnClause {
+            items: clause.items.clone(),
+            distinct: clause.distinct,
+            having: None,
+        };
+        let mut projected = self.execute_return(&return_clause, result_set)?;
+
+        // Apply optional WHERE
+        if let Some(ref where_clause) = clause.where_clause {
+            projected = self.execute_where(where_clause, projected)?;
+        }
+
+        Ok(projected)
+    }
+
+    // ========================================================================
+    // ORDER BY
+    // ========================================================================
+
+    pub(super) fn execute_order_by(
+        &self,
+        clause: &OrderByClause,
+        mut result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
+        self.check_deadline()?;
+        // Fold constant sub-expressions in sort key expressions
+        let folded_sort_exprs: Vec<Expression> = clause
+            .items
+            .iter()
+            .map(|item| self.fold_constants_expr(&item.expression))
+            .collect();
+
+        // Pre-compute sort keys for each row to avoid repeated evaluation
+        let sort_keys: Vec<Vec<Value>> = result_set
+            .rows
+            .iter()
+            .map(|row| {
+                folded_sort_exprs
+                    .iter()
+                    .map(|expr| self.evaluate_expression(expr, row).unwrap_or(Value::Null))
+                    .collect()
+            })
+            .collect();
+
+        // Create indices and sort them
+        let mut indices: Vec<usize> = (0..result_set.rows.len()).collect();
+        indices.sort_by(|&a, &b| {
+            for (i, item) in clause.items.iter().enumerate() {
+                if let Some(ordering) = crate::graph::core::filtering_methods::compare_values(
+                    &sort_keys[a][i],
+                    &sort_keys[b][i],
+                ) {
+                    let ordering = if item.ascending {
+                        ordering
+                    } else {
+                        ordering.reverse()
+                    };
+                    if ordering != std::cmp::Ordering::Equal {
+                        return ordering;
+                    }
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+
+        // Reorder rows
+        let mut sorted_rows = Vec::with_capacity(result_set.rows.len());
+        let mut old_rows = std::mem::take(&mut result_set.rows);
+        // Use index-based reordering
+        let mut temp = Vec::with_capacity(old_rows.len());
+        std::mem::swap(&mut temp, &mut old_rows);
+        let mut indexed: Vec<Option<ResultRow>> = temp.into_iter().map(Some).collect();
+        for &idx in &indices {
+            if let Some(row) = indexed[idx].take() {
+                sorted_rows.push(row);
+            }
+        }
+        // Drop sort_keys
+        drop(sort_keys);
+
+        result_set.rows = sorted_rows;
+        Ok(result_set)
+    }
+
+    // ========================================================================
+    // LIMIT / SKIP
+    // ========================================================================
+
+    pub(super) fn execute_limit(
+        &self,
+        clause: &LimitClause,
+        mut result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
+        let n = match self.evaluate_expression(&clause.count, &ResultRow::new())? {
+            Value::Int64(n) if n >= 0 => n as usize,
+            _ => return Err("LIMIT requires a non-negative integer".to_string()),
+        };
+        result_set.rows.truncate(n);
+        Ok(result_set)
+    }
+
+    pub(super) fn execute_skip(
+        &self,
+        clause: &SkipClause,
+        mut result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
+        let n = match self.evaluate_expression(&clause.count, &ResultRow::new())? {
+            Value::Int64(n) if n >= 0 => n as usize,
+            _ => return Err("SKIP requires a non-negative integer".to_string()),
+        };
+        if n < result_set.rows.len() {
+            result_set.rows = result_set.rows.split_off(n);
+        } else {
+            result_set.rows.clear();
+        }
+        Ok(result_set)
+    }
+
+    // ========================================================================
+    // Fused RETURN + ORDER BY + LIMIT for vector_score (min-heap top-k)
+    // ========================================================================
+
+    /// Fused path: compute vector_score for all rows using a min-heap of size k,
+    /// then project RETURN expressions only for the k surviving rows.
+    /// O(n log k) instead of O(n log n) sort + O(n) full projection.
+    pub(super) fn execute_fused_vector_score_top_k(
+        &self,
+        return_clause: &ReturnClause,
+        score_item_index: usize,
+        descending: bool,
+        limit: usize,
+        result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
+        if result_set.rows.is_empty() || limit == 0 {
+            let columns: Vec<String> = return_clause
+                .items
+                .iter()
+                .map(return_item_column_name)
+                .collect();
+            return Ok(ResultSet {
+                rows: Vec::new(),
+                columns,
+            });
+        }
+
+        let score_expr =
+            self.fold_constants_expr(&return_clause.items[score_item_index].expression);
+
+        // Phase 1: Score all rows, keep top-k in a min-heap
+        self.check_deadline()?;
+        let mut heap: BinaryHeap<ScoredRowRef> = BinaryHeap::with_capacity(limit + 1);
+
+        for (i, row) in result_set.rows.iter().enumerate() {
+            let score_val = self.evaluate_expression(&score_expr, row)?;
+            let score = match score_val {
+                Value::Float64(f) => f,
+                Value::Int64(n) => n as f64,
+                Value::Null => continue, // skip rows without embeddings
+                _ => continue,
+            };
+            heap.push(ScoredRowRef { score, index: i });
+            if heap.len() > limit {
+                heap.pop(); // evict the smallest score
+            }
+        }
+
+        // Phase 2: Extract winners and sort by score
+        let mut winners: Vec<ScoredRowRef> = heap.into_vec();
+        if descending {
+            winners.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        } else {
+            winners.sort_by(|a, b| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+
+        // Phase 3: Project RETURN expressions only for the k winners
+        let columns: Vec<String> = return_clause
+            .items
+            .iter()
+            .map(return_item_column_name)
+            .collect();
+
+        let folded_exprs: Vec<Expression> = return_clause
+            .items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                if idx == score_item_index {
+                    score_expr.clone() // reuse already-folded score expr
+                } else {
+                    self.fold_constants_expr(&item.expression)
+                }
+            })
+            .collect();
+
+        let mut rows = Vec::with_capacity(winners.len());
+        for winner in &winners {
+            let row = &result_set.rows[winner.index];
+            let mut projected = Bindings::with_capacity(return_clause.items.len());
+            for (j, item) in return_clause.items.iter().enumerate() {
+                let key = return_item_column_name(item);
+                let val = if j == score_item_index {
+                    // Use the pre-computed score instead of re-evaluating
+                    Value::Float64(winner.score)
+                } else {
+                    self.evaluate_expression(&folded_exprs[j], row)?
+                };
+                projected.insert(key, val);
+            }
+            rows.push(ResultRow {
+                node_bindings: row.node_bindings.clone(),
+                edge_bindings: row.edge_bindings.clone(),
+                path_bindings: row.path_bindings.clone(),
+                projected,
+            });
+        }
+
+        Ok(ResultSet { rows, columns })
+    }
+
+    // ========================================================================
+    // Fused RETURN + ORDER BY + LIMIT (general top-k)
+    // ========================================================================
+
+    /// Generalized top-k: score all rows with a min-heap of size k, then project
+    /// RETURN expressions only for the k surviving rows.
+    /// O(n log k) instead of O(n log n) sort + O(n) full RETURN projection.
+    pub(super) fn execute_fused_order_by_top_k(
+        &self,
+        return_clause: &ReturnClause,
+        score_item_index: usize,
+        descending: bool,
+        limit: usize,
+        sort_expression: Option<&Expression>,
+        result_set: ResultSet,
+    ) -> Result<ResultSet, String> {
+        if result_set.rows.is_empty() || limit == 0 {
+            let columns: Vec<String> = return_clause
+                .items
+                .iter()
+                .map(return_item_column_name)
+                .collect();
+            return Ok(ResultSet {
+                rows: Vec::new(),
+                columns,
+            });
+        }
+
+        let score_expr = if let Some(expr) = sort_expression {
+            self.fold_constants_expr(expr)
+        } else {
+            self.fold_constants_expr(&return_clause.items[score_item_index].expression)
+        };
+
+        // Type check: if sort key is String, use a String-specific top-K path
+        // instead of the f64 heap. Avoids materializing ALL rows for large types.
+        {
+            let probe = self.evaluate_expression(&score_expr, &result_set.rows[0])?;
+            match probe {
+                Value::Float64(_)
+                | Value::Int64(_)
+                | Value::DateTime(_)
+                | Value::UniqueId(_)
+                | Value::Boolean(_)
+                | Value::Null => {} // Continue to f64 heap below
+                Value::String(_) => {
+                    // String top-K: maintain a sorted Vec of (String, row_index) pairs.
+                    // O(N * K) for small K — much faster than O(N log N) full sort.
+                    self.check_deadline()?;
+                    let mut top_k: Vec<(String, usize)> = Vec::with_capacity(limit + 1);
+                    for (i, row) in result_set.rows.iter().enumerate() {
+                        let val = self.evaluate_expression(&score_expr, row)?;
+                        let s = match val {
+                            Value::String(s) => s,
+                            _ => continue,
+                        };
+                        // Insert into sorted position
+                        let pos = if descending {
+                            top_k.partition_point(|(existing, _)| existing > &s)
+                        } else {
+                            top_k.partition_point(|(existing, _)| existing < &s)
+                        };
+                        if pos < limit {
+                            top_k.insert(pos, (s, i));
+                            if top_k.len() > limit {
+                                top_k.pop();
+                            }
+                        }
+                    }
+                    // Build result rows from top-K winners
+                    let folded_return_exprs: Vec<Expression> = return_clause
+                        .items
+                        .iter()
+                        .map(|item| self.fold_constants_expr(&item.expression))
+                        .collect();
+                    let columns: Vec<String> = return_clause
+                        .items
+                        .iter()
+                        .map(return_item_column_name)
+                        .collect();
+                    let mut final_rows = Vec::with_capacity(top_k.len());
+                    for &(_, row_idx) in &top_k {
+                        let row = &result_set.rows[row_idx];
+                        let mut projected = Bindings::with_capacity(columns.len());
+                        for (j, expr) in folded_return_exprs.iter().enumerate() {
+                            let val = self.evaluate_expression(expr, row)?;
+                            projected.insert(columns[j].clone(), val);
+                        }
+                        final_rows.push(ResultRow::from_projected(projected));
+                    }
+                    return Ok(ResultSet {
+                        rows: final_rows,
+                        columns,
+                    });
+                }
+                _ => {
+                    // Non-numeric, non-string: fall back to full sort
+                    let result = self.execute_return(return_clause, result_set)?;
+                    let order_clause = OrderByClause {
+                        items: vec![OrderItem {
+                            expression: return_clause.items[score_item_index].expression.clone(),
+                            ascending: !descending,
+                        }],
+                    };
+                    let result = self.execute_order_by(&order_clause, result)?;
+                    let limit_clause = LimitClause {
+                        count: Expression::Literal(Value::Int64(limit as i64)),
+                    };
+                    return self.execute_limit(&limit_clause, result);
+                }
+            }
+        }
+
+        // Phase 1: Score all rows, keep top-k in a min-heap.
+        // ScoredRowRef has reverse Ord → BinaryHeap acts as min-heap (smallest popped).
+        // DESC: keep k largest → push actual score, pop smallest survivor → correct.
+        // ASC: keep k smallest → negate score before insertion. Min-heap pops the
+        //      most negative (= largest actual), keeping k smallest actual scores.
+        self.check_deadline()?;
+        let mut heap: BinaryHeap<ScoredRowRef> = BinaryHeap::with_capacity(limit + 1);
+
+        for (i, row) in result_set.rows.iter().enumerate() {
+            let score_val = self.evaluate_expression(&score_expr, row)?;
+            let raw_score = match score_val {
+                Value::Float64(f) => f,
+                Value::Int64(n) => n as f64,
+                Value::DateTime(d) => d.num_days_from_ce() as f64,
+                Value::UniqueId(u) => u as f64,
+                Value::Boolean(b) => {
+                    if b {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                Value::Null => continue,
+                _ => continue,
+            };
+            let heap_score = if descending { raw_score } else { -raw_score };
+            heap.push(ScoredRowRef {
+                score: heap_score,
+                index: i,
+            });
+            if heap.len() > limit {
+                heap.pop();
+            }
+        }
+
+        // Phase 2: Extract winners and sort by actual score
+        let mut winners: Vec<ScoredRowRef> = heap.into_vec();
+        if descending {
+            winners.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        } else {
+            // Scores are negated; sort by ascending actual = descending negated
+            winners.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+
+        // Phase 3: Project RETURN expressions only for the k winners
+        let columns: Vec<String> = return_clause
+            .items
+            .iter()
+            .map(return_item_column_name)
+            .collect();
+
+        // When sort_expression is set, the sort key is external to RETURN items —
+        // don't replace any RETURN item expression with the score expression.
+        let has_external_sort = sort_expression.is_some();
+        let folded_exprs: Vec<Expression> = return_clause
+            .items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                if idx == score_item_index && !has_external_sort {
+                    score_expr.clone()
+                } else {
+                    self.fold_constants_expr(&item.expression)
+                }
+            })
+            .collect();
+
+        // Check whether the score column's original type is numeric
+        // and whether it's specifically Int64 (to preserve integer type).
+        let (score_is_numeric, score_is_int) = {
+            let probe = self.evaluate_expression(
+                &score_expr,
+                &result_set.rows[winners.first().map(|w| w.index).unwrap_or(0)],
+            )?;
+            (
+                matches!(probe, Value::Float64(_) | Value::Int64(_)),
+                matches!(probe, Value::Int64(_)),
+            )
+        };
+
+        let mut rows = Vec::with_capacity(winners.len());
+        for winner in &winners {
+            let row = &result_set.rows[winner.index];
+            let mut projected = Bindings::with_capacity(return_clause.items.len());
+            for (j, item) in return_clause.items.iter().enumerate() {
+                let key = return_item_column_name(item);
+                let val = if j == score_item_index && score_is_numeric && !has_external_sort {
+                    // Recover actual score (undo negation for ASC)
+                    let actual = if descending {
+                        winner.score
+                    } else {
+                        -winner.score
+                    };
+                    if score_is_int {
+                        Value::Int64(actual as i64)
+                    } else {
+                        Value::Float64(actual)
+                    }
+                } else {
+                    self.evaluate_expression(&folded_exprs[j], row)?
+                };
+                projected.insert(key, val);
+            }
+            rows.push(ResultRow {
+                node_bindings: row.node_bindings.clone(),
+                edge_bindings: row.edge_bindings.clone(),
+                path_bindings: row.path_bindings.clone(),
+                projected,
+            });
+        }
+
+        Ok(ResultSet { rows, columns })
+    }
+
+    // ========================================================================
+    // UNWIND
+    // ========================================================================
+}

@@ -20,7 +20,8 @@ mod window;
 pub use ast::OutputFormat;
 pub use executor::{execute_mutable, is_mutation_query, CypherExecutor};
 pub use parser::parse_cypher;
-pub use planner::{optimize, rewrite_text_score};
+pub use planner::optimize;
+pub use planner::simplification::rewrite_text_score;
 pub use result::CypherResult;
 
 use crate::datatypes::values::Value;
@@ -97,18 +98,18 @@ pub fn generate_explain_plan(query: &CypherQuery, graph: &DirGraph) -> String {
                 let has_agg = w
                     .items
                     .iter()
-                    .any(|item| executor::is_aggregate_expression(&item.expression));
+                    .any(|item| ast::is_aggregate_expression(&item.expression));
                 if has_agg {
                     let groups: Vec<String> = w
                         .items
                         .iter()
-                        .filter(|item| !executor::is_aggregate_expression(&item.expression))
+                        .filter(|item| !ast::is_aggregate_expression(&item.expression))
                         .map(|item| format_expr(&item.expression))
                         .collect();
                     let aggs: Vec<String> = w
                         .items
                         .iter()
-                        .filter(|item| executor::is_aggregate_expression(&item.expression))
+                        .filter(|item| ast::is_aggregate_expression(&item.expression))
                         .map(|item| {
                             item.alias
                                 .clone()
