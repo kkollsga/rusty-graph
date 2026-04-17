@@ -48,7 +48,7 @@ ENUM_MATCH_WHITELIST = {
     # reorg homes these with the disk backend.
     "io/ntriples.rs": "disk-internal bulk-build (ntriples loader)",
     "io/io_operations.rs": "disk-internal .kgl load_disk_dir path",
-    "batch_operations.rs": "disk-internal update-path row_id lookup",
+    "mutation/batch_operations.rs": "disk-internal update-path row_id lookup",
 }
 
 ENUM_MATCH_PATTERN = re.compile(r"GraphBackend::[A-Z]")

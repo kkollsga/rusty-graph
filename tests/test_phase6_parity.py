@@ -49,7 +49,7 @@ ENUM_MATCH_WHITELIST = {
     # Disk-internal boundary — unchanged since Phase 5.
     "io/ntriples.rs": "disk-internal bulk-build (ntriples loader)",
     "io/io_operations.rs": "disk-internal .kgl load_disk_dir path",
-    "batch_operations.rs": "disk-internal update-path row_id lookup",
+    "mutation/batch_operations.rs": "disk-internal update-path row_id lookup",
 }
 
 ENUM_MATCH_PATTERN = re.compile(r"GraphBackend::[A-Z]")
