@@ -486,3 +486,6 @@ impl<'de> serde::Deserialize<'de> for MappedGraph {
 }
 
 pub mod impls;
+pub mod recording;
+
+pub use recording::RecordingGraph;

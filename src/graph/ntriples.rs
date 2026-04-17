@@ -775,6 +775,12 @@ pub fn load_ntriples(
                         }
                     }
                 }
+                // RecordingGraph is a Phase 6 validation wrapper only
+                // constructed in Rust tests; the ntriples loader never
+                // sees it in practice.
+                crate::graph::schema::GraphBackend::Recording(_) => {
+                    unreachable!("ntriples loader does not run on a Recording-wrapped graph");
+                }
             }
             if config.verbose {
                 eprintln!(

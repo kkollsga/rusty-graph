@@ -58,6 +58,18 @@ def _list_rs_files(root: Path) -> list[Path]:
     return sorted(root.rglob("*.rs"))
 
 
+def _strip_test_modules(src: str) -> str:
+    """Drop any `#[cfg(test)] mod …` block. The audit is about the
+    production dispatch path; in-source test fixtures may legitimately
+    construct `GraphBackend::Memory(…)` etc. (Phase 6's
+    `storage/recording.rs` tests do this.)
+    """
+
+    marker = "#[cfg(test)]"
+    idx = src.find(marker)
+    return src if idx < 0 else src[:idx]
+
+
 def test_enum_match_audit():
     """`GraphBackend::<Variant>` matches only appear in whitelisted files."""
 
@@ -67,17 +79,10 @@ def test_enum_match_audit():
         rel = rs.relative_to(src_graph).as_posix()
         if rel in ENUM_MATCH_WHITELIST:
             continue
-        # storage/ subdir: only mod.rs is the trait surface; impls.rs is
-        # the per-backend impls (no GraphBackend match).
-        if rel == "storage/impls.rs":
-            # The per-backend impls file MUST NOT carry enum matches —
-            # that would defeat the whole point of splitting.
-            text = rs.read_text()
-            hits = ENUM_MATCH_PATTERN.findall(text)
-            if hits:
-                offenders[rs] = len(hits)
-            continue
-        text = rs.read_text()
+        # storage/ subdir files MUST NOT carry enum matches — they
+        # exist to provide trait-based alternatives. Test-module
+        # fixtures (`#[cfg(test)]`) are stripped before scanning.
+        text = _strip_test_modules(rs.read_text())
         hits = ENUM_MATCH_PATTERN.findall(text)
         if hits:
             offenders[rs] = len(hits)
