@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776378445227,
+  "lastUpdate": 1776403314526,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -6697,6 +6697,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.00011062625382041604",
             "extra": "mean: 1.2221508112956476 msec\nrounds: 779"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "70d61f15403ca520ebd2f3eae72c2477be3da703",
+          "message": "release: v0.7.15 — Cypher correctness fixes + per-row perf wins\n\nThree silent-correctness bugs fixed; five per-row hot paths sped up.\nInspired by cross-referencing mrmagooey/kglite; implementations here\nare independent.\n\nAdded:\n- WHERE n:Label predicate. Cypher now supports label checks as boolean\n  predicates (not just MATCH-level filters). Composes with AND/OR/NOT\n  and chained n:A:B form. Example:\n  MATCH (n) WHERE n:Person OR n:Org RETURN count(n).\n- Value::as_str() -> Option<&str> borrowing companion to as_string().\n\nFixed:\n- HAVING with aggregate expressions. HAVING count(m) > 1 was silently\n  returning zero rows when the RETURN item was aliased (count(m) AS c).\n  Root cause: the aggregate function call fell through to per-row\n  scalar dispatch, which errored, and the error was swallowed by\n  unwrap_or(false), dropping every row. evaluate_expression now\n  resolves aggregate FunctionCalls from row.projected first; a new\n  augment_rows_with_aggregate_keys helper seeds both alias and\n  expression-string keys before all three HAVING sites.\n- rand() / random() correctness under tight loops. SystemTime-per-call\n  seeding could return identical values for adjacent rows when two\n  calls resolved to the same nanosecond, and constant folding could\n  collapse rand() to a single value per query. Replaced with a\n  thread-local xorshift64 PRNG, seeded once per thread with a\n  splitmix64-avalanched counter so Rayon workers don't collide. Top\n  53 bits feed the f64 mantissa for full precision. Marked as\n  row-dependent so constant folding bypasses it.\n\nChanged (perf):\n- Function names lowercased at parse time instead of per-row during\n  dispatch. Every scalar/aggregate dispatch used to call to_lowercase()\n  on the function name each row (21+ sites); normalized once in\n  parse_function_call and compared directly. ~9-12% win on function-\n  heavy queries.\n- count(DISTINCT n) uses typed identity sets — HashSet<usize> keyed\n  on node/edge indices (with HashSet<Value> fallback for non-binding\n  expressions) instead of per-row format!(\"n:{}\", idx.index()) string\n  formatting. ~20-26% faster.\n- substring() skips intermediate Vec<char> — uses chars().skip(start)\n  .take(len).collect() instead of materializing the full char vector.\n  ~10-18% faster.\n- Zero-allocation property iterators. PropertyStorage::keys() and\n  ::iter() return explicit PropertyKeyIter / PropertyIter enums\n  instead of Box<dyn Iterator>. Saves one heap allocation per keys(n)\n  / RETURN n {.*} / property-scan call. ~12% faster on keys(n) over\n  all nodes.\n\nVerified: 1799 Python tests pass (including 13 new regression tests\nin tests/test_cypher_tier_a_fixes.py), make lint clean, perf baseline\nrecorded in tests/benchmarks/bench_tier_b.py.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-17T02:50:01+02:00",
+          "tree_id": "ef6a4e2bb6198136f15a504d4435f7096e8c19f7",
+          "url": "https://github.com/kkollsga/kglite/commit/70d61f15403ca520ebd2f3eae72c2477be3da703"
+        },
+        "date": 1776403314009,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1072.4085880703967,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002047446763877032",
+            "extra": "mean: 932.480410101263 usec\nrounds: 495"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 773.7659940735552,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000031472034681982044",
+            "extra": "mean: 1.2923803936322105 msec\nrounds: 691"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 12615.602212698186,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000005029788189579452",
+            "extra": "mean: 79.26692544200972 usec\nrounds: 6277"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1666.596799498,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000034416742201188845",
+            "extra": "mean: 600.0251532351512 usec\nrounds: 881"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 703512.7400854088,
+            "unit": "iter/sec",
+            "range": "stddev: 4.2855192616884766e-7",
+            "extra": "mean: 1.421438366387788 usec\nrounds: 120251"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 126739.02593744686,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000013333896974485855",
+            "extra": "mean: 7.890229490114265 usec\nrounds: 20807"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2099.8315895094875,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00001836506766073706",
+            "extra": "mean: 476.2286675730963 usec\nrounds: 3309"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1655.5716330254688,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000025488499256561664",
+            "extra": "mean: 604.0209798548876 usec\nrounds: 1241"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 12917.21326177235,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000005085755142654887",
+            "extra": "mean: 77.41607881937158 usec\nrounds: 9858"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 838.5356170991645,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0003967144715395387",
+            "extra": "mean: 1.1925551874104126 msec\nrounds: 699"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 868.0122675212717,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000016847077793902915",
+            "extra": "mean: 1.1520574505883856 msec\nrounds: 850"
           }
         ]
       }
