@@ -27,9 +27,71 @@
 //! module first, implement per-backend, and delegate from
 //! `GraphBackend` — never the other way around.
 
-use crate::graph::schema::{EdgeData, NodeData};
+use crate::datatypes::Value;
+use crate::graph::schema::{EdgeData, InternedKey, NodeData};
+use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableDiGraph;
 use std::ops::{Deref, DerefMut};
+
+// ──────────────────────────────────────────────────────────────────────────
+// GraphRead — unified read interface over storage backends
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Read-side interface shared by every storage backend.
+#[allow(dead_code)] // read methods land incrementally across Phases 0.3 → 1
+///
+/// Phase 0.3 introduces this trait with a minimal surface (counts +
+/// single-property reads + zero-alloc string equality) and migrates
+/// two proof-of-concept call sites. Phase 1 expands to cover edge
+/// iteration, neighbour lookup, and schema metadata — at which point
+/// read-heavy files (pattern_matching, introspection, cypher/executor,
+/// graph_algorithms) all migrate to `&impl GraphRead`.
+///
+/// Implemented today for [`crate::graph::schema::GraphBackend`];
+/// per-backend impls arrive in Phase 1 when `MappedGraph` stops being
+/// a type alias and the three backends start diverging.
+///
+/// Dispatch guidance for consumers:
+/// - **hot loops** — take `&impl GraphRead` so the backend is
+///   monomorphised and the dispatch cost disappears
+/// - **boundary code / object-safe containers** — take
+///   `&dyn GraphRead`, trading the vtable cost for simpler API shapes
+pub trait GraphRead {
+    /// Total live node count across all types.
+    fn node_count(&self) -> usize;
+
+    /// Total live edge count.
+    fn edge_count(&self) -> usize;
+
+    /// Node type key for a given index. `None` if the node has been removed.
+    fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey>;
+
+    /// Read a single property without full NodeData materialisation.
+    /// Used by the hot WHERE-scan path. Returns `None` if the property
+    /// is missing or set to `Value::Null`.
+    fn get_node_property(&self, idx: NodeIndex, key: InternedKey) -> Option<Value>;
+
+    /// Read the node id (handles mapped-mode sentinel values).
+    fn get_node_id(&self, idx: NodeIndex) -> Option<Value>;
+
+    /// Read the node title (handles mapped-mode sentinel values).
+    fn get_node_title(&self, idx: NodeIndex) -> Option<Value>;
+
+    /// Zero-allocation string-equality check for a property against `target`.
+    /// Skips the `Value::String(owned)` materialisation that `get_node_property`
+    /// would do on mapped graphs. Used by the Cypher executor to short-circuit
+    /// `WHERE n.strProp = 'literal'` scans.
+    ///
+    /// Returns:
+    /// - `None` — property is missing or null for this row
+    /// - `Some(true)` — stored value equals `target` byte-for-byte
+    /// - `Some(false)` — stored value is present but differs
+    fn str_prop_eq(&self, idx: NodeIndex, key: InternedKey, target: &str) -> Option<bool>;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Newtype backends
+// ──────────────────────────────────────────────────────────────────────────
 
 /// Heap-resident in-memory graph backend. Wraps `StableDiGraph` and
 /// `Deref`s to it so existing petgraph call sites compile unchanged.

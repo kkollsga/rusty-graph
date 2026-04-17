@@ -802,25 +802,31 @@ fn sample_unique_values(
     property: &str,
     max: usize,
 ) -> HashSet<String> {
+    use crate::graph::storage::GraphRead;
     let mut unique = HashSet::new();
-    if let Some(indices) = graph.type_indices.get(node_type) {
-        for &idx in indices {
-            if unique.len() >= max {
-                break;
-            }
-            if let Some(node) = graph.get_node(idx) {
-                if let Some(val) = node.get_property(property) {
-                    if !is_null_value(&val) {
-                        let s = match &*val {
-                            Value::String(s) => s.clone(),
-                            Value::Int64(n) => n.to_string(),
-                            Value::Float64(f) => f.to_string(),
-                            Value::UniqueId(id) => id.to_string(),
-                            _ => format!("{:?}", val),
-                        };
-                        unique.insert(s);
-                    }
-                }
+    let Some(indices) = graph.type_indices.get(node_type) else {
+        return unique;
+    };
+    let key = InternedKey::from_str(property);
+    // `&impl GraphRead` — monomorphised per backend, no vtable cost.
+    // First consumer of the GraphRead trait; Phase 1 will hoist this helper
+    // into a more general `sample_values<G: GraphRead>(backend: &G, ...)`
+    // once type_indices moves onto a wider metadata trait.
+    let backend: &dyn GraphRead = &graph.graph;
+    for &idx in indices {
+        if unique.len() >= max {
+            break;
+        }
+        if let Some(val) = backend.get_node_property(idx, key) {
+            if !is_null_value(&val) {
+                let s = match &val {
+                    Value::String(s) => s.clone(),
+                    Value::Int64(n) => n.to_string(),
+                    Value::Float64(f) => f.to_string(),
+                    Value::UniqueId(id) => id.to_string(),
+                    _ => format!("{:?}", val),
+                };
+                unique.insert(s);
             }
         }
     }

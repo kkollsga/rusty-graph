@@ -4045,24 +4045,9 @@ impl GraphBackend {
         }
     }
 
-    /// Zero-allocation string equality for a property against `target`.
-    /// Returns `None` if the property is missing/null. Used by the Cypher
-    /// executor to short-circuit `WHERE n.strProp = 'literal'` scans on
-    /// mapped graphs without materialising an owned `String` per node.
-    #[inline]
-    pub fn node_prop_str_eq(&self, idx: NodeIndex, key: InternedKey, target: &str) -> Option<bool> {
-        match self {
-            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g
-                .node_weight(idx)
-                .and_then(|nd| nd.properties.str_prop_eq(key, target)),
-            GraphBackend::Disk(_) => {
-                // Disk path keeps the allocating route for now; the win is
-                // mapped-mode-specific. Equality still works correctly.
-                self.get_node_property(idx, key)
-                    .map(|v| matches!(v, Value::String(ref s) if s == target))
-            }
-        }
-    }
+    // Zero-alloc string equality is the inaugural method on the new
+    // `GraphRead` trait — see `impl GraphRead for GraphBackend` below.
+    // Inherent method deleted: all callers use the trait.
 
     /// Read the node id without full materialization.
     /// Handles mapped-mode sentinel values (Value::Null → ColumnStore fallback).
@@ -4585,6 +4570,61 @@ impl std::fmt::Debug for GraphBackend {
 }
 
 pub type Graph = GraphBackend;
+
+// -- GraphRead trait impl --
+// Phase 0.3 anchors the storage-read API on this trait. Memory/Mapped
+// callers go through `GraphRead::method(...)` rather than inherent
+// `GraphBackend` methods; Phase 1 migrates more consumers + adds
+// per-backend impls when MappedGraph promotes from a type alias.
+
+use crate::graph::storage::GraphRead;
+
+impl GraphRead for GraphBackend {
+    #[inline]
+    fn node_count(&self) -> usize {
+        GraphBackend::node_count(self)
+    }
+
+    #[inline]
+    fn edge_count(&self) -> usize {
+        GraphBackend::edge_count(self)
+    }
+
+    #[inline]
+    fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey> {
+        GraphBackend::node_type_of(self, idx)
+    }
+
+    #[inline]
+    fn get_node_property(&self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
+        GraphBackend::get_node_property(self, idx, key)
+    }
+
+    #[inline]
+    fn get_node_id(&self, idx: NodeIndex) -> Option<Value> {
+        GraphBackend::get_node_id(self, idx)
+    }
+
+    #[inline]
+    fn get_node_title(&self, idx: NodeIndex) -> Option<Value> {
+        GraphBackend::get_node_title(self, idx)
+    }
+
+    #[inline]
+    fn str_prop_eq(&self, idx: NodeIndex, key: InternedKey, target: &str) -> Option<bool> {
+        match self {
+            GraphBackend::Memory(g) | GraphBackend::Mapped(g) => g
+                .node_weight(idx)
+                .and_then(|nd| nd.properties.str_prop_eq(key, target)),
+            GraphBackend::Disk(_) => {
+                // Disk path keeps the allocating route for now; the win is
+                // mapped-mode-specific. Equality still works correctly.
+                GraphRead::get_node_property(self, idx, key)
+                    .map(|v| matches!(v, Value::String(ref s) if s == target))
+            }
+        }
+    }
+}
 
 // ============================================================================
 // Schema Definition & Validation Types

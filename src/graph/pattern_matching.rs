@@ -1667,8 +1667,9 @@ impl<'a> PatternExecutor<'a> {
                 && resolved != "label"
             {
                 if let PropertyMatcher::Equals(Value::String(target)) = matcher {
+                    use crate::graph::storage::GraphRead;
                     let k = InternedKey::from_str(resolved);
-                    match self.graph.graph.node_prop_str_eq(idx, k, target) {
+                    match self.graph.graph.str_prop_eq(idx, k, target) {
                         Some(true) => continue,
                         Some(false) => return false,
                         None => return false,
