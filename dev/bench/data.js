@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776403314526,
+  "lastUpdate": 1776404842181,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -6798,6 +6798,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.000016847077793902915",
             "extra": "mean: 1.1520574505883856 msec\nrounds: 850"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "aa991da6b846466e84fc385a8225d59199c2b040",
+          "message": "release: v0.7.16 — CI fix (clippy 1.95) + dep bumps\n\nFollow-up to v0.7.15, which broke CI on clippy 1.95's stricter lints.\nNo functional changes to the Cypher engine or storage; all changes are\neither mechanical lint fixes or major-version dep bumps with absorbed\nAPI changes.\n\nDependencies:\n- pyo3 0.27 → 0.28: added #[pyclass(skip_from_py_object)] on\n  KnowledgeGraph (pyo3 0.28 made the FromPyObject derive opt-in).\n- geo 0.29 → 0.33: Geodesic is now a static value (Geodesic.distance(...),\n  .length(&Geodesic)); LengthMeasurable trait imported from\n  geo::line_measures.\n- wkt 0.11 → 0.14, bzip2 0.5 → 0.6: API-compatible.\n\nClippy 1.95 compat (30 lint fixes):\n- sort_by(|a, b| b.X.cmp(&a.X)) → sort_by_key(|x| Reverse(x.X))\n  (11 sites across introspection.rs, ntriples.rs, schema.rs).\n- Collapsed `if` into outer match arm guards (7 sites in\n  column_store.rs, mmap_column_store.rs, cypher/executor.rs,\n  filtering_methods.rs, schema.rs, temporal.rs — temporal.rs reworked\n  to nested if-let instead since edition 2021 doesn't support let chains).\n- file_len.checked_div(elem_size).unwrap_or(len) in mmap_vec.rs.\n- Removed redundant .into_iter() on IntoIterator args (4 sites in\n  io_operations.rs, schema.rs).\n\nStubtest allowlist: removed unused entries for collect_children /\ntraverse (the ... vs None mismatch no longer fires).\n\nVerified: make test (1799 pass), make lint clean, 107 spatial tests\npass after geo/wkt upgrade.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-17T07:43:17+02:00",
+          "tree_id": "9b857962d9218adc7fc955a2611fd1991b9b178e",
+          "url": "https://github.com/kkollsga/kglite/commit/aa991da6b846466e84fc385a8225d59199c2b040"
+        },
+        "date": 1776404841290,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1056.8399394414807,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000021829328534489697",
+            "extra": "mean: 946.2170785563617 usec\nrounds: 471"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 763.5194436477532,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00003361434445166338",
+            "extra": "mean: 1.3097243407744128 msec\nrounds: 672"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 12624.63467066918,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000052502360976309245",
+            "extra": "mean: 79.21021289616408 usec\nrounds: 6839"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1692.5044140057214,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00008377144135835585",
+            "extra": "mean: 590.8404088786143 usec\nrounds: 856"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 674141.6097485508,
+            "unit": "iter/sec",
+            "range": "stddev: 5.394905784726164e-7",
+            "extra": "mean: 1.4833678644654371 usec\nrounds: 92670"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 128438.1326272956,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000015479682134623405",
+            "extra": "mean: 7.785849728147483 usec\nrounds: 20769"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2195.5636473831923,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000019257244364771408",
+            "extra": "mean: 455.4639084099709 usec\nrounds: 3603"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1686.5994066865755,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000045186511989245356",
+            "extra": "mean: 592.9090191989094 usec\nrounds: 1198"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 13272.6766327152,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000052439583007070015",
+            "extra": "mean: 75.34275321189901 usec\nrounds: 9340"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 862.1324551604122,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00008761141809310718",
+            "extra": "mean: 1.159914574627556 msec\nrounds: 670"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 888.7865569360266,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000016408385799134443",
+            "extra": "mean: 1.125129528789642 msec\nrounds: 851"
           }
         ]
       }
