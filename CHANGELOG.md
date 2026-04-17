@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.17] — 2026-04-17
+
+### Added
+- **Python 3.14 wheels**. CI test matrix and `build_wheels.yml` now cover
+  3.14 across Linux/macOS (Intel + arm64)/Windows, alongside 3.10–3.13.
+  Full test suite passes on 3.14 (1758 tests, same as 3.12 minus the
+  optional `code-tree` tests that require tree-sitter wheels). pyo3 0.28
+  (shipped in 0.7.16) enables this via `ABI3_MAX_MINOR = 14`.
+
 ## [0.7.16] — 2026-04-17
 
 CI-fix release on top of 0.7.15. No functional changes to the Cypher

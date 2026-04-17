@@ -2,6 +2,7 @@
 /pytest/
 /venv/
 /.venv/
+/.venv*/
 /.claude/
 /.pytest_cache/
 /data/
