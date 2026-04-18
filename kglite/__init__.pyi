@@ -1005,9 +1005,15 @@ class KnowledgeGraph:
     ) -> list[dict[str, Any]]:
         """Find code entities by name, with disambiguation context.
 
-        Searches across code entity node types (Function, Struct, Class, Enum,
-        Trait, Protocol, Interface, Module, Constant) for nodes matching the
-        given name.
+        ⚠ **Code-entity search only.** ``find()`` searches nodes of type
+        ``Function``, ``Struct``, ``Class``, ``Enum``, ``Trait``,
+        ``Protocol``, ``Interface``, ``Module``, or ``Constant`` — the
+        types produced by ``kglite.code_tree``. On graphs that don't
+        contain these types (e.g. a social graph with ``Person`` nodes),
+        ``find()`` returns an empty list. For general name lookup on
+        other node types, use ``select(type).where({"name": ...})`` or
+        ``cypher("MATCH (n:Type) WHERE n.name = $n RETURN n",
+        params={"n": ...})``.
 
         Args:
             name: Entity name to search for (e.g. ``"execute"``).

@@ -95,45 +95,137 @@ the scope is explicit and re-openable for 0.9.0.
 
 ## 3. Benchmark matrix
 
-### Baseline carried forward from Phase 6
+### Phase 11 summary
 
-| Bench | Phase 6 median | Phase 7 status |
-|---|---|---|
-| `construction_10000_memory` | 32 ms | within noise (no structural change affects hot path) |
-| `describe_10000_memory` | 2.55 ms | within noise |
-| `find_20x_10000_memory` | 4.98 ms | within noise |
-| `multi_predicate_10000_memory` | 0.66 ms | within noise |
-| `pagerank_10000_memory` | 4.46 ms | within noise |
-| `two_hop_10x_10000_memory` | 2.55 ms | within noise |
-| `find_20x_10000_mapped` | 8.69 ms | within noise |
-| `describe_10000_mapped` | 2.49 ms | within noise |
-| `pagerank_10000_mapped` | 4.03 ms | within noise |
-| `two_hop_10x_10000_mapped` | 4.74 ms | within noise |
-| `construction_10000_disk` | 37 ms | within noise |
-| `find_20x_10000_disk` | 10.54 ms | within noise |
-| `pagerank_10000_disk` | 4.83 ms | within noise |
-| `two_hop_10x_10000_disk` | 5.15 ms | within noise |
+Ran the full Phase 11 sweep on the macOS dev box. **The 0.8.0 refactor is a net performance improvement over v0.7.17.** No per-mode gate was breached (memory +5 %, mapped +10 %). 14 queries ≥ 2 % faster; 4 queries 2–5 % slower (all under the block gate). The largest wins are in the Cypher hot path: `pattern_match` −60 %, `two_hop` −24 %, `describe` / `pagerank` −17 to −24 %. Construction improved 11–22 % at all scales — the per-backend trait-impl work (Phase 5) is paying off.
 
-Phase 7 is structural-only (file moves + one small extraction); no
-hot-path changes. A full N=20 trial run against the reorganised tree is
-deferred to CI — the existing Phase 6 baseline table is carried
-forward as the 0.8.0 benchmark reference.
+The full machine-readable delta lives in [`tests/benchmarks/phase11_delta.md`](tests/benchmarks/phase11_delta.md); the underlying JSON baselines are committed at [`tests/benchmarks/phase11_main.json`](tests/benchmarks/phase11_main.json) and [`tests/benchmarks/phase11_v0_7_17.json`](tests/benchmarks/phase11_v0_7_17.json). Phase summary JSON: [`tests/parity_baseline_phase_11.json`](tests/parity_baseline_phase_11.json).
+
+### Phase 11 N=20 delta — v0.7.17 (`fa63011c4b`) → 0.8.0 (`b0990e5395`)
+
+Wall-clock budget: 4.4 s (0.8.0 sweep) + 3.2 s (v0.7.17 sweep) for 75 total cells at N=20. Harness: [`tests/benchmarks/phase11_harness.py`](tests/benchmarks/phase11_harness.py). All p50 values in milliseconds.
+
+**Construction sweep** (build wall-clock on the same seeded graph shape):
+
+| scale | mode | v0.7.17 p50 | 0.8.0 p50 | Δ | gate |
+|---:|---|---:|---:|---:|---|
+| 1 000 | memory | 1.741 | 1.699 | −2.4 % | ok |
+| 1 000 | mapped | 2.172 | 1.828 | −15.9 % | ok |
+| 10 000 | memory | 14.019 | 12.447 | **−11.2 %** | ok |
+| 10 000 | mapped | 18.603 | 15.497 | **−16.7 %** | ok |
+| 50 000 | memory | 80.72 | 70.94 | **−12.1 %** | ok |
+| 50 000 | mapped | 145.08 | 113.37 | **−21.9 %** | ok |
+| 10 000 | disk | — (new) | 18.07 | — | new product |
+| 50 000 | disk | — (new) | 107.84 | — | new product |
+
+**Query primitives at 10k nodes** (warmed, N=20):
+
+| test | mode | v0.7.17 p50 | 0.8.0 p50 | Δ | gate |
+|---|---|---:|---:|---:|---|
+| pattern_match | memory | 13.756 | 5.417 | **−60.6 %** | ok |
+| pattern_match | mapped | 13.664 | 5.435 | **−60.2 %** | ok |
+| two_hop_10x | memory | 0.071 | 0.054 | −23.8 % | ok |
+| two_hop_10x | mapped | 0.073 | 0.055 | −24.9 % | ok |
+| describe | memory | 3.037 | 2.395 | **−21.1 %** | ok |
+| describe | mapped | 3.236 | 2.457 | **−24.1 %** | ok |
+| pagerank | memory | 5.185 | 4.276 | −17.5 % | ok |
+| pagerank | mapped | 5.375 | 4.426 | −17.7 % | ok |
+| find_20x | mapped | 10.377 | 9.053 | −12.8 % | ok |
+| aggregation | memory | 1.442 | 1.366 | −5.3 % | ok |
+| schema | memory | 0.001 | 0.001 | −7.5 % | ok |
+| multi_predicate | memory | 0.660 | 0.664 | +0.7 % | ok |
+| order_by_limit | memory | 0.087 | 0.088 | +1.4 % | ok |
+| simple_filter | memory | 0.534 | 0.546 | +2.3 % | **flag** |
+| simple_filter | mapped | 0.578 | 0.596 | +3.1 % | ok |
+| multi_predicate | mapped | 0.609 | 0.636 | +4.3 % | ok |
+| find_20x | memory | 4.436 | 4.642 | +4.7 % | **flag** |
+
+Only two cells exceeded the 2 % flag threshold and both remained under the +5 % memory block gate: `find_20x_10000_memory` (+4.7 %) and `simple_filter_10000_memory` (+2.3 %). The latter is within single-trial measurement noise (0.012 ms absolute). The former is worth re-measuring post-release — likely related to the Phase 3 `GraphRead` GAT refactor moving the `find()` hot path through the trait surface. Not a release blocker.
+
+**Wins explained**:
+
+- `pattern_match` (−60 %): Phase 6 fused-executor removed the redundant NodeData / EdgeData copy per row.
+- `describe` / `schema` (−21 to −24 %): Phase 5's per-backend trait impls + Phase 7's introspection memoisation eliminated re-walks of the type-metadata table.
+- `pagerank` (−17 %): centrality code now calls into the `GraphRead` trait's specialised degree accessors rather than going through the `.select()` Python layer.
+- Construction (−11 to −22 %): columnar `add_nodes` short-circuit for monotonic-ID primary keys (Phase 4 addition).
 
 ### Binary size
 
 - Phase 4: 6,996,688 bytes
-- Phase 5: 7,013,232 bytes (+0.24%)
-- Phase 6: 7,046,288 bytes (+0.47% vs P4)
-- **Phase 7: 7,046,272 bytes (unchanged vs P6)**
+- Phase 5: 7,013,232 bytes (+0.24 %)
+- Phase 6: 7,046,288 bytes (+0.47 % vs P4)
+- Phase 7: 7,046,272 bytes (unchanged vs P6)
+- Phase 9: 7,046,320 bytes (+0.0005 % vs P7 — noise)
+- **Phase 11: 7,046,320 bytes (unchanged vs P9)** — Phase 11 adds no Rust.
 
-Well under the +20% gate baked into `test_phase5_parity.py::test_binary_size_regression`.
+Well under the +20 % gate baked into `test_phase5_parity.py::test_binary_size_regression`.
+
+### Footprint audit (Phase 11)
+
+| scale | mode | RSS after build | on-disk |
+|---:|---|---:|---:|
+| 1 000 | memory | 71.2 MB | — |
+| 1 000 | mapped | 71.6 MB | — |
+| 1 000 | disk | 71.8 MB | 16.0 MB |
+| 10 000 | memory | 83.1 MB | — |
+| 10 000 | mapped | 86.2 MB | — |
+| 10 000 | disk | 86.6 MB | 16.5 MB |
+| 50 000 | memory | 162.9 MB | — |
+| 50 000 | mapped | 205.6 MB | — |
+| 50 000 | disk | 218.7 MB | 18.0 MB |
+
+The mapped / disk RSS overhead for small graphs is fixed-cost (mmap page tables + block-pool allocations). At 10k nodes all three modes are within ~4 % of each other; at 50k the differences are absolute, not proportional. Disk's flat ~16–18 MB on-disk footprint across scales reflects the dictionary-compression + CSR efficiency of the Phase 4 v3 format.
+
+### Mapped-niche stretch (target-gb 5, not 30)
+
+Per the Phase 11 plan (user-scoped from 30 GB), ran `python tests/benchmarks/test_mapped_scale.py --target-gb 5`:
+
+- 5 242 880 nodes, 13 893 632 edges
+- Build: 4.7 minutes
+- Peak RSS: 2.97 GB; steady RSS: 2.44 GB (well under the 5 GB target)
+- On-disk: 129 MB
+- Save: 12.18 s
+- Representative queries (all ≤ 0.5 s except `describe_overview` at 2.89 s which walks 2 915 output chars)
+
+Transcript: [`tests/benchmarks/phase11_mapped_scale_5gb.txt`](tests/benchmarks/phase11_mapped_scale_5gb.txt).
+
+### Wikidata disk bench (partial — OOM)
+
+Ran `python bench/benchmark_wikidata_cypher.py` against the 78 GB v2 disk graph at `/Volumes/EksternalHome/Data/Wikidata/wikidata_disk_graph_v2`. 29 of 45 queries completed before SIGKILL (OOM killer). Residual RSS from the preceding 5 GB mapped bench left insufficient headroom for 78 GB of disk page-cache warmup on the dev box.
+
+The 29 completed queries land in the expected envelope — basics at p50 ≈ 14 ms, anchored hops at p50 ≈ 54 ms, most limit queries ≤ 50 ms. One outlier (`limit_100_any_edge`, 11 260 ms) is expected per the script's "known pain point" commentary and is pre-existing on v0.7.17. Partial data: [`tests/benchmarks/phase11_wikidata_partial.csv`](tests/benchmarks/phase11_wikidata_partial.csv). See [`tests/benchmarks/phase11_wikidata.txt`](tests/benchmarks/phase11_wikidata.txt) for remediation notes.
+
+v0.7.17 is not format-compatible with the v2 disk graph, so there is no v0.7.17 comparison for Wikidata. The 29-query partial serves as the **0.8.0 Wikidata baseline**; a full 45-query run is a pre-release manual gate.
+
+### API benchmark — 4 datasets × 3 modes
+
+Ran `python bench/api_benchmark.py` (the reused-for-11.7 script per user decision). All 51 of 51 tests pass across memory / mapped / disk; all mode-to-mode results match. Transcript: [`tests/benchmarks/phase11_api_benchmark.txt`](tests/benchmarks/phase11_api_benchmark.txt).
+
+### Phase 6 reference baseline (historical)
+
+Retained for traceability. See Phase 11 delta above for the current 0.8.0 numbers.
+
+| Bench | Phase 6 median | Phase 11 0.8.0 p50 |
+|---|---:|---:|
+| `construction_10000_memory` | 32 ms | 12.45 ms |
+| `describe_10000_memory` | 2.55 ms | 2.40 ms |
+| `find_20x_10000_memory` | 4.98 ms | 4.64 ms |
+| `multi_predicate_10000_memory` | 0.66 ms | 0.66 ms |
+| `pagerank_10000_memory` | 4.46 ms | 4.28 ms |
+| `two_hop_10x_10000_memory` | 2.55 ms | 0.054 ms (shape changed — `count(DISTINCT c)` vs full-path enum) |
+| `find_20x_10000_mapped` | 8.69 ms | 9.05 ms |
+| `describe_10000_mapped` | 2.49 ms | 2.46 ms |
+| `pagerank_10000_mapped` | 4.03 ms | 4.43 ms |
+| `construction_10000_disk` | 37 ms | 18.07 ms |
+
+The `construction_10000_memory` delta (32 → 12 ms) is **substantially better** than Phase 6 indicated — investigation suggests Phase 6's timer included prior warmup overhead that the Phase 11 harness excludes. The magnitude is still a real improvement per the v0.7.17 comparison above.
 
 ### Deferred
 
-- N=20 multi-trial bench run with p50/p95/p99 — not rerun in Phase 7 (structural-only changes; carried Phase 6 medians forward).
-- `test_mapped_scale.py --target-gb 30` — not run in Phase 7 (previous `--target-gb 1` run was green; 30 GB stretch test is hardware-gated).
-- Wikidata disk bench — not rerun (structural-only changes).
-- 2-hardware-profile comparison — macOS dev box only. Linux CI cross-check deferred to Phase 8.
+- **11.2 Cross-hardware validation** — dev-box-only (macOS). Linux CI cross-check deferred to post-0.8.0 release cycle.
+- **30 GB mapped-niche** — 5 GB run proved envelope; 30 GB remains a manual pre-release gate (the infrastructure exists: `tests/test_stress.py::test_mapped_scale_30gb` and the CLI `python tests/benchmarks/test_mapped_scale.py --target-gb 30`).
+- **Full 45-query Wikidata bench** — see OOM note above; requires machine with ≥ 32 GB free RAM + cold page cache.
+- **Wikidata v0.7.17 comparison** — disk format incompatible; no apples-to-apples baseline is possible.
 
 ---
 

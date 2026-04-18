@@ -11,7 +11,7 @@ open/closed.
 Adding a backend is a **3-src-file change**:
 
 1. **Own file** — `src/graph/storage/<name>.rs`: a struct + `impl GraphRead for Name` (+ optionally `impl GraphWrite for Name`).
-2. **Enum variant** — `src/graph/schema.rs`: a new `GraphBackend::Name(...)` arm in the dispatch enum.
+2. **Enum variant** — `src/graph/storage/backend.rs`: a new `GraphBackend::Name(...)` arm in the dispatch enum.
 3. **Re-export** — `src/graph/storage/mod.rs`: `pub mod <name>; pub use <name>::Name;`.
 
 Plus a parity test in `tests/test_phaseN_parity.py` that wraps your
@@ -31,7 +31,7 @@ associated types (GATs) — see the "GATs and object-safety" section of
 the trait doc. The trait is **not object-safe**; `&dyn GraphRead` does
 not compile. All consumers take `&impl GraphRead`.
 
-The `GraphBackend` enum in `schema.rs` is a **4-arm dispatcher** that
+The `GraphBackend` enum in `storage/backend.rs` is a **4-arm dispatcher** that
 routes to the per-backend `impl GraphRead` / `impl GraphWrite` impls
 (currently `MemoryGraph`, `MappedGraph`, `DiskGraph`, and
 `RecordingGraph` as the wrapping variant).
@@ -105,7 +105,7 @@ Key points:
 
 ### 2. Add the enum variant
 
-File: `src/graph/schema.rs`.
+File: `src/graph/storage/backend.rs`.
 
 ```rust
 pub enum GraphBackend {
@@ -205,7 +205,7 @@ Phase 6's gate (`tests/test_phase6_parity.py::test_file_count_budget`)
 enforces that adding a wrapper backend touches at most 3 src files:
 
 - own file (`src/graph/storage/recording.rs`)
-- enum + dispatch (`src/graph/schema.rs`)
+- enum + dispatch (`src/graph/storage/backend.rs`)
 - re-export (`src/graph/storage/mod.rs`)
 
 Anything more than that means either (a) the new backend couldn't
@@ -219,6 +219,6 @@ layer. Both require design revisions.
 - `src/graph/storage/mod.rs` — the `GraphRead` / `GraphWrite` trait surface.
 - `src/graph/storage/recording.rs` — the worked example from this guide.
 - `src/graph/storage/impls.rs` — the three production backends' trait impls (Memory / Mapped / Disk).
-- `src/graph/schema.rs` — the 4-arm `GraphBackend` dispatcher.
+- `src/graph/storage/backend.rs` — the 4-arm `GraphBackend` dispatcher.
 - `ARCHITECTURE.md` — diagrams + rules for new storage code.
 - `todo.md` Phase 6 Report-out — lessons learned from RecordingGraph's implementation.

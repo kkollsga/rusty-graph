@@ -1,0 +1,17 @@
+{
+  "query": "MATCH (n) RETURN labels(n)[0] AS label, count(n) AS c",
+  "rows": [
+    {
+      "c": 200,
+      "label": "Place"
+    },
+    {
+      "c": 300,
+      "label": "Company"
+    },
+    {
+      "c": 500,
+      "label": "Person"
+    }
+  ]
+}

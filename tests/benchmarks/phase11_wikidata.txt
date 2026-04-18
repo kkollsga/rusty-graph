@@ -1,0 +1,17 @@
+Wikidata disk bench (0.8.0, git b0990e5) — partial, OOM-killed at query 29/45
+
+System: macOS (Darwin 25.3.0), dev box. Disk graph: 78 GB at
+/Volumes/EksternalHome/Data/Wikidata/wikidata_disk_graph_v2
+
+Previous run: test_mapped_scale.py --target-gb 5 left ~4 GB residual
+RSS / page-cache pressure. Subsequent Wikidata bench was killed by
+SIGKILL at query 29/45 (partway through edge_type category).
+
+29 queries completed successfully before OOM — median latencies land
+in the expected envelope:
+- basics (8 queries):       p50 ~14 ms
+- anchored (9 queries):     p50 ~54 ms  (sweet spot for MCP)
+- limit (4 queries):        p50 ~14 ms; outlier limit_100_any_edge 11,260 ms
+- edge_type (first 8):      p50 ~40 ms
+
+See phase11_wikidata_partial.csv for the per-query table.

@@ -773,6 +773,23 @@ result = graph.cypher("MATCH (n:Field) RETURN n.name, n.wkt_geometry AS geometry
 gdf = result.to_gdf(geometry_column='geometry', crs='EPSG:4326')
 ```
 
+### Human-Readable String Export
+
+`to_str(limit=50)` formats the selection as a multi-line string — each node as a `[Type] title (id: x)` block with indented properties, one per line. Useful for quick inspection in a REPL or for logging.
+
+```python
+print(graph.select('Person').to_str(limit=5))
+# [Person] Alice (id: 1)
+#     age: 30
+#     city: Oslo
+# [Person] Bob (id: 2)
+#     age: 35
+#     city: Bergen
+# ...
+```
+
+`show(columns=['id', 'title'], limit=200)` is the more compact alternative — one node per line as `Type(val1, val2)`, traversal-aware.
+
 ### ResultView
 
 All `cypher()` calls, `collect()` (flat), centrality methods, and `sample()` return a `ResultView`:

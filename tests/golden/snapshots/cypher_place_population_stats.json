@@ -1,0 +1,10 @@
+{
+  "query": "MATCH (pl:Place) RETURN count(pl) AS n, min(pl.population) AS pmin, max(pl.population) AS pmax",
+  "rows": [
+    {
+      "n": 200,
+      "pmax": 998761,
+      "pmin": 1177
+    }
+  ]
+}

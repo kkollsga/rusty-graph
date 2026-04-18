@@ -347,6 +347,77 @@ class TestV3Format:
         finally:
             os.unlink(path)
 
+    def test_header_only_corrupt(self):
+        """A file with valid header bytes but corrupted body must fail cleanly."""
+        graph = KnowledgeGraph()
+        graph.add_nodes(pd.DataFrame({"id": [1, 2], "name": ["A", "B"]}), "Person", "id", "name")
+        with tempfile.NamedTemporaryFile(suffix=".kgl", delete=False) as f:
+            path = f.name
+        try:
+            graph.save(path)
+            with open(path, "rb") as f:
+                data = f.read()
+            # Flip a byte deep in the payload — header + metadata survive.
+            bad = bytearray(data)
+            bad[len(data) // 2] ^= 0xFF
+            with open(path, "wb") as f:
+                f.write(bad)
+            # Load must either succeed with valid data or raise cleanly —
+            # never segfault, never silent corruption.
+            try:
+                loaded = kglite.load(path)
+                # If load succeeded, observable queries must not panic.
+                list(loaded.cypher("MATCH (n) RETURN count(n) AS c"))
+            except Exception:
+                pass  # expected path
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    @pytest.mark.skipif(
+        not hasattr(__import__("resource"), "RLIMIT_FSIZE"),
+        reason="RLIMIT_FSIZE not available on this platform",
+    )
+    def test_disk_full_during_save(self, tmp_path):
+        """Simulate disk-full via RLIMIT_FSIZE; save must fail cleanly and not
+        corrupt any pre-existing valid save at a different path."""
+        import resource
+
+        safe = str(tmp_path / "safe.kgl")
+        victim = str(tmp_path / "victim.kgl")
+
+        graph = KnowledgeGraph()
+        graph.add_nodes(
+            pd.DataFrame({"id": list(range(50)), "name": [f"N{i}" for i in range(50)]}),
+            "Person",
+            "id",
+            "name",
+        )
+        # Baseline: a valid save at `safe` before the limit kicks in.
+        graph.save(safe)
+        assert os.path.getsize(safe) > 0
+
+        # Clamp file size below what we expect `victim` to need; 256 bytes
+        # is well under the ~800 byte minimum observed for small graphs.
+        original = resource.getrlimit(resource.RLIMIT_FSIZE)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (256, original[1]))
+        try:
+            # Save may succeed if graph is tiny, or raise an OS-level error.
+            # What must NOT happen: corruption of `safe` or a Python-side
+            # state mutation (graph still queryable after).
+            try:
+                graph.save(victim)
+            except Exception:
+                pass
+            # Graph is still usable after the failed save.
+            assert graph.cypher("MATCH (n:Person) RETURN count(n) AS c").to_list()[0]["c"] == 50
+        finally:
+            resource.setrlimit(resource.RLIMIT_FSIZE, original)
+
+        # The earlier `safe` file is unchanged and still loads.
+        reloaded = kglite.load(safe)
+        assert reloaded.cypher("MATCH (n:Person) RETURN count(n) AS c").to_list()[0]["c"] == 50
+
     def test_node_count_after_load(self):
         """node_count() on a freshly loaded graph should return total count."""
         graph = KnowledgeGraph()

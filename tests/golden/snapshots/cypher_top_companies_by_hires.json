@@ -1,0 +1,45 @@
+{
+  "query": "MATCH (c:Company)<-[:WORKS_AT]-(p:Person) RETURN c.cid AS cid, count(p) AS hires ORDER BY hires DESC, cid ASC LIMIT 10",
+  "rows": [
+    {
+      "cid": 127,
+      "hires": 5
+    },
+    {
+      "cid": 128,
+      "hires": 5
+    },
+    {
+      "cid": 134,
+      "hires": 5
+    },
+    {
+      "cid": 16,
+      "hires": 4
+    },
+    {
+      "cid": 255,
+      "hires": 5
+    },
+    {
+      "cid": 4,
+      "hires": 7
+    },
+    {
+      "cid": 40,
+      "hires": 5
+    },
+    {
+      "cid": 64,
+      "hires": 4
+    },
+    {
+      "cid": 79,
+      "hires": 5
+    },
+    {
+      "cid": 85,
+      "hires": 4
+    }
+  ]
+}

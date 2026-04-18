@@ -40,7 +40,7 @@ Before starting any performance-related code changes:
 
 - PyO3: `&self` for read-only, return `PyResult<Py<PyAny>>`, use `Python::attach()`.
 - Use `.cast::<T>()` not `.downcast::<T>()` (deprecated in pyo3 0.27+).
-- **All `#[pymethods]` / `#[pyclass]` live under `src/graph/pyapi/`.** Private `impl KnowledgeGraph` helpers stay in `src/graph/mod.rs` (pub(crate) when called from pyapi).
+- **All `#[pymethods] impl` blocks live under `src/graph/pyapi/`.** Private `impl KnowledgeGraph` helpers stay in `src/graph/mod.rs` (pub(crate) when called from pyapi). The `#[pyclass]` *struct attribute* may stay with the struct definition where the data model lives — this applies to `KnowledgeGraph` itself (in `src/graph/mod.rs`) and `ResultView` (in `src/graph/languages/cypher/result_view.rs` / `pyapi/result_view.rs`). The rule is about where PyO3 *method implementations* live, not struct declarations.
 - Value conversion: `py_out::value_to_py()` and `py_out::nodeinfo_to_pydict()`.
 
 ## Storage-backend work (0.8.0 refactor)

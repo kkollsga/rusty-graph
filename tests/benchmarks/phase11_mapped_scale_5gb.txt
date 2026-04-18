@@ -1,0 +1,53 @@
+Target: ~5.0 GB (memory-mode equivalent), mode=mapped, workdir=/var/folders/7h/n6cl9kt96g79hz0s16q5vfxc0000gn/T/kglite_mapped_scale_uslttzrb, start RSS=68 MB
+
+────────────────────────────────────────────────────────────────────
+  Build: 5,242,880 nodes (~5.00 GB memory-eq), mode=mapped
+────────────────────────────────────────────────────────────────────
+  RSS at start: 68 MB
+  Entity    :  3,145,728 in    2.9 min  RSS=2.14 GB
+  Document  :  1,310,720 in    30.51 s  RSS=1.06 GB
+  Topic     :    786,432 in    11.24 s  RSS=1.75 GB
+  MENTIONS  :  6,291,456 Entity→Document in    25.16 s  RSS=2.79 GB
+  ABOUT     :  3,145,728 Entity→Topic in    16.60 s  RSS=2.48 GB
+  CLASSIFIED:  1,310,720 Document→Topic in     2.57 s  RSS=2.54 GB
+  RELATED   :  3,145,728 Entity→Entity in    19.70 s  RSS=2.44 GB
+
+  total: 5,242,880 nodes, 13,893,632 edges in 4.7 min; peak RSS=2.97 GB  steady=2.44 GB
+
+────────────────────────────────────────────────────────────────────
+  save()
+────────────────────────────────────────────────────────────────────
+  save(): 12.18 s; file=129 MB
+
+────────────────────────────────────────────────────────────────────
+  Queries (mapped mode)
+────────────────────────────────────────────────────────────────────
+  count_entities               0 ms  RSS=4.56 GB
+  filter_category            135 ms  RSS=4.75 GB
+  range_scan                 134 ms  RSS=4.75 GB
+  contains                   345 ms  RSS=4.63 GB
+  aggregation                502 ms  RSS=4.51 GB
+  two_hop                    135 ms  RSS=3.13 GB
+  describe_overview          2.89 s  (2,915 chars)
+
+────────────────────────────────────────────────────────────────────
+  SUMMARY
+────────────────────────────────────────────────────────────────────
+  Mode:            mapped
+  Nodes / edges:   5,242,880  /  13,893,632
+  Build time:      4.7 min
+  Peak RSS build:  2.97 GB
+  Steady RSS:      2.44 GB
+  On-disk:         129 MB
+  Save time:       12.18 s
+
+  Query timings:
+    count_entities               0 ms
+    filter_category            135 ms
+    range_scan                 134 ms
+    contains                   345 ms
+    aggregation                502 ms
+    two_hop                    135 ms
+    describe_overview          2.89 s
+
+  Cleaning up /var/folders/7h/n6cl9kt96g79hz0s16q5vfxc0000gn/T/kglite_mapped_scale_uslttzrb

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **Cypher query primitives faster across the board vs v0.7.17** (N=20 trials,
+  macOS dev box, measured end of Phase 11). Memory and mapped modes both win:
+  - `pattern_match` at 10k nodes: −60 %
+  - `two_hop_10x`: −24 %
+  - `describe()`: −21 % (memory), −24 % (mapped)
+  - `pagerank`: −17 %
+  - `find_20x`: −13 % (mapped)
+  - Construction sweep (1k / 10k / 50k nodes): −11 % to −22 %
+  - No memory-mode query regressed above the +5 % gate; only four cells
+    flagged under 5 % (`find_20x_memory` +4.7 %, `simple_filter` /
+    `multi_predicate` minor noise)
+  - Full delta table: `tests/benchmarks/phase11_delta.md`; see
+    `AUDIT_0.8.0.md § 3` for the matrix.
+
 ### Changed (internal, not user-visible)
 
 - **Every `.rs` under `src/graph/` is now at or under the 2,500-line
@@ -14,7 +30,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   down through the 2,610-line `pattern_matching.rs`) into themed
   submodules. `GOD_FILE_EXCEPTIONS` is empty; `test_god_file_gate`
   passes unconditionally.
-- No Python-facing behaviour change. `kglite/__init__.pyi` unchanged.
+- **Testing envelope hardened (Phase 10).** New parity tests cover
+  zero-node / single-edge / 1 000-hop / Unicode / type-promotion /
+  null-NaN / 100 000-row cypher results across memory / mapped / disk
+  (`tests/test_edge_cases_parity.py`). Golden-fixture regression suite
+  (`tests/test_golden.py` + `tests/golden/`) pins byte-exact output
+  for a deterministic 1 000-node / 3 000-edge graph across every
+  storage mode. New `@pytest.mark.stress` tier for the 30 GB mapped
+  bench and 10 k-hop traversal.
+- No Python-facing behaviour change. `kglite/__init__.pyi` signatures
+  are byte-identical to v0.7.17; the `find()` docstring gains a
+  code-entity-search clarification but the signature is unchanged.
 
 ## [0.8.0] — internal-only storage-architecture refactor
 

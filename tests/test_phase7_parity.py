@@ -64,31 +64,6 @@ def test_god_file_gate():
         pytest.fail(msg)
 
 
-def test_exception_list_still_applies():
-    """Every entry in GOD_FILE_EXCEPTIONS actually points at a file > 2500 lines.
-
-    Keeps the exception list honest — if a file drops under the cap
-    via a future split, it should be removed from the list.
-    """
-    stale: list[str] = []
-    missing: list[str] = []
-    for rel in GOD_FILE_EXCEPTIONS:
-        path = SRC_GRAPH / rel
-        if not path.exists():
-            missing.append(rel)
-            continue
-        lines = len(path.read_text().splitlines())
-        if lines <= HARD_CAP:
-            stale.append(f"{rel}: now only {lines} lines (under cap)")
-    errors: list[str] = []
-    if missing:
-        errors.append("exception list references non-existent files:\n" + "\n".join(f"  {r}" for r in missing))
-    if stale:
-        errors.append("exception list has stale entries:\n" + "\n".join(f"  {r}" for r in stale))
-    if errors:
-        pytest.fail("\n\n".join(errors))
-
-
 UNSAFE_OPEN = re.compile(r"unsafe\s*\{")
 
 

@@ -1,0 +1,4 @@
+{
+  "query": "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) WHERE a.id = 0 RETURN DISTINCT c.id AS cid ORDER BY cid LIMIT 15",
+  "rows": []
+}

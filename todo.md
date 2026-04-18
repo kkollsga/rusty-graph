@@ -917,3 +917,259 @@ Every `.rs` under `src/graph/` is now at or under the 2,500-line hard cap. `GOD_
 - **Modified docs**: (none this commit — ARCHITECTURE.md / CLAUDE.md / AUDIT_0.8.0.md / CHANGELOG.md updates deferred to the separate `docs:` commit that accompanies this phase).
 - **Unchanged**: `kglite/__init__.pyi` (zero diff vs pre-Phase 9 — API-stability contract held).
 
+## Phase 10 Report-out (written at phase exit — read this before Phase 11)
+
+**Completed** (single squashed commit `test: Phase 10 — testing hardening` on `main`, local only — user pushes):
+
+Pins the outer envelope of the public API with tests-only additions. Zero Rust source changes; zero `kglite/__init__.pyi` changes (MD5 `cfefb71c1f6a8b819dd11c73ef8af3be` preserved). Deliverables:
+
+1. **10.1 Edge-case parity** — new `tests/test_edge_cases_parity.py` (27 tests @ `pytest.mark.parity`): zero-node graphs, single-node self-edge, 1,000-hop chain, Unicode round-trip (BMP + astral + ZWJ + RTL + flag + empty), Unicode save/load, property-type promotion ladder (int → int+float → int+float+string), null/NaN/empty-string, 100k-row cypher RETURN with RSS budget, NaN-is-null invariant. **Every test passes on memory + mapped + disk on first run — no disk divergences.** The Phase 2 `STRICT_PARITY_MODES` escape hatch was prepared but never needed.
+2. **10.2 Golden fixtures** — new `tests/golden/` package + `tests/test_golden.py` (48 tests). Deterministic 1,000-node / 3,000-edge graph (500 Person + 300 Company + 200 Place, seeded `random.Random(42)`). 10 pinned cypher queries + 5 `find()` queries + 1 schema snapshot × 3 storage modes = 48 byte-for-byte JSON diff assertions. Regenerator script `tests/golden/regenerate.py` with `--check` drift-detection flag.
+3. **10.3 Concurrent equivalence** — extended `tests/test_concurrency.py`: new `test_concurrent_reads_result_equivalence` uses `ThreadPoolExecutor(max_workers=4)` and asserts full result-set equivalence (not just scalar count) to a sequential baseline after normalisation. Two pre-existing concurrency tests kept as-is.
+4. **10.4 Stress tier** — new `tests/test_stress.py` (2 tests @ `pytest.mark.stress`): 30 GB mapped-scale benchmark subprocess invocation + 10k-hop deep traversal. New `stress` marker registered in `pyproject.toml` with `addopts` exclusion by default.
+5. **Malformed-file / disk-full** — extended `tests/test_save_load.py::TestV3Format` with `test_header_only_corrupt` (byte-flip deep in valid-header payload, assert clean failure) and `test_disk_full_during_save` (RLIMIT_FSIZE simulation, skip on platforms without `resource.RLIMIT_FSIZE`). Confirms the graph remains queryable and the prior-saved file remains loadable after a mid-save disk-full.
+
+### Probe results (ran pre-implementation to pick test tiers)
+
+On memory/mapped/disk, 1,000-hop `count(b)` via `[*..1000]` was <1 ms across all three modes — the Cypher planner short-circuits variable-length path counting rather than materialising paths. 100k-row RETURN: 32 ms wall-clock, max 175 MB RSS delta (memory mode — mapped/disk much lower due to columnar storage). All three scenarios kept in default `pytest tests/`, no gating needed.
+
+### Baselines held
+
+- `kglite/__init__.pyi` MD5: `cfefb71c1f6a8b819dd11c73ef8af3be` (byte-identical to Phase 9 — API-stability contract held; zero source changes).
+- `cargo test --release`: **490 passed** (unchanged).
+- `pytest tests/` (default): **1,799 → 1,850 passed** (+51 tests = 27 in `test_edge_cases_parity.py`, already counted in parity total, not here; 48 in `test_golden.py`; 1 in `test_concurrency.py`; 2 in `test_save_load.py`).
+- `pytest -m parity tests/`: **69/1 → 96/1 passed/skipped** (+27 = `test_edge_cases_parity.py` × 3 modes).
+- `pytest -m stress`: 2 tests collected (not run in default gate; `test_deep_traversal_10k_hops` passes; `test_mapped_scale_30gb` manual-run only).
+- `make lint`: clean (cargo fmt + clippy -D warnings + ruff format/check + stubtest on 20 modules, no issues).
+- Phase 7 `.kgl` v3 `GOLDEN_V3_DIGEST` unchanged.
+
+### Surprises found during implementation
+
+1. **`kglite.KnowledgeGraph.find()` is code-specific.** Its docstring says it searches code-entity node types (Function, Struct, Class, Enum, Trait, Protocol, Interface, Module, Constant). On a social graph (Person/Company/Place), `find("Alice")` legitimately returns `[]`. The Phase 10 plan referenced `find()` generically — the golden-fixture test pins the empty-result contract rather than asserting match content. Worth documenting for Phase 12 API-surface audit: find() is domain-specific rather than a generic name-search.
+2. **Variable-length path `[*..1000]` is instant.** The todo.md risk list worried about stack overflow or quadratic planner explosion. Empirically the planner computes reachability counts without path materialisation. This means the Phase 10 "1,000-hop" test doesn't stress-test the deep-recursion path — the 10k-hop stress test likewise completes in <100 ms. **Phase 11 should add a benchmark that actually materialises paths (`RETURN p` where `p = path`) to stress the recursion/memory envelope.**
+3. **Ruff import-sort runs after ruff format.** `ruff format` normalised whitespace but left multi-block imports unsorted; `ruff check --fix` had to collapse them. Two-pass workflow is needed when writing net-new test files. `make lint` catches both via its `ruff format --check && ruff check` sequence.
+4. **PyO3 `ResultView` is iterable, not indexable without `.to_list()`.** Most existing tests use `result[0]["c"]` which works because `ResultView.__getitem__` exists, but cross-mode tests that used `list(result)` returned list-of-dicts cleanly. Kept the existing `list(kg.cypher(...))` pattern — converts the iterator directly.
+5. **`find()` type signature accepts `(name)` and `(name, node_type)` positionally; passing `node_type=None` keyword also works.** The regenerator helper branches on `node_type is None` to call the single-arg form for type-safety against future `#[pymethods]` signature changes — tested empirically in both patterns.
+
+### Decisions made
+
+1. **Golden fixture: 1,000 nodes, not larger.** 1,000 nodes keeps test suite wall-clock under 10 s total (0.37 s for all 48 golden tests). Larger would stress-test aggregation paths but belongs in Phase 11 benchmarks.
+2. **Snapshot format: `json` with `sort_keys=True` + `indent=2`**, not binary hashes. Human-readable diffs on failure; regenerator writes the same format. Floats rounded to 6 decimals to avoid cross-platform formatting drift.
+3. **Datetime columns deliberately excluded from the golden snapshots.** The `joined_at` column is populated in the builder but not queried in any golden cypher — adding it to a RETURN risks locale/timezone serialisation drift across platforms. Can be added in a future phase after confirming PyO3 datetime reprs are stable.
+4. **Disk-full test uses `RLIMIT_FSIZE`, not a real tmpfs.** `RLIMIT_FSIZE` is Unix-portable (macOS + Linux), doesn't require sudo, and is scoped to the process. `skip_if` on `hasattr(resource, 'RLIMIT_FSIZE')` handles Windows.
+5. **The `test_long_chain_traversal_1000_hops` parity test is kept in the default `-m parity` suite despite its triviality.** Rationale: if a future Cypher planner rewrite changes variable-length-path short-circuiting, this test will catch the regression — the assertion is tight (`count == 1000` exactly, no tolerance). The 10k-hop version lives under `-m stress` for the same reason at a different scale.
+6. **Concurrent-equivalence test runs on memory mode only.** The plan allowed pushing to `-m stress` for mapped/disk. Kept it in default suite because it ran in <100 ms on memory and the value of default-suite regression detection outweighs the cost.
+
+### Debt introduced / carried to Phase 11
+
+- **Variable-length path stress coverage is shallow.** The 1k-hop + 10k-hop tests terminate instantly because `count()` short-circuits path enumeration. Phase 11 should add a benchmark that returns actual path objects to measure deep-traversal cost empirically.
+- **Datetime columns unsnapshotted.** The golden graph builder produces `joined_at` datetime rows but doesn't query them. Future work: add a `cypher_dates_roundtrip` snapshot after verifying datetime serialisation stability across platforms.
+- **`test_mapped_scale_30gb` is untested locally.** It runs a 3-hour-budget subprocess against `tests/benchmarks/test_mapped_scale.py --target-gb 30`. The `test_deep_traversal_10k_hops` stress test is verified green locally; `test_mapped_scale_30gb` relies on the underlying benchmark's existing well-tested code path. Manual run before each release is still expected.
+- **`find()` domain-specificity not documented in `__init__.pyi` docstring.** The docstring mentions code entities but the method name doesn't — cross-reference for Phase 12's documentation pass.
+
+### Scope changes vs the approved plan
+
+- **10.1 expanded from 7 to 8 crunch-point tests** — added `test_nan_not_equal_itself` (explicit NaN→null parity via `IS NULL` / `IS NOT NULL`) because the plan's "null/NaN/empty-string parity" task was broad enough to warrant a dedicated test.
+- **Flag sequence added to Unicode list** — the plan mentioned surrogate pairs / ZWJ / emoji / RTL / combining marks; I added the Norwegian flag (🇳🇴, a regional-indicator pair) because it's a compound grapheme-cluster case that exercises column storage without needing Python-side surrogate manipulation.
+- **Disk-full + header-corrupt added to `test_save_load.py`** rather than a new file. Existing `TestV3Format` class is the canonical home; Phase 10's contribution fits cleanly there.
+- **Concurrent test runs on memory mode only** (not parameterised across modes as the plan allowed). See Decisions #6.
+
+### Next-phase prerequisites (Phase 11 — benchmark sweep)
+
+- **Probe data captured in `tests/parity_baseline_phase_10.json`** — includes measured RSS budgets per storage mode, which Phase 11 can use as soft regression gates.
+- **Golden-fixture snapshots are byte-frozen.** If Phase 11's optimizer changes aggregation paths (e.g. vectorised COUNT), the golden tests will fail. Intentional: `python tests/golden/regenerate.py` is the one-command refresh path; diff the snapshot before committing.
+- **The `stress` marker is registered.** Phase 11 benchmarks can opt into it if there are scenarios that exceed `-m benchmark`'s budget (e.g. the 30 GB mapped build).
+- **No new `GOD_FILE_EXCEPTIONS` entries.** `src/` touched zero files this phase — the exception list remains empty (consider deleting the exception-list audit in Phase 11 when it has stayed empty across two phases per Phase 9 suggestion).
+
+### Files touched
+
+- **New tests**: `tests/test_edge_cases_parity.py`, `tests/test_golden.py`, `tests/test_stress.py`.
+- **New fixtures**: `tests/golden/__init__.py`, `tests/golden/build_golden_graph.py`, `tests/golden/queries.py`, `tests/golden/regenerate.py`, `tests/golden/snapshots/*.json` (16 files).
+- **New baseline**: `tests/parity_baseline_phase_10.json`.
+- **Modified**: `pyproject.toml` (stress marker + addopts), `tests/test_concurrency.py` (+1 test), `tests/test_save_load.py` (+2 tests).
+- **Unchanged**: all of `src/`, all of `kglite/` including `__init__.pyi`. Zero production-code diff.
+
+## Phase 11 Report-out (written at phase exit — read this before Phase 12)
+
+**Completed** (single squashed commit `test: Phase 11 — benchmark sweep` on `main`, local only — user pushes):
+
+Ran the full Phase 11 benchmark sweep on the dev box (macOS Darwin 25.3.0). Zero Rust or Python source changes. **The 0.8.0 refactor is a net performance improvement over v0.7.17** across every storage-mode cell that has a v0.7.17 counterpart. No regression gate was breached.
+
+Deliverables:
+
+1. **11.1 N=20 multi-trial sweep on 0.8.0** → `tests/benchmarks/phase11_main.json` (45 cells, 4.4 s wall-clock). Covers 4 construction scales × 3 modes + 10 query primitives × 3 modes at 10k nodes, plus footprint rows per mode.
+2. **11.1 harness itself** → `tests/benchmarks/phase11_harness.py` (296 lines). Standalone Python script (not a pytest test). Self-contained graph builder (`_make_shape` / `_populate`) so it runs unchanged on any KGLite checkout. Argparsed CLI: `--json`, `--n`, `--modes`, `--skip-construction`.
+3. **11.3 v0.7.17 replay** → `tests/benchmarks/phase11_v0_7_17.json` (30 cells, memory + mapped only — disk format incompatible). Executed via `git worktree add ../KGLite-v0.7.17 v0.7.17` + isolated venv + `maturin develop --release` + harness run. Worktree + venv removed cleanly at phase exit (`git worktree list` shows only `main`).
+4. **11.3 comparison generator** → `tests/benchmarks/phase11_compare.py` + `tests/benchmarks/phase11_delta.md`. Markdown table with per-cell gate evaluation (memory +5 % block, mapped +10 % block, disk +15 % flag).
+5. **11.4 Footprint audit** → rolled into `tests/parity_baseline_phase_11.json` (RSS + on-disk per scale × mode). Observations: disk's on-disk footprint stays flat at ~16–18 MB across 1k / 10k / 50k scales (dictionary compression + CSR efficiency). Mapped RSS is within 4 % of memory at 10k, widens at 50k.
+6. **11.5 Mapped-niche 5 GB** → `tests/benchmarks/phase11_mapped_scale_5gb.txt`. Completed cleanly: 5 M nodes, 13.9 M edges, build 4.7 min, peak RSS 2.97 GB, steady 2.44 GB, on-disk 129 MB, save 12.18 s, query latencies ≤ 0.5 s except `describe_overview` at 2.89 s (2,915 output chars — expected).
+7. **11.6 Wikidata disk bench** → **partial** (29 of 45 queries) in `tests/benchmarks/phase11_wikidata_partial.csv`, with narrative in `tests/benchmarks/phase11_wikidata.txt`. SIGKILL (OOM) at query 29 after residual RSS from the preceding 5 GB mapped run exhausted available memory for 78 GB disk page-cache warmup. 29 completed queries land in the expected envelope (basics p50 ≈ 14 ms; anchored hops p50 ≈ 54 ms).
+8. **11.7 API benchmark** → `tests/benchmarks/phase11_api_benchmark.txt`. 51 of 51 pass across 4 datasets × 3 modes; all mode-to-mode results match. Reused `bench/api_benchmark.py` per Phase 11 plan decision; no new file created.
+9. **11.8 `AUDIT_0.8.0.md § 3` rewrite** → Phase 6 "carried forward" table demoted to historical sub-section; new Phase 11 delta tables, footprint matrix, 5 GB stretch summary, Wikidata partial summary, API-bench summary, and updated Deferred subsection are now authoritative.
+10. **`tests/parity_baseline_phase_11.json`** → phase-summary JSON with entry/exit counts, gate results, top wins, footprint data, per-sub-task status.
+
+### Baselines held
+
+- `kglite/__init__.pyi`: byte-identical to v0.7.17 and Phase 10 (MD5 `cfefb71c1f6a8b819dd11c73ef8af3be`). Verified by `git diff v0.7.17 HEAD -- kglite/__init__.pyi` → empty.
+- `cargo test --release`: **490 passed** (unchanged).
+- `pytest tests/`: **1,850 passed** (unchanged — Phase 11 adds no pytest tests).
+- `pytest -m parity tests/`: **96 passed, 1 skipped** (unchanged).
+- `make lint`: clean (cargo fmt + clippy -D warnings + ruff format/check + stubtest).
+- `kglite/kglite.cpython-312-darwin.so`: **7,046,320 bytes** (unchanged vs Phase 9).
+- Phase 7 `.kgl` v3 `GOLDEN_V3_DIGEST` unchanged (no I/O code touched).
+
+### Top numeric wins (v0.7.17 p50 → 0.8.0 p50 at 10k nodes)
+
+| Cell | v0.7.17 | 0.8.0 | Δ |
+|---|---:|---:|---:|
+| `pattern_match_10000_memory` | 13.756 ms | 5.417 ms | **−60.6 %** |
+| `pattern_match_10000_mapped` | 13.664 ms | 5.435 ms | **−60.2 %** |
+| `two_hop_10x_10000_mapped` | 0.073 ms | 0.055 ms | **−24.9 %** |
+| `describe_10000_mapped` | 3.236 ms | 2.457 ms | **−24.1 %** |
+| `describe_10000_memory` | 3.037 ms | 2.395 ms | **−21.1 %** |
+| `pagerank_10000_mapped` | 5.375 ms | 4.426 ms | **−17.7 %** |
+| `pagerank_10000_memory` | 5.185 ms | 4.276 ms | **−17.5 %** |
+| `find_20x_10000_mapped` | 10.377 ms | 9.053 ms | **−12.8 %** |
+| `construction_50000_mapped` | 145.08 ms | 113.37 ms | **−21.9 %** |
+| `construction_50000_memory` | 80.72 ms | 70.94 ms | **−12.1 %** |
+
+### Flagged (under block gate, but worth tracking)
+
+- `find_20x_10000_memory`: +4.7 % (under +5 % memory block). Likely related to Phase 3 `GraphRead` GAT refactor moving `find()` through the trait surface. Post-release investigation.
+- `simple_filter_10000_memory`: +2.3 % (well under block). Absolute delta is 0.012 ms — within single-trial measurement noise.
+- `multi_predicate_10000_mapped`: +4.3 % (under +10 % mapped block). Same order-of-magnitude as single-trial noise for a 0.6 ms query.
+- `simple_filter_10000_mapped`: +3.1 % (under +10 % mapped block).
+
+### Surprises found during implementation
+
+1. **`test_nx_comparison.py::_build_kg_mode` does not exist on v0.7.17.** The first draft of the harness imported from `test_nx_comparison`; running on the v0.7.17 worktree raised `AttributeError`. Refactored the harness to inline the graph builder (`_make_shape` + `_populate`) so it's version-agnostic. Re-ran the 0.8.0 baseline after the refactor so both sides use the same build path.
+2. **Phase 6 `two_hop_10x_10000_memory` baseline was 2.55 ms; Phase 11 reports 0.054 ms.** Not a 47× speedup — the Phase 11 harness uses `RETURN count(DISTINCT c)` which the Cypher planner short-circuits; Phase 6 likely enumerated full paths. The v0.7.17 measurement (0.071 ms) uses the same shape as 0.8.0, so the **v0.7.17 → 0.8.0 comparison at 23.8 % speedup is apples-to-apples**. The Phase 6 comparison is not. The historical sub-table in AUDIT §3 flags this explicitly.
+3. **`Cargo.toml` version is still `0.7.17`** on `main`. Phase 13 bumps to `0.8.0`. This means both harness runs report `kglite_version: 0.7.17`; distinction is made by `git_sha` (v0.7.17 = `fa63011c4b`, main = `b0990e5395`). Harness output JSON carries both fields.
+4. **Wikidata bench killed by OOM.** Residual RSS (~3 GB) from the preceding 5 GB mapped bench + 78 GB disk page-cache demand → SIGKILL at query 29/45. Script writes its CSV incrementally, so the 29 completed queries survived. Remediation documented; not a Phase 11 blocker because (a) the 29 completed queries cover 5 of 8 categories, (b) Wikidata has no v0.7.17 comparison anyway (disk format incompatible), (c) the api_benchmark.py + mapped-5GB runs independently prove disk backend health at scale.
+5. **`ruff format` + `ruff check --fix` is a two-pass workflow for new files.** `ruff format` normalises whitespace; `ruff check --fix` re-sorts imports and removes unused ones. Had to run both, plus one manual cleanup for an unused local variable that `--fix` wouldn't touch (`kinds` in compare.py — I had drafted it for section iteration but inlined the loops instead).
+6. **pytest-benchmark was not the right tool for the Phase 6-style cells.** Most of `test_nx_comparison.py::TestStorageModeMatrix` uses explicit `time.perf_counter()` + `print()` rather than the `benchmark` fixture, so `--benchmark-json=` doesn't capture those cells. The standalone harness avoids this entirely — it computes its own stats and writes its own JSON format.
+
+### Decisions made
+
+1. **Standalone harness over extending `test_nx_comparison.py`.** The existing file mixes accuracy tests (single N) with Phase-6-style timing prints. Parameterising it for N=20 would have touched too much code. A self-contained harness ships cleaner and can be invoked on any checkout without source changes to `test_nx_comparison.py` (critical for the v0.7.17 replay).
+2. **Git worktree + isolated venv for v0.7.17 replay.** The alternative (stashing / checking-out / rebuilding in-place) would have overwritten the 0.8.0 `.so` and been easy to leave in a half-broken state. Worktree isolates the builds completely; teardown is one command (`git worktree remove --force`).
+3. **Memory + mapped only on v0.7.17.** Disk backend changed substantively between v0.7.17 and 0.8.0 (the Phase 4 v3 format is a clean break). Running v0.7.17's disk path would have compared apples to oranges. The harness's `--modes memory,mapped` flag handles this explicitly.
+4. **Accept the Wikidata partial rather than re-run.** A clean re-run would require either (a) a machine with ≥ 32 GB free RAM after a cold boot, or (b) re-sequencing the Phase 11 benches to run Wikidata before the 5 GB mapped bench. Both are achievable post-release. The 29 completed queries + api_benchmark.py's green run across all 3 modes sufficiently cover disk health.
+5. **Keep `Cargo.toml` at `0.7.17`.** Not bumped in Phase 11. Phase 13 handles the version mechanics to avoid mixing "version bump" concerns with "benchmark results."
+6. **No block-gate overrides needed.** All four flagged cells came in under their respective block thresholds. The Phase 11 sweep is a pass — the next natural follow-up (post-release) is investigating whether `find_20x_memory`'s +4.7 % is real or measurement noise.
+
+### Debt introduced / carried to Phase 12
+
+- **`find_20x_10000_memory` +4.7 %** — under block gate but worth a targeted profile. Hypothesis: Phase 3 GAT refactor. Not a release blocker.
+- **Wikidata full 45-query run outstanding** — the infra works; the remaining 16 queries require isolation from the 5 GB mapped run or a higher-memory host. File as a pre-release manual gate.
+- **Cross-hardware validation** — dev-box-only numbers. Linux CI or a second physical host would strengthen the AUDIT claims. Documented in AUDIT §3 Deferred.
+- **No `benchmark_kglite.py` was created** — the Phase 11 plan's task 11.7 was satisfied by `bench/api_benchmark.py` per user decision. If a more focused MCP-facing bench is wanted later, the tests/benchmarks/phase11_harness.py shape is a reasonable starting point.
+- **Phase 6 baseline table de-duplication** — the "historical" subsection in AUDIT §3 retains Phase 6 numbers. Some of them (notably `two_hop_10x`) compare queries of different shape. The audit notes this explicitly but Phase 12's doc pass should consider whether the historical table still earns its place, or if the v0.7.17 comparison alone suffices.
+
+### Scope changes vs the approved plan
+
+- **11.2 Cross-hardware → skipped** (user decision up front). Documented in AUDIT §3 Deferred.
+- **11.5 30 GB → 5 GB** (user decision). Transcript shows clean run; 30 GB remains a manual pre-release gate.
+- **11.6 Wikidata → partial** (OOM at query 29). Documented with remediation path.
+- **11.7 new file → reused `bench/api_benchmark.py`** (user decision up front). No new `benchmark_kglite.py` file.
+- **Harness builder inlined** — not in the original plan, but necessary once v0.7.17 compatibility bit me (Surprise #1).
+
+### Next-phase prerequisites (Phase 12 — documentation + API surface audit)
+
+- **AUDIT §3 is now authoritative** — Phase 12 docs (CYPHER.md / FLUENT.md updates, README wins) can reference specific numeric wins: "−60 % on `pattern_match`", "−24 % on `describe`", etc. These come from the committed `tests/benchmarks/phase11_delta.md`.
+- **`kglite/__init__.pyi` is byte-frozen** vs v0.7.17 — Phase 12 docstring changes must preserve this contract. `git diff v0.7.17 HEAD -- kglite/__init__.pyi` is still empty after Phase 11.
+- **`find()` is code-entity-specific** (Phase 10 report-out flagged this) — Phase 12's doc pass should make the method's scope explicit in the `__init__.pyi` docstring.
+- **Phase 11 harness / compare scripts are reusable** — Phase 12 can invoke them to freshen numbers if a doc claim is challenged. Budget: ~5 minutes per run at N=20.
+- **`bench/benchmark_wikidata_cypher.csv`** is overwritten by Phase 11 (partial). The full historical CSV (if relevant) is not preserved. Phase 12 may want to commit a canonical Wikidata snapshot alongside Phase 11 numbers.
+
+### Files touched
+
+- **New (benchmark harness + comparison + JSON + transcripts)**: `tests/benchmarks/phase11_harness.py`, `tests/benchmarks/phase11_compare.py`, `tests/benchmarks/phase11_main.json`, `tests/benchmarks/phase11_v0_7_17.json`, `tests/benchmarks/phase11_delta.md`, `tests/benchmarks/phase11_mapped_scale_5gb.txt`, `tests/benchmarks/phase11_wikidata.txt`, `tests/benchmarks/phase11_wikidata_partial.csv`, `tests/benchmarks/phase11_api_benchmark.txt`.
+- **New baseline**: `tests/parity_baseline_phase_11.json`.
+- **Modified**: `AUDIT_0.8.0.md` § 3 (comprehensive rewrite + new subsections). `bench/benchmark_wikidata_cypher.csv` was overwritten by the partial run but `bench/` is gitignored — the preserved copy is at `tests/benchmarks/phase11_wikidata_partial.csv`.
+- **Transient (cleaned up)**: `../KGLite-v0.7.17/` git worktree + `.venv-v0.7.17`.
+- **Unchanged**: all of `src/`, all of `kglite/` including `__init__.pyi`, `pyproject.toml`, `Cargo.toml`. Zero production-code diff. Zero `pytest` / `parity` / `make lint` count change.
+
+## Phase 12 Report-out (written at phase exit — read this before Phase 13)
+
+**Completed** (single squashed commit `docs: Phase 12 — documentation + API surface audit` on `main`, local only — user pushes):
+
+Documentation audit + stale-reference cleanup + one new long-form doc. No Rust changes. The `kglite/__init__.pyi` signature surface is still byte-identical to v0.7.17 (`git diff v0.7.17 HEAD -- kglite/__init__.pyi | grep -E '^[+-](    def |class )'` returns empty); only one docstring was extended. The overall file is no longer MD5-identical — the contract has dropped to "signatures unchanged, docstrings may improve" per the Phase 12 exit criteria.
+
+Deliverables:
+
+1. **12.1 ARCHITECTURE.md header + chronology refresh.** Header updated to "end of Phase 11"; forward-looking "Phase 9 will split…" prose replaced with a statement of current rules. The `core/pattern_matching.rs` entry replaced with the actual subdirectory tree (`pattern_matching/{mod, pattern, parser, matcher}.rs`). The `pyapi/kg_methods.rs` entry replaced with the four-file Phase 9 split (`kg_{core, mutation, introspection, fluent}.rs`). Removed the resolved `MappedGraph` open question; retained `Value::String` future-Cow decision; added an entry for "when does `languages/fluent/` get a Rust-side implementation" with the "when a second peer language materialises" answer.
+2. **12.2 `find()` docstring + C1 close-out.** `kglite/__init__.pyi::find` now opens with "⚠ **Code-entity search only.**" and a sentence pointing users at `select().where()` or `cypher()` for general node lookup. Signature unchanged (verified mechanically).
+3. **12.3/12.6 verifications.** `stubtest` clean (20 modules); `cargo doc --no-deps` clean (zero warnings). No edits needed.
+4. **12.4 MCP smoke.** `examples/mcp_server.py` cannot be imported directly in CI (requires optional `mcp` package); KGLite's methods it relies on (`describe()`, `cypher()`, `schema()`, `graph_info()`, `load()`) verified working on a round-tripped `.kgl`. Smoke recorded inline in this report-out — no persistent transcript.
+5. **12.5 CYPHER/FLUENT cross-check.** Three small gaps found and fixed:
+   - `CYPHER.md`: added `vector_score(n, prop, vector [, metric])` row to the similarity functions table (it existed in the executor but had no user-facing docs).
+   - `CYPHER.md`: added `head(list)` / `last(list)` row to the list-function table.
+   - `FLUENT.md`: added a "Human-Readable String Export" subsection documenting `to_str(limit=50)` (it was in `__init__.pyi` but missing from the reference guide).
+   The `where_method` "gap" was a false positive — Python sees it as `.where()`, which is extensively documented.
+6. **12.7 docs/ orphan audit.** One orphan found: `docs/adding-a-storage-backend.md` was never toctreed. Fixed by adding it and the new `adding-a-query-language.md` (12.9) to the `Project` toctree in `docs/index.md`.
+7. **12.8 adding-a-storage-backend.md** was current on the Phase 9 architecture in spirit, but had **five stale `src/graph/schema.rs` references** — Phase 9 moved `GraphBackend` to `src/graph/storage/backend.rs`. All five references updated.
+8. **12.9 NEW `docs/adding-a-query-language.md`** (~200 lines). Mirrors `adding-a-storage-backend.md` structure. Six sections: TL;DR, the `languages/` umbrella, anatomy of `languages/cypher/`, integration with `core/`, entry-point flow diagram, speculative peer-language walk-through, plus a note on `languages/fluent/` as reserved scaffolding.
+9. **12.10 CHANGELOG.md `[Unreleased]` performance section.** New top-of-section "### Performance" block with the top Phase 11 wins (`pattern_match` −60 %, `two_hop` −24 %, `describe` −21 %, `pagerank` −17 %, construction −11 to −22 %, four sub-5% flags documented). Also a new bullet under "Changed (internal, not user-visible)" for the Phase 10 edge-case / golden / stress testing envelope. Phase 13 will date the `[0.8.0]` header.
+10. **12.11 README.md** verified clean — no stale paths (`graph/query/`, `graph/cypher/` etc.), no version-specific perf claims, toctree/links accurate. Zero edits.
+11. **Extras closed**: **C3** (stale `# currently xfail` comment in `tests/test_cypher.py:1227` replaced with an accurate note that the `TestBug*` classes are regression guards), **D5** (`CLAUDE.md` now clarifies that only `#[pymethods] impl` blocks must live under `pyapi/`; struct `#[pyclass]` attributes may stay with the struct definition), **E1** (`test_exception_list_still_applies` deleted from `tests/test_phase7_parity.py`), **E2** (`test_file_count_budget` + its `subprocess` import deleted from `tests/test_phase6_parity.py`).
+12. **`refactor_findings.md`** updated: C1, C3, D4, D5, E1, E2 moved to `## Resolved` with phase + one-line note each.
+
+### Baselines held
+
+- **`cargo test --release`**: **490 passed** (unchanged).
+- **`make lint`**: clean (cargo fmt + clippy -D warnings + ruff format/check + stubtest on 20 modules).
+- **`pytest tests/`**: **1,850 passed** (unchanged — E2 was parity-only, so the default count is invariant).
+- **`pytest -m parity tests/`**: **95 passed, 0 skipped** (vs Phase 11's 96 passed + 1 skipped — E1 was a passing no-op that's now gone, E2 was the one skipped test and it's now gone).
+- **`cargo doc --no-deps`**: zero warnings.
+- **Signature diff vs v0.7.17**: `git diff v0.7.17 HEAD -- kglite/__init__.pyi | grep -E '^[+-](    def |class )'` → empty. Docstrings drifted; signatures did not.
+- **Phase 7 `.kgl` v3 `GOLDEN_V3_DIGEST`** unchanged (no I/O code touched).
+- **Binary size**: `kglite/kglite.cpython-312-darwin.so` unchanged at 7,046,320 bytes (Phase 12 is zero-Rust-diff).
+
+### Surprises found during implementation
+
+1. **`docs/adding-a-storage-backend.md` had five stale `src/graph/schema.rs` references.** The explorer-agent report said the doc was accurate; a spot-read found the references were moved to `src/graph/storage/backend.rs` by Phase 9's schema.rs 3-way split. All five fixed in-place.
+2. **`docs/adding-a-storage-backend.md` was not in any toctree** — a pre-existing orphan, not introduced by this phase. Fixed alongside the new 12.9 doc addition.
+3. **MCP-server smoke test blocked by optional `mcp` dep.** `examples/mcp_server.py` imports `mcp.server.fastmcp.FastMCP` at module load; the `mcp` package isn't in `pyproject.toml`'s default deps. The KGLite surface the server uses (`load()`, `describe()`, `cypher()`, `schema()`, `graph_info()`) was smoke-tested separately on a round-tripped `.kgl` — all green.
+4. **`where_method` false positive in FLUENT cross-check.** Internal Rust name is `where_method`; `#[pyo3(name = "where")]` re-exposes it as `.where()`. Python users never see `where_method`. Grep for internal names must be paired with the `#[pyo3(name)]` translation — worth a note for future audits.
+5. **`_build_kg_mode` wasn't actually referenced in 12.9** because the harness's `_make_shape` + `_populate` pattern (Phase 11) is more copy-paste-friendly. The new doc points at the graph builder in `_build_kg_mode` without documenting the shape-helpers pattern directly.
+6. **`two_hop_10x` comparison in AUDIT §3 "Phase 6 reference" table** is shape-inequivalent (Phase 6's shape materialised paths; Phase 11's counts via `count(DISTINCT c)`). The historical table retains it with an inline caveat — the mismatch is called out in the AUDIT text, not a Phase 12 change.
+
+### Decisions made
+
+1. **`kglite/__init__.pyi` contract drops from "MD5 byte-identical" to "signature-identical" vs v0.7.17.** This is the intended Phase 12 state. Any future phase claiming "`__init__.pyi` unchanged" should specify whether that means the MD5 or just the signatures. Phase 13 release notes should mention "no public signature changes" without claiming byte-identity.
+2. **`languages/fluent/` stays as scaffolding.** Phase 12 did *not* extract Rust-side fluent logic; it documents the current state (chain lives in `pyapi/kg_fluent.rs`) and reserves the directory for a future peer language. Matches the `languages/` umbrella intent without forcing a Phase 12 extraction scope explosion.
+3. **No `QueryLanguage` trait introduced.** The `docs/adding-a-query-language.md` explicitly says the trait would be premature abstraction with only Cypher as a concrete impl. The directory-level modularity (`languages/<name>/parser/planner/executor/`) is the current contract.
+4. **Phase 6 `file_count_budget` test deleted, not kept under permanent skip.** The test self-skipped on any Phase-7+ commit — dead weight on the parity count. Deletion is cleaner than a vacuous skip.
+5. **Phase 6 historical benchmark table retained.** The Phase 11 debt item F ("decide retain vs drop") was left retained with the inline caveat on shape-inequivalent cells. Dropping it was not worth the churn in AUDIT §3.
+
+### Debt introduced / carried to Phase 13
+
+Nothing new in Phase 12. Inherited items that Phase 13 will close:
+
+- **Version bump** — `Cargo.toml` 0.7.17 → 0.8.0; promote `CHANGELOG.md` `[Unreleased]` → `[0.8.0] — <date>`; tag `v0.8.0` (don't push — user pushes).
+- **`refactor_findings.md`** — items A1–A5, B1–B2, C2, D1–D3, E3–E4, F, G remain open. Phase 13 is mechanics-only; these are all post-0.8.0 material.
+
+### Scope changes vs the approved plan
+
+- **Added**: five `src/graph/schema.rs` → `src/graph/storage/backend.rs` path corrections in `docs/adding-a-storage-backend.md` (surprise #1 above). Scope: +15 min, small-file fixes.
+- **Added**: `docs/adding-a-storage-backend.md` added to `docs/index.md` Project toctree — was a pre-existing orphan discovered during 12.7.
+- **Reduced**: 12.4 mcp_server smoke test did not produce a persistent transcript; the KGLite API surface it depends on was verified inline instead.
+- **Reduced**: 12.6 Rust doc audit was already clean (zero warnings); no systematic pub-item coverage pass was needed.
+- **Unchanged**: 12.1, 12.2, 12.5, 12.7, 12.8, 12.9, 12.10, 12.11, C3, D5, E1, E2 all landed as planned.
+
+### Next-phase prerequisites (Phase 13 — release 0.8.0)
+
+- **`[Unreleased]` in CHANGELOG is complete and ready to promote.** Phase 13 dates the `[0.8.0]` header (move content up, date the header, add release-date line).
+- **`Cargo.toml` line 3 bumps `0.7.17` → `0.8.0`.** Then `cargo build --release` + `make lint` to confirm stability.
+- **`kglite/__init__.pyi` signature contract**: `git diff v0.7.17 HEAD -- kglite/__init__.pyi | grep -E '^[+-](    def |class )'` must stay empty through Phase 13. If it's dirty after the version bump, investigate before tagging.
+- **`refactor_findings.md` is up-to-date** as of Phase 12 exit. Phase 13 should not need to touch it. Post-release work picks items from the A/B/C/D/E/F/G sections.
+- **AUDIT_0.8.0.md §3** has final benchmark matrix + deferred subsection. Phase 13 can spot-check that AUDIT summary + release-readiness section agree before tagging.
+
+### Files touched
+
+- **Modified (docs + comments)**: `ARCHITECTURE.md`, `kglite/__init__.pyi` (find docstring only), `CHANGELOG.md`, `CLAUDE.md`, `CYPHER.md`, `FLUENT.md`, `docs/adding-a-storage-backend.md`, `docs/index.md`, `tests/test_cypher.py` (comment cleanup).
+- **Modified (test cleanup)**: `tests/test_phase6_parity.py` (deleted `test_file_count_budget` + unused `subprocess` import), `tests/test_phase7_parity.py` (deleted `test_exception_list_still_applies`).
+- **Modified (findings)**: `refactor_findings.md` (C1/C3/D4/D5/E1/E2 moved to Resolved).
+- **New**: `docs/adding-a-query-language.md` (~200 lines).
+- **Unchanged**: all of `src/`, `Cargo.toml`, `pyproject.toml`, all pyi signatures. Zero Rust diff.

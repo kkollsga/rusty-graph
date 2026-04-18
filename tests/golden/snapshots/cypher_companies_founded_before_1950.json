@@ -1,0 +1,453 @@
+{
+  "query": "MATCH (c:Company) WHERE c.founded < 1950 RETURN c.cid AS cid, c.founded AS founded ORDER BY c.founded ASC, c.cid ASC",
+  "rows": [
+    {
+      "cid": 1,
+      "founded": 1947
+    },
+    {
+      "cid": 105,
+      "founded": 1923
+    },
+    {
+      "cid": 106,
+      "founded": 1928
+    },
+    {
+      "cid": 109,
+      "founded": 1912
+    },
+    {
+      "cid": 112,
+      "founded": 1922
+    },
+    {
+      "cid": 115,
+      "founded": 1918
+    },
+    {
+      "cid": 117,
+      "founded": 1904
+    },
+    {
+      "cid": 120,
+      "founded": 1925
+    },
+    {
+      "cid": 122,
+      "founded": 1918
+    },
+    {
+      "cid": 124,
+      "founded": 1947
+    },
+    {
+      "cid": 125,
+      "founded": 1943
+    },
+    {
+      "cid": 135,
+      "founded": 1918
+    },
+    {
+      "cid": 136,
+      "founded": 1944
+    },
+    {
+      "cid": 138,
+      "founded": 1933
+    },
+    {
+      "cid": 139,
+      "founded": 1944
+    },
+    {
+      "cid": 140,
+      "founded": 1906
+    },
+    {
+      "cid": 143,
+      "founded": 1948
+    },
+    {
+      "cid": 145,
+      "founded": 1909
+    },
+    {
+      "cid": 146,
+      "founded": 1940
+    },
+    {
+      "cid": 147,
+      "founded": 1943
+    },
+    {
+      "cid": 149,
+      "founded": 1943
+    },
+    {
+      "cid": 152,
+      "founded": 1912
+    },
+    {
+      "cid": 155,
+      "founded": 1912
+    },
+    {
+      "cid": 157,
+      "founded": 1946
+    },
+    {
+      "cid": 158,
+      "founded": 1937
+    },
+    {
+      "cid": 159,
+      "founded": 1912
+    },
+    {
+      "cid": 16,
+      "founded": 1914
+    },
+    {
+      "cid": 164,
+      "founded": 1947
+    },
+    {
+      "cid": 168,
+      "founded": 1910
+    },
+    {
+      "cid": 17,
+      "founded": 1909
+    },
+    {
+      "cid": 170,
+      "founded": 1907
+    },
+    {
+      "cid": 173,
+      "founded": 1910
+    },
+    {
+      "cid": 175,
+      "founded": 1918
+    },
+    {
+      "cid": 177,
+      "founded": 1916
+    },
+    {
+      "cid": 185,
+      "founded": 1919
+    },
+    {
+      "cid": 189,
+      "founded": 1949
+    },
+    {
+      "cid": 195,
+      "founded": 1902
+    },
+    {
+      "cid": 196,
+      "founded": 1935
+    },
+    {
+      "cid": 197,
+      "founded": 1917
+    },
+    {
+      "cid": 198,
+      "founded": 1934
+    },
+    {
+      "cid": 199,
+      "founded": 1924
+    },
+    {
+      "cid": 202,
+      "founded": 1908
+    },
+    {
+      "cid": 203,
+      "founded": 1917
+    },
+    {
+      "cid": 204,
+      "founded": 1922
+    },
+    {
+      "cid": 205,
+      "founded": 1931
+    },
+    {
+      "cid": 207,
+      "founded": 1947
+    },
+    {
+      "cid": 209,
+      "founded": 1947
+    },
+    {
+      "cid": 21,
+      "founded": 1902
+    },
+    {
+      "cid": 210,
+      "founded": 1922
+    },
+    {
+      "cid": 211,
+      "founded": 1944
+    },
+    {
+      "cid": 213,
+      "founded": 1949
+    },
+    {
+      "cid": 22,
+      "founded": 1933
+    },
+    {
+      "cid": 221,
+      "founded": 1932
+    },
+    {
+      "cid": 237,
+      "founded": 1923
+    },
+    {
+      "cid": 238,
+      "founded": 1916
+    },
+    {
+      "cid": 240,
+      "founded": 1945
+    },
+    {
+      "cid": 246,
+      "founded": 1938
+    },
+    {
+      "cid": 247,
+      "founded": 1917
+    },
+    {
+      "cid": 250,
+      "founded": 1942
+    },
+    {
+      "cid": 251,
+      "founded": 1900
+    },
+    {
+      "cid": 256,
+      "founded": 1904
+    },
+    {
+      "cid": 258,
+      "founded": 1924
+    },
+    {
+      "cid": 259,
+      "founded": 1928
+    },
+    {
+      "cid": 260,
+      "founded": 1913
+    },
+    {
+      "cid": 261,
+      "founded": 1939
+    },
+    {
+      "cid": 262,
+      "founded": 1938
+    },
+    {
+      "cid": 265,
+      "founded": 1945
+    },
+    {
+      "cid": 266,
+      "founded": 1902
+    },
+    {
+      "cid": 267,
+      "founded": 1927
+    },
+    {
+      "cid": 268,
+      "founded": 1921
+    },
+    {
+      "cid": 269,
+      "founded": 1948
+    },
+    {
+      "cid": 27,
+      "founded": 1939
+    },
+    {
+      "cid": 270,
+      "founded": 1906
+    },
+    {
+      "cid": 274,
+      "founded": 1926
+    },
+    {
+      "cid": 278,
+      "founded": 1915
+    },
+    {
+      "cid": 281,
+      "founded": 1945
+    },
+    {
+      "cid": 282,
+      "founded": 1905
+    },
+    {
+      "cid": 284,
+      "founded": 1900
+    },
+    {
+      "cid": 289,
+      "founded": 1906
+    },
+    {
+      "cid": 292,
+      "founded": 1901
+    },
+    {
+      "cid": 293,
+      "founded": 1945
+    },
+    {
+      "cid": 295,
+      "founded": 1923
+    },
+    {
+      "cid": 298,
+      "founded": 1914
+    },
+    {
+      "cid": 299,
+      "founded": 1913
+    },
+    {
+      "cid": 31,
+      "founded": 1931
+    },
+    {
+      "cid": 37,
+      "founded": 1916
+    },
+    {
+      "cid": 38,
+      "founded": 1942
+    },
+    {
+      "cid": 39,
+      "founded": 1908
+    },
+    {
+      "cid": 41,
+      "founded": 1907
+    },
+    {
+      "cid": 42,
+      "founded": 1947
+    },
+    {
+      "cid": 47,
+      "founded": 1922
+    },
+    {
+      "cid": 48,
+      "founded": 1928
+    },
+    {
+      "cid": 53,
+      "founded": 1908
+    },
+    {
+      "cid": 54,
+      "founded": 1941
+    },
+    {
+      "cid": 55,
+      "founded": 1901
+    },
+    {
+      "cid": 59,
+      "founded": 1919
+    },
+    {
+      "cid": 60,
+      "founded": 1929
+    },
+    {
+      "cid": 65,
+      "founded": 1911
+    },
+    {
+      "cid": 70,
+      "founded": 1930
+    },
+    {
+      "cid": 74,
+      "founded": 1913
+    },
+    {
+      "cid": 76,
+      "founded": 1915
+    },
+    {
+      "cid": 80,
+      "founded": 1927
+    },
+    {
+      "cid": 85,
+      "founded": 1931
+    },
+    {
+      "cid": 87,
+      "founded": 1907
+    },
+    {
+      "cid": 9,
+      "founded": 1940
+    },
+    {
+      "cid": 90,
+      "founded": 1902
+    },
+    {
+      "cid": 92,
+      "founded": 1915
+    },
+    {
+      "cid": 93,
+      "founded": 1921
+    },
+    {
+      "cid": 95,
+      "founded": 1922
+    },
+    {
+      "cid": 96,
+      "founded": 1935
+    },
+    {
+      "cid": 97,
+      "founded": 1904
+    },
+    {
+      "cid": 99,
+      "founded": 1911
+    }
+  ]
+}

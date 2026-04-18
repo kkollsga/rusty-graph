@@ -1,0 +1,8 @@
+{
+  "query": "MATCH (p:Person) WHERE p.active = true RETURN count(p) AS c",
+  "rows": [
+    {
+      "c": 415
+    }
+  ]
+}

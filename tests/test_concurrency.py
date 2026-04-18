@@ -97,6 +97,29 @@ class TestConcurrentReads:
         assert len(results) == 8
         assert all(r == sequential for r in results)
 
+    def test_concurrent_reads_result_equivalence(self, large_graph):
+        """Phase 10: 4 ThreadPoolExecutor workers returning full result sets
+        must equal the sequentially-computed baseline row-for-row."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        query = "MATCH (p:Person)-[:KNOWS]->(q:Person) WHERE p.age > 30 AND q.age > 30 RETURN p.id AS pid, q.id AS qid"
+
+        def normalise(rows):
+            return sorted(
+                (dict(r) for r in rows),
+                key=lambda r: (r["pid"], r["qid"]),
+            )
+
+        baseline = normalise(large_graph.cypher(query))
+        assert baseline, "query must produce non-empty baseline"
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(lambda: large_graph.cypher(query)) for _ in range(4)]
+            worker_results = [normalise(f.result(timeout=10)) for f in futures]
+
+        for i, got in enumerate(worker_results):
+            assert got == baseline, f"worker {i} diverged from sequential baseline"
+
 
 class TestReadWriteIsolation:
     """Reads and writes don't interfere."""

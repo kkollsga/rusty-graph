@@ -1,0 +1,130 @@
+{
+  "query": "MATCH (p:Person)-[:WORKS_AT]->(c:Company)-[:LOCATED_IN]->(pl:Place) WHERE pl.population > 500000 RETURN p.id AS pid, c.cid AS cid, pl.pid AS plid ORDER BY p.id, c.cid, pl.pid LIMIT 25",
+  "rows": [
+    {
+      "cid": 111,
+      "pid": 41,
+      "plid": 38
+    },
+    {
+      "cid": 124,
+      "pid": 11,
+      "plid": 73
+    },
+    {
+      "cid": 127,
+      "pid": 30,
+      "plid": 30
+    },
+    {
+      "cid": 128,
+      "pid": 6,
+      "plid": 33
+    },
+    {
+      "cid": 131,
+      "pid": 3,
+      "plid": 159
+    },
+    {
+      "cid": 132,
+      "pid": 18,
+      "plid": 195
+    },
+    {
+      "cid": 134,
+      "pid": 29,
+      "plid": 3
+    },
+    {
+      "cid": 14,
+      "pid": 15,
+      "plid": 146
+    },
+    {
+      "cid": 160,
+      "pid": 39,
+      "plid": 53
+    },
+    {
+      "cid": 174,
+      "pid": 0,
+      "plid": 84
+    },
+    {
+      "cid": 195,
+      "pid": 20,
+      "plid": 9
+    },
+    {
+      "cid": 226,
+      "pid": 7,
+      "plid": 135
+    },
+    {
+      "cid": 235,
+      "pid": 14,
+      "plid": 155
+    },
+    {
+      "cid": 243,
+      "pid": 38,
+      "plid": 157
+    },
+    {
+      "cid": 247,
+      "pid": 10,
+      "plid": 186
+    },
+    {
+      "cid": 262,
+      "pid": 2,
+      "plid": 30
+    },
+    {
+      "cid": 264,
+      "pid": 26,
+      "plid": 53
+    },
+    {
+      "cid": 274,
+      "pid": 27,
+      "plid": 2
+    },
+    {
+      "cid": 275,
+      "pid": 4,
+      "plid": 163
+    },
+    {
+      "cid": 283,
+      "pid": 36,
+      "plid": 129
+    },
+    {
+      "cid": 288,
+      "pid": 9,
+      "plid": 29
+    },
+    {
+      "cid": 293,
+      "pid": 42,
+      "plid": 185
+    },
+    {
+      "cid": 294,
+      "pid": 5,
+      "plid": 145
+    },
+    {
+      "cid": 38,
+      "pid": 35,
+      "plid": 48
+    },
+    {
+      "cid": 4,
+      "pid": 28,
+      "plid": 198
+    }
+  ]
+}

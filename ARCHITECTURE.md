@@ -1,16 +1,16 @@
-# KGLite — architecture (as of end of Phase 8 of the 0.8.0 refactor)
+# KGLite — architecture (as of end of Phase 11 of the 0.8.0 refactor)
 
 This document is the living spec for how storage is layered in kglite.
 It's updated as each phase of the 0.8.0 refactor lands. See `todo.md`
 for the full plan.
 
-Phase 8 reorganised the source tree so that (a) every `#[pymethods]` /
-`#[pyclass]` attribute lives under `src/graph/pyapi/`, (b) query-interface
+The source tree under `src/graph/` has three layering rules: (a) every
+`#[pymethods] impl` block lives under `src/graph/pyapi/`, (b) query
 languages live under `src/graph/languages/` (peers: `cypher` and
 `fluent`), and (c) shared query primitives live under `src/graph/core/`.
-Phase 9 will split the remaining god files (executor.rs, schema.rs,
-introspection.rs, planner.rs, disk_graph.rs, ntriples.rs, parser.rs,
-pattern_matching.rs, pyapi/kg_methods.rs).
+Every `.rs` is ≤ 2,500 lines (hard cap, enforced by
+`tests/test_phase7_parity.py::test_god_file_gate`); `mod.rs` files are
+re-exports + module docs only.
 
 ## TL;DR
 
@@ -138,8 +138,12 @@ src/graph/
 │   ├── mapped/            # mmap-Columnar backend
 │   └── disk/              # CSR + mmap backend
 │
-├── core/                  # Shared query primitives (was query/ pre-Phase 8)
-│   ├── pattern_matching.rs     # (Phase 9: split into pattern_matching/)
+├── core/                  # Shared query primitives
+│   ├── pattern_matching/       # Pattern AST + parser + PatternExecutor
+│   │   ├── mod.rs
+│   │   ├── pattern.rs
+│   │   ├── parser.rs
+│   │   └── matcher.rs
 │   ├── filtering_methods.rs
 │   ├── traversal_methods.rs
 │   ├── graph_iterators.rs
@@ -148,20 +152,25 @@ src/graph/
 │   ├── value_operations.rs
 │   └── statistics_methods.rs
 │
-├── languages/             # Query-interface languages (NEW in Phase 8)
+├── languages/             # Query-interface languages
 │   ├── mod.rs
-│   ├── cypher/            # Moved from graph/cypher/ in Phase 8
-│   └── fluent/            # NEW: fluent selection chain docs/entry (today's Rust is thin — Python-facing in pyapi/)
+│   ├── cypher/            # parser/, planner/, executor/, window.rs, result_view.rs
+│   └── fluent/            # Scaffolding only — chain state lives in pyapi/kg_fluent.rs
+│                          # (reserved for future Rust-side extraction of a second
+│                          # peer language like SPARQL or GraphQL).
 │
 ├── algorithms/            # PageRank, centrality, components, clustering, vector
-├── introspection/         # describe(), schema(), debug, bug_report
+├── introspection/         # describe(), schema(), debug, bug_report (split into several submodules)
 ├── io/                    # Load / save / ntriples / export
 ├── features/              # spatial / temporal / timeseries / equations
 ├── mutation/              # Batch / maintain / validate / subgraph
 │
-└── pyapi/                 # ALL #[pymethods] + #[pyclass] live here
+└── pyapi/                 # ALL #[pymethods] impl blocks live here
     ├── mod.rs             # Module registration
-    ├── kg_methods.rs      # KnowledgeGraph #[pymethods] (Phase 9: split into kg_{core,mutation,introspection,fluent})
+    ├── kg_core.rs         # KnowledgeGraph: construction, properties, cypher()
+    ├── kg_mutation.rs     # KnowledgeGraph: add_nodes, add_connections, conflict handling
+    ├── kg_introspection.rs  # KnowledgeGraph: describe, schema, find, source, context
+    ├── kg_fluent.rs       # KnowledgeGraph: select/where/traverse chain methods
     ├── transaction.rs     # Transaction #[pyclass]
     ├── result_view.rs     # ResultView + ResultIter #[pyclass]
     ├── pymethods_algorithms.rs
@@ -183,10 +192,12 @@ src/graph/
 
 ## Open questions tracked in `todo.md`
 
-- When does `MappedGraph` stop being a type alias for `MemoryGraph`?
-  → Phase 1 if the backends need distinct trait impls; later if they don't
 - Does `Value::String` become `Cow<'static, str>` / `Arc<str>`?
-  → Deferred; touches everything, not required for the refactor
+  → Deferred to post-0.8.0; touches every value-creation site.
 - Does `Transaction` become a trait?
   → Decided in Phase 2: **no** — transactions stay on `DirGraph` (see
-    "Transactions stay on DirGraph" above)
+    "Transactions stay on DirGraph" above).
+- When does `languages/fluent/` get a Rust-side implementation?
+  → When a second peer language appears, or when a non-Python fluent
+    caller materialises. Today `kg_fluent.rs` in `pyapi/` is the single
+    implementation site.

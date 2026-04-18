@@ -71,5 +71,7 @@ autoapi/index
 :caption: Project
 
 contributing
+adding-a-storage-backend
+adding-a-query-language
 changelog
 ```

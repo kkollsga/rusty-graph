@@ -163,6 +163,7 @@ graph.cypher("""
 | `date_diff(d1, d2)` | Days between two dates (`d1 - d2`); also supports `date - date` arithmetic |
 | `coalesce(a, b, ...)` | First non-null argument |
 | `range(start, end [, step])` | Generate integer list (inclusive); default step = 1 |
+| `head(list)` / `last(list)` | First / last element of a list (returns `null` on empty) |
 | `length(p)` | Path hop count |
 | `nodes(p)` | Nodes in a path |
 | `relationships(p)` | Relationships in a path |
@@ -186,6 +187,7 @@ graph.cypher("""
 | `valid_during(e, start, end, 'from', 'to')` | Temporal range overlap filter |
 | `text_score(n, prop, query)` | Semantic similarity (auto-embeds query text; requires `set_embedder()`) |
 | `text_score(n, prop, query, metric)` | With explicit metric (`'cosine'`, `'dot_product'`, `'euclidean'`, `'poincare'`) |
+| `vector_score(n, prop, vector [, metric])` | Semantic similarity against a pre-computed embedding vector (pass a list of floats directly, no `set_embedder()` needed) |
 | `embedding_norm(n, prop)` | L2 norm of embedding vector (hierarchy depth in Poincaré space: 0=root, ~1=leaf) |
 | `ts_sum(n.ch [, 'start'] [, 'end'])` | Sum of timeseries values (date-string range) |
 | `ts_avg(n.ch [, 'start'] [, 'end'])` | Average of timeseries values |

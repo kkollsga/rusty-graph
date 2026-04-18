@@ -83,8 +83,9 @@ markers = [
     "benchmark: performance benchmark tests (deselect with '-m not benchmark')",
     "slow: slow tests taking >5s (deselect with '-m not slow')",
     "parity: cross-storage-mode oracle tests (memory vs mapped vs disk)",
+    "stress: opt-in stress tests (30GB mapped, 10k-hop) — select with '-m stress'",
 ]
-addopts = "-m 'not benchmark and not parity'"
+addopts = "-m 'not benchmark and not parity and not stress'"
 
 [tool.mypy]
 ignore_missing_imports = true

@@ -1,0 +1,21 @@
+{
+  "query": "MATCH ()-[r]->() RETURN type(r) AS rel, count(*) AS c",
+  "rows": [
+    {
+      "c": 1700,
+      "rel": "KNOWS"
+    },
+    {
+      "c": 300,
+      "rel": "LOCATED_IN"
+    },
+    {
+      "c": 500,
+      "rel": "LIVES_IN"
+    },
+    {
+      "c": 500,
+      "rel": "WORKS_AT"
+    }
+  ]
+}

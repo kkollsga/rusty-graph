@@ -1,0 +1,75 @@
+{
+  "connection_types": {
+    "KNOWS": {
+      "count": 1700,
+      "source_types": [
+        "Person"
+      ],
+      "target_types": [
+        "Person"
+      ]
+    },
+    "LIVES_IN": {
+      "count": 500,
+      "source_types": [
+        "Person"
+      ],
+      "target_types": [
+        "Place"
+      ]
+    },
+    "LOCATED_IN": {
+      "count": 300,
+      "source_types": [
+        "Company"
+      ],
+      "target_types": [
+        "Place"
+      ]
+    },
+    "WORKS_AT": {
+      "count": 500,
+      "source_types": [
+        "Person"
+      ],
+      "target_types": [
+        "Company"
+      ]
+    }
+  },
+  "edge_count": 3000,
+  "indexes": [],
+  "node_count": 1000,
+  "node_types": {
+    "Company": {
+      "count": 300,
+      "properties": {
+        "cid": "UniqueId",
+        "employees": "Int64",
+        "founded": "Int64",
+        "name": "String"
+      }
+    },
+    "Person": {
+      "count": 500,
+      "properties": {
+        "active": "Boolean",
+        "age": "Int64",
+        "id": "UniqueId",
+        "joined_at": "DateTime",
+        "name": "String",
+        "salary": "Float64"
+      }
+    },
+    "Place": {
+      "count": 200,
+      "properties": {
+        "lat": "Float64",
+        "lon": "Float64",
+        "name": "String",
+        "pid": "UniqueId",
+        "population": "Int64"
+      }
+    }
+  }
+}

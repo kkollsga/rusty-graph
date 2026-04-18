@@ -1,0 +1,45 @@
+{
+  "query": "MATCH (p:Person) RETURN p.id AS id, p.age AS age ORDER BY p.age DESC, p.id ASC LIMIT 10",
+  "rows": [
+    {
+      "age": 89,
+      "id": 12
+    },
+    {
+      "age": 89,
+      "id": 42
+    },
+    {
+      "age": 89,
+      "id": 85
+    },
+    {
+      "age": 90,
+      "id": 129
+    },
+    {
+      "age": 90,
+      "id": 132
+    },
+    {
+      "age": 90,
+      "id": 171
+    },
+    {
+      "age": 90,
+      "id": 223
+    },
+    {
+      "age": 90,
+      "id": 442
+    },
+    {
+      "age": 90,
+      "id": 491
+    },
+    {
+      "age": 90,
+      "id": 50
+    }
+  ]
+}

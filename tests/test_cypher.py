@@ -1224,7 +1224,8 @@ class TestMultiMatchEmptyPropagation:
 
 
 # ============================================================================
-# Bug regression tests — currently xfail, will pass once fixed
+# Bug regression tests — guards against the issues named in each class
+# docstring. All currently pass; classes remain named `TestBug*` for traceability.
 # ============================================================================
 
 
