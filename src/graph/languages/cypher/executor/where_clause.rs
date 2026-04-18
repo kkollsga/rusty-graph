@@ -4,7 +4,7 @@ use super::super::ast::*;
 use super::helpers::*;
 use super::*;
 use crate::datatypes::values::Value;
-use crate::graph::algorithms::vector_search as vs;
+use crate::graph::algorithms::vector as vs;
 use crate::graph::core::pattern_matching::{MatchBinding, PatternExecutor, PatternMatch};
 use crate::graph::storage::GraphRead;
 use std::collections::HashSet;
@@ -445,7 +445,7 @@ impl<'a> CypherExecutor<'a> {
                 let val = self.evaluate_expression(expr, row)?;
                 for item in list {
                     let item_val = self.evaluate_expression(item, row)?;
-                    if crate::graph::core::filtering_methods::values_equal(&val, &item_val) {
+                    if crate::graph::core::filtering::values_equal(&val, &item_val) {
                         return Ok(true);
                     }
                 }
@@ -457,7 +457,7 @@ impl<'a> CypherExecutor<'a> {
                 Ok(values.contains(&val)
                     || values
                         .iter()
-                        .any(|v| crate::graph::core::filtering_methods::values_equal(v, &val)))
+                        .any(|v| crate::graph::core::filtering::values_equal(v, &val)))
             }
             Predicate::StartsWith { expr, pattern } => {
                 let val = self.evaluate_expression(expr, row)?;
@@ -539,7 +539,7 @@ impl<'a> CypherExecutor<'a> {
                 let list_val = self.evaluate_expression(list_expr, row)?;
                 let items = parse_list_value(&list_val);
                 for item in &items {
-                    if crate::graph::core::filtering_methods::values_equal(&val, item) {
+                    if crate::graph::core::filtering::values_equal(&val, item) {
                         return Ok(true);
                     }
                 }

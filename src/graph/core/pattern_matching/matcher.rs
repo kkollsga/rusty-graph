@@ -5,7 +5,7 @@
 // paths, and Rayon-parallelised expansion for large match sets.
 
 use crate::datatypes::values::Value;
-use crate::graph::core::filtering_methods::{compare_values, values_equal};
+use crate::graph::core::filtering::{compare_values, values_equal};
 use crate::graph::languages::cypher::result::Bindings;
 use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::GraphRead;

@@ -381,9 +381,8 @@ impl<'a> CypherExecutor<'a> {
                         min_val = Some(match min_val {
                             None => val,
                             Some(current) => {
-                                if crate::graph::core::filtering_methods::compare_values(
-                                    &val, &current,
-                                ) == Some(std::cmp::Ordering::Less)
+                                if crate::graph::core::filtering::compare_values(&val, &current)
+                                    == Some(std::cmp::Ordering::Less)
                                 {
                                     val
                                 } else {
@@ -404,9 +403,8 @@ impl<'a> CypherExecutor<'a> {
                         max_val = Some(match max_val {
                             None => val,
                             Some(current) => {
-                                if crate::graph::core::filtering_methods::compare_values(
-                                    &val, &current,
-                                ) == Some(std::cmp::Ordering::Greater)
+                                if crate::graph::core::filtering::compare_values(&val, &current)
+                                    == Some(std::cmp::Ordering::Greater)
                                 {
                                     val
                                 } else {
@@ -749,9 +747,8 @@ impl<'a> CypherExecutor<'a> {
                             mins[si] = Some(match mins[si].take() {
                                 None => val.clone(),
                                 Some(current) => {
-                                    if crate::graph::core::filtering_methods::compare_values(
-                                        val, &current,
-                                    ) == Some(std::cmp::Ordering::Less)
+                                    if crate::graph::core::filtering::compare_values(val, &current)
+                                        == Some(std::cmp::Ordering::Less)
                                     {
                                         val.clone()
                                     } else {
@@ -767,9 +764,8 @@ impl<'a> CypherExecutor<'a> {
                             maxs[si] = Some(match maxs[si].take() {
                                 None => val.clone(),
                                 Some(current) => {
-                                    if crate::graph::core::filtering_methods::compare_values(
-                                        val, &current,
-                                    ) == Some(std::cmp::Ordering::Greater)
+                                    if crate::graph::core::filtering::compare_values(val, &current)
+                                        == Some(std::cmp::Ordering::Greater)
                                     {
                                         val.clone()
                                     } else {
@@ -880,7 +876,7 @@ impl<'a> CypherExecutor<'a> {
         let mut indices: Vec<usize> = (0..result_set.rows.len()).collect();
         indices.sort_by(|&a, &b| {
             for (i, item) in clause.items.iter().enumerate() {
-                if let Some(ordering) = crate::graph::core::filtering_methods::compare_values(
+                if let Some(ordering) = crate::graph::core::filtering::compare_values(
                     &sort_keys[a][i],
                     &sort_keys[b][i],
                 ) {

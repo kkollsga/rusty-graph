@@ -362,12 +362,12 @@ impl<'a> CypherExecutor<'a> {
                         let val = nd.get_property(key);
                         let ok = match matcher {
                             PropertyMatcher::Equals(expected) => val.as_deref().is_some_and(|v| {
-                                crate::graph::core::filtering_methods::values_equal(v, expected)
+                                crate::graph::core::filtering::values_equal(v, expected)
                             }),
                             PropertyMatcher::In(values) => val.as_deref().is_some_and(|v| {
-                                values.iter().any(|exp| {
-                                    crate::graph::core::filtering_methods::values_equal(v, exp)
-                                })
+                                values
+                                    .iter()
+                                    .any(|exp| crate::graph::core::filtering::values_equal(v, exp))
                             }),
                             // Complex matchers — fall back to slow path
                             _ => return None,
@@ -1434,7 +1434,7 @@ impl<'a> CypherExecutor<'a> {
                     }
                     if !matches!(val, Value::Null) {
                         if acc.mins[ai].is_none()
-                            || crate::graph::core::filtering_methods::compare_values(
+                            || crate::graph::core::filtering::compare_values(
                                 val,
                                 acc.mins[ai].as_ref().unwrap(),
                             ) == Some(std::cmp::Ordering::Less)
@@ -1442,7 +1442,7 @@ impl<'a> CypherExecutor<'a> {
                             acc.mins[ai] = Some(val.clone());
                         }
                         if acc.maxs[ai].is_none()
-                            || crate::graph::core::filtering_methods::compare_values(
+                            || crate::graph::core::filtering::compare_values(
                                 val,
                                 acc.maxs[ai].as_ref().unwrap(),
                             ) == Some(std::cmp::Ordering::Greater)
@@ -1699,12 +1699,12 @@ impl<'a> CypherExecutor<'a> {
             // Insert into top-K sorted Vec
             let pos = if descending {
                 top_k.partition_point(|(existing, _)| {
-                    crate::graph::core::filtering_methods::compare_values(existing, &sort_val)
+                    crate::graph::core::filtering::compare_values(existing, &sort_val)
                         .is_some_and(|o| o != std::cmp::Ordering::Less)
                 })
             } else {
                 top_k.partition_point(|(existing, _)| {
-                    crate::graph::core::filtering_methods::compare_values(existing, &sort_val)
+                    crate::graph::core::filtering::compare_values(existing, &sort_val)
                         .is_some_and(|o| o != std::cmp::Ordering::Greater)
                 })
             };

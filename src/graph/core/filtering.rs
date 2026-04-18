@@ -1,4 +1,4 @@
-// src/graph/filtering_methods.rs
+// src/graph/filtering.rs
 use crate::datatypes::values::{FilterCondition, Value};
 use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, SelectionOperation};
 use crate::graph::storage::GraphRead;
@@ -903,6 +903,7 @@ pub fn filter_orphan_nodes(
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use crate::datatypes::values::{FilterCondition, Value};

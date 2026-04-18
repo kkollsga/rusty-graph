@@ -1,4 +1,4 @@
-// src/graph/statistics_methods.rs
+// src/graph/statistics.rs
 use crate::datatypes::values::Value;
 use crate::graph::schema::{CurrentSelection, DirGraph, NodeData};
 use petgraph::graph::NodeIndex;

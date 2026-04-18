@@ -4,7 +4,7 @@ use super::super::ast::*;
 use super::helpers::*;
 use super::*;
 use crate::datatypes::values::Value;
-use crate::graph::algorithms::vector_search as vs;
+use crate::graph::algorithms::vector as vs;
 use crate::graph::storage::GraphRead;
 use geo::BoundingRect;
 use petgraph::graph::NodeIndex;
@@ -595,8 +595,7 @@ impl<'a> CypherExecutor<'a> {
             for (condition, result) in when_clauses {
                 if let CaseCondition::Expression(cond_expr) = condition {
                     let cond_val = self.evaluate_expression(cond_expr, row)?;
-                    if crate::graph::core::filtering_methods::values_equal(&operand_val, &cond_val)
-                    {
+                    if crate::graph::core::filtering::values_equal(&operand_val, &cond_val) {
                         return self.evaluate_expression(result, row);
                     }
                 }

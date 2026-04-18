@@ -1,4 +1,4 @@
-// src/graph/graph_iterators.rs
+// src/graph/iterators.rs
 //
 // Enum iterator wrappers for GraphBackend. These allow the same iterator
 // interface to work for both InMemory (petgraph) and Disk backends.
@@ -8,7 +8,7 @@
 
 use crate::graph::schema::{EdgeData, NodeData};
 use crate::graph::storage::disk::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints, TOMBSTONE_EDGE};
-use crate::graph::storage::disk::disk_graph::DiskGraph;
+use crate::graph::storage::disk::graph::DiskGraph;
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;

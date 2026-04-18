@@ -1,4 +1,4 @@
-// src/graph/set_operations.rs
+// src/graph/set_ops.rs
 //! Set operations on graph selections (union, intersection, difference)
 
 use crate::graph::schema::CurrentSelection;

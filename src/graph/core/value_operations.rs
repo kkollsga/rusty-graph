@@ -255,6 +255,7 @@ pub fn parse_value_string(s: &str) -> Value {
 // ============================================================================
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 

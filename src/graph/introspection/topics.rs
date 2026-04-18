@@ -510,7 +510,7 @@ pub(super) fn write_topic_temporal(xml: &mut String) {
 
 const FLUENT_TOPIC_LIST: &str = "select, where, traverse, compare, spatial, temporal, \
     retrieval, statistics, algorithms, vectors, timeseries, mutation, \
-    loading, export, indexes, set_operations, subgraph, schema, transactions";
+    loading, export, indexes, set_ops, subgraph, schema, transactions";
 
 /// Tier 2: compact fluent API reference grouped by functional area.
 pub(super) fn write_fluent_overview(xml: &mut String) {
@@ -603,7 +603,7 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"set_embedder(model_name_or_callable)\">Register embedding model for text search.</method>\n");
     xml.push_str("    <method sig=\"embed_texts(type, column)\">Compute and store embeddings for a text column.</method>\n");
     xml.push_str("    <method sig=\"search_text(query, type, column=None, top_k=10, min_score=None)\">Semantic text search (auto-embeds query).</method>\n");
-    xml.push_str("    <method sig=\"vector_search(vector, type, column=None, top_k=10, min_score=None)\">Search with pre-computed query vector.</method>\n");
+    xml.push_str("    <method sig=\"vector(vector, type, column=None, top_k=10, min_score=None)\">Search with pre-computed query vector.</method>\n");
     xml.push_str("  </group>\n");
 
     // Timeseries
@@ -643,7 +643,7 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("  </group>\n");
 
     // Set operations
-    xml.push_str("  <group name=\"set_operations\">\n");
+    xml.push_str("  <group name=\"set_ops\">\n");
     xml.push_str("    <method sig=\"union(other)\">Nodes in either selection.</method>\n");
     xml.push_str("    <method sig=\"intersection(other)\">Nodes in both selections.</method>\n");
     xml.push_str("    <method sig=\"difference(other)\">Nodes in first but not second.</method>\n");
@@ -693,7 +693,7 @@ pub(super) fn write_fluent_topics(xml: &mut String, topics: &[String]) -> Result
             "loading" | "data_loading" => write_fluent_topic_loading(xml),
             "export" | "persistence" => write_fluent_topic_export(xml),
             "indexes" => write_fluent_topic_indexes(xml),
-            "set_operations" => write_fluent_topic_set_operations(xml),
+            "set_ops" => write_fluent_topic_set_operations(xml),
             "subgraph" => write_fluent_topic_subgraph(xml),
             "schema" => write_fluent_topic_schema(xml),
             "transactions" => write_fluent_topic_transactions(xml),
@@ -908,7 +908,7 @@ pub(super) fn write_fluent_topic_vectors(xml: &mut String) {
     xml.push_str("      <m sig=\"embed_texts(type, column)\">Compute and store embeddings for a text column.</m>\n");
     xml.push_str("      <m sig=\"set_embeddings(type, column, embeddings_dict)\">Provide pre-computed embeddings {id: vector}.</m>\n");
     xml.push_str("      <m sig=\"search_text(query, type, column=None, top_k=10, min_score=None)\">Semantic search — auto-embeds query string.</m>\n");
-    xml.push_str("      <m sig=\"vector_search(vector, type, column=None, top_k=10, min_score=None)\">Search with explicit query vector.</m>\n");
+    xml.push_str("      <m sig=\"vector(vector, type, column=None, top_k=10, min_score=None)\">Search with explicit query vector.</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"setup\">graph.set_embedder('all-MiniLM-L6-v2')</ex>\n");
@@ -1026,7 +1026,7 @@ pub(super) fn write_fluent_topic_indexes(xml: &mut String) {
 }
 
 pub(super) fn write_fluent_topic_set_operations(xml: &mut String) {
-    xml.push_str("  <set_operations>\n");
+    xml.push_str("  <set_ops>\n");
     xml.push_str("    <desc>Combine selections using set logic.</desc>\n");
     xml.push_str("    <methods>\n");
     xml.push_str("      <m sig=\"union(other)\">Nodes in either selection.</m>\n");
@@ -1040,7 +1040,7 @@ pub(super) fn write_fluent_topic_set_operations(xml: &mut String) {
         "      <ex desc=\"intersection\">oslo_and_young = oslo.intersection(young)</ex>\n",
     );
     xml.push_str("    </examples>\n");
-    xml.push_str("  </set_operations>\n");
+    xml.push_str("  </set_ops>\n");
 }
 
 pub(super) fn write_fluent_topic_subgraph(xml: &mut String) {

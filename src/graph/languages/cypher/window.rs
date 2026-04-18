@@ -146,7 +146,7 @@ impl CypherExecutor<'_> {
 
         let sort_cmp = |a: usize, b: usize| -> std::cmp::Ordering {
             for (i, item) in order_by.iter().enumerate() {
-                if let Some(ord) = crate::graph::core::filtering_methods::compare_values(
+                if let Some(ord) = crate::graph::core::filtering::compare_values(
                     &sort_keys[a][i],
                     &sort_keys[b][i],
                 ) {

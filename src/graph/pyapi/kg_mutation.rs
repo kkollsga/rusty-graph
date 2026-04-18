@@ -45,14 +45,13 @@ impl KnowledgeGraph {
                         )
                     })?;
                     let data_dir = std::path::Path::new(dir);
-                    let dg =
-                        crate::graph::storage::disk::disk_graph::DiskGraph::new_at_path(data_dir)
-                            .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
-                                "Failed to create disk graph at '{}': {}",
-                                dir, e
-                            ))
-                        })?;
+                    let dg = crate::graph::storage::disk::graph::DiskGraph::new_at_path(data_dir)
+                        .map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
+                            "Failed to create disk graph at '{}': {}",
+                            dir, e
+                        ))
+                    })?;
                     graph.graph = schema::GraphBackend::Disk(Box::new(dg));
                 }
                 other => {
@@ -218,7 +217,7 @@ impl KnowledgeGraph {
         let graph = get_graph_mut(&mut self.inner);
 
         let uid_field_clone = unique_id_field.clone();
-        let result = crate::graph::mutation::maintain_graph::add_nodes(
+        let result = crate::graph::mutation::maintain::add_nodes(
             graph,
             df_result,
             node_type.clone(),
@@ -656,7 +655,7 @@ impl KnowledgeGraph {
 
             let graph = get_graph_mut(&mut self.inner);
 
-            let result = crate::graph::mutation::maintain_graph::add_connections(
+            let result = crate::graph::mutation::maintain::add_connections(
                 graph,
                 df_result,
                 connection_type.clone(),
@@ -735,7 +734,7 @@ impl KnowledgeGraph {
 
         let graph = get_graph_mut(&mut self.inner);
 
-        let result = crate::graph::mutation::maintain_graph::add_connections(
+        let result = crate::graph::mutation::maintain::add_connections(
             graph,
             df_result,
             connection_type.clone(),
@@ -862,7 +861,7 @@ impl KnowledgeGraph {
 
             let graph = get_graph_mut(&mut self.inner);
 
-            let report = crate::graph::mutation::maintain_graph::add_nodes(
+            let report = crate::graph::mutation::maintain::add_nodes(
                 graph,
                 df_result,
                 node_type.clone(),
@@ -1032,7 +1031,7 @@ impl KnowledgeGraph {
 
             let graph = get_graph_mut(&mut self.inner);
 
-            let report = crate::graph::mutation::maintain_graph::add_connections(
+            let report = crate::graph::mutation::maintain::add_connections(
                 graph,
                 df_result,
                 connection_name.clone(),

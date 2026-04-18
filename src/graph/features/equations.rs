@@ -1,4 +1,4 @@
-// src/graph/equation_parser.rs
+// src/graph/equations.rs
 use crate::datatypes::values::Value;
 use std::collections::HashMap;
 

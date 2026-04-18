@@ -643,6 +643,7 @@ fn format_col_type(col_type: &ColumnType) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 

@@ -1,4 +1,5 @@
 //! Executor unit tests.
+#![allow(clippy::approx_constant)]
 use super::helpers::*;
 use super::*;
 use crate::datatypes::values::Value;
@@ -1100,7 +1101,7 @@ fn test_self_loop_pattern_same_variable() {
 
     assert_eq!(result.rows.len(), 1);
     assert_eq!(
-        result.rows[0].get(0),
+        result.rows[0].first(),
         Some(&Value::String("Alice".to_string()))
     );
 }
@@ -1264,7 +1265,7 @@ fn eval_string_fn(query: &str) -> Value {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(result.rows.len(), 1, "Expected 1 row for query: {}", query);
-    result.rows[0].get(0).cloned().unwrap_or(Value::Null)
+    result.rows[0].first().cloned().unwrap_or(Value::Null)
 }
 
 #[test]
@@ -1323,7 +1324,7 @@ fn test_trim_function() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(
-        result.rows[0].get(0),
+        result.rows[0].first(),
         Some(&Value::String("hello".to_string()))
     );
 }
@@ -1339,7 +1340,7 @@ fn test_ltrim_function() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(
-        result.rows[0].get(0),
+        result.rows[0].first(),
         Some(&Value::String("hello  ".to_string()))
     );
 }
@@ -1355,7 +1356,7 @@ fn test_rtrim_function() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(
-        result.rows[0].get(0),
+        result.rows[0].first(),
         Some(&Value::String("  hello".to_string()))
     );
 }
@@ -1379,7 +1380,7 @@ fn test_string_functions_auto_coerce() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(
-        result.rows[0].get(0),
+        result.rows[0].first(),
         Some(&Value::String("[\"42\"]".to_string())),
     );
 
@@ -1389,7 +1390,7 @@ fn test_string_functions_auto_coerce() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(
-        result.rows[0].get(0),
+        result.rows[0].first(),
         Some(&Value::String("42".to_string())),
     );
 
@@ -1398,7 +1399,7 @@ fn test_string_functions_auto_coerce() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(
-        result.rows[0].get(0),
+        result.rows[0].first(),
         Some(&Value::String("24".to_string())),
     );
 
@@ -1407,7 +1408,7 @@ fn test_string_functions_auto_coerce() {
         .unwrap();
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
-    assert_eq!(result.rows[0].get(0), Some(&Value::Null),);
+    assert_eq!(result.rows[0].first(), Some(&Value::Null),);
 }
 
 #[test]
@@ -1480,7 +1481,7 @@ fn test_pagerank_connection_types_list_syntax() {
     assert_eq!(r1.rows.len(), r2.rows.len());
     // Scores must match between string and list syntax
     for (row1, row2) in r1.rows.iter().zip(r2.rows.iter()) {
-        assert_eq!(row1.get(0), row2.get(0), "Node names should match");
+        assert_eq!(row1.first(), row2.first(), "Node names should match");
         assert_eq!(row1.get(1), row2.get(1), "Scores should match");
     }
 
@@ -1508,17 +1509,26 @@ fn test_list_slice_basic() {
     // [start..end]
     let q = super::super::parser::parse_cypher("RETURN [1,2,3,4,5][1..3]").unwrap();
     let result = executor.execute(&q).unwrap();
-    assert_eq!(result.rows[0].get(0), Some(&Value::String("[2, 3]".into())));
+    assert_eq!(
+        result.rows[0].first(),
+        Some(&Value::String("[2, 3]".into()))
+    );
 
     // [..end]
     let q = super::super::parser::parse_cypher("RETURN [1,2,3][..2]").unwrap();
     let result = executor.execute(&q).unwrap();
-    assert_eq!(result.rows[0].get(0), Some(&Value::String("[1, 2]".into())));
+    assert_eq!(
+        result.rows[0].first(),
+        Some(&Value::String("[1, 2]".into()))
+    );
 
     // [start..]
     let q = super::super::parser::parse_cypher("RETURN [1,2,3][1..]").unwrap();
     let result = executor.execute(&q).unwrap();
-    assert_eq!(result.rows[0].get(0), Some(&Value::String("[2, 3]".into())));
+    assert_eq!(
+        result.rows[0].first(),
+        Some(&Value::String("[2, 3]".into()))
+    );
 }
 
 #[test]
@@ -1531,20 +1541,20 @@ fn test_list_slice_edge_cases() {
     let q = super::super::parser::parse_cypher("RETURN [1,2,3][..100]").unwrap();
     let result = executor.execute(&q).unwrap();
     assert_eq!(
-        result.rows[0].get(0),
+        result.rows[0].first(),
         Some(&Value::String("[1, 2, 3]".into()))
     );
 
     // Empty slice (start >= end)
     let q = super::super::parser::parse_cypher("RETURN [1,2,3][3..1]").unwrap();
     let result = executor.execute(&q).unwrap();
-    assert_eq!(result.rows[0].get(0), Some(&Value::String("[]".into())));
+    assert_eq!(result.rows[0].first(), Some(&Value::String("[]".into())));
 
     // Negative index in slice
     let q = super::super::parser::parse_cypher("RETURN [1,2,3,4,5][-3..]").unwrap();
     let result = executor.execute(&q).unwrap();
     assert_eq!(
-        result.rows[0].get(0),
+        result.rows[0].first(),
         Some(&Value::String("[3, 4, 5]".into()))
     );
 }
@@ -1558,11 +1568,11 @@ fn test_list_index_still_works() {
 
     let q = super::super::parser::parse_cypher("RETURN [10,20,30][0]").unwrap();
     let result = executor.execute(&q).unwrap();
-    assert_eq!(result.rows[0].get(0), Some(&Value::Int64(10)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Int64(10)));
 
     let q = super::super::parser::parse_cypher("RETURN [10,20,30][-1]").unwrap();
     let result = executor.execute(&q).unwrap();
-    assert_eq!(result.rows[0].get(0), Some(&Value::Int64(30)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Int64(30)));
 }
 
 #[test]
@@ -1584,7 +1594,7 @@ fn test_list_slice_with_collect() {
     let result = executor.execute(&q).unwrap();
 
     // Should return a list with exactly 2 elements
-    let val = result.rows[0].get(0).unwrap();
+    let val = result.rows[0].first().unwrap();
     let items = parse_list_value(val);
     assert_eq!(items.len(), 2);
 }
@@ -1598,17 +1608,17 @@ fn test_size_on_list() {
     // size() on a list literal should return element count, not string length
     let q = super::super::parser::parse_cypher("RETURN size([1,2,3])").unwrap();
     let result = executor.execute(&q).unwrap();
-    assert_eq!(result.rows[0].get(0), Some(&Value::Int64(3)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Int64(3)));
 
     // size() on a plain string should return character count
     let q = super::super::parser::parse_cypher("RETURN size('hello')").unwrap();
     let result = executor.execute(&q).unwrap();
-    assert_eq!(result.rows[0].get(0), Some(&Value::Int64(5)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Int64(5)));
 
     // size() on empty list
     let q = super::super::parser::parse_cypher("RETURN size([])").unwrap();
     let result = executor.execute(&q).unwrap();
-    assert_eq!(result.rows[0].get(0), Some(&Value::Int64(0)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Int64(0)));
 }
 
 #[test]
@@ -1620,7 +1630,7 @@ fn test_length_on_list() {
     // length() on a list should return element count
     let q = super::super::parser::parse_cypher("RETURN length([10,20,30,40])").unwrap();
     let result = executor.execute(&q).unwrap();
-    assert_eq!(result.rows[0].get(0), Some(&Value::Int64(4)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Int64(4)));
 }
 
 #[test]
@@ -1639,7 +1649,7 @@ fn test_size_on_collect_result() {
     let no_params = HashMap::new();
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
-    assert_eq!(result.rows[0].get(0), Some(&Value::Int64(3)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Int64(3)));
 }
 
 #[test]
@@ -1666,14 +1676,14 @@ fn test_aggregate_with_slice() {
     assert_eq!(result.rows.len(), 2);
     // Group X has 3 items, sliced to 2
     let x_row = &result.rows[0];
-    assert_eq!(x_row.get(0), Some(&Value::String("X".into())));
+    assert_eq!(x_row.first(), Some(&Value::String("X".into())));
     assert_eq!(x_row.get(1), Some(&Value::Int64(3)));
     let sample = parse_list_value(x_row.get(2).unwrap());
     assert_eq!(sample.len(), 2);
 
     // Group Y has 1 item, sliced to at most 2
     let y_row = &result.rows[1];
-    assert_eq!(y_row.get(0), Some(&Value::String("Y".into())));
+    assert_eq!(y_row.first(), Some(&Value::String("Y".into())));
     assert_eq!(y_row.get(1), Some(&Value::Int64(1)));
     let sample_y = parse_list_value(y_row.get(2).unwrap());
     assert_eq!(sample_y.len(), 1);
@@ -1695,7 +1705,7 @@ fn test_aggregate_arithmetic() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     // count(n)=3, 3+1=4.0 (float because add_values promotes)
-    let val = result.rows[0].get(0).unwrap();
+    let val = result.rows[0].first().unwrap();
     match val {
         Value::Int64(i) => assert_eq!(*i, 4),
         Value::Float64(f) => assert!((f - 4.0).abs() < 0.001),
@@ -1720,7 +1730,7 @@ fn test_size_of_collect_in_return() {
     let no_params = HashMap::new();
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
-    assert_eq!(result.rows[0].get(0), Some(&Value::Int64(3)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Int64(3)));
 }
 
 #[test]
@@ -1764,7 +1774,7 @@ fn test_list_predicate_any() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(true)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Boolean(true)));
 }
 
 #[test]
@@ -1779,7 +1789,7 @@ fn test_list_predicate_any_false() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(false)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Boolean(false)));
 }
 
 #[test]
@@ -1794,7 +1804,7 @@ fn test_list_predicate_all() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(true)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Boolean(true)));
 }
 
 #[test]
@@ -1809,7 +1819,7 @@ fn test_list_predicate_all_false() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(false)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Boolean(false)));
 }
 
 #[test]
@@ -1824,7 +1834,7 @@ fn test_list_predicate_none() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(true)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Boolean(true)));
 }
 
 #[test]
@@ -1839,7 +1849,7 @@ fn test_list_predicate_none_false() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(false)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Boolean(false)));
 }
 
 #[test]
@@ -1854,7 +1864,7 @@ fn test_list_predicate_single() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(true)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Boolean(true)));
 }
 
 #[test]
@@ -1869,7 +1879,7 @@ fn test_list_predicate_single_false_multiple() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(false)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Boolean(false)));
 }
 
 #[test]
@@ -1913,7 +1923,7 @@ fn test_list_predicate_with_is_not_null() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(true))); // any: true
+    assert_eq!(result.rows[0].first(), Some(&Value::Boolean(true))); // any: true
     assert_eq!(result.rows[0].get(1), Some(&Value::Boolean(false))); // all: false
     assert_eq!(result.rows[0].get(2), Some(&Value::Boolean(false))); // none: false
 }
@@ -1941,7 +1951,7 @@ fn test_list_predicate_collected_nodes_property_access() {
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0].get(0), Some(&Value::Boolean(true)));
+    assert_eq!(result.rows[0].first(), Some(&Value::Boolean(true)));
 
     // all() — should be false (W2 has no formation)
     let q2 = super::super::parser::parse_cypher(
@@ -1953,5 +1963,5 @@ fn test_list_predicate_collected_nodes_property_access() {
     let executor2 = CypherExecutor::with_params(&graph, &no_params, None);
     let result2 = executor2.execute(&q2).unwrap();
     assert_eq!(result2.rows.len(), 1);
-    assert_eq!(result2.rows[0].get(0), Some(&Value::Boolean(false)));
+    assert_eq!(result2.rows[0].first(), Some(&Value::Boolean(false)));
 }

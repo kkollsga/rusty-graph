@@ -6,5 +6,5 @@
 //! column store used by the mapped backend.
 
 #[allow(dead_code)]
-pub mod mmap_column_store;
+pub mod column_store;
 pub mod mmap_vec;

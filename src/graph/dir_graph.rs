@@ -7,9 +7,8 @@
 use crate::datatypes::values::Value;
 use crate::graph::schema::{
     CompositeIndexKey, CompositeValue, ConnectionTypeInfo, ConnectivityTriple, EdgeData,
-    EmbeddingStore, Graph, GraphBackend, IndexKey, InternedKey, NodeData, PropertyStorage,
-    SaveMetadata, SchemaDefinition, SpatialConfig, StringInterner, TemporalConfig, TypeIdIndex,
-    TypeSchema,
+    EmbeddingStore, GraphBackend, IndexKey, InternedKey, NodeData, PropertyStorage, SaveMetadata,
+    SchemaDefinition, SpatialConfig, StringInterner, TemporalConfig, TypeIdIndex, TypeSchema,
 };
 use crate::graph::storage::{GraphRead, GraphWrite, MemoryGraph};
 use petgraph::graph::{EdgeIndex, NodeIndex};
@@ -27,7 +26,7 @@ use std::sync::{Arc, RwLock};
 /// and optional embedding stores for vector similarity search.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DirGraph {
-    pub(crate) graph: Graph,
+    pub(crate) graph: GraphBackend,
     /// Skipped during serialization — rebuilt from graph on load via `rebuild_type_indices()`.
     #[serde(skip)]
     pub(crate) type_indices: HashMap<String, Vec<NodeIndex>>,
@@ -202,7 +201,7 @@ impl Drop for DirGraph {
 impl DirGraph {
     pub fn new() -> Self {
         DirGraph {
-            graph: Graph::new(),
+            graph: GraphBackend::new(),
             type_indices: HashMap::new(),
             schema_definition: None,
             property_indices: HashMap::new(),
@@ -243,7 +242,7 @@ impl DirGraph {
 
     /// Create a DirGraph from a pre-existing graph (used by v3 loader).
     /// All metadata fields start empty and are populated by the caller.
-    pub fn from_graph(graph: Graph) -> Self {
+    pub fn from_graph(graph: GraphBackend) -> Self {
         DirGraph {
             graph,
             type_indices: HashMap::new(),
@@ -1384,13 +1383,13 @@ impl DirGraph {
         // Extract the StableDiGraph and build DiskGraph
         let disk_graph = match &mut self.graph {
             GraphBackend::Memory(g) => {
-                crate::graph::storage::disk::disk_graph::DiskGraph::from_stable_digraph(
+                crate::graph::storage::disk::graph::DiskGraph::from_stable_digraph(
                     g.inner_mut(),
                     &data_dir,
                 )
             }
             GraphBackend::Mapped(g) => {
-                crate::graph::storage::disk::disk_graph::DiskGraph::from_stable_digraph(
+                crate::graph::storage::disk::graph::DiskGraph::from_stable_digraph(
                     g.inner_mut(),
                     &data_dir,
                 )
@@ -1476,7 +1475,7 @@ impl DirGraph {
             .map_err(|e| format!("DiskGraph save failed: {}", e))?;
 
         // Save DirGraph metadata as JSON
-        let meta = crate::graph::io::io_operations::build_disk_metadata(self);
+        let meta = crate::graph::io::file::build_disk_metadata(self);
         let meta_json = serde_json::to_string_pretty(&meta)
             .map_err(|e| format!("Metadata serialization failed: {}", e))?;
         std::fs::write(dir.join("metadata.json"), meta_json)
@@ -1493,21 +1492,32 @@ impl DirGraph {
         std::fs::write(dir.join("interner.json"), interner_json)
             .map_err(|e| format!("Failed to write interner: {}", e))?;
 
-        // Save column stores (per type)
-        let columns_dir = dir.join("columns");
-        std::fs::create_dir_all(&columns_dir)
-            .map_err(|e| format!("Failed to create columns dir: {}", e))?;
-        for (type_name, store) in &self.column_stores {
-            let type_dir = columns_dir.join(type_name);
-            std::fs::create_dir_all(&type_dir)
-                .map_err(|e| format!("Failed to create type dir: {}", e))?;
-            let packed = store
-                .write_packed(&self.interner)
-                .map_err(|e| format!("Column pack failed: {}", e))?;
-            let compressed = zstd::encode_all(packed.as_slice(), 3)
-                .map_err(|e| format!("Column compression failed: {}", e))?;
-            std::fs::write(type_dir.join("columns.zst"), compressed)
-                .map_err(|e| format!("Failed to write columns: {}", e))?;
+        // Save column stores (per type, legacy format) — only when the
+        // v3 single-file `columns.bin` is absent. The v3 format is
+        // written by the N-Triples builder's Phase 1b during
+        // `load_ntriples` + streaming-write disk builds, making this
+        // per-type loop redundant (and multi-minute on Wikidata-scale
+        // graphs with 88k+ types). `load_file` prefers the v3 path
+        // (`file.rs:580`), falling back to `columns/<type>/columns.zst`
+        // only when v3 is missing (pre-Phase-4 graphs, or DirGraph → disk
+        // saves that never went through the streaming builder).
+        let columns_bin = dir.join("columns.bin");
+        if !columns_bin.exists() {
+            let columns_dir = dir.join("columns");
+            std::fs::create_dir_all(&columns_dir)
+                .map_err(|e| format!("Failed to create columns dir: {}", e))?;
+            for (type_name, store) in &self.column_stores {
+                let type_dir = columns_dir.join(type_name);
+                std::fs::create_dir_all(&type_dir)
+                    .map_err(|e| format!("Failed to create type dir: {}", e))?;
+                let packed = store
+                    .write_packed(&self.interner)
+                    .map_err(|e| format!("Column pack failed: {}", e))?;
+                let compressed = zstd::encode_all(packed.as_slice(), 3)
+                    .map_err(|e| format!("Column compression failed: {}", e))?;
+                std::fs::write(type_dir.join("columns.zst"), compressed)
+                    .map_err(|e| format!("Failed to write columns: {}", e))?;
+            }
         }
 
         // Save type_indices and id_indices (previously only written by N-Triples builder)

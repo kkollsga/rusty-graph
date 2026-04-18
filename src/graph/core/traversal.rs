@@ -1,4 +1,4 @@
-// src/graph/traversal_methods.rs
+// src/graph/traversal.rs
 use crate::datatypes::values::FilterCondition;
 use crate::datatypes::values::Value;
 use crate::graph::schema::{
@@ -93,9 +93,7 @@ fn edge_matches_conditions(
     conditions.iter().all(|(field, condition)| {
         let ik = InternedKey::from_str(field);
         match properties.iter().find(|(k, _)| *k == ik).map(|(_, v)| v) {
-            Some(value) => {
-                crate::graph::core::filtering_methods::matches_condition(value, condition)
-            }
+            Some(value) => crate::graph::core::filtering::matches_condition(value, condition),
             None => {
                 // Missing field is treated as null
                 matches!(condition, FilterCondition::IsNull)
@@ -524,7 +522,7 @@ fn make_traversal_full(
         let target_vec: Vec<NodeIndex> = targets.into_iter().collect();
 
         // Apply filtering and sorting in one pass
-        let processed_nodes = crate::graph::core::filtering_methods::process_nodes(
+        let processed_nodes = crate::graph::core::filtering::process_nodes(
             graph,
             target_vec,
             filter_target,
@@ -609,10 +607,10 @@ pub fn make_comparison_traversal(
                 .ok_or("method 'text_score' requires 'property'")?;
             let thresh = config.threshold.unwrap_or(0.0);
             let dist_metric = match config.metric.as_deref() {
-                Some("dot_product") => crate::graph::algorithms::vector_search::DistanceMetric::DotProduct,
-                Some("euclidean") => crate::graph::algorithms::vector_search::DistanceMetric::Euclidean,
-                Some("poincare") => crate::graph::algorithms::vector_search::DistanceMetric::Poincare,
-                _ => crate::graph::algorithms::vector_search::DistanceMetric::Cosine,
+                Some("dot_product") => crate::graph::algorithms::vector::DistanceMetric::DotProduct,
+                Some("euclidean") => crate::graph::algorithms::vector::DistanceMetric::Euclidean,
+                Some("poincare") => crate::graph::algorithms::vector::DistanceMetric::Poincare,
+                _ => crate::graph::algorithms::vector::DistanceMetric::Cosine,
             };
             semantic_score_traversal(
                 graph,
@@ -793,7 +791,7 @@ fn insert_matches_into_selection(
     ))];
 
     for (parent, children) in matches {
-        let processed = crate::graph::core::filtering_methods::process_nodes(
+        let processed = crate::graph::core::filtering::process_nodes(
             graph,
             children,
             filter_target,
@@ -1261,7 +1259,7 @@ fn semantic_score_traversal(
     target_type: &str,
     embedding_property: &str,
     threshold: f64,
-    metric: crate::graph::algorithms::vector_search::DistanceMetric,
+    metric: crate::graph::algorithms::vector::DistanceMetric,
     filter_target: Option<&HashMap<String, FilterCondition>>,
     sort_target: Option<&Vec<(String, bool)>>,
     max_nodes: Option<usize>,
@@ -1291,17 +1289,17 @@ fn semantic_score_traversal(
         })?;
 
     let similarity_fn = match metric {
-        crate::graph::algorithms::vector_search::DistanceMetric::Cosine => {
-            crate::graph::algorithms::vector_search::cosine_similarity
+        crate::graph::algorithms::vector::DistanceMetric::Cosine => {
+            crate::graph::algorithms::vector::cosine_similarity
         }
-        crate::graph::algorithms::vector_search::DistanceMetric::DotProduct => {
-            crate::graph::algorithms::vector_search::dot_product
+        crate::graph::algorithms::vector::DistanceMetric::DotProduct => {
+            crate::graph::algorithms::vector::dot_product
         }
-        crate::graph::algorithms::vector_search::DistanceMetric::Euclidean => {
-            crate::graph::algorithms::vector_search::neg_euclidean_distance
+        crate::graph::algorithms::vector::DistanceMetric::Euclidean => {
+            crate::graph::algorithms::vector::neg_euclidean_distance
         }
-        crate::graph::algorithms::vector_search::DistanceMetric::Poincare => {
-            crate::graph::algorithms::vector_search::neg_poincare_distance
+        crate::graph::algorithms::vector::DistanceMetric::Poincare => {
+            crate::graph::algorithms::vector::neg_poincare_distance
         }
     };
     let threshold_f32 = threshold as f32;

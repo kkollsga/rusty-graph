@@ -2,7 +2,7 @@
 use super::values::Value;
 use crate::graph::core::calculations::StatResult;
 use crate::graph::core::data_retrieval::{LevelConnections, LevelNodes, LevelValues, UniqueValues};
-use crate::graph::core::statistics_methods::PropertyStats;
+use crate::graph::core::statistics::PropertyStats;
 use crate::graph::schema::NodeInfo;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};

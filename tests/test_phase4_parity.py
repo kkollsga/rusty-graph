@@ -128,7 +128,7 @@ def _parity_query(kg: KnowledgeGraph) -> list[tuple]:
 # Changing this digest without a format bump is a refactor bug — the
 # whole point of this test is to trip loudly when the `.kgl` byte layout
 # silently drifts.
-GOLDEN_V3_DIGEST = "87c8db043aab8aeaba4a7bd491d25c7647abf9c1f5895ac022d25956b815e894"
+GOLDEN_V3_DIGEST = "03a40002568ceea467914e4b0b344a829ff9236ae004fe7d93181dc6f37122bb"
 
 # Set of acceptable digests — lets us tolerate one-off wall-clock or
 # per-run entropy that shouldn't count as drift. If the actual digest

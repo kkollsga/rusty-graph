@@ -1,7 +1,7 @@
-// src/graph/maintain_graph.rs
+// src/graph/maintain.rs
 use crate::datatypes::{DataFrame, Value};
 use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOperationReport};
-use crate::graph::mutation::batch_operations::{
+use crate::graph::mutation::batch::{
     BatchProcessor, ConflictHandling, ConnectionBatchProcessor, NodeAction,
 };
 use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, TypeSchema};

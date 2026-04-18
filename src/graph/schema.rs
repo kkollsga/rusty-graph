@@ -10,7 +10,7 @@ use crate::graph::storage::GraphRead;
 // Phase 9 split: DirGraph + GraphBackend moved to sibling modules.
 // Re-exported here to preserve `crate::graph::schema::X` import paths.
 pub use crate::graph::dir_graph::DirGraph;
-pub use crate::graph::storage::backend::{Graph, GraphBackend};
+pub use crate::graph::storage::backend::GraphBackend;
 // MemoryGraph re-export: required by `storage/recording.rs` tests.
 // DO NOT REMOVE even if cargo fix suggests it — the test-only usage is
 // what keeps this file's API stable.
@@ -1811,7 +1811,7 @@ impl std::fmt::Display for ValidationError {
 #[cfg(test)]
 mod maintenance_tests {
     use super::*;
-    use crate::graph::storage::{GraphRead, GraphWrite, MemoryGraph};
+    use crate::graph::storage::{GraphRead, GraphWrite};
 
     /// Helper: create a DirGraph with N Person nodes and edges between consecutive pairs
     fn make_test_graph(num_nodes: usize, num_edges: bool) -> DirGraph {
@@ -2388,7 +2388,7 @@ mod maintenance_tests {
         };
 
         // Deserialize into a new graph — will come back as Map
-        let graph2: Graph = {
+        let graph2: GraphBackend = {
             let _guard = SerdeDeserializeGuard::new(&mut g.interner);
             bincode::deserialize(&serialized).unwrap()
         };

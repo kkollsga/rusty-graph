@@ -509,6 +509,7 @@ pub fn token_to_keyword_name(token: &CypherToken) -> Option<String> {
 // ============================================================================
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 

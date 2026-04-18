@@ -1,6 +1,6 @@
 // src/graph/storage/lookups.rs
 use crate::datatypes::Value;
-use crate::graph::schema::{Graph, InternedKey};
+use crate::graph::schema::{GraphBackend, InternedKey};
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ pub struct TypeLookup {
 }
 
 impl TypeLookup {
-    pub fn new(graph: &Graph, node_type: String) -> Result<Self, String> {
+    pub fn new(graph: &GraphBackend, node_type: String) -> Result<Self, String> {
         if node_type.is_empty() {
             return Err("Node type cannot be empty".to_string());
         }
@@ -44,7 +44,7 @@ impl TypeLookup {
     /// Does not build title_to_index since it's unused in the add_nodes hot path.
     pub fn from_id_indices(
         id_indices: &HashMap<String, crate::graph::schema::TypeIdIndex>,
-        graph: &Graph,
+        graph: &GraphBackend,
         node_type: String,
     ) -> Result<Self, String> {
         if node_type.is_empty() {
@@ -83,7 +83,11 @@ pub struct CombinedTypeLookup {
 }
 
 impl CombinedTypeLookup {
-    pub fn new(graph: &Graph, source_type: String, target_type: String) -> Result<Self, String> {
+    pub fn new(
+        graph: &GraphBackend,
+        source_type: String,
+        target_type: String,
+    ) -> Result<Self, String> {
         if source_type.is_empty() || target_type.is_empty() {
             return Err("Node types cannot be empty".to_string());
         }
@@ -124,7 +128,7 @@ impl CombinedTypeLookup {
     /// Falls back to graph scan if id_indices has been invalidated for either type.
     pub fn from_id_indices(
         id_indices: &HashMap<String, crate::graph::schema::TypeIdIndex>,
-        graph: &Graph,
+        graph: &GraphBackend,
         source_type: String,
         target_type: String,
     ) -> Result<Self, String> {

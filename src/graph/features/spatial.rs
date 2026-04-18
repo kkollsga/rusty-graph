@@ -552,6 +552,7 @@ pub fn get_bounds(
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 

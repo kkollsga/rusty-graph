@@ -1,4 +1,4 @@
-// src/graph/batch_operations.rs
+// src/graph/batch.rs
 use crate::datatypes::Value;
 use crate::graph::schema::{DirGraph, EdgeData, InternedKey, NodeData, PropertyStorage};
 use crate::graph::storage::{GraphRead, GraphWrite};

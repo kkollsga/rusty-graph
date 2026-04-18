@@ -40,6 +40,18 @@ impl KnowledgeGraph {
     /// restored by ``load()``, so this only needs to be called once
     /// after building or mutating a graph.
     fn rebuild_caches(&mut self) {
+        // Order matters on large disk graphs: `compute_type_connectivity`
+        // runs first so its single sequential sweep of `edge_endpoints.bin`
+        // also warms the page cache for the histogram builder below. On
+        // Wikidata (~13.8 GB edge_endpoints) this avoids a second cold
+        // read and cuts `rebuild_caches` by ~100 s on loaded-from-cold-disk
+        // graphs. See `src/graph/storage/disk/builder.rs::build_peer_count_histogram`
+        // — it deliberately no longer evicts pages after finishing.
+
+        // Single O(E) pass: compute type connectivity triples
+        // Uses edge_endpoint_keys() — mmap reads only, no heap allocation per edge.
+        let triples = introspection::compute_type_connectivity(&self.inner);
+
         // On disk graphs, also rebuild the per-(conn_type, peer) edge-count
         // histogram so the Cypher planner's fast path for unanchored
         // aggregate queries works. Legacy disk graphs built before v0.7.13
@@ -50,10 +62,6 @@ impl KnowledgeGraph {
                 dg.rebuild_peer_count_histogram();
             }
         }
-
-        // Single O(E) pass: compute type connectivity triples
-        // Uses edge_endpoint_keys() — mmap reads only, no heap allocation per edge.
-        let triples = introspection::compute_type_connectivity(&self.inner);
 
         // Derive edge type counts + endpoint types from triples (no extra scan)
         let derived = introspection::derive_edge_counts_from_triples(&triples);
@@ -362,7 +370,7 @@ impl KnowledgeGraph {
         }
 
         // Prep phase (quick): stamp metadata, snapshot index keys
-        io::io_operations::prepare_save(&mut self.inner);
+        io::file::prepare_save(&mut self.inner);
 
         // Consolidate ALL node properties into column stores (v3 requires columnar).
         // Always rebuild: after load+add, some nodes may have Compact storage;
@@ -376,7 +384,7 @@ impl KnowledgeGraph {
         // Heavy phase: serialize, compress, write — release GIL for other Python threads
         let inner = self.inner.clone();
         let path_owned = path.to_string();
-        py.detach(move || io::io_operations::write_graph_v3(&inner, &path_owned))
+        py.detach(move || io::file::write_graph_v3(&inner, &path_owned))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))
     }
 
@@ -588,11 +596,8 @@ impl KnowledgeGraph {
     /// Returns a new KnowledgeGraph with the union of both selections
     fn union(&self, other: &Self) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        crate::graph::mutation::set_operations::union_selections(
-            &mut new_kg.selection,
-            &other.selection,
-        )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        crate::graph::mutation::set_ops::union_selections(&mut new_kg.selection, &other.selection)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
     }
 
@@ -600,7 +605,7 @@ impl KnowledgeGraph {
     /// Returns a new KnowledgeGraph with only nodes that exist in both selections
     fn intersection(&self, other: &Self) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        crate::graph::mutation::set_operations::intersection_selections(
+        crate::graph::mutation::set_ops::intersection_selections(
             &mut new_kg.selection,
             &other.selection,
         )
@@ -612,7 +617,7 @@ impl KnowledgeGraph {
     /// Returns a new KnowledgeGraph with nodes from self that are not in other
     fn difference(&self, other: &Self) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        crate::graph::mutation::set_operations::difference_selections(
+        crate::graph::mutation::set_ops::difference_selections(
             &mut new_kg.selection,
             &other.selection,
         )
@@ -624,7 +629,7 @@ impl KnowledgeGraph {
     /// Returns a new KnowledgeGraph with nodes that are in exactly one of the selections
     fn symmetric_difference(&self, other: &Self) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        crate::graph::mutation::set_operations::symmetric_difference_selections(
+        crate::graph::mutation::set_ops::symmetric_difference_selections(
             &mut new_kg.selection,
             &other.selection,
         )
@@ -804,7 +809,7 @@ impl KnowledgeGraph {
             )
         })?;
 
-        let errors = crate::graph::mutation::schema_validation::validate_graph(
+        let errors = crate::graph::mutation::validation::validate_graph(
             &self.inner,
             schema,
             strict.unwrap_or(false),

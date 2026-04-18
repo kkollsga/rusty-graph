@@ -214,7 +214,7 @@ fn execute_create(
                             .get_node(actual_target)
                             .map(|n| n.get_node_type_ref(&graph.interner).to_string())
                             .unwrap_or_default();
-                        crate::graph::mutation::schema_validation::validate_edge_creation(
+                        crate::graph::mutation::validation::validate_edge_creation(
                             &edge_pat.connection_type,
                             &src_type,
                             &tgt_type,
@@ -313,7 +313,7 @@ fn create_node(
 
     // Schema lock validation
     if graph.schema_locked {
-        crate::graph::mutation::schema_validation::validate_node_creation(
+        crate::graph::mutation::validation::validate_node_creation(
             &label,
             &properties,
             &graph.node_type_metadata,
@@ -373,7 +373,7 @@ fn create_node(
 
 /// Ensure type metadata exists for the given node type.
 /// Reads property types from the sample node and upserts them into graph metadata.
-/// This mirrors the behavior of the Python add_nodes() API in maintain_graph.rs.
+/// This mirrors the behavior of the Python add_nodes() API in maintain.rs.
 fn ensure_type_metadata(
     graph: &mut DirGraph,
     node_type: &str,
@@ -479,7 +479,7 @@ fn execute_set(
 
                     // Schema lock validation for SET
                     if graph.schema_locked {
-                        crate::graph::mutation::schema_validation::validate_property_set(
+                        crate::graph::mutation::validation::validate_property_set(
                             &node_type_str,
                             property,
                             &value,

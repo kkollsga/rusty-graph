@@ -9,7 +9,7 @@
 //! - [`MappedGraph`] — mmap-columnar-spill variant (Phase 5 promoted
 //!   this from a type alias to a distinct struct so its trait impls
 //!   can diverge from memory's once the column ownership differs).
-//! - [`crate::graph::storage::disk::disk_graph::DiskGraph`] — CSR + mmap
+//! - [`crate::graph::storage::disk::graph::DiskGraph`] — CSR + mmap
 //!   columns.
 //!
 //! Rule for new storage operations: add the method to [`GraphRead`] or
@@ -25,7 +25,7 @@ pub mod memory;
 pub mod type_build_meta;
 
 use crate::datatypes::Value;
-use crate::graph::core::graph_iterators::GraphEdgeRef;
+use crate::graph::core::iterators::GraphEdgeRef;
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;

@@ -54,14 +54,18 @@ ENUM_MATCH_WHITELIST = {
     "pyapi/kg_mutation.rs": "PyO3 boundary (KnowledgeGraph mutation + storage swap)",
     "pyapi/kg_introspection.rs": "PyO3 boundary (KnowledgeGraph introspection)",
     "pyapi/kg_fluent.rs": "PyO3 boundary (KnowledgeGraph fluent chain)",
+    # Hot-path Rayon fast-path: compute_type_connectivity matches on the
+    # backend enum to bypass the boxed-iterator trait path on 800M+ edge
+    # scans. See the function-level doc comment for the Wikidata win.
+    "introspection/connectivity.rs": "compute_type_connectivity disk-mode Rayon fast path",
     # Disk-internal boundary: reach into DiskGraph fields (node_slots,
     # pending_edges, column_stores, data_dir, qnum_to_idx) for bulk-path
     # performance. Documented and intentional; the disk-backend subdir
     # homes these with the disk backend.
     "io/ntriples/loader.rs": "disk-internal bulk-build (ntriples loader)",
     "io/ntriples/writer.rs": "disk-internal bulk-build (ntriples edge writer)",
-    "io/io_operations.rs": "disk-internal .kgl load_disk_dir path",
-    "mutation/batch_operations.rs": "disk-internal update-path row_id lookup",
+    "io/file.rs": "disk-internal .kgl load_disk_dir path",
+    "mutation/batch.rs": "disk-internal update-path row_id lookup",
 }
 
 ENUM_MATCH_PATTERN = re.compile(r"GraphBackend::[A-Z]")

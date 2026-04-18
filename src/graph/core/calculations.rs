@@ -1,7 +1,7 @@
 // src/graph/query/calculations.rs
 use crate::datatypes::values::Value;
-use crate::graph::core::statistics_methods::{get_parent_child_pairs, ParentChildPair};
-use crate::graph::features::equation_parser::{AggregateType, Evaluator, Expr, Parser};
+use crate::graph::core::statistics::{get_parent_child_pairs, ParentChildPair};
+use crate::graph::features::equations::{AggregateType, Evaluator, Expr, Parser};
 use crate::graph::introspection::reporting::CalculationOperationReport; // Remove unused OperationReport import
 use crate::graph::schema::{CurrentSelection, DirGraph, NodeData, StringInterner};
 use crate::graph::storage::lookups::TypeLookup;
@@ -257,7 +257,7 @@ pub fn process_equation(
     }
 
     // Update the node properties with verified node indices
-    let update_result = crate::graph::mutation::maintain_graph::update_node_properties(
+    let update_result = crate::graph::mutation::maintain::update_node_properties(
         graph,
         &nodes_to_update,
         target_property,
@@ -685,7 +685,7 @@ pub fn store_count_results(
     }
 
     // Use the optimized batch update (which now returns a NodeOperationReport)
-    let update_result = match crate::graph::mutation::maintain_graph::update_node_properties(
+    let update_result = match crate::graph::mutation::maintain::update_node_properties(
         graph,
         &nodes_to_update,
         target_property,

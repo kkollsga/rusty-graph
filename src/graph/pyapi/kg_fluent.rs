@@ -134,7 +134,7 @@ impl KnowledgeGraph {
             None
         };
 
-        crate::graph::core::filtering_methods::filter_nodes(
+        crate::graph::core::filtering::filter_nodes(
             &self.inner,
             &mut new_kg.selection,
             conditions,
@@ -201,7 +201,7 @@ impl KnowledgeGraph {
             None => None,
         };
 
-        crate::graph::core::filtering_methods::filter_nodes(
+        crate::graph::core::filtering::filter_nodes(
             &self.inner,
             &mut new_kg.selection,
             filter_conditions,
@@ -258,7 +258,7 @@ impl KnowledgeGraph {
             None => None,
         };
 
-        crate::graph::core::filtering_methods::filter_nodes_any(
+        crate::graph::core::filtering::filter_nodes_any(
             &self.inner,
             &mut new_kg.selection,
             &condition_sets,
@@ -286,7 +286,7 @@ impl KnowledgeGraph {
             None
         };
 
-        crate::graph::core::filtering_methods::filter_orphan_nodes(
+        crate::graph::core::filtering::filter_orphan_nodes(
             &self.inner,
             &mut new_kg.selection,
             include,
@@ -303,18 +303,14 @@ impl KnowledgeGraph {
         let mut new_kg = self.clone();
         let sort_fields = py_in::parse_sort_fields(sort, ascending)?;
 
-        crate::graph::core::filtering_methods::sort_nodes(
-            &self.inner,
-            &mut new_kg.selection,
-            sort_fields,
-        )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        crate::graph::core::filtering::sort_nodes(&self.inner, &mut new_kg.selection, sort_fields)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
     }
 
     fn limit(&mut self, max_per_group: usize) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        crate::graph::core::filtering_methods::limit_nodes_per_group(
+        crate::graph::core::filtering::limit_nodes_per_group(
             &self.inner,
             &mut new_kg.selection,
             max_per_group,
@@ -329,7 +325,7 @@ impl KnowledgeGraph {
     ///   graph.sort('name').offset(20).limit(10)
     fn offset(&mut self, n: usize) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        crate::graph::core::filtering_methods::offset_nodes(&self.inner, &mut new_kg.selection, n)
+        crate::graph::core::filtering::offset_nodes(&self.inner, &mut new_kg.selection, n)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
     }
@@ -355,7 +351,7 @@ impl KnowledgeGraph {
             }
         };
 
-        crate::graph::core::filtering_methods::filter_by_connection(
+        crate::graph::core::filtering::filter_by_connection(
             &self.inner,
             &mut new_kg.selection,
             connection_type,
@@ -599,7 +595,7 @@ impl KnowledgeGraph {
                 .map(|&idx| (Some(idx), property_value.clone()))
                 .collect();
 
-            match crate::graph::mutation::maintain_graph::update_node_properties(
+            match crate::graph::mutation::maintain::update_node_properties(
                 graph,
                 &node_values,
                 property_name,

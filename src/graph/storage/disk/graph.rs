@@ -9,7 +9,7 @@
 // For 100M nodes + 1B edges: ~5-6 GB RAM + OS page cache.
 
 use crate::datatypes::values::Value;
-use crate::graph::core::graph_iterators::{
+use crate::graph::core::iterators::{
     DiskEdgeIndices, DiskEdgeReferences, DiskEdges, DiskEdgesConnecting, DiskNeighbors,
     DiskNodeIndices,
 };
@@ -726,7 +726,7 @@ impl DiskGraph {
         // Narrow range via binary search when CSR is sorted by type
         if let Some(ct) = conn_type {
             if self.csr_sorted_by_type {
-                let (lo, hi) = crate::graph::core::graph_iterators::binary_search_conn_type(
+                let (lo, hi) = crate::graph::core::iterators::binary_search_conn_type(
                     edges,
                     &self.edge_endpoints,
                     start,
@@ -858,7 +858,7 @@ impl DiskGraph {
         // Narrow range via binary search when CSR is sorted
         if let Some(ct) = conn_type {
             if self.csr_sorted_by_type {
-                let (lo, hi) = crate::graph::core::graph_iterators::binary_search_conn_type(
+                let (lo, hi) = crate::graph::core::iterators::binary_search_conn_type(
                     edges,
                     &self.edge_endpoints,
                     start,

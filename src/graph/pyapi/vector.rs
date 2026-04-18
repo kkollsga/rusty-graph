@@ -8,7 +8,7 @@ use pyo3::IntoPyObjectExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::graph::io::io_operations;
+use crate::graph::io::file;
 use crate::graph::schema;
 use crate::graph::storage::GraphRead;
 use crate::graph::KnowledgeGraph;
@@ -183,10 +183,10 @@ impl KnowledgeGraph {
             }
         };
         let metric = match effective_metric.as_str() {
-            "cosine" => crate::graph::algorithms::vector_search::DistanceMetric::Cosine,
-            "dot_product" => crate::graph::algorithms::vector_search::DistanceMetric::DotProduct,
-            "euclidean" => crate::graph::algorithms::vector_search::DistanceMetric::Euclidean,
-            "poincare" => crate::graph::algorithms::vector_search::DistanceMetric::Poincare,
+            "cosine" => crate::graph::algorithms::vector::DistanceMetric::Cosine,
+            "dot_product" => crate::graph::algorithms::vector::DistanceMetric::DotProduct,
+            "euclidean" => crate::graph::algorithms::vector::DistanceMetric::Euclidean,
+            "poincare" => crate::graph::algorithms::vector::DistanceMetric::Poincare,
             other => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "Unknown metric '{}'. Use 'cosine', 'dot_product', 'euclidean', or 'poincare'.",
@@ -199,7 +199,7 @@ impl KnowledgeGraph {
         let selection = self.selection.clone();
         let results = py
             .detach(|| {
-                crate::graph::algorithms::vector_search::vector_search(
+                crate::graph::algorithms::vector::vector_search(
                     &inner,
                     &selection,
                     &embedding_property,
@@ -312,7 +312,7 @@ impl KnowledgeGraph {
             Some(obj) => {
                 if let Ok(list) = obj.cast::<PyList>() {
                     let types: Vec<String> = list.extract()?;
-                    Some(io_operations::EmbeddingExportFilter::Types(types))
+                    Some(file::EmbeddingExportFilter::Types(types))
                 } else if let Ok(dict) = obj.cast::<PyDict>() {
                     let mut map: HashMap<String, Vec<String>> = HashMap::new();
                     for (k, v) in dict.iter() {
@@ -320,7 +320,7 @@ impl KnowledgeGraph {
                         let vals: Vec<String> = v.extract()?;
                         map.insert(key, vals);
                     }
-                    Some(io_operations::EmbeddingExportFilter::TypeProperties(map))
+                    Some(file::EmbeddingExportFilter::TypeProperties(map))
                 } else {
                     return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                         "node_types must be a list of strings or a dict of {str: list[str]}",
@@ -332,9 +332,7 @@ impl KnowledgeGraph {
         let inner = self.inner.clone();
         let path_owned = path.to_string();
         let stats = py
-            .detach(move || {
-                io_operations::export_embeddings_to_file(&inner, &path_owned, filter.as_ref())
-            })
+            .detach(move || file::export_embeddings_to_file(&inner, &path_owned, filter.as_ref()))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
 
         let result = PyDict::new(py);
@@ -355,7 +353,7 @@ impl KnowledgeGraph {
     ///     Dict with 'stores' (int), 'imported' (int), and 'skipped' (int) counts.
     fn import_embeddings(&mut self, py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
         let g = Arc::make_mut(&mut self.inner);
-        let stats = io_operations::import_embeddings_from_file(g, path)
+        let stats = file::import_embeddings_from_file(g, path)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
 
         let result = PyDict::new(py);
@@ -728,7 +726,7 @@ impl KnowledgeGraph {
     ///     to_df: If True, return a pandas DataFrame.
     ///
     /// Returns:
-    ///     Same format as ``vector_search()`` — list of dicts or DataFrame.
+    ///     Same format as ``vector()`` — list of dicts or DataFrame.
     #[pyo3(signature = (text_column, query, top_k=None, metric=None, to_df=None))]
     fn search_text(
         &self,

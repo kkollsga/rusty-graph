@@ -115,7 +115,7 @@ pub(crate) fn extract_fluent_param(
 /// Called just before Python conversion so that NodeRef (an internal
 /// representation used to preserve node identity through collect/WITH)
 /// is never exposed to Python.
-pub(crate) fn resolve_noderefs(graph: &schema::Graph, rows: &mut [Vec<Value>]) {
+pub(crate) fn resolve_noderefs(graph: &schema::GraphBackend, rows: &mut [Vec<Value>]) {
     for row in rows.iter_mut() {
         for val in row.iter_mut() {
             if let Value::NodeRef(idx) = val {
@@ -945,8 +945,8 @@ pub(crate) fn community_results_to_py(
 /// Dict form: `method={'type': 'distance', 'max_m': 5000, 'resolve': 'centroid'}`
 pub(crate) fn parse_method_param(
     val: &Bound<'_, PyAny>,
-) -> PyResult<crate::graph::core::traversal_methods::MethodConfig> {
-    use crate::graph::core::traversal_methods::MethodConfig;
+) -> PyResult<crate::graph::core::traversal::MethodConfig> {
+    use crate::graph::core::traversal::MethodConfig;
 
     // Try string first
     if let Ok(s) = val.extract::<String>() {
@@ -1036,13 +1036,13 @@ pub(crate) fn compare_inner(
     inner: &Arc<DirGraph>,
     selection: &mut CowSelection,
     target_type: Option<&str>,
-    config: &crate::graph::core::traversal_methods::MethodConfig,
+    config: &crate::graph::core::traversal::MethodConfig,
     conditions: Option<&HashMap<String, FilterCondition>>,
     sort_fields: Option<&Vec<(String, bool)>>,
     limit: Option<usize>,
     estimated: usize,
 ) -> PyResult<usize> {
-    crate::graph::core::traversal_methods::make_comparison_traversal(
+    crate::graph::core::traversal::make_comparison_traversal(
         inner,
         selection,
         target_type,

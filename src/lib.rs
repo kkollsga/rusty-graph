@@ -2,7 +2,7 @@
 use pyo3::prelude::*;
 mod datatypes;
 mod graph;
-use graph::io::io_operations::load_file;
+use graph::io::file::load_file;
 use graph::pyapi::result_view::{ResultIter, ResultView};
 use graph::{KnowledgeGraph, Transaction};
 

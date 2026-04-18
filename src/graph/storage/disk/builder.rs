@@ -5,7 +5,7 @@
 //! `disk_graph.rs` to keep the main file under the 2,500-line cap.
 
 use super::csr::{CsrEdge, EdgeEndpoints, MergeSortEntry, TOMBSTONE_EDGE};
-use super::disk_graph::DiskGraph;
+use super::graph::DiskGraph;
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use std::collections::HashMap;
 use std::path::Path;
@@ -1025,7 +1025,13 @@ impl DiskGraph {
             }
         }
 
-        endpoints.advise_dontneed();
+        // Note: no `advise_dontneed` here. `rebuild_caches` chains this
+        // with `compute_type_connectivity`, which also scans every edge
+        // endpoint; evicting the 13.8 GB (Wikidata scale) from page
+        // cache forced a second full cold read and cost +100 s on that
+        // pass. Leaving pages resident lets the following scan hit
+        // warm cache. Harmless at save-time finalization since nothing
+        // else touches edge_endpoints between here and the final flush.
 
         // Group by conn_type, sort peers within each group, flatten.
         let mut by_type: HashMap<u64, Vec<(u32, u32)>> = HashMap::new();

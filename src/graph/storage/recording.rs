@@ -75,21 +75,21 @@ impl<G: GraphRead> RecordingGraph<G> {
 
     /// Snapshot of the read log so far. Test-only audit hook.
     #[inline]
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn log(&self) -> Vec<&'static str> {
         self.log.lock().expect("recording log poisoned").clone()
     }
 
     /// Number of logged reads. Test-only audit hook.
     #[inline]
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn log_len(&self) -> usize {
         self.log.lock().expect("recording log poisoned").len()
     }
 
     /// Drain the log, returning the captured entries. Test-only audit hook.
     #[inline]
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn drain_log(&self) -> Vec<&'static str> {
         std::mem::take(&mut *self.log.lock().expect("recording log poisoned"))
     }
@@ -440,7 +440,7 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
 mod tests {
     use super::*;
     use crate::graph::schema::{EdgeData, GraphBackend, MappedGraph, MemoryGraph, StringInterner};
-    use crate::graph::storage::disk::disk_graph::DiskGraph;
+    use crate::graph::storage::disk::graph::DiskGraph;
     use std::collections::HashMap;
     use tempfile::TempDir;
 

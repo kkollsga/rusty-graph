@@ -14,13 +14,13 @@
 //! Phase 7's structural reorg.
 
 use crate::datatypes::Value;
-use crate::graph::core::graph_iterators::{
+use crate::graph::core::iterators::{
     GraphEdgeIndices, GraphEdgeReferences, GraphEdges, GraphEdgesConnecting, GraphNeighbors,
     GraphNodeIndices,
 };
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use crate::graph::storage::disk::csr::TOMBSTONE_EDGE;
-use crate::graph::storage::disk::disk_graph::DiskGraph;
+use crate::graph::storage::disk::graph::DiskGraph;
 use crate::graph::storage::{GraphRead, GraphWrite, MappedGraph, MemoryGraph};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::{EdgeRef, IntoEdgeReferences, NodeIndexable};

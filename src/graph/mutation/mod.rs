@@ -5,8 +5,8 @@
 //! everything that changes state, plus the maintenance helpers that
 //! keep storage caches coherent.
 
-pub mod batch_operations;
-pub mod maintain_graph;
-pub mod schema_validation;
-pub mod set_operations;
+pub mod batch;
+pub mod maintain;
+pub mod set_ops;
 pub mod subgraph;
+pub mod validation;

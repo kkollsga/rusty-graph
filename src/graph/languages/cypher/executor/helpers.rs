@@ -258,7 +258,7 @@ pub(super) fn predicate_to_string(pred: &Predicate) -> String {
     }
 }
 
-/// Evaluate a comparison using existing filtering_methods infrastructure
+/// Evaluate a comparison using existing filtering infrastructure
 pub(super) fn evaluate_comparison(
     left: &Value,
     op: &ComparisonOp,
@@ -269,25 +269,19 @@ pub(super) fn evaluate_comparison(
     // (except IS NULL / IS NOT NULL which are handled elsewhere, and
     // Equals/NotEquals which handle Null explicitly via values_equal).
     match op {
-        ComparisonOp::Equals => Ok(crate::graph::core::filtering_methods::values_equal(
-            left, right,
-        )),
-        ComparisonOp::NotEquals => Ok(!crate::graph::core::filtering_methods::values_equal(
-            left, right,
-        )),
+        ComparisonOp::Equals => Ok(crate::graph::core::filtering::values_equal(left, right)),
+        ComparisonOp::NotEquals => Ok(!crate::graph::core::filtering::values_equal(left, right)),
         _ if matches!(left, Value::Null) || matches!(right, Value::Null) => Ok(false),
-        ComparisonOp::LessThan => Ok(crate::graph::core::filtering_methods::compare_values(
-            left, right,
-        ) == Some(std::cmp::Ordering::Less)),
+        ComparisonOp::LessThan => Ok(crate::graph::core::filtering::compare_values(left, right)
+            == Some(std::cmp::Ordering::Less)),
         ComparisonOp::LessThanEq => Ok(matches!(
-            crate::graph::core::filtering_methods::compare_values(left, right),
+            crate::graph::core::filtering::compare_values(left, right),
             Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
         )),
-        ComparisonOp::GreaterThan => Ok(crate::graph::core::filtering_methods::compare_values(
-            left, right,
-        ) == Some(std::cmp::Ordering::Greater)),
+        ComparisonOp::GreaterThan => Ok(crate::graph::core::filtering::compare_values(left, right)
+            == Some(std::cmp::Ordering::Greater)),
         ComparisonOp::GreaterThanEq => Ok(matches!(
-            crate::graph::core::filtering_methods::compare_values(left, right),
+            crate::graph::core::filtering::compare_values(left, right),
             Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
         )),
         ComparisonOp::RegexMatch => match (left, right) {

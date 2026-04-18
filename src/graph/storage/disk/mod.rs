@@ -13,4 +13,4 @@ pub mod block_pool;
 pub mod builder;
 pub mod csr;
 #[allow(dead_code)]
-pub mod disk_graph;
+pub mod graph;

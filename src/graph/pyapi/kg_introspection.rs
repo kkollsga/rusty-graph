@@ -495,7 +495,7 @@ impl KnowledgeGraph {
 
             let graph = get_graph_mut(&mut self.inner);
 
-            crate::graph::mutation::maintain_graph::update_node_properties(
+            crate::graph::mutation::maintain::update_node_properties(
                 graph,
                 &nodes,
                 target_property,
@@ -647,10 +647,7 @@ impl KnowledgeGraph {
                 .temporal_edge_configs
                 .get(&connection_type)
                 .map(|configs| {
-                    crate::graph::core::traversal_methods::TemporalEdgeFilter::At(
-                        configs.clone(),
-                        date,
-                    )
+                    crate::graph::core::traversal::TemporalEdgeFilter::At(configs.clone(), date)
                 })
         } else if let Some((start_str, end_str)) = &during {
             let (start, _) = crate::graph::features::timeseries::parse_date_query(start_str)
@@ -661,7 +658,7 @@ impl KnowledgeGraph {
                 .temporal_edge_configs
                 .get(&connection_type)
                 .map(|configs| {
-                    crate::graph::core::traversal_methods::TemporalEdgeFilter::During(
+                    crate::graph::core::traversal::TemporalEdgeFilter::During(
                         configs.clone(),
                         start,
                         end,
@@ -677,7 +674,7 @@ impl KnowledgeGraph {
                     .get(&connection_type)
                     .map(|configs| {
                         let today = chrono::Local::now().date_naive();
-                        crate::graph::core::traversal_methods::TemporalEdgeFilter::At(
+                        crate::graph::core::traversal::TemporalEdgeFilter::At(
                             configs.clone(),
                             today,
                         )
@@ -687,17 +684,14 @@ impl KnowledgeGraph {
                     .temporal_edge_configs
                     .get(&connection_type)
                     .map(|configs| {
-                        crate::graph::core::traversal_methods::TemporalEdgeFilter::At(
-                            configs.clone(),
-                            *d,
-                        )
+                        crate::graph::core::traversal::TemporalEdgeFilter::At(configs.clone(), *d)
                     }),
                 TemporalContext::During(start, end) => self
                     .inner
                     .temporal_edge_configs
                     .get(&connection_type)
                     .map(|configs| {
-                        crate::graph::core::traversal_methods::TemporalEdgeFilter::During(
+                        crate::graph::core::traversal::TemporalEdgeFilter::During(
                             configs.clone(),
                             *start,
                             *end,
@@ -706,7 +700,7 @@ impl KnowledgeGraph {
             }
         };
 
-        crate::graph::core::traversal_methods::make_traversal(
+        crate::graph::core::traversal::make_traversal(
             &self.inner,
             &mut new_kg.selection,
             connection_type.clone(),
@@ -828,7 +822,7 @@ impl KnowledgeGraph {
 
         let graph = get_graph_mut(&mut self.inner);
 
-        let result = crate::graph::mutation::maintain_graph::create_connections(
+        let result = crate::graph::mutation::maintain::create_connections(
             graph,
             &self.selection,
             connection_type,
@@ -876,7 +870,7 @@ impl KnowledgeGraph {
         properties: &Bound<'_, PyDict>,
         keep_selection: Option<bool>,
     ) -> PyResult<Self> {
-        use crate::graph::mutation::maintain_graph::{
+        use crate::graph::mutation::maintain::{
             add_properties as core_add_properties, PropertySpec,
         };
 
@@ -962,7 +956,7 @@ impl KnowledgeGraph {
                 None => None,
             };
 
-            crate::graph::core::filtering_methods::filter_nodes(
+            crate::graph::core::filtering::filter_nodes(
                 &self.inner,
                 &mut filtered_kg.selection,
                 conditions,
@@ -973,7 +967,7 @@ impl KnowledgeGraph {
         } else if let Some(spec) = sort {
             let sort_fields = py_in::parse_sort_fields(spec, None)?;
 
-            crate::graph::core::filtering_methods::sort_nodes(
+            crate::graph::core::filtering::sort_nodes(
                 &self.inner,
                 &mut filtered_kg.selection,
                 sort_fields,
@@ -981,7 +975,7 @@ impl KnowledgeGraph {
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
             if let Some(max) = limit {
-                crate::graph::core::filtering_methods::limit_nodes_per_group(
+                crate::graph::core::filtering::limit_nodes_per_group(
                     &self.inner,
                     &mut filtered_kg.selection,
                     max,
@@ -989,7 +983,7 @@ impl KnowledgeGraph {
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
             }
         } else if let Some(max) = limit {
-            crate::graph::core::filtering_methods::limit_nodes_per_group(
+            crate::graph::core::filtering::limit_nodes_per_group(
                 &self.inner,
                 &mut filtered_kg.selection,
                 max,
@@ -998,7 +992,7 @@ impl KnowledgeGraph {
         }
 
         // Generate the property lists with titles already included
-        let property_groups = crate::graph::core::traversal_methods::get_children_properties(
+        let property_groups = crate::graph::core::traversal::get_children_properties(
             &filtered_kg.inner,
             &filtered_kg.selection,
             property_name,
@@ -1007,21 +1001,18 @@ impl KnowledgeGraph {
         // If store_as is not provided, return the properties as a dictionary
         if store_as.is_none() {
             // Format for dictionary display
-            let dict_pairs = crate::graph::core::traversal_methods::format_for_dictionary(
-                &property_groups,
-                max_length,
-            );
+            let dict_pairs =
+                crate::graph::core::traversal::format_for_dictionary(&property_groups, max_length);
 
             return Python::attach(|py| py_out::string_pairs_to_pydict(py, &dict_pairs));
         }
 
         // Format for storage
-        let nodes =
-            crate::graph::core::traversal_methods::format_for_storage(&property_groups, max_length);
+        let nodes = crate::graph::core::traversal::format_for_storage(&property_groups, max_length);
 
         let graph = get_graph_mut(&mut self.inner);
 
-        let result = crate::graph::mutation::maintain_graph::update_node_properties(
+        let result = crate::graph::mutation::maintain::update_node_properties(
             graph,
             &nodes,
             store_as.unwrap(),
@@ -1059,7 +1050,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         // group_by: compute statistics grouped by a property value
         if let Some(group_prop) = group_by {
-            let nodes = crate::graph::core::statistics_methods::collect_selected_nodes(
+            let nodes = crate::graph::core::statistics::collect_selected_nodes(
                 &self.selection,
                 level_index,
             );
@@ -1119,15 +1110,10 @@ impl KnowledgeGraph {
             });
         }
 
-        let pairs = crate::graph::core::statistics_methods::get_parent_child_pairs(
-            &self.selection,
-            level_index,
-        );
-        let stats = crate::graph::core::statistics_methods::calculate_property_stats(
-            &self.inner,
-            &pairs,
-            property,
-        );
+        let pairs =
+            crate::graph::core::statistics::get_parent_child_pairs(&self.selection, level_index);
+        let stats =
+            crate::graph::core::statistics::calculate_property_stats(&self.inner, &pairs, property);
         py_out::convert_stats_for_python(stats)
     }
 
@@ -1251,7 +1237,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         // group_by property: count nodes grouped by a property value
         if let Some(property) = group_by {
-            let nodes = crate::graph::core::statistics_methods::collect_selected_nodes(
+            let nodes = crate::graph::core::statistics::collect_selected_nodes(
                 &self.selection,
                 level_index,
             );

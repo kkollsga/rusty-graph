@@ -1,4 +1,4 @@
-// src/graph/schema_validation.rs
+// src/graph/validation.rs
 //! Schema validation module for validating graph data against a defined schema.
 
 use crate::datatypes::values::Value;
@@ -524,6 +524,7 @@ fn normalize_type_name(type_name: &str) -> &str {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 

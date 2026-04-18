@@ -1,4 +1,4 @@
-// src/graph/pymethods_timeseries.rs
+// src/graph/timeseries.rs
 //
 // PyO3 methods for timeseries operations on KnowledgeGraph.
 

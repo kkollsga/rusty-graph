@@ -105,13 +105,37 @@ pub fn load_ntriples(
             let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
                 std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
             });
-            // Clean up stale spill dirs from previous killed builds
+            // Clean up stale spill dirs from previous killed builds.
+            //
+            // Safe for concurrent runs: only delete directories whose
+            // contents haven't been modified in the last hour. A running
+            // build writes to its `properties.log.zst` continuously, so
+            // active spill dirs always look "fresh" and won't be touched.
+            // This matters because a parallel `load_ntriples` call (e.g.
+            // `api_benchmark.py` spawning multiple loaders, or a long
+            // Wikidata rebuild running alongside a small test) would
+            // otherwise wipe out the log file of the *other* run.
+            const STALE_AFTER_SECS: u64 = 3600; // 1 hour
             if let Some(parent) = spill_dir.parent() {
                 if let Ok(entries) = std::fs::read_dir(parent) {
+                    let now = std::time::SystemTime::now();
                     for entry in entries.flatten() {
                         let name = entry.file_name();
                         let name = name.to_string_lossy();
-                        if name.starts_with("kglite_build_") && entry.path() != spill_dir {
+                        if !name.starts_with("kglite_build_") {
+                            continue;
+                        }
+                        if entry.path() == spill_dir {
+                            continue;
+                        }
+                        let is_stale = entry
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|m| now.duration_since(m).ok())
+                            .map(|d| d.as_secs() > STALE_AFTER_SECS)
+                            .unwrap_or(false);
+                        if is_stale {
                             let _ = std::fs::remove_dir_all(entry.path());
                         }
                     }
@@ -847,7 +871,7 @@ pub fn load_ntriples(
 
             // Save DirGraph metadata
             let save_step = Instant::now();
-            let meta = crate::graph::io::io_operations::build_disk_metadata(graph);
+            let meta = crate::graph::io::file::build_disk_metadata(graph);
             if let Ok(json) = serde_json::to_string_pretty(&meta) {
                 let _ = std::fs::write(data_dir.join("metadata.json"), json);
             }
@@ -970,15 +994,15 @@ pub struct ColumnTypeMeta {
 }
 
 impl RegionMeta {
-    fn from_region(r: &crate::graph::storage::mapped::mmap_column_store::Region) -> Self {
+    fn from_region(r: &crate::graph::storage::mapped::column_store::Region) -> Self {
         RegionMeta {
             offset: r.offset,
             len: r.len,
         }
     }
 
-    fn to_region(self) -> crate::graph::storage::mapped::mmap_column_store::Region {
-        crate::graph::storage::mapped::mmap_column_store::Region {
+    fn to_region(self) -> crate::graph::storage::mapped::column_store::Region {
+        crate::graph::storage::mapped::column_store::Region {
             offset: self.offset,
             len: self.len,
         }
@@ -990,8 +1014,8 @@ impl ColumnTypeMeta {
     pub fn to_mmap_store(
         &self,
         mmap: Arc<memmap2::MmapMut>,
-    ) -> crate::graph::storage::mapped::mmap_column_store::MmapColumnStore {
-        use crate::graph::storage::mapped::mmap_column_store::{
+    ) -> crate::graph::storage::mapped::column_store::MmapColumnStore {
+        use crate::graph::storage::mapped::column_store::{
             ColRef, FixedColumnMeta, MmapColumnStore, StrColumnMeta,
         };
 
@@ -1073,7 +1097,7 @@ fn build_columns_direct(
     type_rename_map: &HashMap<String, String>,
     verbose: bool,
 ) -> std::io::Result<()> {
-    use crate::graph::storage::mapped::mmap_column_store::{
+    use crate::graph::storage::mapped::column_store::{
         ColRef, FixedColumnMeta, MmapColumnStore, Region, StrColumnMeta,
     };
     use crate::graph::storage::memory::column_store::ColumnStore;
@@ -2324,6 +2348,7 @@ fn format_count(n: u64) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::super::parser::{XSD_BOOLEAN, XSD_DECIMAL, XSD_DOUBLE};
     use super::*;

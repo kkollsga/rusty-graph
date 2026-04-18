@@ -191,14 +191,3 @@ src/graph/
 5. **In-memory performance is sacred.** If an optimisation helps mapped or disk at the cost of memory, find a mode-specific way. Never regress the core product.
 6. **No god files.** Soft cap 1500 lines per `.rs`; hard cap 2500 (enforced in Phase 7). `mod.rs` files are re-exports + module docs only — no `impl` blocks, no functions > 20 lines.
 
-## Open questions tracked in `dev-documentation/todo.md`
-
-- Does `Value::String` become `Cow<'static, str>` / `Arc<str>`?
-  → Deferred to post-0.8.0; touches every value-creation site.
-- Does `Transaction` become a trait?
-  → Decided in Phase 2: **no** — transactions stay on `DirGraph` (see
-    "Transactions stay on DirGraph" above).
-- When does `languages/fluent/` get a Rust-side implementation?
-  → When a second peer language appears, or when a non-Python fluent
-    caller materialises. Today `kg_fluent.rs` in `pyapi/` is the single
-    implementation site.

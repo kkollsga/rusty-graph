@@ -7,50 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Performance
+## [0.8.0] — 2026-04-18
 
-- **Cypher query primitives faster across the board vs v0.7.17** (N=20 trials,
-  macOS dev box, measured end of Phase 11). Memory and mapped modes both win:
-  - `pattern_match` at 10k nodes: −60 %
-  - `two_hop_10x`: −24 %
-  - `describe()`: −21 % (memory), −24 % (mapped)
-  - `pagerank`: −17 %
-  - `find_20x`: −13 % (mapped)
-  - Construction sweep (1k / 10k / 50k nodes): −11 % to −22 %
-  - No memory-mode query regressed above the +5 % gate; only four cells
-    flagged under 5 % (`find_20x_memory` +4.7 %, `simple_filter` /
-    `multi_predicate` minor noise)
-  - Measured on macOS dev box, N=20 trials per cell. Full delta tables
-    + methodology live in `dev-documentation/` (gitignored —
-    repo-checkout only).
-
-### Changed (internal, not user-visible)
-
-- **Every `.rs` under `src/graph/` is now at or under the 2,500-line
-  hard cap.** Phase 9 split 9 god files (12,144-line `executor.rs`
-  down through the 2,610-line `pattern_matching.rs`) into themed
-  submodules. `GOD_FILE_EXCEPTIONS` is empty; `test_god_file_gate`
-  passes unconditionally.
-- **Testing envelope hardened (Phase 10).** New parity tests cover
-  zero-node / single-edge / 1 000-hop / Unicode / type-promotion /
-  null-NaN / 100 000-row cypher results across memory / mapped / disk
-  (`tests/test_edge_cases_parity.py`). Golden-fixture regression suite
-  (`tests/test_golden.py` + `tests/golden/`) pins byte-exact output
-  for a deterministic 1 000-node / 3 000-edge graph across every
-  storage mode. New `@pytest.mark.stress` tier for the 30 GB mapped
-  bench and 10 k-hop traversal.
-- No Python-facing behaviour change. `kglite/__init__.pyi` signatures
-  are byte-identical to v0.7.17; the `find()` docstring gains a
-  code-entity-search clarification but the signature is unchanged.
-
-## [0.8.0] — internal-only storage-architecture refactor
-
-**No Python API signature changes.** `kglite/__init__.pyi` is
-byte-identical to v0.7.17. Users upgrading from 0.7.x will see no
-behavioural differences other than the three disk-mode bug fixes and
-the determinism improvements noted below.
+Internal-only storage-architecture refactor plus a handful of disk-mode
+bug fixes and large performance wins. **No Python API signature changes.**
+`kglite/__init__.pyi` signatures are byte-identical to v0.7.17 (`git diff
+v0.7.17 HEAD -- kglite/__init__.pyi` contains only docstring additions).
+Users upgrading from 0.7.x will see no behavioural differences other
+than the fixes and performance gains listed below.
 
 ### Fixed
+
+- **Concurrent `load_ntriples` calls no longer wipe each other's spill
+  directories.** The previous cleanup logic deleted *all other*
+  `kglite_build_*` directories in `/tmp` at every ingest start. Two
+  `load_ntriples` calls running at the same time (e.g. a long Wikidata
+  build and a small test suite) would kill each other's property-log
+  files, causing the in-flight build to crash at Phase 1b with `No
+  such file or directory`. The cleanup now only removes spill dirs
+  whose contents haven't been modified in the last hour, so active
+  builds are always safe.
+- **`save()` on Wikidata-scale disk graphs no longer appears to hang.**
+  On large disk graphs (e.g. 124 M nodes / 88 K types from N-Triples
+  ingest), `save()` was iterating `self.column_stores` and writing
+  each type's columnar data as a separate `columns/<type>/columns.zst`
+  zstd file — a multi-hour serial loop, redundant because the v3
+  single-file `columns.bin` (written during Phase 1b of the N-Triples
+  builder) already contains everything the loader needs. `save_disk`
+  now skips the per-type loop when `columns.bin` exists on disk, and
+  reduces to the metadata flush it was always meant to be.
+  **Measured on Wikidata (124 230 686 nodes, 862 810 243 edges,
+  88 931 types): `save()` went from ≥ 60 min → 5.52 s.** In-memory
+  graphs persisted to disk still write the per-type files as before
+  (that path never produces `columns.bin`).
 - **Disk-mode `add_nodes(conflict_handling="update")` now applies
   property updates.** Previously on disk graphs, re-inserting an
   existing node via `add_nodes(..., conflict_handling="update")`
@@ -74,7 +63,43 @@ the determinism improvements noted below.
   (`add_connections`, ntriples) still use the pending+rebuild path via
   `build_csr_from_pending`.
 
+### Performance
+
+- **Cypher query primitives faster across the board vs v0.7.17** (N=20
+  trials, macOS dev box). Memory and mapped modes both win:
+  - `pattern_match` at 10 k nodes: −60 %
+  - `two_hop_10x`: −24 %
+  - `describe()`: −21 % (memory), −24 % (mapped)
+  - `pagerank`: −17 %
+  - `find_20x`: −13 % (mapped)
+  - Construction sweep (1 k / 10 k / 50 k nodes): −11 % to −22 %
+  - No memory-mode query regressed above the +5 % gate; only four cells
+    flagged under 5 % (`find_20x_memory` +4.7 %, `simple_filter` /
+    `multi_predicate` minor noise).
+- **N-Triples disk-graph build is 2.5 % faster on Wikidata.** Added
+  `#[inline(always)]` on the hot `GraphBackend` → `GraphRead`/`GraphWrite`
+  trampolines (`node_type_of`, `edge_endpoint_keys`, `edge_endpoints`,
+  `node_weight`) and a new closure-based
+  `GraphBackend::for_each_edge_endpoint_key` that bypasses the
+  boxed-iterator virtual-dispatch on hot edge iteration. Phase 1b
+  (columnar write) −86 s, Phase 2 (edge creation) −32 s, Phase 3
+  (CSR build) −55 s on a 7.65 B-triple / 862.8 M-edge build. Total
+  `load_ntriples`: 4747 s → 4627 s.
+- **`rebuild_caches()` is 28 % faster on large disk graphs.** Two
+  fixes: (a) `compute_type_connectivity` is now Rayon-parallel on the
+  disk backend — shards the edge range across all cores and merges
+  per-shard HashMaps serially, matching `build_peer_count_histogram`'s
+  pattern; (b) removed a `madvise(DONT_NEED)` call at the end of
+  `build_peer_count_histogram` that was evicting the 13.8 GB
+  `edge_endpoints` from page cache right before
+  `compute_type_connectivity` had to re-read it. Also reordered
+  `rebuild_caches` to run `compute_type_connectivity` first so its
+  sequential sweep warms the cache for the histogram builder. Measured
+  on Wikidata (862.8 M edges): 235 s → 169 s. Memory and mapped modes
+  unaffected (serial path retained).
+
 ### Changed
+
 - **Deterministic `.kgl` v3 saves.** `save()` now produces byte-identical
   output for identical graphs regardless of per-process HashMap
   randomisation. `write_graph_v3` iterates `column_stores` in sorted
@@ -87,14 +112,24 @@ the determinism improvements noted below.
   (HashMap<String, String>) now emit in lexicographic order, hardening
   the v3 golden-hash invariant for fixtures richer than single-element
   sets. Existing `.kgl` files load unchanged.
-- **Internal reorganization — `src/graph/` split into 8 domain
+
+### Changed (internal, not user-visible)
+
+- **Internal reorganization — `src/graph/` split into domain
   subdirectories.** Code previously flat in `src/graph/` now lives
-  under `algorithms/`, `cypher/`, `features/`, `introspection/`,
-  `io/`, `mutation/`, `pyapi/`, `query/`, and `storage/`. `storage/`
-  further splits into `memory/`, `mapped/`, and `disk/` per-backend
-  folders. Pure file moves via `git mv` (rename similarity 97–100%;
-  git blame preserved). No Python-facing behaviour change. See
-  `ARCHITECTURE.md` for the final target layout.
+  under `algorithms/`, `languages/cypher/`, `features/`,
+  `introspection/`, `io/`, `mutation/`, `pyapi/`, `core/` (shared
+  primitives, was `query/`), and `storage/`. `storage/` further splits
+  into `memory/`, `mapped/`, and `disk/` per-backend folders. Pure
+  file moves via `git mv` (rename similarity 97–100 %; git blame
+  preserved). Filenames cleaned of redundant prefixes / suffixes
+  (`pymethods_*` → `*`, `filtering_methods` → `filtering`, etc.). See
+  `ARCHITECTURE.md` for the final layout.
+- **Every `.rs` under `src/graph/` is now at or under the 2,500-line
+  hard cap.** The Phase 9 split carved nine god files (12,144-line
+  `executor.rs` down through the 2,610-line `pattern_matching.rs`)
+  into themed submodules. `GOD_FILE_EXCEPTIONS` is empty;
+  `test_god_file_gate` passes unconditionally.
 - **`MappedGraph` promoted to a distinct struct** (was a type alias
   for `MemoryGraph` pre-Phase 5). Per-backend `impl GraphRead` /
   `impl GraphWrite` land in `src/graph/storage/impls.rs`, setting up
@@ -104,17 +139,30 @@ the determinism improvements noted below.
   Used internally to prove the architecture is actually open/closed —
   adding a new backend is a 3-src-file change. Not exposed to Python.
   See `docs/adding-a-storage-backend.md` for the worked example.
+- **Testing envelope hardened.** New parity tests cover zero-node /
+  single-edge / 1 000-hop / Unicode / type-promotion / null-NaN /
+  100 000-row cypher results across memory / mapped / disk
+  (`tests/test_edge_cases_parity.py`). Golden-fixture regression suite
+  (`tests/test_golden.py` + `tests/golden/`) pins byte-exact output
+  for a deterministic 1 000-node / 3 000-edge graph across every
+  storage mode. New `@pytest.mark.stress` tier for the 30 GB mapped
+  bench and 10 k-hop traversal.
 - **Unsafe-block hygiene.** All 40 `unsafe { ... }` blocks in `src/`
-  now carry `// SAFETY:` justifications (Phase 7 added 29 on top of
-  the 11 that pre-existed). A module-level invariants block at the
-  top of `src/graph/storage/mapped/mmap_vec.rs` documents the shared
-  mmap safety contract.
+  carry `// SAFETY:` justifications. A module-level invariants block
+  at the top of `src/graph/storage/mapped/mmap_vec.rs` documents the
+  shared mmap safety contract.
+- **Python API docstring clarification.** The `find()` docstring now
+  warns that it searches only code-entity node types (`Function`,
+  `Struct`, `Class`, `Enum`, `Trait`, `Protocol`, `Interface`,
+  `Module`, `Constant`). The signature is unchanged.
 - **Deprecated `TempDir::into_path()` calls** migrated to
   `TempDir::keep()` per tempfile 3.14+ API.
-
-### Known issues carried from 0.7.x
-
-- Loading a 0.8.0 `.kgl` file in a 0.7.17 process will fail. The on-disk format is byte-compatible in the v3-accepting direction (old files load in 0.8.0), but the canonicalised output produced by 0.8.0 saves is stricter than what 0.7.17 emitted, and columns may appear in a different order. Save once with 0.8.0 and the file is forward-stable.
+- **`pub type Graph = GraphBackend` alias dropped.** Every call site
+  uses `GraphBackend` directly. Removes a hygiene wart flagged in the
+  Phase 9 report-out.
+- **RecordingGraph audit methods (`log`, `log_len`, `drain_log`) are
+  now `#[cfg(test)]` rather than `#[allow(dead_code)]`.** Release
+  builds no longer compile these helpers at all.
 
 ## [0.7.17] — 2026-04-17
 

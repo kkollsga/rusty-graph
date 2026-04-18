@@ -7,4 +7,4 @@
 
 pub mod clustering;
 pub mod graph_algorithms;
-pub mod vector_search;
+pub mod vector;

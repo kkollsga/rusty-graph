@@ -7,10 +7,10 @@
 
 pub mod calculations;
 pub mod data_retrieval;
-pub mod filtering_methods;
+pub mod filtering;
 #[allow(dead_code)]
-pub mod graph_iterators;
+pub mod iterators;
 pub mod pattern_matching;
-pub mod statistics_methods;
-pub mod traversal_methods;
+pub mod statistics;
+pub mod traversal;
 pub mod value_operations;

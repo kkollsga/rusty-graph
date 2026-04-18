@@ -159,25 +159,11 @@ fn mark_skip_target_type_check(query: &mut CypherQuery, graph: &DirGraph) {
     }
 }
 
-/// Fuse MATCH + RETURN into O(1)/O(types) count short-circuits.
-///
-/// Detects three patterns and replaces them with specialized fused clauses:
-/// - `MATCH (n) RETURN count(n)` → `FusedCountAll` (O(1))
-/// - `MATCH (n) RETURN n.type, count(n)` → `FusedCountByType` (O(types))
-/// - `MATCH ()-[r]->() RETURN type(r), count(*)` → `FusedCountEdgesByType` (O(E) single pass)
-///
-/// Any trailing ORDER BY / LIMIT clauses are left in place since they
-/// operate on the tiny fused result set.
-/// Fuse `MATCH (var)-[r:TYPE?]->({id: V}) RETURN count(var)` (and the three
-/// symmetric variants) into `FusedCountAnchoredEdges` — O(log D) offset
-/// arithmetic on the anchored node's CSR range. When `has_tombstones` is
-/// false the executor takes a pure subtraction; otherwise it still walks the
-/// narrowed range.
-///
-/// Conservative: if the anchor's `{id: V}` literal doesn't resolve to any
-/// known node (e.g. typo, or a value from a different graph), skip fusion and
-/// let the normal executor return 0 via the usual path. That preserves
-/// Cypher semantics.
+// Historical note: the fusion docstrings for `FusedCountAll`,
+// `FusedCountByType`, `FusedCountEdgesByType`, and
+// `FusedCountAnchoredEdges` moved to their respective fuse functions in
+// `src/graph/languages/cypher/planner/fusion.rs` during the Phase 9
+// split. See those functions for the current prose.
 
 // ============================================================================
 // Tests
