@@ -221,4 +221,4 @@ layer. Both require design revisions.
 - `src/graph/storage/impls.rs` — the three production backends' trait impls (Memory / Mapped / Disk).
 - `src/graph/storage/backend.rs` — the 4-arm `GraphBackend` dispatcher.
 - `ARCHITECTURE.md` — diagrams + rules for new storage code.
-- `todo.md` Phase 6 Report-out — lessons learned from RecordingGraph's implementation.
+- `dev-documentation/todo.md` Phase 6 Report-out (gitignored, repo-checkout only) — lessons learned from RecordingGraph's implementation.

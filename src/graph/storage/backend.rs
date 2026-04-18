@@ -74,6 +74,58 @@ impl GraphBackend {
             GraphBackend::Recording(rg) => rg.inner().as_stable_digraph(),
         }
     }
+
+    /// Closure-based hot-path iteration over all live edges, yielding
+    /// `(source, target, connection_type)` per edge.
+    ///
+    /// Avoids the `Box<dyn Iterator>` + virtual `.next()` dispatch that
+    /// [`GraphRead::edge_endpoint_keys`] requires. Monomorphises per
+    /// backend at the call site, so the compiler fully inlines the hot
+    /// loop. Use this from any code path that walks every edge on a
+    /// large graph (e.g. `compute_type_connectivity`, cache rebuild,
+    /// bulk index builds). 863M-edge benchmarks show ~40–90 s savings
+    /// per sweep vs the boxed-iterator path on Wikidata-scale graphs.
+    ///
+    /// The `Recording` variant forwards to its wrapped backend without
+    /// recording — it logs only the trait-path methods.
+    #[inline(always)]
+    pub fn for_each_edge_endpoint_key<F>(&self, mut f: F)
+    where
+        F: FnMut(NodeIndex, NodeIndex, InternedKey),
+    {
+        use petgraph::visit::{EdgeRef, IntoEdgeReferences};
+        match self {
+            GraphBackend::Memory(g) => {
+                for er in g.inner().edge_references() {
+                    let w = er.weight();
+                    f(er.source(), er.target(), w.connection_type);
+                }
+            }
+            GraphBackend::Mapped(g) => {
+                for er in g.inner().edge_references() {
+                    let w = er.weight();
+                    f(er.source(), er.target(), w.connection_type);
+                }
+            }
+            GraphBackend::Disk(g) => {
+                let dg = g.as_ref();
+                for i in 0..dg.next_edge_idx {
+                    let ep = dg.edge_endpoints.get(i as usize);
+                    if ep.source == crate::graph::storage::disk::csr::TOMBSTONE_EDGE {
+                        continue;
+                    }
+                    f(
+                        NodeIndex::new(ep.source as usize),
+                        NodeIndex::new(ep.target as usize),
+                        InternedKey::from_u64(ep.connection_type),
+                    );
+                }
+            }
+            GraphBackend::Recording(rg) => {
+                rg.inner().for_each_edge_endpoint_key(f);
+            }
+        }
+    }
 }
 
 // -- Index traits --
@@ -246,7 +298,7 @@ impl GraphRead for GraphBackend {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey> {
         match self {
             Self::Memory(g) => GraphRead::node_type_of(g, idx),
@@ -256,7 +308,7 @@ impl GraphRead for GraphBackend {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
         match self {
             Self::Memory(g) => GraphRead::node_weight(g, idx),
@@ -423,7 +475,7 @@ impl GraphRead for GraphBackend {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn edge_endpoints(&self, idx: EdgeIndex) -> Option<(NodeIndex, NodeIndex)> {
         match self {
             Self::Memory(g) => GraphRead::edge_endpoints(g, idx),
@@ -433,7 +485,7 @@ impl GraphRead for GraphBackend {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn edge_endpoint_keys<'a>(
         &'a self,
     ) -> Box<dyn Iterator<Item = (NodeIndex, NodeIndex, InternedKey)> + 'a> {

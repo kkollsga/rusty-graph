@@ -20,8 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - No memory-mode query regressed above the +5 % gate; only four cells
     flagged under 5 % (`find_20x_memory` +4.7 %, `simple_filter` /
     `multi_predicate` minor noise)
-  - Full delta table: `tests/benchmarks/phase11_delta.md`; see
-    `AUDIT_0.8.0.md § 3` for the matrix.
+  - Measured on macOS dev box, N=20 trials per cell. Full delta tables
+    + methodology live in `dev-documentation/` (gitignored —
+    repo-checkout only).
 
 ### Changed (internal, not user-visible)
 

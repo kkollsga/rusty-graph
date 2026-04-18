@@ -14,19 +14,24 @@ use super::{NeighborConnection, NeighborsSchema};
 /// Uses InternedKey-based aggregation (no string allocation during scan)
 /// and sequential iteration for cache-friendly I/O on disk graphs.
 /// Resolves keys to strings only at the end.
+///
+/// **Hot path (861M+ edges on Wikidata).** Goes through the closure-based
+/// [`crate::graph::schema::GraphBackend::for_each_edge_endpoint_key`] rather
+/// than the boxed-iterator [`GraphRead::edge_endpoint_keys`] to avoid 863M
+/// virtual `.next()` calls. `node_type_of` stays on the boxed enum method
+/// because rustc's static-dispatch inlines it cleanly on a `&GraphBackend`.
 pub fn compute_type_connectivity(graph: &DirGraph) -> Vec<ConnectivityTriple> {
     // Aggregate with InternedKey tuples — no string allocation per edge.
-    // Uses edge_endpoint_keys() which reads mmap'd data directly on disk graphs
-    // (zero heap allocation, no EdgeData materialization).
     let mut counts: HashMap<(InternedKey, InternedKey, InternedKey), usize> = HashMap::new();
+    let backend = &graph.graph;
 
-    for (src_idx, tgt_idx, conn_key) in graph.graph.edge_endpoint_keys() {
-        let src_key = graph.graph.node_type_of(src_idx);
-        let tgt_key = graph.graph.node_type_of(tgt_idx);
+    backend.for_each_edge_endpoint_key(|src_idx, tgt_idx, conn_key| {
+        let src_key = backend.node_type_of(src_idx);
+        let tgt_key = backend.node_type_of(tgt_idx);
         if let (Some(sk), Some(tk)) = (src_key, tgt_key) {
             *counts.entry((sk, conn_key, tk)).or_insert(0) += 1;
         }
-    }
+    });
 
     // Resolve to strings once at the end
     let mut triples: Vec<ConnectivityTriple> = counts

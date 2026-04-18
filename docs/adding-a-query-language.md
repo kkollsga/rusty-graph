@@ -238,5 +238,6 @@ A new language should mirror this layout:
 - `src/graph/pyapi/kg_core.rs` — where `cypher` is exposed to Python.
 - `ARCHITECTURE.md` — the big picture, including the `languages/` vs
   `core/` vs `storage/` layering rules.
-- `todo.md` Phase 8 + Phase 9 Report-outs — the decisions behind the
-  `languages/` umbrella and the executor's clause-per-file split.
+- `dev-documentation/todo.md` Phase 8 + Phase 9 Report-outs (gitignored,
+  repo-checkout only) — the decisions behind the `languages/` umbrella
+  and the executor's clause-per-file split.

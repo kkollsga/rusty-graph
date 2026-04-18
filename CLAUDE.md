@@ -46,7 +46,8 @@ Before starting any performance-related code changes:
 ## Storage-backend work (0.8.0 refactor)
 
 Live architecture doc: `ARCHITECTURE.md` at repo root. Full refactor
-plan: `todo.md` at repo root.
+plan + per-phase report-outs + findings: `dev-documentation/` (gitignored
+— repo-checkout only).
 
 - **Reads go on `GraphRead`, mutations on `GraphWrite: GraphRead`.** Add new storage ops to the trait first, not as inherent `GraphBackend` methods. Both traits live in `src/graph/storage/mod.rs`.
 - **Transactions stay on `DirGraph`.** OCC `version`, `read_only`, `schema_locked`, and validation helpers are not trait surface — see ARCHITECTURE.md.

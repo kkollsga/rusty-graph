@@ -1,6 +1,6 @@
 //! Storage-backend types and `GraphRead` / `GraphWrite` traits.
 //!
-//! Anchor for the 0.8.0 storage-architecture refactor (see `todo.md`).
+//! Anchor for the 0.8.0 storage-architecture refactor.
 //! Every backend implements [`GraphRead`] / [`GraphWrite`] directly;
 //! the [`crate::graph::schema::GraphBackend`] enum is a dumb dispatcher.
 //! Per-backend trait impls live in [`crate::graph::storage::impls`].
@@ -319,7 +319,7 @@ pub trait GraphRead {
 
 /// Write-side interface shared by every storage backend.
 ///
-/// Phase 2 of the 0.8.0 refactor (see `todo.md`). Pulls together the
+/// Phase 2 of the 0.8.0 refactor. Pulls together the
 /// mutation methods that were inherent on
 /// [`crate::graph::schema::GraphBackend`] so write-path files can
 /// dispatch through the trait instead of matching on the backend

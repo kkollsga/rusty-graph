@@ -1,8 +1,9 @@
 # KGLite — architecture (as of end of Phase 11 of the 0.8.0 refactor)
 
 This document is the living spec for how storage is layered in kglite.
-It's updated as each phase of the 0.8.0 refactor lands. See `todo.md`
-for the full plan.
+It's updated as each phase of the 0.8.0 refactor lands. See
+`dev-documentation/todo.md` (gitignored — repo-checkout only) for the
+full plan and phase report-outs.
 
 The source tree under `src/graph/` has three layering rules: (a) every
 `#[pymethods] impl` block lives under `src/graph/pyapi/`, (b) query
@@ -190,7 +191,7 @@ src/graph/
 5. **In-memory performance is sacred.** If an optimisation helps mapped or disk at the cost of memory, find a mode-specific way. Never regress the core product.
 6. **No god files.** Soft cap 1500 lines per `.rs`; hard cap 2500 (enforced in Phase 7). `mod.rs` files are re-exports + module docs only — no `impl` blocks, no functions > 20 lines.
 
-## Open questions tracked in `todo.md`
+## Open questions tracked in `dev-documentation/todo.md`
 
 - Does `Value::String` become `Cow<'static, str>` / `Arc<str>`?
   → Deferred to post-0.8.0; touches every value-creation site.

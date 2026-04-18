@@ -6,7 +6,7 @@
 //! method name to an interior-mutable `log`. It exists to prove the
 //! trait surface is complete enough that a 4th backend drops in
 //! without touching the hot paths — the "open/closed" demonstration
-//! called out in `todo.md` Phase 6.
+//! called out in the Phase 6 report-out.
 //!
 //! Scope is Rust-only: no Python constructor reaches [`RecordingGraph`].
 //! The in-source `#[cfg(test)] mod tests` module below exercises the

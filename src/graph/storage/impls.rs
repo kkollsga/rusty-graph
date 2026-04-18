@@ -176,7 +176,7 @@ macro_rules! impl_heap_graph_read {
                 self.inner().edge_endpoints(idx)
             }
 
-            #[inline]
+            #[inline(always)]
             fn edge_endpoint_keys<'a>(
                 &'a self,
             ) -> Box<dyn Iterator<Item = (NodeIndex, NodeIndex, InternedKey)> + 'a> {
@@ -362,7 +362,7 @@ impl GraphRead for DiskGraph {
         true
     }
 
-    #[inline]
+    #[inline(always)]
     fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey> {
         DiskGraph::node_type_of(self, idx)
     }
@@ -459,7 +459,7 @@ impl GraphRead for DiskGraph {
         self.edge_endpoints_fn(idx)
     }
 
-    #[inline]
+    #[inline(always)]
     fn edge_endpoint_keys<'a>(
         &'a self,
     ) -> Box<dyn Iterator<Item = (NodeIndex, NodeIndex, InternedKey)> + 'a> {

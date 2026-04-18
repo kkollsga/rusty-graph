@@ -277,7 +277,7 @@ def test_collect_then_delete_snapshot(tmp_path):
 
     KGLite is single-threaded from Python (GIL), so this is the
     observable equivalent of the 'concurrent mutation + read' crunch
-    point in todo.md.
+    point from the Phase 2 plan.
     """
     snapshots: dict[str, tuple] = {}
 
