@@ -69,8 +69,12 @@ pub struct DiskGraph {
     /// Flushed to edge_properties on next clear_arenas call.
     edge_mut_cache: HashMap<u32, EdgeData>,
 
-    // ── Pending edges (UnsafeCell for auto-CSR-build from &self queries) ──
+    // ── Pending edges (UnsafeCell reserved for a planned &self CSR-build path) ──
     // File-backed (MmapOrVec) to avoid ~14 GB heap allocation at Wikidata scale.
+    // Today every access goes through `get_mut()` in `&mut self` methods
+    // (add_edge with defer_csr, build_csr_from_pending, compact) — see the
+    // struct-level SAFETY block for the full accounting of interior-mutability
+    // fields.
     pub(crate) pending_edges: UnsafeCell<MmapOrVec<(u32, u32, u64)>>,
 
     // ── Mutation overflow (for incremental edges after CSR) ──
@@ -118,9 +122,39 @@ pub struct DiskGraph {
 
 use std::sync::Arc;
 
-// SAFETY: DiskGraph uses UnsafeCell for node_arena (single-threaded materialization)
-// and Mutex<Vec<Box<EdgeData>>> for edge_arena (thread-safe for Rayon parallel queries).
-// Pending edges use UnsafeCell but are only accessed during CSR build (&mut self).
+// SAFETY — DiskGraph interior-mutability model:
+//
+// Three arena-like fields have different thread-safety postures:
+//
+// 1. `node_arena: UnsafeCell<Vec<NodeData>>` — accessed via `&self` from
+//    `node_weight`, mutated via `&mut self` from `clear_arenas` and via
+//    `&self` from `reset_arenas` (the sole non-`&mut self` reset path,
+//    which requires no live references from prior materializations). The
+//    invariant is KGLite's single-threaded-query contract: the graph is
+//    accessed behind a Python-level Mutex / GIL, so concurrent `&self`
+//    calls never reach this code. Rayon is used for CSR builds in
+//    `disk/builder.rs`, but those sites are `&mut self` and do not touch
+//    `node_arena`. Query-time Rayon (in `cypher/executor/…`) parallelises
+//    row evaluation *after* materialization, so node_weight is not called
+//    concurrently from Rayon tasks. Because the arena's `Vec` is not
+//    Box-wrapped, a `push` that triggers realloc invalidates references
+//    handed out by prior `node_weight` calls — relying on the same
+//    single-threaded contract that says only one materialization path is
+//    live at a time.
+//
+// 2. `edge_arena: Mutex<Vec<Box<EdgeData>>>` — thread-safe for Rayon
+//    parallel queries. `Box` gives stable heap pointers that survive Vec
+//    reallocation (see field doc at line 67). Contrast with `node_arena`,
+//    which does not need this because query-time parallelism does not
+//    call node_weight. If `node_weight` ever becomes Rayon-reachable,
+//    this field is the pattern to follow.
+//
+// 3. `pending_edges: UnsafeCell<MmapOrVec<…>>` — only accessed via
+//    `get_mut()` in `&mut self` contexts (`add_edge` with `defer_csr`,
+//    `build_csr_from_pending`, `compact`). `UnsafeCell` is retained here
+//    for a planned future auto-CSR-build-from-`&self` path; today no
+//    `&self` access exists, so the current soundness argument is just
+//    Rust's standard borrow checker.
 unsafe impl Send for DiskGraph {}
 unsafe impl Sync for DiskGraph {}
 
@@ -469,10 +503,13 @@ impl DiskGraph {
             return None;
         }
 
-        // SAFETY: `node_arena` is UnsafeCell<Vec<NodeData>>; it is only
-        // accessed from this `&self` path and `reset_arenas` (`&mut self`).
-        // We rely on the KGLite single-threaded contract (the graph is
-        // accessed behind a Python-level Mutex / GIL) to serialise reads.
+        // SAFETY: `node_arena` is UnsafeCell<Vec<NodeData>>. Accessed from
+        // this `&self` path, `clear_arenas` (`&mut self`), and `reset_arenas`
+        // (`&self`, requires no live materialization refs). Under KGLite's
+        // single-threaded-query contract (graph behind Python Mutex/GIL,
+        // query-time Rayon does not call `node_weight`), only one path is
+        // live at a time. See the struct-level SAFETY block for the full
+        // argument.
         let arena = unsafe { &mut *self.node_arena.get() };
         let pos = arena.len();
 
@@ -500,8 +537,17 @@ impl DiskGraph {
             }
         };
 
+        // Rationale: the arena is append-only during `&self` borrows (only
+        // `clear_arenas` / `reset_arenas` shrink it, both with exclusive
+        // access — `&mut self` or the no-live-refs reset contract). Under
+        // the single-threaded-query contract (see struct-level SAFETY
+        // block above), the `push` just above is not racing with other
+        // borrows. Caveat: a subsequent `node_weight` call that triggers
+        // Vec realloc invalidates any prior returned reference — callers
+        // must consume each returned `&NodeData` before the next
+        // materialization, or copy out.
         arena.push(node_data);
-        // SAFETY: arena is append-only during &self borrows.
+        // SAFETY: see rationale directly above and struct-level block.
         unsafe { Some(&*(arena.get_unchecked(pos) as *const NodeData)) }
     }
 
