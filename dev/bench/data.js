@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776515465738,
+  "lastUpdate": 1776557382540,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -7606,6 +7606,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.0000173514840139938",
             "extra": "mean: 1.1450661939389564 msec\nrounds: 825"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "35cec09091b6db319c0df3639be00fa3ce7be059",
+          "message": "feat: port code_tree to Rust (0.8.0 → 0.8.1)\n\nRewrite the polyglot codebase parser (previously ~7,500 LOC of Python\nunder kglite/code_tree/) as a first-class Rust module at src/code_tree/,\nexposed via PyO3 as kglite._kglite_code_tree. All eight language parsers\n(Python, Rust, TypeScript/JavaScript, Go, Java, C#, C, C++), the\n5-tier CALLS resolver, type-edge builder, manifest readers, and repo\nclone helper now run natively. Tree-sitter grammars are bundled into\nthe native extension, so `pip install kglite[code-tree]` is no longer\nrequired and the extras entry has been dropped.\n\nPerformance (release build, wall-clock):\n\n- duckdb C++ (2,805 files)  : 29 s  (Python) → 0.63 s — ~46×\n- neo4j  Java (7,966 files) : crashed       → 1.66 s\n- KGLite mixed  (248 files) : —             → 0.17 s\n\nKey optimizations: per-thread tree-sitter Parser via `thread_local!`\n(no Mutex contention), rayon-parallel 5-tier CALLS match loop,\nAho-Corasick multi-pattern scan for USES_TYPE (replacing regex\nalternation), `&str` borrows through the hot path (no String clones\nper edge).\n\nAlso:\n\n- Switch to PyO3 abi3-py310. CI wheel matrix collapses from 20 wheels\n  (5 Python versions × 4 platforms) to 4 — one wheel per platform,\n  works on Python ≥ 3.10.\n- Schema-aware edge routing (per-row node-type lookup) fixes the\n  pre-existing Python crash on pure-Java repos:\n  \"Source type 'Struct' does not exist in graph\".\n- Fix abi3 compile failure in type_conversions.rs by routing datetime\n  field access through Python's generic attribute API instead of the\n  non-stable `PyDateAccess` trait.\n- Rewrite tests/test_code_tree_{calls,pyi}.py to drive the public\n  build() API (the old tests imported the now-deleted private helpers\n  `_build_call_edges` and `PythonParser`).\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-19T02:06:09+02:00",
+          "tree_id": "6ceb2272d6e54637343b0e74ef717b0b8975d047",
+          "url": "https://github.com/kkollsga/kglite/commit/35cec09091b6db319c0df3639be00fa3ce7be059"
+        },
+        "date": 1776557381552,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1058.9392255257915,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000025389581747112058",
+            "extra": "mean: 944.3412576424993 usec\nrounds: 458"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 756.7316547126691,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000032915075864795734",
+            "extra": "mean: 1.321472405405982 msec\nrounds: 666"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 12527.30815659611,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000051142693690519626",
+            "extra": "mean: 79.82560878200012 usec\nrounds: 6536"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1580.8388013095891,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00014401748460050553",
+            "extra": "mean: 632.5755663206053 usec\nrounds: 867"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 668356.6607040226,
+            "unit": "iter/sec",
+            "range": "stddev: 4.747189849644502e-7",
+            "extra": "mean: 1.4962071283117555 usec\nrounds: 71603"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 124719.4462932201,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00000147535917010363",
+            "extra": "mean: 8.01799582760304 usec\nrounds: 17257"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2226.8375483204154,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000028464256586374266",
+            "extra": "mean: 449.06733351709767 usec\nrounds: 3628"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1669.4569727480625,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002224395387113064",
+            "extra": "mean: 598.9971687344049 usec\nrounds: 1209"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 13735.353188887811,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000004259413950263256",
+            "extra": "mean: 72.80482607531498 usec\nrounds: 11551"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 870.0832501353158,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0002775717978494181",
+            "extra": "mean: 1.1493153095919035 msec\nrounds: 688"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 884.5093492375325,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000015641062634958257",
+            "extra": "mean: 1.1305702996378988 msec\nrounds: 831"
           }
         ]
       }
