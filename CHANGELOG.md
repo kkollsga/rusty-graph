@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`code_tree` rewritten in Rust.** The polyglot codebase parser previously
+  implemented in Python (`kglite/code_tree/*.py`, ~7,500 LOC) is now a
+  first-class Rust module (`src/code_tree/`) exposed via PyO3. All eight
+  language parsers (Python, Rust, TypeScript/JavaScript, Go, Java, C#, C,
+  C++) plus the builder and manifest readers run natively. Tree-sitter
+  grammars are bundled into the native extension — no optional dependency
+  needed. **`pip install kglite[code-tree]` is no longer required**; the
+  `[code-tree]` extras entry has been removed.
+- **abi3 wheel — one wheel per platform, Python 3.10+.** PyO3's
+  `abi3-py310` stable-ABI target is now enabled, collapsing the CI wheel
+  matrix from 20 wheels (5 Python versions × 4 platforms) to 4. Users on
+  any Python ≥ 3.10 install the same wheel.
+- **Parallel parsing via rayon + thread-local parsers.** File-level
+  parsing runs across CPU cores with one tree-sitter `Parser` per thread
+  (via `thread_local!`) — no `Mutex` contention.
+- **Parallel CALLS-edge tier resolution.** The 5-tier name-matching pass
+  (84 K functions → 200 K edges) now runs in parallel via rayon; each
+  function's edges are independent.
+- **Aho-Corasick for USES_TYPE.** The multi-pattern type-name scan
+  replaces a giant regex alternation with an Aho-Corasick automaton,
+  yielding ~2.5× faster `USES_TYPE` edge building on Java-scale corpora.
+- **End-to-end performance on real repos:**
+  - duckdb C++ (2,805 files): **29 s (Python) → 0.63 s (Rust)** — ~46×
+  - neo4j Java (7,966 files, 84 K functions): **crashed in Python →
+    1.69 s in Rust**
+  - KGLite mixed Py+Rust (248 files): 0.17 s
+- **New `code_tree` module shape.** `kglite/code_tree/__init__.py` is a
+  4-line shim importing from the native `kglite._kglite_code_tree`
+  submodule. The previous Python modules under `kglite/code_tree/` have
+  been removed.
+
+### Fixed
+
+- **`build()` no longer crashes on pure-Java repos** (e.g. `neo4j/neo4j`)
+  with `Source type 'Struct' does not exist in graph`. Edge routing now
+  picks source/target node types per-row from the graph schema rather
+  than defaulting to hardcoded names.
+
 ## [0.8.0] — 2026-04-18
 
 Internal-only storage-architecture refactor plus a handful of disk-mode

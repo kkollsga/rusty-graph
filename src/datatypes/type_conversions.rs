@@ -1,7 +1,6 @@
 // src/datatypes/type_conversions.rs
 use chrono::NaiveDate;
 use pyo3::prelude::*;
-use pyo3::types::{PyDateAccess, PyDateTime};
 use pyo3::Bound;
 
 pub fn to_u32(value: &Bound<'_, PyAny>) -> Option<u32> {
@@ -88,14 +87,17 @@ pub fn to_datetime(value: &Bound<'_, PyAny>) -> Option<NaiveDate> {
         return None;
     }
 
-    // Try to extract as Python datetime first
+    // Try to extract as Python datetime/date first via attribute access
+    // (abi3-compatible: PyDateAccess is not part of the stable ABI).
     Python::attach(|_py| {
-        if let Ok(ts) = value.cast::<PyDateTime>() {
-            return NaiveDate::from_ymd_opt(
-                ts.get_year(),
-                ts.get_month() as u32,
-                ts.get_day() as u32,
-            );
+        if let (Ok(y), Ok(m), Ok(d)) = (
+            value.getattr("year").and_then(|v| v.extract::<i32>()),
+            value.getattr("month").and_then(|v| v.extract::<u32>()),
+            value.getattr("day").and_then(|v| v.extract::<u32>()),
+        ) {
+            if let Some(date) = NaiveDate::from_ymd_opt(y, m, d) {
+                return Some(date);
+            }
         }
 
         // Try to parse string dates (ISO format: YYYY-MM-DD)

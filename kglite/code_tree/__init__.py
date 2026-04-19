@@ -1,23 +1,16 @@
-"""Parse codebases into KGLite knowledge graphs using tree-sitter.
+"""Parse codebases into KGLite knowledge graphs.
 
-Requires optional dependencies: ``pip install kglite[code-tree]``
+All functionality is implemented in Rust (with bundled tree-sitter
+grammars) and exposed through the native `_kglite_code_tree` submodule.
+No optional dependencies are required.
 
 Usage::
 
     from kglite.code_tree import build
 
-    graph = build("/path/to/project/src")
+    graph = build("/path/to/project")
 """
 
-try:
-    import tree_sitter  # noqa: F401
-except ImportError:
-    raise ImportError(
-        "The kglite.code_tree module requires tree-sitter. Install with: pip install kglite[code-tree]"
-    ) from None
-
-from .builder import build
-from .parsers.manifest import read_manifest
-from .repo import repo_tree
+from kglite._kglite_code_tree import build, read_manifest, repo_tree
 
 __all__ = ["build", "read_manifest", "repo_tree"]

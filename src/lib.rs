@@ -1,5 +1,6 @@
 // src/lib.rs
 use pyo3::prelude::*;
+mod code_tree;
 mod datatypes;
 mod graph;
 use graph::io::file::load_file;
@@ -13,12 +14,13 @@ fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
 }
 
 #[pymodule]
-fn kglite(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
     m.add_class::<KnowledgeGraph>()?;
     m.add_class::<Transaction>()?;
     m.add_class::<ResultView>()?;
     m.add_class::<ResultIter>()?;
+    code_tree::pyapi::register(py, m)?;
     Ok(())
 }

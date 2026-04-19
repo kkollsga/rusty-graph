@@ -177,6 +177,24 @@ impl TemporalContext {
     }
 }
 
+impl KnowledgeGraph {
+    /// Create a fresh in-memory KnowledgeGraph without going through PyO3.
+    /// Used by internal Rust modules (e.g. code_tree) that need to build a
+    /// graph from native data without holding the GIL.
+    pub(crate) fn new_empty() -> Self {
+        KnowledgeGraph {
+            inner: Arc::new(DirGraph::new()),
+            selection: CowSelection::new(),
+            reports: OperationReports::new(),
+            last_mutation_stats: None,
+            embedder: None,
+            temporal_context: TemporalContext::default(),
+            default_timeout_ms: None,
+            default_max_rows: None,
+        }
+    }
+}
+
 impl Clone for KnowledgeGraph {
     fn clone(&self) -> Self {
         KnowledgeGraph {

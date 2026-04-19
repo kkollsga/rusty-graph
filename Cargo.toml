@@ -1,6 +1,6 @@
 [package]
 name = "kglite"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 description = "A high-performance graph database with Python bindings written in Rust."
@@ -13,7 +13,7 @@ name = "kglite"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.28", features = ["multiple-pymethods"] }
+pyo3 = { version = "0.28", features = ["multiple-pymethods", "abi3-py310"] }
 petgraph = { version = "0.8.3", features = ["serde-1"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -27,6 +27,21 @@ flate2 = "1"
 zstd = "0.13"
 memmap2 = "0.9"
 bzip2 = "0.6"
+tree-sitter = "0.26.8"
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-go = "0.25.0"
+tree-sitter-java = "0.23.5"
+tree-sitter-c = "0.24.1"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-c-sharp = "0.23.5"
+toml = "1.1.2"
+roxmltree = "0.21.1"
+walkdir = "2.5.0"
+tempfile = "3"
+aho-corasick = "1.1.4"
 
 [dev-dependencies]
 tempfile = "3"

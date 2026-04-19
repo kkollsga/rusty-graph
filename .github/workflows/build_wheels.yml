@@ -65,7 +65,7 @@ jobs:
           wait-interval: 15
 
   build:
-    name: Build wheels - ${{ matrix.os }} - ${{ matrix.target }} - py${{ matrix.python-version }}
+    name: Build abi3 wheel - ${{ matrix.os }} - ${{ matrix.target }}
     needs: [ci-gate, version-check]
     runs-on: ${{ matrix.os }}
     permissions:
@@ -73,92 +73,31 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
-        target: ['']
         include:
-          # Windows
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            python-version: '3.10'
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            python-version: '3.11'
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            python-version: '3.12'
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            python-version: '3.13'
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            python-version: '3.14'
-          # Linux
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            python-version: '3.10'
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            python-version: '3.11'
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            python-version: '3.12'
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            python-version: '3.13'
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            python-version: '3.14'
-          # macOS Intel (x86_64) - using macos-15-intel runner
           - os: macos-15-intel
             target: x86_64-apple-darwin
-            python-version: '3.10'
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            python-version: '3.11'
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            python-version: '3.12'
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            python-version: '3.13'
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            python-version: '3.14'
-          # macOS Apple Silicon (arm64)
           - os: macos-latest
             target: aarch64-apple-darwin
-            python-version: '3.10'
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            python-version: '3.11'
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            python-version: '3.12'
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            python-version: '3.13'
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            python-version: '3.14'
-        exclude:
-          - target: ''
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python 3.10 (abi3 floor)
         uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: '3.10'
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - name: Install Maturin
         run: pip install maturin
-      - name: Build wheels
+      - name: Build abi3 wheel
         run: |
           if (!(Test-Path -Path "wheels")) { New-Item -ItemType Directory -Path "wheels" }
           maturin build --release --target ${{ matrix.target }} --out wheels
@@ -169,7 +108,7 @@ jobs:
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v7
         with:
-          name: wheels-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.python-version }}
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}
           path: wheels/*.whl
 
   publish:

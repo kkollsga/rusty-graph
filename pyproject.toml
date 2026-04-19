@@ -37,18 +37,6 @@ dependencies = [
 dynamic = ["version"]
 
 [project.optional-dependencies]
-code-tree = [
-    "tree-sitter>=0.21",
-    "tree-sitter-rust",
-    "tree-sitter-python",
-    "tree-sitter-typescript",
-    "tree-sitter-javascript",
-    "tree-sitter-go",
-    "tree-sitter-java",
-    "tree-sitter-c",
-    "tree-sitter-cpp",
-    "tree-sitter-c-sharp",
-]
 neo4j = ["neo4j>=5.0"]
 
 [project.urls]
@@ -59,6 +47,9 @@ Changelog = "https://github.com/kkollsga/kglite/blob/main/CHANGELOG.md"
 Issues = "https://github.com/kkollsga/kglite/issues"
 
 [tool.maturin]
+# extension-module must be added via maturin features (not Cargo.toml default)
+# so `cargo test` can still link. abi3-py310 is in Cargo.toml since it affects
+# symbol visibility even outside maturin builds.
 features = ["pyo3/extension-module"]
 
 [tool.ruff]
@@ -89,15 +80,14 @@ addopts = "-m 'not benchmark and not parity and not stress'"
 
 [tool.mypy]
 ignore_missing_imports = true
-exclude = "kglite/(code_tree|blueprint)/"
+exclude = "kglite/blueprint/"
 
 [[tool.mypy.overrides]]
-module = ["kglite.code_tree.*", "kglite.blueprint.*"]
+module = ["kglite.blueprint.*"]
 ignore_errors = true
 
 [tool.coverage.run]
 source = ["kglite"]
-omit = ["kglite/code_tree/*"]
 
 [tool.coverage.report]
 exclude_lines = ["if __name__", "pragma: no cover", "raise NotImplementedError"]
