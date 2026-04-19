@@ -4,6 +4,7 @@ mod code_tree;
 mod datatypes;
 mod graph;
 use graph::io::file::load_file;
+use graph::pyapi::blueprint::from_blueprint_rust;
 use graph::pyapi::result_view::{ResultIter, ResultView};
 use graph::{KnowledgeGraph, Transaction};
 
@@ -17,6 +18,7 @@ fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
 fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
+    m.add_function(wrap_pyfunction!(from_blueprint_rust, m)?)?;
     m.add_class::<KnowledgeGraph>()?;
     m.add_class::<Transaction>()?;
     m.add_class::<ResultView>()?;

@@ -6,6 +6,7 @@
 //! the Rust internal / Python ergonomic contract visible.
 
 pub mod algorithms;
+pub mod blueprint;
 pub mod export;
 pub mod indexes;
 pub mod kg_core;

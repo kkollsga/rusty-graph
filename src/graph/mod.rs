@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub mod algorithms;
+pub mod blueprint;
 pub mod core;
 pub mod dir_graph;
 pub mod features;

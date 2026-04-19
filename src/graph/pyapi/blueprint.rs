@@ -1,0 +1,126 @@
+//! PyO3 entry for the Rust blueprint loader.
+//!
+//! Thin wrapper: returns the populated `KnowledgeGraph` plus the output
+//! path declared in the blueprint (if any). Save and `lock_schema` are
+//! invoked from the Python shim using the existing `KnowledgeGraph`
+//! methods — avoids duplicating the v3 save pipeline here.
+
+use crate::graph::blueprint;
+use crate::graph::introspection::reporting::OperationReports;
+use crate::graph::schema::{self, CowSelection, DirGraph};
+use crate::graph::{KnowledgeGraph, TemporalContext};
+use pyo3::prelude::*;
+use std::path::Path;
+use std::sync::Arc;
+
+/// Parse a JSON blueprint and build a `KnowledgeGraph` from its CSVs.
+///
+/// Returns `(graph, output_path_or_none)` — the Python shim saves and
+/// applies `lock_schema` on top. Exposed as `kglite.kglite.from_blueprint_rust`
+/// to avoid colliding with the user-facing `kglite.from_blueprint` wrapper.
+#[pyfunction]
+#[pyo3(signature = (blueprint_path, *, verbose=false, storage=None, path=None))]
+pub fn from_blueprint_rust(
+    py: Python<'_>,
+    blueprint_path: String,
+    verbose: bool,
+    storage: Option<&str>,
+    path: Option<&str>,
+) -> PyResult<(KnowledgeGraph, Option<String>)> {
+    let bp_path = Path::new(&blueprint_path).to_path_buf();
+    if !bp_path.exists() {
+        return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
+            "Blueprint file not found: {}",
+            bp_path.display()
+        )));
+    }
+
+    let (kg, output_path) = py
+        .detach(
+            || -> Result<(KnowledgeGraph, Option<std::path::PathBuf>), String> {
+                // Construct the backing DirGraph with the requested storage mode
+                let mut graph = DirGraph::new();
+                match storage {
+                    None | Some("default") | Some("") => {}
+                    Some("mapped") => {
+                        graph.graph = schema::GraphBackend::Mapped(schema::MappedGraph::new());
+                        graph.memory_limit = Some(0);
+                    }
+                    Some("disk") => {
+                        let dir = path.ok_or_else(|| {
+                            "storage='disk' requires a path parameter".to_string()
+                        })?;
+                        let dg = crate::graph::storage::disk::graph::DiskGraph::new_at_path(
+                            Path::new(dir),
+                        )
+                        .map_err(|e| format!("Failed to create disk graph at '{}': {}", dir, e))?;
+                        graph.graph = schema::GraphBackend::Disk(Box::new(dg));
+                    }
+                    Some(other) => {
+                        return Err(format!(
+                            "Unknown storage mode '{}'. Expected 'default', 'mapped', or 'disk'.",
+                            other
+                        ));
+                    }
+                }
+
+                // Parse blueprint
+                let blueprint = blueprint::load_blueprint_file(&bp_path)?;
+                let output_path = blueprint
+                    .settings
+                    .resolved_output(bp_path.parent().unwrap_or_else(|| Path::new(".")));
+
+                // Run the build
+                let bp_dir = bp_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf();
+                let opts = blueprint::BuildOptions { verbose };
+                let report = blueprint::build(&mut graph, blueprint, &bp_dir, &opts)?;
+
+                if verbose {
+                    let n_total: usize = report.nodes_by_type.values().sum();
+                    let e_total: usize = report.edges_by_type.values().sum();
+                    println!("Loading blueprint...");
+                    for (t, n) in &report.nodes_by_type {
+                        println!("  {}: {} nodes", t, n);
+                    }
+                    for (t, n) in &report.edges_by_type {
+                        println!("  [{}]: {} edges", t, n);
+                    }
+                    println!(
+                        "Loaded {} nodes ({} types), {} edges ({} types)",
+                        n_total,
+                        report.nodes_by_type.len(),
+                        e_total,
+                        report.edges_by_type.len(),
+                    );
+                }
+                if !report.warnings.is_empty() {
+                    for w in &report.warnings {
+                        eprintln!("warning: {}", w);
+                    }
+                }
+                if !report.errors.is_empty() {
+                    for e in &report.errors {
+                        eprintln!("error: {}", e);
+                    }
+                }
+
+                let kg = KnowledgeGraph {
+                    inner: Arc::new(graph),
+                    selection: CowSelection::new(),
+                    reports: OperationReports::new(),
+                    last_mutation_stats: None,
+                    embedder: None,
+                    temporal_context: TemporalContext::default(),
+                    default_timeout_ms: None,
+                    default_max_rows: None,
+                };
+                Ok((kg, output_path))
+            },
+        )
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
+    Ok((kg, output_path.map(|p| p.to_string_lossy().into_owned())))
+}

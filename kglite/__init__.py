@@ -1,6 +1,6 @@
 """KGLite - A high-performance graph database library with Python bindings written in Rust."""
 
-from .blueprint import from_blueprint
+from .blueprint import from_blueprint  # noqa: E402  (must override star-import from .kglite)
 from .kglite import *  # noqa: F401, F403
 from .kglite import (  # explicit re-exports for type checkers
     KnowledgeGraph,
