@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776613933210,
+  "lastUpdate": 1776622987639,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -8111,6 +8111,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.000056972324051758527",
             "extra": "mean: 1.2328310709677137 msec\nrounds: 775"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "02af07a3e71b368659d024e8787ec813e6db0671",
+          "message": "perf(describe): inverted-index fast path for connections=['T'] (0.8.6)\n\nRewrote write_connections_detail to stop sweeping edge_references\nthree times per topic. The old path materialised every visited edge\ninto the DiskGraph per-query arena, so describe(connections=['P31'])\non Wikidata (863M edges) exhausted VM and was SIGKILLed.\n\nNew path, in order: pair counts come from type_connectivity_cache\nwhen populated; property-stats scan is skipped when metadata declares\nno edge properties; only matching edges are walked via the persisted\nconn_type_index_* inverted index, capped at two samples via an\nearly-exit callback. Nothing materialises EdgeData on disk.\n\nMeasured on Wikidata (122M nodes, 863M edges, cold page cache):\n  describe(connections=['P170'])  1.3M edges: 108s  -> 0.24s\n  describe(connections=['P31'])  122M edges: SIGKILL -> 0.25s\n  describe(connections=True):     unchanged at 0.15s\n\nNew API:\n  GraphBackend::for_each_edge_of_conn_type(conn, |src,tgt,idx,props|)\n    returns bool; on disk uses the inverted index, on memory/mapped\n    filters petgraph's resident edge_references.\n  DiskGraph::edge_properties_at(edge_idx) borrows a property slice\n    without pushing into the arena.\n  describe(..., max_pairs=N) caps the (src_type, tgt_type) pair\n    breakdown (default 50). P31 has 191k distinct pairs — the cap\n    keeps the default response at ~4KB with a <more pairs=\"…\"\n    edges=\"…\"/> marker for the tail; pass max_pairs=1000 to drill in.",
+          "timestamp": "2026-04-19T20:17:16+02:00",
+          "tree_id": "03b64648792feae9958ed55e3320bb482c70ea05",
+          "url": "https://github.com/kkollsga/kglite/commit/02af07a3e71b368659d024e8787ec813e6db0671"
+        },
+        "date": 1776622987135,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1046.849443787546,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000019349364469876087",
+            "extra": "mean: 955.2472000003718 usec\nrounds: 500"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 748.6317226996388,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00005833691295716892",
+            "extra": "mean: 1.3357702721892453 msec\nrounds: 676"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 12603.620521117355,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000006253362703202482",
+            "extra": "mean: 79.34228092035148 usec\nrounds: 6824"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1681.4375986707314,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00004393298401576098",
+            "extra": "mean: 594.7291774553839 usec\nrounds: 896"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 665375.0919230345,
+            "unit": "iter/sec",
+            "range": "stddev: 4.585244510246316e-7",
+            "extra": "mean: 1.5029116841597556 usec\nrounds: 76249"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 126678.26832239497,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000013407325193434232",
+            "extra": "mean: 7.894013813442805 usec\nrounds: 25772"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2161.379954187894,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000014678884181833722",
+            "extra": "mean: 462.66737972765884 usec\nrounds: 3305"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1676.7475872858572,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00008458403654372023",
+            "extra": "mean: 596.3926875950929 usec\nrounds: 1306"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 14121.536375534215,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000005614626204398014",
+            "extra": "mean: 70.81382460144464 usec\nrounds: 11357"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 859.3801172605931,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002855558006933432",
+            "extra": "mean: 1.1636294346530316 msec\nrounds: 681"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 882.5936682064075,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00001902864308087805",
+            "extra": "mean: 1.133024217171401 msec\nrounds: 792"
           }
         ]
       }
