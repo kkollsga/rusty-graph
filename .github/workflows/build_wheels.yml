@@ -2,6 +2,10 @@ name: Build and Publish Python Wheels
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - 'docs/**'
   workflow_dispatch: # Allow manual triggering
 
 jobs:
