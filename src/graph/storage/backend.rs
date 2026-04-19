@@ -126,6 +126,75 @@ impl GraphBackend {
             }
         }
     }
+
+    /// Iterate only edges whose connection type matches `conn_type`,
+    /// yielding `(src, tgt, edge_idx, properties)` per match.
+    ///
+    /// The callback returns `true` to continue or `false` to stop — so
+    /// callers collecting a bounded prefix (sample edges, first match)
+    /// don't pay for the rest of the matches.
+    ///
+    /// Avoids the disk backend's per-edge `Box<EdgeData>` arena push by
+    /// reading `edge_endpoints` + `edge_properties` directly. On
+    /// Memory/Mapped the petgraph iterator already hands out `&EdgeData`
+    /// references into the resident storage, so there is no arena cost.
+    ///
+    /// On the disk backend, complexity is O(matching edges) thanks to
+    /// the persisted `conn_type_index_*` inverted index — not O(all
+    /// edges) as a filtered `edge_references()` sweep would be.
+    ///
+    /// `properties` is the empty slice when the edge has no custom
+    /// properties (common case for topology-heavy graphs).
+    #[inline(always)]
+    pub fn for_each_edge_of_conn_type<F>(&self, conn_type: InternedKey, mut f: F)
+    where
+        F: FnMut(NodeIndex, NodeIndex, u32, &[(InternedKey, Value)]) -> bool,
+    {
+        use petgraph::visit::{EdgeRef, IntoEdgeReferences};
+        let ct_u64 = conn_type.as_u64();
+        match self {
+            GraphBackend::Memory(g) => {
+                for er in g.inner().edge_references() {
+                    let w = er.weight();
+                    if w.connection_type == conn_type
+                        && !f(
+                            er.source(),
+                            er.target(),
+                            er.id().index() as u32,
+                            w.properties.as_slice(),
+                        )
+                    {
+                        return;
+                    }
+                }
+            }
+            GraphBackend::Mapped(g) => {
+                for er in g.inner().edge_references() {
+                    let w = er.weight();
+                    if w.connection_type == conn_type
+                        && !f(
+                            er.source(),
+                            er.target(),
+                            er.id().index() as u32,
+                            w.properties.as_slice(),
+                        )
+                    {
+                        return;
+                    }
+                }
+            }
+            GraphBackend::Disk(g) => {
+                let dg = g.as_ref();
+                dg.for_each_edge_of_conn_type(ct_u64, |src, tgt, edge_idx| {
+                    let props = dg.edge_properties_at(edge_idx).unwrap_or(&[]);
+                    f(src, tgt, edge_idx, props)
+                });
+            }
+            GraphBackend::Recording(rg) => {
+                rg.inner().for_each_edge_of_conn_type(conn_type, f);
+            }
+        }
+    }
 }
 
 // -- Index traits --

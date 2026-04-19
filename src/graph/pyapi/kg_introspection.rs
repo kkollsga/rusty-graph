@@ -1364,8 +1364,13 @@ impl KnowledgeGraph {
     /// - `cypher` → Cypher language reference (True=compact, list=detailed topics)
     /// - `fluent` → Fluent API reference (True=compact, list=detailed topics)
     ///
+    /// `max_pairs` bounds the `(src_type, tgt_type)` breakdown rendered for each
+    /// `describe(connections=['T'])` deep-dive. Defaults to 50. Raise it to drill
+    /// into wide fan-out connection types (e.g. Wikidata `P31` has 191k distinct
+    /// pairs); the head-by-count distribution is emitted first regardless.
+    ///
     /// When `type_search`, `connections`, `cypher`, or `fluent` is set, only those tracks are returned.
-    #[pyo3(signature = (types=None, type_search=None, connections=None, cypher=None, fluent=None))]
+    #[pyo3(signature = (types=None, type_search=None, connections=None, cypher=None, fluent=None, max_pairs=None))]
     fn describe(
         &self,
         types: Option<Vec<String>>,
@@ -1373,6 +1378,7 @@ impl KnowledgeGraph {
         connections: Option<&Bound<'_, PyAny>>,
         cypher: Option<&Bound<'_, PyAny>>,
         fluent: Option<&Bound<'_, PyAny>>,
+        max_pairs: Option<usize>,
     ) -> PyResult<String> {
         let conn_detail = extract_detail_param(connections, "connections")?;
         let cypher_detail = extract_cypher_param(cypher)?;
@@ -1384,6 +1390,7 @@ impl KnowledgeGraph {
             &cypher_detail,
             &fluent_detail,
             type_search.as_deref(),
+            max_pairs,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }

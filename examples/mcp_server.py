@@ -115,6 +115,7 @@ def graph_overview(
     types: list[str] | None = None,
     connections: bool | list[str] | None = None,
     cypher: bool | list[str] | None = None,
+    max_pairs: int | None = None,
 ) -> str:
     """Get graph schema, connection details, or Cypher language reference.
 
@@ -125,9 +126,13 @@ def graph_overview(
       graph_overview(connections=["CALLS"])       — deep-dive: property stats, sample edges
       graph_overview(cypher=True)                 — Cypher reference
       graph_overview(cypher=["temporal","MATCH"]) — detailed docs with examples
+
+    `max_pairs` caps the (src_type, tgt_type) breakdown in
+    connections=[...] deep-dives (default 50). Raise it when a connection
+    type has many distinct endpoint pairs and you want the full list.
     """
     try:
-        return graph.describe(types=types, connections=connections, cypher=cypher)
+        return graph.describe(types=types, connections=connections, cypher=cypher, max_pairs=max_pairs)
     except Exception as e:
         return f"Error: {e}"
 

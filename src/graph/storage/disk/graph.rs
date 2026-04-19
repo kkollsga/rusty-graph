@@ -1084,6 +1084,131 @@ impl DiskGraph {
         Some(sources)
     }
 
+    /// Iterate only the edges matching `conn_type`, yielding `(src, tgt, edge_idx)`
+    /// per match. Never calls `materialize_edge` — no growth of `edge_arena`.
+    ///
+    /// Path: persisted inverted index (`conn_type_index_*`) gives the sources with
+    /// at least one outgoing edge of that type. Each source's outgoing CSR slice
+    /// is then filtered by `conn_type` (binary-search when the CSR is sorted by
+    /// type, linear fallback otherwise). Overflow-out entries are visited for
+    /// sources added after the last CSR build.
+    ///
+    /// The callback returns `true` to continue, `false` to stop iteration —
+    /// lets callers collect a bounded prefix (e.g. two sample edges) without
+    /// scanning every match.
+    ///
+    /// Complexity is O(matching edges) when `csr_sorted_by_type`, not O(all edges).
+    /// Designed for the introspection fast path (`describe(connections=['T'])`)
+    /// which previously did three full `edge_references()` sweeps per topic.
+    pub fn for_each_edge_of_conn_type<F>(&self, conn_type: u64, mut f: F)
+    where
+        F: FnMut(NodeIndex, NodeIndex, u32) -> bool,
+    {
+        self.ensure_csr();
+
+        // CSR-indexed sources via the inverted index.
+        if !self.conn_type_index_types.is_empty() {
+            let num_types = self.conn_type_index_types.len();
+            let mut lo = 0usize;
+            let mut hi = num_types;
+            let mut range: Option<(usize, usize)> = None;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let mid_type = self.conn_type_index_types.get(mid);
+                if mid_type < conn_type {
+                    lo = mid + 1;
+                } else if mid_type > conn_type {
+                    hi = mid;
+                } else {
+                    let s = self.conn_type_index_offsets.get(mid) as usize;
+                    let e = self.conn_type_index_offsets.get(mid + 1) as usize;
+                    range = Some((s, e));
+                    break;
+                }
+            }
+
+            if let Some((src_start, src_end)) = range {
+                let out_offsets_len = self.out_offsets.len().saturating_sub(1);
+                for i in src_start..src_end {
+                    let src_u32 = self.conn_type_index_sources.get(i);
+                    let src_idx = src_u32 as usize;
+                    if src_idx >= out_offsets_len {
+                        continue;
+                    }
+                    let csr_start = self.out_offsets.get(src_idx) as usize;
+                    let csr_end = self.out_offsets.get(src_idx + 1) as usize;
+
+                    if self.csr_sorted_by_type {
+                        let (lo_p, hi_p) = crate::graph::core::iterators::binary_search_conn_type(
+                            &self.out_edges,
+                            &self.edge_endpoints,
+                            csr_start,
+                            csr_end,
+                            conn_type,
+                        );
+                        for p in lo_p..hi_p {
+                            let e = self.out_edges.get(p);
+                            if e.edge_idx == TOMBSTONE_EDGE {
+                                continue;
+                            }
+                            if !f(
+                                NodeIndex::new(src_u32 as usize),
+                                NodeIndex::new(e.peer as usize),
+                                e.edge_idx,
+                            ) {
+                                return;
+                            }
+                        }
+                    } else {
+                        for p in csr_start..csr_end {
+                            let e = self.out_edges.get(p);
+                            if e.edge_idx == TOMBSTONE_EDGE {
+                                continue;
+                            }
+                            let ep = self.edge_endpoints.get(e.edge_idx as usize);
+                            if ep.connection_type == conn_type
+                                && !f(
+                                    NodeIndex::new(src_u32 as usize),
+                                    NodeIndex::new(e.peer as usize),
+                                    e.edge_idx,
+                                )
+                            {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Overflow sources — edges appended after the last CSR build. Typically tiny.
+        for (&src_u32, edges) in &self.overflow_out {
+            for e in edges {
+                if e.edge_idx == TOMBSTONE_EDGE {
+                    continue;
+                }
+                let ep = self.edge_endpoints.get(e.edge_idx as usize);
+                if ep.connection_type == conn_type
+                    && !f(
+                        NodeIndex::new(src_u32 as usize),
+                        NodeIndex::new(e.peer as usize),
+                        e.edge_idx,
+                    )
+                {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Borrow an edge's property slice without materializing `EdgeData`.
+    /// Returns `None` when the edge has no custom properties (common case).
+    /// Safe to call in hot loops — does not push into `edge_arena`.
+    #[inline]
+    pub fn edge_properties_at(&self, edge_idx: u32) -> Option<&[(InternedKey, Value)]> {
+        self.edge_properties.get(&edge_idx).map(|v| v.as_slice())
+    }
+
     pub fn prefetch_hot_regions(&self) {
         // Prefetch out_offsets + in_offsets (948 MB each — always needed for traversal).
         // Skip node_slots (2 GB) — prefetching it adds too much load latency.

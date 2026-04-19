@@ -1739,6 +1739,7 @@ class KnowledgeGraph:
         connections: bool | list[str] | None = None,
         cypher: bool | list[str] | None = None,
         fluent: bool | list[str] | None = None,
+        max_pairs: int | None = None,
     ) -> str:
         """Return an XML description of this graph for AI agents.
 
@@ -1794,6 +1795,13 @@ class KnowledgeGraph:
             connections: True for overview, list for deep-dive into specific types.
             cypher: True for compact reference, list for detailed topic docs.
             fluent: True for compact reference, list for detailed topic docs.
+            max_pairs: Cap on ``(src_type, tgt_type)`` pairs rendered in the
+                ``describe(connections=['T'])`` deep-dive. Defaults to 50.
+                Sorted by count desc, so the head covers the dominant
+                relationships; a trailing ``<more pairs="…" edges="…"/>``
+                marker reports the hidden tail. Raise to drill into
+                wide fan-out connection types (e.g. Wikidata ``P31`` has
+                191k distinct pairs).
 
         Raises:
             ValueError: If any type/connection/topic is not found.

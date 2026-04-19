@@ -5,7 +5,7 @@
 //! connections / cypher / fluent) and assembles an XML document.
 
 use crate::datatypes::values::Value;
-use crate::graph::schema::DirGraph;
+use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::GraphRead;
 use std::collections::{HashMap, HashSet};
 
@@ -176,75 +176,168 @@ fn write_connection_map(xml: &mut String, graph: &DirGraph, conn_stats: &[Connec
     }
 }
 
-/// Compute property stats for edges of a given connection type.
-fn compute_edge_property_stats(
-    graph: &DirGraph,
-    connection_type: &str,
-    max_values: usize,
-) -> Vec<PropertyStatInfo> {
-    let mut all_props: HashSet<String> = HashSet::new();
-    let mut total_edges: usize = 0;
+/// Single-topic accumulator — populated from pre-computed caches when
+/// available, falling back to a single pass over edges matching the
+/// topic's connection type.
+///
+/// Pre-rewrite, this path did three full `edge_references()` sweeps per
+/// topic (pair counts + property names + per-property values). On a
+/// multi-billion-edge disk graph that was unusable — every edge in the
+/// graph was iterated three times and each iteration materialised an
+/// `EdgeData` into a per-query arena that was never cleared within the
+/// call.
+struct ConnectionTopicAccum {
+    /// (src_type, tgt_type) → edge count. Strings, not `InternedKey`s,
+    /// because the cache path already resolved them and we need strings
+    /// for the final XML anyway.
+    pair_counts: HashMap<(String, String), usize>,
+    /// property key → non-null count, observed type, bounded unique-value set.
+    props: HashMap<InternedKey, EdgePropertyAccum>,
+    /// Up to 2 sample edges, captured on first encounter.
+    samples: Vec<SampleEdge>,
+}
 
-    let g = &graph.graph;
-    // First pass: discover property names
-    for edge_ref in g.edge_references() {
-        let ed = edge_ref.weight();
-        if ed.connection_type_str(&graph.interner) == connection_type {
-            total_edges += 1;
-            for key in ed.property_keys(&graph.interner) {
-                all_props.insert(key.to_string());
-            }
+/// Per-property running totals. `value_set` is capped at `max_values + 1`
+/// entries: we only need to know whether unique count is ≤ `max_values`
+/// for the final emission decision, and keeping the set tight avoids
+/// blowing up on high-cardinality properties.
+struct EdgePropertyAccum {
+    non_null: usize,
+    type_name: Option<&'static str>,
+    value_set: HashSet<Value>,
+}
+
+struct SampleEdge {
+    src_idx: petgraph::graph::NodeIndex,
+    tgt_idx: petgraph::graph::NodeIndex,
+    properties: Vec<(InternedKey, Value)>,
+}
+
+impl ConnectionTopicAccum {
+    fn new() -> Self {
+        Self {
+            pair_counts: HashMap::new(),
+            props: HashMap::new(),
+            samples: Vec::with_capacity(2),
         }
     }
+}
 
-    if all_props.is_empty() {
-        return Vec::new();
-    }
+/// Collect pair counts, property stats, and sample edges for one connection
+/// type.
+///
+/// Fast paths, in order:
+/// 1. Pair counts come from the cached `type_connectivity_cache` triples
+///    when populated (zero edge I/O, O(triples-for-topic)).
+/// 2. Property stats are skipped entirely when the connection type's
+///    metadata declares no properties — common for triple-dump graphs
+///    like Wikidata where edges are topology only.
+/// 3. Samples take only the first 1–2 matching edges. Even on Wikidata's
+///    312M-edge `P31`, the inverted-index iterator yields the first
+///    match after a handful of reads.
+///
+/// Falls back to a single `for_each_edge_of_conn_type` sweep when the
+/// cache is absent or the connection has properties. That sweep never
+/// calls `materialize_edge`, so the disk arena does not grow.
+fn accumulate_connection_topic(
+    graph: &DirGraph,
+    conn_key: InternedKey,
+    topic: &str,
+    max_values: usize,
+) -> ConnectionTopicAccum {
+    let mut acc = ConnectionTopicAccum::new();
+    let value_cap = max_values.saturating_add(1);
 
-    let mut prop_names: Vec<String> = all_props.into_iter().collect();
-    prop_names.sort();
-
-    let mut results = Vec::new();
-    for prop_name in &prop_names {
-        let mut non_null: usize = 0;
-        let mut value_set: HashSet<Value> = HashSet::new();
-        let mut first_type: Option<&'static str> = None;
-
-        for edge_ref in g.edge_references() {
-            let ed = edge_ref.weight();
-            if ed.connection_type_str(&graph.interner) != connection_type {
-                continue;
-            }
-            if let Some(v) = ed.get_property(prop_name) {
-                if !is_null_value(v) {
-                    non_null += 1;
-                    if first_type.is_none() {
-                        first_type = Some(value_type_name(v));
-                    }
-                    value_set.insert(v.clone());
+    // Pair counts — prefer cached connectivity triples.
+    let mut pair_counts_from_cache = false;
+    {
+        let triples_guard = graph.type_connectivity_cache.read().unwrap();
+        if let Some(triples) = triples_guard.as_ref() {
+            for t in triples {
+                if t.conn == topic {
+                    acc.pair_counts
+                        .insert((t.src.clone(), t.tgt.clone()), t.count);
                 }
             }
+            pair_counts_from_cache = true;
         }
-
-        let unique = value_set.len();
-        let values = if max_values > 0 && unique <= max_values && unique > 0 {
-            let mut vals: Vec<Value> = value_set.into_iter().collect();
-            vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            Some(vals)
-        } else {
-            None
-        };
-
-        results.push(PropertyStatInfo {
-            property_name: prop_name.clone(),
-            type_string: first_type.unwrap_or("unknown").to_string(),
-            non_null,
-            unique,
-            values,
-        });
     }
-    let _ = total_edges; // used implicitly by context
-    results
+
+    // Property stats — skip when metadata declares no properties.
+    let has_properties = graph
+        .connection_type_metadata
+        .get(topic)
+        .map(|info| !info.property_types.is_empty())
+        .unwrap_or(true); // conservative: scan if metadata missing
+
+    // Samples — always need at least one pass to pick 1–2 concrete edges.
+    let need_samples = true;
+    let need_pair_scan = !pair_counts_from_cache;
+    let need_property_scan = has_properties;
+
+    if !need_pair_scan && !need_property_scan && !need_samples {
+        return acc;
+    }
+
+    // Decide how much work each edge has to do so hot-path checks are
+    // cheap for the common topology-only case.
+    let collect_pairs = need_pair_scan;
+    let collect_props = need_property_scan;
+    let sample_cap: usize = 2;
+
+    graph
+        .graph
+        .for_each_edge_of_conn_type(conn_key, |src_idx, tgt_idx, _edge_idx, props| {
+            if collect_pairs {
+                if let (Some(sk), Some(tk)) = (
+                    graph.graph.node_type_of(src_idx),
+                    graph.graph.node_type_of(tgt_idx),
+                ) {
+                    let src = graph.interner.resolve(sk).to_string();
+                    let tgt = graph.interner.resolve(tk).to_string();
+                    *acc.pair_counts.entry((src, tgt)).or_insert(0) += 1;
+                }
+            }
+
+            if collect_props {
+                for (key, value) in props {
+                    if is_null_value(value) {
+                        continue;
+                    }
+                    let entry = acc.props.entry(*key).or_insert_with(|| EdgePropertyAccum {
+                        non_null: 0,
+                        type_name: None,
+                        value_set: HashSet::new(),
+                    });
+                    entry.non_null += 1;
+                    if entry.type_name.is_none() {
+                        entry.type_name = Some(value_type_name(value));
+                    }
+                    if entry.value_set.len() < value_cap {
+                        entry.value_set.insert(value.clone());
+                    }
+                }
+            }
+
+            if acc.samples.len() < sample_cap {
+                acc.samples.push(SampleEdge {
+                    src_idx,
+                    tgt_idx,
+                    properties: props.to_vec(),
+                });
+            }
+
+            // Continue iterating if any collector still needs more work.
+            // Pair counts and property stats must see every matching edge;
+            // samples stop at `sample_cap`. When pairs come from the
+            // connectivity cache and the connection has no properties,
+            // both `collect_pairs` and `collect_props` are false, so this
+            // short-circuits after the first two matches — avoiding
+            // O(matching edges) I/O on topology-heavy types like `P31`.
+            collect_pairs || collect_props || acc.samples.len() < sample_cap
+        });
+
+    acc
 }
 
 /// Connections overview: all connection types with count, endpoints, property names.
@@ -322,10 +415,20 @@ fn write_connections_overview(xml: &mut String, graph: &DirGraph) {
 }
 
 /// Connections deep-dive: per-pair counts, property stats, sample edges.
+///
+/// One pass per topic via `GraphBackend::for_each_edge_of_conn_type` — on
+/// disk this walks only matching edges (persisted inverted index) and
+/// avoids the per-edge `Box<EdgeData>` arena that would balloon VSZ on
+/// multi-billion-edge graphs.
+///
+/// `max_pairs` caps the emitted `(src_type, tgt_type)` breakdown so wide
+/// fan-out types stay within agent response budgets. The full pair count
+/// is still computed — only the rendering is capped.
 fn write_connections_detail(
     xml: &mut String,
     graph: &DirGraph,
     topics: &[String],
+    max_pairs: usize,
 ) -> Result<(), String> {
     // Validate all connection types exist
     let conn_stats = compute_connection_type_stats(graph);
@@ -345,6 +448,8 @@ fn write_connections_detail(
         }
     }
 
+    const MAX_PROP_VALUES: usize = 15;
+
     xml.push_str("<connections>\n");
     for topic in topics {
         let ct = conn_stats
@@ -358,29 +463,24 @@ fn write_connections_detail(
             ct.count
         ));
 
-        // Per source→target pair counts
-        let mut pair_counts: HashMap<(String, String), usize> = HashMap::new();
-        let g = &graph.graph;
-        for edge_ref in g.edge_references() {
-            let ed = edge_ref.weight();
-            if ed.connection_type_str(&graph.interner) != *topic {
-                continue;
-            }
-            let src_type = graph
-                .get_node(edge_ref.source())
-                .map(|n| n.node_type_str(&graph.interner).to_string())
-                .unwrap_or_default();
-            let tgt_type = graph
-                .get_node(edge_ref.target())
-                .map(|n| n.node_type_str(&graph.interner).to_string())
-                .unwrap_or_default();
-            *pair_counts.entry((src_type, tgt_type)).or_insert(0) += 1;
-        }
-        let mut pairs: Vec<((String, String), usize)> = pair_counts.into_iter().collect();
+        let conn_key = InternedKey::from_str(topic);
+        let acc = accumulate_connection_topic(graph, conn_key, topic, MAX_PROP_VALUES);
+
+        // Pair counts — already keyed by (src_type, tgt_type) strings.
+        let mut pairs: Vec<((String, String), usize)> = acc.pair_counts.into_iter().collect();
         pairs.sort_by_key(|p| std::cmp::Reverse(p.1));
 
-        xml.push_str("    <endpoints>\n");
-        for ((src, tgt), count) in &pairs {
+        let total_pairs = pairs.len();
+        let shown = total_pairs.min(max_pairs);
+        if total_pairs > max_pairs {
+            xml.push_str(&format!(
+                "    <endpoints total=\"{}\" shown=\"{}\">\n",
+                total_pairs, shown
+            ));
+        } else {
+            xml.push_str("    <endpoints>\n");
+        }
+        for ((src, tgt), count) in pairs.iter().take(shown) {
             xml.push_str(&format!(
                 "      <pair from=\"{}\" to=\"{}\" count=\"{}\"/>\n",
                 xml_escape(src),
@@ -388,49 +488,64 @@ fn write_connections_detail(
                 count
             ));
         }
+        if total_pairs > max_pairs {
+            let hidden_edges: usize = pairs.iter().skip(max_pairs).map(|(_, c)| c).sum();
+            xml.push_str(&format!(
+                "      <more pairs=\"{}\" edges=\"{}\"/>\n",
+                total_pairs - max_pairs,
+                hidden_edges,
+            ));
+        }
         xml.push_str("    </endpoints>\n");
 
         // Edge property stats
-        let prop_stats = compute_edge_property_stats(graph, topic, 15);
-        if !prop_stats.is_empty() {
-            xml.push_str("    <properties>\n");
-            for ps in &prop_stats {
-                if ps.non_null == 0 {
+        if !acc.props.is_empty() {
+            // Sort property names alphabetically for stable output.
+            let mut prop_entries: Vec<(String, EdgePropertyAccum)> = acc
+                .props
+                .into_iter()
+                .map(|(k, v)| (graph.interner.resolve(k).to_string(), v))
+                .collect();
+            prop_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+            let mut wrote_header = false;
+            for (prop_name, stats) in prop_entries {
+                if stats.non_null == 0 {
                     continue;
                 }
-                let vals_attr = match &ps.values {
-                    Some(vals) if !vals.is_empty() => {
-                        let vals_str: Vec<String> =
-                            vals.iter().map(value_display_compact).collect();
-                        format!(" vals=\"{}\"", xml_escape(&vals_str.join("|")))
-                    }
-                    _ => String::new(),
+                if !wrote_header {
+                    xml.push_str("    <properties>\n");
+                    wrote_header = true;
+                }
+                let unique = stats.value_set.len();
+                let type_string = stats.type_name.unwrap_or("unknown");
+                let vals_attr = if unique > 0 && unique <= MAX_PROP_VALUES {
+                    let mut vals: Vec<Value> = stats.value_set.into_iter().collect();
+                    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    let vals_str: Vec<String> = vals.iter().map(value_display_compact).collect();
+                    format!(" vals=\"{}\"", xml_escape(&vals_str.join("|")))
+                } else {
+                    String::new()
                 };
                 xml.push_str(&format!(
                     "      <prop name=\"{}\" type=\"{}\" non_null=\"{}\" unique=\"{}\"{}/>\n",
-                    xml_escape(&ps.property_name),
-                    xml_escape(&ps.type_string),
-                    ps.non_null,
-                    ps.unique,
+                    xml_escape(&prop_name),
+                    xml_escape(type_string),
+                    stats.non_null,
+                    unique,
                     vals_attr,
                 ));
             }
-            xml.push_str("    </properties>\n");
+            if wrote_header {
+                xml.push_str("    </properties>\n");
+            }
         }
 
-        // Sample edges (first 2)
+        // Sample edges (first 2 encountered during the pass).
         xml.push_str("    <samples>\n");
-        let mut sample_count = 0;
-        for edge_ref in g.edge_references() {
-            let ed = edge_ref.weight();
-            if ed.connection_type_str(&graph.interner) != *topic {
-                continue;
-            }
-            if sample_count >= 2 {
-                break;
-            }
+        for sample in &acc.samples {
             let src_label = graph
-                .get_node(edge_ref.source())
+                .get_node(sample.src_idx)
                 .map(|n| {
                     format!(
                         "{}:{}",
@@ -440,7 +555,7 @@ fn write_connections_detail(
                 })
                 .unwrap_or_default();
             let tgt_label = graph
-                .get_node(edge_ref.target())
+                .get_node(sample.tgt_idx)
                 .map(|n| {
                     format!(
                         "{}:{}",
@@ -455,27 +570,22 @@ fn write_connections_detail(
                 xml_escape(&src_label),
                 xml_escape(&tgt_label),
             );
-            // Add up to 4 edge properties
-            let mut prop_count = 0;
-            let mut keys: Vec<&str> = ed.property_keys(&graph.interner).collect();
-            keys.sort();
-            for key in keys {
-                if prop_count >= 4 {
-                    break;
-                }
-                if let Some(v) = ed.get_property(key) {
-                    if !is_null_value(v) {
-                        attrs.push_str(&format!(
-                            " {}=\"{}\"",
-                            xml_escape(key),
-                            xml_escape(&value_display_compact(v))
-                        ));
-                        prop_count += 1;
-                    }
-                }
+            // Up to 4 non-null edge properties, alphabetically by key.
+            let mut prop_refs: Vec<(&str, &Value)> = sample
+                .properties
+                .iter()
+                .filter(|(_, v)| !is_null_value(v))
+                .map(|(k, v)| (graph.interner.resolve(*k), v))
+                .collect();
+            prop_refs.sort_by_key(|(k, _)| *k);
+            for (key, v) in prop_refs.iter().take(4) {
+                attrs.push_str(&format!(
+                    " {}=\"{}\"",
+                    xml_escape(key),
+                    xml_escape(&value_display_compact(v))
+                ));
             }
             xml.push_str(&format!("      <edge {}/>\n", attrs));
-            sample_count += 1;
         }
         xml.push_str("    </samples>\n");
 
@@ -1415,7 +1525,12 @@ pub fn compute_description(
     cypher: &CypherDetail,
     fluent: &FluentDetail,
     type_search: Option<&str>,
+    max_pairs: Option<usize>,
 ) -> Result<String, String> {
+    // Default cap matches pre-parameter behavior — 50 pairs is enough
+    // to cover the dominant (src_type, tgt_type) relationships while
+    // staying well under typical MCP response budgets.
+    let max_pairs = max_pairs.unwrap_or(50);
     // If type_search, connections, cypher, or fluent is requested, return only those tracks
     let standalone = type_search.is_some()
         || !matches!(connections, ConnectionDetail::Off)
@@ -1447,7 +1562,7 @@ pub fn compute_description(
             ConnectionDetail::Off => {}
             ConnectionDetail::Overview => write_connections_overview(&mut result, graph),
             ConnectionDetail::Topics(ref topics) => {
-                write_connections_detail(&mut result, graph, topics)?;
+                write_connections_detail(&mut result, graph, topics, max_pairs)?;
             }
         }
         match cypher {
@@ -1536,6 +1651,7 @@ def graph_overview(
     type_search: str | None = None,
     connections: bool | list[str] | None = None,
     cypher: bool | list[str] | None = None,
+    max_pairs: int | None = None,
 ) -> str:
     """Get graph schema, connection details, or Cypher language reference.
 
@@ -1546,8 +1662,17 @@ def graph_overview(
       graph_overview(connections=True)            — all connection types with properties
       graph_overview(connections=["BELONGS_TO"])  — deep-dive: property stats, sample edges
       graph_overview(cypher=True)                 — Cypher clauses, functions, procedures
-      graph_overview(cypher=["cluster","MATCH"])  — detailed docs with examples"""
-    return graph.describe(types=types, type_search=type_search, connections=connections, cypher=cypher)
+      graph_overview(cypher=["cluster","MATCH"])  — detailed docs with examples
+
+    max_pairs: cap on (src_type, tgt_type) rows in connections=[...] deep-dives.
+    Defaults to 50. Raise it for wide fan-out types (e.g. Wikidata P31)."""
+    return graph.describe(
+        types=types,
+        type_search=type_search,
+        connections=connections,
+        cypher=cypher,
+        max_pairs=max_pairs,
+    )
 
 @mcp.tool()
 def cypher_query(query: str) -> str:

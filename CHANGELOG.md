@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.6] — 2026-04-19
+
+### Performance
+
+- **`describe(connections=['T'])` fast path on disk graphs.** Rewrote
+  `write_connections_detail` to use the persisted `conn_type_index_*`
+  inverted index instead of three full `edge_references()` sweeps. The
+  previous path materialised every visited edge into a per-query
+  `edge_arena` that was never cleared mid-call, growing VSZ linearly
+  with scanned edges — on Wikidata (863 M edges) a single
+  `describe(connections=['P31'])` call was SIGKILLed by the kernel
+  after exhausting VM. The new path:
+  - Reads pair counts from `type_connectivity_cache` when populated
+    (zero edge I/O).
+  - Skips the property-stats scan entirely when the connection type's
+    metadata declares no edge properties.
+  - Walks only matching edges via the inverted index, capped at two
+    samples via an early-exit callback.
+  - Measured on Wikidata (`wikidata_disk_graph_p12rebuild`, 122 M
+    nodes, 863 M edges, cold page cache):
+    - `describe(connections=['P170'])` (1.3 M edges): 108 s → **0.24 s**
+      (~450× faster; previous in-flight code held VSZ at +27 GB
+      after 90 s without completing).
+    - `describe(connections=['P31'])` (122 M edges): **0.25 s** (was
+      SIGKILLed by OOM killer before this change).
+    - `describe(connections=True)` unchanged at ~0.15 s.
+
+### Changed
+
+- **`describe(connections=['T'])` pair-breakdown now capped at 50
+  entries by default** (sorted by count desc), overridable via a new
+  `max_pairs` keyword argument. Wide fan-out connection types like
+  Wikidata's `P31` have tens of thousands of distinct
+  `(src_type, tgt_type)` pairs — P31 alone has 191 k — which produced
+  ~13 MB of XML that overshot typical MCP response budgets. The cap
+  emits `<endpoints total="N" shown="…">` plus a trailing
+  `<more pairs="…" edges="…"/>` marker so agents see both the
+  dominant relationships and the exact size of the tail. P31 output
+  drops 13 MB → ~4 KB by default; pass `max_pairs=500` (or similar)
+  to drill into the full distribution on demand.
+
+### Added
+
+- `GraphBackend::for_each_edge_of_conn_type` — monomorphic closure
+  iterator yielding `(src, tgt, edge_idx, properties)` per match. On
+  disk uses the inverted index and never materialises `EdgeData`; on
+  Memory/Mapped filters petgraph's resident `edge_references`. The
+  callback returns `bool` so callers can stop after a bounded prefix.
+- `DiskGraph::edge_properties_at(edge_idx)` — borrow an edge's
+  property slice without going through the `materialize_edge` arena.
+- `describe(..., max_pairs=<int>)` keyword argument — controls the
+  pair-breakdown cap described above. `None` (default) resolves to 50.
+
 ## [0.8.5] — 2026-04-19
 
 Internal: test coverage, SAFETY docs, storage module reorganization.
