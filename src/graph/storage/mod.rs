@@ -17,6 +17,7 @@
 //! `GraphBackend` dispatcher route to them — never the other way.
 
 pub mod backend;
+pub mod column_store;
 pub mod disk;
 pub mod interner;
 pub mod lookups;

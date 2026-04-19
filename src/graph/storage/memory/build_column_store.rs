@@ -7,10 +7,10 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{InternedKey, StringInterner, TypeSchema};
+use crate::graph::storage::column_store::{ColumnStore, TypedColumn};
 use crate::graph::storage::disk::block_column::{BlockColumn, ColumnType};
 use crate::graph::storage::disk::block_pool::BlockPool;
 use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
-use crate::graph::storage::memory::column_store::{ColumnStore, TypedColumn};
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;

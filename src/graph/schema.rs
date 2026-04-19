@@ -143,7 +143,7 @@ pub(crate) enum PropertyStorage {
     /// Column-oriented storage — properties live in a per-type `ColumnStore`.
     /// The node's row is identified by `row_id`.
     Columnar {
-        store: Arc<crate::graph::storage::memory::column_store::ColumnStore>,
+        store: Arc<crate::graph::storage::column_store::ColumnStore>,
         row_id: u32,
     },
 }

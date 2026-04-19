@@ -746,10 +746,9 @@ pub fn load_ntriples(
 
                 for type_meta in &columns_meta {
                     let mmap_store = type_meta.to_mmap_store(Arc::clone(&mmap_arc));
-                    let store =
-                        crate::graph::storage::memory::column_store::ColumnStore::from_mmap_store(
-                            Arc::new(mmap_store),
-                        );
+                    let store = crate::graph::storage::column_store::ColumnStore::from_mmap_store(
+                        Arc::new(mmap_store),
+                    );
                     graph
                         .column_stores
                         .insert(type_meta.type_name.clone(), Arc::new(store));
@@ -1097,10 +1096,10 @@ fn build_columns_direct(
     type_rename_map: &HashMap<String, String>,
     verbose: bool,
 ) -> std::io::Result<()> {
+    use crate::graph::storage::column_store::ColumnStore;
     use crate::graph::storage::mapped::column_store::{
         ColRef, FixedColumnMeta, MmapColumnStore, Region, StrColumnMeta,
     };
-    use crate::graph::storage::memory::column_store::ColumnStore;
     use crate::graph::storage::memory::property_log::PropertyLogReader;
     use memmap2::MmapMut;
 

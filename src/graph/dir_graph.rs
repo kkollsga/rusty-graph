@@ -143,7 +143,7 @@ pub struct DirGraph {
     /// Not persisted — rebuilt on load if columnar mode is enabled.
     #[serde(skip)]
     pub(crate) column_stores:
-        HashMap<String, Arc<crate::graph::storage::memory::column_store::ColumnStore>>,
+        HashMap<String, Arc<crate::graph::storage::column_store::ColumnStore>>,
     /// Memory limit for columnar heap storage. If Some(n), `enable_columnar()`
     /// will spill columns to temp files when total heap_bytes exceeds n.
     #[serde(skip)]
@@ -1603,7 +1603,7 @@ impl DirGraph {
     /// This reduces memory usage by eliminating per-node `Value` enum overhead
     /// for homogeneous typed columns.
     pub fn enable_columnar(&mut self) {
-        use crate::graph::storage::memory::column_store::ColumnStore;
+        use crate::graph::storage::column_store::ColumnStore;
 
         // Ensure properties are compacted first
         if self.type_schemas.is_empty() {
@@ -1797,8 +1797,8 @@ impl DirGraph {
     pub fn ensure_column_store_for_push(
         &mut self,
         node_type: &str,
-    ) -> &mut crate::graph::storage::memory::column_store::ColumnStore {
-        use crate::graph::storage::memory::column_store::ColumnStore;
+    ) -> &mut crate::graph::storage::column_store::ColumnStore {
+        use crate::graph::storage::column_store::ColumnStore;
 
         let current_schema = self
             .type_schemas

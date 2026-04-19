@@ -20,7 +20,7 @@ use crate::graph::schema::{
     SerdeDeserializeGuard, SerdeSerializeGuard, SpatialConfig, StringInterner,
     StripPropertiesGuard, TemporalConfig,
 };
-use crate::graph::storage::memory::column_store::ColumnStore;
+use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::{GraphRead, GraphWrite};
 use crate::graph::{KnowledgeGraph, TemporalContext};
 use bincode::Options;
@@ -597,7 +597,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
 
         for tm in type_metas {
             let store = tm.to_mmap_store(std::sync::Arc::clone(&mmap_arc));
-            let cs = crate::graph::storage::memory::column_store::ColumnStore::from_mmap_store(
+            let cs = crate::graph::storage::column_store::ColumnStore::from_mmap_store(
                 std::sync::Arc::new(store),
             );
             graph.column_stores.insert(tm.type_name, Arc::new(cs));
@@ -633,15 +633,14 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
                             .get(&type_name)
                             .map(|v| v.len() as u32)
                             .unwrap_or(0);
-                        let store =
-                            crate::graph::storage::memory::column_store::ColumnStore::load_packed(
-                                schema,
-                                &type_meta,
-                                &graph.interner,
-                                &packed,
-                                row_count,
-                                None,
-                            )?;
+                        let store = crate::graph::storage::column_store::ColumnStore::load_packed(
+                            schema,
+                            &type_meta,
+                            &graph.interner,
+                            &packed,
+                            row_count,
+                            None,
+                        )?;
                         graph.column_stores.insert(type_name, Arc::new(store));
                     }
                 }

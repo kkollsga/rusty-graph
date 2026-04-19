@@ -7,5 +7,4 @@
 //! internals today; the struct types diverge in the trait layer).
 
 pub mod build_column_store;
-pub mod column_store;
 pub mod property_log;

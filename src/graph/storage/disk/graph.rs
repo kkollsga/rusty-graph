@@ -45,7 +45,7 @@ pub struct DiskGraph {
 
     // ── Column stores for node properties (Arc refs, data mmap'd) ──
     pub(crate) column_stores:
-        HashMap<InternedKey, Arc<crate::graph::storage::memory::column_store::ColumnStore>>,
+        HashMap<InternedKey, Arc<crate::graph::storage::column_store::ColumnStore>>,
 
     // ── Edge CSR (mmap'd) ──
     pub(super) out_offsets: MmapOrVec<u64>,
@@ -361,7 +361,7 @@ impl DiskGraph {
     /// Set column store references. Called by DirGraph after columnar setup or load.
     pub fn set_column_stores(
         &mut self,
-        stores: HashMap<InternedKey, Arc<crate::graph::storage::memory::column_store::ColumnStore>>,
+        stores: HashMap<InternedKey, Arc<crate::graph::storage::column_store::ColumnStore>>,
     ) {
         self.column_stores = stores;
     }

@@ -207,10 +207,8 @@ impl BatchProcessor {
         // hold shared references.
         let mut deferred_columnar: Vec<(NodeIndex, String, u32)> = Vec::new();
         // Owned mutable column stores, extracted from Arc to avoid clone-on-write
-        let mut owned_stores: HashMap<
-            String,
-            crate::graph::storage::memory::column_store::ColumnStore,
-        > = HashMap::new();
+        let mut owned_stores: HashMap<String, crate::graph::storage::column_store::ColumnStore> =
+            HashMap::new();
 
         if mapped {
             // Collect affected node types from both create queues
@@ -301,7 +299,7 @@ impl BatchProcessor {
                             .get(&creation.node_type)
                             .cloned()
                             .unwrap_or_default();
-                        crate::graph::storage::memory::column_store::ColumnStore::new(
+                        crate::graph::storage::column_store::ColumnStore::new(
                             schema,
                             &meta,
                             &graph.interner,
@@ -319,7 +317,7 @@ impl BatchProcessor {
                             .unwrap_or_default();
                         let old_store = std::mem::replace(
                             store,
-                            crate::graph::storage::memory::column_store::ColumnStore::new(
+                            crate::graph::storage::column_store::ColumnStore::new(
                                 cs.clone(),
                                 &meta,
                                 &graph.interner,
@@ -416,7 +414,7 @@ impl BatchProcessor {
                             .get(&creation.node_type)
                             .cloned()
                             .unwrap_or_default();
-                        crate::graph::storage::memory::column_store::ColumnStore::new(
+                        crate::graph::storage::column_store::ColumnStore::new(
                             schema,
                             &meta,
                             &graph.interner,
@@ -433,7 +431,7 @@ impl BatchProcessor {
                             .unwrap_or_default();
                         let old_store = std::mem::replace(
                             store,
-                            crate::graph::storage::memory::column_store::ColumnStore::new(
+                            crate::graph::storage::column_store::ColumnStore::new(
                                 cs.clone(),
                                 &meta,
                                 &graph.interner,
