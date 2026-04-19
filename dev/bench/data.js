@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776622987639,
+  "lastUpdate": 1776630446996,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -8212,6 +8212,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.00001902864308087805",
             "extra": "mean: 1.133024217171401 msec\nrounds: 792"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "412cf0ae0f81f2649c3aa0ac2cc725918d84d7d9",
+          "message": "feat(cypher): disk property index + schema validation + diagnostics (0.8.7)\n\nAgent-usability overhaul for Cypher on disk-backed graphs.\n\n- Persistent disk-backed property index: create_index on storage='disk'\n  writes four mmap'd files (property_index_{type}_{property}_*.bin),\n  lazy-loaded on first query after reopen. Equality + STARTS WITH\n  served by the same sorted-string layout. Planner pushdown via\n  GraphRead::lookup_by_property_{eq,prefix} trait methods; matcher\n  falls through to the disk index after the in-memory property_indices\n  HashMap misses. Replaces the silent-OOM-on-load path for large\n  disk-backed types.\n- Schema validation at plan time: catches unknown pattern-literal\n  property names ({agee: 30}) before the executor scans, with \"Did\n  you mean?\" suggestions. Node/connection types and WHERE/RETURN\n  expression property accesses pass through (legitimate existence\n  checks, virtual columns).\n- Backend-aware default timeouts: Disk 10s, Mapped 60s, Memory none.\n  timeout_ms=0 is the documented escape hatch. Bare \"Query timed out\"\n  replaced with a structured hint about anchoring and timeout override.\n- Deadline polling added to three unanchored matcher scan loops; worst-\n  case overshoot drops from 20-60s to ~ms past the deadline.\n- ResultView.diagnostics: always-on elapsed_ms / timed_out / timeout_ms\n  dict attached to every cypher() result.\n- describe() annotates indexed properties with indexed=\"eq,prefix\"\n  (strings) or indexed=\"eq\" (numeric), plus an <indexing> hint in\n  <extensions> teaching agents to anchor.\n- MCP cypher_query tool accepts timeout_ms for per-call overrides.\n\nIn-memory backend: zero behaviour change. Disk: create_index now\npersists, default deadline applies, and structured diagnostics ship\nwith every result.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-19T22:24:04+02:00",
+          "tree_id": "6e50ad2fb2843e8c858770f23a1efe82479cfe14",
+          "url": "https://github.com/kkollsga/kglite/commit/412cf0ae0f81f2649c3aa0ac2cc725918d84d7d9"
+        },
+        "date": 1776630446683,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1185.61251412053,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00002320216472185778",
+            "extra": "mean: 843.4458881718074 usec\nrounds: 465"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 816.628950913749,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00003000038490363141",
+            "extra": "mean: 1.2245463485969632 msec\nrounds: 677"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 13771.412616666214,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000033825670819924663",
+            "extra": "mean: 72.61419201032407 usec\nrounds: 5432"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1644.4652823971978,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000020984011144684874",
+            "extra": "mean: 608.1004024251962 usec\nrounds: 907"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 663918.5422715864,
+            "unit": "iter/sec",
+            "range": "stddev: 4.100472209466412e-7",
+            "extra": "mean: 1.5062088740261967 usec\nrounds: 69731"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 128808.02359284091,
+            "unit": "iter/sec",
+            "range": "stddev: 9.036817215786217e-7",
+            "extra": "mean: 7.763491528765135 usec\nrounds: 15051"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2261.2698820651526,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000009847422543916464",
+            "extra": "mean: 442.22938974746734 usec\nrounds: 3687"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1626.3996612834676,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000020477324246405164",
+            "extra": "mean: 614.8550222955982 usec\nrounds: 1211"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 13553.963231265558,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000031780987311255793",
+            "extra": "mean: 73.77915838617987 usec\nrounds: 9963"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 797.3490029841016,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000026212275097326777",
+            "extra": "mean: 1.2541559546164494 msec\nrounds: 639"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 803.4585213753974,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00008189114902014082",
+            "extra": "mean: 1.2446193218389843 msec\nrounds: 783"
           }
         ]
       }
