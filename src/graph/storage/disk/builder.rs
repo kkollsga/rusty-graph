@@ -1126,3 +1126,194 @@ impl DiskGraph {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::datatypes::values::Value;
+    use crate::graph::schema::{EdgeData, NodeData, StringInterner};
+    use crate::graph::storage::interner::InternedKey;
+    use petgraph::graph::NodeIndex;
+    use tempfile::TempDir;
+
+    fn make_node(interner: &mut StringInterner, id: i64) -> NodeData {
+        NodeData::new(
+            Value::Int64(id),
+            Value::String(format!("n{id}")),
+            "N".to_string(),
+            HashMap::new(),
+            interner,
+        )
+    }
+
+    fn make_edge(interner: &mut StringInterner, ct: &str) -> EdgeData {
+        EdgeData::new(ct.to_string(), HashMap::new(), interner)
+    }
+
+    /// Build a DiskGraph in a temp directory with the given edges,
+    /// exercising the pending → CSR build path including conn_type_index
+    /// and peer_count_histogram construction.
+    fn build_graph(
+        dir: &TempDir,
+        num_nodes: usize,
+        edges: &[(usize, usize, &str)],
+    ) -> (DiskGraph, StringInterner) {
+        let mut interner = StringInterner::new();
+        let mut dg = DiskGraph::new_at_path(dir.path()).expect("create disk graph");
+        dg.defer_csr = true;
+        let node_ids: Vec<NodeIndex> = (0..num_nodes)
+            .map(|i| dg.add_node(make_node(&mut interner, i as i64)))
+            .collect();
+        for &(s, t, ct) in edges {
+            dg.add_edge(node_ids[s], node_ids[t], make_edge(&mut interner, ct));
+        }
+        dg.build_csr_from_pending();
+        (dg, interner)
+    }
+
+    fn collect_index(dg: &DiskGraph) -> Vec<(u64, Vec<u32>)> {
+        let n_types = dg.conn_type_index_types.len();
+        (0..n_types)
+            .map(|i| {
+                let ct = dg.conn_type_index_types.get(i);
+                let start = dg.conn_type_index_offsets.get(i) as usize;
+                let end = dg.conn_type_index_offsets.get(i + 1) as usize;
+                let sources: Vec<u32> = (start..end)
+                    .map(|j| dg.conn_type_index_sources.get(j))
+                    .collect();
+                (ct, sources)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn conn_type_index_sorted_and_complete() {
+        let dir = TempDir::new().unwrap();
+        let edges = [
+            (0, 1, "A"),
+            (2, 3, "B"),
+            (0, 3, "C"),
+            (1, 2, "A"),
+            (2, 0, "B"),
+        ];
+        let (dg, interner) = build_graph(&dir, 4, &edges);
+
+        let index = collect_index(&dg);
+        assert_eq!(index.len(), 3, "expected 3 connection types");
+
+        // Types sorted ascending.
+        let types: Vec<u64> = index.iter().map(|(ct, _)| *ct).collect();
+        let mut sorted = types.clone();
+        sorted.sort();
+        assert_eq!(types, sorted, "conn_type_index_types must be sorted");
+
+        // Offsets chain correctly — total sources = sum of per-type source counts.
+        let total_sources: usize = index.iter().map(|(_, srcs)| srcs.len()).sum();
+        assert_eq!(dg.conn_type_index_sources.len(), total_sources);
+
+        // Each type's source list is sorted ascending (per builder invariant).
+        for (ct, sources) in &index {
+            let mut s = sources.clone();
+            s.sort_unstable();
+            assert_eq!(*sources, s, "sources for type {ct:#x} must be sorted");
+        }
+
+        // Correctness: every source that has an outgoing edge of type T
+        // appears exactly once in T's source list.
+        let type_a = InternedKey::from_str("A").as_u64();
+        let type_b = InternedKey::from_str("B").as_u64();
+        let type_c = InternedKey::from_str("C").as_u64();
+
+        let lookup = |ct: u64| -> Vec<u32> {
+            index
+                .iter()
+                .find_map(|(t, s)| (*t == ct).then(|| s.clone()))
+                .unwrap_or_default()
+        };
+        // A edges: 0→1, 1→2 → sources {0, 1}
+        assert_eq!(lookup(type_a), vec![0, 1]);
+        // B edges: 2→3, 2→0 → sources {2} (dedup per type)
+        assert_eq!(lookup(type_b), vec![2]);
+        // C edges: 0→3 → sources {0}
+        assert_eq!(lookup(type_c), vec![0]);
+
+        drop(interner);
+    }
+
+    #[test]
+    fn conn_type_index_excludes_isolated_nodes() {
+        let dir = TempDir::new().unwrap();
+        // Node 2 is isolated (no outgoing edges).
+        let edges = [(0, 1, "A"), (1, 0, "A")];
+        let (dg, _) = build_graph(&dir, 3, &edges);
+
+        let index = collect_index(&dg);
+        assert_eq!(index.len(), 1);
+        let (_, sources) = &index[0];
+        assert!(
+            !sources.contains(&2),
+            "isolated node 2 must not appear as a source"
+        );
+        assert_eq!(sources, &vec![0, 1]);
+    }
+
+    #[test]
+    fn peer_count_entries_segregated_by_type() {
+        // Node 0 connects to node 1 via two different connection types.
+        // Each type's histogram must list node 1 once with count 1 —
+        // the per-type buckets must not merge.
+        let dir = TempDir::new().unwrap();
+        let edges = [(0, 1, "KNOWS"), (0, 1, "LIKES")];
+        let (dg, _) = build_graph(&dir, 2, &edges);
+
+        let knows = InternedKey::from_str("KNOWS").as_u64();
+        let likes = InternedKey::from_str("LIKES").as_u64();
+
+        let knows_counts = dg.lookup_peer_counts(knows).expect("KNOWS bucket exists");
+        let likes_counts = dg.lookup_peer_counts(likes).expect("LIKES bucket exists");
+
+        assert_eq!(knows_counts.len(), 1);
+        assert_eq!(knows_counts.get(&1), Some(&1));
+        assert_eq!(likes_counts.len(), 1);
+        assert_eq!(likes_counts.get(&1), Some(&1));
+    }
+
+    #[test]
+    fn peer_count_entries_aggregates_parallel_edges() {
+        // Three edges of the same type 0→1 aggregate to (peer=1, count=3).
+        let dir = TempDir::new().unwrap();
+        let edges = [(0, 1, "T"), (0, 1, "T"), (0, 1, "T")];
+        let (dg, _) = build_graph(&dir, 2, &edges);
+
+        let t = InternedKey::from_str("T").as_u64();
+        let counts = dg.lookup_peer_counts(t).expect("T bucket exists");
+        assert_eq!(counts.get(&1), Some(&3));
+    }
+
+    #[test]
+    fn peer_count_entries_sparsity() {
+        // High-degree target (node 0) and low-degree target (node 3).
+        //   1→0, 2→0, 3→0, 2→3
+        // Outgoing-oriented histogram keys on target, so peer=0 has count=3,
+        // peer=3 has count=1.
+        let dir = TempDir::new().unwrap();
+        let edges = [(1, 0, "T"), (2, 0, "T"), (3, 0, "T"), (2, 3, "T")];
+        let (dg, _) = build_graph(&dir, 4, &edges);
+
+        let t = InternedKey::from_str("T").as_u64();
+        let counts = dg.lookup_peer_counts(t).expect("T bucket exists");
+        assert_eq!(counts.get(&0), Some(&3));
+        assert_eq!(counts.get(&3), Some(&1));
+        assert_eq!(counts.len(), 2, "no spurious peer entries");
+    }
+
+    #[test]
+    fn lookup_peer_counts_missing_type_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let edges = [(0, 1, "A")];
+        let (dg, _) = build_graph(&dir, 2, &edges);
+
+        let missing = InternedKey::from_str("NEVER_USED").as_u64();
+        assert!(dg.lookup_peer_counts(missing).is_none());
+    }
+}
