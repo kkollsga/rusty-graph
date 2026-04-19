@@ -244,6 +244,16 @@ pub fn generate_explain_plan(query: &CypherQuery, graph: &DirGraph) -> String {
                 format!("FusedNodeScanTopK (optimized MATCH + ORDER BY + LIMIT {limit})"),
                 Some(*limit),
             ),
+            Clause::SpatialJoin {
+                container_type,
+                probe_type,
+                ..
+            } => (
+                format!(
+                    "SpatialJoin (optimized MATCH (:{container_type}), (:{probe_type}) WHERE contains(...))"
+                ),
+                None,
+            ),
         };
         if let Some(est) = est {
             lines.push(format!("  {}. {} (~{} rows)", step, desc, est));

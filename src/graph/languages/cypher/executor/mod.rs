@@ -234,6 +234,11 @@ pub fn clause_display_name(clause: &Clause) -> String {
         }
         Clause::FusedNodeScanAggregate { .. } => "FusedNodeScanAggregate".into(),
         Clause::FusedNodeScanTopK { limit, .. } => format!("FusedNodeScanTopK (k={limit})"),
+        Clause::SpatialJoin {
+            container_type,
+            probe_type,
+            ..
+        } => format!("SpatialJoin :{container_type} ⊇ :{probe_type}"),
     }
 }
 
@@ -593,6 +598,19 @@ impl<'a> CypherExecutor<'a> {
                 sort_expression,
                 *descending,
                 *limit,
+            ),
+            Clause::SpatialJoin {
+                container_var,
+                probe_var,
+                container_type,
+                probe_type,
+                remainder,
+            } => self.execute_spatial_join(
+                container_var,
+                probe_var,
+                container_type,
+                probe_type,
+                remainder.as_ref(),
             ),
             Clause::Call(c) => self.execute_call(c, result_set),
             Clause::Create(_)
@@ -1103,6 +1121,7 @@ pub mod expression;
 pub mod helpers;
 pub mod match_clause;
 pub mod return_clause;
+pub mod spatial_join;
 #[cfg(test)]
 pub mod tests;
 pub mod where_clause;

@@ -158,6 +158,17 @@ pub enum Clause {
         descending: bool,
         limit: usize,
     },
+    /// Optimizer-generated: MATCH (s:A), (w:B) WHERE contains(s, w) → spatial-join operator.
+    /// Builds an R-tree on container bboxes and probes points against it, avoiding the
+    /// full cartesian product. `remainder` is the ANDed residual predicate (or None) left
+    /// after `try_extract_contains_filter` removed the contains() call.
+    SpatialJoin {
+        container_var: String,
+        probe_var: String,
+        container_type: String,
+        probe_type: String,
+        remainder: Option<Predicate>,
+    },
 }
 
 // ============================================================================

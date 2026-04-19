@@ -23,7 +23,8 @@ use cost_model::reorder_predicates_by_cost;
 use fusion::{
     fuse_anchored_edge_count, fuse_count_short_circuits, fuse_match_return_aggregate,
     fuse_match_with_aggregate, fuse_node_scan_aggregate, fuse_node_scan_top_k,
-    fuse_optional_match_aggregate, fuse_order_by_top_k, fuse_vector_score_order_limit,
+    fuse_optional_match_aggregate, fuse_order_by_top_k, fuse_spatial_join,
+    fuse_vector_score_order_limit,
 };
 use index_selection::push_where_into_match;
 use join_order::{optimize_pattern_start_node, reorder_match_patterns};
@@ -35,6 +36,7 @@ pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<Stri
     push_where_into_match(query, params);
     fold_or_to_in(query);
     push_where_into_match(query, params); // second pass: push newly-created IN predicates
+    fuse_spatial_join(query, graph);
     optimize_pattern_start_node(query, graph);
     reorder_match_patterns(query, graph);
     push_limit_into_match(query, graph);

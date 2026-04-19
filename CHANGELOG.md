@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3] — 2026-04-19
+
+### Performance
+
+- **Spatial-join operator for `MATCH (s:A), (w:B) WHERE contains(s, w)`.**
+  A new planner pass (`fuse_spatial_join`) rewrites this two-pattern
+  containment shape into `Clause::SpatialJoin`, bypassing the cartesian
+  product. The executor builds an R-tree over the container side (via
+  the new `rstar` dependency), iterates the probe side once, and emits
+  only matching (container, probe) pairs — `O((N+M) log N + K)` rather
+  than `O(N·M)`. Speedups on `tests/bench_spatial.py` (release build):
+  - `contains 500K pairs` (500 polygons × 1 K points): 86.96 ms → 0.52 ms (**~167×**)
+  - `contains 2.6M prospect_shape` (263 complex polygons × 10 K points):
+    480.51 ms → 3.32 ms (**~145×**)
+  - `contains 100K pairs`: 17.65 ms → 0.55 ms (~32×)
+  - Complex polygons (50 vertices): 18.29 ms → 0.24 ms (~76×)
+
+  Fires when both types have `SpatialConfig` (container needs `geometry`,
+  probe needs `location`), the two patterns are disjoint typed nodes
+  with no edges, and the WHERE is `contains(var, var)` optionally ANDed
+  with a residual predicate. Other shapes (`NOT contains`, constant-point
+  `contains(a, point(…))`, intra-pattern edges, three-plus patterns,
+  disjunctions) fall back to the existing per-row fast path unchanged.
+
 ## [0.8.2] — 2026-04-19
 
 ### Changed

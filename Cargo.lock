@@ -628,7 +628,7 @@ dependencies = [
 
 [[package]]
 name = "kglite"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "aho-corasick",
  "bincode",
@@ -645,6 +645,7 @@ dependencies = [
  "rayon",
  "regex",
  "roxmltree",
+ "rstar 0.12.2",
  "serde",
  "serde_json",
  "tempfile",

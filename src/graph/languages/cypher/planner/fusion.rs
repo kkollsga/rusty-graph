@@ -1693,3 +1693,306 @@ pub(super) fn fuse_order_by_top_k(query: &mut CypherQuery) {
         i += 1;
     }
 }
+
+// ============================================================================
+// Spatial-join fusion: MATCH (s:A), (w:B) WHERE contains(s, w) [AND rest]
+// ============================================================================
+
+/// Try to strip `contains(var, var)` from a predicate, returning
+/// (container_var, probe_var, remainder_predicate).
+/// Returns `None` if the predicate doesn't match the required shape.
+///
+/// Matches these AST shapes (see where_clause.rs `try_extract_contains_filter`):
+///   - `contains(a, b) <> false` (parser truthy wrapper) → primary case
+///   - `contains(a, b) <> false AND rest` or `rest AND contains(...)` → with remainder
+///
+/// Does NOT match: `NOT contains(...)`, `contains(a, point(…))` (constant point),
+/// disjunctions, or any non-variable first/second arg.
+fn extract_spatial_join_contains(pred: &Predicate) -> Option<(String, String, Option<Predicate>)> {
+    match pred {
+        Predicate::Comparison {
+            left,
+            operator: ComparisonOp::NotEquals,
+            right: Expression::Literal(Value::Boolean(false)),
+        } => {
+            let (c, p) = extract_contains_call_vars(left)?;
+            Some((c, p, None))
+        }
+        Predicate::And(l, r) => {
+            if let Some((c, p, None)) = extract_spatial_join_contains(l) {
+                return Some((c, p, Some((**r).clone())));
+            }
+            if let Some((c, p, None)) = extract_spatial_join_contains(r) {
+                return Some((c, p, Some((**l).clone())));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Match a `contains(Variable, Variable)` function call expression.
+fn extract_contains_call_vars(expr: &Expression) -> Option<(String, String)> {
+    if let Expression::FunctionCall { name, args, .. } = expr {
+        if name != "contains" || args.len() != 2 {
+            return None;
+        }
+        let c = match &args[0] {
+            Expression::Variable(n) => n.clone(),
+            _ => return None,
+        };
+        let p = match &args[1] {
+            Expression::Variable(n) => n.clone(),
+            _ => return None,
+        };
+        if c == p {
+            return None;
+        }
+        Some((c, p))
+    } else {
+        None
+    }
+}
+
+/// Rewrite `MATCH (s:A), (w:B) WHERE contains(s, w) [AND rest]` into
+/// `Clause::SpatialJoin { ..., remainder: rest }`.
+///
+/// Preconditions (all must hold or the rewrite is skipped):
+/// - Adjacent `Match` + `Where` clauses with no intervening skipped fusion.
+/// - Two disjoint single-node patterns, each with `variable` and `node_type`,
+///   no edges, no path assignments, no limit/distinct hints.
+/// - WHERE predicate matches `contains(var, var) <> false` (parser's truthy
+///   wrapper), possibly ANDed with a remainder. No NOT, no OR, no constant point.
+/// - The two contains() variables bind to the two MATCH patterns (in either order).
+/// - Container type has `SpatialConfig::geometry`; probe type has
+///   `SpatialConfig::location`.
+pub(super) fn fuse_spatial_join(query: &mut CypherQuery, graph: &DirGraph) {
+    let mut i = 0;
+    while i + 1 < query.clauses.len() {
+        let eligible = matches!(
+            (&query.clauses[i], &query.clauses[i + 1]),
+            (Clause::Match(_), Clause::Where(_))
+        );
+        if !eligible {
+            i += 1;
+            continue;
+        }
+
+        let (p0_var, p0_type, p1_var, p1_type) = {
+            let mc = match &query.clauses[i] {
+                Clause::Match(m) => m,
+                _ => unreachable!(),
+            };
+            if mc.patterns.len() != 2
+                || !mc.path_assignments.is_empty()
+                || mc.limit_hint.is_some()
+                || mc.distinct_node_hint.is_some()
+            {
+                i += 1;
+                continue;
+            }
+            let extract = |pat: &crate::graph::core::pattern_matching::Pattern| {
+                if pat.elements.len() != 1 {
+                    return None;
+                }
+                match &pat.elements[0] {
+                    PatternElement::Node(np) => {
+                        // Require a variable and a typed label. Properties are
+                        // allowed (planner still lets us prune per-type); other
+                        // fields must be defaults.
+                        let v = np.variable.as_ref()?.clone();
+                        let t = np.node_type.as_ref()?.clone();
+                        Some((v, t))
+                    }
+                    _ => None,
+                }
+            };
+            let (v0, t0) = match extract(&mc.patterns[0]) {
+                Some(x) => x,
+                None => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let (v1, t1) = match extract(&mc.patterns[1]) {
+                Some(x) => x,
+                None => {
+                    i += 1;
+                    continue;
+                }
+            };
+            (v0, t0, v1, t1)
+        };
+
+        let (container_var, probe_var, remainder) = {
+            let w = match &query.clauses[i + 1] {
+                Clause::Where(w) => w,
+                _ => unreachable!(),
+            };
+            match extract_spatial_join_contains(&w.predicate) {
+                Some(x) => x,
+                None => {
+                    i += 1;
+                    continue;
+                }
+            }
+        };
+
+        // Resolve which MATCH pattern each variable came from, and the types.
+        let (container_type, probe_type) = if container_var == p0_var && probe_var == p1_var {
+            (p0_type.clone(), p1_type.clone())
+        } else if container_var == p1_var && probe_var == p0_var {
+            (p1_type.clone(), p0_type.clone())
+        } else {
+            i += 1;
+            continue;
+        };
+
+        // Schema gate: container needs geometry, probe needs location.
+        let container_ok = graph
+            .get_spatial_config(&container_type)
+            .is_some_and(|c| c.geometry.is_some());
+        let probe_ok = graph
+            .get_spatial_config(&probe_type)
+            .is_some_and(|c| c.location.is_some());
+        if !(container_ok && probe_ok) {
+            i += 1;
+            continue;
+        }
+
+        // Commit rewrite: replace Match+Where with a single SpatialJoin clause.
+        query.clauses.remove(i + 1);
+        query.clauses[i] = Clause::SpatialJoin {
+            container_var,
+            probe_var,
+            container_type,
+            probe_type,
+            remainder,
+        };
+
+        i += 1;
+    }
+}
+
+#[cfg(test)]
+mod spatial_join_tests {
+    use super::*;
+    use crate::graph::languages::cypher::parser::parse_cypher;
+    use crate::graph::schema::{DirGraph, SpatialConfig};
+
+    fn graph_with_spatial() -> DirGraph {
+        let mut g = DirGraph::new();
+        g.spatial_configs.insert(
+            "Area".into(),
+            SpatialConfig {
+                geometry: Some("geom".into()),
+                location: None,
+                points: Default::default(),
+                shapes: Default::default(),
+            },
+        );
+        g.spatial_configs.insert(
+            "City".into(),
+            SpatialConfig {
+                geometry: None,
+                location: Some(("lat".into(), "lon".into())),
+                points: Default::default(),
+                shapes: Default::default(),
+            },
+        );
+        g
+    }
+
+    #[test]
+    fn rewrites_canonical_two_pattern_contains() {
+        let mut q =
+            parse_cypher("MATCH (a:Area), (c:City) WHERE contains(a, c) RETURN a.name, c.name")
+                .unwrap();
+        fuse_spatial_join(&mut q, &graph_with_spatial());
+        assert!(matches!(&q.clauses[0], Clause::SpatialJoin { .. }));
+        // WHERE consumed, RETURN remains
+        assert_eq!(q.clauses.len(), 2);
+        assert!(matches!(&q.clauses[1], Clause::Return(_)));
+    }
+
+    #[test]
+    fn rewrites_with_and_remainder() {
+        let mut q = parse_cypher(
+            "MATCH (a:Area), (c:City) WHERE contains(a, c) AND c.name = 'x' RETURN a.name",
+        )
+        .unwrap();
+        fuse_spatial_join(&mut q, &graph_with_spatial());
+        if let Clause::SpatialJoin { remainder, .. } = &q.clauses[0] {
+            assert!(remainder.is_some(), "remainder should carry c.name = 'x'");
+        } else {
+            panic!("expected SpatialJoin, got {:?}", q.clauses[0]);
+        }
+    }
+
+    #[test]
+    fn skips_constant_point() {
+        let mut q =
+            parse_cypher("MATCH (a:Area), (c:City) WHERE contains(a, point(60.0, 10.0)) RETURN a")
+                .unwrap();
+        fuse_spatial_join(&mut q, &graph_with_spatial());
+        assert!(
+            !q.clauses
+                .iter()
+                .any(|c| matches!(c, Clause::SpatialJoin { .. })),
+            "constant-point case must not rewrite"
+        );
+    }
+
+    #[test]
+    fn skips_negated_contains() {
+        let mut q =
+            parse_cypher("MATCH (a:Area), (c:City) WHERE NOT contains(a, c) RETURN a").unwrap();
+        fuse_spatial_join(&mut q, &graph_with_spatial());
+        assert!(
+            !q.clauses
+                .iter()
+                .any(|c| matches!(c, Clause::SpatialJoin { .. })),
+            "NOT contains must fall back to existing path"
+        );
+    }
+
+    #[test]
+    fn skips_three_patterns() {
+        let mut q =
+            parse_cypher("MATCH (a:Area), (b:Area), (c:City) WHERE contains(a, c) RETURN a")
+                .unwrap();
+        fuse_spatial_join(&mut q, &graph_with_spatial());
+        assert!(
+            !q.clauses
+                .iter()
+                .any(|c| matches!(c, Clause::SpatialJoin { .. })),
+            "three-pattern MATCH must not rewrite"
+        );
+    }
+
+    #[test]
+    fn skips_without_spatial_config() {
+        let mut q = parse_cypher("MATCH (a:Foo), (c:Bar) WHERE contains(a, c) RETURN a").unwrap();
+        fuse_spatial_join(&mut q, &DirGraph::new());
+        assert!(
+            !q.clauses
+                .iter()
+                .any(|c| matches!(c, Clause::SpatialJoin { .. })),
+            "types without SpatialConfig must not rewrite"
+        );
+    }
+
+    #[test]
+    fn skips_edge_pattern() {
+        let mut q =
+            parse_cypher("MATCH (a:Area)-[:R]->(x), (c:City) WHERE contains(a, c) RETURN a")
+                .unwrap();
+        fuse_spatial_join(&mut q, &graph_with_spatial());
+        assert!(
+            !q.clauses
+                .iter()
+                .any(|c| matches!(c, Clause::SpatialJoin { .. })),
+            "patterns with edges must not rewrite"
+        );
+    }
+}

@@ -305,3 +305,119 @@ class TestSpatialAggregation:
         ).to_list()
         assert rows[0]["min_d"] < 1000.0  # Oslo to itself ~ 0
         assert rows[0]["max_d"] > 300_000  # Farthest city > 300km
+
+
+# ============================================================================
+# Spatial-join fusion: MATCH (a:A), (b:B) WHERE contains(a, b)
+# ============================================================================
+
+
+@pytest.fixture
+def spatial_join_graph():
+    """Graph with SpatialConfig on both Area (geometry) and City (location),
+    which is the exact shape that triggers `fuse_spatial_join`."""
+    g = kglite.KnowledgeGraph()
+    areas = pd.DataFrame(
+        {
+            "id": [10, 11, 12],
+            "title": ["SouthNorway", "WestNorway", "SmallBox"],
+            "geometry": [
+                "POLYGON((5 58, 12 58, 12 62, 5 62, 5 58))",
+                "POLYGON((4 58, 7 58, 7 62, 4 62, 4 58))",
+                "POLYGON((10 59, 11 59, 11 60, 10 60, 10 59))",
+            ],
+        }
+    )
+    g.add_nodes(areas, "Area", "id", "title", column_types={"geometry": "geometry"})
+    cities = pd.DataFrame(
+        {
+            "id": [1, 2, 3, 4, 5],
+            "title": ["Oslo", "Bergen", "Stavanger", "Trondheim", "Drammen"],
+            "latitude": [59.91, 60.39, 58.97, 63.43, 59.74],
+            "longitude": [10.75, 5.32, 5.73, 10.40, 10.20],
+        }
+    )
+    g.add_nodes(
+        cities,
+        "City",
+        "id",
+        "title",
+        column_types={"latitude": "location.lat", "longitude": "location.lon"},
+    )
+    return g
+
+
+class TestSpatialJoin:
+    def _brute_force(self, graph):
+        """Reference implementation using the pre-existing non-fused path
+        (`contains(a.geometry, point(c.latitude, c.longitude))` goes through
+        expression evaluation, not the spatial-join executor)."""
+        rows = graph.cypher(
+            "MATCH (a:Area), (c:City) "
+            "WHERE contains(a.geometry, point(c.latitude, c.longitude)) "
+            "RETURN a.title AS area, c.title AS city ORDER BY area, city"
+        ).to_list()
+        return {(r["area"], r["city"]) for r in rows}
+
+    def test_two_pattern_matches_brute_force(self, spatial_join_graph):
+        """The fused spatial-join must produce the same (area, city) pairs
+        as the non-fused brute-force path."""
+        fused = spatial_join_graph.cypher(
+            "MATCH (a:Area), (c:City) WHERE contains(a, c) RETURN a.title AS area, c.title AS city ORDER BY area, city"
+        ).to_list()
+        fused_set = {(r["area"], r["city"]) for r in fused}
+        reference = self._brute_force(spatial_join_graph)
+        assert fused_set == reference
+        # Sanity: the reference isn't empty — we expect at least Oslo∈SouthNorway.
+        assert ("SouthNorway", "Oslo") in fused_set
+
+    def test_with_and_remainder(self, spatial_join_graph):
+        """The ANDed remainder predicate must still filter correctly after
+        the spatial-join emits pairs."""
+        rows = spatial_join_graph.cypher(
+            "MATCH (a:Area), (c:City) WHERE contains(a, c) AND c.title = 'Oslo' RETURN a.title AS area ORDER BY area"
+        ).to_list()
+        areas = [r["area"] for r in rows]
+        assert "Oslo" not in areas  # areas only — not cities
+        assert "SouthNorway" in areas  # Oslo is inside SouthNorway
+
+    def test_explain_shows_spatial_join(self, spatial_join_graph):
+        """EXPLAIN output should mention the fused SpatialJoin operator
+        so that we can confirm the fusion actually fires in production."""
+        result = spatial_join_graph.cypher(
+            "EXPLAIN MATCH (a:Area), (c:City) WHERE contains(a, c) RETURN a.title"
+        ).to_list()
+        text = "\n".join(str(r) for r in result)
+        assert "SpatialJoin" in text
+
+    def test_negated_falls_back_to_existing_path(self, spatial_join_graph):
+        """`NOT contains(a, c)` must not trigger the fusion (the executor
+        wouldn't handle negation) and must still return correct results via
+        the existing per-row fast path."""
+        rows = spatial_join_graph.cypher(
+            "MATCH (a:Area), (c:City) "
+            "WHERE NOT contains(a, c) AND a.title = 'SmallBox' "
+            "RETURN c.title AS city ORDER BY city"
+        ).to_list()
+        # SmallBox (lon 10-11, lat 59-60) contains Oslo and Drammen;
+        # Bergen, Stavanger, Trondheim are outside.
+        assert [r["city"] for r in rows] == ["Bergen", "Stavanger", "Trondheim"]
+        # Confirm the fallback path was taken — no SpatialJoin in EXPLAIN.
+        explain = spatial_join_graph.cypher(
+            "EXPLAIN MATCH (a:Area), (c:City) WHERE NOT contains(a, c) AND a.title = 'SmallBox' RETURN c.title"
+        ).to_list()
+        assert "SpatialJoin" not in "\n".join(str(r) for r in explain)
+
+    def test_empty_when_one_type_missing(self):
+        """A graph with Area but no City must return zero rows without crashing."""
+        g = kglite.KnowledgeGraph()
+        areas = pd.DataFrame(
+            {
+                "id": [1],
+                "title": ["Only"],
+                "geometry": ["POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))"],
+            }
+        )
+        g.add_nodes(areas, "Area", "id", "title", column_types={"geometry": "geometry"})
+        rows = g.cypher("MATCH (a:Area), (c:City) WHERE contains(a, c) RETURN a.title").to_list()
+        assert rows == []
