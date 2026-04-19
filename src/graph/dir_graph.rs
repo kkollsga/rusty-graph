@@ -751,6 +751,21 @@ impl DirGraph {
         self.property_indices.contains_key(&key)
     }
 
+    /// Check if **any** index exists for `(node_type, property)` — the
+    /// in-memory `property_indices` HashMap *or* a persistent
+    /// disk-backed `PropertyIndex`. Used by `describe()` to annotate
+    /// schema output with `indexed=…` attributes so agents can tell
+    /// which properties hit an O(log N) path.
+    pub fn has_any_index(&self, node_type: &str, property: &str) -> bool {
+        if self.has_index(node_type, property) {
+            return true;
+        }
+        if let crate::graph::storage::backend::GraphBackend::Disk(dg) = &self.graph {
+            return dg.has_property_index(node_type, property);
+        }
+        false
+    }
+
     /// Get all existing indexes as a list of (node_type, property) tuples.
     pub fn list_indexes(&self) -> Vec<(String, String)> {
         self.property_indices.keys().cloned().collect()

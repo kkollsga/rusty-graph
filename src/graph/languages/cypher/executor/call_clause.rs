@@ -673,6 +673,7 @@ impl<'a> CypherExecutor<'a> {
                 rows,
                 stats: None,
                 profile: None,
+                diagnostics: None,
             });
         }
 
@@ -707,6 +708,7 @@ impl<'a> CypherExecutor<'a> {
             rows,
             stats: None,
             profile: None,
+            diagnostics: None,
         })
     }
 }

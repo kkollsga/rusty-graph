@@ -222,6 +222,23 @@ pub struct MutationStats {
     pub properties_removed: usize,
 }
 
+/// Lightweight diagnostics attached to every `CypherResult` — gives
+/// agents the signal they need to iterate without relying on PROFILE.
+///
+/// Populated unconditionally. The cost is a single `Instant::now()` call
+/// pair and a handful of counter bumps, so always-on.
+#[derive(Debug, Clone, Default)]
+pub struct QueryDiagnostics {
+    /// Wall-clock time spent executing the query (parse + plan + execute).
+    pub elapsed_ms: u64,
+    /// True when the deadline fired during execution. When set, the
+    /// result rows are the partial set materialised before cancellation.
+    pub timed_out: bool,
+    /// Deadline that was in effect for this query, in milliseconds.
+    /// `None` when no deadline applied.
+    pub timeout_ms: Option<u64>,
+}
+
 /// Final query result returned to Python
 #[derive(Debug)]
 pub struct CypherResult {
@@ -229,6 +246,7 @@ pub struct CypherResult {
     pub rows: Vec<Vec<Value>>,
     pub stats: Option<MutationStats>,
     pub profile: Option<Vec<ClauseStats>>,
+    pub diagnostics: Option<QueryDiagnostics>,
 }
 
 impl CypherResult {
@@ -238,6 +256,7 @@ impl CypherResult {
             rows: Vec::new(),
             stats: None,
             profile: None,
+            diagnostics: None,
         }
     }
 

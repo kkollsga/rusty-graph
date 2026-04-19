@@ -135,6 +135,7 @@ pub fn execute_mutable(
             rows: Vec::new(),
             stats: Some(stats),
             profile,
+            diagnostics: None,
         })
     }
 }

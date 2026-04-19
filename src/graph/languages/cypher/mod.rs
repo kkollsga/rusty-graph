@@ -21,6 +21,7 @@ pub use ast::OutputFormat;
 pub use executor::{execute_mutable, is_mutation_query, CypherExecutor};
 pub use parser::parse_cypher;
 pub use planner::optimize;
+pub use planner::schema_check::validate_schema;
 pub use planner::simplification::rewrite_text_score;
 pub use result::CypherResult;
 
@@ -367,6 +368,7 @@ pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result:
         rows,
         stats: None,
         profile: None,
+        diagnostics: None,
     }
 }
 

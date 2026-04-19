@@ -618,6 +618,53 @@ impl GraphRead for GraphBackend {
     }
 
     #[inline]
+    fn lookup_by_property_eq(
+        &self,
+        node_type: &str,
+        property: &str,
+        value: &str,
+    ) -> Option<Vec<NodeIndex>> {
+        match self {
+            Self::Memory(g) => GraphRead::lookup_by_property_eq(g, node_type, property, value),
+            Self::Mapped(g) => GraphRead::lookup_by_property_eq(g, node_type, property, value),
+            Self::Disk(g) => {
+                GraphRead::lookup_by_property_eq(g.as_ref(), node_type, property, value)
+            }
+            Self::Recording(rg) => {
+                GraphRead::lookup_by_property_eq(rg.as_ref(), node_type, property, value)
+            }
+        }
+    }
+
+    #[inline]
+    fn lookup_by_property_prefix(
+        &self,
+        node_type: &str,
+        property: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Option<Vec<NodeIndex>> {
+        match self {
+            Self::Memory(g) => {
+                GraphRead::lookup_by_property_prefix(g, node_type, property, prefix, limit)
+            }
+            Self::Mapped(g) => {
+                GraphRead::lookup_by_property_prefix(g, node_type, property, prefix, limit)
+            }
+            Self::Disk(g) => {
+                GraphRead::lookup_by_property_prefix(g.as_ref(), node_type, property, prefix, limit)
+            }
+            Self::Recording(rg) => GraphRead::lookup_by_property_prefix(
+                rg.as_ref(),
+                node_type,
+                property,
+                prefix,
+                limit,
+            ),
+        }
+    }
+
+    #[inline]
     fn count_edges_grouped_by_peer(
         &self,
         conn_type: InternedKey,

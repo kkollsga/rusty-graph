@@ -12,7 +12,9 @@ use crate::graph::languages::cypher::py_convert::{
     preprocess_values_owned, preprocessed_result_to_dataframe, preprocessed_value_to_py,
     stats_to_py, PreProcessedValue,
 };
-use crate::graph::languages::cypher::result::{ClauseStats, CypherResult, MutationStats};
+use crate::graph::languages::cypher::result::{
+    ClauseStats, CypherResult, MutationStats, QueryDiagnostics,
+};
 use crate::graph::schema::{DirGraph, NodeData};
 use crate::graph::storage::GraphRead;
 use petgraph::Direction;
@@ -76,6 +78,7 @@ pub struct ResultView {
     rows: Vec<Vec<PreProcessedValue>>,
     stats: Option<MutationStats>,
     profile: Option<Vec<ClauseStats>>,
+    diagnostics: Option<QueryDiagnostics>,
     /// Per-row connection summaries (only populated for node-based results).
     node_connections: Option<Vec<NodeConnections>>,
 }
@@ -87,17 +90,23 @@ pub struct ResultView {
 impl ResultView {
     /// Cypher read path: data already preprocessed during py.detach (GIL-free).
     /// O(1) — just moves owned data into the struct.
+    /// Cypher read path: data already preprocessed during py.detach
+    /// (GIL-free). `diagnostics` attaches elapsed-time / timeout
+    /// bookkeeping for agent feedback; pass `None` when not applicable
+    /// (mutation paths, centrality results).
     pub fn from_preprocessed(
         columns: Vec<String>,
         rows: Vec<Vec<PreProcessedValue>>,
         stats: Option<MutationStats>,
         profile: Option<Vec<ClauseStats>>,
+        diagnostics: Option<QueryDiagnostics>,
     ) -> Self {
         ResultView {
             columns,
             rows,
             stats,
             profile,
+            diagnostics,
             node_connections: None,
         }
     }
@@ -110,6 +119,7 @@ impl ResultView {
             rows,
             stats: result.stats,
             profile: result.profile,
+            diagnostics: result.diagnostics,
             node_connections: None,
         }
     }
@@ -146,6 +156,7 @@ impl ResultView {
             rows,
             stats: None,
             profile: None,
+            diagnostics: None,
             node_connections: None,
         }
     }
@@ -333,6 +344,7 @@ impl ResultView {
             rows,
             stats: None,
             profile: None,
+            diagnostics: None,
             node_connections: Some(node_connections),
         }
     }
@@ -413,6 +425,7 @@ impl ResultView {
                     rows: sliced_rows,
                     stats: None,
                     profile: None,
+                    diagnostics: None,
                     node_connections: None,
                 },
             )
@@ -483,6 +496,32 @@ impl ResultView {
         }
     }
 
+    /// Lightweight execution diagnostics, or None when the backend
+    /// didn't populate them (mutation queries, EXPLAIN, transaction
+    /// paths).
+    ///
+    /// Returns a dict with ``elapsed_ms`` (wall-clock query duration),
+    /// ``timed_out`` (True when the deadline fired), and ``timeout_ms``
+    /// (the deadline that was in effect, or None). Use this to tune
+    /// ``timeout_ms`` or move toward anchored queries when queries
+    /// approach the deadline.
+    #[getter]
+    fn diagnostics(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.diagnostics {
+            Some(d) => {
+                let dict = PyDict::new(py);
+                dict.set_item("elapsed_ms", d.elapsed_ms)?;
+                dict.set_item("timed_out", d.timed_out)?;
+                match d.timeout_ms {
+                    Some(ms) => dict.set_item("timeout_ms", ms)?,
+                    None => dict.set_item("timeout_ms", py.None())?,
+                }
+                Ok(dict.into_any().unbind())
+            }
+            None => Ok(py.None()),
+        }
+    }
+
     /// Materialize all rows as a list of dicts.
     ///
     /// Example::
@@ -510,6 +549,7 @@ impl ResultView {
             rows: self.rows[..take].to_vec(),
             stats: None,
             profile: None,
+            diagnostics: None,
             node_connections: self.node_connections.as_ref().map(|nc| nc[..take].to_vec()),
         }
     }
@@ -529,6 +569,7 @@ impl ResultView {
             rows: self.rows[start..].to_vec(),
             stats: None,
             profile: None,
+            diagnostics: None,
             node_connections: self
                 .node_connections
                 .as_ref()

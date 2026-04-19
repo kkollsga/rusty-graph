@@ -237,6 +237,25 @@ class ResultView:
         """
         ...
 
+    @property
+    def diagnostics(self) -> Optional[dict[str, Any]]:
+        """Lightweight execution diagnostics for this query, or ``None``
+        for mutation paths / EXPLAIN / transactions.
+
+        Returned dict keys:
+
+        - ``elapsed_ms`` (int): wall-clock query duration in milliseconds.
+        - ``timed_out`` (bool): ``True`` when the deadline fired (result
+          rows reflect the partial set before cancellation).
+        - ``timeout_ms`` (Optional[int]): the deadline that was in effect,
+          or ``None`` when no deadline applied (memory graphs by default,
+          or any call with ``timeout_ms=0``).
+
+        Use this to tune ``timeout_ms`` or move toward anchored queries
+        when your query repeatedly approaches the deadline.
+        """
+        ...
+
     def head(self, n: int = 5) -> ResultView:
         """Return a new ResultView with the first *n* rows (default 5)."""
         ...
@@ -2195,7 +2214,13 @@ class KnowledgeGraph:
     def set_default_timeout(self, timeout_ms: Optional[int] = None) -> None:
         """Set a default query timeout (milliseconds) for all cypher() calls.
 
-        Pass None to disable (default). Per-query ``timeout_ms`` overrides this.
+        - ``None`` (default): fall through to the backend-aware default
+          (Disk 10_000 ms, Mapped 60_000 ms, Memory none).
+        - ``0``: disable the deadline for every query unless per-call
+          ``timeout_ms`` overrides.
+        - Positive integer: use as the default.
+
+        Per-query ``timeout_ms`` always overrides this setting.
         """
         ...
 
@@ -2899,10 +2924,22 @@ class KnowledgeGraph:
         a CSV string instead of a ResultView. Good for large result transfers
         and token-efficient LLM consumption in MCP servers.
 
+        Before execution, the query is validated against the graph schema
+        (known node types, connection types, and properties). Unknown
+        identifiers raise ``ValueError`` with a ``Did you mean '...'?``
+        suggestion — catches typos before any scan runs.
+
         Args:
             query: Cypher query string.
             to_df: If ``True``, return a pandas DataFrame.
             params: Optional parameter dict for ``$param`` substitution.
+            timeout_ms: Deadline in milliseconds. If omitted, uses
+                ``set_default_timeout()`` when set, otherwise a
+                backend-aware default (Disk 10_000, Mapped 60_000,
+                Memory none). Pass ``0`` to disable the deadline for
+                this call.
+            max_rows: Cap on intermediate rows; defaults to
+                ``set_default_max_rows()``.
 
         Returns:
             ResultView by default, DataFrame when ``to_df=True``,

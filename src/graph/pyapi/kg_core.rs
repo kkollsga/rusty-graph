@@ -406,7 +406,14 @@ impl KnowledgeGraph {
     }
 
     /// Set a default query timeout (milliseconds) applied to all cypher() calls.
-    /// Pass None to disable (default). Per-query timeout_ms overrides this.
+    ///
+    /// - `None` (default): fall through to the backend-aware default
+    ///   (Disk 10s, Mapped 60s, Memory none).
+    /// - `0`: disable the deadline for every query unless a per-call
+    ///   `timeout_ms` overrides.
+    /// - Any positive value: use it as the default.
+    ///
+    /// Per-query `timeout_ms` always overrides this setting.
     #[pyo3(signature = (timeout_ms=None))]
     fn set_default_timeout(&mut self, timeout_ms: Option<u64>) {
         self.default_timeout_ms = timeout_ms;
@@ -1045,6 +1052,12 @@ impl KnowledgeGraph {
     ///
     /// Args:
     ///     query: The Cypher query string
+    ///     timeout_ms: Deadline in milliseconds. If omitted, uses
+    ///         `set_default_timeout()` when set, otherwise a backend-aware
+    ///         default (Disk: 10_000 ms, Mapped: 60_000 ms, Memory: none).
+    ///         Pass `0` to disable the deadline entirely for this call.
+    ///     max_rows: Cap on intermediate result rows; queries producing
+    ///         more return an error. Defaults to `set_default_max_rows()`.
     ///
     /// Returns:
     ///     A dict with 'columns' (list of column names) and 'rows'
@@ -1073,16 +1086,31 @@ impl KnowledgeGraph {
         max_rows: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
         let self_ref = slf.borrow();
-        let effective_timeout = timeout_ms.or(self_ref.default_timeout_ms);
+        let effective_timeout = timeout_ms
+            .or(self_ref.default_timeout_ms)
+            .or_else(|| backend_default_timeout_ms(&self_ref.inner));
         let effective_max_rows = max_rows.or(self_ref.default_max_rows);
         drop(self_ref);
-        let deadline = effective_timeout
-            .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        // timeout_ms == 0 is the documented escape hatch for "no deadline".
+        let deadline = match effective_timeout {
+            Some(0) | None => None,
+            Some(ms) => Some(std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        };
 
         // Parse the Cypher query (no borrow needed)
         let mut parsed = cypher::parse_cypher(query).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Cypher syntax error: {}", e))
         })?;
+
+        // Schema validation — catches unknown node/edge types and properties
+        // before any execution or scan. Runs in O(clauses) against in-memory
+        // metadata; skipped when the graph has no declared schema.
+        {
+            let this = slf.borrow();
+            cypher::validate_schema(&parsed, &this.inner).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Schema error: {}", e))
+            })?;
+        }
 
         let output_csv = parsed.output_format == cypher::OutputFormat::Csv;
 
@@ -1222,6 +1250,7 @@ impl KnowledgeGraph {
                 let this = slf.borrow();
                 this.inner.clone()
             };
+            let query_started = std::time::Instant::now();
             let result = {
                 let executor = cypher::CypherExecutor::with_params(&inner, &param_map, deadline)
                     .with_max_rows(effective_max_rows);
@@ -1233,6 +1262,19 @@ impl KnowledgeGraph {
                     e
                 ))
             })?;
+            let elapsed_ms = query_started.elapsed().as_millis() as u64;
+            // `Some(0)` is the documented "disable deadline" escape hatch.
+            // Report it as "no deadline" (None) in diagnostics so the
+            // field reflects what actually applied at runtime.
+            let reported_timeout_ms = match effective_timeout {
+                Some(0) | None => None,
+                other => other,
+            };
+            let diagnostics = cypher::result::QueryDiagnostics {
+                elapsed_ms,
+                timed_out: false,
+                timeout_ms: reported_timeout_ms,
+            };
             let columns = result.columns;
             let stats = result.stats;
             let profile = result.profile;
@@ -1245,6 +1287,7 @@ impl KnowledgeGraph {
                     rows,
                     stats,
                     profile,
+                    diagnostics: Some(diagnostics),
                 };
                 csv_result.to_csv().into_py_any(py)
             } else {
@@ -1261,6 +1304,7 @@ impl KnowledgeGraph {
                         preprocessed,
                         stats,
                         profile,
+                        Some(diagnostics),
                     );
                     Py::new(py, view).map(|v| v.into_any())
                 }
@@ -1363,5 +1407,22 @@ impl KnowledgeGraph {
             base_version: version,
             deadline,
         })
+    }
+}
+
+/// Backend-aware default Cypher timeout (milliseconds).
+///
+/// Disk-backed graphs on external drives can hit pathological scans that
+/// run for minutes; a conservative default protects agents from runaway
+/// queries. Memory graphs are reliably fast, so no default deadline.
+/// Users can override per-call with `timeout_ms=N` (or `0` to disable),
+/// or globally via `set_default_timeout(ms)`.
+pub(crate) fn backend_default_timeout_ms(graph: &schema::DirGraph) -> Option<u64> {
+    if graph.graph.is_disk() {
+        Some(10_000)
+    } else if graph.graph.is_mapped() {
+        Some(60_000)
+    } else {
+        None
     }
 }

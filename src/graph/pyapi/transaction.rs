@@ -94,9 +94,20 @@ impl Transaction {
             }
         }
 
-        // Merge per-query timeout with transaction deadline (use the earlier one)
-        let query_deadline =
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        // Merge per-query timeout with transaction deadline (use the earlier one).
+        // timeout_ms == 0 is the documented escape hatch: "no per-query deadline"
+        // (the transaction-level deadline still applies if set).
+        let effective_timeout_ms = match timeout_ms {
+            Some(0) => None,
+            Some(ms) => Some(ms),
+            None => {
+                // Fall through to the graph's backend-aware default.
+                let graph = self.snapshot.as_deref().or(self.working.as_ref());
+                graph.and_then(super::kg_core::backend_default_timeout_ms)
+            }
+        };
+        let query_deadline = effective_timeout_ms
+            .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
         let deadline = match (self.deadline, query_deadline) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (Some(a), None) => Some(a),
@@ -131,6 +142,9 @@ impl Transaction {
                     "Cypher parse error: {}",
                     e
                 ))
+            })?;
+            cypher::validate_schema(&parsed, graph).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Schema error: {}", e))
             })?;
             cypher::optimize(&mut parsed, graph, &param_map);
 
@@ -183,6 +197,9 @@ impl Transaction {
                     "Cypher parse error: {}",
                     e
                 ))
+            })?;
+            cypher::validate_schema(&parsed, working).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Schema error: {}", e))
             })?;
             cypher::optimize(&mut parsed, working, &param_map);
 

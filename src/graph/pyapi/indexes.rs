@@ -38,12 +38,40 @@ impl KnowledgeGraph {
         property: &str,
     ) -> PyResult<Py<PyAny>> {
         let graph = get_graph_mut(&mut self.inner);
-        let unique_values = graph.create_index(node_type, property);
+        // In-memory backends use the existing HashMap-based property_indices.
+        // On the Disk backend that HashMap would silently OOM on large types
+        // (~13M rows × String × Vec = multiple GB of heap rebuilt every load);
+        // route there to the persistent mmap-backed PropertyIndex instead.
+        let mut persistent_disk = false;
+        let mut disk_count = 0usize;
+        if let crate::graph::storage::backend::GraphBackend::Disk(dg) = &graph.graph {
+            match dg.build_property_index(node_type, property) {
+                Ok(n) => {
+                    persistent_disk = true;
+                    disk_count = n;
+                }
+                Err(e) => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
+                        "Failed to build persistent property index for {}.{}: {}",
+                        node_type, property, e
+                    )));
+                }
+            }
+        }
+        let unique_values = if persistent_disk {
+            // Skip the in-memory HashMap build on disk graphs — the
+            // persistent index takes its place. Return disk_count (nodes
+            // indexed) as the `unique_values` field for API parity.
+            disk_count
+        } else {
+            graph.create_index(node_type, property)
+        };
 
         let result_dict = PyDict::new(py);
         result_dict.set_item("node_type", node_type)?;
         result_dict.set_item("property", property)?;
         result_dict.set_item("unique_values", unique_values)?;
+        result_dict.set_item("persistent", persistent_disk)?;
         result_dict.set_item("created", true)?;
 
         Ok(result_dict.into())

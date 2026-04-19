@@ -17,6 +17,7 @@ pub mod cost_model;
 pub mod fusion;
 pub mod index_selection;
 pub mod join_order;
+pub mod schema_check;
 pub mod simplification;
 
 use cost_model::reorder_predicates_by_cost;

@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints, TOMBSTONE_EDGE};
+use super::property_index;
 // ============================================================================
 // DiskGraph
 // ============================================================================
@@ -117,8 +118,27 @@ pub struct DiskGraph {
     // count_edges_filtered short-circuit the per-edge tombstone check when
     // no removals have happened (fresh builds, reloaded read-only graphs).
     pub(crate) has_tombstones: bool,
+    // ── Persistent property indexes (lazy-loaded).
+    //
+    // Populated in two ways:
+    //   1. `build_property_index(type, prop)` — user calls `create_index`
+    //      on a disk graph; writes 4 files to `data_dir` and caches the
+    //      handle.
+    //   2. `lookup_property_eq(type, prop, value)` on first miss — scans
+    //      `data_dir` for a `property_index_{type}_{prop}_meta.bin`; if
+    //      present, mmaps it and caches.
+    //
+    // The `None` sentinel records "we checked and no index exists" so
+    // repeat misses don't stat the filesystem. `Arc` so concurrent reads
+    // of the same index don't hold the outer RwLock.
+    pub(crate) property_indexes: PropertyIndexCache,
     // ── Temp dir for CSR mmap files (cleaned up on Drop) ──
 }
+
+/// Lazy-loaded cache of persistent property indexes, keyed by
+/// `(node_type, property)`. `None` records "checked and absent".
+type PropertyIndexCache =
+    std::sync::RwLock<HashMap<(String, String), Option<Arc<property_index::PropertyIndex>>>>;
 
 use std::sync::Arc;
 
@@ -225,6 +245,7 @@ impl DiskGraph {
             peer_count_offsets: MmapOrVec::new(),
             peer_count_entries: MmapOrVec::new(),
             has_tombstones: false,
+            property_indexes: std::sync::RwLock::new(HashMap::new()),
         })
     }
 
@@ -385,6 +406,7 @@ impl DiskGraph {
             peer_count_offsets: MmapOrVec::new(),
             peer_count_entries: MmapOrVec::new(),
             has_tombstones: false,
+            property_indexes: std::sync::RwLock::new(HashMap::new()),
         })
     }
 
@@ -1963,6 +1985,7 @@ impl Clone for DiskGraph {
             peer_count_offsets: MmapOrVec::new(),
             peer_count_entries: MmapOrVec::new(),
             has_tombstones: self.has_tombstones,
+            property_indexes: std::sync::RwLock::new(HashMap::new()),
         }
     }
 }
@@ -1973,6 +1996,176 @@ impl Drop for DiskGraph {
         if self.metadata_dirty {
             let _ = self.write_metadata();
         }
+    }
+}
+
+// ============================================================================
+// Persistent property indexes
+// ============================================================================
+
+impl DiskGraph {
+    /// Build (or rebuild) a persistent string property index for
+    /// `(node_type, property)`. Writes four files to `data_dir` and
+    /// caches the handle. Subsequent `lookup_property_eq` calls use the
+    /// index; the planner sees it via the `GraphRead::lookup_by_property_eq`
+    /// trait method.
+    ///
+    /// Only `TypedColumn::Str` columns are indexable today — the property
+    /// must exist on the type's ColumnStore as a string column. Non-string
+    /// or missing properties are a no-op that returns `Ok(())`; the index
+    /// will simply contain zero entries and all lookups will miss.
+    pub fn build_property_index(&self, node_type: &str, property: &str) -> std::io::Result<usize> {
+        let type_key = InternedKey::from_str(node_type);
+        let type_u64 = type_key.as_u64();
+        let prop_key = InternedKey::from_str(property);
+
+        // Three ways to resolve a property to a string value per node:
+        //   1. Title/id alias columns (checked via helpers below) — covers
+        //      `label`, `nid`, and any user-chosen title/id field names.
+        //   2. Regular schema column via `get_str_by_slot`.
+        //   3. Fall back to NodeData::get_property, which is the arena
+        //      path used by the pattern matcher — slower but correct for
+        //      exotic cases (non-columnar properties, map storage).
+        let col_store = self.column_stores.get(&type_key);
+        let schema_slot = col_store.and_then(|cs| cs.schema().slot(prop_key));
+        // Heuristic: "title" or "id" literals, and anything stored outside
+        // the regular schema, goes through the NodeData materialisation
+        // path so title/id aliases and mapped-mode stores resolve
+        // correctly. Everything else reads directly from the column.
+        let use_slot_path = schema_slot.is_some();
+
+        let node_bound = self.node_slots.len();
+        let mut entries: Vec<(String, u32)> = Vec::with_capacity(node_bound);
+        for i in 0..node_bound {
+            let nslot = self.node_slots.get(i);
+            if !nslot.is_alive() || nslot.node_type != type_u64 {
+                continue;
+            }
+            // Try paths in order of specificity:
+            //   1. Regular schema column (`get_str_by_slot`) — fast path.
+            //   2. Title column (`get_title`) — covers `label`/`name`/
+            //      any user-chosen title alias.
+            //   3. Id column (`get_id`) — covers `nid` and other id
+            //      aliases when the user explicitly indexes the id.
+            let maybe_str: Option<String> = if use_slot_path {
+                col_store
+                    .and_then(|cs| cs.get_str_by_slot(nslot.row_id, schema_slot.unwrap()))
+                    .map(str::to_string)
+            } else if let Some(cs) = col_store {
+                // Not in schema — try title, then id. If both return a
+                // non-empty String, prefer title (which is what users
+                // typically mean when aliasing `label` / `name` / ...).
+                let from_title = cs.get_title(nslot.row_id).and_then(|v| match v {
+                    Value::String(s) if !s.is_empty() => Some(s),
+                    _ => None,
+                });
+                if from_title.is_some() {
+                    from_title
+                } else {
+                    cs.get_id(nslot.row_id).and_then(|v| match v {
+                        Value::String(s) if !s.is_empty() => Some(s),
+                        _ => None,
+                    })
+                }
+            } else {
+                None
+            };
+            if let Some(s) = maybe_str {
+                entries.push((s, i as u32));
+            }
+        }
+
+        let count = entries.len();
+        let idx =
+            property_index::PropertyIndex::build(&self.data_dir, node_type, property, entries)?;
+        self.property_indexes.write().unwrap().insert(
+            (node_type.to_string(), property.to_string()),
+            Some(Arc::new(idx)),
+        );
+        Ok(count)
+    }
+
+    /// Delete the on-disk index files and the in-memory cache entry.
+    pub fn drop_property_index(&self, node_type: &str, property: &str) -> std::io::Result<()> {
+        property_index::PropertyIndex::remove_files(&self.data_dir, node_type, property)?;
+        self.property_indexes
+            .write()
+            .unwrap()
+            .insert((node_type.to_string(), property.to_string()), None);
+        Ok(())
+    }
+
+    /// Exact-match lookup. Returns `None` when no index has been built
+    /// for `(node_type, property)`; returns `Some(Vec)` (possibly empty)
+    /// when an index exists. The planner uses the distinction to decide
+    /// whether to route through the fast path or fall back to scan.
+    pub fn lookup_property_eq(
+        &self,
+        node_type: &str,
+        property: &str,
+        value: &str,
+    ) -> Option<Vec<NodeIndex>> {
+        let key = (node_type.to_string(), property.to_string());
+        // Fast path: cached handle.
+        {
+            let read = self.property_indexes.read().unwrap();
+            if let Some(slot) = read.get(&key) {
+                return slot.as_ref().map(|idx| idx.lookup_eq_str(value));
+            }
+        }
+        // Slow path: check disk. If files exist, mmap and cache.
+        let idx_opt = property_index::PropertyIndex::open(&self.data_dir, node_type, property)
+            .ok()
+            .flatten();
+        let result = idx_opt.as_ref().map(|idx| idx.lookup_eq_str(value));
+        self.property_indexes
+            .write()
+            .unwrap()
+            .insert(key, idx_opt.map(Arc::new));
+        result
+    }
+
+    /// Prefix lookup (STARTS WITH). Same `None`/`Some` semantics as
+    /// [`lookup_property_eq`].
+    pub fn lookup_property_prefix(
+        &self,
+        node_type: &str,
+        property: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Option<Vec<NodeIndex>> {
+        let key = (node_type.to_string(), property.to_string());
+        {
+            let read = self.property_indexes.read().unwrap();
+            if let Some(slot) = read.get(&key) {
+                return slot
+                    .as_ref()
+                    .map(|idx| idx.lookup_prefix_str(prefix, limit));
+            }
+        }
+        let idx_opt = property_index::PropertyIndex::open(&self.data_dir, node_type, property)
+            .ok()
+            .flatten();
+        let result = idx_opt
+            .as_ref()
+            .map(|idx| idx.lookup_prefix_str(prefix, limit));
+        self.property_indexes
+            .write()
+            .unwrap()
+            .insert(key, idx_opt.map(Arc::new));
+        result
+    }
+
+    /// Whether an index has been built for `(node_type, property)`.
+    /// Checks the cache first, then the filesystem.
+    #[allow(dead_code)]
+    pub fn has_property_index(&self, node_type: &str, property: &str) -> bool {
+        let key = (node_type.to_string(), property.to_string());
+        if let Some(slot) = self.property_indexes.read().unwrap().get(&key) {
+            return slot.is_some();
+        }
+        let (meta, _, _, _) = property_index::file_paths(&self.data_dir, node_type, property);
+        meta.exists()
     }
 }
 
@@ -2207,6 +2400,7 @@ impl DiskGraph {
                 peer_count_offsets: load_raw_or_zst_optional(&dir.join("peer_count_offsets")),
                 peer_count_entries: load_raw_or_zst_optional(&dir.join("peer_count_entries")),
                 has_tombstones: meta.has_tombstones,
+                property_indexes: std::sync::RwLock::new(HashMap::new()),
             },
             temp_dir,
         ))

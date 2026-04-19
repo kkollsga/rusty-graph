@@ -44,14 +44,21 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
         let prior_scalar_vars = collect_prior_scalar_vars(&query.clauses[..i]);
 
         // Split predicate into pushable conditions and remainder
-        let (pushable, pushable_in, pushable_cmp, pushable_var, pushable_nodeprop, remaining) =
-            extract_pushable_equalities(
-                &where_pred,
-                &match_vars,
-                &prior_node_vars,
-                &prior_scalar_vars,
-                params,
-            );
+        let PushableResult {
+            pushable,
+            pushable_in,
+            pushable_cmp,
+            pushable_var,
+            pushable_nodeprop,
+            pushable_prefix,
+            remaining,
+        } = extract_pushable_equalities(
+            &where_pred,
+            &match_vars,
+            &prior_node_vars,
+            &prior_scalar_vars,
+            params,
+        );
 
         // Apply pushable conditions to MATCH/OPTIONAL MATCH patterns
         if !pushable.is_empty()
@@ -59,6 +66,7 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
             || !pushable_cmp.is_empty()
             || !pushable_var.is_empty()
             || !pushable_nodeprop.is_empty()
+            || !pushable_prefix.is_empty()
         {
             let patterns = match &mut query.clauses[i] {
                 Clause::Match(ref mut m) => &mut m.patterns,
@@ -82,6 +90,9 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
             }
             for (var_name, property, ref_var, ref_prop) in pushable_nodeprop {
                 apply_nodeprop_to_patterns(patterns, &var_name, &property, ref_var, ref_prop);
+            }
+            for (var_name, property, prefix) in pushable_prefix {
+                apply_prefix_to_patterns(patterns, &var_name, &property, prefix);
             }
 
             // Update WHERE clause with remaining predicates.
@@ -173,24 +184,26 @@ pub(super) fn collect_pattern_variables(
     vars
 }
 
-/// (equality_conditions, in_conditions, comparison_conditions,
-///  scalar_var_refs, node_prop_refs, remaining_predicate)
-type PushableResult = (
-    Vec<(String, String, Value)>,
-    Vec<(String, String, Vec<Value>)>,
-    Vec<(String, String, ComparisonOp, Value)>,
-    Vec<(String, String, String)>,
-    Vec<(String, String, String, String)>,
-    Option<Predicate>,
-);
+/// Result of splitting a WHERE predicate into MATCH-pushable components
+/// plus whatever could not be pushed.
+pub(super) struct PushableResult {
+    pub pushable: Vec<(String, String, Value)>,
+    pub pushable_in: Vec<(String, String, Vec<Value>)>,
+    pub pushable_cmp: Vec<(String, String, ComparisonOp, Value)>,
+    pub pushable_var: Vec<(String, String, String)>,
+    pub pushable_nodeprop: Vec<(String, String, String, String)>,
+    /// `(var, property, prefix)` — pushed from `WHERE n.prop STARTS WITH 'X'`.
+    pub pushable_prefix: Vec<(String, String, String)>,
+    pub remaining: Option<Predicate>,
+}
 
 /// Extract pushable predicates from a WHERE clause into MATCH patterns.
-/// Returns `(equality, in, comparison, scalar_var, node_prop, remaining)`.
 ///
 /// Pushes conditions of the form:
 /// - `variable.property = literal_value` / `= $param` (equality)
 /// - `variable.property IN [literal, ...]` (IN list)
 /// - `variable.property > literal_value` (and >=, <, <=)
+/// - `variable.property STARTS WITH 'prefix'` (string prefix)
 /// - `variable.property = other_variable` when `other_variable` is a scalar
 ///   from a prior WITH/UNWIND  →  EqualsVar
 /// - `variable.property = other_var.other_prop` when `other_var` is a node
@@ -209,6 +222,7 @@ pub(super) fn extract_pushable_equalities(
     let mut pushable_cmp = Vec::new();
     let mut pushable_var = Vec::new();
     let mut pushable_nodeprop = Vec::new();
+    let mut pushable_prefix = Vec::new();
     let remaining = extract_from_predicate(
         pred,
         match_vars,
@@ -220,15 +234,17 @@ pub(super) fn extract_pushable_equalities(
         &mut pushable_cmp,
         &mut pushable_var,
         &mut pushable_nodeprop,
+        &mut pushable_prefix,
     );
-    (
+    PushableResult {
         pushable,
         pushable_in,
         pushable_cmp,
         pushable_var,
         pushable_nodeprop,
+        pushable_prefix,
         remaining,
-    )
+    }
 }
 
 /// Recursively extract pushable predicates from a predicate tree.
@@ -245,6 +261,7 @@ pub(super) fn extract_from_predicate(
     pushable_cmp: &mut Vec<(String, String, ComparisonOp, Value)>,
     pushable_var: &mut Vec<(String, String, String)>,
     pushable_nodeprop: &mut Vec<(String, String, String, String)>,
+    pushable_prefix: &mut Vec<(String, String, String)>,
 ) -> Option<Predicate> {
     match pred {
         Predicate::Comparison {
@@ -313,6 +330,21 @@ pub(super) fn extract_from_predicate(
             }
             Some(pred.clone())
         }
+        Predicate::StartsWith { expr, pattern } => {
+            // Push `variable.property STARTS WITH 'literal'` into MATCH
+            // so the persistent prefix index can route the scan.
+            if let (
+                Expression::PropertyAccess { variable, property },
+                Expression::Literal(Value::String(prefix)),
+            ) = (expr, pattern)
+            {
+                if match_vars.iter().any(|(v, _)| v == variable) && !prefix.is_empty() {
+                    pushable_prefix.push((variable.clone(), property.clone(), prefix.clone()));
+                    return None;
+                }
+            }
+            Some(pred.clone())
+        }
         Predicate::And(left, right) => {
             let left_remaining = extract_from_predicate(
                 left,
@@ -325,6 +357,7 @@ pub(super) fn extract_from_predicate(
                 pushable_cmp,
                 pushable_var,
                 pushable_nodeprop,
+                pushable_prefix,
             );
             let right_remaining = extract_from_predicate(
                 right,
@@ -337,6 +370,7 @@ pub(super) fn extract_from_predicate(
                 pushable_cmp,
                 pushable_var,
                 pushable_nodeprop,
+                pushable_prefix,
             );
 
             match (left_remaining, right_remaining) {
@@ -657,6 +691,31 @@ pub(super) fn apply_property_to_patterns(
                     props
                         .entry(property.to_string())
                         .or_insert(PropertyMatcher::Equals(value));
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Apply a string-prefix matcher (`STARTS WITH`) to the matching node
+/// pattern. The pattern executor's `try_index_lookup` routes this to
+/// `GraphRead::lookup_by_property_prefix` on the disk backend and to a
+/// linear filter on in-memory.
+pub(super) fn apply_prefix_to_patterns(
+    patterns: &mut [crate::graph::core::pattern_matching::Pattern],
+    var_name: &str,
+    property: &str,
+    prefix: String,
+) {
+    for pattern in patterns.iter_mut() {
+        for element in &mut pattern.elements {
+            if let PatternElement::Node(ref mut np) = element {
+                if np.variable.as_deref() == Some(var_name) {
+                    let props = np.properties.get_or_insert_with(Default::default);
+                    props
+                        .entry(property.to_string())
+                        .or_insert(PropertyMatcher::StartsWith(prefix));
                     return;
                 }
             }

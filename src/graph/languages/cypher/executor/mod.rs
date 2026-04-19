@@ -291,7 +291,14 @@ impl<'a> CypherExecutor<'a> {
     pub(super) fn check_deadline(&self) -> Result<(), String> {
         if let Some(dl) = self.deadline {
             if Instant::now() > dl {
-                return Err("Query timed out".to_string());
+                return Err(
+                    "Query timed out. Hints: anchor the query with MATCH (n {id: ...}) \
+                     or a pattern property matching an indexed column (e.g. \
+                     MATCH (n {label: 'X'})). To allow a longer run, pass \
+                     timeout_ms=N to cypher() or set kg.set_default_timeout(ms); \
+                     timeout_ms=0 disables the deadline."
+                        .to_string(),
+                );
             }
         }
         Ok(())

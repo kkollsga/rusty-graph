@@ -740,6 +740,52 @@ for step in result.profile:
 
 For non-profiled queries, `result.profile` is `None`.
 
+## Diagnostics
+
+Every `cypher()` call attaches lightweight execution diagnostics to the returned `ResultView`. No prefix required, always on:
+
+```python
+result = graph.cypher("MATCH (n:Country {label: 'Norway'}) RETURN n.nid")
+print(result.diagnostics)
+# {'elapsed_ms': 3, 'timed_out': False, 'timeout_ms': 10000}
+```
+
+Keys:
+
+- `elapsed_ms` — wall-clock duration in milliseconds.
+- `timed_out` — `True` when the deadline fired (rows reflect the partial set).
+- `timeout_ms` — the deadline that was in effect, or `None` when no deadline applied.
+
+`timeout_ms` resolution: explicit `cypher(..., timeout_ms=N)` > `kg.set_default_timeout(ms)` > backend-aware default (Disk 10_000, Mapped 60_000, Memory none). Pass `timeout_ms=0` to disable the deadline entirely for one call.
+
+## Indexes
+
+Create an equality index on a `(node_type, property)` pair to accelerate `MATCH (n:T {prop: value})` and `WHERE n.prop = value` to O(log N):
+
+```python
+graph.create_index('Country', 'label')
+# {'node_type': 'Country', 'property': 'label',
+#  'unique_values': 5, 'persistent': true, 'created': true}
+```
+
+On a `storage='disk'` graph the index is **persistent** — written as four mmap'd files next to the CSR (`property_index_{type}_{property}_{meta,keys,offsets,ids}.bin`) and lazy-loaded on first query after reopen. No heap HashMap rebuild on `load()`. On in-memory graphs the existing `property_indices` HashMap is used (no change).
+
+`describe()` annotates indexed properties so agents can see which columns hit the fast path before writing a query. String indexes support both equality and prefix; numeric indexes support equality only:
+
+```xml
+<prop name="label"  type="String" unique="5" indexed="eq,prefix" vals="Norway|..."/>
+<prop name="year"   type="Int"    unique="20" indexed="eq"/>
+```
+
+### STARTS WITH pushdown
+
+With a string index in place, `WHERE n.prop STARTS WITH 'x'` is pushed into the MATCH pattern and served by the prefix side of the sorted mmap:
+
+```python
+graph.cypher("MATCH (n:Country) WHERE n.label STARTS WITH 'O' RETURN n.nid")
+# O(log N + k) where k is the number of matches
+```
+
 ## Timeseries Functions
 
 Query time-indexed numeric data attached to nodes. All date arguments are strings (`'2020'`, `'2020-2'`, `'2020-2-15'`), and precision is validated against the data's resolution.

@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.7] — 2026-04-19
+
+### Added
+
+- **`WHERE n.prop STARTS WITH 'prefix'` now pushes down into the MATCH
+  pattern** and routes through the persistent disk prefix index when
+  available. New `PropertyMatcher::StartsWith(String)` variant, new
+  `apply_prefix_to_patterns` helper in
+  `src/graph/languages/cypher/planner/index_selection.rs`, new path in
+  `matcher.rs::try_index_lookup` that calls
+  `GraphRead::lookup_by_property_prefix`. String indexes are annotated
+  `indexed="eq,prefix"` in `describe()` output (previously just `eq`);
+  numeric indexes remain `indexed="eq"` only.
+- **Deadline polling inside unanchored matcher scans.** Three hot
+  loops in `matcher.rs` that used `.filter().collect()` over
+  13M+-node type lists now poll the deadline every 4096 rows (via a
+  new `check_scan_deadline()` helper with a structured hint message).
+  Worst-case overshoot past the deadline drops from 20-60+ s to under
+  a few ms. Other scan loops (variable-length paths, CSR edge
+  counting, column stats) already polled; this closes the final gaps.
+- **MCP `cypher_query` tool accepts `timeout_ms`.** `examples/mcp_server.py`'s
+  tool signature now exposes the override so agents can deliberately
+  extend or disable the deadline (`timeout_ms=0`) per call after an
+  EXPLAIN confirms the plan is anchored. Previously the MCP agent was
+  stuck with the backend-aware default.
+- **`ResultView.diagnostics` — lightweight execution diagnostics.** Every
+  `cypher()` call now attaches an always-on diagnostics dict to the
+  returned `ResultView` with `elapsed_ms`, `timed_out`, and the
+  `timeout_ms` that was in effect. Gives agents immediate feedback on
+  query cost and timeout state without requiring `PROFILE`. The field
+  is ``None`` for mutation paths, EXPLAIN, and transaction queries.
+- **`describe()` indexed-property annotations.** Properties covered by
+  an index (in-memory `property_indices` *or* the new persistent disk
+  `PropertyIndex`) are now emitted with an `indexed="eq"` attribute in
+  the `<properties>` detail block. A new `<indexing>` hint inside
+  `<extensions>` explains the annotation and reminds agents to prefer
+  anchored queries over unanchored scans on disk-backed graphs. New
+  helper `DirGraph::has_any_index(node_type, property)` consolidates
+  the "in-memory or persistent" check.
+- **Persistent disk-backed property index.** `create_index('T', 'label')`
+  on a `storage='disk'` graph now writes four mmap'd files
+  (`property_index_{type}_{property}_{meta,keys,offsets,ids}.bin`)
+  next to the CSR instead of rebuilding a `HashMap<Value, Vec<NodeIndex>>`
+  on every `load()`. The previous in-memory path consumed ~1-3 GB of
+  heap on 13M-row types and made `create_index` effectively unusable
+  on Wikidata-scale disk graphs. The new persistent index is lazy-loaded
+  on first query after reopen, keys are sorted lexicographically (so
+  both equality and prefix can share the same structure), and the
+  Cypher planner consults it via a new `GraphRead::lookup_by_property_eq`
+  trait method. `MATCH (n {label: 'X'})` now hits the index on disk in
+  O(log N + k). Supports string columns and title aliases
+  (`node_title_field` at `add_nodes` time — `label`, `name`, etc.).
+  Numeric equality and `STARTS WITH` pushdown are follow-ups. In-memory
+  graphs are unchanged (keep the existing `property_indices` HashMap).
+  The `create_index` return dict grows a `persistent: bool` field
+  indicating whether the disk path was taken.
+- **Cypher schema validation** at plan time — catches typos in
+  pattern-literal property names (`MATCH (n:Person {agee: 30})`) before
+  the executor commits to a scan. Returns a `Did you mean 'age'?` hint.
+  Runs in O(clauses) against `node_type_metadata`; skipped when a graph
+  has no declared schema. Pattern-literal properties are the only v1
+  target — unknown node types, connection types, and WHERE/RETURN
+  `n.prop` accesses deliberately pass through (existence-check queries
+  and virtual columns would otherwise false-positive). Phase 3 will
+  surface those as non-fatal diagnostics.
+
+### Changed
+
+- **`cypher()` default timeout is now backend-aware.** Disk-backed
+  graphs default to 10 s, Mapped to 60 s, Memory to no deadline. Users
+  can override per-call via `timeout_ms=N` or globally via
+  `set_default_timeout(ms)`. The documented escape hatch
+  `timeout_ms=0` disables the deadline entirely. Previously,
+  disk-backed queries without an explicit `timeout_ms` ran until the
+  harness killed them; the new default returns a structured timeout
+  error after 10 s with hints pointing at anchoring / index usage.
+  (Also applies to transaction-level `cypher()`.)
+- **Cypher timeout error message now carries remediation hints.**
+  Replaces the bare string `Query timed out` with guidance on
+  anchoring queries, raising `timeout_ms`, or using the `timeout_ms=0`
+  escape hatch.
+- **`set_default_timeout(None)` behaviour updated.** Passing `None`
+  now falls through to the backend-aware default rather than meaning
+  "no timeout". Pass `0` for the old behaviour explicitly.
+
 ## [0.8.6] — 2026-04-19
 
 ### Performance

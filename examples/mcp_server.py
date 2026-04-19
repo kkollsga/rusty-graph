@@ -138,12 +138,18 @@ def graph_overview(
 
 
 @mcp.tool()
-def cypher_query(query: str) -> str:
+def cypher_query(query: str, timeout_ms: int | None = None) -> str:
     """Run a Cypher query against the knowledge graph. Returns up to 15 rows
     inline. Append FORMAT CSV to export full results to a CSV file (no row
-    limit). Call graph_overview() first if you need the schema."""
+    limit). Call graph_overview() first if you need the schema.
+
+    timeout_ms: Deadline in milliseconds. None (default) uses the
+    backend-aware default (Disk 10_000, Mapped 60_000, Memory none).
+    Pass 0 to disable the deadline entirely for this call — use
+    sparingly, typically only after describe()/EXPLAIN confirmed the
+    plan is anchored on an index."""
     try:
-        result = graph.cypher(query)
+        result = graph.cypher(query, timeout_ms=timeout_ms)
         if isinstance(result, str):  # FORMAT CSV returns a string
             TEMP_DIR.mkdir(exist_ok=True)
             filename = f"data-{datetime.now():%Y%m%d-%H%M%S}.csv"

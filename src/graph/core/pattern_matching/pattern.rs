@@ -107,6 +107,9 @@ pub enum PropertyMatcher {
         upper: Value,
         upper_inclusive: bool,
     },
+    /// String prefix matcher — pushed from `WHERE n.prop STARTS WITH 'X'`.
+    /// Enables persistent prefix index acceleration on disk graphs.
+    StartsWith(String),
 }
 
 // ============================================================================

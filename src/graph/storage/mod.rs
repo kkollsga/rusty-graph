@@ -257,6 +257,35 @@ pub trait GraphRead {
         None
     }
 
+    /// Exact-match lookup on a persistent string property index.
+    ///
+    /// Returns `Some(Vec)` (possibly empty) when an index for
+    /// `(node_type, property)` exists; returns `None` when no index
+    /// exists — the caller falls back to a scan. Default `None` for
+    /// backends without persistent indexes; the disk backend overrides
+    /// to consult its mmap'd `PropertyIndex`.
+    fn lookup_by_property_eq(
+        &self,
+        _node_type: &str,
+        _property: &str,
+        _value: &str,
+    ) -> Option<Vec<NodeIndex>> {
+        None
+    }
+
+    /// Prefix lookup (STARTS WITH) on a persistent string property
+    /// index. Same `None`/`Some` semantics as
+    /// [`GraphRead::lookup_by_property_eq`].
+    fn lookup_by_property_prefix(
+        &self,
+        _node_type: &str,
+        _property: &str,
+        _prefix: &str,
+        _limit: usize,
+    ) -> Option<Vec<NodeIndex>> {
+        None
+    }
+
     /// Count edges of a connection type grouped by peer node, via a full
     /// scan. Every backend implements this — disk uses sequential CSR
     /// I/O; memory/mapped iterate petgraph edges.

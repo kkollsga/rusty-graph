@@ -588,11 +588,20 @@ impl<'a> PatternExecutor<'a> {
                 None => return Ok(vec![]),
             };
             if let Some(ref props) = pattern.properties {
-                Ok(type_nodes
-                    .iter()
-                    .copied()
-                    .filter(|&idx| self.node_matches_properties(idx, props))
-                    .collect())
+                // Manual scan so we can poll the deadline. A raw
+                // `.filter().collect()` over 13M rows is ≥ the default
+                // 10s timeout on an external-drive-backed graph and
+                // would never observe cancellation without polling.
+                let mut out = Vec::new();
+                for (i, &idx) in type_nodes.iter().enumerate() {
+                    if i & 0xFFF == 0 {
+                        self.check_scan_deadline()?;
+                    }
+                    if self.node_matches_properties(idx, props) {
+                        out.push(idx);
+                    }
+                }
+                Ok(out)
             } else {
                 Ok(type_nodes.to_vec())
             }
@@ -612,14 +621,46 @@ impl<'a> PatternExecutor<'a> {
             }
             // No id property — scan all nodes with property filter.
             let g = &self.graph.graph;
-            Ok(g.node_indices()
-                .filter(|&idx| self.node_matches_properties(idx, props))
-                .collect())
+            let mut out = Vec::new();
+            for (i, idx) in g.node_indices().enumerate() {
+                if i & 0xFFF == 0 {
+                    self.check_scan_deadline()?;
+                }
+                if self.node_matches_properties(idx, props) {
+                    out.push(idx);
+                }
+            }
+            Ok(out)
         } else {
             // No type, no properties — all nodes
             let g = &self.graph.graph;
-            Ok(g.node_indices().collect())
+            let mut out = Vec::with_capacity(g.node_count());
+            for (i, idx) in g.node_indices().enumerate() {
+                if i & 0xFFF == 0 {
+                    self.check_scan_deadline()?;
+                }
+                out.push(idx);
+            }
+            Ok(out)
         }
+    }
+
+    /// Deadline check used by all full-type / unanchored scans in this
+    /// file. Poll every 4096 nodes — amortised overhead is negligible
+    /// (≤ 1 `Instant::now()` per ~4K pattern comparisons) while keeping
+    /// the worst-case response time under a few milliseconds past the
+    /// deadline.
+    #[inline]
+    fn check_scan_deadline(&self) -> Result<(), String> {
+        if let Some(dl) = self.deadline {
+            if Instant::now() > dl {
+                return Err("Query timed out during node scan. Hint: add an index on a \
+                     predicate property (create_index), anchor with \
+                     MATCH (n {id: ...}), or raise timeout_ms."
+                    .to_string());
+            }
+        }
+        Ok(())
     }
 
     /// Try to use property indexes for faster node lookup.
@@ -738,6 +779,50 @@ impl<'a> PatternExecutor<'a> {
                     return Some(results);
                 } else {
                     // Index covers one property — filter remaining manually
+                    let filtered = results
+                        .into_iter()
+                        .filter(|&idx| self.node_matches_properties(idx, props))
+                        .collect();
+                    return Some(filtered);
+                }
+            }
+        }
+
+        // Persistent disk-backed property index (string equality).
+        // `lookup_by_property_eq` returns `Some(Vec)` only when a
+        // persistent index for `(node_type, prop)` exists; otherwise
+        // `None` so we fall through to scan. Only Value::String values
+        // are indexable today.
+        for (prop, value) in &equality_props {
+            if let Value::String(s) = value {
+                if let Some(results) = self.graph.graph.lookup_by_property_eq(node_type, prop, s) {
+                    if equality_props.len() == 1 && props.len() == 1 {
+                        return Some(results);
+                    }
+                    let filtered = results
+                        .into_iter()
+                        .filter(|&idx| self.node_matches_properties(idx, props))
+                        .collect();
+                    return Some(filtered);
+                }
+            }
+        }
+
+        // Persistent disk-backed prefix index (STARTS WITH). Same
+        // `None` / `Some` semantics as the equality path — `None` means
+        // no index and the caller falls through to scan. Uses
+        // `usize::MAX` as the cap; outer LIMIT pushdown is not wired
+        // into matcher state yet.
+        for (prop, matcher) in props {
+            if let PropertyMatcher::StartsWith(prefix) = matcher {
+                if let Some(results) =
+                    self.graph
+                        .graph
+                        .lookup_by_property_prefix(node_type, prop, prefix, usize::MAX)
+                {
+                    if props.len() == 1 {
+                        return Some(results);
+                    }
                     let filtered = results
                         .into_iter()
                         .filter(|&idx| self.node_matches_properties(idx, props))
@@ -994,6 +1079,10 @@ impl<'a> PatternExecutor<'a> {
                 };
                 above_lower && below_upper
             }
+            PropertyMatcher::StartsWith(prefix) => match value {
+                Value::String(s) => s.starts_with(prefix.as_str()),
+                _ => false,
+            },
         }
     }
 
