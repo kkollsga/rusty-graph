@@ -948,9 +948,9 @@ impl<'a> PatternExecutor<'a> {
                 .params
                 .get(name.as_str())
                 .is_some_and(|expected| values_equal(value, expected)),
-            // EqualsVar should be resolved to Equals before pattern matching.
-            // If it reaches here unresolved, no match is possible.
-            PropertyMatcher::EqualsVar(_) => false,
+            // EqualsVar / EqualsNodeProp should be resolved to Equals before
+            // pattern matching. If they reach here unresolved, no match is possible.
+            PropertyMatcher::EqualsVar(_) | PropertyMatcher::EqualsNodeProp { .. } => false,
             PropertyMatcher::In(values) => values.iter().any(|v| values_equal(value, v)),
             PropertyMatcher::GreaterThan(threshold) => {
                 compare_values(value, threshold) == Some(std::cmp::Ordering::Greater)

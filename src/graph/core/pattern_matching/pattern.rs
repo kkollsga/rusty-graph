@@ -81,6 +81,14 @@ pub enum PropertyMatcher {
     /// from WITH/UNWIND before pattern matching. Example:
     /// `WITH "Oslo" AS city MATCH (n:Person {city: city})`
     EqualsVar(String),
+    /// Deferred node-property resolution: resolved against an already-bound
+    /// node's property at row-execute time. Pushed by the planner from a
+    /// correlated `WHERE cur.prop = prior.other_prop` so the pattern executor
+    /// can pick an indexed lookup when `(cur_type, prop)` is indexed.
+    EqualsNodeProp {
+        var: String,
+        prop: String,
+    },
     /// IN-list matching: value must be one of these values.
     /// Pushed from `WHERE n.prop IN [v1, v2, ...]` by the planner.
     In(Vec<Value>),

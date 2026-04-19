@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4] — 2026-04-19
+
+### Performance
+
+- **Correlated-equality pushdown in the Cypher planner.** `WHERE cur.prop =
+  prior.other_prop` — where `prior` is a node bound by an earlier MATCH —
+  now pushes onto the current MATCH's pattern as a new `EqualsNodeProp`
+  matcher that the executor resolves per-row via the bound node's
+  property. When the probe-side property is indexed, the pattern executor
+  then picks an indexed lookup instead of scanning all nodes of that
+  type. Also pushes `cur.prop = scalar_var` (where `scalar_var` is
+  projected by a prior WITH/UNWIND) as `EqualsVar`. WHERE stays as a
+  safety-net filter. Fallback: unchanged behavior when no index exists.
+- **`add_connections(query=...)` now runs the planner.** Previously, the
+  query path in `add_connections` went straight from parse → execute,
+  skipping the entire planner — so no pushdowns (equality, IN,
+  comparison), no spatial-join fusion, no LIMIT/DISTINCT pushdown. It
+  now calls `cypher::optimize` like `g.cypher()` does. Combined with
+  the correlated-equality pushdown, the Sodir prospect graph's derived
+  connections (Phase 7) now build **~8.5× faster** — 29.6 s → 3.5 s:
+  - 7a HC_IN_FORMATION (3 UNION ranks): 11.0 s → 1.2 s (~9×)
+  - 7b/7c StructuralElement ENCLOSES: 0.6 s → 0.05 s (fuse_spatial_join
+    now fires here)
+  - 7d PLAY_HAS_FORMATION (primary + fallback): 17.3 s → 1.5 s (~11×)
+
 ## [0.8.3] — 2026-04-19
 
 ### Performance

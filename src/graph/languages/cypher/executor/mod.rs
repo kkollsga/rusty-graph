@@ -627,10 +627,16 @@ impl<'a> CypherExecutor<'a> {
     // Variable resolution for pattern properties
     // ========================================================================
 
-    /// Resolve `EqualsVar(name)` references in pattern properties against the
-    /// current row's projected values. Converts them to `Equals(value)` so
-    /// the PatternExecutor can match them. Enables:
-    ///   `WITH "Oslo" AS city MATCH (n:Person {city: city}) RETURN n`
+    /// Resolve `EqualsVar(name)` and `EqualsNodeProp { var, prop }` references
+    /// in pattern properties against the current row. Converts them to
+    /// `Equals(value)` so the PatternExecutor can match them (and pick an
+    /// indexed lookup if one is available). Enables:
+    ///   `WITH "Oslo" AS city MATCH (n:Person {city: city}) RETURN n`  (EqualsVar)
+    ///   `MATCH (a) MATCH (b) WHERE b.x = a.y` after planner pushdown  (EqualsNodeProp)
+    ///
+    /// When a reference cannot be resolved (unknown var, missing property, or
+    /// null), the matcher is replaced with `In(vec![])` so the pattern yields
+    /// no candidates — Cypher equality treats null as never-equal.
     pub(super) fn resolve_pattern_vars(&self, pattern: &Pattern, row: &ResultRow) -> Pattern {
         let mut resolved = pattern.clone();
         for element in &mut resolved.elements {
@@ -640,13 +646,36 @@ impl<'a> CypherExecutor<'a> {
             };
             if let Some(props) = props {
                 for matcher in props.values_mut() {
-                    if let PropertyMatcher::EqualsVar(name) = matcher {
-                        // Check projected scalars (WITH ... AS varName)
-                        if let Some(val) = row.projected.get(name) {
-                            *matcher = PropertyMatcher::Equals(val.clone());
+                    match matcher {
+                        PropertyMatcher::EqualsVar(name) => {
+                            // Check projected scalars (WITH/UNWIND ... AS varName)
+                            if let Some(val) = row.projected.get(name) {
+                                if matches!(val, Value::Null) {
+                                    *matcher = PropertyMatcher::In(Vec::new());
+                                } else {
+                                    *matcher = PropertyMatcher::Equals(val.clone());
+                                }
+                            } else {
+                                *matcher = PropertyMatcher::In(Vec::new());
+                            }
                         }
-                        // Could extend to resolve node property access (a.prop)
-                        // but the pattern tokenizer doesn't support dotted names yet
+                        PropertyMatcher::EqualsNodeProp { var, prop } => {
+                            // Resolve by reading the bound node's property
+                            let val = row
+                                .node_bindings
+                                .get(var)
+                                .and_then(|idx| self.graph.graph.node_weight(*idx))
+                                .map(|node| helpers::resolve_node_property(node, prop, self.graph));
+                            match val {
+                                Some(v) if !matches!(v, Value::Null) => {
+                                    *matcher = PropertyMatcher::Equals(v);
+                                }
+                                _ => {
+                                    *matcher = PropertyMatcher::In(Vec::new());
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -654,7 +683,7 @@ impl<'a> CypherExecutor<'a> {
         resolved
     }
 
-    /// Check if a pattern contains any EqualsVar references that need resolution.
+    /// Check if a pattern contains any deferred-resolution matchers.
     pub(super) fn pattern_has_vars(pattern: &Pattern) -> bool {
         for element in &pattern.elements {
             let props = match element {
@@ -663,7 +692,10 @@ impl<'a> CypherExecutor<'a> {
             };
             if let Some(props) = props {
                 for matcher in props.values() {
-                    if matches!(matcher, PropertyMatcher::EqualsVar(_)) {
+                    if matches!(
+                        matcher,
+                        PropertyMatcher::EqualsVar(_) | PropertyMatcher::EqualsNodeProp { .. }
+                    ) {
                         return true;
                     }
                 }

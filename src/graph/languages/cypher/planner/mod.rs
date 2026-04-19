@@ -351,4 +351,143 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_correlated_nodeprop_pushdown() {
+        // The classic shape from sodir-prospect build:
+        //   MATCH (a:A) MATCH (b:B) WHERE b.x = a.y
+        // should push { x: EqualsNodeProp { var: "a", prop: "y" } } onto B.
+        let mut query =
+            parse_cypher("MATCH (a:A) MATCH (b:B) WHERE b.x = a.y RETURN a.id, b.id").unwrap();
+
+        let graph = DirGraph::new();
+        let params = HashMap::new();
+        optimize(&mut query, &graph, &params);
+
+        // Locate the second MATCH (matching on B)
+        let b_match = query
+            .clauses
+            .iter()
+            .filter_map(|c| match c {
+                Clause::Match(m) => Some(m),
+                _ => None,
+            })
+            .find(|m| {
+                matches!(
+                    &m.patterns[0].elements[0],
+                    PatternElement::Node(np) if np.node_type.as_deref() == Some("B")
+                )
+            })
+            .expect("expected second MATCH on B");
+
+        if let PatternElement::Node(np) = &b_match.patterns[0].elements[0] {
+            let props = np.properties.as_ref().expect("expected props on b");
+            match props.get("x") {
+                Some(PropertyMatcher::EqualsNodeProp { var, prop }) => {
+                    assert_eq!(var, "a");
+                    assert_eq!(prop, "y");
+                }
+                other => panic!("expected EqualsNodeProp on b.x, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_correlated_nodeprop_reversed_sides() {
+        // Reversed: a.y = b.x (the cur_var b appears on the right).
+        let mut query =
+            parse_cypher("MATCH (a:A) MATCH (b:B) WHERE a.y = b.x RETURN a.id, b.id").unwrap();
+
+        let graph = DirGraph::new();
+        let params = HashMap::new();
+        optimize(&mut query, &graph, &params);
+
+        let b_match = query
+            .clauses
+            .iter()
+            .filter_map(|c| match c {
+                Clause::Match(m) => Some(m),
+                _ => None,
+            })
+            .find(|m| {
+                matches!(
+                    &m.patterns[0].elements[0],
+                    PatternElement::Node(np) if np.node_type.as_deref() == Some("B")
+                )
+            })
+            .unwrap();
+
+        if let PatternElement::Node(np) = &b_match.patterns[0].elements[0] {
+            let props = np.properties.as_ref().unwrap();
+            assert!(matches!(
+                props.get("x"),
+                Some(PropertyMatcher::EqualsNodeProp { var, prop })
+                    if var == "a" && prop == "y"
+            ));
+        }
+    }
+
+    #[test]
+    fn test_scalar_var_pushdown_from_unwind() {
+        // WHERE s.title = fname where fname comes from UNWIND should become
+        // an EqualsVar matcher on the pattern.
+        let mut query = parse_cypher(
+            "UNWIND ['x','y'] AS fname MATCH (s:Strat) WHERE s.title = fname RETURN s.id",
+        )
+        .unwrap();
+
+        let graph = DirGraph::new();
+        let params = HashMap::new();
+        optimize(&mut query, &graph, &params);
+
+        let s_match = query
+            .clauses
+            .iter()
+            .filter_map(|c| match c {
+                Clause::Match(m) => Some(m),
+                _ => None,
+            })
+            .next()
+            .unwrap();
+
+        if let PatternElement::Node(np) = &s_match.patterns[0].elements[0] {
+            let props = np.properties.as_ref().unwrap();
+            assert!(matches!(
+                props.get("title"),
+                Some(PropertyMatcher::EqualsVar(n)) if n == "fname"
+            ));
+        }
+    }
+
+    #[test]
+    fn test_no_pushdown_when_both_vars_in_same_match() {
+        // Within the same MATCH, a.y = b.x is handled by the pattern
+        // executor's shared-var join. We must NOT rewrite it as an
+        // EqualsNodeProp (which assumes prior-bound node).
+        let mut query =
+            parse_cypher("MATCH (a:A), (b:B) WHERE a.y = b.x RETURN a.id, b.id").unwrap();
+
+        let graph = DirGraph::new();
+        let params = HashMap::new();
+        optimize(&mut query, &graph, &params);
+
+        for clause in &query.clauses {
+            if let Clause::Match(m) = clause {
+                for pat in &m.patterns {
+                    for el in &pat.elements {
+                        if let PatternElement::Node(np) = el {
+                            if let Some(props) = &np.properties {
+                                for m in props.values() {
+                                    assert!(
+                                        !matches!(m, PropertyMatcher::EqualsNodeProp { .. }),
+                                        "same-MATCH correlated equality must not be rewritten"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

@@ -3,7 +3,7 @@
 use super::super::ast::*;
 use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::{PatternElement, PropertyMatcher};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<String, Value>) {
     let mut i = 0;
@@ -36,12 +36,30 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
             }
         };
 
+        // Collect vars bound by prior clauses (for correlated-equality pushdown).
+        // Node vars come from earlier MATCH/OPTIONAL MATCH patterns; scalar vars
+        // from WITH/UNWIND projections. We only collect names here — runtime
+        // resolution picks the right binding map (node_bindings vs projected).
+        let prior_node_vars = collect_prior_node_vars(&query.clauses[..i], &match_vars);
+        let prior_scalar_vars = collect_prior_scalar_vars(&query.clauses[..i]);
+
         // Split predicate into pushable conditions and remainder
-        let (pushable, pushable_in, pushable_cmp, remaining) =
-            extract_pushable_equalities(&where_pred, &match_vars, params);
+        let (pushable, pushable_in, pushable_cmp, pushable_var, pushable_nodeprop, remaining) =
+            extract_pushable_equalities(
+                &where_pred,
+                &match_vars,
+                &prior_node_vars,
+                &prior_scalar_vars,
+                params,
+            );
 
         // Apply pushable conditions to MATCH/OPTIONAL MATCH patterns
-        if !pushable.is_empty() || !pushable_in.is_empty() || !pushable_cmp.is_empty() {
+        if !pushable.is_empty()
+            || !pushable_in.is_empty()
+            || !pushable_cmp.is_empty()
+            || !pushable_var.is_empty()
+            || !pushable_nodeprop.is_empty()
+        {
             let patterns = match &mut query.clauses[i] {
                 Clause::Match(ref mut m) => &mut m.patterns,
                 Clause::OptionalMatch(ref mut m) => &mut m.patterns,
@@ -59,6 +77,12 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
             for (var_name, property, op, value) in pushable_cmp {
                 apply_comparison_to_patterns(patterns, &var_name, &property, op, value);
             }
+            for (var_name, property, ref_name) in pushable_var {
+                apply_var_property_to_patterns(patterns, &var_name, &property, ref_name);
+            }
+            for (var_name, property, ref_var, ref_prop) in pushable_nodeprop {
+                apply_nodeprop_to_patterns(patterns, &var_name, &property, ref_var, ref_prop);
+            }
 
             // Update WHERE clause with remaining predicates.
             // When all predicates are pushed into the pattern, keep the WHERE
@@ -73,6 +97,56 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
 
         i += 1;
     }
+}
+
+/// Collect node variable names bound by earlier MATCH/OPTIONAL MATCH clauses,
+/// excluding any names also in the current MATCH's patterns (to avoid
+/// self-correlation — those are normal within-pattern joins the pattern
+/// executor already handles via shared bindings).
+fn collect_prior_node_vars(
+    prior_clauses: &[Clause],
+    current_match_vars: &[(String, Option<String>)],
+) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let current: HashSet<&str> = current_match_vars.iter().map(|(v, _)| v.as_str()).collect();
+    for c in prior_clauses {
+        let patterns = match c {
+            Clause::Match(m) => Some(&m.patterns),
+            Clause::OptionalMatch(m) => Some(&m.patterns),
+            _ => None,
+        };
+        if let Some(patterns) = patterns {
+            for (v, _) in collect_pattern_variables(patterns) {
+                if !current.contains(v.as_str()) {
+                    out.insert(v);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Collect scalar names projected by WITH/UNWIND clauses.
+fn collect_prior_scalar_vars(prior_clauses: &[Clause]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for c in prior_clauses {
+        match c {
+            Clause::With(w) => {
+                for item in &w.items {
+                    if let Some(alias) = &item.alias {
+                        out.insert(alias.clone());
+                    } else if let Expression::Variable(name) = &item.expression {
+                        out.insert(name.clone());
+                    }
+                }
+            }
+            Clause::Unwind(u) => {
+                out.insert(u.alias.clone());
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Push LIMIT into MATCH when there's no ORDER BY/aggregation between them.
@@ -99,52 +173,78 @@ pub(super) fn collect_pattern_variables(
     vars
 }
 
-/// (equality_conditions, in_conditions, comparison_conditions, remaining_predicate)
+/// (equality_conditions, in_conditions, comparison_conditions,
+///  scalar_var_refs, node_prop_refs, remaining_predicate)
 type PushableResult = (
     Vec<(String, String, Value)>,
     Vec<(String, String, Vec<Value>)>,
     Vec<(String, String, ComparisonOp, Value)>,
+    Vec<(String, String, String)>,
+    Vec<(String, String, String, String)>,
     Option<Predicate>,
 );
 
 /// Extract pushable predicates from a WHERE clause into MATCH patterns.
-/// Returns (equality_conditions, in_conditions, comparison_conditions, remaining_predicate).
+/// Returns `(equality, in, comparison, scalar_var, node_prop, remaining)`.
 ///
 /// Pushes conditions of the form:
-/// - `variable.property = literal_value` (equality)
-/// - `variable.property = $param` (equality with param)
+/// - `variable.property = literal_value` / `= $param` (equality)
 /// - `variable.property IN [literal, ...]` (IN list)
 /// - `variable.property > literal_value` (and >=, <, <=)
+/// - `variable.property = other_variable` when `other_variable` is a scalar
+///   from a prior WITH/UNWIND  →  EqualsVar
+/// - `variable.property = other_var.other_prop` when `other_var` is a node
+///   bound by a prior MATCH  →  EqualsNodeProp (correlated join pushdown)
 ///
-/// The variable must be defined in MATCH.
+/// The first variable must be defined in the current MATCH.
 pub(super) fn extract_pushable_equalities(
     pred: &Predicate,
     match_vars: &[(String, Option<String>)],
+    prior_node_vars: &HashSet<String>,
+    prior_scalar_vars: &HashSet<String>,
     params: &HashMap<String, Value>,
 ) -> PushableResult {
     let mut pushable = Vec::new();
     let mut pushable_in = Vec::new();
     let mut pushable_cmp = Vec::new();
+    let mut pushable_var = Vec::new();
+    let mut pushable_nodeprop = Vec::new();
     let remaining = extract_from_predicate(
         pred,
         match_vars,
+        prior_node_vars,
+        prior_scalar_vars,
         params,
         &mut pushable,
         &mut pushable_in,
         &mut pushable_cmp,
+        &mut pushable_var,
+        &mut pushable_nodeprop,
     );
-    (pushable, pushable_in, pushable_cmp, remaining)
+    (
+        pushable,
+        pushable_in,
+        pushable_cmp,
+        pushable_var,
+        pushable_nodeprop,
+        remaining,
+    )
 }
 
 /// Recursively extract pushable predicates from a predicate tree.
 /// Returns the remaining predicate (None if fully consumed).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn extract_from_predicate(
     pred: &Predicate,
     match_vars: &[(String, Option<String>)],
+    prior_node_vars: &HashSet<String>,
+    prior_scalar_vars: &HashSet<String>,
     params: &HashMap<String, Value>,
     pushable: &mut Vec<(String, String, Value)>,
     pushable_in: &mut Vec<(String, String, Vec<Value>)>,
     pushable_cmp: &mut Vec<(String, String, ComparisonOp, Value)>,
+    pushable_var: &mut Vec<(String, String, String)>,
+    pushable_nodeprop: &mut Vec<(String, String, String, String)>,
 ) -> Option<Predicate> {
     match pred {
         Predicate::Comparison {
@@ -152,13 +252,26 @@ pub(super) fn extract_from_predicate(
             operator: ComparisonOp::Equals,
             right,
         } => {
-            // Check if this is variable.property = literal or variable.property = $param
+            // 1) Try literal/param equality first (fully resolved at plan time)
             if let Some((var, prop, val)) = try_extract_equality(left, right, match_vars, params) {
                 pushable.push((var, prop, val));
-                None // Fully consumed
-            } else {
-                Some(pred.clone()) // Keep as-is
+                return None;
             }
+            // 2) Try correlated node-prop equality: cur.prop = prior.other_prop
+            if let Some((var, prop, ref_var, ref_prop)) =
+                try_extract_correlated_nodeprop(left, right, match_vars, prior_node_vars)
+            {
+                pushable_nodeprop.push((var, prop, ref_var, ref_prop));
+                return None;
+            }
+            // 3) Try scalar-var equality: cur.prop = scalar_var
+            if let Some((var, prop, ref_name)) =
+                try_extract_scalar_var(left, right, match_vars, prior_scalar_vars)
+            {
+                pushable_var.push((var, prop, ref_name));
+                return None;
+            }
+            Some(pred.clone())
         }
         Predicate::Comparison {
             left,
@@ -204,18 +317,26 @@ pub(super) fn extract_from_predicate(
             let left_remaining = extract_from_predicate(
                 left,
                 match_vars,
+                prior_node_vars,
+                prior_scalar_vars,
                 params,
                 pushable,
                 pushable_in,
                 pushable_cmp,
+                pushable_var,
+                pushable_nodeprop,
             );
             let right_remaining = extract_from_predicate(
                 right,
                 match_vars,
+                prior_node_vars,
+                prior_scalar_vars,
                 params,
                 pushable,
                 pushable_in,
                 pushable_cmp,
+                pushable_var,
+                pushable_nodeprop,
             );
 
             match (left_remaining, right_remaining) {
@@ -299,6 +420,71 @@ pub(super) fn try_extract_equality(
         }
     }
 
+    None
+}
+
+/// Try to extract a correlated node-prop equality: `cur.prop = prior.other_prop`.
+/// Returns `(cur_var, cur_prop, prior_var, prior_prop)` when either side is a
+/// current-match property access and the other side is a prior-bound node's
+/// property access. The prior-bound node's property is read at row-execute time
+/// via the `EqualsNodeProp` matcher.
+pub(super) fn try_extract_correlated_nodeprop(
+    left: &Expression,
+    right: &Expression,
+    match_vars: &[(String, Option<String>)],
+    prior_node_vars: &HashSet<String>,
+) -> Option<(String, String, String, String)> {
+    let is_cur = |v: &str| match_vars.iter().any(|(name, _)| name == v);
+    let is_prior = |v: &str| prior_node_vars.contains(v);
+    if let (
+        Expression::PropertyAccess {
+            variable: lv,
+            property: lp,
+        },
+        Expression::PropertyAccess {
+            variable: rv,
+            property: rp,
+        },
+    ) = (left, right)
+    {
+        // Refuse self-equality (would shortcut a variable to itself)
+        if lv == rv {
+            return None;
+        }
+        if is_cur(lv) && is_prior(rv) {
+            return Some((lv.clone(), lp.clone(), rv.clone(), rp.clone()));
+        }
+        if is_cur(rv) && is_prior(lv) {
+            return Some((rv.clone(), rp.clone(), lv.clone(), lp.clone()));
+        }
+    }
+    None
+}
+
+/// Try to extract a scalar-var equality: `cur.prop = scalar_var`, where
+/// `scalar_var` is defined by a prior WITH/UNWIND. Returns `(cur_var,
+/// cur_prop, ref_name)` that the planner pushes as an `EqualsVar` matcher.
+pub(super) fn try_extract_scalar_var(
+    left: &Expression,
+    right: &Expression,
+    match_vars: &[(String, Option<String>)],
+    prior_scalar_vars: &HashSet<String>,
+) -> Option<(String, String, String)> {
+    let is_cur = |v: &str| match_vars.iter().any(|(name, _)| name == v);
+    if let (Expression::PropertyAccess { variable, property }, Expression::Variable(ref_name)) =
+        (left, right)
+    {
+        if is_cur(variable) && prior_scalar_vars.contains(ref_name) {
+            return Some((variable.clone(), property.clone(), ref_name.clone()));
+        }
+    }
+    if let (Expression::Variable(ref_name), Expression::PropertyAccess { variable, property }) =
+        (left, right)
+    {
+        if is_cur(variable) && prior_scalar_vars.contains(ref_name) {
+            return Some((variable.clone(), property.clone(), ref_name.clone()));
+        }
+    }
     None
 }
 
@@ -491,6 +677,57 @@ pub(super) fn apply_in_property_to_patterns(
                 if np.variable.as_deref() == Some(var_name) {
                     let props = np.properties.get_or_insert_with(Default::default);
                     props.insert(property.to_string(), PropertyMatcher::In(values));
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Apply a scalar-var reference (EqualsVar) to the matching node pattern.
+/// Resolved at row-execute time from projected scalar values.
+pub(super) fn apply_var_property_to_patterns(
+    patterns: &mut [crate::graph::core::pattern_matching::Pattern],
+    var_name: &str,
+    property: &str,
+    ref_name: String,
+) {
+    for pattern in patterns.iter_mut() {
+        for element in &mut pattern.elements {
+            if let PatternElement::Node(ref mut np) = element {
+                if np.variable.as_deref() == Some(var_name) {
+                    let props = np.properties.get_or_insert_with(Default::default);
+                    props
+                        .entry(property.to_string())
+                        .or_insert(PropertyMatcher::EqualsVar(ref_name));
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Apply a correlated node-prop reference (EqualsNodeProp) to the matching
+/// node pattern. Resolved at row-execute time by reading the prior-bound
+/// node's property.
+pub(super) fn apply_nodeprop_to_patterns(
+    patterns: &mut [crate::graph::core::pattern_matching::Pattern],
+    var_name: &str,
+    property: &str,
+    ref_var: String,
+    ref_prop: String,
+) {
+    for pattern in patterns.iter_mut() {
+        for element in &mut pattern.elements {
+            if let PatternElement::Node(ref mut np) = element {
+                if np.variable.as_deref() == Some(var_name) {
+                    let props = np.properties.get_or_insert_with(Default::default);
+                    props
+                        .entry(property.to_string())
+                        .or_insert(PropertyMatcher::EqualsNodeProp {
+                            var: ref_var,
+                            prop: ref_prop,
+                        });
                     return;
                 }
             }

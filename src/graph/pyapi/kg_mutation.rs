@@ -590,7 +590,7 @@ impl KnowledgeGraph {
         // ── Query path: run Cypher, convert to internal DataFrame ──
         if let Some(query_str) = query {
             // Parse the cypher query
-            let parsed = cypher::parse_cypher(&query_str).map_err(|e| {
+            let mut parsed = cypher::parse_cypher(&query_str).map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "Cypher syntax error in query: {}",
                     e
@@ -608,6 +608,9 @@ impl KnowledgeGraph {
             // Execute read-only: clone Arc, execute without holding mutable borrow
             let inner_clone = self.inner.clone();
             let empty_params = HashMap::new();
+            // Run the same planner optimizations as g.cypher() — otherwise
+            // pushdowns (including correlated-equality) don't fire here.
+            cypher::optimize(&mut parsed, &inner_clone, &empty_params);
             let cypher_result = {
                 let executor =
                     cypher::CypherExecutor::with_params(&inner_clone, &empty_params, None);
