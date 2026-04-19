@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-04-19
+
 ### Changed
 
 - **Blueprint loader rewritten in Rust.** `kglite.from_blueprint()` now runs
@@ -32,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     keeps edge counts byte-identical to the old loader).
   - Set `KGLITE_BLUEPRINT_PROFILE=1` for a per-phase / per-sub-phase
     ms breakdown on stderr.
+
+## [0.8.1] — 2026-04-19
+
+### Changed
+
 - **`code_tree` rewritten in Rust.** The polyglot codebase parser previously
   implemented in Python (`kglite/code_tree/*.py`, ~7,500 LOC) is now a
   first-class Rust module (`src/code_tree/`) exposed via PyO3. All eight
