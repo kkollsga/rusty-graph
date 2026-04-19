@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776587471351,
+  "lastUpdate": 1776591045889,
   "repoUrl": "https://github.com/kkollsga/kglite",
   "entries": {
     "Benchmark": [
@@ -7808,6 +7808,107 @@ window.BENCHMARK_DATA = {
             "unit": "iter/sec",
             "range": "stddev: 0.00003341313180630608",
             "extra": "mean: 1.133549051465648 msec\nrounds: 855"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "committer": {
+            "email": "kkollsg@gmail.com",
+            "name": "kkollsga",
+            "username": "kkollsga"
+          },
+          "distinct": true,
+          "id": "111e33eb1bc8d4169749217b20edb4f97323e19f",
+          "message": "perf(cypher): spatial-join operator for contains() cross-product (0.8.3)\n\nPlanner pass `fuse_spatial_join` rewrites `MATCH (s:A), (w:B) WHERE\ncontains(s, w) [AND rest]` into a new `Clause::SpatialJoin`. Executor\nbuilds an R-tree (new `rstar` dep) over the container side and probes\nthe point side once, replacing the N×M cartesian with O((N+M) log N + K).\n\nSpeedups on tests/bench_spatial.py (release build):\n- contains 500K pairs: 86.96 ms → 0.52 ms (~167×)\n- contains 2.6M prospect_shape (263 × 10K complex): 480.51 ms → 3.32 ms (~145×)\n- contains 100K pairs: 17.65 ms → 0.55 ms (~32×)\n\nFires only when both types have SpatialConfig (container.geometry,\nprobe.location), patterns are disjoint typed nodes with no edges, and\nWHERE is `contains(var, var)` with at most an ANDed residual. NOT,\nconstant-point, edges, 3+ patterns, and disjunctions fall back to the\nexisting per-row fast path unchanged.\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-04-19T11:25:27+02:00",
+          "tree_id": "af74824a35988060c916cc3c9668d02316dd634c",
+          "url": "https://github.com/kkollsga/kglite/commit/111e33eb1bc8d4169749217b20edb4f97323e19f"
+        },
+        "date": 1776591045387,
+        "tool": "pytest",
+        "benches": [
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+            "value": 1055.5799102972348,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000018521288156370992",
+            "extra": "mean: 947.3465630076416 usec\nrounds: 492"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+            "value": 738.8663342095434,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00003559378821794251",
+            "extra": "mean: 1.353424772113651 msec\nrounds: 667"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+            "value": 12713.876886666609,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00000515285429031728",
+            "extra": "mean: 78.65421451805369 usec\nrounds: 6764"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+            "value": 1677.5281720060698,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000022163180683862214",
+            "extra": "mean: 596.1151751056148 usec\nrounds: 948"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+            "value": 675651.1619820372,
+            "unit": "iter/sec",
+            "range": "stddev: 4.794643002716235e-7",
+            "extra": "mean: 1.4800536967426778 usec\nrounds: 68980"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+            "value": 124326.75670574239,
+            "unit": "iter/sec",
+            "range": "stddev: 0.0000013652147943624701",
+            "extra": "mean: 8.043320894848147 usec\nrounds: 18598"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+            "value": 2264.017348864364,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00004214285356397561",
+            "extra": "mean: 441.69272841553186 usec\nrounds: 3579"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+            "value": 1680.2658095487748,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000022061006929130027",
+            "extra": "mean: 595.1439315833867 usec\nrounds: 1257"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+            "value": 13745.024617060264,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00000496629425340829",
+            "extra": "mean: 72.75359832814009 usec\nrounds: 11365"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+            "value": 847.5383195768218,
+            "unit": "iter/sec",
+            "range": "stddev: 0.00003282720046747523",
+            "extra": "mean: 1.1798876545184442 msec\nrounds: 686"
+          },
+          {
+            "name": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+            "value": 858.0745711812634,
+            "unit": "iter/sec",
+            "range": "stddev: 0.000016427717169657032",
+            "extra": "mean: 1.1653998773362504 msec\nrounds: 856"
           }
         ]
       }
