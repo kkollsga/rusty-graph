@@ -14,17 +14,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filter DSL + geometry + timeseries + build orchestrator). `pandas` is no
   longer touched during ingestion — CSVs are parsed with the `csv` crate
   straight into the internal columnar `DataFrame`, then handed to
-  `mutation::maintain::add_nodes` / `add_connections`. CSVs are pre-parsed
-  in parallel via `rayon` so later serial phases never block on disk I/O.
-  The Python shim (`kglite/blueprint/__init__.py`, ~60 lines) now only
-  handles optional save + schema lock on top of the native build. The old
-  831-line `kglite/blueprint/loader.py` is deleted.
-  - Sodir blueprint (564 K nodes, 759 K edges): **9.87 s → 3.82 s** (~2.6×).
+  `mutation::maintain::add_nodes` / `add_connections`.
+  - Every parallelisable phase is pipelined: CSV pre-parse, per-spec
+    prep (filter + geometry + typed-column build), FK edge DataFrames,
+    and junction edge DataFrames all run across threads via `rayon`.
+    Only the graph mutation calls (`add_nodes` / `add_connections`)
+    stay serial, because the graph is `&mut`. GeoJSON→WKT centroid
+    extraction is also parallelised per row.
+  - The Python shim (`kglite/blueprint/__init__.py`, ~60 lines) now
+    only handles optional save + schema lock on top of the native
+    build. The old 831-line `kglite/blueprint/loader.py` is deleted.
+  - Sodir blueprint (564 K nodes, 759 K edges): **9.87 s → 1.6 s** (~6×).
   - Node / edge counts match the previous Python loader exactly (parity
     verified per-type across all 90 node types and all 93 edge types).
   - New runtime deps: `csv`, `geojson`, `indexmap` (the last so node /
     sub-node iteration preserves blueprint JSON order, which in turn
     keeps edge counts byte-identical to the old loader).
+  - Set `KGLITE_BLUEPRINT_PROFILE=1` for a per-phase / per-sub-phase
+    ms breakdown on stderr.
 - **`code_tree` rewritten in Rust.** The polyglot codebase parser previously
   implemented in Python (`kglite/code_tree/*.py`, ~7,500 LOC) is now a
   first-class Rust module (`src/code_tree/`) exposed via PyO3. All eight

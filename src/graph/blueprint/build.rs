@@ -60,7 +60,18 @@ pub fn build(
         errors: Vec::new(),
     };
 
+    let profile = std::env::var("KGLITE_BLUEPRINT_PROFILE").is_ok();
+    let t0 = std::time::Instant::now();
+
     let (core_specs, sub_specs) = collect_specs(&blueprint.nodes);
+    if profile {
+        eprintln!(
+            "  collect_specs: {} ms ({} core + {} sub)",
+            t0.elapsed().as_millis(),
+            core_specs.len(),
+            sub_specs.len()
+        );
+    }
 
     // Phase 0: pre-parse all distinct CSV paths in parallel so later serial
     // phases can hit the cache without blocking on disk I/O. We walk the
@@ -78,11 +89,24 @@ pub fn build(
     }
     all_csv_paths.sort();
     all_csv_paths.dedup();
+    let t_preparse = std::time::Instant::now();
     parse_in_parallel(&all_csv_paths, &root, &csv_cache);
+    if profile {
+        eprintln!(
+            "  parse_in_parallel: {} ms ({} distinct files)",
+            t_preparse.elapsed().as_millis(),
+            all_csv_paths.len()
+        );
+    }
 
     // Phase 1: manual nodes.
+    let t = std::time::Instant::now();
     load_manual_nodes(graph, &core_specs, &sub_specs, &root, &mut report)?;
+    if profile {
+        eprintln!("  load_manual_nodes: {} ms", t.elapsed().as_millis());
+    }
 
+    let t = std::time::Instant::now();
     load_node_specs(
         graph,
         &core_specs,
@@ -92,6 +116,10 @@ pub fn build(
         opts,
         "core nodes",
     )?;
+    if profile {
+        eprintln!("  load_core_nodes: {} ms", t.elapsed().as_millis());
+    }
+    let t = std::time::Instant::now();
     load_node_specs(
         graph,
         &sub_specs,
@@ -101,6 +129,9 @@ pub fn build(
         opts,
         "sub-nodes",
     )?;
+    if profile {
+        eprintln!("  load_sub_nodes: {} ms", t.elapsed().as_millis());
+    }
 
     // Register parent types for sub-nodes
     for sub in &sub_specs {
@@ -117,10 +148,19 @@ pub fn build(
 
     // Phase 4: FK edges
     let all_specs: Vec<&FlatSpec> = core_specs.iter().chain(sub_specs.iter()).collect();
+    let t = std::time::Instant::now();
     load_fk_edges(graph, &all_specs, &root, &csv_cache, &mut report, opts)?;
+    if profile {
+        eprintln!("  load_fk_edges: {} ms", t.elapsed().as_millis());
+    }
 
     // Phase 5: junction edges
+    let t = std::time::Instant::now();
     load_junction_edges(graph, &all_specs, &root, &csv_cache, &mut report, opts)?;
+    if profile {
+        eprintln!("  load_junction_edges: {} ms", t.elapsed().as_millis());
+        eprintln!("  TOTAL build: {} ms", t0.elapsed().as_millis());
+    }
 
     Ok(report)
 }
@@ -372,6 +412,158 @@ fn load_manual_nodes(
 
 // ─── Phase 2 + 3: node loading ────────────────────────────────────────────
 
+/// Everything a single node spec produces — computed off-thread by
+/// `prep_node_spec`, then consumed sequentially by `load_node_specs`.
+struct PreppedNode {
+    node_type: String,
+    pk: String,
+    title_arg: Option<String>,
+    df: DataFrame,
+    spatial_config: Option<SpatialConfig>,
+    /// Full raw (pre-dedup) CSV + resolved timeseries spec, if this type
+    /// has `timeseries` declared. Kept because `apply_timeseries` needs
+    /// every row, not just the dedup'd node DataFrame.
+    timeseries: Option<(RawCsv, ts::ResolvedTimeseries)>,
+}
+
+fn prep_node_spec(
+    spec: &FlatSpec,
+    root: &Path,
+    cache: &CsvCache,
+) -> Result<Option<PreppedNode>, String> {
+    if spec.is_manual {
+        return Ok(None);
+    }
+    let Some(csv_rel) = spec.spec.csv.as_deref() else {
+        return Ok(None);
+    };
+    let raw_rc = match cache.get(root, csv_rel) {
+        Ok(r) => r,
+        Err(e) => return Err(format!("[{}] {}", spec.node_type, e)),
+    };
+    let mut raw: RawCsv = (*raw_rc).clone_raw();
+
+    if !spec.spec.filter.is_empty() {
+        apply_filter(&mut raw, &spec.spec.filter);
+    }
+    if let Some(tspec) = &spec.spec.timeseries {
+        ts::drop_zero_time_components(&mut raw, tspec);
+    }
+
+    // Handle pk: "auto"
+    let pk = spec.spec.pk.clone().unwrap_or_else(|| "id".to_string());
+    let (pk, synth_pk_values) = if pk == "auto" {
+        let synth = format!("_{}_id", spec.node_type);
+        let n = raw.row_count();
+        let values: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
+        (synth, Some(values))
+    } else {
+        (pk, None)
+    };
+    if let Some(vals) = &synth_pk_values {
+        raw.headers.push(pk.clone());
+        for (r, row) in raw.rows.iter_mut().enumerate() {
+            row.push(vals[r].clone());
+            raw.nulls[r].push(false);
+        }
+    }
+
+    let title_field = spec.spec.title.clone().unwrap_or_else(|| pk.clone());
+
+    // Geometry conversion (GeoJSON → WKT + centroid, in-place on raw)
+    let has_geo = has_spatial_properties(&spec.spec.properties);
+    let targets = if has_geo {
+        let t = spatial_targets(&spec.spec.properties);
+        convert_geojson(&mut raw, &t)?;
+        Some(t)
+    } else {
+        None
+    };
+
+    let ts_resolved = if let Some(tspec) = &spec.spec.timeseries {
+        Some(ts::resolve(tspec, &raw)?)
+    } else {
+        None
+    };
+
+    // Dedup for node creation only (timeseries keeps the full row set).
+    let raw_for_nodes = if ts_resolved.is_some() {
+        dedupe_by_pk(&raw, &pk)
+    } else {
+        raw.clone_raw()
+    };
+
+    let skip_set: HashSet<&String> = spec.spec.skipped.iter().collect();
+    let ts_excluded: HashSet<String> = ts_resolved
+        .as_ref()
+        .map(|r| r.excluded_columns.iter().cloned().collect())
+        .unwrap_or_default();
+    let geometry_passthrough: HashSet<String> = HashSet::from_iter(["_geometry".to_string()]);
+    let parent_fk_skip: HashSet<String> = match &spec.spec.parent_fk {
+        Some(pfk) if !spec.spec.properties.contains_key(pfk) => HashSet::from_iter([pfk.clone()]),
+        _ => HashSet::new(),
+    };
+
+    let mut declared: HashMap<String, String> = HashMap::new();
+    for (col, ty) in &spec.spec.properties {
+        if map_blueprint_type(ty).is_some() {
+            declared.insert(col.clone(), ty.clone());
+        }
+    }
+
+    let keep: Vec<String> = raw
+        .headers
+        .iter()
+        .filter(|h| {
+            !skip_set.contains(h)
+                && !ts_excluded.contains(h.as_str())
+                && !geometry_passthrough.contains(h.as_str())
+                && !parent_fk_skip.contains(h.as_str())
+                || *h == &pk
+                || *h == &title_field
+        })
+        .cloned()
+        .collect();
+    let mut seen = HashSet::new();
+    let keep: Vec<String> = keep
+        .into_iter()
+        .filter(|h| seen.insert(h.clone()))
+        .collect();
+
+    let df = typed_dataframe(&raw_for_nodes, &keep, &declared)?;
+
+    let title_arg = if title_field != pk {
+        Some(title_field.clone())
+    } else {
+        None
+    };
+
+    let spatial_config = if has_geo {
+        let tgt = targets.unwrap_or_default();
+        let mut cfg = SpatialConfig {
+            geometry: tgt.wkt,
+            ..Default::default()
+        };
+        if let (Some(lat), Some(lon)) = (tgt.lat, tgt.lon) {
+            cfg.location = Some((lat, lon));
+        }
+        Some(cfg)
+    } else {
+        None
+    };
+
+    let timeseries = ts_resolved.map(|r| (raw, r));
+
+    Ok(Some(PreppedNode {
+        node_type: spec.node_type.clone(),
+        pk,
+        title_arg,
+        df,
+        spatial_config,
+        timeseries,
+    }))
+}
+
 fn load_node_specs(
     graph: &mut DirGraph,
     specs: &[FlatSpec],
@@ -381,176 +573,69 @@ fn load_node_specs(
     _opts: &BuildOptions,
     _phase_name: &str,
 ) -> Result<(), String> {
-    for spec in specs {
-        if spec.is_manual {
-            continue;
-        }
-        let Some(csv_rel) = spec.spec.csv.as_deref() else {
-            continue;
-        };
-        let raw_rc = match cache.get(root, csv_rel) {
-            Ok(r) => r,
+    use rayon::prelude::*;
+    let profile = std::env::var("KGLITE_BLUEPRINT_PROFILE").is_ok();
+
+    // Parallel prep: every spec's CSV + filter + geometry + typed_dataframe
+    // runs off-thread. Mutation into the graph happens later, serially.
+    let t_par = std::time::Instant::now();
+    let prepped: Vec<Result<Option<PreppedNode>, String>> = specs
+        .par_iter()
+        .map(|spec| prep_node_spec(spec, root, cache))
+        .collect();
+    let t_par_ms = t_par.elapsed().as_millis();
+
+    let t_serial = std::time::Instant::now();
+    let mut t_add = std::time::Duration::ZERO;
+    let mut t_ts = std::time::Duration::ZERO;
+    for (spec, result) in specs.iter().zip(prepped) {
+        let node = match result {
+            Ok(Some(n)) => n,
+            Ok(None) => continue,
             Err(e) => {
-                report.errors.push(format!("[{}] {}", spec.node_type, e));
+                report.errors.push(e);
                 continue;
             }
         };
-        let mut raw: RawCsv = (*raw_rc).clone_raw();
 
-        // Apply filter
-        if !spec.spec.filter.is_empty() {
-            apply_filter(&mut raw, &spec.spec.filter);
-        }
-
-        // Apply timeseries zero-row filter
-        if let Some(tspec) = &spec.spec.timeseries {
-            ts::drop_zero_time_components(&mut raw, tspec);
-        }
-
-        // Handle pk: "auto"
-        let pk = spec.spec.pk.clone().unwrap_or_else(|| "id".to_string());
-        let (pk, synth_pk_values) = if pk == "auto" {
-            let synth = format!("_{}_id", spec.node_type);
-            let n = raw.row_count();
-            let values: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
-            (synth, Some(values))
-        } else {
-            (pk, None)
-        };
-        if let Some(vals) = &synth_pk_values {
-            // Append synthesised column to raw.
-            raw.headers.push(pk.clone());
-            for (r, row) in raw.rows.iter_mut().enumerate() {
-                row.push(vals[r].clone());
-                raw.nulls[r].push(false);
-            }
-        }
-
-        let title_field = spec.spec.title.clone().unwrap_or_else(|| pk.clone());
-
-        // Geometry conversion (GeoJSON → WKT + centroid, in-place on raw)
-        let has_geo = has_spatial_properties(&spec.spec.properties);
-        let targets = if has_geo {
-            let t = spatial_targets(&spec.spec.properties);
-            convert_geojson(&mut raw, &t)?;
-            Some(t)
-        } else {
-            None
-        };
-
-        // Resolve timeseries (rename handled in-place when we read the channel
-        // columns; we do NOT rename raw.headers because that would break
-        // downstream column lookups.)
-        let ts_resolved = if let Some(tspec) = &spec.spec.timeseries {
-            let resolved = ts::resolve(tspec, &raw)?;
-            Some(resolved)
-        } else {
-            None
-        };
-
-        // If this spec is a timeseries type, node rows must be deduped by pk
-        // (one node per unique carrier; the timeseries data carries the per-row
-        // values). Build a deduplicated view used only for the node DataFrame.
-        let raw_for_nodes = if ts_resolved.is_some() {
-            dedupe_by_pk(&raw, &pk)
-        } else {
-            raw.clone_raw()
-        };
-
-        // Decide which columns to type and keep
-        let skip_set: HashSet<&String> = spec.spec.skipped.iter().collect();
-        let ts_excluded: HashSet<String> = ts_resolved
-            .as_ref()
-            .map(|r| r.excluded_columns.iter().cloned().collect())
-            .unwrap_or_default();
-        let geometry_passthrough: HashSet<String> = HashSet::from_iter(["_geometry".to_string()]);
-
-        // Also skip the parent_fk column if it isn't a real property. Python
-        // loader does this whenever `parent_fk` is set, regardless of whether
-        // `parent` is also set — mirror that.
-        let parent_fk_skip: HashSet<String> = match &spec.spec.parent_fk {
-            Some(pfk) if !spec.spec.properties.contains_key(pfk) => {
-                HashSet::from_iter([pfk.clone()])
-            }
-            _ => HashSet::new(),
-        };
-
-        // Build declared types map (only columns present in the CSV headers).
-        let mut declared: HashMap<String, String> = HashMap::new();
-        for (col, ty) in &spec.spec.properties {
-            // Non-spatial, non-virtual types only
-            if map_blueprint_type(ty).is_some() {
-                declared.insert(col.clone(), ty.clone());
-            }
-        }
-        // Force known ID columns to Int64 when possible (mirrors pandas Int64 coercion)
-        // — if the pk looks like an integer, declare it so.
-        // (Safe: declared has higher precedence than inference, but we don't
-        // override user-supplied types.)
-        let keep: Vec<String> = raw
-            .headers
-            .iter()
-            .filter(|h| {
-                !skip_set.contains(h)
-                    && !ts_excluded.contains(h.as_str())
-                    && !geometry_passthrough.contains(h.as_str())
-                    && !parent_fk_skip.contains(h.as_str())
-                    // Never drop pk or title
-                    || *h == &pk
-                    || *h == &title_field
-            })
-            .cloned()
-            .collect();
-
-        // Dedupe keep list while preserving order
-        let mut seen = HashSet::new();
-        let keep: Vec<String> = keep
-            .into_iter()
-            .filter(|h| seen.insert(h.clone()))
-            .collect();
-
-        let df = typed_dataframe(&raw_for_nodes, &keep, &declared)?;
-
-        let title_arg = if title_field != pk {
-            Some(title_field.clone())
-        } else {
-            None
-        };
-        let result = maintain::add_nodes(
+        let t_a = std::time::Instant::now();
+        let rep = maintain::add_nodes(
             graph,
-            df,
-            spec.node_type.clone(),
-            pk.clone(),
-            title_arg,
+            node.df,
+            node.node_type.clone(),
+            node.pk.clone(),
+            node.title_arg,
             None,
         )
-        .map_err(|e| format!("add_nodes '{}': {}", spec.node_type, e))?;
+        .map_err(|e| format!("add_nodes '{}': {}", node.node_type, e))?;
+        t_add += t_a.elapsed();
 
-        let count = result.nodes_created + result.nodes_updated;
+        let count = rep.nodes_created + rep.nodes_updated;
         *report
             .nodes_by_type
-            .entry(spec.node_type.clone())
+            .entry(node.node_type.clone())
             .or_insert(0) += count;
 
-        // Spatial config
-        if has_geo {
-            let tgt = targets.unwrap_or_default();
-            let mut cfg = SpatialConfig {
-                geometry: tgt.wkt,
-                ..Default::default()
-            };
-            if let (Some(lat), Some(lon)) = (tgt.lat, tgt.lon) {
-                cfg.location = Some((lat, lon));
-            }
-            graph.spatial_configs.insert(spec.node_type.clone(), cfg);
+        if let Some(cfg) = node.spatial_config {
+            graph.spatial_configs.insert(node.node_type.clone(), cfg);
         }
 
-        // Timeseries
-        if let Some(resolved) = ts_resolved {
-            apply_timeseries(graph, &spec.node_type, &pk, &raw, &resolved)?;
+        if let Some((raw, resolved)) = node.timeseries {
+            let t_t = std::time::Instant::now();
+            apply_timeseries(graph, &spec.node_type, &node.pk, &raw, &resolved)?;
+            t_ts += t_t.elapsed();
         }
     }
 
+    if profile {
+        eprintln!(
+            "    parallel prep (CSV/filter/geometry/typed_df): {} ms | serial add_nodes: {} ms | timeseries: {} ms | serial total: {} ms",
+            t_par_ms,
+            t_add.as_millis(),
+            t_ts.as_millis(),
+            t_serial.elapsed().as_millis(),
+        );
+    }
     Ok(())
 }
 
@@ -589,6 +674,167 @@ fn apply_timeseries(
 
 // ─── Phase 4: FK edges ────────────────────────────────────────────────────
 
+struct PreppedFkEdges {
+    /// Source type (borrowed from the FlatSpec).
+    source_type: String,
+    /// Source PK column name (which may be a synthesised `_type_id` for `pk: "auto"`).
+    pk: String,
+    /// Pre-built edge DataFrames, one per declared FK edge, in blueprint
+    /// insertion order (critical for `skip_existence_check` parity with the
+    /// old Python loader).
+    edges: Vec<PreppedFkEdge>,
+    /// Spec-level errors (e.g. missing FK column); surfaced after the serial
+    /// consumer runs.
+    errors: Vec<String>,
+}
+
+struct PreppedFkEdge {
+    edge_type: String,
+    target_type: String,
+    target_col: String,
+    df: DataFrame,
+}
+
+fn prep_fk_edges(spec: &FlatSpec, root: &Path, cache: &CsvCache) -> Option<PreppedFkEdges> {
+    let csv_rel = spec.spec.csv.as_deref()?;
+
+    let mut fk_edges: IndexMap<String, super::schema::FkEdge> = spec
+        .spec
+        .connections
+        .fk_edges
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                super::schema::FkEdge {
+                    target: v.target.clone(),
+                    fk: v.fk.clone(),
+                },
+            )
+        })
+        .collect();
+    if let (Some(parent_type), Some(parent_fk)) = (&spec.spec.parent, &spec.spec.parent_fk) {
+        let edge_type = format!("OF_{}", parent_type.to_uppercase());
+        fk_edges.entry(edge_type).or_insert(super::schema::FkEdge {
+            target: parent_type.clone(),
+            fk: parent_fk.clone(),
+        });
+    }
+    if fk_edges.is_empty() {
+        return None;
+    }
+
+    let raw_rc = cache.get(root, csv_rel).ok()?;
+    let mut raw: RawCsv = (*raw_rc).clone_raw();
+    if !spec.spec.filter.is_empty() {
+        apply_filter(&mut raw, &spec.spec.filter);
+    }
+    if let Some(tspec) = &spec.spec.timeseries {
+        ts::drop_zero_time_components(&mut raw, tspec);
+    }
+    let raw_pk = spec.spec.pk.clone().unwrap_or_else(|| "id".to_string());
+    let pk = if raw_pk == "auto" {
+        let synth = format!("_{}_id", spec.node_type);
+        let n = raw.row_count();
+        let values: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
+        raw.headers.push(synth.clone());
+        for (r, row) in raw.rows.iter_mut().enumerate() {
+            row.push(values[r].clone());
+            raw.nulls[r].push(false);
+        }
+        synth
+    } else {
+        raw_pk
+    };
+
+    let mut built = Vec::new();
+    let mut errors = Vec::new();
+
+    for (edge_type, edge) in &fk_edges {
+        let Some(fk_idx) = raw.col_index(&edge.fk) else {
+            errors.push(format!(
+                "[{}] FK column '{}' not found for edge {}",
+                spec.node_type, edge.fk, edge_type
+            ));
+            continue;
+        };
+        let Some(pk_idx) = raw.col_index(&pk) else {
+            errors.push(format!(
+                "[{}] pk column '{}' not found for edge {}",
+                spec.node_type, pk, edge_type
+            ));
+            continue;
+        };
+
+        let (target_col, src_vals, tgt_vals) =
+            build_fk_columns(&raw, &pk, &edge.fk, pk_idx, fk_idx);
+        if src_vals.is_empty() {
+            continue;
+        }
+
+        let Ok(df) = build_edge_df(&pk, &target_col, src_vals, tgt_vals) else {
+            errors.push(format!(
+                "[{}] failed to build edge DataFrame for {}",
+                spec.node_type, edge_type
+            ));
+            continue;
+        };
+        built.push(PreppedFkEdge {
+            edge_type: edge_type.clone(),
+            target_type: edge.target.clone(),
+            target_col,
+            df,
+        });
+    }
+
+    Some(PreppedFkEdges {
+        source_type: spec.node_type.clone(),
+        pk,
+        edges: built,
+        errors,
+    })
+}
+
+fn build_fk_columns(
+    raw: &RawCsv,
+    pk: &str,
+    fk: &str,
+    pk_idx: usize,
+    fk_idx: usize,
+) -> (String, Vec<Option<String>>, Vec<Option<String>>) {
+    // Keep only rows with a non-null target id (matches Python at loader.py:468).
+    if pk == fk {
+        // Self-reference: synthesise _target_{fk} so source/target column names differ.
+        let target_col = format!("_target_{}", fk);
+        let mut src = Vec::new();
+        let mut tgt = Vec::new();
+        for (r, row) in raw.rows.iter().enumerate() {
+            if raw.nulls[r][pk_idx] {
+                continue;
+            }
+            src.push(Some(row[pk_idx].clone()));
+            tgt.push(Some(row[pk_idx].clone()));
+        }
+        (target_col, src, tgt)
+    } else {
+        let mut src = Vec::new();
+        let mut tgt = Vec::new();
+        for (r, row) in raw.rows.iter().enumerate() {
+            if raw.nulls[r][fk_idx] {
+                continue;
+            }
+            let src_val = if raw.nulls[r][pk_idx] {
+                None
+            } else {
+                Some(row[pk_idx].clone())
+            };
+            src.push(src_val);
+            tgt.push(Some(row[fk_idx].clone()));
+        }
+        (fk.to_string(), src, tgt)
+    }
+}
+
 fn load_fk_edges(
     graph: &mut DirGraph,
     specs: &[&FlatSpec],
@@ -597,158 +843,52 @@ fn load_fk_edges(
     report: &mut BuildReport,
     _opts: &BuildOptions,
 ) -> Result<(), String> {
-    for spec in specs {
-        let Some(csv_rel) = spec.spec.csv.as_deref() else {
-            continue;
-        };
+    use rayon::prelude::*;
+    let profile = std::env::var("KGLITE_BLUEPRINT_PROFILE").is_ok();
 
-        // Build the effective fk_edges map: blueprint's + implicit parent edge.
-        let mut fk_edges: IndexMap<String, super::schema::FkEdge> = spec
-            .spec
-            .connections
-            .fk_edges
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    super::schema::FkEdge {
-                        target: v.target.clone(),
-                        fk: v.fk.clone(),
-                    },
-                )
-            })
-            .collect();
-        if let (Some(parent_type), Some(parent_fk)) = (&spec.spec.parent, &spec.spec.parent_fk) {
-            let edge_type = format!("OF_{}", parent_type.to_uppercase());
-            fk_edges.entry(edge_type).or_insert(super::schema::FkEdge {
-                target: parent_type.clone(),
-                fk: parent_fk.clone(),
-            });
+    // Parallel prep: per-spec CSV clone + filter + pk handling + per-edge
+    // DataFrame construction. Mutation is serial below.
+    let t_par = std::time::Instant::now();
+    let prepped: Vec<Option<PreppedFkEdges>> = specs
+        .par_iter()
+        .map(|spec| prep_fk_edges(spec, root, cache))
+        .collect();
+    let t_par_ms = t_par.elapsed().as_millis();
+
+    let t_serial = std::time::Instant::now();
+    let mut t_connect = std::time::Duration::ZERO;
+    for result in prepped {
+        let Some(pfx) = result else { continue };
+        for err in pfx.errors {
+            report.errors.push(err);
         }
-        if fk_edges.is_empty() {
-            continue;
-        }
-
-        let raw_rc = match cache.get(root, csv_rel) {
-            Ok(r) => r,
-            Err(_) => continue, // already reported in node phase
-        };
-        let mut raw: RawCsv = (*raw_rc).clone_raw();
-
-        // Apply same filter as node loading
-        if !spec.spec.filter.is_empty() {
-            apply_filter(&mut raw, &spec.spec.filter);
-        }
-        if let Some(tspec) = &spec.spec.timeseries {
-            ts::drop_zero_time_components(&mut raw, tspec);
-        }
-
-        // Handle pk: auto (regenerate same synthesised IDs)
-        let raw_pk = spec.spec.pk.clone().unwrap_or_else(|| "id".to_string());
-        let pk = if raw_pk == "auto" {
-            let synth = format!("_{}_id", spec.node_type);
-            let n = raw.row_count();
-            let values: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
-            raw.headers.push(synth.clone());
-            for (r, row) in raw.rows.iter_mut().enumerate() {
-                row.push(values[r].clone());
-                raw.nulls[r].push(false);
-            }
-            synth
-        } else {
-            raw_pk
-        };
-
-        for (edge_type, edge) in &fk_edges {
-            if raw.col_index(&edge.fk).is_none() {
-                report.errors.push(format!(
-                    "[{}] FK column '{}' not found for edge {}",
-                    spec.node_type, edge.fk, edge_type
-                ));
-                continue;
-            }
-
-            // Build a 2-column DataFrame (pk, fk). When pk == fk (self-reference
-            // from the sub-node pattern), synthesise a _target_{col}.
-            let pk_idx = raw
-                .col_index(&pk)
-                .ok_or_else(|| format!("pk column '{}' not found for edge {}", pk, edge_type))?;
-            let fk_idx = raw
-                .col_index(&edge.fk)
-                .ok_or_else(|| format!("fk column '{}' not found", edge.fk))?;
-
-            let (target_col, pk_column, fk_column) = if pk == edge.fk {
-                let pk_col = raw
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .map(|(r, row)| {
-                        if raw.nulls[r][pk_idx] {
-                            None
-                        } else {
-                            Some(row[pk_idx].clone())
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let fk_col: Vec<Option<String>> = pk_col.clone();
-                (format!("_target_{}", edge.fk), pk_col, fk_col)
-            } else {
-                let pk_col = raw
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .map(|(r, row)| {
-                        if raw.nulls[r][pk_idx] {
-                            None
-                        } else {
-                            Some(row[pk_idx].clone())
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let fk_col: Vec<Option<String>> = raw
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .map(|(r, row)| {
-                        if raw.nulls[r][fk_idx] {
-                            None
-                        } else {
-                            Some(row[fk_idx].clone())
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                (edge.fk.clone(), pk_col, fk_col)
-            };
-
-            // Drop rows where the target id is null (source null is handled by
-            // the batch processor as a skipped row — matches Python loader at
-            // loader.py:468 where only fk_col is dropna'd).
-            let mut src_vals: Vec<Option<String>> = Vec::with_capacity(pk_column.len());
-            let mut tgt_vals: Vec<Option<String>> = Vec::with_capacity(pk_column.len());
-            for (s, t) in pk_column.iter().zip(fk_column.iter()) {
-                if t.is_none() {
-                    continue;
-                }
-                src_vals.push(s.clone());
-                tgt_vals.push(t.clone());
-            }
-            if src_vals.is_empty() {
-                continue;
-            }
-
-            let df = build_edge_df(&pk, &target_col, src_vals, tgt_vals)?;
+        for edge in pfx.edges {
+            let t_c = std::time::Instant::now();
             let count = connect(
                 graph,
-                df,
-                edge_type,
-                &spec.node_type,
-                &pk,
-                &edge.target,
-                &target_col,
+                edge.df,
+                &edge.edge_type,
+                &pfx.source_type,
+                &pfx.pk,
+                &edge.target_type,
+                &edge.target_col,
                 report,
             )?;
-            *report.edges_by_type.entry(edge_type.clone()).or_insert(0) += count;
+            t_connect += t_c.elapsed();
+            *report
+                .edges_by_type
+                .entry(edge.edge_type.clone())
+                .or_insert(0) += count;
         }
+    }
+
+    if profile {
+        eprintln!(
+            "    fk parallel prep: {} ms | serial connect: {} ms | serial total: {} ms",
+            t_par_ms,
+            t_connect.as_millis(),
+            t_serial.elapsed().as_millis(),
+        );
     }
     Ok(())
 }
@@ -883,65 +1023,112 @@ fn connect(
 
 // ─── Phase 5: junction edges ──────────────────────────────────────────────
 
+struct PreppedJunction {
+    source_type: String,
+    edge_type: String,
+    source_fk: String,
+    target_type: String,
+    target_fk: String,
+    df: Result<DataFrame, String>,
+}
+
+fn prep_junction_edges(spec: &FlatSpec, root: &Path, cache: &CsvCache) -> Vec<PreppedJunction> {
+    let mut out = Vec::new();
+    for (edge_type, junc) in &spec.spec.connections.junction_edges {
+        // Use the shared cache so repeated junction CSVs only parse once.
+        let raw_rc = match cache.get(root, &junc.csv) {
+            Ok(r) => r,
+            Err(e) => {
+                out.push(PreppedJunction {
+                    source_type: spec.node_type.clone(),
+                    edge_type: edge_type.clone(),
+                    source_fk: junc.source_fk.clone(),
+                    target_type: junc.target.clone(),
+                    target_fk: junc.target_fk.clone(),
+                    df: Err(format!("junction {}: {}", edge_type, e)),
+                });
+                continue;
+            }
+        };
+        let raw: &RawCsv = raw_rc.as_ref();
+
+        let mut keep: Vec<String> = vec![junc.source_fk.clone(), junc.target_fk.clone()];
+        for p in &junc.properties {
+            if raw.col_index(p).is_some() && !keep.contains(p) {
+                keep.push(p.clone());
+            }
+        }
+        let mut declared: HashMap<String, String> = HashMap::new();
+        for (col, ty) in &junc.property_types {
+            if map_blueprint_type(ty).is_some() {
+                declared.insert(col.clone(), ty.clone());
+            }
+        }
+
+        out.push(PreppedJunction {
+            source_type: spec.node_type.clone(),
+            edge_type: edge_type.clone(),
+            source_fk: junc.source_fk.clone(),
+            target_type: junc.target.clone(),
+            target_fk: junc.target_fk.clone(),
+            df: typed_dataframe(raw, &keep, &declared),
+        });
+    }
+    out
+}
+
 fn load_junction_edges(
     graph: &mut DirGraph,
     specs: &[&FlatSpec],
     root: &Path,
-    _cache: &CsvCache,
+    cache: &CsvCache,
     report: &mut BuildReport,
     _opts: &BuildOptions,
 ) -> Result<(), String> {
-    for spec in specs {
-        for (edge_type, junc) in &spec.spec.connections.junction_edges {
-            let full = root.join(&junc.csv);
-            let raw = match read_csv_raw(&full) {
-                Ok(r) => r,
+    use rayon::prelude::*;
+
+    // Pre-ensure every junction CSV is in the cache so the parallel prep
+    // below doesn't race on disk. This also makes the cache the single
+    // source of truth (vs. previous implementation that re-read files).
+    let mut paths: Vec<String> = Vec::new();
+    for s in specs {
+        for (_, j) in &s.spec.connections.junction_edges {
+            paths.push(j.csv.clone());
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    parse_in_parallel(&paths, root, cache);
+
+    // Parallel prep; serial consumer preserves blueprint insertion order.
+    let prepped: Vec<Vec<PreppedJunction>> = specs
+        .par_iter()
+        .map(|spec| prep_junction_edges(spec, root, cache))
+        .collect();
+
+    for group in prepped {
+        for pj in group {
+            let df = match pj.df {
+                Ok(df) => df,
                 Err(e) => {
-                    report.errors.push(format!(
-                        "[{}] junction {}: {}",
-                        spec.node_type, edge_type, e
-                    ));
+                    report.errors.push(format!("[{}] {}", pj.source_type, e));
                     continue;
                 }
             };
-
-            // Determine which columns to keep: source FK, target FK, declared properties
-            let mut keep: Vec<String> = vec![junc.source_fk.clone(), junc.target_fk.clone()];
-            for p in &junc.properties {
-                if raw.col_index(p).is_some() && !keep.contains(p) {
-                    keep.push(p.clone());
-                }
-            }
-
-            let mut declared: HashMap<String, String> = HashMap::new();
-            for (col, ty) in &junc.property_types {
-                if map_blueprint_type(ty).is_some() {
-                    declared.insert(col.clone(), ty.clone());
-                }
-            }
-
-            let df = match typed_dataframe(&raw, &keep, &declared) {
-                Ok(d) => d,
-                Err(e) => {
-                    report.errors.push(format!(
-                        "[{}] junction {}: {}",
-                        spec.node_type, edge_type, e
-                    ));
-                    continue;
-                }
-            };
-
             let count = connect(
                 graph,
                 df,
-                edge_type,
-                &spec.node_type,
-                &junc.source_fk,
-                &junc.target,
-                &junc.target_fk,
+                &pj.edge_type,
+                &pj.source_type,
+                &pj.source_fk,
+                &pj.target_type,
+                &pj.target_fk,
                 report,
             )?;
-            *report.edges_by_type.entry(edge_type.clone()).or_insert(0) += count;
+            *report
+                .edges_by_type
+                .entry(pj.edge_type.clone())
+                .or_insert(0) += count;
         }
     }
     Ok(())

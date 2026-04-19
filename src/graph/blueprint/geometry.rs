@@ -10,6 +10,7 @@
 use super::csv_loader::RawCsv;
 use geo::Centroid;
 use indexmap::IndexMap;
+use rayon::prelude::*;
 use wkt::ToWkt;
 
 /// Is any property type a spatial virtual type?
@@ -49,37 +50,52 @@ pub fn convert_geojson(raw: &mut RawCsv, targets: &SpatialTargets) -> Result<(),
     };
 
     let n = raw.row_count();
-    let mut wkts = vec![None; n];
-    let mut lats = vec![None; n];
-    let mut lons = vec![None; n];
+    let want_wkt = targets.wkt.is_some();
+    let want_centroid = targets.lat.is_some() || targets.lon.is_some();
 
-    for (r, row) in raw.rows.iter().enumerate() {
-        if raw.nulls[r][geo_idx] {
-            continue;
-        }
-        let s = &row[geo_idx];
-        if s.is_empty() {
-            continue;
-        }
-        let Ok(gj): Result<geojson::GeoJson, _> = s.parse() else {
-            continue;
-        };
-        let geom_opt: Option<geo::Geometry<f64>> = match gj {
-            geojson::GeoJson::Geometry(g) => (&g).try_into().ok(),
-            geojson::GeoJson::Feature(f) => f.geometry.as_ref().and_then(|g| g.try_into().ok()),
-            geojson::GeoJson::FeatureCollection(_) => None,
-        };
-        let Some(g) = geom_opt else { continue };
-
-        if targets.wkt.is_some() {
-            wkts[r] = Some(g.wkt_string());
-        }
-        if targets.lat.is_some() || targets.lon.is_some() {
-            if let Some(c) = g.centroid() {
-                lats[r] = Some(c.y());
-                lons[r] = Some(c.x());
+    // Parse every row's GeoJSON → (WKT, lat, lon) in parallel. GeoJSON parsing
+    // plus the geo::Centroid trait are pure CPU work; no shared mutable state.
+    let triples: Vec<(Option<String>, Option<f64>, Option<f64>)> = (0..n)
+        .into_par_iter()
+        .map(|r| {
+            if raw.nulls[r][geo_idx] {
+                return (None, None, None);
             }
-        }
+            let s = &raw.rows[r][geo_idx];
+            if s.is_empty() {
+                return (None, None, None);
+            }
+            let Ok(gj): Result<geojson::GeoJson, _> = s.parse() else {
+                return (None, None, None);
+            };
+            let geom_opt: Option<geo::Geometry<f64>> = match gj {
+                geojson::GeoJson::Geometry(g) => (&g).try_into().ok(),
+                geojson::GeoJson::Feature(f) => f.geometry.as_ref().and_then(|g| g.try_into().ok()),
+                geojson::GeoJson::FeatureCollection(_) => None,
+            };
+            let Some(g) = geom_opt else {
+                return (None, None, None);
+            };
+            let wkt = if want_wkt { Some(g.wkt_string()) } else { None };
+            let (lat, lon) = if want_centroid {
+                match g.centroid() {
+                    Some(c) => (Some(c.y()), Some(c.x())),
+                    None => (None, None),
+                }
+            } else {
+                (None, None)
+            };
+            (wkt, lat, lon)
+        })
+        .collect();
+
+    let mut wkts = Vec::with_capacity(n);
+    let mut lats = Vec::with_capacity(n);
+    let mut lons = Vec::with_capacity(n);
+    for (w, la, lo) in triples {
+        wkts.push(w);
+        lats.push(la);
+        lons.push(lo);
     }
 
     write_column(raw, &targets.wkt, |r| wkts[r].clone());
