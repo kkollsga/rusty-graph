@@ -17,6 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+pub mod label_spill;
 pub mod loader;
 pub mod parser;
 pub mod writer;

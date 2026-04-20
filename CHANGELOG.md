@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Streaming label journal replaces in-memory `label_cache` during
+  `load_ntriples`.** The previous `HashMap<u32, String>` grew to ~10GB
+  on Wikidata's 124M entities, collapsing streaming throughput from
+  1.8M triples/s to 450K/s via swap pressure. Labels now spill to a
+  sequential on-disk journal (`{spill_dir}/labels.bin`) — zero heap
+  growth during Phase 1. The post-Phase-1 rename pass reads the
+  journal once, filtering to the ~tens-of-thousands of Q-numbers
+  that actually appear as type names (~3MB final footprint). New
+  module: `src/graph/io/ntriples/label_spill.rs`.
+
 ### Fixed
 
 - **Typed `MATCH (n:Type {title: 'X'})` now takes the cross-type

@@ -179,8 +179,27 @@ pub fn load_ntriples(
         EdgeBuffer::Strings(Vec::new())
     };
 
-    // Label cache for auto-typing: qnum → label, built during Phase 1.
-    let mut label_cache: HashMap<u32, String> = HashMap::new();
+    // Label journal for auto-typing. Previously a `HashMap<u32, String>`
+    // that grew to ~10 GB of heap at Wikidata scale (124M entities),
+    // pushing 16 GB machines into swap and collapsing the Phase 1
+    // rate from 1.8M to 450K triples/s. Now a buffered sequential
+    // write to `{spill_dir}/labels.bin` — zero heap growth during
+    // Phase 1. The post-Phase-1 rename pass reads the journal once,
+    // keeping only the ~88K labels that actually appear as type names.
+    // In-Phase-1 `get` is gone entirely (it was best-effort anyway —
+    // misses always fell through to post-Phase-1 rename).
+    let mut label_writer: Option<super::label_spill::LabelSpillWriter> = if config.auto_type {
+        let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
+        });
+        let _ = std::fs::create_dir_all(&spill_dir);
+        Some(
+            super::label_spill::LabelSpillWriter::new(&spill_dir.join("labels.bin"))
+                .map_err(|e| format!("Failed to create label journal: {}", e))?,
+        )
+    } else {
+        None
+    };
 
     // Per-type build metadata for Phase 1b pre-allocation.
     let mut type_meta: HashMap<String, TypeBuildMeta> = HashMap::new();
@@ -258,7 +277,7 @@ pub fn load_ntriples(
                         &mut stats,
                         mapped,
                         &mut prop_log,
-                        &mut label_cache,
+                        &mut label_writer,
                         &mut type_meta,
                         &mut qnum_to_idx,
                     );
@@ -350,26 +369,65 @@ pub fn load_ntriples(
             &mut stats,
             mapped,
             &mut prop_log,
-            &mut label_cache,
+            &mut label_writer,
             &mut type_meta,
             &mut qnum_to_idx,
         );
     }
 
-    // Post-Phase-1: resolve Q-code type names using the now-complete label cache.
-    // During streaming, types are assigned as entities arrive — if the P31 target
-    // entity hasn't been seen yet, the raw Q-code is used. Now that all labels are
-    // cached, we can fix these. This renames type_indices keys, node_type_metadata,
-    // type_schemas, and updates node_type InternedKeys in the graph.
-    // Mapping from old Q-code type names to new label names (populated by merge below).
-    // Passed to Phase 1b so property log entries with old names find the right column writer.
+    // Post-Phase-1: resolve Q-code type names using the label journal.
+    // During Phase 1 every entity's type stayed as its raw Q-code (e.g.
+    // "Q5") because the old HashMap cache was removed to avoid the ~10
+    // GB heap spike. Now we read the journal ONCE and pull labels only
+    // for the small set of Q-codes that actually became type names —
+    // typically tens of thousands on Wikidata, not the 124M entries
+    // the in-memory cache held.
     let mut type_rename_map: HashMap<String, String> = HashMap::new();
 
+    // Flush + close the label journal before reading it back.
+    let label_journal_path = if let Some(writer) = label_writer.take() {
+        let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
+        });
+        let path = spill_dir.join("labels.bin");
+        let journal_size = writer.finish().unwrap_or(0);
+        if config.verbose {
+            eprintln!(
+                "  Label journal: {} bytes on disk",
+                format_count(journal_size)
+            );
+        }
+        Some(path)
+    } else {
+        None
+    };
+
     if config.auto_type {
+        // Collect the Q-numbers that actually need label resolution —
+        // only those that appear as type names in `type_indices`.
+        let wanted: std::collections::HashSet<u32> = graph
+            .type_indices
+            .keys()
+            .filter_map(|type_name| parse_qcode_number(type_name))
+            .collect();
+
+        // Pull those labels (and only those) from the journal. One
+        // forward scan; skips unwanted records without allocating.
+        let label_lookup: HashMap<u32, String> = if let Some(ref path) = label_journal_path {
+            super::label_spill::read_labels_for(path, &wanted).unwrap_or_else(|e| {
+                if config.verbose {
+                    eprintln!("  WARN: failed to read label journal: {}", e);
+                }
+                HashMap::new()
+            })
+        } else {
+            HashMap::new()
+        };
+
         let mut renames: Vec<(String, String)> = Vec::new();
         for type_name in graph.type_indices.keys() {
             if let Some(qnum) = parse_qcode_number(type_name) {
-                if let Some(label) = label_cache.get(&qnum) {
+                if let Some(label) = label_lookup.get(&qnum) {
                     if label != type_name {
                         renames.push((type_name.clone(), label.clone()));
                     }
@@ -494,9 +552,6 @@ pub fn load_ntriples(
         }
     }
 
-    let label_cache_size = label_cache.len();
-    drop(label_cache);
-
     if config.verbose {
         let t = start.elapsed().as_secs_f64();
         let buf_len = edge_buffer.len() as u64;
@@ -509,11 +564,6 @@ pub fn load_ntriples(
             format_count(buf_len),
             format_count(num_types as u64),
             format_count(total_cols as u64),
-        );
-        eprintln!(
-            "  [T+{:.0}s] Label cache: {} entries (freed)",
-            t,
-            format_count(label_cache_size as u64),
         );
     }
 
@@ -2163,35 +2213,32 @@ fn flush_entity(
     stats: &mut NTriplesStats,
     mapped: bool,
     prop_log: &mut Option<crate::graph::storage::memory::property_log::PropertyLogWriter>,
-    label_cache: &mut HashMap<u32, String>,
+    label_writer: &mut Option<super::label_spill::LabelSpillWriter>,
     type_meta: &mut HashMap<String, TypeBuildMeta>,
     qnum_to_idx: &mut Option<MmapOrVec<u32>>,
 ) {
     let title = acc.label.unwrap_or_else(|| acc.id.clone());
 
-    // Cache this entity's label for auto-type resolution.
-    // Later entities may reference this one via P31.
-    if config.auto_type {
+    // Append to the label journal for post-Phase-1 type resolution.
+    // Sequential write only — zero heap pressure during the streaming
+    // phase. The previous HashMap-based cache grew to ~10 GB at
+    // Wikidata scale and caused swap thrash on 16 GB machines.
+    if let Some(ref mut w) = label_writer {
         if let Some(qnum) = parse_qcode_number(&acc.id) {
-            label_cache.insert(qnum, title.clone());
+            let _ = w.append(qnum, &title);
         }
     }
 
-    // Determine node type from P31 value.
-    // Priority: explicit node_types mapping > auto-type (label cache) > Q-code > "Entity"
+    // Determine node type from P31 value. During Phase 1 we always use
+    // the raw Q-code when auto_type is on — the post-Phase-1 rename
+    // pass resolves it to the human-readable label using the journal.
+    // This avoids the old in-loop HashMap lookup on a 124M-entry map.
     let node_type = if let Some(ref tq) = acc.type_qcode {
         if let Some(mapped_name) = config.node_types.get(tq) {
             mapped_name.clone()
         } else if config.auto_type {
-            // Try to resolve Q-code to label via cache
-            if let Some(qnum) = parse_qcode_number(tq) {
-                label_cache
-                    .get(&qnum)
-                    .cloned()
-                    .unwrap_or_else(|| tq.clone())
-            } else {
-                tq.clone()
-            }
+            // Raw Q-code; post-Phase-1 rename will resolve to label.
+            tq.clone()
         } else {
             "Entity".to_string()
         }
