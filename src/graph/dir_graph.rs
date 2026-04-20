@@ -1477,6 +1477,13 @@ impl DirGraph {
             if dg.has_overflow() {
                 dg.compact();
             }
+            // Auto-build the cross-type global title index so that
+            // `MATCH (n {title: 'X'})` and `g.search(text)` are O(log N)
+            // out of the box on every saved disk graph. Runs after
+            // CSR / overflow consolidation so it sees the final node
+            // set. Tied to `save_disk` rather than `build_csr_*` so
+            // node-only graphs (no edges) still get the index built.
+            let _ = dg.build_global_property_index("title");
         }
 
         let dir = std::path::Path::new(path);

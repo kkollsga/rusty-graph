@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.8] — 2026-04-19
+
+### Added
+
+- **Cross-type global property index.** New `create_global_index(property)`
+  builds a single mmap'd sorted-string index covering every live node,
+  not just one type. On a disk graph, `save()` now auto-builds a global
+  title index so `MATCH (n {title: 'X'})` — without a type label — is
+  O(log N) out of the box. Solves the "title-to-ID without guessing
+  the type" problem that agents hit repeatedly on Wikidata-scale graphs.
+  Files: `global_index_{property}_{meta,keys,offsets,ids}.bin`.
+- **`g.search(text, property='title', limit=10)` helper.** Returns
+  the top-k nodes whose `property` matches `text` (exact match first,
+  then prefix fallback) as `[{id, type, title, id_value}]`. Backed by
+  the global index. Also exposed as a new MCP tool so agents can skip
+  the "guess the type" ceremony entirely: `search('Equinor')` returns
+  the right Q-number without `MATCH` or a type label.
+- **Alias-aware cross-type lookups.** When the untyped matcher sees
+  `{title: 'X'}` and the literal `title` index doesn't exist, it also
+  tries the hardcoded title family (`title/label/name`) AND any
+  per-type aliases declared via `node_title_field=` at `add_nodes`
+  time. Same for `id/nid/qid`. An agent who built the index as
+  `create_global_index('label')` still hits the fast path when
+  querying `{title: 'X'}`, and vice versa. Derivation is automatic
+  from the graph's existing schema — no new config API.
+
+### Changed
+
+- **`save_disk` auto-builds the global title index.** Every call to
+  `save()` on a disk graph now produces `global_index_title_*.bin`
+  files. Adds a one-pass sweep over `node_slots` at save time —
+  negligible on small graphs, ~single-digit minutes on Wikidata-scale
+  (124M nodes). Opt-out: delete the files after save.
+
 ## [0.8.7] — 2026-04-19
 
 ### Added

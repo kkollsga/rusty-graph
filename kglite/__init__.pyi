@@ -2809,10 +2809,10 @@ class KnowledgeGraph:
         self,
         text: str,
         *,
-        property: str = "label",
+        property: str = "title",
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        """Find nodes matching ``text`` on ``property`` (default 'label').
+        """Find nodes matching ``text`` on ``property`` (default 'title').
 
         Tries exact match first, then prefix match. Returns up to ``limit``
         results as dicts with ``id`` (node index), ``type``, ``title``, and

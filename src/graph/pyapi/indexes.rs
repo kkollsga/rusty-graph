@@ -131,22 +131,28 @@ impl KnowledgeGraph {
         Ok(result.into())
     }
 
-    /// Search for nodes matching ``text`` on a property (default ``label``).
+    /// Search for nodes matching ``text`` on a property (default ``title``).
     ///
     /// Uses the cross-type global index when one has been built — see
-    /// ``create_global_index(property)``. Tries exact match first; if
-    /// none, falls back to prefix match. Returns the top ``limit``
-    /// results as dicts with ``id`` (node index), ``type``, ``title``,
-    /// and the node's id property.
+    /// ``create_global_index(property)``. Alias-aware: a miss on
+    /// ``title`` also tries ``label`` and ``name`` (and ``id``/``nid``/
+    /// ``qid`` for the id family), so an index built under one alias
+    /// is still hit when queried with another. Tries exact match
+    /// first; if none, falls back to prefix match.
     ///
-    /// Returns an empty list if no global index exists for ``property``.
+    /// Returns the top ``limit`` results as dicts with ``id`` (node
+    /// index), ``type``, ``title``, and ``id_value``.
+    ///
+    /// Returns an empty list if no global index exists for any alias
+    /// of ``property``.
     ///
     /// Example::
     ///
-    ///     graph.create_global_index('label')
+    ///     graph.create_global_index('label')   # or 'title'
     ///     hits = graph.search('Norway')
-    ///     # [{'id': 12345, 'type': 'country', 'title': 'Norway', 'nid': 'Q20'}, ...]
-    #[pyo3(signature = (text, *, property="label", limit=10))]
+    ///     # [{'id': 12345, 'type': 'country', 'title': 'Norway',
+    ///     #   'id_value': 'Q20'}, ...]
+    #[pyo3(signature = (text, *, property="title", limit=10))]
     fn search(
         &self,
         py: Python<'_>,
@@ -156,14 +162,41 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         use crate::graph::storage::GraphRead;
         let backend = &self.inner.graph;
-        // Exact match first, then prefix fallback.
-        let mut hits: Vec<petgraph::graph::NodeIndex> =
-            match backend.lookup_by_property_eq_any_type(property, text) {
-                Some(v) if !v.is_empty() => v,
-                _ => backend
-                    .lookup_by_property_prefix_any_type(property, text, limit)
-                    .unwrap_or_default(),
-            };
+
+        // Alias-aware lookup. Mirrors the matcher's cross-type fast
+        // path so `g.search(...)` and `MATCH (n {title: ...})` resolve
+        // through the same candidate list.
+        let candidates: Vec<&str> = match property {
+            "title" => vec!["title", "label", "name"],
+            "label" => vec!["label", "title", "name"],
+            "name" => vec!["name", "title", "label"],
+            "id" => vec!["id", "nid", "qid"],
+            "nid" => vec!["nid", "id", "qid"],
+            "qid" => vec!["qid", "id", "nid"],
+            other => vec![other],
+        };
+
+        // Exact match across every candidate name, then prefix
+        // fallback on the same names.
+        let mut hits: Vec<petgraph::graph::NodeIndex> = Vec::new();
+        for name in &candidates {
+            if let Some(v) = backend.lookup_by_property_eq_any_type(name, text) {
+                if !v.is_empty() {
+                    hits = v;
+                    break;
+                }
+            }
+        }
+        if hits.is_empty() {
+            for name in &candidates {
+                if let Some(v) = backend.lookup_by_property_prefix_any_type(name, text, limit) {
+                    if !v.is_empty() {
+                        hits = v;
+                        break;
+                    }
+                }
+            }
+        }
         hits.truncate(limit);
 
         let result_list = pyo3::types::PyList::empty(py);

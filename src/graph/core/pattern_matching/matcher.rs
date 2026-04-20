@@ -27,6 +27,40 @@ use super::pattern::{
 /// contention when multiple queries run concurrently (shared thread pool).
 const EXPANSION_RAYON_THRESHOLD: usize = 8192;
 
+/// Return the ordered list of index-name candidates to try when the
+/// cross-type fast path sees a query for `prop`. The first entry is
+/// always `prop` itself.
+///
+/// Two sources of aliases:
+///   1. Hardcoded families — `title ↔ label ↔ name` and `id ↔ nid ↔
+///      qid`. Covers the common KGLite conventions without any
+///      per-graph config.
+///   2. Per-type `title_field_aliases` / `id_field_aliases` on
+///      `DirGraph`. If any node type registered `'original_name'` as
+///      its title alias, a query for `{title: 'X'}` falls back to the
+///      `original_name` index too. Derived automatically from the
+///      graph's existing schema — no new config API.
+fn global_alias_candidates(prop: &str, graph: &DirGraph) -> Vec<String> {
+    let mut out: Vec<String> = vec![prop.to_string()];
+    let (family, per_type_map): (&[&str], &HashMap<String, String>) = match prop {
+        "title" | "label" | "name" => (&["title", "label", "name"], &graph.title_field_aliases),
+        "id" | "nid" | "qid" => (&["id", "nid", "qid"], &graph.id_field_aliases),
+        _ => return out,
+    };
+    for &sibling in family {
+        let s = sibling.to_string();
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    for alias in per_type_map.values() {
+        if !out.contains(alias) {
+            out.push(alias.clone());
+        }
+    }
+    out
+}
+
 // ============================================================================
 // Executor
 // ============================================================================
@@ -623,36 +657,47 @@ impl<'a> PatternExecutor<'a> {
             // StartsWith(String), consult the persistent global index
             // if one exists for that property. Turns `MATCH (n {label:
             // 'Norway'})` into O(log N) without requiring a type label.
+            //
+            // Alias-aware: if the literal property name misses, also
+            // try common title/id aliases (title↔label↔name,
+            // id↔nid↔qid). That way an agent who built the index as
+            // `create_global_index('label')` but queries with
+            // `{title: 'X'}` still hits the fast path.
             for (prop, matcher) in props {
+                let alias_candidates = global_alias_candidates(prop, self.graph);
                 match matcher {
                     PropertyMatcher::Equals(Value::String(s)) => {
-                        if let Some(candidates) =
-                            self.graph.graph.lookup_by_property_eq_any_type(prop, s)
-                        {
-                            if props.len() == 1 {
-                                return Ok(candidates);
+                        for idx_name in &alias_candidates {
+                            if let Some(candidates) =
+                                self.graph.graph.lookup_by_property_eq_any_type(idx_name, s)
+                            {
+                                if props.len() == 1 {
+                                    return Ok(candidates);
+                                }
+                                let filtered = candidates
+                                    .into_iter()
+                                    .filter(|&idx| self.node_matches_properties(idx, props))
+                                    .collect();
+                                return Ok(filtered);
                             }
-                            let filtered = candidates
-                                .into_iter()
-                                .filter(|&idx| self.node_matches_properties(idx, props))
-                                .collect();
-                            return Ok(filtered);
                         }
                     }
                     PropertyMatcher::StartsWith(prefix) => {
-                        if let Some(candidates) = self
-                            .graph
-                            .graph
-                            .lookup_by_property_prefix_any_type(prop, prefix, usize::MAX)
-                        {
-                            if props.len() == 1 {
-                                return Ok(candidates);
+                        for idx_name in &alias_candidates {
+                            if let Some(candidates) = self
+                                .graph
+                                .graph
+                                .lookup_by_property_prefix_any_type(idx_name, prefix, usize::MAX)
+                            {
+                                if props.len() == 1 {
+                                    return Ok(candidates);
+                                }
+                                let filtered = candidates
+                                    .into_iter()
+                                    .filter(|&idx| self.node_matches_properties(idx, props))
+                                    .collect();
+                                return Ok(filtered);
                             }
-                            let filtered = candidates
-                                .into_iter()
-                                .filter(|&idx| self.node_matches_properties(idx, props))
-                                .collect();
-                            return Ok(filtered);
                         }
                     }
                     _ => {}
