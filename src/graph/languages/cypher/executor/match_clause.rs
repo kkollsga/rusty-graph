@@ -358,8 +358,24 @@ impl<'a> CypherExecutor<'a> {
             if let Some(ref props) = other_node.properties {
                 if let Some(nd) = self.graph.graph.node_weight(other_idx) {
                     let mut all_match = true;
+                    // Resolve aliases against the target node's type so
+                    // `{id: 20}` / `{nid: 'Q76'}` / `{label: 'X'}` /
+                    // `{title: 'X'}` all reach the right column.
+                    // Without this, get_property("id") misses because
+                    // id lives in the id_column, not the regular
+                    // property map — which silently dropped EXISTS
+                    // inline-property predicates before.
+                    let tgt_type_str = nd.node_type_str(&self.graph.interner);
                     for (key, matcher) in props {
-                        let val = nd.get_property(key);
+                        let resolved = self.graph.resolve_alias(tgt_type_str, key);
+                        let val: Option<std::borrow::Cow<'_, Value>> = match resolved {
+                            "name" | "title" => Some(nd.title()),
+                            "id" => Some(nd.id()),
+                            "type" | "node_type" | "label" => Some(std::borrow::Cow::Owned(
+                                Value::String(tgt_type_str.to_string()),
+                            )),
+                            other => nd.get_property(other),
+                        };
                         let ok = match matcher {
                             PropertyMatcher::Equals(expected) => val.as_deref().is_some_and(|v| {
                                 crate::graph::core::filtering::values_equal(v, expected)

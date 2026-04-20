@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.8.8] — 2026-04-19
 
+### Fixed
+
+- **EXISTS inline-property filters on target nodes were silently
+  dropped.** `WHERE EXISTS { (a)-[:REL]->({id: 20}) }` used the fast
+  path's `get_property("id")` which missed the special id_column,
+  producing silent zero-row results even when the pattern genuinely
+  matched. Ported the same alias resolution that
+  `node_matches_properties` uses — `title`/`name`/`label`/`id`/`type`
+  all route to the right column via `resolve_alias`. The fast path
+  now behaves identically to the slow path for these literal-property
+  checks. Regression tests added to `test_where_exists.py`.
+
 ### Added
 
 - **Cross-type global property index.** New `create_global_index(property)`

@@ -459,3 +459,83 @@ class TestInlinePatternPredicates:
 
         names = [row["p.name"] for row in result]
         assert names == ["Charlie", "Diana"]
+
+
+class TestExistsInlinePropertyRegression:
+    """Regression for the silent-wrong-answer bug where inline property
+    filters on the target node of an EXISTS subpattern (e.g.
+    ``{id: 20}``) were dropped by the fast-path check, because
+    get_property('id') missed the id_column. Reported from a Wikidata
+    MCP session; fix lives in match_clause.rs::try_fast_exists_check
+    by resolving title/id aliases before looking up values.
+
+    All three queries below describe the same logical filter — T2 and
+    T3 worked before the fix; T1 returned zero rows. After the fix,
+    all three must return the same single row."""
+
+    @pytest.fixture
+    def id_graph(self):
+        import pandas as pd
+
+        graph = KnowledgeGraph()
+        # add_nodes honours user-provided IDs (unlike bare CREATE which
+        # auto-assigns sequentially), so {id: 17764457} matches reality.
+        graph.add_nodes(
+            pd.DataFrame({"nid": [17764457], "name": ["Gina Krog"]}),
+            "Field",
+            "nid",
+            "name",
+        )
+        graph.add_nodes(
+            pd.DataFrame({"nid": [20], "name": ["Norway"]}),
+            "Country",
+            "nid",
+            "name",
+        )
+        graph.add_connections(
+            pd.DataFrame({"from_id": [17764457], "to_id": [20]}),
+            "P17",
+            "Field",
+            "from_id",
+            "Country",
+            "to_id",
+        )
+        return graph
+
+    def test_t1_exists_inline_id_property(self, id_graph):
+        # Previously returned [] — the {id: 20} filter inside EXISTS
+        # was silently dropped.
+        result = id_graph.cypher("""
+            MATCH (f {id: 17764457})
+            WHERE EXISTS { MATCH (f)-[:P17]->({id: 20}) }
+            RETURN f.id
+        """)
+        ids = [row["f.id"] for row in result]
+        assert ids == [17764457]
+
+    def test_t2_exists_where_id_equals(self, id_graph):
+        result = id_graph.cypher("""
+            MATCH (f {id: 17764457})
+            WHERE EXISTS { MATCH (f)-[:P17]->(c) WHERE c.id = 20 }
+            RETURN f.id
+        """)
+        ids = [row["f.id"] for row in result]
+        assert ids == [17764457]
+
+    def test_t3_inline_id_property_in_match(self, id_graph):
+        result = id_graph.cypher("""
+            MATCH (f {id: 17764457})-[:P17]->({id: 20})
+            RETURN f.id
+        """)
+        ids = [row["f.id"] for row in result]
+        assert ids == [17764457]
+
+    def test_exists_inline_title_property(self, id_graph):
+        # Same bug shape but for the `title` alias column.
+        result = id_graph.cypher("""
+            MATCH (f {id: 17764457})
+            WHERE EXISTS { MATCH (f)-[:P17]->({title: 'Norway'}) }
+            RETURN f.id
+        """)
+        ids = [row["f.id"] for row in result]
+        assert ids == [17764457]
