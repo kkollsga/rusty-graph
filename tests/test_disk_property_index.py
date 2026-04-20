@@ -147,6 +147,69 @@ class TestDescribeAnnotations:
         assert "<indexing hint=" in d
 
 
+class TestGlobalIndexAndSearch:
+    """Cross-type global index + the ``search()`` helper."""
+
+    def _build_multi_type_graph(self, path):
+        g = KnowledgeGraph(storage="disk", path=path)
+        g.add_nodes(
+            pd.DataFrame({"nid": ["Q1", "Q2", "Q3"], "label": ["Norway", "Sweden", "Iceland"]}),
+            "Country",
+            "nid",
+            "label",
+        )
+        g.add_nodes(
+            pd.DataFrame({"nid": ["P1", "P2"], "label": ["Oslo", "Stockholm"]}),
+            "City",
+            "nid",
+            "label",
+        )
+        return g
+
+    def test_create_global_index_reports_count(self, disk_dir):
+        g = self._build_multi_type_graph(disk_dir)
+        info = g.create_global_index("label")
+        assert info["property"] == "label"
+        assert info["unique_values"] == 5
+        assert info["created"] is True
+
+    def test_search_finds_node_across_types(self, disk_dir):
+        g = self._build_multi_type_graph(disk_dir)
+        g.create_global_index("label")
+        assert [h["title"] for h in g.search("Oslo")] == ["Oslo"]
+        assert [h["title"] for h in g.search("Norway")] == ["Norway"]
+        assert g.search("Atlantis") == []
+
+    def test_search_falls_back_to_prefix(self, disk_dir):
+        g = self._build_multi_type_graph(disk_dir)
+        g.create_global_index("label")
+        hits = g.search("S")  # matches Stockholm + Sweden
+        titles = sorted(h["title"] for h in hits)
+        assert titles == ["Stockholm", "Sweden"]
+
+    def test_search_returns_type_per_hit(self, disk_dir):
+        g = self._build_multi_type_graph(disk_dir)
+        g.create_global_index("label")
+        hits = g.search("Oslo")
+        assert hits[0]["type"] == "City"
+        assert hits[0]["id_value"] == "P1"
+
+    def test_untyped_cypher_match_uses_global_index(self, disk_dir):
+        g = self._build_multi_type_graph(disk_dir)
+        g.create_global_index("label")
+        # No :Country / :City label on the pattern — only resolvable
+        # via the cross-type index.
+        r = g.cypher("MATCH (n {label: 'Stockholm'}) RETURN n.nid").to_df()
+        assert len(r) == 1
+        assert r["n.nid"][0] == "P2"
+
+    def test_search_returns_empty_without_index(self, disk_dir):
+        # No create_global_index call — search still works but returns
+        # empty (would otherwise require a 124M-node scan on Wikidata).
+        g = self._build_multi_type_graph(disk_dir)
+        assert g.search("Oslo") == []
+
+
 class TestPersistenceAcrossReload:
     def test_index_survives_save_and_reload(self, disk_dir):
         g = _build_disk_graph(disk_dir)

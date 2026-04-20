@@ -367,6 +367,28 @@ impl<G: GraphRead> GraphRead for RecordingGraph<G> {
     }
 
     #[inline]
+    fn lookup_by_property_eq_any_type(
+        &self,
+        property: &str,
+        value: &str,
+    ) -> Option<Vec<NodeIndex>> {
+        self.record("lookup_by_property_eq_any_type");
+        self.inner.lookup_by_property_eq_any_type(property, value)
+    }
+
+    #[inline]
+    fn lookup_by_property_prefix_any_type(
+        &self,
+        property: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Option<Vec<NodeIndex>> {
+        self.record("lookup_by_property_prefix_any_type");
+        self.inner
+            .lookup_by_property_prefix_any_type(property, prefix, limit)
+    }
+
+    #[inline]
     fn count_edges_grouped_by_peer(
         &self,
         conn_type: InternedKey,

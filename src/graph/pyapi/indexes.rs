@@ -90,6 +90,110 @@ impl KnowledgeGraph {
         Ok(removed)
     }
 
+    /// Build a cross-type global index on `property`. Unlike
+    /// ``create_index`` (keyed by ``(node_type, property)``), this
+    /// indexes EVERY node with a non-empty string value at that
+    /// property, regardless of type.
+    ///
+    /// Enables two agent-friendly patterns:
+    ///     * ``MATCH (n {label: 'Norway'})`` — untyped lookup, routes
+    ///       through the global index in O(log N).
+    ///     * ``graph.search('Norway')`` — returns the top-k nodes by
+    ///       that property across all types.
+    ///
+    /// Disk-backed graphs only. On memory/mapped graphs this is a
+    /// no-op that returns 0 — per-type ``create_index`` already covers
+    /// the use case at in-memory scale.
+    ///
+    /// Args:
+    ///     property: The property name to index (e.g. 'label', 'title', 'name').
+    ///
+    /// Returns:
+    ///     Dict with ``property``, ``unique_values`` (node count indexed),
+    ///     and ``created``.
+    fn create_global_index(&mut self, py: Python<'_>, property: &str) -> PyResult<Py<PyAny>> {
+        let graph = get_graph_mut(&mut self.inner);
+        let count = match &graph.graph {
+            crate::graph::storage::backend::GraphBackend::Disk(dg) => {
+                dg.build_global_property_index(property).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
+                        "Failed to build global property index for '{}': {}",
+                        property, e
+                    ))
+                })?
+            }
+            _ => 0,
+        };
+        let result = PyDict::new(py);
+        result.set_item("property", property)?;
+        result.set_item("unique_values", count)?;
+        result.set_item("created", true)?;
+        Ok(result.into())
+    }
+
+    /// Search for nodes matching ``text`` on a property (default ``label``).
+    ///
+    /// Uses the cross-type global index when one has been built — see
+    /// ``create_global_index(property)``. Tries exact match first; if
+    /// none, falls back to prefix match. Returns the top ``limit``
+    /// results as dicts with ``id`` (node index), ``type``, ``title``,
+    /// and the node's id property.
+    ///
+    /// Returns an empty list if no global index exists for ``property``.
+    ///
+    /// Example::
+    ///
+    ///     graph.create_global_index('label')
+    ///     hits = graph.search('Norway')
+    ///     # [{'id': 12345, 'type': 'country', 'title': 'Norway', 'nid': 'Q20'}, ...]
+    #[pyo3(signature = (text, *, property="label", limit=10))]
+    fn search(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        property: &str,
+        limit: usize,
+    ) -> PyResult<Py<PyAny>> {
+        use crate::graph::storage::GraphRead;
+        let backend = &self.inner.graph;
+        // Exact match first, then prefix fallback.
+        let mut hits: Vec<petgraph::graph::NodeIndex> =
+            match backend.lookup_by_property_eq_any_type(property, text) {
+                Some(v) if !v.is_empty() => v,
+                _ => backend
+                    .lookup_by_property_prefix_any_type(property, text, limit)
+                    .unwrap_or_default(),
+            };
+        hits.truncate(limit);
+
+        let result_list = pyo3::types::PyList::empty(py);
+        for idx in hits {
+            let Some(node) = backend.node_weight(idx) else {
+                continue;
+            };
+            let dict = PyDict::new(py);
+            dict.set_item("id", idx.index())?;
+            dict.set_item("type", node.node_type_str(&self.inner.interner))?;
+            let title = node.title();
+            match title.as_ref() {
+                crate::datatypes::values::Value::String(s) => dict.set_item("title", s.as_str())?,
+                crate::datatypes::values::Value::Null => dict.set_item("title", py.None())?,
+                other => dict.set_item("title", format!("{:?}", other))?,
+            }
+            let node_id = node.id();
+            match node_id.as_ref() {
+                crate::datatypes::values::Value::String(s) => {
+                    dict.set_item("id_value", s.as_str())?
+                }
+                crate::datatypes::values::Value::Int64(n) => dict.set_item("id_value", *n)?,
+                crate::datatypes::values::Value::Null => dict.set_item("id_value", py.None())?,
+                other => dict.set_item("id_value", format!("{:?}", other))?,
+            }
+            result_list.append(dict)?;
+        }
+        Ok(result_list.into_any().unbind())
+    }
+
     /// List all existing indexes.
     ///
     /// Returns:

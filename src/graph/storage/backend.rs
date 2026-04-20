@@ -665,6 +665,45 @@ impl GraphRead for GraphBackend {
     }
 
     #[inline]
+    fn lookup_by_property_eq_any_type(
+        &self,
+        property: &str,
+        value: &str,
+    ) -> Option<Vec<NodeIndex>> {
+        match self {
+            Self::Memory(g) => GraphRead::lookup_by_property_eq_any_type(g, property, value),
+            Self::Mapped(g) => GraphRead::lookup_by_property_eq_any_type(g, property, value),
+            Self::Disk(g) => GraphRead::lookup_by_property_eq_any_type(g.as_ref(), property, value),
+            Self::Recording(rg) => {
+                GraphRead::lookup_by_property_eq_any_type(rg.as_ref(), property, value)
+            }
+        }
+    }
+
+    #[inline]
+    fn lookup_by_property_prefix_any_type(
+        &self,
+        property: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Option<Vec<NodeIndex>> {
+        match self {
+            Self::Memory(g) => {
+                GraphRead::lookup_by_property_prefix_any_type(g, property, prefix, limit)
+            }
+            Self::Mapped(g) => {
+                GraphRead::lookup_by_property_prefix_any_type(g, property, prefix, limit)
+            }
+            Self::Disk(g) => {
+                GraphRead::lookup_by_property_prefix_any_type(g.as_ref(), property, prefix, limit)
+            }
+            Self::Recording(rg) => {
+                GraphRead::lookup_by_property_prefix_any_type(rg.as_ref(), property, prefix, limit)
+            }
+        }
+    }
+
+    #[inline]
     fn count_edges_grouped_by_peer(
         &self,
         conn_type: InternedKey,

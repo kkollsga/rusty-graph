@@ -619,7 +619,46 @@ impl<'a> PatternExecutor<'a> {
                 }
                 return Ok(vec![]);
             }
-            // No id property — scan all nodes with property filter.
+            // Cross-type fast paths: for any Equals(String) or
+            // StartsWith(String), consult the persistent global index
+            // if one exists for that property. Turns `MATCH (n {label:
+            // 'Norway'})` into O(log N) without requiring a type label.
+            for (prop, matcher) in props {
+                match matcher {
+                    PropertyMatcher::Equals(Value::String(s)) => {
+                        if let Some(candidates) =
+                            self.graph.graph.lookup_by_property_eq_any_type(prop, s)
+                        {
+                            if props.len() == 1 {
+                                return Ok(candidates);
+                            }
+                            let filtered = candidates
+                                .into_iter()
+                                .filter(|&idx| self.node_matches_properties(idx, props))
+                                .collect();
+                            return Ok(filtered);
+                        }
+                    }
+                    PropertyMatcher::StartsWith(prefix) => {
+                        if let Some(candidates) = self
+                            .graph
+                            .graph
+                            .lookup_by_property_prefix_any_type(prop, prefix, usize::MAX)
+                        {
+                            if props.len() == 1 {
+                                return Ok(candidates);
+                            }
+                            let filtered = candidates
+                                .into_iter()
+                                .filter(|&idx| self.node_matches_properties(idx, props))
+                                .collect();
+                            return Ok(filtered);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // No id property, no global index — scan all nodes with property filter.
             let g = &self.graph.graph;
             let mut out = Vec::new();
             for (i, idx) in g.node_indices().enumerate() {

@@ -132,6 +132,15 @@ pub struct DiskGraph {
     // repeat misses don't stat the filesystem. `Arc` so concurrent reads
     // of the same index don't hold the outer RwLock.
     pub(crate) property_indexes: PropertyIndexCache,
+    // ── Persistent cross-type global property indexes (lazy-loaded).
+    //
+    // Keyed by property name only. Built by `build_global_property_index(prop)`
+    // — scans every alive `DiskNodeSlot` and collects one
+    // `(string_value, NodeIndex)` entry per node where `prop` resolves
+    // (via column slot, title alias, or id alias). Powers untyped
+    // patterns like `MATCH (n {label: 'X'})` where the agent doesn't
+    // know the node type.
+    pub(crate) global_indexes: GlobalIndexCache,
     // ── Temp dir for CSR mmap files (cleaned up on Drop) ──
 }
 
@@ -139,6 +148,11 @@ pub struct DiskGraph {
 /// `(node_type, property)`. `None` records "checked and absent".
 type PropertyIndexCache =
     std::sync::RwLock<HashMap<(String, String), Option<Arc<property_index::PropertyIndex>>>>;
+
+/// Lazy-loaded cache of persistent cross-type global indexes, keyed
+/// by property name. `None` records "checked and absent".
+type GlobalIndexCache =
+    std::sync::RwLock<HashMap<String, Option<Arc<property_index::PropertyIndex>>>>;
 
 use std::sync::Arc;
 
@@ -246,6 +260,7 @@ impl DiskGraph {
             peer_count_entries: MmapOrVec::new(),
             has_tombstones: false,
             property_indexes: std::sync::RwLock::new(HashMap::new()),
+            global_indexes: std::sync::RwLock::new(HashMap::new()),
         })
     }
 
@@ -406,6 +421,7 @@ impl DiskGraph {
             peer_count_offsets: MmapOrVec::new(),
             peer_count_entries: MmapOrVec::new(),
             has_tombstones: false,
+            global_indexes: std::sync::RwLock::new(HashMap::new()),
             property_indexes: std::sync::RwLock::new(HashMap::new()),
         })
     }
@@ -1984,6 +2000,7 @@ impl Clone for DiskGraph {
             peer_count_types: MmapOrVec::new(),
             peer_count_offsets: MmapOrVec::new(),
             peer_count_entries: MmapOrVec::new(),
+            global_indexes: std::sync::RwLock::new(HashMap::new()),
             has_tombstones: self.has_tombstones,
             property_indexes: std::sync::RwLock::new(HashMap::new()),
         }
@@ -2165,6 +2182,132 @@ impl DiskGraph {
             return slot.is_some();
         }
         let (meta, _, _, _) = property_index::file_paths(&self.data_dir, node_type, property);
+        meta.exists()
+    }
+
+    /// Build a cross-type global index for `property`. Scans every
+    /// alive `DiskNodeSlot` and emits one `(string_value, NodeIndex)`
+    /// entry per node where `property` resolves to a non-empty string
+    /// (regular column, title alias, or id alias — same resolution
+    /// order as [`build_property_index`]).
+    ///
+    /// Powers untyped patterns like `MATCH (n {label: 'X'})` and the
+    /// `search(text)` helper. Re-run whenever the graph is rebuilt.
+    pub fn build_global_property_index(&self, property: &str) -> std::io::Result<usize> {
+        let prop_key = InternedKey::from_str(property);
+        let node_bound = self.node_slots.len();
+        let mut entries: Vec<(String, u32)> = Vec::with_capacity(node_bound / 2);
+
+        // Cache per-type (column_store, schema_slot) lookups so every
+        // node in the same type reuses the slot resolution.
+        type ColStore = Arc<crate::graph::storage::column_store::ColumnStore>;
+        type TypeCacheEntry = Option<(ColStore, Option<u16>)>;
+        let mut type_cache: HashMap<u64, TypeCacheEntry> = HashMap::new();
+
+        for i in 0..node_bound {
+            let nslot = self.node_slots.get(i);
+            if !nslot.is_alive() {
+                continue;
+            }
+            let cached = type_cache.entry(nslot.node_type).or_insert_with(|| {
+                let tk = InternedKey::from_u64(nslot.node_type);
+                self.column_stores.get(&tk).cloned().map(|cs| {
+                    let slot = cs.schema().slot(prop_key);
+                    (cs, slot)
+                })
+            });
+            let Some((col_store, schema_slot)) = cached else {
+                continue;
+            };
+            let maybe_str: Option<String> = if let Some(slot) = schema_slot {
+                col_store
+                    .get_str_by_slot(nslot.row_id, *slot)
+                    .map(str::to_string)
+            } else {
+                let from_title = col_store.get_title(nslot.row_id).and_then(|v| match v {
+                    Value::String(s) if !s.is_empty() => Some(s),
+                    _ => None,
+                });
+                from_title.or_else(|| {
+                    col_store.get_id(nslot.row_id).and_then(|v| match v {
+                        Value::String(s) if !s.is_empty() => Some(s),
+                        _ => None,
+                    })
+                })
+            };
+            if let Some(s) = maybe_str {
+                if !s.is_empty() {
+                    entries.push((s, i as u32));
+                }
+            }
+        }
+
+        let count = entries.len();
+        let idx = property_index::PropertyIndex::build_global(&self.data_dir, property, entries)?;
+        self.global_indexes
+            .write()
+            .unwrap()
+            .insert(property.to_string(), Some(Arc::new(idx)));
+        Ok(count)
+    }
+
+    /// Exact-match lookup across every node type for a cross-type
+    /// global index. Returns `None` when no index has been built for
+    /// `property`; returns `Some(Vec)` (possibly empty) otherwise.
+    pub fn lookup_global_eq(&self, property: &str, value: &str) -> Option<Vec<NodeIndex>> {
+        {
+            let read = self.global_indexes.read().unwrap();
+            if let Some(slot) = read.get(property) {
+                return slot.as_ref().map(|idx| idx.lookup_eq_str(value));
+            }
+        }
+        let idx_opt = property_index::PropertyIndex::open_global(&self.data_dir, property)
+            .ok()
+            .flatten();
+        let result = idx_opt.as_ref().map(|idx| idx.lookup_eq_str(value));
+        self.global_indexes
+            .write()
+            .unwrap()
+            .insert(property.to_string(), idx_opt.map(Arc::new));
+        result
+    }
+
+    /// Prefix lookup (STARTS WITH) against the cross-type global
+    /// index. Same `None`/`Some` semantics as [`lookup_global_eq`].
+    pub fn lookup_global_prefix(
+        &self,
+        property: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Option<Vec<NodeIndex>> {
+        {
+            let read = self.global_indexes.read().unwrap();
+            if let Some(slot) = read.get(property) {
+                return slot
+                    .as_ref()
+                    .map(|idx| idx.lookup_prefix_str(prefix, limit));
+            }
+        }
+        let idx_opt = property_index::PropertyIndex::open_global(&self.data_dir, property)
+            .ok()
+            .flatten();
+        let result = idx_opt
+            .as_ref()
+            .map(|idx| idx.lookup_prefix_str(prefix, limit));
+        self.global_indexes
+            .write()
+            .unwrap()
+            .insert(property.to_string(), idx_opt.map(Arc::new));
+        result
+    }
+
+    /// Whether a cross-type global index exists for `property`.
+    #[allow(dead_code)]
+    pub fn has_global_index(&self, property: &str) -> bool {
+        if let Some(slot) = self.global_indexes.read().unwrap().get(property) {
+            return slot.is_some();
+        }
+        let (meta, _, _, _) = property_index::global_file_paths(&self.data_dir, property);
         meta.exists()
     }
 }
@@ -2401,6 +2544,7 @@ impl DiskGraph {
                 peer_count_entries: load_raw_or_zst_optional(&dir.join("peer_count_entries")),
                 has_tombstones: meta.has_tombstones,
                 property_indexes: std::sync::RwLock::new(HashMap::new()),
+                global_indexes: std::sync::RwLock::new(HashMap::new()),
             },
             temp_dir,
         ))

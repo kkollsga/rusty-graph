@@ -183,6 +183,33 @@ def cypher_query(query: str, timeout_ms: int | None = None) -> str:
 
 
 @mcp.tool()
+def search(text: str, property: str = "label", limit: int = 10) -> str:
+    """Find nodes whose `property` (default 'label') matches `text`.
+
+    Tries exact match first, then prefix match. Returns up to `limit`
+    hits with type, title, and id. Requires a global index — the graph
+    author runs `graph.create_global_index('label')` once to build it.
+
+    Use this when you have a human-readable name (e.g. 'Equinor',
+    'Viking Age') but don't know which node type it belongs to. Skips
+    the "guess the type" ceremony that MATCH (n:Type {...}) requires."""
+    try:
+        hits = graph.search(text, property=property, limit=limit)
+        if not hits:
+            return (
+                f"No nodes matching '{text}' on property '{property}'. "
+                "If this is unexpected, confirm a global index exists: "
+                "graph.create_global_index('{property}')."
+            )
+        lines = [f"{len(hits)} hit(s):"]
+        for h in hits:
+            lines.append(f"  [{h['type']}] {h['title']}  id={h['id_value']}  (node={h['id']})")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Search error: {e}"
+
+
+@mcp.tool()
 def bug_report(query: str, result: str, expected: str, description: str) -> str:
     """File a Cypher bug report to reported_bugs.md."""
     try:

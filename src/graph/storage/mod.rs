@@ -286,6 +286,29 @@ pub trait GraphRead {
         None
     }
 
+    /// Exact-match lookup across every node type using a cross-type
+    /// global index. Returns `Some(Vec)` (possibly empty) when a
+    /// global index for `property` exists; `None` otherwise (caller
+    /// falls back to scan or per-type iteration).
+    fn lookup_by_property_eq_any_type(
+        &self,
+        _property: &str,
+        _value: &str,
+    ) -> Option<Vec<NodeIndex>> {
+        None
+    }
+
+    /// Prefix lookup (STARTS WITH) across every node type. Same
+    /// `None`/`Some` semantics as [`GraphRead::lookup_by_property_eq_any_type`].
+    fn lookup_by_property_prefix_any_type(
+        &self,
+        _property: &str,
+        _prefix: &str,
+        _limit: usize,
+    ) -> Option<Vec<NodeIndex>> {
+        None
+    }
+
     /// Count edges of a connection type grouped by peer node, via a full
     /// scan. Every backend implements this — disk uses sequential CSR
     /// I/O; memory/mapped iterate petgraph edges.

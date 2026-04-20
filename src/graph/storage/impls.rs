@@ -522,6 +522,25 @@ impl GraphRead for DiskGraph {
     }
 
     #[inline]
+    fn lookup_by_property_eq_any_type(
+        &self,
+        property: &str,
+        value: &str,
+    ) -> Option<Vec<NodeIndex>> {
+        DiskGraph::lookup_global_eq(self, property, value)
+    }
+
+    #[inline]
+    fn lookup_by_property_prefix_any_type(
+        &self,
+        property: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Option<Vec<NodeIndex>> {
+        DiskGraph::lookup_global_prefix(self, property, prefix, limit)
+    }
+
+    #[inline]
     fn count_edges_grouped_by_peer(
         &self,
         conn_type: InternedKey,

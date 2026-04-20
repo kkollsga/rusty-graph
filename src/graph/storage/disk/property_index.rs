@@ -28,8 +28,15 @@ use petgraph::graph::NodeIndex;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Filename prefix for all on-disk property index files.
+/// Filename prefix for per-type on-disk property index files.
 const FILE_PREFIX: &str = "property_index_";
+
+/// Filename prefix for cross-type "global" property index files.
+/// A global index stores `(value, NodeIndex)` pairs for every live
+/// node in the graph whose property resolves to a non-empty string,
+/// regardless of node type. Used by untyped patterns like
+/// `MATCH (n {label: 'X'})` and by the `search(text)` helper.
+const GLOBAL_PREFIX: &str = "global_index_";
 
 /// A single `(node_type, property)` string index, backed by three
 /// mmap'd files.
@@ -68,6 +75,18 @@ pub fn file_paths(
         sanitise(node_type),
         sanitise(property)
     );
+    (
+        data_dir.join(format!("{}_meta.bin", stem)),
+        data_dir.join(format!("{}_keys.bin", stem)),
+        data_dir.join(format!("{}_offsets.bin", stem)),
+        data_dir.join(format!("{}_ids.bin", stem)),
+    )
+}
+
+/// Four file paths for a cross-type global index keyed by `property`.
+/// Returns `(meta, keys, offsets, ids)`.
+pub fn global_file_paths(data_dir: &Path, property: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    let stem = format!("{}{}", GLOBAL_PREFIX, sanitise(property));
     (
         data_dir.join(format!("{}_meta.bin", stem)),
         data_dir.join(format!("{}_keys.bin", stem)),
@@ -204,6 +223,33 @@ impl PropertyIndex {
         data_dir: &Path,
         node_type: &str,
         property: &str,
+        entries: Vec<(String, u32)>,
+    ) -> std::io::Result<Self> {
+        let paths = file_paths(data_dir, node_type, property);
+        Self::build_at(&paths.0, &paths.1, &paths.2, &paths.3, entries)
+    }
+
+    /// Build a cross-type global index keyed by `property`. Files are
+    /// written with the `global_index_` prefix. Lookup semantics mirror
+    /// the per-type variant; the caller decides whether to pair the
+    /// resulting `NodeIndex` with its type by reading
+    /// `node_type_of(idx)` afterward.
+    pub fn build_global(
+        data_dir: &Path,
+        property: &str,
+        entries: Vec<(String, u32)>,
+    ) -> std::io::Result<Self> {
+        let paths = global_file_paths(data_dir, property);
+        Self::build_at(&paths.0, &paths.1, &paths.2, &paths.3, entries)
+    }
+
+    /// Low-level build: write the four files at the supplied paths.
+    /// Shared by [`build`] and [`build_global`].
+    fn build_at(
+        meta_path: &Path,
+        keys_path: &Path,
+        offsets_path: &Path,
+        ids_path: &Path,
         mut entries: Vec<(String, u32)>,
     ) -> std::io::Result<Self> {
         entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
@@ -211,14 +257,11 @@ impl PropertyIndex {
         let total_bytes: usize = entries.iter().map(|(k, _)| k.len()).sum();
         let count = entries.len();
 
-        let (meta_path, keys_path, offsets_path, ids_path) =
-            file_paths(data_dir, node_type, property);
-
-        let mut keys_buf = MmapBytes::mapped(&keys_path, total_bytes.max(4096))
+        let mut keys_buf = MmapBytes::mapped(keys_path, total_bytes.max(4096))
             .unwrap_or_else(|_| MmapBytes::new());
-        let mut offsets_buf = MmapOrVec::<u64>::mapped(&offsets_path, count + 1)
+        let mut offsets_buf = MmapOrVec::<u64>::mapped(offsets_path, count + 1)
             .unwrap_or_else(|_| MmapOrVec::with_capacity(count + 1));
-        let mut ids_buf = MmapOrVec::<u32>::mapped(&ids_path, count.max(1))
+        let mut ids_buf = MmapOrVec::<u32>::mapped(ids_path, count.max(1))
             .unwrap_or_else(|_| MmapOrVec::with_capacity(count));
 
         let mut offset: u64 = 0;
@@ -230,7 +273,7 @@ impl PropertyIndex {
         }
         offsets_buf.push(offset);
 
-        write_meta(&meta_path, count, total_bytes)?;
+        write_meta(meta_path, count, total_bytes)?;
 
         Ok(PropertyIndex {
             keys: keys_buf,
@@ -240,12 +283,26 @@ impl PropertyIndex {
         })
     }
 
-    /// Re-open a previously built index. Returns `Ok(None)` if any
-    /// file is missing (the index was never built or was partially
-    /// cleaned up).
+    /// Re-open a previously built per-type index. Returns `Ok(None)`
+    /// if any file is missing.
     pub fn open(data_dir: &Path, node_type: &str, property: &str) -> std::io::Result<Option<Self>> {
-        let (meta_path, keys_path, offsets_path, ids_path) =
-            file_paths(data_dir, node_type, property);
+        let paths = file_paths(data_dir, node_type, property);
+        Self::open_at(&paths.0, &paths.1, &paths.2, &paths.3)
+    }
+
+    /// Re-open a cross-type global index. Returns `Ok(None)` if any
+    /// file is missing.
+    pub fn open_global(data_dir: &Path, property: &str) -> std::io::Result<Option<Self>> {
+        let paths = global_file_paths(data_dir, property);
+        Self::open_at(&paths.0, &paths.1, &paths.2, &paths.3)
+    }
+
+    fn open_at(
+        meta_path: &Path,
+        keys_path: &Path,
+        offsets_path: &Path,
+        ids_path: &Path,
+    ) -> std::io::Result<Option<Self>> {
         if !meta_path.exists()
             || !keys_path.exists()
             || !offsets_path.exists()
@@ -253,10 +310,10 @@ impl PropertyIndex {
         {
             return Ok(None);
         }
-        let (count, keys_len) = read_meta(&meta_path)?;
-        let keys = MmapBytes::load_mapped(&keys_path, keys_len)?;
-        let offsets = MmapOrVec::<u64>::load_mapped(&offsets_path, count + 1)?;
-        let ids = MmapOrVec::<u32>::load_mapped(&ids_path, count)?;
+        let (count, keys_len) = read_meta(meta_path)?;
+        let keys = MmapBytes::load_mapped(keys_path, keys_len)?;
+        let offsets = MmapOrVec::<u64>::load_mapped(offsets_path, count + 1)?;
+        let ids = MmapOrVec::<u32>::load_mapped(ids_path, count)?;
         Ok(Some(PropertyIndex {
             keys,
             offsets,
@@ -268,9 +325,24 @@ impl PropertyIndex {
     /// Delete the on-disk files for this index. Used when a
     /// `drop_index` is routed to disk.
     pub fn remove_files(data_dir: &Path, node_type: &str, property: &str) -> std::io::Result<()> {
-        let (meta_path, keys_path, offsets_path, ids_path) =
-            file_paths(data_dir, node_type, property);
-        for p in [&meta_path, &keys_path, &offsets_path, &ids_path] {
+        let paths = file_paths(data_dir, node_type, property);
+        Self::remove_files_at(&paths.0, &paths.1, &paths.2, &paths.3)
+    }
+
+    /// Delete the on-disk files for a cross-type global index.
+    #[allow(dead_code)]
+    pub fn remove_global_files(data_dir: &Path, property: &str) -> std::io::Result<()> {
+        let paths = global_file_paths(data_dir, property);
+        Self::remove_files_at(&paths.0, &paths.1, &paths.2, &paths.3)
+    }
+
+    fn remove_files_at(
+        meta_path: &Path,
+        keys_path: &Path,
+        offsets_path: &Path,
+        ids_path: &Path,
+    ) -> std::io::Result<()> {
+        for p in [meta_path, keys_path, offsets_path, ids_path] {
             if p.exists() {
                 fs::remove_file(p)?;
             }

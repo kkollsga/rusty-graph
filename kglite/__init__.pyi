@@ -2783,6 +2783,53 @@ class KnowledgeGraph:
         """Remove an index. Returns ``True`` if it existed."""
         ...
 
+    def create_global_index(self, property: str) -> dict[str, Any]:
+        """Build a cross-type global index on `property`.
+
+        Unlike ``create_index``, which is keyed by ``(node_type, property)``,
+        this indexes EVERY node whose value at `property` is a non-empty
+        string — regardless of node type. Enables:
+
+        - ``MATCH (n {label: 'Norway'})`` — untyped Cypher lookups, routed
+          through the global index in O(log N).
+        - ``graph.search(text)`` — top-k helper that returns the nodes
+          whose label (or any indexed property) matches.
+
+        Disk-backed graphs only. On memory/mapped graphs this is a no-op
+        that returns ``unique_values=0`` — per-type ``create_index`` already
+        covers the use case at in-memory scale.
+
+        Returns:
+            Dict with ``property``, ``unique_values`` (count of nodes
+            indexed), and ``created``.
+        """
+        ...
+
+    def search(
+        self,
+        text: str,
+        *,
+        property: str = "label",
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Find nodes matching ``text`` on ``property`` (default 'label').
+
+        Tries exact match first, then prefix match. Returns up to ``limit``
+        results as dicts with ``id`` (node index), ``type``, ``title``, and
+        ``id_value`` (the node's id-field value, e.g. a Wikidata Q-number).
+
+        Requires ``create_global_index(property)`` to have been run on a
+        disk-backed graph. Returns an empty list otherwise.
+
+        Example::
+
+            graph.create_global_index('label')
+            hits = graph.search('Norway')
+            # [{'id': 12345, 'type': 'country', 'title': 'Norway',
+            #   'id_value': 'Q20'}]
+        """
+        ...
+
     def list_indexes(self) -> list[dict[str, str]]:
         """List all indexes. Each dict has ``type`` and ``property``."""
         ...
