@@ -628,7 +628,7 @@ dependencies = [
 
 [[package]]
 name = "kglite"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "aho-corasick",
  "bincode",
