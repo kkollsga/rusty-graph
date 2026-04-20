@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **String-form id anchors (`{nid: 'Q76'}`) hit the id index.**
+  `TypeIdIndex::get` now coerces `"Q76"` → `UniqueId(76)` by stripping
+  the leading alpha prefix. Works for any `[A-Za-z]+[0-9]+` id
+  scheme (Wikidata Q-codes, P-codes, E-codes, ...). Previously the
+  lookup fell through to a full-type scan, so
+  `MATCH (a:human {nid: 'Q76'})-[r]-(b:human {nid: 'Q13133'})`
+  dropped from ~14s to ~300ms on Wikidata. Also fixes the
+  correctness bug where `MATCH (a {id: 'Q76'})` silently returned
+  `0` rows instead of the matching node.
+
+## [0.8.9] — 2026-04-20
+
 ### Changed
 
 - **Streaming label journal replaces in-memory `label_cache` during
