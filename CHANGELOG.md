@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.10] — 2026-04-20
+
+### Performance
+
+- **GROUP BY aggregation defers property materialization.** Queries of the
+  shape `RETURN x.prop, count(*)` now hash by NodeIndex during the per-row
+  pass and resolve the property once per resulting group, rather than once
+  per input row. For high-fanout aggregations on disk graphs (e.g., walking
+  Wikidata's 439K country=Norway entities and grouping by their `instance_of`
+  type) this drops O(rows) random-I/O column reads to O(distinct groups).
+  Cypher semantics are preserved by re-bucketing on resolved values after —
+  two distinct nodes that share a property value still collapse into one
+  group. Implementation in `src/graph/languages/cypher/executor/return_clause.rs`.
+
+### Fixed
+
+- **OPTIONAL MATCH + RETURN with PropertyAccess group keys no longer silently
+  returns NULL groups.** The fused OPTIONAL MATCH + aggregation path
+  evaluated group-key expressions against the source row (pre-OPTIONAL),
+  so a query like `OPTIONAL MATCH (p)-[:OWNS]->(pet) RETURN pet.name,
+  count(*)` would resolve `pet.name` to NULL for all rows, collapsing every
+  result into one wrong group. The fusion check now rejects PropertyAccess
+  on variables only bound by the OPTIONAL MATCH itself, falling through to
+  the correct (non-fused) aggregation path. `is_fusable_return_clause` in
+  `src/graph/languages/cypher/planner/fusion.rs` now takes the OPTIONAL
+  MATCH variable set and rejects matching property accesses.
+
+- **Multi-MATCH re-bind no longer full-scans the graph.** When a second
+  MATCH clause re-bound a variable from a prior clause
+  (`MATCH (f {id: X}) MATCH (f)-[:R]->(c)`), the pattern matcher's
+  inverted-index fast path ignored the existing binding and returned
+  every source node for the edge type — 20s+ timeouts on Wikidata-scale
+  graphs. The fast path now skips when the first node is already bound,
+  falling through to `find_matching_nodes` which resolves the variable
+  to a single node. `{Gjøa, Norway}` goes from >20s timeout to ~36ms
+  on the 124M-node Wikidata graph.
+
+### Changed
+
+- **Graph algorithm procedures (`CALL pagerank/degree/betweenness/
+  closeness/louvain/label_propagation/connected_components`) now error
+  on timeout instead of silently returning partial results.** Algorithm
+  signatures changed to `Result<_, String>`; the `break`-on-deadline
+  branches now return `Err`, and the new `algorithm_timeout_err()`
+  message points users at `timeout_ms=N` / `timeout_ms=0`. Fixes silent
+  half-converged results that looked successful.
+- **`CALL` on graphs over 2M nodes now refuses unscoped procedure
+  runs up front.** Prior to this, `CALL degree()` on Wikidata (124M
+  nodes) ignored its `_deadline` parameter entirely and ran for
+  minutes — long enough to exhaust MCP transport timeouts and appear
+  to wedge the server. The new guard errors in <1ms with "would scan
+  the whole graph. Subgraph scoping is not yet supported — try a
+  smaller graph, or pass timeout_ms=0 to override this guard."
+- **`degree_centrality` and `weakly_connected_components` now honor
+  the 20s Cypher deadline.** Both previously ignored deadlines (the
+  former via an unused `_deadline` parameter, the latter by not
+  accepting one). Periodic checks every ~1M edges.
+
 ## [0.8.9] — 2026-04-20
 
 ### Changed

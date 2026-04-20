@@ -9,6 +9,17 @@ use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+/// Standard timeout error message for graph algorithms.
+/// Mirrors the MATCH timeout text in `cypher::executor::mod::check_deadline`,
+/// adapted for procedure context (no anchor hint — large graphs may simply
+/// not converge within the default 20s).
+pub fn algorithm_timeout_err() -> String {
+    "CALL procedure timed out. Pass timeout_ms=N to cypher() to extend, \
+     or timeout_ms=0 to disable the deadline. Subgraph scoping is not \
+     yet supported — large graphs may not converge within the default 20s."
+        .to_string()
+}
+
 // ============================================================================
 // Path Filtering Helpers
 // ============================================================================
@@ -573,7 +584,8 @@ pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
     // For disk mode, fall back to weakly_connected_components since
     // kosaraju_scc requires petgraph trait bounds.
     if GraphRead::is_disk(&graph.graph) {
-        return weakly_connected_components(graph);
+        return weakly_connected_components(graph, None)
+            .expect("weakly_connected_components with deadline=None cannot time out");
     }
     kosaraju_scc(graph.graph.as_stable_digraph())
 }
@@ -581,7 +593,10 @@ pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
 /// Find weakly connected components (treating graph as undirected).
 /// This is often more useful for knowledge graphs.
 /// Uses Union-Find (disjoint set) for optimal performance — O(E * α(V)) ≈ O(E).
-pub fn weakly_connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
+pub fn weakly_connected_components(
+    graph: &DirGraph,
+    deadline: Option<Instant>,
+) -> Result<Vec<Vec<NodeIndex>>, String> {
     let nodes: Vec<NodeIndex> = {
         let g = &graph.graph;
         g.node_indices().collect()
@@ -589,7 +604,7 @@ pub fn weakly_connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
     let n = nodes.len();
 
     if n == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // Use node_bound() not node_count() — StableDiGraph indices can have gaps
@@ -633,11 +648,21 @@ pub fn weakly_connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
         }
     }
 
-    // Process all edges — single pass, no adjacency list needed
+    // Process all edges — single pass, no adjacency list needed.
+    // Periodic deadline check (every ~1M edges, negligible overhead via bitmask).
+    let mut edge_counter: usize = 0;
     for edge in {
         let g = &graph.graph;
         g.edge_references()
     } {
+        edge_counter += 1;
+        if edge_counter & 0xFFFFF == 0 {
+            if let Some(dl) = deadline {
+                if Instant::now() > dl {
+                    return Err(algorithm_timeout_err());
+                }
+            }
+        }
         let src_i = node_to_idx[edge.source().index()];
         let tgt_i = node_to_idx[edge.target().index()];
         union(&mut parent, &mut rank, src_i, tgt_i);
@@ -655,7 +680,7 @@ pub fn weakly_connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
     // Sort components by size (largest first)
     components.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
-    components
+    Ok(components)
 }
 
 /// Get node info for building Python-friendly path output
@@ -745,8 +770,9 @@ pub fn betweenness_centrality(
     sample_size: Option<usize>,
     connection_types: Option<&[String]>,
     deadline: Option<Instant>,
-) -> Vec<CentralityResult> {
+) -> Result<Vec<CentralityResult>, String> {
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let nodes: Vec<NodeIndex> = {
         let g = &graph.graph;
@@ -755,13 +781,13 @@ pub fn betweenness_centrality(
     let n = nodes.len();
 
     if n <= 2 {
-        return nodes
+        return Ok(nodes
             .iter()
             .map(|&idx| CentralityResult {
                 node_idx: idx,
                 score: 0.0,
             })
-            .collect();
+            .collect());
     }
 
     // Use Vec-based index mapping for O(1) lookup (vs HashMap)
@@ -815,11 +841,16 @@ pub fn betweenness_centrality(
     // Parallel vs sequential Brandes' algorithm
     let use_parallel = n >= 4096;
 
+    // Shared timeout flag for the parallel path: rayon closures can't bubble
+    // up Result, so we set this on deadline expiry and check after the join.
+    let timed_out = AtomicBool::new(false);
+
     let mut betweenness: Vec<f64> = if use_parallel {
         use rayon::prelude::*;
 
         let adj_ref = &adj;
         let deadline_ref = &deadline;
+        let timed_out_ref = &timed_out;
         let num_threads = rayon::current_num_threads();
         let chunk_size = (source_indices.len() / num_threads).max(1);
 
@@ -839,8 +870,12 @@ pub fn betweenness_centrality(
                 for (local_counter, &s_idx) in chunk.iter().enumerate() {
                     // Periodic timeout check (every 10 sources within this chunk)
                     if local_counter % 10 == 0 {
+                        if timed_out_ref.load(Ordering::Relaxed) {
+                            break;
+                        }
                         if let Some(dl) = deadline_ref {
                             if Instant::now() > *dl {
+                                timed_out_ref.store(true, Ordering::Relaxed);
                                 break;
                             }
                         }
@@ -916,7 +951,7 @@ pub fn betweenness_centrality(
             if source_counter.is_multiple_of(10) {
                 if let Some(dl) = deadline {
                     if Instant::now() > dl {
-                        break;
+                        return Err(algorithm_timeout_err());
                     }
                 }
             }
@@ -964,6 +999,11 @@ pub fn betweenness_centrality(
         betweenness
     };
 
+    // Surface deadline expiry from the parallel rayon path (set via timed_out flag).
+    if timed_out.load(Ordering::Relaxed) {
+        return Err(algorithm_timeout_err());
+    }
+
     // Undirected BFS counts each (s,t) pair twice, so halve raw scores.
     for score in betweenness.iter_mut() {
         *score /= 2.0;
@@ -1005,7 +1045,7 @@ pub fn betweenness_centrality(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    results
+    Ok(results)
 }
 
 /// Calculate PageRank centrality for all nodes in the graph.
@@ -1025,7 +1065,7 @@ pub fn pagerank(
     tolerance: f64,
     connection_types: Option<&[String]>,
     deadline: Option<Instant>,
-) -> Vec<CentralityResult> {
+) -> Result<Vec<CentralityResult>, String> {
     let nodes: Vec<NodeIndex> = {
         let g = &graph.graph;
         g.node_indices().collect()
@@ -1033,7 +1073,7 @@ pub fn pagerank(
     let n = nodes.len();
 
     if n == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // Use Vec-based index mapping for O(1) lookup (vs HashMap)
@@ -1089,10 +1129,12 @@ pub fn pagerank(
 
     // Iterative computation
     for _iteration in 0..max_iterations {
-        // Timeout check each iteration
+        // Timeout check each iteration — error rather than return partial.
+        // Half-converged PageRank scores are misleading; an explicit error
+        // tells the caller to extend timeout_ms or scope the graph.
         if let Some(dl) = deadline {
             if Instant::now() > dl {
-                break;
+                return Err(algorithm_timeout_err());
             }
         }
 
@@ -1167,7 +1209,7 @@ pub fn pagerank(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    results
+    Ok(results)
 }
 
 /// Calculate degree centrality for all nodes.
@@ -1178,8 +1220,8 @@ pub fn degree_centrality(
     graph: &DirGraph,
     normalized: bool,
     connection_types: Option<&[String]>,
-    _deadline: Option<Instant>,
-) -> Vec<CentralityResult> {
+    deadline: Option<Instant>,
+) -> Result<Vec<CentralityResult>, String> {
     let nodes: Vec<NodeIndex> = {
         let g = &graph.graph;
         g.node_indices().collect()
@@ -1187,7 +1229,7 @@ pub fn degree_centrality(
     let n = nodes.len();
 
     if n == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let scale = if normalized && n > 1 {
@@ -1196,14 +1238,25 @@ pub fn degree_centrality(
         1.0
     };
 
-    // Compute all degrees in a single pass over edges instead of per-node traversal
+    // Compute all degrees in a single pass over edges instead of per-node traversal.
+    // Periodic deadline check (every ~1M edges) keeps overhead negligible while
+    // ensuring 863M-edge scans on Wikidata-scale graphs honor the 20s timeout.
     let interned_ct = intern_connection_types(connection_types);
     let bound = graph.graph.node_bound();
     let mut degrees = vec![0usize; bound];
+    let mut edge_counter: usize = 0;
     for edge in {
         let g = &graph.graph;
         g.edge_references()
     } {
+        edge_counter += 1;
+        if edge_counter & 0xFFFFF == 0 {
+            if let Some(dl) = deadline {
+                if Instant::now() > dl {
+                    return Err(algorithm_timeout_err());
+                }
+            }
+        }
         if let Some(ref types) = interned_ct {
             if !types.iter().any(|t| *t == edge.weight().connection_type) {
                 continue;
@@ -1227,7 +1280,7 @@ pub fn degree_centrality(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    results
+    Ok(results)
 }
 
 /// Calculate closeness centrality for all nodes.
@@ -1246,7 +1299,9 @@ pub fn closeness_centrality(
     sample_size: Option<usize>,
     connection_types: Option<&[String]>,
     deadline: Option<Instant>,
-) -> Vec<CentralityResult> {
+) -> Result<Vec<CentralityResult>, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     let nodes: Vec<NodeIndex> = {
         let g = &graph.graph;
         g.node_indices().collect()
@@ -1254,7 +1309,7 @@ pub fn closeness_centrality(
     let n = nodes.len();
 
     if n == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // Use Vec-based index mapping for O(1) lookup (vs HashMap)
@@ -1306,12 +1361,16 @@ pub fn closeness_centrality(
     // Parallel path: each source BFS is independent, no shared accumulator
     let use_parallel = source_indices.len() >= 4096;
 
+    // Shared timeout flag for the parallel rayon path; checked after the join.
+    let timed_out = AtomicBool::new(false);
+
     if use_parallel {
         use rayon::prelude::*;
 
         let adj_ref = &adj_incoming;
         let deadline_ref = &deadline;
         let nodes_ref = &nodes;
+        let timed_out_ref = &timed_out;
 
         let mut results: Vec<CentralityResult> = source_indices
             .par_iter()
@@ -1321,8 +1380,15 @@ pub fn closeness_centrality(
 
                 // Periodic timeout check (every 100 sources)
                 if i % 100 == 0 {
+                    if timed_out_ref.load(Ordering::Relaxed) {
+                        return CentralityResult {
+                            node_idx: source,
+                            score: 0.0,
+                        };
+                    }
                     if let Some(dl) = deadline_ref {
                         if Instant::now() > *dl {
+                            timed_out_ref.store(true, Ordering::Relaxed);
                             return CentralityResult {
                                 node_idx: source,
                                 score: 0.0,
@@ -1385,13 +1451,17 @@ pub fn closeness_centrality(
             })
             .collect();
 
+        if timed_out.load(Ordering::Relaxed) {
+            return Err(algorithm_timeout_err());
+        }
+
         results.sort_unstable_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        return results;
+        return Ok(results);
     }
 
     // Sequential path: reuses pre-allocated buffers across iterations
@@ -1408,7 +1478,7 @@ pub fn closeness_centrality(
         if i.is_multiple_of(10) {
             if let Some(dl) = deadline {
                 if Instant::now() > dl {
-                    break;
+                    return Err(algorithm_timeout_err());
                 }
             }
         }
@@ -1475,7 +1545,7 @@ pub fn closeness_centrality(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    results
+    Ok(results)
 }
 
 // ============================================================================
@@ -1507,7 +1577,7 @@ pub fn louvain_communities(
     resolution: f64,
     connection_types: Option<&[String]>,
     deadline: Option<Instant>,
-) -> CommunityResult {
+) -> Result<CommunityResult, String> {
     let nodes: Vec<NodeIndex> = {
         let g = &graph.graph;
         g.node_indices().collect()
@@ -1515,11 +1585,11 @@ pub fn louvain_communities(
     let n = nodes.len();
 
     if n == 0 {
-        return CommunityResult {
+        return Ok(CommunityResult {
             assignments: Vec::new(),
             num_communities: 0,
             modularity: 0.0,
-        };
+        });
     }
 
     // Build compact index mapping
@@ -1573,11 +1643,11 @@ pub fn louvain_communities(
                 community_id: i,
             })
             .collect();
-        return CommunityResult {
+        return Ok(CommunityResult {
             assignments,
             num_communities: n,
             modularity: 0.0,
-        };
+        });
     }
 
     // community[i] = community id for compact node i
@@ -1608,10 +1678,12 @@ pub fn louvain_communities(
     // Iterative optimization
     let max_iterations = 100;
     for _ in 0..max_iterations {
-        // Timeout check each iteration
+        // Timeout check each iteration — error rather than return partial.
+        // Half-converged communities are misleading; an explicit error tells
+        // the caller to extend timeout_ms or scope the graph.
         if let Some(dl) = deadline {
             if Instant::now() > dl {
-                break;
+                return Err(algorithm_timeout_err());
             }
         }
 
@@ -1709,11 +1781,11 @@ pub fn louvain_communities(
         weight_property,
     );
 
-    CommunityResult {
+    Ok(CommunityResult {
         assignments,
         num_communities,
         modularity,
-    }
+    })
 }
 
 /// Label propagation for community detection.
@@ -1726,7 +1798,7 @@ pub fn label_propagation(
     max_iterations: usize,
     connection_types: Option<&[String]>,
     deadline: Option<Instant>,
-) -> CommunityResult {
+) -> Result<CommunityResult, String> {
     let nodes: Vec<NodeIndex> = {
         let g = &graph.graph;
         g.node_indices().collect()
@@ -1734,11 +1806,11 @@ pub fn label_propagation(
     let n = nodes.len();
 
     if n == 0 {
-        return CommunityResult {
+        return Ok(CommunityResult {
             assignments: Vec::new(),
             num_communities: 0,
             modularity: 0.0,
-        };
+        });
     }
 
     // Build compact index mapping
@@ -1781,10 +1853,10 @@ pub fn label_propagation(
     let mut touched_labels: Vec<usize> = Vec::with_capacity(64);
 
     for _ in 0..max_iterations {
-        // Timeout check each iteration
+        // Timeout check each iteration — error rather than return partial.
         if let Some(dl) = deadline {
             if Instant::now() > dl {
-                break;
+                return Err(algorithm_timeout_err());
             }
         }
 
@@ -1860,11 +1932,11 @@ pub fn label_propagation(
     let num_communities = id_map.len();
     let modularity = compute_modularity(graph, &labels_bound, &node_exists, total_weight, None);
 
-    CommunityResult {
+    Ok(CommunityResult {
         assignments,
         num_communities,
         modularity,
-    }
+    })
 }
 
 /// Get edge weight from a property, or 1.0 if not specified.
@@ -2172,7 +2244,7 @@ mod tests {
     #[test]
     fn test_weakly_connected_components_connected() {
         let (graph, _) = build_chain_graph();
-        let components = weakly_connected_components(&graph);
+        let components = weakly_connected_components(&graph, None).unwrap();
         assert_eq!(components.len(), 1);
         assert_eq!(components[0].len(), 5);
     }
@@ -2180,7 +2252,7 @@ mod tests {
     #[test]
     fn test_weakly_connected_components_disconnected() {
         let (graph, _) = build_disconnected_graph();
-        let components = weakly_connected_components(&graph);
+        let components = weakly_connected_components(&graph, None).unwrap();
         assert_eq!(components.len(), 2);
         // Sorted by size descending, both have 2 nodes
         assert_eq!(components[0].len(), 2);
@@ -2190,7 +2262,7 @@ mod tests {
     #[test]
     fn test_weakly_connected_components_empty() {
         let graph = DirGraph::new();
-        let components = weakly_connected_components(&graph);
+        let components = weakly_connected_components(&graph, None).unwrap();
         assert!(components.is_empty());
     }
 
@@ -2232,7 +2304,7 @@ mod tests {
     #[test]
     fn test_betweenness_centrality_chain() {
         let (graph, indices) = build_chain_graph();
-        let results = betweenness_centrality(&graph, false, None, None, None);
+        let results = betweenness_centrality(&graph, false, None, None, None).unwrap();
         assert_eq!(results.len(), 5);
         // Middle node (index 2) should have highest betweenness in a chain
         let middle_score = results
@@ -2252,7 +2324,7 @@ mod tests {
     fn test_betweenness_centrality_with_sampling() {
         let (graph, indices) = build_chain_graph();
         // With sample_size, stride-based sampling should still find the middle node
-        let results = betweenness_centrality(&graph, false, Some(3), None, None);
+        let results = betweenness_centrality(&graph, false, Some(3), None, None).unwrap();
         assert_eq!(results.len(), 5);
         // Middle node should still have a non-zero betweenness score
         let middle_score = results
@@ -2269,7 +2341,7 @@ mod tests {
     #[test]
     fn test_degree_centrality() {
         let (graph, indices) = build_chain_graph();
-        let results = degree_centrality(&graph, false, None, None);
+        let results = degree_centrality(&graph, false, None, None).unwrap();
         assert_eq!(results.len(), 5);
         // Middle nodes should have degree 2, end nodes degree 1
         let middle = results.iter().find(|r| r.node_idx == indices[2]).unwrap();
@@ -2281,7 +2353,7 @@ mod tests {
     #[test]
     fn test_pagerank_basic() {
         let (graph, _) = build_triangle_graph();
-        let results = pagerank(&graph, 0.85, 100, 1e-6, None, None);
+        let results = pagerank(&graph, 0.85, 100, 1e-6, None, None).unwrap();
         assert_eq!(results.len(), 3);
         // All nodes in a symmetric triangle should have roughly equal PageRank
         let scores: Vec<f64> = results.iter().map(|r| r.score).collect();
@@ -2296,7 +2368,7 @@ mod tests {
     #[test]
     fn test_closeness_centrality_chain() {
         let (graph, indices) = build_chain_graph();
-        let results = closeness_centrality(&graph, false, None, None, None);
+        let results = closeness_centrality(&graph, false, None, None, None).unwrap();
         assert_eq!(results.len(), 5);
         // Middle node should have highest closeness
         let middle = results
@@ -2315,7 +2387,7 @@ mod tests {
     #[test]
     fn test_pagerank_empty_graph() {
         let graph = DirGraph::new();
-        let results = pagerank(&graph, 0.85, 100, 1e-6, None, None);
+        let results = pagerank(&graph, 0.85, 100, 1e-6, None, None).unwrap();
         assert!(results.is_empty());
     }
 

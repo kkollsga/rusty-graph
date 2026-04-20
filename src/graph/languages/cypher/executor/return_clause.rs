@@ -7,6 +7,40 @@ use crate::datatypes::values::Value;
 use chrono::Datelike;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
+/// Surrogate key for a single grouping expression. NodeProp defers property
+/// materialization until after the per-row pass — the same NodeIndex hashes to
+/// the same bucket regardless of how many rows reference it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum GroupKeyPart {
+    /// Bound-node property access — resolve later, once per group.
+    NodeProp(petgraph::graph::NodeIndex),
+    /// Pre-evaluated value (for any expression that isn't a node-binding
+    /// property access, or where the variable wasn't a node binding for a
+    /// given row).
+    Resolved(Value),
+}
+
+/// Per-grouping-expression strategy chosen once before iterating rows.
+enum GroupExprStrategy {
+    /// `<variable>.<property>` where `<variable>` is expected to bind a node.
+    /// Carries the variable name so the per-row pass can look up the binding.
+    NodeProp { variable: String },
+    /// Anything else — evaluate the expression per row.
+    Eval,
+}
+
+impl GroupExprStrategy {
+    fn for_expr(expr: &Expression) -> Self {
+        if let Expression::PropertyAccess { variable, .. } = expr {
+            Self::NodeProp {
+                variable: variable.clone(),
+            }
+        } else {
+            Self::Eval
+        }
+    }
+}
+
 impl<'a> CypherExecutor<'a> {
     pub(super) fn execute_return(
         &self,
@@ -178,23 +212,92 @@ impl<'a> CypherExecutor<'a> {
             .map(|&i| self.fold_constants_expr(&clause.items[i].expression))
             .collect();
 
-        // Group rows by grouping key values using Value hash directly (no string formatting)
+        // Classify each grouping expression: bound-node property accesses get a
+        // cheap NodeIndex surrogate key; everything else is fully evaluated per-row.
+        // Defers expensive disk-backed property reads (e.g. `t.title`) until after
+        // the grouping pass — typically O(distinct groups) reads instead of O(rows).
+        let strategies: Vec<GroupExprStrategy> = folded_group_exprs
+            .iter()
+            .map(GroupExprStrategy::for_expr)
+            .collect();
+
+        // Group rows by surrogate keys (NodeIndex for bound-node property accesses,
+        // resolved Value otherwise). The per-row pass is now O(rows) hash-of-int
+        // operations for surrogate parts, with zero disk I/O.
         self.check_deadline()?;
-        let mut groups: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
-        let mut group_index_map: HashMap<Vec<Value>, usize> = HashMap::new();
+        let mut surrogate_groups: Vec<(Vec<GroupKeyPart>, Vec<usize>)> = Vec::new();
+        let mut surrogate_index: HashMap<Vec<GroupKeyPart>, usize> = HashMap::new();
 
         for (row_idx, row) in result_set.rows.iter().enumerate() {
-            let key_values: Vec<Value> = folded_group_exprs
+            let key_parts: Vec<GroupKeyPart> = strategies
                 .iter()
-                .map(|expr| self.evaluate_expression(expr, row).unwrap_or(Value::Null))
+                .zip(folded_group_exprs.iter())
+                .map(|(strategy, expr)| match strategy {
+                    GroupExprStrategy::NodeProp { variable, .. } => {
+                        if let Some(&idx) = row.node_bindings.get(variable) {
+                            GroupKeyPart::NodeProp(idx)
+                        } else {
+                            // Variable isn't a node binding for this row (e.g.
+                            // OPTIONAL MATCH null) — fall back to full evaluation.
+                            GroupKeyPart::Resolved(
+                                self.evaluate_expression(expr, row).unwrap_or(Value::Null),
+                            )
+                        }
+                    }
+                    GroupExprStrategy::Eval => GroupKeyPart::Resolved(
+                        self.evaluate_expression(expr, row).unwrap_or(Value::Null),
+                    ),
+                })
                 .collect();
 
-            if let Some(&group_idx) = group_index_map.get(&key_values) {
-                groups[group_idx].1.push(row_idx);
+            if let Some(&idx) = surrogate_index.get(&key_parts) {
+                surrogate_groups[idx].1.push(row_idx);
             } else {
-                let group_idx = groups.len();
-                group_index_map.insert(key_values.clone(), group_idx);
-                groups.push((key_values, vec![row_idx]));
+                let idx = surrogate_groups.len();
+                surrogate_index.insert(key_parts.clone(), idx);
+                surrogate_groups.push((key_parts, vec![row_idx]));
+            }
+        }
+
+        // Resolve NodeProp surrogates to actual property values, deduplicating reads.
+        // For Q5-style queries (439K rows → ~50 groups), this drops 439K title reads
+        // to ~50.
+        let mut resolved_node_props: HashMap<(petgraph::graph::NodeIndex, usize), Value> =
+            HashMap::new();
+        for (key_parts, _) in &surrogate_groups {
+            for (slot, part) in key_parts.iter().enumerate() {
+                if let GroupKeyPart::NodeProp(idx) = part {
+                    resolved_node_props.entry((*idx, slot)).or_insert_with(|| {
+                        self.resolve_node_prop_for_group(*idx, &folded_group_exprs[slot])
+                    });
+                }
+            }
+        }
+
+        // Re-bucket by resolved Value to preserve Cypher semantics: two distinct
+        // NodeIndexes that resolve to the same property value (e.g. two Person
+        // nodes both named "Alice") must collapse into one group.
+        let mut groups: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
+        let mut group_index_map: HashMap<Vec<Value>, usize> = HashMap::new();
+        for (key_parts, row_indices) in surrogate_groups {
+            let resolved_key: Vec<Value> = key_parts
+                .iter()
+                .enumerate()
+                .map(|(slot, part)| match part {
+                    GroupKeyPart::NodeProp(idx) => resolved_node_props
+                        .get(&(*idx, slot))
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    GroupKeyPart::Resolved(v) => v.clone(),
+                })
+                .collect();
+
+            if let Some(&idx) = group_index_map.get(&resolved_key) {
+                groups[idx].1.extend(row_indices);
+            } else {
+                let idx = groups.len();
+                group_index_map.insert(resolved_key.clone(), idx);
+                groups.push((resolved_key, row_indices));
             }
         }
 
@@ -270,6 +373,23 @@ impl<'a> CypherExecutor<'a> {
             rows: result_rows,
             columns,
         })
+    }
+
+    /// Resolve a grouping expression's value for a single NodeIndex. Used by
+    /// the post-grouping materialization pass — builds a minimal one-binding
+    /// row and routes through the normal expression evaluator so all special
+    /// cases (title alias, disk fast paths, etc.) stay in one place.
+    fn resolve_node_prop_for_group(
+        &self,
+        node_idx: petgraph::graph::NodeIndex,
+        expr: &Expression,
+    ) -> Value {
+        let mut tiny_row = ResultRow::new();
+        if let Expression::PropertyAccess { variable, .. } = expr {
+            tiny_row.node_bindings.insert(variable.clone(), node_idx);
+        }
+        self.evaluate_expression(expr, &tiny_row)
+            .unwrap_or(Value::Null)
     }
 
     /// Evaluate aggregate function over all rows in a ResultSet

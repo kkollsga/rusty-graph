@@ -232,6 +232,58 @@ class TestPreBindingOptimization:
         assert rows[1]["p.name"] == "Bob"
         assert rows[1]["c.name"] == "London"
 
+    def test_sequential_match_rebinds_variable(self):
+        """Two separate MATCH clauses re-binding a variable must use the prior anchor.
+
+        Regression for the multi-MATCH planner bug found on Wikidata 2026-04-20:
+        the inverted-index fast path in pattern_matching/matcher.rs was firing
+        on bare re-bindings like `MATCH (f)-[:R]->(c)` even when `f` was already
+        bound, returning every R-source in the graph (124M+ on Wikidata) instead
+        of just the bound node.
+        """
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Person {name: 'Alice'})")
+        g.cypher("CREATE (:City {name: 'Oslo'})")
+        g.cypher("MATCH (a:Person {name: 'Alice'}), (c:City {name: 'Oslo'}) CREATE (a)-[:LIVES_IN]->(c)")
+
+        # Two separate MATCH clauses, no WITH between — the failing case.
+        rows = g.cypher("""
+            MATCH (p:Person {name: 'Alice'})
+            MATCH (p)-[:LIVES_IN]->(c:City)
+            RETURN p.name, c.name
+        """)
+        assert len(rows) == 1
+        assert rows[0]["p.name"] == "Alice"
+        assert rows[0]["c.name"] == "Oslo"
+
+    def test_sequential_match_rebind_perf_no_full_scan(self):
+        """Perf-regression guard: re-bound MATCH must not scan the whole graph.
+
+        Build a graph where every node has a :REL edge — a buggy planner would
+        scan all of them and take 100x longer than the prebound-anchor path.
+        """
+        import time
+
+        g = KnowledgeGraph()
+        # 5_000 Source nodes, each with a :REL to a single Target.
+        for i in range(5_000):
+            g.cypher(f"CREATE (:Source {{sid: {i}}})")
+        g.cypher("CREATE (:Target {name: 'T'})")
+        g.cypher("MATCH (s:Source), (t:Target) WHERE s.sid < 5000 CREATE (s)-[:REL]->(t)")
+        # Pick one Source to anchor on.
+        anchor_id = g.cypher("MATCH (s:Source {sid: 42}) RETURN s.id AS sid")[0]["sid"]
+
+        start = time.perf_counter()
+        rows = g.cypher(f"MATCH (s {{id: {anchor_id}}}) MATCH (s)-[:REL]->(t:Target) RETURN t.name AS tname")
+        elapsed = time.perf_counter() - start
+
+        assert len(rows) == 1
+        assert rows[0]["tname"] == "T"
+        # On a 5K-edge graph, anchored lookup is sub-millisecond. A full scan
+        # would be ~tens of ms. 200ms is a generous ceiling that catches the
+        # regression while tolerating CI noise.
+        assert elapsed < 0.2, f"Re-bound MATCH took {elapsed * 1000:.1f}ms — likely full-scanning"
+
     def test_optional_match_null_for_unmatched(self):
         """OPTIONAL MATCH produces nulls when no match, not cross-products."""
         g = KnowledgeGraph()

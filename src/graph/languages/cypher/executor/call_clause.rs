@@ -100,6 +100,43 @@ impl<'a> CypherExecutor<'a> {
             }
         }
 
+        // Fail-fast guard against unscoped procedure runs on large graphs.
+        // These procedures all walk the full graph (no scope/projection arg
+        // exists yet), and on Wikidata-scale graphs (124M nodes) that takes
+        // minutes — long enough to exhaust the MCP transport timeout and
+        // appear to wedge the server. The deadline-check inside the algorithm
+        // catches it eventually, but bailing up front is much friendlier.
+        // `timeout_ms=0` disables the deadline (`self.deadline = None`) and
+        // also bypasses this guard — explicit opt-in for users who knowingly
+        // want a full-graph walk.
+        const PROC_FULL_GRAPH_LIMIT: usize = 2_000_000;
+        let needs_scope = matches!(
+            proc_name.as_str(),
+            "pagerank"
+                | "betweenness"
+                | "betweenness_centrality"
+                | "degree"
+                | "degree_centrality"
+                | "closeness"
+                | "closeness_centrality"
+                | "louvain"
+                | "louvain_communities"
+                | "label_propagation"
+                | "connected_components"
+                | "weakly_connected_components"
+        );
+        if needs_scope && self.deadline.is_some() {
+            let n = self.graph.graph.node_count();
+            if n > PROC_FULL_GRAPH_LIMIT {
+                return Err(format!(
+                    "CALL {}() on a graph with {n} nodes would scan the whole graph. \
+                     Subgraph scoping is not yet supported — try a smaller graph, \
+                     or pass timeout_ms=0 to override this guard.",
+                    clause.procedure_name
+                ));
+            }
+        }
+
         // Extract parameters
         let params = self.extract_call_params(&clause.parameters)?;
 
@@ -117,8 +154,8 @@ impl<'a> CypherExecutor<'a> {
                     tolerance,
                     conn.as_deref(),
                     self.deadline,
-                );
-                self.centrality_to_rows(&results, &clause.yield_items)
+                )?;
+                self.centrality_to_rows(&results, &clause.yield_items)?
             }
             "betweenness" | "betweenness_centrality" => {
                 let normalized = call_param_bool(&params, "normalized", true);
@@ -130,8 +167,8 @@ impl<'a> CypherExecutor<'a> {
                     sample_size,
                     conn.as_deref(),
                     self.deadline,
-                );
-                self.centrality_to_rows(&results, &clause.yield_items)
+                )?;
+                self.centrality_to_rows(&results, &clause.yield_items)?
             }
             "degree" | "degree_centrality" => {
                 let normalized = call_param_bool(&params, "normalized", true);
@@ -141,8 +178,8 @@ impl<'a> CypherExecutor<'a> {
                     normalized,
                     conn.as_deref(),
                     self.deadline,
-                );
-                self.centrality_to_rows(&results, &clause.yield_items)
+                )?;
+                self.centrality_to_rows(&results, &clause.yield_items)?
             }
             "closeness" | "closeness_centrality" => {
                 let normalized = call_param_bool(&params, "normalized", true);
@@ -154,8 +191,8 @@ impl<'a> CypherExecutor<'a> {
                     sample_size,
                     conn.as_deref(),
                     self.deadline,
-                );
-                self.centrality_to_rows(&results, &clause.yield_items)
+                )?;
+                self.centrality_to_rows(&results, &clause.yield_items)?
             }
             "louvain" | "louvain_communities" => {
                 let resolution = call_param_f64(&params, "resolution", 1.0);
@@ -167,8 +204,8 @@ impl<'a> CypherExecutor<'a> {
                     resolution,
                     conn.as_deref(),
                     self.deadline,
-                );
-                self.community_to_rows(&result.assignments, &clause.yield_items)
+                )?;
+                self.community_to_rows(&result.assignments, &clause.yield_items)?
             }
             "label_propagation" => {
                 let max_iter = call_param_usize(&params, "max_iterations", 100);
@@ -178,17 +215,25 @@ impl<'a> CypherExecutor<'a> {
                     max_iter,
                     conn.as_deref(),
                     self.deadline,
-                );
-                self.community_to_rows(&result.assignments, &clause.yield_items)
+                )?;
+                self.community_to_rows(&result.assignments, &clause.yield_items)?
             }
             "connected_components" | "weakly_connected_components" => {
                 let components =
                     crate::graph::algorithms::graph_algorithms::weakly_connected_components(
                         self.graph,
-                    );
+                        self.deadline,
+                    )?;
+                // Periodic deadline check: 124M nodes can spend minutes here even
+                // after the algorithm itself completes within budget.
                 let mut rows = Vec::new();
+                let mut row_counter: usize = 0;
                 for (comp_id, nodes) in components.iter().enumerate() {
                     for &node_idx in nodes {
+                        row_counter += 1;
+                        if row_counter & 0xFFFFF == 0 {
+                            self.check_deadline()?;
+                        }
                         let mut row = ResultRow::new();
                         for item in &clause.yield_items {
                             let alias = item.alias.as_deref().unwrap_or(&item.name);
@@ -510,59 +555,66 @@ impl<'a> CypherExecutor<'a> {
     }
 
     /// Convert centrality results to ResultRows with node bindings + score.
+    /// Periodic deadline check: building 124M rows can take minutes even when
+    /// the algorithm itself returned within budget.
     pub(super) fn centrality_to_rows(
         &self,
         results: &[crate::graph::algorithms::graph_algorithms::CentralityResult],
         yield_items: &[YieldItem],
-    ) -> Vec<ResultRow> {
-        results
-            .iter()
-            .map(|cr| {
-                let mut row = ResultRow::new();
-                for item in yield_items {
-                    let alias = item.alias.as_deref().unwrap_or(&item.name);
-                    match item.name.as_str() {
-                        "node" => {
-                            row.node_bindings.insert(alias.to_string(), cr.node_idx);
-                        }
-                        "score" => {
-                            row.projected
-                                .insert(alias.to_string(), Value::Float64(cr.score));
-                        }
-                        _ => {}
+    ) -> Result<Vec<ResultRow>, String> {
+        let mut rows = Vec::with_capacity(results.len());
+        for (i, cr) in results.iter().enumerate() {
+            if i & 0xFFFFF == 0 {
+                self.check_deadline()?;
+            }
+            let mut row = ResultRow::new();
+            for item in yield_items {
+                let alias = item.alias.as_deref().unwrap_or(&item.name);
+                match item.name.as_str() {
+                    "node" => {
+                        row.node_bindings.insert(alias.to_string(), cr.node_idx);
                     }
+                    "score" => {
+                        row.projected
+                            .insert(alias.to_string(), Value::Float64(cr.score));
+                    }
+                    _ => {}
                 }
-                row
-            })
-            .collect()
+            }
+            rows.push(row);
+        }
+        Ok(rows)
     }
 
     /// Convert community assignments to ResultRows with node bindings + community id.
+    /// Periodic deadline check: see centrality_to_rows rationale.
     pub(super) fn community_to_rows(
         &self,
         assignments: &[crate::graph::algorithms::graph_algorithms::CommunityAssignment],
         yield_items: &[YieldItem],
-    ) -> Vec<ResultRow> {
-        assignments
-            .iter()
-            .map(|ca| {
-                let mut row = ResultRow::new();
-                for item in yield_items {
-                    let alias = item.alias.as_deref().unwrap_or(&item.name);
-                    match item.name.as_str() {
-                        "node" => {
-                            row.node_bindings.insert(alias.to_string(), ca.node_idx);
-                        }
-                        "community" => {
-                            row.projected
-                                .insert(alias.to_string(), Value::Int64(ca.community_id as i64));
-                        }
-                        _ => {}
+    ) -> Result<Vec<ResultRow>, String> {
+        let mut rows = Vec::with_capacity(assignments.len());
+        for (i, ca) in assignments.iter().enumerate() {
+            if i & 0xFFFFF == 0 {
+                self.check_deadline()?;
+            }
+            let mut row = ResultRow::new();
+            for item in yield_items {
+                let alias = item.alias.as_deref().unwrap_or(&item.name);
+                match item.name.as_str() {
+                    "node" => {
+                        row.node_bindings.insert(alias.to_string(), ca.node_idx);
                     }
+                    "community" => {
+                        row.projected
+                            .insert(alias.to_string(), Value::Int64(ca.community_id as i64));
+                    }
+                    _ => {}
                 }
-                row
-            })
-            .collect()
+            }
+            rows.push(row);
+        }
+        Ok(rows)
     }
 
     // ========================================================================

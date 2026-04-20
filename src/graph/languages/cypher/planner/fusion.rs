@@ -445,19 +445,12 @@ pub(super) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
             continue;
         }
 
-        // Check that the WITH/RETURN contains count() aggregation and simple pass-through group keys
-        let fusable = match &query.clauses[i + 1] {
-            Clause::With(w) => is_fusable_with_clause(w),
-            Clause::Return(r) => is_fusable_return_clause(r),
-            _ => false,
-        };
-
-        if !fusable {
-            i += 1;
-            continue;
-        }
-
-        // Collect variables defined in the OPTIONAL MATCH pattern
+        // Collect variables defined in the OPTIONAL MATCH pattern *first* —
+        // we need this both to validate the count() args and to reject
+        // group-key PropertyAccess on OPTIONAL-bound variables. The fused
+        // executor evaluates group keys against the *source* row (before
+        // OPTIONAL MATCH expansion), so `pet.name` where `pet` only exists
+        // post-OPTIONAL would always be NULL — silently wrong.
         let opt_match_vars: std::collections::HashSet<String> =
             if let Clause::OptionalMatch(m) = &query.clauses[i] {
                 collect_pattern_variables(&m.patterns)
@@ -468,6 +461,18 @@ pub(super) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
                 i += 1;
                 continue;
             };
+
+        // Check that the WITH/RETURN contains count() aggregation and simple pass-through group keys
+        let fusable = match &query.clauses[i + 1] {
+            Clause::With(w) => is_fusable_with_clause(w),
+            Clause::Return(r) => is_fusable_return_clause(r, &opt_match_vars),
+            _ => false,
+        };
+
+        if !fusable {
+            i += 1;
+            continue;
+        }
 
         // Verify ALL count aggregate variables come from THIS OPTIONAL MATCH,
         // and none use DISTINCT (which the fused path cannot handle)
@@ -569,8 +574,16 @@ pub(super) fn is_fusable_with_clause(with: &WithClause) -> bool {
 
 /// Check if a RETURN clause is eligible for fusion with an OPTIONAL MATCH.
 /// Same as `is_fusable_with_clause` but allows PropertyAccess group keys
-/// (RETURN items can be `l.korttittel`, not just bare `l`).
-pub(super) fn is_fusable_return_clause(ret: &ReturnClause) -> bool {
+/// (RETURN items can be `l.korttittel`, not just bare `l`) — *except* when
+/// the PropertyAccess targets a variable that's only bound by the OPTIONAL
+/// MATCH itself. The fused executor evaluates group keys against the source
+/// row (pre-OPTIONAL-MATCH), so `pet.name` where `pet` only exists post-
+/// OPTIONAL would always resolve to NULL — silently merging all rows into
+/// one wrong group.
+pub(super) fn is_fusable_return_clause(
+    ret: &ReturnClause,
+    opt_match_vars: &std::collections::HashSet<String>,
+) -> bool {
     use super::super::ast::is_aggregate_expression;
 
     let mut has_count = false;
@@ -585,12 +598,16 @@ pub(super) fn is_fusable_return_clause(ret: &ReturnClause) -> bool {
                 _ => return false, // Non-count aggregate → bail
             }
         } else {
-            // Group key must be a simple variable or property access
-            if !matches!(
-                &item.expression,
-                Expression::Variable(_) | Expression::PropertyAccess { .. }
-            ) {
-                return false;
+            // Group key must be a simple variable or PropertyAccess on a
+            // variable bound *before* the OPTIONAL MATCH.
+            match &item.expression {
+                Expression::Variable(_) => {}
+                Expression::PropertyAccess { variable, .. } => {
+                    if opt_match_vars.contains(variable) {
+                        return false;
+                    }
+                }
+                _ => return false,
             }
         }
     }

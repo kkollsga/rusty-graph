@@ -284,3 +284,48 @@ class TestCallExplain:
         """)
         ops = [r["operation"] for r in result.to_list()]
         assert any("Call" in op for op in ops)
+
+
+class TestCallLargeGraphGuard:
+    """Regression tests for the 'scope required' guard on large graphs.
+
+    Bug found on Wikidata 2026-04-20: CALL degree() on 124M nodes ran past
+    the MCP transport timeout (4+ min) with no deadline honored, wedging the
+    server from answering any subsequent queries. The guard refuses to run
+    unscoped procedures on graphs above PROC_FULL_GRAPH_LIMIT (2M nodes)
+    unless timeout_ms=0 is explicitly set.
+    """
+
+    def test_small_graph_still_works(self, graph):
+        """Guard must not affect graphs well below the 2M-node threshold."""
+        result = graph.cypher("""
+            CALL degree() YIELD node, score
+            RETURN node.name, score ORDER BY score DESC LIMIT 3
+        """)
+        assert len(result) == 3
+
+    def test_server_not_wedged_after_guard_error(self, graph):
+        """After any CALL error, subsequent trivial queries must still work.
+
+        This is the regression test for the 'wedges the server' symptom — even
+        though the underlying fix is the deadline wiring, any CALL error path
+        (including the size guard) must not leave the executor in a bad state.
+        """
+        # Trigger an error path first.
+        with pytest.raises((RuntimeError, ValueError)):
+            graph.cypher("CALL unknown_algo() YIELD node, score")
+        # Subsequent trivial query must still work.
+        rows = graph.cypher("MATCH (n:Person) RETURN count(n) AS c")
+        assert rows[0]["c"] == 6
+
+    def test_zero_timeout_bypasses_guard(self, graph):
+        """timeout_ms=0 disables the deadline and also bypasses the size guard.
+
+        On a small fixture graph the guard wouldn't fire anyway; this just
+        verifies that timeout_ms=0 is accepted and the query completes.
+        """
+        result = graph.cypher(
+            "CALL degree() YIELD node, score RETURN count(*) AS c",
+            timeout_ms=0,
+        )
+        assert result[0]["c"] == 6

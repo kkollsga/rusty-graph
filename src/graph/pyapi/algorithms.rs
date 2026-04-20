@@ -525,7 +525,11 @@ impl KnowledgeGraph {
         let weak = weak.unwrap_or(true);
 
         let components = if weak {
-            crate::graph::algorithms::graph_algorithms::weakly_connected_components(&self.inner)
+            crate::graph::algorithms::graph_algorithms::weakly_connected_components(
+                &self.inner,
+                None,
+            )
+            .map_err(pyo3::exceptions::PyValueError::new_err)?
         } else {
             crate::graph::algorithms::graph_algorithms::connected_components(&self.inner)
         };
@@ -704,15 +708,17 @@ impl KnowledgeGraph {
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         let inner = Arc::clone(&self.inner);
-        let results = py.detach(move || {
-            crate::graph::algorithms::graph_algorithms::betweenness_centrality(
-                &inner,
-                normalized,
-                sample_size,
-                connection_types.as_deref(),
-                deadline,
-            )
-        });
+        let results = py
+            .detach(move || {
+                crate::graph::algorithms::graph_algorithms::betweenness_centrality(
+                    &inner,
+                    normalized,
+                    sample_size,
+                    connection_types.as_deref(),
+                    deadline,
+                )
+            })
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -773,16 +779,18 @@ impl KnowledgeGraph {
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         let inner = Arc::clone(&self.inner);
-        let results = py.detach(move || {
-            crate::graph::algorithms::graph_algorithms::pagerank(
-                &inner,
-                damping,
-                max_iter,
-                tol,
-                connection_types.as_deref(),
-                deadline,
-            )
-        });
+        let results = py
+            .detach(move || {
+                crate::graph::algorithms::graph_algorithms::pagerank(
+                    &inner,
+                    damping,
+                    max_iter,
+                    tol,
+                    connection_types.as_deref(),
+                    deadline,
+                )
+            })
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -835,14 +843,16 @@ impl KnowledgeGraph {
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         let inner = Arc::clone(&self.inner);
-        let results = py.detach(move || {
-            crate::graph::algorithms::graph_algorithms::degree_centrality(
-                &inner,
-                normalized,
-                connection_types.as_deref(),
-                deadline,
-            )
-        });
+        let results = py
+            .detach(move || {
+                crate::graph::algorithms::graph_algorithms::degree_centrality(
+                    &inner,
+                    normalized,
+                    connection_types.as_deref(),
+                    deadline,
+                )
+            })
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -901,15 +911,17 @@ impl KnowledgeGraph {
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
         let inner = Arc::clone(&self.inner);
-        let results = py.detach(move || {
-            crate::graph::algorithms::graph_algorithms::closeness_centrality(
-                &inner,
-                normalized,
-                sample_size,
-                connection_types.as_deref(),
-                deadline,
-            )
-        });
+        let results = py
+            .detach(move || {
+                crate::graph::algorithms::graph_algorithms::closeness_centrality(
+                    &inner,
+                    normalized,
+                    sample_size,
+                    connection_types.as_deref(),
+                    deadline,
+                )
+            })
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -958,7 +970,8 @@ impl KnowledgeGraph {
             res,
             connection_types.as_deref(),
             deadline,
-        );
+        )
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
         community_results_to_py(py, &self.inner, result)
     }
 
@@ -988,7 +1001,8 @@ impl KnowledgeGraph {
             max_iter,
             connection_types.as_deref(),
             deadline,
-        );
+        )
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
         community_results_to_py(py, &self.inner, result)
     }
 
