@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Typed `MATCH (n:Type {title: 'X'})` now takes the cross-type
+  global-index fast path.** Previously only untyped patterns consulted
+  the global index; typed patterns fell through to a full-type scan —
+  10–14s (and frequent timeouts) on 13M-row types like Wikidata
+  `human`. The matcher now consults the global index and post-filters
+  by `node_type_of(idx)`, dropping `MATCH (n:human {title: 'Barack
+  Obama'})` from 14s to ~25ms. Alias-aware (title↔label↔name).
+- **Per-type `{nid: ...}` / `{qid: ...}` anchors hit the id index.**
+  Both typed and untyped paths previously only checked the literal
+  `"id"` key, so alias queries fell through to full scans. Now
+  `id`/`nid`/`qid` all anchor via the same per-type id_index.
+
 ## [0.8.8] — 2026-04-19
 
 ### Fixed

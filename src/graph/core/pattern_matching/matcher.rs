@@ -615,6 +615,17 @@ impl<'a> PatternExecutor<'a> {
                 if let Some(indexed) = self.try_index_lookup(node_type, props) {
                     return Ok(indexed);
                 }
+                // Cross-type global-index fast path for typed patterns.
+                // When a per-type index doesn't exist but a cross-type
+                // global index does (the common shape on Wikidata-scale
+                // disk graphs), consult it and filter the handful of
+                // hits by node_type. `{title: 'X'}` on a type with 13M
+                // rows drops from a full-type scan (10-14s) to the
+                // number of global matches × one type-check per match
+                // (microseconds).
+                if let Some(indexed) = self.try_global_index_lookup_typed(node_type, props) {
+                    return Ok(indexed);
+                }
             }
             // Use type index
             let type_nodes = match self.graph.type_indices.get(node_type) {
@@ -643,7 +654,18 @@ impl<'a> PatternExecutor<'a> {
             // Fast path: untyped node with {id: X} — cross-type id lookup.
             // Tries lookup_by_id_readonly on each type. When id_indices are built,
             // each lookup is O(1). Total: O(types) which is fast even for 132K types.
-            if let Some(PropertyMatcher::Equals(ref id_val)) = props.get("id") {
+            //
+            // Alias-aware: `{nid: 'Q76'}` / `{qid: 'Q76'}` also take this
+            // path. Without the alias check the query falls through to a
+            // 124M-row scan on Wikidata (times out).
+            let id_val_opt = ["id", "nid", "qid"].iter().find_map(|k| {
+                if let Some(PropertyMatcher::Equals(v)) = props.get(*k) {
+                    Some(v)
+                } else {
+                    None
+                }
+            });
+            if let Some(id_val) = id_val_opt {
                 for node_type in self.graph.type_indices.keys() {
                     if let Some(idx) = self.graph.lookup_by_id_readonly(node_type, id_val) {
                         if props.len() == 1 || self.node_matches_properties(idx, props) {
@@ -747,6 +769,76 @@ impl<'a> PatternExecutor<'a> {
         Ok(())
     }
 
+    /// Cross-type global-index fast path for **typed** patterns.
+    ///
+    /// The untyped branch above already consults the global index. On
+    /// Wikidata-scale disk graphs the common shape is typed — `MATCH
+    /// (n:Human {title: 'Barack Obama'})` — and there's no per-type
+    /// index built for that 13M-row type. Without this fast path the
+    /// executor falls through to a full-type scan (10–14s, usually a
+    /// timeout).
+    ///
+    /// Strategy: consult the cross-type global index (built once at
+    /// save-time, covering every node type), then filter by
+    /// `node_type_of(idx)`. For a query that hits a handful of rows
+    /// across the whole graph, the filter is O(hits) — microseconds —
+    /// and avoids the 13M-row scan entirely.
+    ///
+    /// Alias-aware via `global_alias_candidates` so an index built as
+    /// `global_index_label_*` still serves `{title: 'X'}` queries.
+    ///
+    /// Returns `None` if no global index matches any alias for any
+    /// pushable predicate in `props`, leaving the caller to fall
+    /// through to the existing type-scan path.
+    fn try_global_index_lookup_typed(
+        &self,
+        node_type: &str,
+        props: &HashMap<String, PropertyMatcher>,
+    ) -> Option<Vec<NodeIndex>> {
+        let expected = InternedKey::from_str(node_type);
+        for (prop, matcher) in props {
+            let aliases = global_alias_candidates(prop, self.graph);
+            match matcher {
+                PropertyMatcher::Equals(Value::String(s)) => {
+                    for alias in &aliases {
+                        if let Some(candidates) =
+                            self.graph.graph.lookup_by_property_eq_any_type(alias, s)
+                        {
+                            let filtered: Vec<NodeIndex> = candidates
+                                .into_iter()
+                                .filter(|&idx| self.graph.graph.node_type_of(idx) == Some(expected))
+                                .filter(|&idx| {
+                                    props.len() == 1 || self.node_matches_properties(idx, props)
+                                })
+                                .collect();
+                            return Some(filtered);
+                        }
+                    }
+                }
+                PropertyMatcher::StartsWith(prefix) => {
+                    for alias in &aliases {
+                        if let Some(candidates) = self
+                            .graph
+                            .graph
+                            .lookup_by_property_prefix_any_type(alias, prefix, usize::MAX)
+                        {
+                            let filtered: Vec<NodeIndex> = candidates
+                                .into_iter()
+                                .filter(|&idx| self.graph.graph.node_type_of(idx) == Some(expected))
+                                .filter(|&idx| {
+                                    props.len() == 1 || self.node_matches_properties(idx, props)
+                                })
+                                .collect();
+                            return Some(filtered);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Try to use property indexes for faster node lookup.
     /// Returns None if no indexes cover the requested properties.
     fn try_index_lookup(
@@ -821,10 +913,12 @@ impl<'a> PatternExecutor<'a> {
             return None;
         }
 
-        // Try ID index for {id: value} patterns — O(1) lookup
+        // Try ID index for {id: value} patterns — O(1) lookup.
+        // Alias-aware: `nid` / `qid` anchor via the same per-type
+        // id_index that `id` does — same index, same semantics.
         if equality_props.len() == 1 {
             let (prop_name, value) = equality_props[0];
-            if prop_name == "id" {
+            if matches!(prop_name.as_str(), "id" | "nid" | "qid") {
                 if let Some(idx) = self.graph.lookup_by_id_readonly(node_type, value) {
                     return Some(vec![idx]);
                 }
