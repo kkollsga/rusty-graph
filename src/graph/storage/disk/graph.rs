@@ -25,6 +25,19 @@ use std::path::{Path, PathBuf};
 use super::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints, TOMBSTONE_EDGE};
 use super::edge_properties::{EdgePropertyStore, EdgePropertyStoreMeta};
 use super::property_index;
+
+/// PR1 phase 4: CSR + column binaries live under this subdirectory of the
+/// graph root. Top-level files (disk_graph_meta.json, seg_manifest.json,
+/// interner.json, metadata.json) stay at the graph root. Legacy graphs
+/// gated by `DiskGraphMeta::csr_layout_version` == 0 use the flat layout
+/// (everything at the root) — see `load_from_dir`.
+pub(crate) const CSR_SUBDIR: &str = "seg_000";
+
+/// Current CSR-layout version emitted by every save. 0 = legacy flat,
+/// 1 = seg_000 subdir. Loading tolerates both via the version field
+/// in `DiskGraphMeta` (serde-defaulted to 0 for pre-phase-4 graphs).
+pub(crate) const CURRENT_CSR_LAYOUT_VERSION: u8 = 1;
+
 // ============================================================================
 // DiskGraph
 // ============================================================================
@@ -224,8 +237,16 @@ impl DiskGraph {
 
     /// Create an empty DiskGraph at the given directory path.
     /// All data is written directly to disk via mmap.
-    pub fn new_at_path(data_dir: &Path) -> std::io::Result<Self> {
-        std::fs::create_dir_all(data_dir)?;
+    ///
+    /// Fresh graphs use the segmented layout (PR1 phase 4): CSR / column
+    /// binaries live at `root/seg_000/*.bin`, top-level `disk_graph_meta.json`
+    /// and `seg_manifest.json` stay at `root/`. Legacy .kgl directories with
+    /// the flat (pre-phase-4) layout continue to load — see `load_from_dir`.
+    pub fn new_at_path(root_dir: &Path) -> std::io::Result<Self> {
+        std::fs::create_dir_all(root_dir)?;
+        let data_dir = root_dir.join(CSR_SUBDIR);
+        std::fs::create_dir_all(&data_dir)?;
+        let data_dir = data_dir.as_path();
 
         Ok(DiskGraph {
             node_slots: MmapOrVec::mapped(&data_dir.join("node_slots.bin"), 1024)?,
@@ -280,13 +301,19 @@ impl DiskGraph {
 
     /// Build a DiskGraph from a petgraph StableDiGraph.
     /// Converts nodes to DiskNodeSlots on disk, builds CSR arrays.
+    ///
+    /// `root_dir` is the graph root; CSR binaries land in `root_dir/seg_000/`
+    /// per the PR1 phase-4 segment layout.
     pub fn from_stable_digraph(
         graph: &mut petgraph::stable_graph::StableDiGraph<NodeData, EdgeData>,
-        data_dir: &Path,
+        root_dir: &Path,
     ) -> std::io::Result<Self> {
         use petgraph::visit::{EdgeRef, IntoEdgeReferences, NodeIndexable};
 
-        std::fs::create_dir_all(data_dir)?;
+        std::fs::create_dir_all(root_dir)?;
+        let data_dir_buf = root_dir.join(CSR_SUBDIR);
+        std::fs::create_dir_all(&data_dir_buf)?;
+        let data_dir = data_dir_buf.as_path();
 
         let node_bound = graph.node_bound();
         let edge_count = graph.edge_count();
@@ -2395,6 +2422,12 @@ struct DiskGraphMeta {
     /// for format=0 graphs or graphs that don't have any edge properties.
     #[serde(default)]
     edge_properties_meta: EdgePropertyStoreMeta,
+    /// CSR-layout version. 0 = legacy flat (all files at graph root).
+    /// 1 = segmented (CSR / columns / per-segment indexes live under
+    /// `seg_000/`). Added in PR1 phase 4; defaults to 0 so pre-phase-4
+    /// .kgl directories still load.
+    #[serde(default)]
+    csr_layout_version: u8,
 }
 
 fn default_has_tombstones() -> bool {
@@ -2437,6 +2470,8 @@ impl DiskGraph {
             // format; legacy format=0 is only ever loaded, never written.
             edge_properties_format: 1,
             edge_properties_meta: edge_props_meta,
+            // PR1 phase 4: fresh saves always emit the segmented layout.
+            csr_layout_version: CURRENT_CSR_LAYOUT_VERSION,
         };
         let json = serde_json::to_string_pretty(&meta).map_err(std::io::Error::other)?;
         std::fs::write(dir.join("disk_graph_meta.json"), json)
@@ -2502,22 +2537,27 @@ impl DiskGraph {
         _interner: &crate::graph::schema::StringInterner,
     ) -> std::io::Result<()> {
         std::fs::create_dir_all(target_dir)?;
+        // PR1 phase 4: CSR binaries live under seg_000/. Fresh graphs
+        // already have self.data_dir pointing at their own seg_000;
+        // save-as to a different path creates a matching subdir.
+        let csr_target = target_dir.join(CSR_SUBDIR);
+        std::fs::create_dir_all(&csr_target)?;
 
         // Flush any mmap arrays that aren't already in the graph dir
-        // (e.g. node_slots from new_at_path, or if target_dir differs from data_dir)
-        if target_dir != self.data_dir {
+        // (e.g. node_slots from new_at_path, or if csr_target differs from data_dir)
+        if csr_target != self.data_dir {
             self.node_slots
-                .save_to_file(&target_dir.join("node_slots.bin"))?;
+                .save_to_file(&csr_target.join("node_slots.bin"))?;
             self.out_offsets
-                .save_to_file(&target_dir.join("out_offsets.bin"))?;
+                .save_to_file(&csr_target.join("out_offsets.bin"))?;
             self.out_edges
-                .save_to_file(&target_dir.join("out_edges.bin"))?;
+                .save_to_file(&csr_target.join("out_edges.bin"))?;
             self.in_offsets
-                .save_to_file(&target_dir.join("in_offsets.bin"))?;
+                .save_to_file(&csr_target.join("in_offsets.bin"))?;
             self.in_edges
-                .save_to_file(&target_dir.join("in_edges.bin"))?;
+                .save_to_file(&csr_target.join("in_edges.bin"))?;
             self.edge_endpoints
-                .save_to_file(&target_dir.join("edge_endpoints.bin"))?;
+                .save_to_file(&csr_target.join("edge_endpoints.bin"))?;
         }
 
         // Save overflow edges (bincode + zstd)
@@ -2532,10 +2572,11 @@ impl DiskGraph {
         // Save edge properties (columnar: edge_prop_offsets.bin + edge_prop_heap.bin).
         // Always write even when empty so format=1 + zero-length files are
         // self-consistent with the metadata. No interner/guard needed —
-        // the columnar format stores raw u64 hashes directly.
+        // the columnar format stores raw u64 hashes directly. Phase-4
+        // layout puts these alongside the CSR in `csr_target`.
         let upper = self.next_edge_idx;
-        self.edge_properties.save_to(target_dir, upper)?;
-        let edge_props_meta = EdgePropertyStore::meta_for(target_dir);
+        self.edge_properties.save_to(&csr_target, upper)?;
+        let edge_props_meta = EdgePropertyStore::meta_for(&csr_target);
 
         // Trim the conn_type_index mmap'd files to their logical length.
         // `MmapOrVec::mapped(path, initial_cap)` has a 64-element minimum,
@@ -2566,8 +2607,8 @@ impl DiskGraph {
         // Save metadata to target_dir (not data_dir)
         self.write_metadata_to(target_dir, edge_props_meta)?;
 
-        // Also save optional persisted-cache files if present and target differs from data_dir
-        if target_dir != self.data_dir {
+        // Also save optional persisted-cache files if present and csr_target differs from data_dir
+        if csr_target != self.data_dir {
             for fname in [
                 "conn_type_index_types.bin",
                 "conn_type_index_offsets.bin",
@@ -2578,7 +2619,7 @@ impl DiskGraph {
             ] {
                 let src = self.data_dir.join(fname);
                 if src.exists() {
-                    let _ = std::fs::copy(&src, target_dir.join(fname));
+                    let _ = std::fs::copy(&src, csr_target.join(fname));
                 }
             }
         }
@@ -2601,32 +2642,47 @@ impl DiskGraph {
         let meta_str = std::fs::read_to_string(dir.join("disk_graph_meta.json"))?;
         let meta: DiskGraphMeta = serde_json::from_str(&meta_str).map_err(std::io::Error::other)?;
 
+        // PR1 phase 4: CSR binaries live under seg_000/ when the graph
+        // was written with csr_layout_version >= 1. Legacy .kgl directories
+        // (version=0, the serde default) keep the flat layout.
+        let csr_dir: PathBuf = if meta.csr_layout_version >= 1 {
+            dir.join(CSR_SUBDIR)
+        } else {
+            dir.to_path_buf()
+        };
+
         // Temp dir for legacy .zst decompression (only created if needed).
         // Lives inside graph dir so no external temp space required.
         let temp_dir = dir.join("_zst_cache");
 
-        // Load raw .bin directly from graph dir; fall back to .bin.zst if missing
-        let node_slots = load_raw_or_zst(&dir.join("node_slots"), meta.node_slots_len, &temp_dir)?;
-        let out_offsets =
-            load_raw_or_zst(&dir.join("out_offsets"), meta.out_offsets_len, &temp_dir)?;
-        let out_edges = load_raw_or_zst(&dir.join("out_edges"), meta.out_edges_len, &temp_dir)?;
-        let in_offsets = load_raw_or_zst(&dir.join("in_offsets"), meta.in_offsets_len, &temp_dir)?;
-        let in_edges = load_raw_or_zst(&dir.join("in_edges"), meta.in_edges_len, &temp_dir)?;
+        // Load raw .bin directly from csr_dir; fall back to .bin.zst if missing
+        let node_slots =
+            load_raw_or_zst(&csr_dir.join("node_slots"), meta.node_slots_len, &temp_dir)?;
+        let out_offsets = load_raw_or_zst(
+            &csr_dir.join("out_offsets"),
+            meta.out_offsets_len,
+            &temp_dir,
+        )?;
+        let out_edges = load_raw_or_zst(&csr_dir.join("out_edges"), meta.out_edges_len, &temp_dir)?;
+        let in_offsets =
+            load_raw_or_zst(&csr_dir.join("in_offsets"), meta.in_offsets_len, &temp_dir)?;
+        let in_edges = load_raw_or_zst(&csr_dir.join("in_edges"), meta.in_edges_len, &temp_dir)?;
         let edge_endpoints = load_raw_or_zst(
-            &dir.join("edge_endpoints"),
+            &csr_dir.join("edge_endpoints"),
             meta.edge_endpoints_len,
             &temp_dir,
         )?;
 
         // Load edge properties — columnar (format=1) or legacy (format=0).
+        // In the segmented layout the files live alongside the CSR.
         let edge_properties = EdgePropertyStore::load_from(
-            dir,
+            &csr_dir,
             meta.edge_properties_format,
             meta.edge_properties_meta,
             interner,
         )?;
 
-        // Load overflow edges
+        // Load overflow edges (kept at the graph root; orthogonal to segments)
         let (overflow_out, overflow_in) = if dir.join("overflow_edges.bin.zst").exists() {
             let compressed = std::fs::read(dir.join("overflow_edges.bin.zst"))?;
             let bytes = zstd::decode_all(compressed.as_slice()).map_err(std::io::Error::other)?;
@@ -2656,21 +2712,23 @@ impl DiskGraph {
                 overflow_out,
                 overflow_in,
                 free_edge_slots: meta.free_edge_slots,
-                data_dir: dir.to_path_buf(),
+                data_dir: csr_dir.clone(),
                 metadata_dirty: false,
                 csr_sorted_by_type: meta.csr_sorted_by_type,
                 defer_csr: false,
                 edge_type_counts_raw: None,
-                conn_type_index_types: load_raw_or_zst_optional(&dir.join("conn_type_index_types")),
+                conn_type_index_types: load_raw_or_zst_optional(
+                    &csr_dir.join("conn_type_index_types"),
+                ),
                 conn_type_index_offsets: load_raw_or_zst_optional(
-                    &dir.join("conn_type_index_offsets"),
+                    &csr_dir.join("conn_type_index_offsets"),
                 ),
                 conn_type_index_sources: load_raw_or_zst_optional(
-                    &dir.join("conn_type_index_sources"),
+                    &csr_dir.join("conn_type_index_sources"),
                 ),
-                peer_count_types: load_raw_or_zst_optional(&dir.join("peer_count_types")),
-                peer_count_offsets: load_raw_or_zst_optional(&dir.join("peer_count_offsets")),
-                peer_count_entries: load_raw_or_zst_optional(&dir.join("peer_count_entries")),
+                peer_count_types: load_raw_or_zst_optional(&csr_dir.join("peer_count_types")),
+                peer_count_offsets: load_raw_or_zst_optional(&csr_dir.join("peer_count_offsets")),
+                peer_count_entries: load_raw_or_zst_optional(&csr_dir.join("peer_count_entries")),
                 has_tombstones: meta.has_tombstones,
                 property_indexes: std::sync::RwLock::new(HashMap::new()),
                 global_indexes: std::sync::RwLock::new(HashMap::new()),

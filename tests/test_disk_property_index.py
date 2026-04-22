@@ -2,7 +2,9 @@
 
 Verifies that ``create_index`` on a ``storage='disk'`` graph:
   1. Succeeds and reports ``persistent=True``.
-  2. Writes four ``property_index_*`` files next to the CSR.
+  2. Writes four ``property_index_*`` files next to the CSR (in
+     ``seg_000/`` under PR1 phase 4's segmented layout; at the graph
+     root for pre-phase-4 directories).
   3. Is consulted by the Cypher planner on ``WHERE n.prop = 'X'`` queries.
   4. Survives a save/load roundtrip (lazy-loaded on first lookup).
 """
@@ -48,11 +50,15 @@ class TestPersistentIndexBuild:
     def test_create_index_writes_files_to_disk(self, disk_dir):
         g = _build_disk_graph(disk_dir)
         g.create_index("Country", "label")
+        # PR1 phase 4: property-index files live alongside the CSR in
+        # seg_000/ for fresh graphs. Legacy flat-layout directories
+        # would have them at the root — check whichever matches.
         d = Path(disk_dir)
-        assert (d / "property_index_Country_label_meta.bin").exists()
-        assert (d / "property_index_Country_label_keys.bin").exists()
-        assert (d / "property_index_Country_label_offsets.bin").exists()
-        assert (d / "property_index_Country_label_ids.bin").exists()
+        csr_dir = d / "seg_000" if (d / "seg_000").exists() else d
+        assert (csr_dir / "property_index_Country_label_meta.bin").exists()
+        assert (csr_dir / "property_index_Country_label_keys.bin").exists()
+        assert (csr_dir / "property_index_Country_label_offsets.bin").exists()
+        assert (csr_dir / "property_index_Country_label_ids.bin").exists()
 
 
 class TestPlannerRoutesToIndex:
