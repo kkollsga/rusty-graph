@@ -35,6 +35,7 @@ import hashlib
 from pathlib import Path
 import random
 import resource
+import sys
 import tempfile
 
 import pandas as pd
@@ -270,9 +271,11 @@ def test_save_incremental_v0_7_6(tmp_path: Path):
 
 
 def _rss_mb() -> float:
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    # macOS returns bytes; Linux returns KB. 1e9 threshold disambiguates.
-    return usage.ru_maxrss / (1024 * 1024) if usage.ru_maxrss > 1e9 else usage.ru_maxrss / 1024
+    # ru_maxrss is bytes on macOS (darwin), KB on Linux. The previous
+    # threshold-based detection returned 1000× too-large readings for
+    # sub-GB processes on macOS.
+    ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return ru / (1024 * 1024) if sys.platform == "darwin" else ru / 1024
 
 
 def test_save_rss_ceiling(tmp_path: Path):
