@@ -2740,14 +2740,26 @@ impl DiskGraph {
         // was written with csr_layout_version >= 1. Legacy .kgl directories
         // (version=0, the serde default) keep the flat layout.
         //
-        // Phase 6: drive the CSR subdir from `enumerate_segment_dirs` so
-        // phase 7 can produce additional segments without touching this
-        // block. Today every segmented graph has exactly one subdir —
-        // `seg_000/`. Multi-segment graphs aren't yet written, so we
-        // require exactly one segment here and error otherwise; the
-        // multi-segment read path lands in phase 7 alongside the multi-
-        // segment write path.
-        let csr_dir: PathBuf = if meta.csr_layout_version >= 1 {
+        // Phase 6 added `enumerate_segment_dirs`; phase 7 wires the
+        // multi-segment concat read path through it. For csr_layout
+        // version >= 1 the CSR dir choice (single-segment) or the
+        // concat'd combined arrays (multi-segment) come out of this
+        // block. Writes are still single-segment today (phase 8 will
+        // seal overflow into additional segments), so the N>1 branch
+        // is only exercised by unit tests on `concat_segment_csrs`
+        // until then.
+        //
+        // Auxiliary per-segment data (conn_type_index_*, peer_count_*,
+        // edge_properties, column_stores, per-(type,prop) property
+        // indexes) is still loaded from segment 0 only in the N>1
+        // branch — that's a documented limitation on `SegmentCsr`
+        // pending phase 8. No code path produces an N>1 graph today,
+        // so no running workload sees it.
+        // Temp dir for legacy .zst decompression (only created if needed).
+        // Lives inside graph dir so no external temp space required.
+        let temp_dir = dir.join("_zst_cache");
+
+        let (csr_dir, segment_csr): (PathBuf, SegmentCsr) = if meta.csr_layout_version >= 1 {
             let segs = enumerate_segment_dirs(dir);
             match segs.len() {
                 0 => {
@@ -2757,40 +2769,97 @@ impl DiskGraph {
                         dir.display()
                     )));
                 }
-                1 => segs.into_iter().next().unwrap().1,
-                n => {
-                    return Err(std::io::Error::other(format!(
-                        "multi-segment load not yet supported ({n} segments under {}); \
-                         phase 7 adds the concatenating read path",
-                        dir.display()
-                    )));
+                1 => {
+                    // Single-segment: stay on the direct mmap path using
+                    // the graph-level `meta.*_len` values. No allocation,
+                    // zero overhead vs pre-phase-7 load.
+                    let seg_dir = segs.into_iter().next().unwrap().1;
+                    let csr = SegmentCsr {
+                        node_slots: load_raw_or_zst(
+                            &seg_dir.join("node_slots"),
+                            meta.node_slots_len,
+                            &temp_dir,
+                        )?,
+                        out_offsets: load_raw_or_zst(
+                            &seg_dir.join("out_offsets"),
+                            meta.out_offsets_len,
+                            &temp_dir,
+                        )?,
+                        out_edges: load_raw_or_zst(
+                            &seg_dir.join("out_edges"),
+                            meta.out_edges_len,
+                            &temp_dir,
+                        )?,
+                        in_offsets: load_raw_or_zst(
+                            &seg_dir.join("in_offsets"),
+                            meta.in_offsets_len,
+                            &temp_dir,
+                        )?,
+                        in_edges: load_raw_or_zst(
+                            &seg_dir.join("in_edges"),
+                            meta.in_edges_len,
+                            &temp_dir,
+                        )?,
+                        edge_endpoints: load_raw_or_zst(
+                            &seg_dir.join("edge_endpoints"),
+                            meta.edge_endpoints_len,
+                            &temp_dir,
+                        )?,
+                    };
+                    (seg_dir, csr)
+                }
+                _ => {
+                    // Multi-segment: load each segment via the file-size-
+                    // inferring loader, then concat. The first segment's
+                    // path doubles as `data_dir` — that's where the
+                    // auxiliary-indexes limitation points.
+                    let mut loaded = Vec::with_capacity(segs.len());
+                    let first_dir = segs[0].1.clone();
+                    for (_, sdir) in &segs {
+                        loaded.push(SegmentCsr::load_from(sdir, &temp_dir)?);
+                    }
+                    let csr = concat_segment_csrs(loaded);
+                    (first_dir, csr)
                 }
             }
         } else {
-            dir.to_path_buf()
+            // Legacy flat layout: load from root as one segment, using
+            // meta's *_len values. Same code as phase 6 once unwrapped.
+            let csr = SegmentCsr {
+                node_slots: load_raw_or_zst(
+                    &dir.join("node_slots"),
+                    meta.node_slots_len,
+                    &temp_dir,
+                )?,
+                out_offsets: load_raw_or_zst(
+                    &dir.join("out_offsets"),
+                    meta.out_offsets_len,
+                    &temp_dir,
+                )?,
+                out_edges: load_raw_or_zst(&dir.join("out_edges"), meta.out_edges_len, &temp_dir)?,
+                in_offsets: load_raw_or_zst(
+                    &dir.join("in_offsets"),
+                    meta.in_offsets_len,
+                    &temp_dir,
+                )?,
+                in_edges: load_raw_or_zst(&dir.join("in_edges"), meta.in_edges_len, &temp_dir)?,
+                edge_endpoints: load_raw_or_zst(
+                    &dir.join("edge_endpoints"),
+                    meta.edge_endpoints_len,
+                    &temp_dir,
+                )?,
+            };
+            (dir.to_path_buf(), csr)
         };
 
-        // Temp dir for legacy .zst decompression (only created if needed).
-        // Lives inside graph dir so no external temp space required.
-        let temp_dir = dir.join("_zst_cache");
-
-        // Load raw .bin directly from csr_dir; fall back to .bin.zst if missing
-        let node_slots =
-            load_raw_or_zst(&csr_dir.join("node_slots"), meta.node_slots_len, &temp_dir)?;
-        let out_offsets = load_raw_or_zst(
-            &csr_dir.join("out_offsets"),
-            meta.out_offsets_len,
-            &temp_dir,
-        )?;
-        let out_edges = load_raw_or_zst(&csr_dir.join("out_edges"), meta.out_edges_len, &temp_dir)?;
-        let in_offsets =
-            load_raw_or_zst(&csr_dir.join("in_offsets"), meta.in_offsets_len, &temp_dir)?;
-        let in_edges = load_raw_or_zst(&csr_dir.join("in_edges"), meta.in_edges_len, &temp_dir)?;
-        let edge_endpoints = load_raw_or_zst(
-            &csr_dir.join("edge_endpoints"),
-            meta.edge_endpoints_len,
-            &temp_dir,
-        )?;
+        let SegmentCsr {
+            node_slots,
+            out_offsets,
+            out_edges,
+            in_offsets,
+            in_edges,
+            edge_endpoints,
+        } = segment_csr;
 
         // Load edge properties — columnar (format=1) or legacy (format=0).
         // In the segmented layout the files live alongside the CSR.
@@ -2927,10 +2996,269 @@ fn load_compressed<T: Copy + Default + 'static>(
     MmapOrVec::load_mapped(&temp_path, len)
 }
 
+// ============================================================================
+// Multi-segment CSR (PR1 phase 7)
+// ============================================================================
+
+/// One segment's core CSR arrays, loaded from its subdirectory. Used
+/// only when a graph spans multiple `seg_NNN/` dirs — single-segment
+/// graphs continue on the direct mmap path in [`DiskGraph::load_from_dir`]
+/// for zero-overhead compatibility with every existing `.kgl` directory.
+///
+/// The arrays bundled here are the CSR backbone:
+///
+///   - `node_slots`: one `DiskNodeSlot` per node in this segment (the
+///     segment owns a disjoint node-id range reported in its
+///     `SegmentSummary`).
+///   - `out_offsets` / `in_offsets`: CSR offsets into `out_edges` /
+///     `in_edges`, indexed by local node position inside the segment.
+///     Length = `node_slots.len() + 1`.
+///   - `out_edges` / `in_edges`: `CsrEdge` arrays. Each entry's
+///     `edge_idx` is **segment-local** (`0..edge_endpoints.len()`),
+///     so concat shifts them onto combined edge_endpoints.
+///   - `edge_endpoints`: `EdgeEndpoints` array, one per edge recorded
+///     in this segment. `source` / `target` store *global* node ids
+///     (unchanged by concat).
+///
+/// The auxiliary inverted indexes (`conn_type_index_*`, `peer_count_*`)
+/// and the `edge_properties` / `column_stores` / per-type property
+/// indexes are **not** bundled here — they remain loaded from segment 0
+/// only. That's a known limitation pending the phase 8 multi-segment
+/// write path, which will exercise it end-to-end. No current code
+/// produces multi-segment graphs, so no existing workload sees the
+/// limitation today.
+pub(crate) struct SegmentCsr {
+    pub(crate) node_slots: MmapOrVec<super::csr::DiskNodeSlot>,
+    pub(crate) out_offsets: MmapOrVec<u64>,
+    pub(crate) out_edges: MmapOrVec<super::csr::CsrEdge>,
+    pub(crate) in_offsets: MmapOrVec<u64>,
+    pub(crate) in_edges: MmapOrVec<super::csr::CsrEdge>,
+    pub(crate) edge_endpoints: MmapOrVec<super::csr::EdgeEndpoints>,
+}
+
+impl SegmentCsr {
+    /// Load the core CSR arrays from `csr_dir`, inferring each array's
+    /// length from the file size (matches `load_raw_or_zst_optional`).
+    /// Legacy `.bin.zst` fallback uses `temp_dir` for the decompressed
+    /// staging files.
+    pub(crate) fn load_from(csr_dir: &Path, temp_dir: &Path) -> std::io::Result<Self> {
+        Ok(SegmentCsr {
+            node_slots: load_with_inferred_len(&csr_dir.join("node_slots"), temp_dir)?,
+            out_offsets: load_with_inferred_len(&csr_dir.join("out_offsets"), temp_dir)?,
+            out_edges: load_with_inferred_len(&csr_dir.join("out_edges"), temp_dir)?,
+            in_offsets: load_with_inferred_len(&csr_dir.join("in_offsets"), temp_dir)?,
+            in_edges: load_with_inferred_len(&csr_dir.join("in_edges"), temp_dir)?,
+            edge_endpoints: load_with_inferred_len(&csr_dir.join("edge_endpoints"), temp_dir)?,
+        })
+    }
+}
+
+/// Like [`load_raw_or_zst`] but derives the element count from the file
+/// size on disk rather than from a pre-known length. Used in the multi-
+/// segment load path, where `DiskGraphMeta`'s `*_len` fields describe
+/// the *graph-level* concat total, not any one segment.
+fn load_with_inferred_len<T: Copy + Default + 'static>(
+    base_path: &Path,
+    temp_dir: &Path,
+) -> std::io::Result<MmapOrVec<T>> {
+    let elem = std::mem::size_of::<T>();
+    let raw_path = base_path.with_extension("bin");
+    if raw_path.exists() && elem > 0 {
+        let bytes = std::fs::metadata(&raw_path)?.len() as usize;
+        let len = bytes / elem;
+        if len > 0 {
+            return MmapOrVec::load_mapped(&raw_path, len);
+        }
+    }
+    let zst_path = base_path.with_extension("bin.zst");
+    if zst_path.exists() && elem > 0 {
+        // Legacy path: zstd stream doesn't carry the element count in
+        // metadata, so we decompress to a temp file and infer from its
+        // size. Matches `load_raw_or_zst`'s `load_compressed` flow,
+        // minus the advance length check.
+        std::fs::create_dir_all(temp_dir)?;
+        let compressed = std::fs::read(&zst_path)?;
+        let raw = zstd::decode_all(compressed.as_slice())?;
+        let file_name = zst_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("data")
+            .trim_end_matches(".zst");
+        let temp_path = temp_dir.join(file_name);
+        std::fs::write(&temp_path, &raw)?;
+        let len = raw.len() / elem;
+        if len > 0 {
+            return MmapOrVec::load_mapped(&temp_path, len);
+        }
+    }
+    Ok(MmapOrVec::new())
+}
+
+/// Combine per-segment CSR arrays into a single unified CSR by
+/// concatenating node_slots / edge_endpoints, stitching offsets, and
+/// shifting each segment's `edge_idx` values onto the combined
+/// `edge_endpoints` numbering.
+///
+/// Single-segment input is returned as-is — the `Vec<SegmentCsr>` is
+/// popped once and no allocation happens, so the N==1 case pays
+/// essentially nothing beyond the function call.
+///
+/// The returned `SegmentCsr` is always `MmapOrVec::Vec`-backed — it
+/// does not touch the filesystem. A graph-level page cache concat-to-
+/// disk would be a future win; for now the in-memory combined CSR is
+/// what the read path sees.
+///
+/// Assumptions on inputs (documented so the phase-8 writer obeys them):
+///   1. Segments are provided in manifest order (ascending
+///      `segment_id`), covering contiguous disjoint node-id ranges
+///      `[0, n_0) + [n_0, n_0 + n_1) + ...`. The caller
+///      ([`DiskGraph::load_from_dir`]) preserves `enumerate_segment_dirs`
+///      ordering.
+///   2. Each segment's `out_offsets` / `in_offsets` is segment-local:
+///      `out_offsets[0] == 0`, `out_offsets[last] == out_edges.len()`.
+///   3. Each segment's `CsrEdge::edge_idx` values are segment-local
+///      (`0..edge_endpoints.len()`).
+///   4. `EdgeEndpoints::{source, target}` hold *global* node ids and
+///      are never rewritten by concat.
+///
+/// Violations produce a garbage combined CSR; the assumptions are
+/// phase 7's contract with phase 8's writer.
+pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> SegmentCsr {
+    use super::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints};
+    match segments.len() {
+        0 => SegmentCsr {
+            node_slots: MmapOrVec::new(),
+            out_offsets: MmapOrVec::new(),
+            out_edges: MmapOrVec::new(),
+            in_offsets: MmapOrVec::new(),
+            in_edges: MmapOrVec::new(),
+            edge_endpoints: MmapOrVec::new(),
+        },
+        1 => segments.pop().unwrap(),
+        _ => {
+            // Pre-size everything.
+            let total_nodes: usize = segments.iter().map(|s| s.node_slots.len()).sum();
+            let total_out_edges: usize = segments.iter().map(|s| s.out_edges.len()).sum();
+            let total_in_edges: usize = segments.iter().map(|s| s.in_edges.len()).sum();
+            let total_endpoints: usize = segments.iter().map(|s| s.edge_endpoints.len()).sum();
+
+            let mut node_slots: MmapOrVec<DiskNodeSlot> = MmapOrVec::with_capacity(total_nodes);
+            let mut edge_endpoints: MmapOrVec<EdgeEndpoints> =
+                MmapOrVec::with_capacity(total_endpoints);
+            let mut out_offsets: MmapOrVec<u64> = MmapOrVec::with_capacity(total_nodes + 1);
+            let mut out_edges: MmapOrVec<CsrEdge> = MmapOrVec::with_capacity(total_out_edges);
+            let mut in_offsets: MmapOrVec<u64> = MmapOrVec::with_capacity(total_nodes + 1);
+            let mut in_edges: MmapOrVec<CsrEdge> = MmapOrVec::with_capacity(total_in_edges);
+
+            // Offsets are cumulative: offset[0] = 0 for the first segment,
+            // and each subsequent segment's local offsets get shifted by
+            // the prior segments' edge-array length.
+            out_offsets.push(0);
+            in_offsets.push(0);
+
+            let mut out_edge_base: u64 = 0;
+            let mut in_edge_base: u64 = 0;
+            let mut endpoint_base: u32 = 0;
+
+            for seg in &segments {
+                // Node slots: straight concat.
+                for i in 0..seg.node_slots.len() {
+                    node_slots.push(seg.node_slots.get(i));
+                }
+
+                // Edge endpoints: straight concat — source/target are
+                // already global node ids.
+                for i in 0..seg.edge_endpoints.len() {
+                    edge_endpoints.push(seg.edge_endpoints.get(i));
+                }
+
+                // out_offsets: append entries [1..=n_k] of the segment's
+                // local offsets, each shifted by `out_edge_base`.
+                // Element 0 of every segment is 0, which is subsumed by
+                // the previous segment's last entry after the shift.
+                let n_nodes_k = seg.node_slots.len();
+                for i in 1..=n_nodes_k {
+                    out_offsets.push(seg.out_offsets.get(i) + out_edge_base);
+                }
+                for i in 1..=n_nodes_k {
+                    in_offsets.push(seg.in_offsets.get(i) + in_edge_base);
+                }
+
+                // out_edges / in_edges: concat, shifting each entry's
+                // segment-local edge_idx onto the combined endpoint
+                // numbering.
+                for i in 0..seg.out_edges.len() {
+                    let mut e = seg.out_edges.get(i);
+                    e.edge_idx = e.edge_idx.wrapping_add(endpoint_base);
+                    out_edges.push(e);
+                }
+                for i in 0..seg.in_edges.len() {
+                    let mut e = seg.in_edges.get(i);
+                    e.edge_idx = e.edge_idx.wrapping_add(endpoint_base);
+                    in_edges.push(e);
+                }
+
+                out_edge_base += seg.out_edges.len() as u64;
+                in_edge_base += seg.in_edges.len() as u64;
+                endpoint_base += seg.edge_endpoints.len() as u32;
+            }
+
+            SegmentCsr {
+                node_slots,
+                out_offsets,
+                out_edges,
+                in_offsets,
+                in_edges,
+                edge_endpoints,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{enumerate_segment_dirs, segment_subdir};
+    use super::{concat_segment_csrs, enumerate_segment_dirs, segment_subdir, SegmentCsr};
+    use crate::graph::storage::disk::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints};
+    use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
     use tempfile::TempDir;
+
+    // ------------- fixture helpers -------------
+
+    fn seg(
+        node_slots: Vec<DiskNodeSlot>,
+        out_offsets: Vec<u64>,
+        out_edges: Vec<CsrEdge>,
+        in_offsets: Vec<u64>,
+        in_edges: Vec<CsrEdge>,
+        edge_endpoints: Vec<EdgeEndpoints>,
+    ) -> SegmentCsr {
+        SegmentCsr {
+            node_slots: from_vec(node_slots),
+            out_offsets: from_vec(out_offsets),
+            out_edges: from_vec(out_edges),
+            in_offsets: from_vec(in_offsets),
+            in_edges: from_vec(in_edges),
+            edge_endpoints: from_vec(edge_endpoints),
+        }
+    }
+
+    fn from_vec<T: Copy + Default + 'static>(v: Vec<T>) -> MmapOrVec<T> {
+        let mut m: MmapOrVec<T> = MmapOrVec::with_capacity(v.len());
+        for x in v {
+            m.push(x);
+        }
+        m
+    }
+
+    fn slot(node_type: u64, row_id: u32) -> DiskNodeSlot {
+        DiskNodeSlot {
+            node_type,
+            row_id,
+            flags: DiskNodeSlot::ALIVE_BIT,
+        }
+    }
+
+    // ------------- segment_subdir + enumerate (pre-phase-7 cases) -------------
 
     #[test]
     fn segment_subdir_zero_pads_three_digits() {
@@ -2984,5 +3312,269 @@ mod tests {
     fn enumerate_segment_dirs_empty_root_returns_empty() {
         let tmp = TempDir::new().unwrap();
         assert!(enumerate_segment_dirs(tmp.path()).is_empty());
+    }
+
+    // ------------- concat_segment_csrs (phase 7) -------------
+
+    #[test]
+    fn concat_empty_input_returns_all_empty() {
+        let c = concat_segment_csrs(Vec::new());
+        assert_eq!(c.node_slots.len(), 0);
+        assert_eq!(c.out_offsets.len(), 0);
+        assert_eq!(c.out_edges.len(), 0);
+        assert_eq!(c.in_offsets.len(), 0);
+        assert_eq!(c.in_edges.len(), 0);
+        assert_eq!(c.edge_endpoints.len(), 0);
+    }
+
+    #[test]
+    fn concat_single_segment_returns_it_unchanged() {
+        // Node 0 → node 1 (edge_idx 0). One node, one edge for simplicity
+        // of comparison: passthrough must not mutate anything.
+        let s = seg(
+            vec![slot(7, 100), slot(7, 101)],
+            vec![0, 1, 1], // out_offsets: node 0 emits edge [0,1), node 1 emits nothing
+            vec![CsrEdge {
+                peer: 1,
+                edge_idx: 0,
+            }],
+            vec![0, 0, 1], // in_offsets: node 0 receives nothing, node 1 receives [0,1)
+            vec![CsrEdge {
+                peer: 0,
+                edge_idx: 0,
+            }],
+            vec![EdgeEndpoints {
+                source: 0,
+                target: 1,
+                connection_type: 42,
+            }],
+        );
+        let c = concat_segment_csrs(vec![s]);
+        assert_eq!(c.node_slots.len(), 2);
+        assert_eq!(c.out_offsets.len(), 3);
+        assert_eq!(c.out_edges.len(), 1);
+        assert_eq!(c.out_edges.get(0).edge_idx, 0); // unchanged
+        assert_eq!(c.edge_endpoints.len(), 1);
+        assert_eq!(c.edge_endpoints.get(0).source, 0);
+    }
+
+    #[test]
+    fn concat_two_segments_stitches_offsets_and_shifts_edge_idx() {
+        // Segment 0: 2 nodes, 1 intra-segment edge  0 → 1
+        let s0 = seg(
+            vec![slot(1, 10), slot(1, 11)],
+            vec![0, 1, 1],
+            vec![CsrEdge {
+                peer: 1,
+                edge_idx: 0,
+            }],
+            vec![0, 0, 1],
+            vec![CsrEdge {
+                peer: 0,
+                edge_idx: 0,
+            }],
+            vec![EdgeEndpoints {
+                source: 0,
+                target: 1,
+                connection_type: 100,
+            }],
+        );
+        // Segment 1: 2 nodes (global ids 2, 3), 2 intra-segment edges
+        // 2 → 3 (segment-local edge_idx 0) and 3 → 2 (segment-local 1).
+        let s1 = seg(
+            vec![slot(2, 20), slot(2, 21)],
+            vec![0, 1, 2],
+            vec![
+                CsrEdge {
+                    peer: 3,
+                    edge_idx: 0,
+                },
+                CsrEdge {
+                    peer: 2,
+                    edge_idx: 1,
+                },
+            ],
+            vec![0, 1, 2],
+            vec![
+                CsrEdge {
+                    peer: 3,
+                    edge_idx: 1,
+                },
+                CsrEdge {
+                    peer: 2,
+                    edge_idx: 0,
+                },
+            ],
+            vec![
+                EdgeEndpoints {
+                    source: 2,
+                    target: 3,
+                    connection_type: 200,
+                },
+                EdgeEndpoints {
+                    source: 3,
+                    target: 2,
+                    connection_type: 201,
+                },
+            ],
+        );
+
+        let c = concat_segment_csrs(vec![s0, s1]);
+
+        // Shape.
+        assert_eq!(c.node_slots.len(), 4);
+        assert_eq!(c.out_offsets.len(), 5); // n+1
+        assert_eq!(c.in_offsets.len(), 5);
+        assert_eq!(c.out_edges.len(), 3);
+        assert_eq!(c.in_edges.len(), 3);
+        assert_eq!(c.edge_endpoints.len(), 3);
+
+        // Stitched out_offsets: [0, 1, 1, 2, 3] — seg 0 contributes
+        // [0,1,1]; seg 1 contributes [+1, +2] atop seg 0's last (=1),
+        // so combined ends [..., 2, 3].
+        let out_off: Vec<u64> = (0..c.out_offsets.len())
+            .map(|i| c.out_offsets.get(i))
+            .collect();
+        assert_eq!(out_off, vec![0, 1, 1, 2, 3]);
+
+        // Stitched in_offsets: [0, 0, 1, 2, 3] — seg 0 [0,0,1]; seg 1
+        // contributes [+1, +2].
+        let in_off: Vec<u64> = (0..c.in_offsets.len())
+            .map(|i| c.in_offsets.get(i))
+            .collect();
+        assert_eq!(in_off, vec![0, 0, 1, 2, 3]);
+
+        // out_edges[0] comes from seg 0, edge_idx unchanged (0).
+        // out_edges[1..3] come from seg 1, edge_idx shifted by seg 0's
+        // edge_endpoints.len() == 1 → (1, 2).
+        assert_eq!(c.out_edges.get(0).edge_idx, 0);
+        assert_eq!(c.out_edges.get(0).peer, 1);
+        assert_eq!(c.out_edges.get(1).edge_idx, 1);
+        assert_eq!(c.out_edges.get(1).peer, 3);
+        assert_eq!(c.out_edges.get(2).edge_idx, 2);
+        assert_eq!(c.out_edges.get(2).peer, 2);
+
+        // in_edges shifts follow the same rule.
+        assert_eq!(c.in_edges.get(0).edge_idx, 0); // seg 0, unchanged
+        assert_eq!(c.in_edges.get(1).edge_idx, 2); // seg 1, +1
+        assert_eq!(c.in_edges.get(2).edge_idx, 1); // seg 1, +1
+
+        // edge_endpoints concat — source/target are global node ids.
+        assert_eq!(c.edge_endpoints.get(0).source, 0);
+        assert_eq!(c.edge_endpoints.get(0).target, 1);
+        assert_eq!(c.edge_endpoints.get(1).source, 2);
+        assert_eq!(c.edge_endpoints.get(1).target, 3);
+        assert_eq!(c.edge_endpoints.get(2).source, 3);
+        assert_eq!(c.edge_endpoints.get(2).target, 2);
+    }
+
+    #[test]
+    fn concat_three_segments_keeps_offset_chain_consistent() {
+        // Three one-node-one-self-edge segments. Verifies that the
+        // cumulative shifts carry through multiple iterations.
+        let mk_one_node = |global_id: u32, conn: u64| {
+            seg(
+                vec![slot(1, 0)],
+                vec![0, 1],
+                vec![CsrEdge {
+                    peer: global_id,
+                    edge_idx: 0,
+                }],
+                vec![0, 1],
+                vec![CsrEdge {
+                    peer: global_id,
+                    edge_idx: 0,
+                }],
+                vec![EdgeEndpoints {
+                    source: global_id,
+                    target: global_id,
+                    connection_type: conn,
+                }],
+            )
+        };
+        let c = concat_segment_csrs(vec![
+            mk_one_node(0, 10),
+            mk_one_node(1, 20),
+            mk_one_node(2, 30),
+        ]);
+
+        let out_off: Vec<u64> = (0..c.out_offsets.len())
+            .map(|i| c.out_offsets.get(i))
+            .collect();
+        assert_eq!(out_off, vec![0, 1, 2, 3]);
+
+        // Each out_edges entry's edge_idx should point at its own
+        // self-loop's endpoint in the combined array — segment K's
+        // endpoint lands at index K.
+        assert_eq!(c.out_edges.get(0).edge_idx, 0);
+        assert_eq!(c.out_edges.get(1).edge_idx, 1);
+        assert_eq!(c.out_edges.get(2).edge_idx, 2);
+
+        // The endpoint at edge_idx K should be the self-loop of node K.
+        for k in 0..3 {
+            assert_eq!(c.edge_endpoints.get(k).source, k as u32);
+            assert_eq!(c.edge_endpoints.get(k).target, k as u32);
+        }
+    }
+
+    #[test]
+    fn concat_handles_edgeless_segment() {
+        // A segment with nodes but no edges (e.g. a freshly-created
+        // empty segment). Offsets must still stitch correctly.
+        let s0 = seg(
+            vec![slot(1, 0)],
+            vec![0, 1],
+            vec![CsrEdge {
+                peer: 0,
+                edge_idx: 0,
+            }],
+            vec![0, 1],
+            vec![CsrEdge {
+                peer: 0,
+                edge_idx: 0,
+            }],
+            vec![EdgeEndpoints {
+                source: 0,
+                target: 0,
+                connection_type: 1,
+            }],
+        );
+        let s_empty = seg(
+            vec![slot(1, 1)],
+            vec![0, 0],
+            Vec::new(),
+            vec![0, 0],
+            Vec::new(),
+            Vec::new(),
+        );
+        let s1 = seg(
+            vec![slot(1, 2)],
+            vec![0, 1],
+            vec![CsrEdge {
+                peer: 2,
+                edge_idx: 0,
+            }],
+            vec![0, 1],
+            vec![CsrEdge {
+                peer: 2,
+                edge_idx: 0,
+            }],
+            vec![EdgeEndpoints {
+                source: 2,
+                target: 2,
+                connection_type: 3,
+            }],
+        );
+        let c = concat_segment_csrs(vec![s0, s_empty, s1]);
+        let out_off: Vec<u64> = (0..c.out_offsets.len())
+            .map(|i| c.out_offsets.get(i))
+            .collect();
+        // 3 nodes total; middle node contributes no edges.
+        assert_eq!(out_off, vec![0, 1, 1, 2]);
+        assert_eq!(c.out_edges.len(), 2);
+        // Segment 2 (index 2 in the input) had endpoint_base of
+        // s0.edge_endpoints.len() + s_empty.edge_endpoints.len() == 1,
+        // so its self-loop's edge_idx should now be 1.
+        assert_eq!(c.out_edges.get(1).edge_idx, 1);
     }
 }
