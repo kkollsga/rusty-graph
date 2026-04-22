@@ -145,6 +145,15 @@ pub struct DiskGraph {
     // patterns like `MATCH (n {label: 'X'})` where the agent doesn't
     // know the node type.
     pub(crate) global_indexes: GlobalIndexCache,
+    // ── Segment manifest (PR1 phase 2, single-segment view today).
+    //
+    // Persisted at `seg_manifest.json` alongside the CSR files. Legacy
+    // graphs that lack the file load as an empty manifest — the planner
+    // treats that as "pre-segmented, don't prune" in subsequent phases.
+    // Fresh saves always write a one-segment manifest describing the
+    // whole graph; PR1 phase 3+ will split into multiple segments once
+    // the segmented CSR layout lands.
+    pub(crate) segment_manifest: super::segment_summary::SegmentManifest,
     // ── Temp dir for CSR mmap files (cleaned up on Drop) ──
 }
 
@@ -265,6 +274,7 @@ impl DiskGraph {
             has_tombstones: false,
             property_indexes: std::sync::RwLock::new(HashMap::new()),
             global_indexes: std::sync::RwLock::new(HashMap::new()),
+            segment_manifest: super::segment_summary::SegmentManifest::new(),
         })
     }
 
@@ -427,6 +437,7 @@ impl DiskGraph {
             has_tombstones: false,
             global_indexes: std::sync::RwLock::new(HashMap::new()),
             property_indexes: std::sync::RwLock::new(HashMap::new()),
+            segment_manifest: super::segment_summary::SegmentManifest::new(),
         })
     }
 
@@ -2016,6 +2027,7 @@ impl Clone for DiskGraph {
             global_indexes: std::sync::RwLock::new(HashMap::new()),
             has_tombstones: self.has_tombstones,
             property_indexes: std::sync::RwLock::new(HashMap::new()),
+            segment_manifest: self.segment_manifest.clone(),
         }
     }
 }
@@ -2430,6 +2442,54 @@ impl DiskGraph {
         std::fs::write(dir.join("disk_graph_meta.json"), json)
     }
 
+    /// Build a single-segment summary covering the whole graph. PR1 phase 2
+    /// — subsequent phases split the graph into multiple segments and this
+    /// helper becomes one of several per-segment builders.
+    ///
+    /// conn_types are read from the conn_type_index (built alongside the
+    /// CSR), so the summary only reflects types that made it into the
+    /// index — typically all of them after a save-time compact. Node type
+    /// counts come from `column_stores` (one entry per node type); the
+    /// count is the stored row count minus any tombstone slack (which we
+    /// don't tally precisely here — the planner treats `has_node_type` as
+    /// a lower-bound predicate).
+    fn build_single_segment_manifest(&self) -> super::segment_summary::SegmentManifest {
+        use super::segment_summary::{SegmentManifest, SegmentSummary};
+        let mut summary = SegmentSummary::new(0, 0);
+        summary.node_id_hi = self.node_count as u32;
+        summary.edge_count = self.edge_count as u64;
+
+        // Connection types: iterate the persisted inverted-index u64 list.
+        for i in 0..self.conn_type_index_types.len() {
+            summary.conn_types.insert(self.conn_type_index_types.get(i));
+        }
+        // Also include overflow edge conn_types that may not yet be in
+        // the persisted index (post-CSR mutations).
+        for edges in self.overflow_out.values() {
+            for e in edges {
+                if e.edge_idx == TOMBSTONE_EDGE {
+                    continue;
+                }
+                let ct = self.edge_endpoints.get(e.edge_idx as usize).connection_type;
+                summary.conn_types.insert(ct);
+            }
+        }
+
+        // Node type counts: one column_store per node type.
+        // `row_count` includes tombstoned rows — conservative upper
+        // bound is fine for planner pruning (the planner uses these
+        // only as "any rows of this type?" predicates).
+        for (type_key, store) in &self.column_stores {
+            summary
+                .node_type_counts
+                .insert(type_key.as_u64(), store.row_count());
+        }
+
+        let mut manifest = SegmentManifest::new();
+        manifest.append(summary);
+        manifest
+    }
+
     /// Save disk graph state. For disk mode, binary arrays are already on disk
     /// via mmap — this only flushes metadata + any in-memory overflow/properties.
     ///
@@ -2494,6 +2554,14 @@ impl DiskGraph {
         if let Some(path) = self.conn_type_index_sources.file_path().map(PathBuf::from) {
             let _ = self.conn_type_index_sources.save_to_file(&path);
         }
+
+        // PR1 phase 2: compute and persist a single-segment manifest.
+        // Subsequent phases split saves into multiple segments; today the
+        // manifest describes the whole graph as one segment so the planner
+        // hook can be wired up without changing read-path behaviour.
+        let manifest = self.build_single_segment_manifest();
+        manifest.save_to(target_dir)?;
+        self.segment_manifest = manifest;
 
         // Save metadata to target_dir (not data_dir)
         self.write_metadata_to(target_dir, edge_props_meta)?;
@@ -2606,6 +2674,11 @@ impl DiskGraph {
                 has_tombstones: meta.has_tombstones,
                 property_indexes: std::sync::RwLock::new(HashMap::new()),
                 global_indexes: std::sync::RwLock::new(HashMap::new()),
+                // Legacy .kgl directories have no seg_manifest.json;
+                // load_from returns an empty manifest which subsequent
+                // PR1 phases treat as "pre-segmented, don't prune".
+                segment_manifest: super::segment_summary::SegmentManifest::load_from(dir)
+                    .unwrap_or_default(),
             },
             temp_dir,
         ))
