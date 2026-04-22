@@ -46,6 +46,22 @@ SODIR_BUILD_SCRIPT = Path("/Volumes/EksternalHome/Koding/MCP servers")
 SODIR_BLUEPRINT = str(Path(__file__).resolve().parent / "sodir_graph_config.json")
 WIKIDATA_500K = "/Volumes/EksternalHome/Data/Wikidata/test_500k.nt.zst"
 WIKIDATA_5M = "/Volumes/EksternalHome/Data/Wikidata/test_5M.nt.zst"
+WIKIDATA_50M = "/Volumes/EksternalHome/Data/Wikidata/test_50M.nt.zst"
+WIKIDATA_100M = "/Volumes/EksternalHome/Data/Wikidata/test_100M.nt.zst"
+WIKIDATA_200M = "/Volumes/EksternalHome/Data/Wikidata/test_200M.nt.zst"
+
+# (label, path, nominal triple count)
+# Nominal count is the number of lines the subset was sliced at via
+# `make_wikidata_subset.sh`; the actual graph-level node/edge counts
+# are much smaller because load_ntriples collapses labels/types into
+# node attributes. Used for triples/s reporting on build.
+WIKIDATA_SUBSETS = [
+    ("wiki500k", WIKIDATA_500K, 500_000),
+    ("wiki5m", WIKIDATA_5M, 5_000_000),
+    ("wiki50m", WIKIDATA_50M, 50_000_000),
+    ("wiki100m", WIKIDATA_100M, 100_000_000),
+    ("wiki200m", WIKIDATA_200M, 200_000_000),
+]
 
 TIMEOUT_MS = 10_000
 
@@ -214,9 +230,57 @@ PROSPECT_QUERIES = [
 ]
 
 WIKIDATA_QUERIES = [
+    # Anchor on edge type — simple walk, works on every wiki subset size.
     (
         "P31 LIMIT 50",
         "MATCH (a)-[:P31]->(b) RETURN a.title, b.title ORDER BY a.title, b.title LIMIT 50",
+        True,
+    ),
+    # Anchor on node type (Q5 = human, the most populated class in Wikidata).
+    (
+        "Q5 (human) lookup",
+        "MATCH (h:Q5) RETURN h.title ORDER BY h.title LIMIT 10",
+        True,
+    ),
+    # Aggregation with LIMIT — counts every :P31 edge and returns top 10 classes.
+    (
+        "P31 class counts",
+        "MATCH ()-[:P31]->(c) RETURN c.title, count(*) AS k ORDER BY k DESC, c.title LIMIT 10",
+        True,
+    ),
+    # Two-hop through the type hierarchy (instance-of → subclass-of).
+    (
+        "2-hop P31 + P279",
+        "MATCH (a)-[:P31]->(b)-[:P279]->(c) "
+        "RETURN a.title, c.title ORDER BY a.title, c.title LIMIT 10",
+        True,
+    ),
+    # Different edge type (P27 = citizenship) anchored on Q5.
+    (
+        "Human citizenship (P27)",
+        "MATCH (h:Q5)-[:P27]->(c) "
+        "RETURN h.title, c.title ORDER BY h.title, c.title LIMIT 10",
+        True,
+    ),
+    # OPTIONAL MATCH path — left-joins P27 onto every Q5.
+    (
+        "OPTIONAL citizenship",
+        "MATCH (h:Q5) OPTIONAL MATCH (h)-[:P27]->(c) "
+        "RETURN h.title, c.title ORDER BY h.title LIMIT 10",
+        True,
+    ),
+    # EXISTS subquery — humans with any citizenship edge.
+    (
+        "EXISTS P27",
+        "MATCH (h:Q5) WHERE EXISTS { MATCH (h)-[:P27]->() } "
+        "RETURN h.title ORDER BY h.title LIMIT 10",
+        True,
+    ),
+    # WITH + post-aggregation sort — countries by number of citizens.
+    (
+        "WITH P27 count",
+        "MATCH (h:Q5)-[:P27]->(c) WITH c, count(h) AS k "
+        "RETURN c.title, k ORDER BY k DESC, c.title LIMIT 10",
         True,
     ),
 ]
@@ -272,26 +336,39 @@ def fluent_tests(g, dataset):
 # ---------------------------------------------------------------------------
 # Run one dataset
 # ---------------------------------------------------------------------------
-def run_dataset(mode, dataset, build_fn, extra_queries):
-    """Build, save, load, query one dataset. Returns list of result dicts."""
-    results = []
+def run_dataset(mode, dataset, build_fn, extra_queries, build_metadata=None):
+    """Build, save, load, query one dataset. Returns list of result dicts.
 
-    def record(test_name, time_ms, status="ok", row_count=None, cs=None, error=None):
+    ``build_metadata`` optionally carries extra numbers to attach to the
+    ``build`` result row. Only key currently used is ``nominal_triples``
+    for wiki datasets, which the comparison output reads to compute
+    triples/s.
+    """
+    results = []
+    build_metadata = build_metadata or {}
+
+    def record(test_name, time_ms, status="ok", row_count=None, cs=None, error=None,
+               extra=None):
         tag = f"{time_ms:>8.1f}ms" if status == "ok" else f"{status:>8s}"
         row_str = f" rows={row_count}" if row_count is not None else ""
         err_str = f"  {error[:50]}" if error else ""
-        print(f"    {test_name:40s} {tag}{row_str}{err_str}", flush=True)
-        results.append(
-            {
-                "dataset": dataset,
-                "test": test_name,
-                "time_ms": round(time_ms, 1),
-                "status": status,
-                "row_count": row_count,
-                "checksum": cs,
-                "error": error,
-            }
-        )
+        # Inline triples/s on the build row for wiki datasets.
+        rate_str = ""
+        if extra and "triples_per_sec" in extra:
+            rate_str = f"  ({extra['triples_per_sec']:,.0f} triples/s)"
+        print(f"    {test_name:40s} {tag}{row_str}{rate_str}{err_str}", flush=True)
+        row = {
+            "dataset": dataset,
+            "test": test_name,
+            "time_ms": round(time_ms, 1),
+            "status": status,
+            "row_count": row_count,
+            "checksum": cs,
+            "error": error,
+        }
+        if extra:
+            row.update(extra)
+        results.append(row)
 
     # ── Build ──
     g = None  # noqa: F841 — set in try, used in later blocks
@@ -300,7 +377,12 @@ def run_dataset(mode, dataset, build_fn, extra_queries):
         g, ms = timed(build_fn)
         info = g.graph_info()
         nc, ec = info["node_count"], info["edge_count"]
-        record("build", ms, row_count=nc)
+        extra = {}
+        if "nominal_triples" in build_metadata and ms > 0:
+            n_triples = build_metadata["nominal_triples"]
+            extra["nominal_triples"] = n_triples
+            extra["triples_per_sec"] = n_triples / (ms / 1000.0)
+        record("build", ms, row_count=nc, extra=extra or None)
     except BaseException as e:
         record("build", 0, status="ERROR", error=str(e)[:120])
         return results
@@ -382,17 +464,25 @@ def run(mode):
     print(f"\n  [prospect] ({mode})")
     all_results.extend(run_dataset(mode, "prospect", lambda: build_prospect(storage), PROSPECT_QUERIES))
 
-    # 3. Wikidata 500K
-    print(f"\n  [wiki500k] ({mode})")
-    all_results.extend(
-        run_dataset(mode, "wiki500k", lambda: build_wikidata(storage, WIKIDATA_500K, "wiki500k"), WIKIDATA_QUERIES)
-    )
-
-    # 4. Wikidata 5M
-    print(f"\n  [wiki5m] ({mode})")
-    all_results.extend(
-        run_dataset(mode, "wiki5m", lambda: build_wikidata(storage, WIKIDATA_5M, "wiki5m"), WIKIDATA_QUERIES)
-    )
+    # 3+. Wikidata subsets. Each entry auto-skipped if the .nt.zst file
+    # is absent on the current machine, so developers without the full
+    # corpus can still run the core legal/prospect benchmarks. Nominal
+    # triple counts (from `make_wikidata_subset.sh`) drive the
+    # triples/s display in the comparison output.
+    for label, path, nominal_triples in WIKIDATA_SUBSETS:
+        if not os.path.exists(path):
+            print(f"\n  [{label}] ({mode}) — skipped (file not found: {path})")
+            continue
+        print(f"\n  [{label}] ({mode})")
+        all_results.extend(
+            run_dataset(
+                mode,
+                label,
+                lambda p=path, lbl=label: build_wikidata(storage, p, lbl),
+                WIKIDATA_QUERIES,
+                build_metadata={"nominal_triples": nominal_triples},
+            )
+        )
 
     return all_results
 
@@ -480,6 +570,26 @@ def compare(all_results):
             print(f"    {ds}/{test} [{mode}]: {detail}")
     else:
         print(" -- all results match")
+
+    # Build throughput — triples/s per wiki dataset × mode.
+    # Rows are sparse: only wiki datasets record nominal_triples.
+    wiki_rows = []
+    for mode in modes:
+        for r in all_results[mode]:
+            if r["test"] == "build" and r.get("nominal_triples") and r["status"] == "ok":
+                wiki_rows.append((r["dataset"], mode, r["nominal_triples"], r["time_ms"]))
+    if wiki_rows:
+        print(f"\n{'=' * 100}")
+        print("  BUILD THROUGHPUT (N-Triples ingest)")
+        print(f"{'=' * 100}")
+        print(f"  {'dataset':<12s} {'mode':<8s} {'triples':>12s} {'wall_s':>10s} {'triples/s':>14s}")
+        print(f"  {'-' * 12} {'-' * 8} {'-' * 12} {'-' * 10} {'-' * 14}")
+        for ds, mode, n_tri, ms in sorted(wiki_rows):
+            rate = n_tri / (ms / 1000.0) if ms > 0 else 0
+            print(
+                f"  {ds:<12s} {mode:<8s} {n_tri:>12,} "
+                f"{ms / 1000.0:>10.2f} {rate:>14,.0f}"
+            )
 
 
 # ---------------------------------------------------------------------------
