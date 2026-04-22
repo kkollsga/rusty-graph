@@ -2655,12 +2655,69 @@ impl DiskGraph {
     /// Takes `&mut self` because the edge-property store may need to drop
     /// its base mmap before overwriting the files (when target_dir equals
     /// the current data_dir).
+    /// Phase-6 gate: every live overflow edge has both source AND
+    /// target at or above `sealed_nodes_bound`. When true, the tail
+    /// can be sealed into a new segment without violating phase-7's
+    /// "each node's out_edges live in exactly one segment" invariant.
+    fn overflow_is_clean(&self) -> bool {
+        let bound = self.sealed_nodes_bound;
+        for (&src, edges) in &self.overflow_out {
+            for e in edges {
+                if e.edge_idx == TOMBSTONE_EDGE {
+                    continue;
+                }
+                let ep = self.edge_endpoints.get(e.edge_idx as usize);
+                if src < bound || ep.target < bound {
+                    return false;
+                }
+            }
+        }
+        for (&tgt, edges) in &self.overflow_in {
+            for e in edges {
+                if e.edge_idx == TOMBSTONE_EDGE {
+                    continue;
+                }
+                let ep = self.edge_endpoints.get(e.edge_idx as usize);
+                if tgt < bound || ep.source < bound {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     pub fn save_to_dir(
         &mut self,
         target_dir: &Path,
         _interner: &crate::graph::schema::StringInterner,
     ) -> std::io::Result<()> {
         std::fs::create_dir_all(target_dir)?;
+
+        // 0.8.12 phase-6: auto-wire `seal_to_new_segment`. When the
+        // graph has a non-empty tail above `sealed_nodes_bound` AND
+        // the overflow is "clean" (every live edge has both endpoints
+        // in the tail's node range), write just a new seg_NNN/ and
+        // return. Replaces the compact+rewrite path's O(total) cost
+        // with O(tail) for incremental-ingest workloads that add
+        // node batches without touching older nodes.
+        //
+        // Fall through to compact-and-rewrite when:
+        //   - no tail (nothing new to seal)
+        //   - overflow has cross-segment edges (phase 7's relaxation)
+        //   - target_dir differs from the graph's root (save-as to a
+        //     new location can't append to a non-existent manifest)
+        //   - segment_manifest has never been persisted (initial save)
+        let have_prior_save = !self.segment_manifest.is_empty();
+        let same_dir = target_dir == self.data_dir.parent().unwrap_or(target_dir);
+        if have_prior_save
+            && same_dir
+            && self.sealed_nodes_bound < self.node_count as u32
+            && self.overflow_is_clean()
+        {
+            let _seg_id = self.seal_to_new_segment(target_dir)?;
+            return Ok(());
+        }
+
         // PR1 phase 4: CSR binaries live under a per-segment subdirectory.
         // Fresh graphs already have self.data_dir pointing at their own
         // seg_000/; save-as to a different path creates a matching
@@ -4425,5 +4482,79 @@ mod tests {
         let (k, v) = &weight.as_ref()[0];
         assert_eq!(*k, weight_key);
         assert_eq!(*v, Value::Float64(2.5));
+    }
+
+    #[test]
+    fn save_to_dir_auto_wires_seal_when_tail_is_clean() {
+        // Phase 6: a second save after a clean-tail workload should
+        // dispatch to `seal_to_new_segment` instead of the traditional
+        // compact-and-rewrite path. Verify by checking that seg_001/
+        // appears on disk and that the manifest grows to 2 segments.
+        let tmp = TempDir::new().unwrap();
+        let mut interner = StringInterner::new();
+        let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();
+        dg.defer_csr = true;
+        let n0 = dg.add_node(seal_test_node(&mut interner, 0, "A"));
+        let n1 = dg.add_node(seal_test_node(&mut interner, 1, "A"));
+        dg.add_edge(n0, n1, seal_test_edge(&mut interner, "T"));
+        dg.build_csr_from_pending();
+        dg.save_to_dir(tmp.path(), &interner).unwrap();
+
+        // After first save: seg_000 exists, seg_001 does not.
+        assert!(tmp.path().join("seg_000").exists());
+        assert!(!tmp.path().join("seg_001").exists());
+        assert_eq!(dg.sealed_nodes_bound, 2);
+
+        // Tail: 2 new nodes, 1 intra-tail edge.
+        let n2 = dg.add_node(seal_test_node(&mut interner, 2, "B"));
+        let n3 = dg.add_node(seal_test_node(&mut interner, 3, "B"));
+        dg.add_edge(n2, n3, seal_test_edge(&mut interner, "U"));
+
+        // Second save: auto-wire should trigger seal_to_new_segment.
+        dg.save_to_dir(tmp.path(), &interner).unwrap();
+
+        assert!(
+            tmp.path().join("seg_001").exists(),
+            "phase-6 auto-wire should have produced seg_001/"
+        );
+        assert_eq!(dg.sealed_nodes_bound, 4);
+
+        let manifest =
+            super::super::segment_summary::SegmentManifest::load_from(tmp.path()).unwrap();
+        assert_eq!(manifest.len(), 2, "manifest should have 2 segments");
+
+        // Reload and verify the combined view still makes sense.
+        drop(dg);
+        let mut interner2 = StringInterner::new();
+        let (reloaded, _tmp_zst) =
+            super::DiskGraph::load_from_dir(tmp.path(), &mut interner2).unwrap();
+        assert_eq!(reloaded.node_count, 4);
+        assert_eq!(reloaded.edge_count, 2);
+    }
+
+    #[test]
+    fn save_to_dir_falls_back_when_overflow_crosses_segment_boundary() {
+        // Phase 6: cross-segment overflow must force the compact+
+        // rewrite fallback, not attempt an unsafe seal.
+        let tmp = TempDir::new().unwrap();
+        let mut interner = StringInterner::new();
+        let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();
+        dg.defer_csr = true;
+        let n0 = dg.add_node(seal_test_node(&mut interner, 0, "A"));
+        let n1 = dg.add_node(seal_test_node(&mut interner, 1, "A"));
+        dg.add_edge(n0, n1, seal_test_edge(&mut interner, "T"));
+        dg.build_csr_from_pending();
+        dg.save_to_dir(tmp.path(), &interner).unwrap();
+
+        // Cross-segment edge (old → new) — overflow_is_clean returns false.
+        let n2 = dg.add_node(seal_test_node(&mut interner, 2, "B"));
+        dg.add_edge(n0, n2, seal_test_edge(&mut interner, "T"));
+
+        // Save should NOT produce seg_001; it falls through to rewrite.
+        dg.save_to_dir(tmp.path(), &interner).unwrap();
+        assert!(
+            !tmp.path().join("seg_001").exists(),
+            "cross-segment overflow must NOT trigger seal"
+        );
     }
 }
