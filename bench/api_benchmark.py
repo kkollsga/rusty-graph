@@ -49,6 +49,7 @@ WIKIDATA_5M = "/Volumes/EksternalHome/Data/Wikidata/test_5M.nt.zst"
 WIKIDATA_50M = "/Volumes/EksternalHome/Data/Wikidata/test_50M.nt.zst"
 WIKIDATA_100M = "/Volumes/EksternalHome/Data/Wikidata/test_100M.nt.zst"
 WIKIDATA_200M = "/Volumes/EksternalHome/Data/Wikidata/test_200M.nt.zst"
+WIKIDATA_500M = "/Volumes/EksternalHome/Data/Wikidata/test_500M.nt.zst"
 
 # (label, path, nominal triple count)
 # Nominal count is the number of lines the subset was sliced at via
@@ -61,6 +62,7 @@ WIKIDATA_SUBSETS = [
     ("wiki50m", WIKIDATA_50M, 50_000_000),
     ("wiki100m", WIKIDATA_100M, 100_000_000),
     ("wiki200m", WIKIDATA_200M, 200_000_000),
+    ("wiki500m", WIKIDATA_500M, 500_000_000),
 ]
 
 TIMEOUT_MS = 10_000
