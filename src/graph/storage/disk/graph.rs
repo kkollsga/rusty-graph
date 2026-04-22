@@ -214,6 +214,18 @@ pub struct DiskGraph {
     // Phase 6+ will split into multiple segments once multi-segment
     // writes and reads are in place.
     pub(crate) segment_manifest: super::segment_summary::SegmentManifest,
+    // ── Sealed-nodes watermark (PR1 phase 8).
+    //
+    // Node ids in `[0, sealed_nodes_bound)` are accounted for in a prior
+    // sealed segment's `node_slots`. Node ids in
+    // `[sealed_nodes_bound, node_count)` are either in the active
+    // (still-mutable) tail — not yet sealed into any segment — or were
+    // just added via `add_node`. `seal_to_new_segment` flushes the tail
+    // into a new `seg_NNN/` and advances this watermark.
+    //
+    // Zero on freshly-built / pre-phase-8 graphs; the `DiskGraphMeta`
+    // serde `default` keeps old `.kgl` directories loadable.
+    pub(crate) sealed_nodes_bound: u32,
     // ── Temp dir for CSR mmap files (cleaned up on Drop) ──
 }
 
@@ -343,6 +355,10 @@ impl DiskGraph {
             property_indexes: std::sync::RwLock::new(HashMap::new()),
             global_indexes: std::sync::RwLock::new(HashMap::new()),
             segment_manifest: super::segment_summary::SegmentManifest::new(),
+            // Freshly-created graph has no sealed segments yet; the
+            // first save seals everything up to node_count into seg_000
+            // and advances this watermark accordingly.
+            sealed_nodes_bound: 0,
         })
     }
 
@@ -512,6 +528,9 @@ impl DiskGraph {
             global_indexes: std::sync::RwLock::new(HashMap::new()),
             property_indexes: std::sync::RwLock::new(HashMap::new()),
             segment_manifest: super::segment_summary::SegmentManifest::new(),
+            // Fresh build from a petgraph: no sealed segments yet.
+            // First save seals the whole graph into seg_000.
+            sealed_nodes_bound: 0,
         })
     }
 
@@ -2102,6 +2121,7 @@ impl Clone for DiskGraph {
             has_tombstones: self.has_tombstones,
             property_indexes: std::sync::RwLock::new(HashMap::new()),
             segment_manifest: self.segment_manifest.clone(),
+            sealed_nodes_bound: self.sealed_nodes_bound,
         }
     }
 }
@@ -2475,6 +2495,16 @@ struct DiskGraphMeta {
     /// .kgl directories still load.
     #[serde(default)]
     csr_layout_version: u8,
+    /// Boundary past which nodes are in the still-mutable tail (not yet
+    /// sealed into any segment). `seal_to_new_segment` flushes
+    /// `node_slots[sealed_nodes_bound..node_count]` into a new
+    /// `seg_NNN/` and advances this. Added in PR1 phase 8; zero for
+    /// pre-phase-8 graphs via serde default — their `seg_000` accounts
+    /// for everything below `node_count`, so `seal_to_new_segment`
+    /// will treat subsequent adds as the next-segment tail on first
+    /// call (after saving to bump the watermark).
+    #[serde(default)]
+    sealed_nodes_bound: u32,
 }
 
 fn default_has_tombstones() -> bool {
@@ -2519,6 +2549,9 @@ impl DiskGraph {
             edge_properties_meta: edge_props_meta,
             // PR1 phase 4: fresh saves always emit the segmented layout.
             csr_layout_version: CURRENT_CSR_LAYOUT_VERSION,
+            // PR1 phase 8: persist the watermark so reloads know which
+            // nodes already live in sealed segments vs which are tail.
+            sealed_nodes_bound: self.sealed_nodes_bound,
         };
         let json = serde_json::to_string_pretty(&meta).map_err(std::io::Error::other)?;
         std::fs::write(dir.join("disk_graph_meta.json"), json)
@@ -2690,6 +2723,34 @@ impl DiskGraph {
             let _ = self.conn_type_index_sources.save_to_file(&path);
         }
 
+        // PR1 phase 8: trim the core CSR mmap files to their logical
+        // length when writing in-place (csr_target == self.data_dir).
+        // The not-in-place branch above already writes exact-sized
+        // files via `save_to_file(&different_path)`. Without this trim
+        // the multi-segment load path would misread the padding as
+        // real CSR data — the single-segment path uses `meta.*_len`
+        // and is unaffected.
+        if csr_target == self.data_dir {
+            if let Some(p) = self.node_slots.file_path().map(PathBuf::from) {
+                let _ = self.node_slots.save_to_file(&p);
+            }
+            if let Some(p) = self.out_offsets.file_path().map(PathBuf::from) {
+                let _ = self.out_offsets.save_to_file(&p);
+            }
+            if let Some(p) = self.out_edges.file_path().map(PathBuf::from) {
+                let _ = self.out_edges.save_to_file(&p);
+            }
+            if let Some(p) = self.in_offsets.file_path().map(PathBuf::from) {
+                let _ = self.in_offsets.save_to_file(&p);
+            }
+            if let Some(p) = self.in_edges.file_path().map(PathBuf::from) {
+                let _ = self.in_edges.save_to_file(&p);
+            }
+            if let Some(p) = self.edge_endpoints.file_path().map(PathBuf::from) {
+                let _ = self.edge_endpoints.save_to_file(&p);
+            }
+        }
+
         // PR1 phase 2: compute and persist a single-segment manifest.
         // Subsequent phases split saves into multiple segments; today the
         // manifest describes the whole graph as one segment so the planner
@@ -2718,7 +2779,269 @@ impl DiskGraph {
             }
         }
 
+        // PR1 phase 8: after a full save, everything up to node_count
+        // is accounted for in the (single-segment) on-disk state. Bump
+        // the sealed watermark so any subsequent `seal_to_new_segment`
+        // correctly treats post-save adds as the new tail.
+        self.sealed_nodes_bound = self.node_count as u32;
+
         Ok(())
+    }
+
+    /// Seal the still-mutable tail of the graph — nodes in
+    /// `[sealed_nodes_bound, node_count)` plus the overflow edges
+    /// between them — into a fresh `seg_NNN/` directory under `root`.
+    /// Advances `sealed_nodes_bound` to `node_count`, clears the
+    /// consumed overflow entries, appends a [`SegmentSummary`] to the
+    /// on-disk manifest, and rewrites `disk_graph_meta.json`.
+    ///
+    /// PR1 phase 8 — the multi-segment write path. Lets incremental
+    /// ingest add a batch of new entities and persist them without
+    /// rewriting the existing sealed CSR (`save_to_dir`'s compact +
+    /// rebuild). The new segment's CSR is segment-local: its
+    /// `out_offsets` / `in_offsets` are zero-based, its `edge_idx`
+    /// values span `0..|edges|`. Phase 7's `concat_segment_csrs`
+    /// stitches these onto the combined view at load time.
+    ///
+    /// ## Constraints (enforced)
+    ///
+    /// Phase 7's concat assumes each node lives in exactly one segment
+    /// and each segment's CSR owns the edges originating from its
+    /// nodes. That forbids cross-segment edges for now: an overflow
+    /// edge whose source or target is `< sealed_nodes_bound` cannot
+    /// land in a new segment without breaking the invariant that
+    /// each node's outgoing edges are all in one place. This method
+    /// returns an `io::Error` in that case — the user must flush such
+    /// edges via compact + `save_to_dir` (full rewrite) instead. A
+    /// future phase will relax this once the concat model knows how
+    /// to union a node's out_edges across segments.
+    ///
+    /// ## Not wired from save_to_dir
+    ///
+    /// `save_to_dir` still takes the traditional compact-and-rewrite
+    /// path. `seal_to_new_segment` is an explicit call — phase 8 ships
+    /// the mechanism; phase 9 ties it to the save path once the
+    /// auxiliary-index story (conn_type_index, peer_count, edge
+    /// properties for sealed edges) lands.
+    ///
+    /// ## Known phase-8 limitations
+    ///
+    /// The sealed segment writes **only** the six core CSR arrays
+    /// (`node_slots`, `out_offsets`, `out_edges`, `in_offsets`,
+    /// `in_edges`, `edge_endpoints`). It does not write its own
+    /// `conn_type_index_*`, `peer_count_*`, or `edge_prop_*` files.
+    /// Consequences for a graph loaded with ≥2 segments:
+    ///   - Untyped edge scans (`MATCH (a)-[]->(b)`) work correctly.
+    ///   - Typed-edge matches (`MATCH (a)-[:T]->(b)`) miss edges in
+    ///     non-seg-0 segments (the inverted index only covers seg 0).
+    ///   - `edge_weight()` on sealed edges returns `None`.
+    ///   - `peer_count` aggregates undercount for sealed edges.
+    ///
+    /// These are deliberate phase-8 scope boundaries — the write path
+    /// mechanism is what's shipping; phase 9 addresses the auxiliaries.
+    pub fn seal_to_new_segment(&mut self, root: &Path) -> std::io::Result<u32> {
+        use super::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints};
+
+        let tail_lo = self.sealed_nodes_bound;
+        let tail_hi = self.node_count as u32;
+        if tail_hi <= tail_lo {
+            return Err(std::io::Error::other(
+                "seal_to_new_segment: nothing to seal — node_count <= sealed_nodes_bound",
+            ));
+        }
+        let tail_len = (tail_hi - tail_lo) as usize;
+
+        // Validate overflow edges up front — iterate both overflow_out
+        // and overflow_in so we catch cross-segment edges regardless
+        // of which side owns a given entry.
+        for (&src_global, edges) in &self.overflow_out {
+            for e in edges {
+                if e.edge_idx == TOMBSTONE_EDGE {
+                    continue;
+                }
+                let ep = self.edge_endpoints.get(e.edge_idx as usize);
+                if src_global < tail_lo || ep.target < tail_lo {
+                    return Err(std::io::Error::other(format!(
+                        "seal_to_new_segment: edge {}→{} (edge_idx {}) crosses \
+                         segment boundary (watermark {}); compact+save instead",
+                        ep.source, ep.target, e.edge_idx, tail_lo
+                    )));
+                }
+            }
+        }
+        for (&tgt_global, edges) in &self.overflow_in {
+            for e in edges {
+                if e.edge_idx == TOMBSTONE_EDGE {
+                    continue;
+                }
+                let ep = self.edge_endpoints.get(e.edge_idx as usize);
+                if tgt_global < tail_lo || ep.source < tail_lo {
+                    return Err(std::io::Error::other(format!(
+                        "seal_to_new_segment: edge {}→{} (edge_idx {}) crosses \
+                         segment boundary (watermark {}); compact+save instead",
+                        ep.source, ep.target, e.edge_idx, tail_lo
+                    )));
+                }
+            }
+        }
+
+        // Next segment id = max(existing) + 1, or 0 if the dir is
+        // empty (shouldn't happen in practice — first save creates
+        // seg_000 before any seal).
+        let existing = enumerate_segment_dirs(root);
+        let next_id = existing
+            .iter()
+            .map(|(id, _)| *id)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
+        let seg_dir = root.join(segment_subdir(next_id));
+        std::fs::create_dir_all(&seg_dir)?;
+
+        // Collect overflow edges into a flat list, sorted by
+        // (segment-local-source, connection_type). This matches the
+        // layout `csr_sorted_by_type` promises — so typed-edge binary
+        // search still works within a segment's CSR slice once phase
+        // 9 wires the per-segment conn_type index.
+        struct SealEdge {
+            local_src: u32,
+            local_tgt: u32, // segment-local target (global - tail_lo)
+            conn_type: u64,
+        }
+        let mut seal_edges: Vec<SealEdge> = Vec::new();
+        for (&src_global, edges) in &self.overflow_out {
+            for e in edges {
+                if e.edge_idx == TOMBSTONE_EDGE {
+                    continue;
+                }
+                let ep = self.edge_endpoints.get(e.edge_idx as usize);
+                seal_edges.push(SealEdge {
+                    local_src: src_global - tail_lo,
+                    local_tgt: ep.target - tail_lo,
+                    conn_type: ep.connection_type,
+                });
+            }
+        }
+        seal_edges.sort_by_key(|e| (e.local_src, e.conn_type));
+        let n_edges = seal_edges.len();
+
+        // ─── Build segment-local arrays in memory (Heap-backed). ───
+        //
+        // node_slots: concat of self.node_slots[tail_lo..tail_hi].
+        let mut node_slots: MmapOrVec<DiskNodeSlot> = MmapOrVec::with_capacity(tail_len);
+        for i in 0..tail_len {
+            node_slots.push(self.node_slots.get(tail_lo as usize + i));
+        }
+
+        // edge_endpoints: one per sealed edge, global source/target.
+        // Segment-local edge_idx runs 0..n_edges parallel to the
+        // sorted `seal_edges` order, so `edge_endpoints[local_idx]`
+        // describes `seal_edges[local_idx]`.
+        let mut edge_endpoints: MmapOrVec<EdgeEndpoints> = MmapOrVec::with_capacity(n_edges);
+        for e in &seal_edges {
+            edge_endpoints.push(EdgeEndpoints {
+                source: e.local_src + tail_lo,
+                target: e.local_tgt + tail_lo,
+                connection_type: e.conn_type,
+            });
+        }
+
+        // out_offsets / out_edges: CSR keyed by segment-local source.
+        // Since `seal_edges` is pre-sorted by local_src, we can sweep
+        // once to fill offsets + edges together.
+        let mut out_offsets: MmapOrVec<u64> = MmapOrVec::with_capacity(tail_len + 1);
+        let mut out_edges: MmapOrVec<CsrEdge> = MmapOrVec::with_capacity(n_edges);
+        let mut cursor = 0usize;
+        for node_local in 0..tail_len as u32 {
+            out_offsets.push(cursor as u64);
+            while cursor < n_edges && seal_edges[cursor].local_src == node_local {
+                let e = &seal_edges[cursor];
+                out_edges.push(CsrEdge {
+                    peer: e.local_tgt + tail_lo, // peer stores GLOBAL node id
+                    edge_idx: cursor as u32,
+                });
+                cursor += 1;
+            }
+        }
+        out_offsets.push(cursor as u64);
+
+        // in_offsets / in_edges: same sweep but keyed by local target.
+        // Sort by (local_tgt, conn_type) for a matching layout on the
+        // incoming side.
+        let mut by_target: Vec<(u32, u32, u64)> = seal_edges
+            .iter()
+            .enumerate()
+            .map(|(orig_idx, e)| (e.local_tgt, orig_idx as u32, e.conn_type))
+            .collect();
+        by_target.sort_by_key(|(t, _, ct)| (*t, *ct));
+
+        let mut in_offsets: MmapOrVec<u64> = MmapOrVec::with_capacity(tail_len + 1);
+        let mut in_edges: MmapOrVec<CsrEdge> = MmapOrVec::with_capacity(n_edges);
+        let mut tcursor = 0usize;
+        for node_local in 0..tail_len as u32 {
+            in_offsets.push(tcursor as u64);
+            while tcursor < n_edges && by_target[tcursor].0 == node_local {
+                let (_, orig_idx, _) = by_target[tcursor];
+                let src_peer = seal_edges[orig_idx as usize].local_src + tail_lo;
+                in_edges.push(CsrEdge {
+                    peer: src_peer, // global source id
+                    edge_idx: orig_idx,
+                });
+                tcursor += 1;
+            }
+        }
+        in_offsets.push(tcursor as u64);
+
+        // ─── Persist to disk. ───
+        node_slots.save_to_file(&seg_dir.join("node_slots.bin"))?;
+        out_offsets.save_to_file(&seg_dir.join("out_offsets.bin"))?;
+        out_edges.save_to_file(&seg_dir.join("out_edges.bin"))?;
+        in_offsets.save_to_file(&seg_dir.join("in_offsets.bin"))?;
+        in_edges.save_to_file(&seg_dir.join("in_edges.bin"))?;
+        edge_endpoints.save_to_file(&seg_dir.join("edge_endpoints.bin"))?;
+
+        // ─── Manifest bookkeeping. ───
+        use super::segment_summary::SegmentSummary;
+        let mut summary = SegmentSummary::new(next_id, tail_lo);
+        summary.node_id_hi = tail_hi;
+        summary.edge_count = n_edges as u64;
+        // Connection types touched by this segment's edges.
+        for e in &seal_edges {
+            summary.conn_types.insert(e.conn_type);
+        }
+        // Node-type counts from the tail's slots.
+        for i in 0..tail_len {
+            let ns = self.node_slots.get(tail_lo as usize + i);
+            if !ns.is_alive() {
+                continue;
+            }
+            *summary.node_type_counts.entry(ns.node_type).or_insert(0) += 1;
+        }
+        // (indexed_prop_ranges stays empty for the new segment — phase
+        // 5's cache+scan populates for seg 0's indexes only, and
+        // per-segment indexes are phase 9.)
+
+        self.segment_manifest.append(summary);
+        self.segment_manifest.save_to(root)?;
+
+        // ─── Clear consumed overflow + advance watermark. ───
+        //
+        // All validated overflow edges belong to this seal (their
+        // source and target are both >= tail_lo). Drop them in-memory;
+        // the persisted CSR in seg_NNN/ is now the source of truth.
+        self.overflow_out.clear();
+        self.overflow_in.clear();
+        self.sealed_nodes_bound = tail_hi;
+
+        // Persist the updated metadata (watermark, manifest presence)
+        // at the root. `write_metadata_to` reads edge-property meta
+        // from `self.data_dir` — seg 0's subdir — which is the right
+        // behaviour here since seal_to_new_segment doesn't rewrite
+        // edge_properties.
+        let edge_props_meta = EdgePropertyStore::meta_for(&self.data_dir);
+        self.write_metadata_to(root, edge_props_meta)?;
+
+        Ok(next_id)
     }
 
     /// Load a disk graph from a directory.
@@ -2925,6 +3248,10 @@ impl DiskGraph {
                 // PR1 phases treat as "pre-segmented, don't prune".
                 segment_manifest: super::segment_summary::SegmentManifest::load_from(dir)
                     .unwrap_or_default(),
+                // PR1 phase 8: serde-defaulted to 0 on pre-phase-8 graphs
+                // (their single seg_000 accounts for everything). Fresh
+                // phase-8 graphs will advance the watermark on save.
+                sealed_nodes_bound: meta.sealed_nodes_bound,
             },
             temp_dir,
         ))
@@ -3576,5 +3903,157 @@ mod tests {
         // s0.edge_endpoints.len() + s_empty.edge_endpoints.len() == 1,
         // so its self-loop's edge_idx should now be 1.
         assert_eq!(c.out_edges.get(1).edge_idx, 1);
+    }
+
+    // ------------- seal_to_new_segment round-trip (phase 8) -------------
+
+    use crate::datatypes::values::Value;
+    use crate::graph::schema::{EdgeData, NodeData, StringInterner};
+
+    fn seal_test_node(interner: &mut StringInterner, id: i64, ntype: &str) -> NodeData {
+        NodeData::new(
+            Value::Int64(id),
+            Value::String(format!("n{id}")),
+            ntype.to_string(),
+            std::collections::HashMap::new(),
+            interner,
+        )
+    }
+
+    fn seal_test_edge(interner: &mut StringInterner, ct: &str) -> EdgeData {
+        EdgeData::new(ct.to_string(), std::collections::HashMap::new(), interner)
+    }
+
+    #[test]
+    fn seal_rejects_when_nothing_to_seal() {
+        let tmp = TempDir::new().unwrap();
+        let mut interner = StringInterner::new();
+        let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();
+        dg.defer_csr = true;
+        let _n0 = dg.add_node(seal_test_node(&mut interner, 0, "A"));
+        dg.build_csr_from_pending();
+        dg.save_to_dir(tmp.path(), &interner).unwrap();
+        // save_to_dir set sealed_nodes_bound = node_count, so tail is empty.
+        let err = dg.seal_to_new_segment(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("nothing to seal"));
+    }
+
+    #[test]
+    fn seal_rejects_cross_segment_edges() {
+        let tmp = TempDir::new().unwrap();
+        let mut interner = StringInterner::new();
+        let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();
+        dg.defer_csr = true;
+        let n0 = dg.add_node(seal_test_node(&mut interner, 0, "A"));
+        let n1 = dg.add_node(seal_test_node(&mut interner, 1, "A"));
+        dg.add_edge(n0, n1, seal_test_edge(&mut interner, "T"));
+        dg.build_csr_from_pending();
+        dg.save_to_dir(tmp.path(), &interner).unwrap();
+
+        // Add a new node + a cross-segment edge (old n0 → new n2).
+        // That edge has source below the watermark after save, so
+        // seal should refuse.
+        let n2 = dg.add_node(seal_test_node(&mut interner, 2, "A"));
+        dg.add_edge(n0, n2, seal_test_edge(&mut interner, "T"));
+        let err = dg.seal_to_new_segment(tmp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("crosses segment boundary"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn seal_round_trip_basic_reads() {
+        // Build seg_0: 3 nodes of type A with one edge between them.
+        let tmp = TempDir::new().unwrap();
+        let mut interner = StringInterner::new();
+        let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();
+        dg.defer_csr = true;
+        let n0 = dg.add_node(seal_test_node(&mut interner, 0, "A"));
+        let n1 = dg.add_node(seal_test_node(&mut interner, 1, "A"));
+        let _n2 = dg.add_node(seal_test_node(&mut interner, 2, "A"));
+        dg.add_edge(n0, n1, seal_test_edge(&mut interner, "T"));
+        dg.build_csr_from_pending();
+        dg.save_to_dir(tmp.path(), &interner).unwrap();
+
+        assert_eq!(dg.node_count, 3);
+        assert_eq!(dg.sealed_nodes_bound, 3);
+
+        // Add 2 new nodes of type B + an edge between them.
+        // Both endpoints are strictly above the watermark, so the
+        // seal constraint holds.
+        let n3 = dg.add_node(seal_test_node(&mut interner, 3, "B"));
+        let n4 = dg.add_node(seal_test_node(&mut interner, 4, "B"));
+        dg.add_edge(n3, n4, seal_test_edge(&mut interner, "U"));
+
+        let pre_edge_count = dg.edge_count;
+        let pre_node_count = dg.node_count;
+        assert_eq!(pre_node_count, 5);
+        assert_eq!(pre_edge_count, 2);
+
+        // Seal the tail to seg_001.
+        let seg_id = dg.seal_to_new_segment(tmp.path()).unwrap();
+        assert_eq!(seg_id, 1);
+        assert_eq!(dg.sealed_nodes_bound, 5);
+        assert!(dg.overflow_out.is_empty());
+        assert!(dg.overflow_in.is_empty());
+
+        // Verify seg_001/ has the expected files on disk.
+        let seg1 = tmp.path().join("seg_001");
+        for name in [
+            "node_slots.bin",
+            "out_offsets.bin",
+            "out_edges.bin",
+            "in_offsets.bin",
+            "in_edges.bin",
+            "edge_endpoints.bin",
+        ] {
+            assert!(seg1.join(name).exists(), "missing {name}");
+        }
+        // Manifest should have 2 entries now.
+        let manifest =
+            super::super::segment_summary::SegmentManifest::load_from(tmp.path()).unwrap();
+        assert_eq!(manifest.len(), 2);
+        assert_eq!(manifest.segments[1].segment_id, 1);
+        assert_eq!(manifest.segments[1].node_id_lo, 3);
+        assert_eq!(manifest.segments[1].node_id_hi, 5);
+        assert_eq!(manifest.segments[1].edge_count, 1);
+
+        // Drop in-memory graph and reload — this exercises the phase-7
+        // concat read path.
+        drop(dg);
+        let mut interner2 = StringInterner::new();
+        let (reloaded, _tmp_zst) =
+            super::DiskGraph::load_from_dir(tmp.path(), &mut interner2).unwrap();
+
+        assert_eq!(reloaded.node_count, pre_node_count);
+        assert_eq!(reloaded.edge_count, pre_edge_count);
+        // sealed_nodes_bound persists through save/load.
+        assert_eq!(reloaded.sealed_nodes_bound, 5);
+
+        // Untyped outgoing edges for node 3 should be exactly 1 (the
+        // n3 → n4 edge). This verifies the concat stitched the
+        // out_offsets correctly for the sealed tail.
+        let n3_idx = 3usize;
+        let start = reloaded.out_offsets.get(n3_idx) as usize;
+        let end = reloaded.out_offsets.get(n3_idx + 1) as usize;
+        assert_eq!(end - start, 1, "expected 1 outgoing edge for seg_1 node 3");
+        let e = reloaded.out_edges.get(start);
+        assert_eq!(e.peer, 4);
+        // Combined edge_idx = segment-local 0 + endpoint_base (= seg_0's 1)
+        // = 1. Verifies the phase-7 concat shift lands at the right slot.
+        assert_eq!(e.edge_idx, 1);
+        // edge_endpoints at that global index should hold the original
+        // global node ids.
+        let ep = reloaded.edge_endpoints.get(1);
+        assert_eq!(ep.source, 3);
+        assert_eq!(ep.target, 4);
+
+        // And seg_0's original edge (0 → 1) is still present at
+        // combined edge_idx 0.
+        let ep0 = reloaded.edge_endpoints.get(0);
+        assert_eq!(ep0.source, 0);
+        assert_eq!(ep0.target, 1);
+        let _ = (n1, n4); // silence unused-warnings if optimised out
     }
 }
