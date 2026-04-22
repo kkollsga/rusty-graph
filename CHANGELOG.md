@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.11] — 2026-04-22
+
+### Added (disk-graph-improvement-plan PR1, phases 1–8)
+
+This release lays the groundwork for segmented CSR on the disk
+backend — the mechanism that, once wired into `save_to_dir` and
+paired with per-segment auxiliary indexes in 0.8.12, will cut
+write amplification on incremental ingest from the current 5–25×
+down to ~2× (target from `dev-documentation/disk-graph-improvement-plan.md`).
+No production workload changes today; every existing `.kgl`
+directory loads byte-for-byte identically.
+
+- **Segment manifest (`seg_manifest.json`).** On-disk JSON listing
+  per-segment `node_id_range`, `edge_count`, `conn_types`,
+  `node_type_counts`, and `indexed_prop_ranges` summaries. Future
+  planner pruning consults this before scanning. Today populated
+  as a single-segment descriptor on every save. New module
+  `src/graph/storage/disk/segment_summary.rs`.
+
+- **Segmented CSR directory layout (`seg_NNN/`).** The CSR
+  binaries, ColumnStore, and per-(type,prop) property indexes now
+  live under a per-segment subdirectory. Graph-level metadata
+  (`disk_graph_meta.json`, `seg_manifest.json`, DirGraph
+  metadata) stays at the graph root. Gated by
+  `csr_layout_version` (`#[serde(default)] == 0`) so legacy flat-
+  layout `.kgl` directories still load.
+
+- **`segment_subdir(id)` + `enumerate_segment_dirs(root)`.** The
+  directory name is now id-parameterised, and load walks a sorted
+  `seg_NNN/` enumeration instead of a hardcoded path.
+
+- **Multi-segment read path.** `SegmentCsr` bundles one segment's
+  six core CSR arrays (`node_slots`, `out_offsets`, `out_edges`,
+  `in_offsets`, `in_edges`, `edge_endpoints`);
+  `concat_segment_csrs` stitches them by shifting segment-local
+  `edge_idx` onto combined `edge_endpoints`, concatenating
+  per-segment `node_slots` and `edge_endpoints`, and welding the
+  offset arrays. Single-segment load stays on the direct-mmap
+  path for zero overhead vs 0.8.10.
+
+- **Multi-segment write path (`DiskGraph::seal_to_new_segment`).**
+  Flushes the still-mutable tail
+  (`[sealed_nodes_bound, node_count)` + overflow edges between
+  those nodes) to a fresh `seg_NNN/` in segment-local form, appends
+  a `SegmentSummary` to the manifest, clears consumed overflow,
+  advances the watermark, and rewrites `disk_graph_meta.json`. Not
+  automatically invoked from `save_to_dir` — the 0.8.11 release
+  ships the mechanism; 0.8.12 wires it alongside the auxiliary-
+  index work.
+
+### Fixed
+
+- **CSR mmap files now trim in-place on `save_to_dir`.**
+  `MmapOrVec::mapped(path, cap)` has a 64-element minimum, so
+  small graphs left trailing zeros on disk. The single-segment
+  load path masked this by using `meta.*_len`, but the new
+  multi-segment load path relies on file-size inference. All six
+  core CSR arrays now pass through `save_to_file` on the
+  same-dir save path, triggering the `file.set_len(byte_len)`
+  truncation. Same bug pattern as the 0.8.10 conn_type_index trim.
+
+### Deferred to 0.8.12+
+
+- **Auxiliary-index concat for multi-segment graphs.** `conn_type_index_*`,
+  `peer_count_*`, and `edge_prop_*` currently come only from `seg_000`
+  in the N>1 read path. For graphs built with `seal_to_new_segment`
+  this means typed-edge matches miss sealed edges, `edge_weight`
+  returns None on them, and `peer_count` aggregates undercount.
+  Documented as a scope boundary on the relevant functions.
+
+- **Automatic incremental save.** `save_to_dir` still takes the
+  compact-and-rewrite path. 0.8.12 will wire `seal_to_new_segment`
+  once the auxiliary-index work above lands.
+
+- **Planner pruning using `SegmentManifest`.** Summaries are
+  populated and persisted; the pattern matcher doesn't yet
+  consult them. Target: 2–10× on selective queries whose
+  predicates correlate with segment boundaries (type filters,
+  node-id ranges, conn-type filters).
+
+- **Relaxing the cross-segment edge restriction.**
+  `seal_to_new_segment` currently refuses overflow containing
+  edges whose source or target is below the watermark. Removing
+  that restriction requires a different concat model for
+  `out_offsets`/`in_offsets`; phase 9 scope.
+
 ## [0.8.10] — 2026-04-20
 
 ### Performance
