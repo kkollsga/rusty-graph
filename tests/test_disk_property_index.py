@@ -227,3 +227,92 @@ class TestPersistenceAcrossReload:
         result = reloaded.cypher("MATCH (n:Country {label: 'Denmark'}) RETURN n.nid").to_df()
         assert len(result) == 1
         assert result["n.nid"][0] == "Q3"
+
+
+def _fnv1a_64(s: str) -> int:
+    """Mirror of `InternedKey::from_str` (FNV-1a 64-bit) for manifest
+    hash checks. Must stay in sync with `src/graph/storage/interner.rs`."""
+    h = 0xCBF29CE484222325
+    prime = 0x100000001B3
+    for b in s.encode("utf-8"):
+        h ^= b
+        h = (h * prime) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+class TestSegmentManifestRecordsIndexes:
+    """PR1 phase 5: every PropertyIndex in a segment should show up in
+    the saved ``seg_manifest.json`` under ``indexed_prop_ranges`` so the
+    planner (phase 7+) can consult it for pruning."""
+
+    def test_manifest_lists_built_index(self, disk_dir):
+        import json
+
+        g = _build_disk_graph(disk_dir)
+        g.create_index("Country", "label")
+        g.save(disk_dir)
+        del g
+
+        manifest = json.loads((Path(disk_dir) / "seg_manifest.json").read_text())
+        assert len(manifest["segments"]) == 1
+        ranges = manifest["segments"][0]["indexed_prop_ranges"]
+        # Expect exactly one entry for (Country, label) as StringBloomPlaceholder.
+        t_hash = _fnv1a_64("Country")
+        p_hash = _fnv1a_64("label")
+        assert (t_hash, p_hash) in {(e[0], e[1]) for e in ranges}
+        placeholder_entry = next(e for e in ranges if (e[0], e[1]) == (t_hash, p_hash))
+        # Phase 5 only emits the placeholder; numeric / bloom variants land later.
+        assert placeholder_entry[2] == "StringBloomPlaceholder"
+
+    def test_manifest_empty_without_indexes(self, disk_dir):
+        import json
+
+        g = _build_disk_graph(disk_dir)
+        g.save(disk_dir)
+        manifest = json.loads((Path(disk_dir) / "seg_manifest.json").read_text())
+        assert manifest["segments"][0]["indexed_prop_ranges"] == []
+
+    def test_manifest_survives_reload_and_resave(self, disk_dir):
+        """Indexes present on disk (but not yet looked up in the loaded
+        session) must still show up in the manifest after a resave —
+        the disk-scan fallback covers this."""
+        import json
+
+        g = _build_disk_graph(disk_dir)
+        g.create_index("Country", "label")
+        g.save(disk_dir)
+        del g
+
+        # Reload without querying the index; then resave. The cache is
+        # empty, so the manifest entry comes from scan_segment_hashes.
+        reloaded = load(disk_dir)
+        reloaded.save(disk_dir)
+
+        manifest = json.loads((Path(disk_dir) / "seg_manifest.json").read_text())
+        ranges = manifest["segments"][0]["indexed_prop_ranges"]
+        t_hash = _fnv1a_64("Country")
+        p_hash = _fnv1a_64("label")
+        assert (t_hash, p_hash) in {(e[0], e[1]) for e in ranges}
+
+    def test_manifest_lists_global_index_too(self, disk_dir):
+        """Cross-type global indexes use a different file prefix
+        (``global_index_*``) so they won't appear via
+        ``scan_segment_hashes``. That's intentional for phase 5 — the
+        manifest's ``indexed_prop_ranges`` tracks per-type indexes,
+        which the phase 7 planner will consult for
+        ``MATCH (n:Type {prop: v})``. This test just pins the behaviour."""
+        import json
+
+        g = KnowledgeGraph(storage="disk", path=disk_dir)
+        g.add_nodes(
+            pd.DataFrame({"nid": ["Q1"], "label": ["Norway"]}),
+            "Country",
+            "nid",
+            "label",
+        )
+        g.create_global_index("label")
+        g.save(disk_dir)
+
+        manifest = json.loads((Path(disk_dir) / "seg_manifest.json").read_text())
+        # Only the global index was built — no per-type indexes.
+        assert manifest["segments"][0]["indexed_prop_ranges"] == []

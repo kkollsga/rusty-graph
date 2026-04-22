@@ -158,14 +158,17 @@ pub struct DiskGraph {
     // patterns like `MATCH (n {label: 'X'})` where the agent doesn't
     // know the node type.
     pub(crate) global_indexes: GlobalIndexCache,
-    // ── Segment manifest (PR1 phase 2, single-segment view today).
+    // ── Segment manifest (PR1 phases 2/5, single-segment view today).
     //
     // Persisted at `seg_manifest.json` alongside the CSR files. Legacy
     // graphs that lack the file load as an empty manifest — the planner
     // treats that as "pre-segmented, don't prune" in subsequent phases.
     // Fresh saves always write a one-segment manifest describing the
-    // whole graph; PR1 phase 3+ will split into multiple segments once
-    // the segmented CSR layout lands.
+    // whole graph; PR1 phase 5 populates `indexed_prop_ranges` for each
+    // `PropertyIndex` discovered in the segment directory, using
+    // `StringBloomPlaceholder` until the bloom-filter variant lands.
+    // Phase 6+ will split into multiple segments once multi-segment
+    // writes and reads are in place.
     pub(crate) segment_manifest: super::segment_summary::SegmentManifest,
     // ── Temp dir for CSR mmap files (cleaned up on Drop) ──
 }
@@ -2488,8 +2491,17 @@ impl DiskGraph {
     /// count is the stored row count minus any tombstone slack (which we
     /// don't tally precisely here — the planner treats `has_node_type` as
     /// a lower-bound predicate).
+    ///
+    /// PR1 phase 5 additionally populates `indexed_prop_ranges` from the
+    /// segment's on-disk `PropertyIndex` files (which live in `data_dir`,
+    /// which under phase-4 layout is `seg_000/`). Today only string
+    /// indexes exist, so every entry uses `PropRange::StringBloomPlaceholder`
+    /// — a conservative placeholder that never prunes, but registers the
+    /// `(type_hash, prop_hash)` pair so phase 6+ can upgrade to real
+    /// bloom filters without changing the manifest schema.
     fn build_single_segment_manifest(&self) -> super::segment_summary::SegmentManifest {
-        use super::segment_summary::{SegmentManifest, SegmentSummary};
+        use super::segment_summary::{PropRange, SegmentManifest, SegmentSummary};
+        use std::collections::HashSet;
         let mut summary = SegmentSummary::new(0, 0);
         summary.node_id_hi = self.node_count as u32;
         summary.edge_count = self.edge_count as u64;
@@ -2518,6 +2530,41 @@ impl DiskGraph {
             summary
                 .node_type_counts
                 .insert(type_key.as_u64(), store.row_count());
+        }
+
+        // PR1 phase 5: record every (type, prop) index present in the
+        // segment. Prefer the in-memory cache — its keys hold the
+        // *original* type/prop strings the user passed in, so hashes
+        // round-trip cleanly through `InternedKey::from_str`. Fall back
+        // to a disk scan for indexes that were persisted earlier and
+        // haven't been queried this session; scanned names are sanitised
+        // filenames, which are identity-equal to originals for the only
+        // shape we ever emit (`[A-Za-z0-9_-]`).
+        let mut seen: HashSet<(u64, u64)> = HashSet::new();
+        if let Ok(cache) = self.property_indexes.read() {
+            for ((ty, prop), slot) in cache.iter() {
+                if slot.is_none() {
+                    continue;
+                }
+                let t_hash = InternedKey::from_str(ty).as_u64();
+                let p_hash = InternedKey::from_str(prop).as_u64();
+                if seen.insert((t_hash, p_hash)) {
+                    summary.indexed_prop_ranges.push((
+                        t_hash,
+                        p_hash,
+                        PropRange::StringBloomPlaceholder,
+                    ));
+                }
+            }
+        }
+        for (t_hash, p_hash) in property_index::scan_segment_hashes(&self.data_dir) {
+            if seen.insert((t_hash, p_hash)) {
+                summary.indexed_prop_ranges.push((
+                    t_hash,
+                    p_hash,
+                    PropRange::StringBloomPlaceholder,
+                ));
+            }
         }
 
         let mut manifest = SegmentManifest::new();

@@ -23,6 +23,7 @@
 //! Restricted to `TypedColumn::Str` columns — numeric equality is a
 //! follow-up.
 
+use crate::graph::schema::InternedKey;
 use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
 use petgraph::graph::NodeIndex;
 use std::fs;
@@ -96,9 +97,13 @@ pub fn global_file_paths(data_dir: &Path, property: &str) -> (PathBuf, PathBuf, 
 }
 
 /// Scan `data_dir` for all `property_index_*_meta.bin` files and
-/// return the `(node_type, property)` pairs they cover. Used at
-/// `DiskGraph::open()` time to populate the in-memory index registry.
-#[allow(dead_code)]
+/// return the `(node_type, property)` pairs they cover. Names come back
+/// as they appear on disk — sanitised through [`sanitise`] at build
+/// time, which is the identity transformation for all characters in
+/// `[A-Za-z0-9_-]` (the only shape we've ever seen in practice).
+///
+/// Used by `build_single_segment_manifest` to discover which indexes
+/// exist in a segment and populate `SegmentSummary.indexed_prop_ranges`.
 pub fn scan_data_dir(data_dir: &Path) -> Vec<(String, String)> {
     let Ok(entries) = fs::read_dir(data_dir) else {
         return Vec::new();
@@ -121,6 +126,23 @@ pub fn scan_data_dir(data_dir: &Path) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// Like [`scan_data_dir`] but returns the pairs as `(type_hash, prop_hash)`
+/// tuples. Hashes are computed via [`InternedKey::from_str`] over the
+/// sanitised names read from disk — equal to the hashes derived at build
+/// time for all `[A-Za-z0-9_-]` type/prop names (the only shape we emit
+/// or have ever seen on disk). Returned in filesystem-enumeration order.
+pub fn scan_segment_hashes(segment_dir: &Path) -> Vec<(u64, u64)> {
+    scan_data_dir(segment_dir)
+        .into_iter()
+        .map(|(t, p)| {
+            (
+                InternedKey::from_str(&t).as_u64(),
+                InternedKey::from_str(&p).as_u64(),
+            )
+        })
+        .collect()
 }
 
 /// Write the meta file for a `(node_type, property)` index.
@@ -485,5 +507,30 @@ mod tests {
         let idx = PropertyIndex::build(&dir, "Human", "label", Vec::new()).unwrap();
         assert!(idx.lookup_eq_str("anything").is_empty());
         assert!(idx.lookup_prefix_str("x", 10).is_empty());
+    }
+
+    #[test]
+    fn scan_segment_hashes_returns_hashed_pairs() {
+        // `tempfile::TempDir` avoids the nanosecond-timestamp collisions
+        // that the legacy `tmp_dir()` helper can hit under parallel tests.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let _ = PropertyIndex::build(dir, "Human", "label", vec![("A".into(), 1)]).unwrap();
+        let _ = PropertyIndex::build(dir, "Paper", "title", vec![("Z".into(), 2)]).unwrap();
+
+        let mut pairs = scan_segment_hashes(dir);
+        pairs.sort();
+        let mut expected = vec![
+            (
+                InternedKey::from_str("Human").as_u64(),
+                InternedKey::from_str("label").as_u64(),
+            ),
+            (
+                InternedKey::from_str("Paper").as_u64(),
+                InternedKey::from_str("title").as_u64(),
+            ),
+        ];
+        expected.sort();
+        assert_eq!(pairs, expected);
     }
 }
