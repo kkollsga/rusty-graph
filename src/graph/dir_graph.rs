@@ -1525,8 +1525,15 @@ impl DirGraph {
         // (`file.rs:580`), falling back to `columns/<type>/columns.zst`
         // only when v3 is missing (pre-Phase-4 graphs, or DirGraph → disk
         // saves that never went through the streaming builder).
-        let columns_bin = dir.join("columns.bin");
-        if !columns_bin.exists() {
+        //
+        // 0.8.12 phase-1: PR1 phase 4 moved `columns.bin` under
+        // `seg_000/`, so this guard started missing on every disk save —
+        // the per-type legacy fallback was running unconditionally and
+        // ate ~3s on a wiki100m graph. Check both the root (legacy
+        // flat layout) and `seg_000/` (post-phase-4 segmented layout).
+        let columns_bin_present =
+            dir.join("columns.bin").exists() || dir.join("seg_000/columns.bin").exists();
+        if !columns_bin_present {
             let columns_dir = dir.join("columns");
             std::fs::create_dir_all(&columns_dir)
                 .map_err(|e| format!("Failed to create columns dir: {}", e))?;

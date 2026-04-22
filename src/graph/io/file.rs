@@ -569,10 +569,37 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
             .insert(node_type.clone(), std::sync::Arc::new(schema));
     }
 
-    // Load column stores — prefer mmap-backed (columns.bin + columns_meta)
-    let mmap_path = dir.join("columns.bin");
-    let meta_bin_path = dir.join("columns_meta.bin.zst");
-    let meta_json_path = dir.join("columns_meta.json");
+    // Load column stores — prefer mmap-backed (columns.bin + columns_meta).
+    // 0.8.12 phase-1: PR1 phase 4 moved these files to `seg_000/`. Check
+    // both locations so post-phase-4 saves still take the fast mmap path
+    // — without this the load fell through to the legacy
+    // `columns/<type>/columns.zst` branch which returns an empty
+    // `column_stores` map, breaking `MATCH (n:Type)` queries after a
+    // disk-mode save + reload.
+    let mmap_path = {
+        let seg0 = dir.join("seg_000/columns.bin");
+        if seg0.exists() {
+            seg0
+        } else {
+            dir.join("columns.bin")
+        }
+    };
+    let meta_bin_path = {
+        let seg0 = dir.join("seg_000/columns_meta.bin.zst");
+        if seg0.exists() {
+            seg0
+        } else {
+            dir.join("columns_meta.bin.zst")
+        }
+    };
+    let meta_json_path = {
+        let seg0 = dir.join("seg_000/columns_meta.json");
+        if seg0.exists() {
+            seg0
+        } else {
+            dir.join("columns_meta.json")
+        }
+    };
     let has_mmap = mmap_path.exists() && (meta_bin_path.exists() || meta_json_path.exists());
     if has_mmap {
         use crate::graph::io::ntriples::ColumnTypeMeta;

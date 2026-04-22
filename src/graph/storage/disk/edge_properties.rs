@@ -294,6 +294,25 @@ impl EdgePropertyStore {
             }
         }
 
+        // 0.8.12 phase-1 fast path: skip the O(upper_bound) sweep when
+        // no edge has any properties. The pre-phase-1 loop ran 6.7M
+        // overlay HashMap lookups and wrote a 54 MB all-zero offsets
+        // file on every save of a property-less wiki500m graph — ~1–2 s
+        // per save. Now we emit zero-length files and reload resolves
+        // to an empty base (see matching guard in `load_from`). Every
+        // `get(edge_idx)` on the reloaded store returns `None`, which
+        // is exactly what the full-sweep path produced anyway.
+        if self.is_empty() {
+            std::fs::write(&offsets_path, b"")?;
+            std::fs::write(&heap_path, b"")?;
+            let legacy = target_dir.join(LEGACY_FILE);
+            if legacy.exists() {
+                let _ = std::fs::remove_file(&legacy);
+            }
+            self.overlay.clear();
+            return Ok(());
+        }
+
         let mut offsets: Vec<u64> = Vec::with_capacity(upper_bound as usize + 1);
         // Pre-size heap based on overlay content — avoids repeated realloc.
         let heap_hint: usize = self
@@ -347,6 +366,16 @@ impl EdgePropertyStore {
         let offsets_path = dir.join(OFFSETS_FILE);
         let heap_path = dir.join(HEAP_FILE);
         if !offsets_path.exists() {
+            return Ok(Self::new());
+        }
+        // 0.8.12 phase-1: the save path now emits zero-length
+        // offsets/heap files for the "no properties anywhere" case.
+        // `MmapOrVec::load_mapped` with `len == 0` would try to
+        // `map_mut` a zero-byte region, which fails on some platforms.
+        // Short-circuit to an empty store — every `get()` on this
+        // store will resolve via the overlay check (base is None) and
+        // return `None`, matching the semantic of "no edge has props".
+        if meta.offsets_len == 0 {
             return Ok(Self::new());
         }
         let offsets = MmapOrVec::<u64>::load_mapped(&offsets_path, meta.offsets_len)?;
@@ -527,5 +556,38 @@ mod tests {
         let got = loaded.get(2).expect("should load from legacy");
         assert_eq!(got.as_ref().len(), 1);
         assert_eq!(got.as_ref()[0].1, Value::String("old".into()));
+    }
+
+    #[test]
+    fn empty_store_save_emits_zero_length_files_and_reload_preserves_semantics() {
+        // 0.8.12 phase-1 fast path: when no edge has properties, save
+        // must not sweep `0..upper_bound` or write a 54 MB all-zero
+        // offsets file. Verify the files are zero-length *and* that a
+        // reload with a large `upper_bound` answers `get()` as None for
+        // every edge.
+        let tmp = TempDir::new().unwrap();
+        let mut interner = StringInterner::new();
+        let mut s = EdgePropertyStore::new();
+
+        // upper_bound is deliberately large — pre-phase-1 this would
+        // have written 1_000_000 * 8 = 8 MB of zeros.
+        s.save_to(tmp.path(), 1_000_000).unwrap();
+
+        let offsets_meta = std::fs::metadata(tmp.path().join(OFFSETS_FILE)).unwrap();
+        let heap_meta = std::fs::metadata(tmp.path().join(HEAP_FILE)).unwrap();
+        assert_eq!(offsets_meta.len(), 0, "offsets file should be empty");
+        assert_eq!(heap_meta.len(), 0, "heap file should be empty");
+
+        let meta = EdgePropertyStore::meta_for(tmp.path());
+        assert_eq!(meta.offsets_len, 0);
+        assert_eq!(meta.heap_len, 0);
+
+        let reloaded = EdgePropertyStore::load_from(tmp.path(), 1, meta, &mut interner).unwrap();
+        assert!(reloaded.is_empty());
+        // get() on any edge_idx returns None — matches the pre-phase-1
+        // behavior where every edge had an empty slot.
+        assert!(reloaded.get(0).is_none());
+        assert!(reloaded.get(999_999).is_none());
+        assert!(reloaded.get(u32::MAX).is_none());
     }
 }
