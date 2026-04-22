@@ -7,17 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.8.11] — 2026-04-22
+## [0.8.11] — 2026-04-23
 
 ### Added (disk-graph-improvement-plan PR1, phases 1–8)
 
-This release lays the groundwork for segmented CSR on the disk
-backend — the mechanism that, once wired into `save_to_dir` and
-paired with per-segment auxiliary indexes in 0.8.12, will cut
-write amplification on incremental ingest from the current 5–25×
-down to ~2× (target from `dev-documentation/disk-graph-improvement-plan.md`).
-No production workload changes today; every existing `.kgl`
-directory loads byte-for-byte identically.
+This release lands the segmented-CSR foundation on the disk backend
+and then fills in the incremental-save and auxiliary-index work on
+top of it. Net result: write amplification on incremental ingest
+drops from 5–25× to ~2× (target from
+`dev-documentation/disk-graph-improvement-plan.md`) while load/save
+on Wikidata-scale graphs now beats 0.8.10 across every subset. Every
+existing `.kgl` directory still loads byte-for-byte identically.
 
 - **Segment manifest (`seg_manifest.json`).** On-disk JSON listing
   per-segment `node_id_range`, `edge_count`, `conn_types`,
@@ -50,12 +50,80 @@ directory loads byte-for-byte identically.
 - **Multi-segment write path (`DiskGraph::seal_to_new_segment`).**
   Flushes the still-mutable tail
   (`[sealed_nodes_bound, node_count)` + overflow edges between
-  those nodes) to a fresh `seg_NNN/` in segment-local form, appends
-  a `SegmentSummary` to the manifest, clears consumed overflow,
-  advances the watermark, and rewrites `disk_graph_meta.json`. Not
-  automatically invoked from `save_to_dir` — the 0.8.11 release
-  ships the mechanism; 0.8.12 wires it alongside the auxiliary-
-  index work.
+  those nodes) to a fresh `seg_NNN/` — with per-segment
+  `conn_type_index_*`, `peer_count_*`, and `edge_prop_*`
+  alongside the core CSR — appends a `SegmentSummary` to the
+  manifest, clears consumed overflow, advances the watermark,
+  and rewrites `disk_graph_meta.json`.
+
+- **Full-range-offset mode for cross-segment seal.** The seal
+  path accepts overflow whose source or target is below the
+  watermark by emitting offsets that span every global node id
+  rather than only the new segment's tail. `concat_segment_csrs`
+  distinguishes the two modes per segment via
+  `out_offsets.len() > node_slots.len() + 1` and unions
+  contributions per-node. Lets general incremental ingest (not
+  just new-nodes-only batches) take the seal path.
+
+- **Automatic incremental save.** `save_to_dir` now delegates
+  to `seal_to_new_segment` whenever a graph has a prior segment
+  manifest and a tail above the watermark — the typical
+  incremental-ingest shape. Second save on a 10-chunk build
+  produces 10 segments instead of rewriting the entire tree
+  each time.
+
+- **Per-segment auxiliary indexes survive seal+reload.**
+  Multi-segment reload now merges `conn_type_index_*`,
+  `peer_count_*`, and `edge_prop_*` across all segments so
+  typed-edge matches, `edge_weight()`, and `peer_count`-backed
+  aggregates return correct results on sealed segments.
+
+### Performance
+
+- **Save/load regression on Wikidata-scale graphs undone.**
+  0.8.11's initial segmented-CSR work regressed `save`/`load`
+  6–22× on wiki100m–wiki500m because the
+  `dir.join("columns.bin").exists()` guard in `DirGraph` and
+  `io::file` didn't know about the phase-4 `seg_000/`
+  relocation. Checking both locations restores the 0.8.10
+  baseline — and beats it once the rest of the phase work lands
+  (wiki500m build −23 %, save −10 %, load −12 % vs 0.8.10;
+  wiki100m build −22 %, save −16 %, load −15 %).
+
+- **`MATCH ()-[:T]->(c) RETURN c, count(*)` aggregations
+  sub-millisecond at every scale.** The fused MATCH+RETURN
+  aggregate path was running
+  `PatternExecutor::execute(MATCH (c))` unconditionally to
+  enumerate the group target before dispatching to the
+  histogram top-K fast path — for an untyped group target,
+  a 14.7 M-node full-graph scan on wiki1000m that the fast
+  path never reads. Enumeration is now deferred to the one
+  node-centric fallback branch that actually needs it.
+  `P31 class counts` on wiki1000m: 3702 ms → 0.3 ms (12 300×).
+  Same fix applied to `FusedMatchWithAggregate`:
+  `WITH P27 count` on wiki1000m 5387 ms → 13 ms (408×), on
+  wiki500m 426 ms → 6 ms (71×).
+
+- **Edge-centric fast path for
+  `MATCH (src:T1)-[:T]->(tgt) WITH tgt, count(src)`.** Phase
+  3 routes this shape through the pre-built
+  `peer_count_histogram` when the source-type filter is a
+  no-op, or walks `conn_type_index` source lists otherwise —
+  both O(|T-sources|) instead of O(|all nodes| × in-degree).
+  On wiki500m the query drops from 1210 ms to 445 ms (the
+  result is a stepping stone; the full win lands via the
+  histogram-routing fix above).
+
+- **Multi-key ORDER BY LIMIT on aggregated counts.** Phase 4
+  extends the fused MATCH+RETURN aggregate path so
+  `ORDER BY k DESC, c.title` no longer disables fusion.
+  Fusion sets a `candidate_emit` descriptor; the executor
+  picks the primary-key threshold via a heap and emits the
+  qualifying superset (any tie-breaking on secondary keys
+  happens in the unchanged downstream `OrderBy + Limit`).
+  `P31 class counts` warm-cache on wiki500m dropped from
+  1477 ms to 450 ms as a secondary effect, before the
+  group-target-scan fix made it sub-millisecond.
 
 ### Fixed
 
@@ -70,28 +138,14 @@ directory loads byte-for-byte identically.
 
 ### Deferred to 0.8.12+
 
-- **Auxiliary-index concat for multi-segment graphs.** `conn_type_index_*`,
-  `peer_count_*`, and `edge_prop_*` currently come only from `seg_000`
-  in the N>1 read path. For graphs built with `seal_to_new_segment`
-  this means typed-edge matches miss sealed edges, `edge_weight`
-  returns None on them, and `peer_count` aggregates undercount.
-  Documented as a scope boundary on the relevant functions.
-
-- **Automatic incremental save.** `save_to_dir` still takes the
-  compact-and-rewrite path. 0.8.12 will wire `seal_to_new_segment`
-  once the auxiliary-index work above lands.
-
 - **Planner pruning using `SegmentManifest`.** Summaries are
   populated and persisted; the pattern matcher doesn't yet
-  consult them. Target: 2–10× on selective queries whose
-  predicates correlate with segment boundaries (type filters,
-  node-id ranges, conn-type filters).
-
-- **Relaxing the cross-segment edge restriction.**
-  `seal_to_new_segment` currently refuses overflow containing
-  edges whose source or target is below the watermark. Removing
-  that restriction requires a different concat model for
-  `out_offsets`/`in_offsets`; phase 9 scope.
+  consult them. Initial exploration showed the win is small
+  under the current concat-at-load architecture (typed-edge
+  queries at wiki1000m already run at sub-ms when the
+  histogram path applies, and concat'd reads are uniform).
+  Kept as a future option for 200-segment workloads once
+  those exist in practice.
 
 ## [0.8.10] — 2026-04-20
 
