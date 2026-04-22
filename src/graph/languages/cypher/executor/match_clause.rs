@@ -1832,6 +1832,27 @@ impl<'a> CypherExecutor<'a> {
             })
             .collect();
 
+        // 0.8.12 phase-3: edge-centric aggregation via peer_count_histogram.
+        // Pattern must be 3 elements, group on the target (element 2),
+        // target has no property constraints, edge has a typed connection.
+        // Source may have a node-type constraint if a cheap uniformity
+        // check proves every source of the edge type already has that
+        // type. For wiki-style queries like
+        //   MATCH (h:Q5)-[:P27]->(c) WITH c, count(h) AS k
+        // this drops wall time from O(|tgt nodes| × avg in-degree) to
+        // O(|distinct peers|) by consulting the pre-built histogram.
+        if let Some(rows) = self.try_fast_with_aggregate_via_histogram(
+            pattern,
+            with_clause,
+            &columns,
+            group_var,
+            group_elem_idx,
+            &group_key_indices,
+            &count_indices,
+        )? {
+            return Ok(ResultSet { rows, columns });
+        }
+
         let mut result_rows = Vec::with_capacity(group_matches.len());
 
         for m in &group_matches {
@@ -1906,5 +1927,158 @@ impl<'a> CypherExecutor<'a> {
             rows: result_rows,
             columns,
         })
+    }
+
+    /// 0.8.12 phase-3 fast path for
+    ///   `MATCH (src [:Type])-[:T]->(tgt) WITH tgt, count(src) [AS k] ...`
+    /// — answers in O(|distinct peers|) via the `peer_count_histogram`
+    /// instead of the per-source iteration that the generic path takes.
+    /// Returns `Ok(None)` when the pattern shape, the target
+    /// constraints, or the histogram availability make this path unsafe
+    /// — caller then uses the per-source iteration.
+    ///
+    /// Preconditions for the fast path:
+    ///   1. Pattern is exactly 3 elements: node, edge, node.
+    ///   2. Group variable is the *target* (element index 2).
+    ///   3. Edge has a connection type (`[:T]`) — required to look up
+    ///      the histogram at all.
+    ///   4. Target element has no property constraints (`{…}`) — the
+    ///      histogram counts every peer, so an added property filter
+    ///      would require post-filter which defeats the point.
+    ///   5. Source's type constraint (if any) is a no-op on this edge
+    ///      type: every node in `sources_for_conn_type_bounded(T)` has
+    ///      the constrained type. Otherwise using the unfiltered
+    ///      histogram would overcount.
+    ///
+    /// Histogram fallback isn't implemented here — when
+    /// `lookup_peer_counts` returns `None` (memory / mapped backends,
+    /// or older disk graphs) we return `Ok(None)` so the caller takes
+    /// the per-source path.
+    #[allow(clippy::too_many_arguments)]
+    fn try_fast_with_aggregate_via_histogram(
+        &self,
+        pattern: &Pattern,
+        with_clause: &WithClause,
+        columns: &[String],
+        group_var: &str,
+        group_elem_idx: usize,
+        group_key_indices: &[usize],
+        count_indices: &[usize],
+    ) -> Result<Option<Vec<ResultRow>>, String> {
+        if pattern.elements.len() != 3 || group_elem_idx != 2 {
+            return Ok(None);
+        }
+        let edge_conn_type = match &pattern.elements[1] {
+            PatternElement::Edge(ep) => ep.connection_type.as_deref(),
+            _ => return Ok(None),
+        };
+        let Some(ct_str) = edge_conn_type else {
+            return Ok(None);
+        };
+        // Target must have no property constraint; it's the group key.
+        let (tgt_props, src_type, src_props) = match (&pattern.elements[0], &pattern.elements[2]) {
+            (PatternElement::Node(src), PatternElement::Node(tgt)) => {
+                (&tgt.properties, src.node_type.as_deref(), &src.properties)
+            }
+            _ => return Ok(None),
+        };
+        if tgt_props.is_some() || src_props.is_some() {
+            return Ok(None);
+        }
+
+        let conn_key = InternedKey::from_str(ct_str);
+        let want_type_key = src_type.map(InternedKey::from_str);
+
+        // Two fast paths. (A) no source constraint → precomputed
+        // `peer_count_histogram`, O(distinct peers). (B) source has a
+        // type constraint → walk the edge-type's source list from
+        // `conn_type_index` (only sources that HAVE an outgoing edge
+        // of this type), filter by `node_type_of`, iterate that
+        // source's outgoing T-edges and accumulate per-peer counts.
+        // (B) is O(|T-sources| + |matching T-edges|) — much cheaper
+        // than the slow path's O(|all nodes| × in-degree) iteration.
+        let counts: std::collections::HashMap<u32, i64> = if let Some(want_key) = want_type_key {
+            let Some(srcs) = self
+                .graph
+                .graph
+                .sources_for_conn_type_bounded(conn_key, None)
+            else {
+                return Ok(None);
+            };
+            let mut counts: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
+            let mut deadline_iter = 0usize;
+            for s in &srcs {
+                deadline_iter += 1;
+                // Periodic deadline checks — the inner edge loop can
+                // dominate on hub sources.
+                if deadline_iter.is_multiple_of(1 << 14) {
+                    self.check_deadline()?;
+                }
+                let s_idx = NodeIndex::new(*s as usize);
+                if self.graph.graph.node_type_of(s_idx) != Some(want_key) {
+                    continue;
+                }
+                for edge_ref in self.graph.graph.edges_directed_filtered(
+                    s_idx,
+                    Direction::Outgoing,
+                    Some(conn_key),
+                ) {
+                    *counts.entry(edge_ref.target().index() as u32).or_insert(0) += 1;
+                }
+            }
+            counts
+        } else {
+            let Some(h) = self.graph.graph.lookup_peer_counts(conn_key) else {
+                return Ok(None);
+            };
+            h
+        };
+
+        let _ = columns; // column names are the caller's ResultSet wrap
+        let mut rows: Vec<ResultRow> = Vec::with_capacity(counts.len());
+        for (&peer, &count) in &counts {
+            let node_idx = NodeIndex::new(peer as usize);
+
+            // Build temporary row so group-key expressions (e.g.
+            // `c.title`) can resolve via the evaluator.
+            let mut tmp_row = ResultRow::new();
+            tmp_row
+                .node_bindings
+                .insert(group_var.to_string(), node_idx);
+
+            let mut projected = Bindings::with_capacity(with_clause.items.len());
+            for &idx in group_key_indices {
+                let item = &with_clause.items[idx];
+                let key = item
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}", item.expression));
+                let val = self.evaluate_expression(&item.expression, &tmp_row)?;
+                projected.insert(key, val);
+            }
+            for &idx in count_indices {
+                let item = &with_clause.items[idx];
+                let key = item
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}", item.expression));
+                projected.insert(key, Value::Int64(count));
+            }
+
+            let mut new_row = ResultRow::from_projected(projected);
+            new_row
+                .node_bindings
+                .insert(group_var.to_string(), node_idx);
+            rows.push(new_row);
+        }
+
+        // Apply WITH WHERE filter (mirrors the slow path's behavior so
+        // `count(h) > 5` etc. still work).
+        if let Some(ref where_clause) = with_clause.where_clause {
+            let folded = self.fold_constants_pred(&where_clause.predicate);
+            rows.retain(|row| self.evaluate_predicate(&folded, row).unwrap_or(false));
+        }
+
+        Ok(Some(rows))
     }
 }
