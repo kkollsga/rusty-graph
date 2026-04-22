@@ -2730,25 +2730,20 @@ impl DiskGraph {
         // the multi-segment load path would misread the padding as
         // real CSR data — the single-segment path uses `meta.*_len`
         // and is unaffected.
+        //
+        // `trim_to_logical_length` truncates the file AND remaps, so
+        // subsequent `push`es on the same MmapOrVec see the new size
+        // as the starting capacity and extend cleanly. A naive
+        // `save_to_file(&same_path)` set_len without remap leaves the
+        // mmap spanning past the new EOF and SIGBUSes on the next
+        // push — caught in the 0.8.11 ingest benchmark.
         if csr_target == self.data_dir {
-            if let Some(p) = self.node_slots.file_path().map(PathBuf::from) {
-                let _ = self.node_slots.save_to_file(&p);
-            }
-            if let Some(p) = self.out_offsets.file_path().map(PathBuf::from) {
-                let _ = self.out_offsets.save_to_file(&p);
-            }
-            if let Some(p) = self.out_edges.file_path().map(PathBuf::from) {
-                let _ = self.out_edges.save_to_file(&p);
-            }
-            if let Some(p) = self.in_offsets.file_path().map(PathBuf::from) {
-                let _ = self.in_offsets.save_to_file(&p);
-            }
-            if let Some(p) = self.in_edges.file_path().map(PathBuf::from) {
-                let _ = self.in_edges.save_to_file(&p);
-            }
-            if let Some(p) = self.edge_endpoints.file_path().map(PathBuf::from) {
-                let _ = self.edge_endpoints.save_to_file(&p);
-            }
+            let _ = self.node_slots.trim_to_logical_length();
+            let _ = self.out_offsets.trim_to_logical_length();
+            let _ = self.out_edges.trim_to_logical_length();
+            let _ = self.in_offsets.trim_to_logical_length();
+            let _ = self.in_edges.trim_to_logical_length();
+            let _ = self.edge_endpoints.trim_to_logical_length();
         }
 
         // PR1 phase 2: compute and persist a single-segment manifest.
@@ -3023,6 +3018,28 @@ impl DiskGraph {
 
         self.segment_manifest.append(summary);
         self.segment_manifest.save_to(root)?;
+
+        // ─── Reconcile seg_0's on-disk files with the new layout. ───
+        //
+        // self.{node_slots, out_offsets, in_offsets, edge_endpoints}
+        // all grew during the post-save adds — their files are at
+        // seg_0/... and now span past seg_0's logical extent (the
+        // tail entries belong in seg_NNN/, which was just written).
+        // Truncate each seg_0 file to its pre-tail size and swap
+        // self's backing to heap-owned copies that still hold the
+        // combined view for in-memory queries. On reload, seg_0 reads
+        // cleanly via file-size inference, then concat stitches seg_NNN.
+        //
+        // `out_edges` / `in_edges` were NOT pushed during the overflow
+        // adds (add_edge's post-CSR path writes overflow_out/in +
+        // edge_endpoints only), so their files stay at seg_0's size —
+        // no reconcile needed.
+        let sealed_edge_count = n_edges;
+        let seg0_next_edge_idx = self.next_edge_idx as usize - sealed_edge_count;
+        reconcile_seg0_csr::<DiskNodeSlot>(&mut self.node_slots, tail_lo as usize)?;
+        reconcile_seg0_csr::<u64>(&mut self.out_offsets, tail_lo as usize + 1)?;
+        reconcile_seg0_csr::<u64>(&mut self.in_offsets, tail_lo as usize + 1)?;
+        reconcile_seg0_csr::<EdgeEndpoints>(&mut self.edge_endpoints, seg0_next_edge_idx)?;
 
         // ─── Clear consumed overflow + advance watermark. ───
         //
@@ -3378,6 +3395,39 @@ impl SegmentCsr {
             edge_endpoints: load_with_inferred_len(&csr_dir.join("edge_endpoints"), temp_dir)?,
         })
     }
+}
+
+/// Post-seal cleanup helper — see `DiskGraph::seal_to_new_segment`.
+///
+/// `field` is one of seg_0's CSR mmap-backed arrays that grew past its
+/// seg_0 logical size during the post-save add batch (e.g.,
+/// `self.node_slots` got pushes from `add_node`, `self.edge_endpoints`
+/// got pushes from `add_edge`). We need three things at once:
+///
+///  1. The on-disk file trimmed to exactly `seg0_len` elements — so
+///     the next reload reads seg_0 with the right element count.
+///  2. The in-memory data to keep all current entries (seg_0 + tail)
+///     so queries between seal and drop still see the combined graph.
+///  3. The file handle released, so `set_len` doesn't race an
+///     existing mmap.
+///
+/// Simplest way to get all three: snapshot the current contents into
+/// a Vec, replace `field` with a fresh heap-backed MmapOrVec holding
+/// that Vec, then reopen the file briefly just to `set_len`.
+fn reconcile_seg0_csr<T: Copy + Default + 'static>(
+    field: &mut MmapOrVec<T>,
+    seg0_len: usize,
+) -> std::io::Result<()> {
+    let all = field.to_vec();
+    let path = field.file_path().map(PathBuf::from);
+    // Replace before truncate so the old mmap is dropped (releases the
+    // file) before we `set_len` on the path.
+    *field = MmapOrVec::from_vec(all);
+    if let Some(p) = path {
+        let f = std::fs::OpenOptions::new().write(true).open(&p)?;
+        f.set_len((seg0_len * std::mem::size_of::<T>()) as u64)?;
+    }
+    Ok(())
 }
 
 /// Like [`load_raw_or_zst`] but derives the element count from the file

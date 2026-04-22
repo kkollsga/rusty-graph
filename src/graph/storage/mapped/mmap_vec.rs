@@ -487,6 +487,49 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         writer.write_all(self.as_raw_bytes())
     }
 
+    /// Trim the backing file to the exact `len * size_of::<T>()` bytes and
+    /// remap, so any subsequent `push` sees the post-trim size as the
+    /// starting capacity and extends the file before writing. No-op on
+    /// `Heap`. Used by the disk backend's save path to collapse the 64-
+    /// element minimum-capacity padding of `mapped(path, cap)` on small
+    /// graphs, so multi-segment file-size inference (phase 7 concat)
+    /// reads the correct element count.
+    ///
+    /// Leaves `len` unchanged; shrinks `capacity` to equal `len`.
+    pub fn trim_to_logical_length(&mut self) -> io::Result<()> {
+        match self {
+            MmapOrVec::Heap { .. } => Ok(()),
+            MmapOrVec::Mapped {
+                mmap,
+                len,
+                capacity,
+                file,
+                path,
+                ..
+            } => {
+                mmap.flush()?;
+                let byte_len = *len * std::mem::size_of::<T>();
+                file.set_len(byte_len as u64)?;
+                // Remap to the new file size. `map_mut` with `len == 0`
+                // is undefined behaviour on some platforms; fall back to
+                // a size-1 mapping for empty arrays (the `*len` check on
+                // reads keeps the stale byte inaccessible).
+                let map_len = byte_len.max(1);
+                // SAFETY: file just truncated to byte_len; map_len >= byte_len.
+                *mmap = unsafe {
+                    MmapOptions::new()
+                        .len(map_len)
+                        .map_mut(&*file)
+                        .unwrap_or_else(|e| {
+                            panic!("trim remap failed for {}: {}", path.display(), e)
+                        })
+                };
+                *capacity = *len;
+                Ok(())
+            }
+        }
+    }
+
     /// Write the data to a file (for save_mmap). For heap, writes Vec contents.
     /// For mapped, flushes then copies the file.
     pub fn save_to_file(&self, path: &Path) -> io::Result<()> {
