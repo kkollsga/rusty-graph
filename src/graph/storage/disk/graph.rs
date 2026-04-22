@@ -2987,13 +2987,52 @@ impl DiskGraph {
         }
         in_offsets.push(tcursor as u64);
 
-        // ─── Persist to disk. ───
+        // ─── Persist core CSR to disk. ───
         node_slots.save_to_file(&seg_dir.join("node_slots.bin"))?;
         out_offsets.save_to_file(&seg_dir.join("out_offsets.bin"))?;
         out_edges.save_to_file(&seg_dir.join("out_edges.bin"))?;
         in_offsets.save_to_file(&seg_dir.join("in_offsets.bin"))?;
         in_edges.save_to_file(&seg_dir.join("in_edges.bin"))?;
         edge_endpoints.save_to_file(&seg_dir.join("edge_endpoints.bin"))?;
+
+        // ─── Persist auxiliary indexes (phase 5). ───
+        //
+        // Without these, typed-edge matches, peer-count aggregates,
+        // and `edge_weight()` all return incomplete results on the
+        // sealed edges — phase 8's seal_to_new_segment commit doc
+        // documented this as a deferred limitation. Now we write the
+        // per-segment `conn_type_index_*`, `peer_count_*`, and flush
+        // the global `edge_properties` overlay so the sealed edges'
+        // properties survive into the segment's store.
+        //
+        // Segment-local inputs: the just-built node_slots / out_offsets
+        // / out_edges / edge_endpoints vectors above. All are
+        // `MmapOrVec::Heap` — no file handles — so the builders don't
+        // race with anything mmap'd under `self.data_dir`.
+        let _ = super::builder::write_conn_type_index(
+            &out_offsets,
+            &out_edges,
+            &edge_endpoints,
+            tail_len,
+            &seg_dir,
+            false,
+        );
+        let _ = super::builder::write_peer_count_histogram(
+            &edge_endpoints,
+            0,
+            n_edges,
+            &seg_dir,
+            false,
+        );
+
+        // Flush the edge_properties overlay to seg_0's base store. The
+        // overlay currently holds props for the sealed edges (keyed by
+        // their original global edge_idx). `save_to` absorbs the
+        // overlay into seg_0's edge_prop_* files, which after phase 7
+        // concat cover every segment's edges (since concat preserves
+        // global edge_idx). Sealed edges' properties survive reload.
+        let upper = self.next_edge_idx;
+        self.edge_properties.save_to(&self.data_dir, upper)?;
 
         // ─── Manifest bookkeeping. ───
         use super::segment_summary::SegmentSummary;
@@ -3145,6 +3184,24 @@ impl DiskGraph {
                             meta.edge_endpoints_len,
                             &temp_dir,
                         )?,
+                        conn_type_index_types: load_raw_or_zst_optional(
+                            &seg_dir.join("conn_type_index_types"),
+                        ),
+                        conn_type_index_offsets: load_raw_or_zst_optional(
+                            &seg_dir.join("conn_type_index_offsets"),
+                        ),
+                        conn_type_index_sources: load_raw_or_zst_optional(
+                            &seg_dir.join("conn_type_index_sources"),
+                        ),
+                        peer_count_types: load_raw_or_zst_optional(
+                            &seg_dir.join("peer_count_types"),
+                        ),
+                        peer_count_offsets: load_raw_or_zst_optional(
+                            &seg_dir.join("peer_count_offsets"),
+                        ),
+                        peer_count_entries: load_raw_or_zst_optional(
+                            &seg_dir.join("peer_count_entries"),
+                        ),
                     };
                     (seg_dir, csr)
                 }
@@ -3188,6 +3245,16 @@ impl DiskGraph {
                     meta.edge_endpoints_len,
                     &temp_dir,
                 )?,
+                conn_type_index_types: load_raw_or_zst_optional(&dir.join("conn_type_index_types")),
+                conn_type_index_offsets: load_raw_or_zst_optional(
+                    &dir.join("conn_type_index_offsets"),
+                ),
+                conn_type_index_sources: load_raw_or_zst_optional(
+                    &dir.join("conn_type_index_sources"),
+                ),
+                peer_count_types: load_raw_or_zst_optional(&dir.join("peer_count_types")),
+                peer_count_offsets: load_raw_or_zst_optional(&dir.join("peer_count_offsets")),
+                peer_count_entries: load_raw_or_zst_optional(&dir.join("peer_count_entries")),
             };
             (dir.to_path_buf(), csr)
         };
@@ -3199,6 +3266,12 @@ impl DiskGraph {
             in_offsets,
             in_edges,
             edge_endpoints,
+            conn_type_index_types,
+            conn_type_index_offsets,
+            conn_type_index_sources,
+            peer_count_types,
+            peer_count_offsets,
+            peer_count_entries,
         } = segment_csr;
 
         // Load edge properties — columnar (format=1) or legacy (format=0).
@@ -3245,18 +3318,17 @@ impl DiskGraph {
                 csr_sorted_by_type: meta.csr_sorted_by_type,
                 defer_csr: false,
                 edge_type_counts_raw: None,
-                conn_type_index_types: load_raw_or_zst_optional(
-                    &csr_dir.join("conn_type_index_types"),
-                ),
-                conn_type_index_offsets: load_raw_or_zst_optional(
-                    &csr_dir.join("conn_type_index_offsets"),
-                ),
-                conn_type_index_sources: load_raw_or_zst_optional(
-                    &csr_dir.join("conn_type_index_sources"),
-                ),
-                peer_count_types: load_raw_or_zst_optional(&csr_dir.join("peer_count_types")),
-                peer_count_offsets: load_raw_or_zst_optional(&csr_dir.join("peer_count_offsets")),
-                peer_count_entries: load_raw_or_zst_optional(&csr_dir.join("peer_count_entries")),
+                // Auxiliary indexes — single-segment graphs read them
+                // from `csr_dir` directly via `SegmentCsr::load_from`
+                // (or the manual constructor in the N==1 branch above);
+                // multi-segment graphs get the merged view from
+                // `concat_segment_csrs`.
+                conn_type_index_types,
+                conn_type_index_offsets,
+                conn_type_index_sources,
+                peer_count_types,
+                peer_count_offsets,
+                peer_count_entries,
                 has_tombstones: meta.has_tombstones,
                 property_indexes: std::sync::RwLock::new(HashMap::new()),
                 global_indexes: std::sync::RwLock::new(HashMap::new()),
@@ -3378,6 +3450,15 @@ pub(crate) struct SegmentCsr {
     pub(crate) in_offsets: MmapOrVec<u64>,
     pub(crate) in_edges: MmapOrVec<super::csr::CsrEdge>,
     pub(crate) edge_endpoints: MmapOrVec<super::csr::EdgeEndpoints>,
+    // Phase 5: per-segment auxiliary indexes. Each segment carries its
+    // own inverted indexes; `concat_segment_csrs` merges them at load
+    // time.
+    pub(crate) conn_type_index_types: MmapOrVec<u64>,
+    pub(crate) conn_type_index_offsets: MmapOrVec<u64>,
+    pub(crate) conn_type_index_sources: MmapOrVec<u32>,
+    pub(crate) peer_count_types: MmapOrVec<u64>,
+    pub(crate) peer_count_offsets: MmapOrVec<u64>,
+    pub(crate) peer_count_entries: MmapOrVec<u32>,
 }
 
 impl SegmentCsr {
@@ -3393,6 +3474,20 @@ impl SegmentCsr {
             in_offsets: load_with_inferred_len(&csr_dir.join("in_offsets"), temp_dir)?,
             in_edges: load_with_inferred_len(&csr_dir.join("in_edges"), temp_dir)?,
             edge_endpoints: load_with_inferred_len(&csr_dir.join("edge_endpoints"), temp_dir)?,
+            // Auxiliary files are optional — older segments (seg_000
+            // written before phase 5 wired auxiliary writes into seal)
+            // may lack them. `load_raw_or_zst_optional` already returns
+            // an empty MmapOrVec when the file is absent.
+            conn_type_index_types: load_raw_or_zst_optional(&csr_dir.join("conn_type_index_types")),
+            conn_type_index_offsets: load_raw_or_zst_optional(
+                &csr_dir.join("conn_type_index_offsets"),
+            ),
+            conn_type_index_sources: load_raw_or_zst_optional(
+                &csr_dir.join("conn_type_index_sources"),
+            ),
+            peer_count_types: load_raw_or_zst_optional(&csr_dir.join("peer_count_types")),
+            peer_count_offsets: load_raw_or_zst_optional(&csr_dir.join("peer_count_offsets")),
+            peer_count_entries: load_raw_or_zst_optional(&csr_dir.join("peer_count_entries")),
         })
     }
 }
@@ -3510,6 +3605,12 @@ pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> SegmentCsr {
             in_offsets: MmapOrVec::new(),
             in_edges: MmapOrVec::new(),
             edge_endpoints: MmapOrVec::new(),
+            conn_type_index_types: MmapOrVec::new(),
+            conn_type_index_offsets: MmapOrVec::new(),
+            conn_type_index_sources: MmapOrVec::new(),
+            peer_count_types: MmapOrVec::new(),
+            peer_count_offsets: MmapOrVec::new(),
+            peer_count_entries: MmapOrVec::new(),
         },
         1 => segments.pop().unwrap(),
         _ => {
@@ -3580,6 +3681,17 @@ pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> SegmentCsr {
                 endpoint_base += seg.edge_endpoints.len() as u32;
             }
 
+            // ─── Phase 5: auxiliary index merge ───────────────────────────
+            //
+            // conn_type_index — per-type source-list union across segments.
+            // Each segment's source list is globally sorted (segments own
+            // disjoint node ranges); concatenating segments in manifest
+            // order preserves ascending global order per type.
+            let (cti_types, cti_offsets, cti_sources) = merge_conn_type_index(&segments);
+
+            // peer_count — sum counts per (type, peer) across segments.
+            let (pc_types, pc_offsets, pc_entries) = merge_peer_count_histogram(&segments);
+
             SegmentCsr {
                 node_slots,
                 out_offsets,
@@ -3587,9 +3699,111 @@ pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> SegmentCsr {
                 in_offsets,
                 in_edges,
                 edge_endpoints,
+                conn_type_index_types: cti_types,
+                conn_type_index_offsets: cti_offsets,
+                conn_type_index_sources: cti_sources,
+                peer_count_types: pc_types,
+                peer_count_offsets: pc_offsets,
+                peer_count_entries: pc_entries,
             }
         }
     }
+}
+
+/// Merge per-segment `conn_type_index_*` into a combined index.
+/// For each connection type, the combined sources list is the
+/// concatenation of per-segment sources lists (already globally sorted
+/// because segments own disjoint node ranges and per-segment lists are
+/// locally sorted). Types are unioned and sorted ascending.
+fn merge_conn_type_index(
+    segments: &[SegmentCsr],
+) -> (MmapOrVec<u64>, MmapOrVec<u64>, MmapOrVec<u32>) {
+    use std::collections::BTreeMap;
+    // Walk each segment and accumulate: type → Vec<segment_index>.
+    let mut type_to_segs: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (si, seg) in segments.iter().enumerate() {
+        for i in 0..seg.conn_type_index_types.len() {
+            let t = seg.conn_type_index_types.get(i);
+            type_to_segs.entry(t).or_default().push(si);
+        }
+    }
+    let total_sources: usize = segments
+        .iter()
+        .map(|s| s.conn_type_index_sources.len())
+        .sum();
+    let mut out_types: MmapOrVec<u64> = MmapOrVec::with_capacity(type_to_segs.len());
+    let mut out_offsets: MmapOrVec<u64> = MmapOrVec::with_capacity(type_to_segs.len() + 1);
+    let mut out_sources: MmapOrVec<u32> = MmapOrVec::with_capacity(total_sources);
+    let mut cur_off: u64 = 0;
+    for (t, seg_idxs) in &type_to_segs {
+        out_types.push(*t);
+        out_offsets.push(cur_off);
+        for &si in seg_idxs {
+            let seg = &segments[si];
+            // Find the type's [start, end) slice inside this segment.
+            let n = seg.conn_type_index_types.len();
+            // Linear scan — typical segment has ≤ hundreds of types,
+            // so a BTreeMap-per-segment isn't worth the setup cost.
+            for j in 0..n {
+                if seg.conn_type_index_types.get(j) == *t {
+                    let start = seg.conn_type_index_offsets.get(j) as usize;
+                    let end = seg.conn_type_index_offsets.get(j + 1) as usize;
+                    for k in start..end {
+                        out_sources.push(seg.conn_type_index_sources.get(k));
+                    }
+                    cur_off += (end - start) as u64;
+                    break;
+                }
+            }
+        }
+    }
+    out_offsets.push(cur_off);
+    (out_types, out_offsets, out_sources)
+}
+
+/// Merge per-segment `peer_count_*` histograms by summing counts for
+/// every `(conn_type, peer)` pair that appears in any segment.
+fn merge_peer_count_histogram(
+    segments: &[SegmentCsr],
+) -> (MmapOrVec<u64>, MmapOrVec<u64>, MmapOrVec<u32>) {
+    use std::collections::BTreeMap;
+    // type → peer → summed count.
+    let mut by_type: BTreeMap<u64, BTreeMap<u32, u64>> = BTreeMap::new();
+    for seg in segments {
+        let n = seg.peer_count_types.len();
+        for i in 0..n {
+            let t = seg.peer_count_types.get(i);
+            let start = seg.peer_count_offsets.get(i) as usize;
+            let end = seg.peer_count_offsets.get(i + 1) as usize;
+            let type_bucket = by_type.entry(t).or_default();
+            // Entries are flat (peer, count) pairs.
+            let mut k = start;
+            while k < end {
+                let peer = seg.peer_count_entries.get(k * 2);
+                let count = seg.peer_count_entries.get(k * 2 + 1) as u64;
+                *type_bucket.entry(peer).or_insert(0) += count;
+                k += 1;
+            }
+        }
+    }
+    let mut out_types: MmapOrVec<u64> = MmapOrVec::with_capacity(by_type.len());
+    let mut out_offsets: MmapOrVec<u64> = MmapOrVec::with_capacity(by_type.len() + 1);
+    let mut out_entries: MmapOrVec<u32> = MmapOrVec::new();
+    let mut cur_pairs: u64 = 0;
+    for (t, peers) in &by_type {
+        out_types.push(*t);
+        out_offsets.push(cur_pairs);
+        for (peer, count) in peers {
+            out_entries.push(*peer);
+            // u64 count saturates to u32 for the on-disk format; sums
+            // across segments in practice fit because per-segment
+            // counts are u32 and at most `edge_count`.
+            out_entries.push((*count).min(u32::MAX as u64) as u32);
+        }
+        cur_pairs += peers.len() as u64;
+    }
+    out_offsets.push(cur_pairs);
+    (out_types, out_offsets, out_entries)
 }
 
 #[cfg(test)]
@@ -3616,6 +3830,15 @@ mod tests {
             in_offsets: from_vec(in_offsets),
             in_edges: from_vec(in_edges),
             edge_endpoints: from_vec(edge_endpoints),
+            // Phase-5 auxiliary fields default to empty in these
+            // CSR-only unit tests. Dedicated phase-5 tests populate
+            // them explicitly.
+            conn_type_index_types: MmapOrVec::new(),
+            conn_type_index_offsets: MmapOrVec::new(),
+            conn_type_index_sources: MmapOrVec::new(),
+            peer_count_types: MmapOrVec::new(),
+            peer_count_offsets: MmapOrVec::new(),
+            peer_count_entries: MmapOrVec::new(),
         }
     }
 
@@ -4105,5 +4328,102 @@ mod tests {
         assert_eq!(ep0.source, 0);
         assert_eq!(ep0.target, 1);
         let _ = (n1, n4); // silence unused-warnings if optimised out
+    }
+
+    #[test]
+    fn seal_round_trip_auxiliary_indexes() {
+        // Phase 5: verify that conn_type_index_*, peer_count_*, and
+        // edge_properties survive the seal → reload roundtrip for edges
+        // in the sealed segment.
+        let tmp = TempDir::new().unwrap();
+        let mut interner = StringInterner::new();
+        let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();
+        dg.defer_csr = true;
+        // seg_0: 3 nodes of type A with one T edge (0 → 1).
+        let n0 = dg.add_node(seal_test_node(&mut interner, 0, "A"));
+        let n1 = dg.add_node(seal_test_node(&mut interner, 1, "A"));
+        let _n2 = dg.add_node(seal_test_node(&mut interner, 2, "A"));
+        dg.add_edge(n0, n1, seal_test_edge(&mut interner, "T"));
+        dg.build_csr_from_pending();
+        dg.save_to_dir(tmp.path(), &interner).unwrap();
+
+        // Tail: 2 nodes of type B, 2 U-edges — one intra-tail (3→4), one
+        // self-loop on 3. Attach a property on the self-loop to verify
+        // edge_properties flushing on seal.
+        let n3 = dg.add_node(seal_test_node(&mut interner, 3, "B"));
+        let n4 = dg.add_node(seal_test_node(&mut interner, 4, "B"));
+        dg.add_edge(n3, n4, seal_test_edge(&mut interner, "U"));
+        let self_loop = {
+            let weight_key = interner.get_or_intern("weight");
+            let ed = crate::graph::schema::EdgeData {
+                connection_type: interner.get_or_intern("U"),
+                properties: vec![(weight_key, Value::Float64(2.5))],
+            };
+            dg.add_edge(n3, n3, ed)
+        };
+
+        dg.seal_to_new_segment(tmp.path()).unwrap();
+
+        // seg_001 has its own auxiliary files now (phase 5).
+        let seg1 = tmp.path().join("seg_001");
+        for name in [
+            "conn_type_index_types.bin",
+            "conn_type_index_offsets.bin",
+            "conn_type_index_sources.bin",
+            "peer_count_types.bin",
+            "peer_count_offsets.bin",
+            "peer_count_entries.bin",
+        ] {
+            assert!(seg1.join(name).exists(), "phase-5 missing {name}");
+        }
+
+        drop(dg);
+        let mut interner2 = StringInterner::new();
+        let (reloaded, _tmp_zst) =
+            super::DiskGraph::load_from_dir(tmp.path(), &mut interner2).unwrap();
+
+        // conn_type_index should cover BOTH T (from seg_0) and U (from
+        // seg_1). Merge is what `concat_segment_csrs::merge_conn_type_index`
+        // produces.
+        let t_key = interner2.get_or_intern("T").as_u64();
+        let u_key = interner2.get_or_intern("U").as_u64();
+        let cti_types: Vec<u64> = (0..reloaded.conn_type_index_types.len())
+            .map(|i| reloaded.conn_type_index_types.get(i))
+            .collect();
+        assert!(
+            cti_types.contains(&t_key),
+            "T missing from merged conn_type_index"
+        );
+        assert!(
+            cti_types.contains(&u_key),
+            "U missing from merged conn_type_index"
+        );
+
+        // peer_count histogram for U should report node 4 as a target
+        // once (from n3 → n4) and node 3 as a target once (self-loop).
+        let u_counts = reloaded
+            .lookup_peer_counts(u_key)
+            .expect("U histogram present");
+        assert_eq!(u_counts.get(&4), Some(&1));
+        assert_eq!(u_counts.get(&3), Some(&1));
+
+        // And T's histogram still has the seg_0 entry intact.
+        let t_counts = reloaded
+            .lookup_peer_counts(t_key)
+            .expect("T histogram present");
+        assert_eq!(t_counts.get(&1), Some(&1));
+
+        // Edge properties on the self-loop should survive — combined
+        // edge_idx matches the original global assignment
+        // (seg_0's 1 edge + seg_1's local index), which equals the
+        // self_loop edge_index we captured pre-seal.
+        let weight_key = interner2.get_or_intern("weight");
+        let weight = reloaded
+            .edge_properties
+            .get(self_loop.index() as u32)
+            .expect("self_loop has props");
+        let (k, v) = &weight.as_ref()[0];
+        assert_eq!(*k, weight_key);
+        assert_eq!(*v, Value::Float64(2.5));
     }
 }

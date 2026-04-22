@@ -861,102 +861,18 @@ impl DiskGraph {
     /// Build connection-type inverted index from current CSR arrays.
     /// Reads self.out_offsets, self.out_edges, self.edge_endpoints (must be valid).
     /// Writes index files to self.data_dir and assigns to self.
-    ///
-    /// Parallelised via Rayon: each thread scans a partition of nodes and builds
-    /// a local `HashMap<conn_type, Vec<node_id>>`, then maps are merged. The
-    /// preceding per-node sort guarantees that within one node's edge range, each
-    /// conn_type appears contiguously, so each type is pushed at most once per
-    /// node and the per-thread map key count is bounded by the global type count.
     pub(super) fn build_conn_type_index(&mut self, node_bound: usize, verbose: bool) {
-        use rayon::prelude::*;
-        let idx_start = std::time::Instant::now();
-
-        let out_offsets = &self.out_offsets;
-        let out_edges = &self.out_edges;
-        let edge_endpoints = &self.edge_endpoints;
-        let effective_bound = node_bound.min(out_offsets.len().saturating_sub(1));
-
-        let mut type_sources: HashMap<u64, Vec<u32>> = (0..effective_bound)
-            .into_par_iter()
-            .fold(HashMap::<u64, Vec<u32>>::new, |mut acc, node| {
-                let start = out_offsets.get(node) as usize;
-                let end = out_offsets.get(node + 1) as usize;
-                if start == end {
-                    return acc;
-                }
-                let mut last_type: u64 = u64::MAX;
-                for i in start..end {
-                    let e = out_edges.get(i);
-                    if e.edge_idx == TOMBSTONE_EDGE {
-                        continue;
-                    }
-                    let ct = edge_endpoints.get(e.edge_idx as usize).connection_type;
-                    if ct != last_type {
-                        acc.entry(ct).or_default().push(node as u32);
-                        last_type = ct;
-                    }
-                }
-                acc
-            })
-            .reduce(HashMap::<u64, Vec<u32>>::new, |mut a, b| {
-                for (k, mut v) in b {
-                    a.entry(k).or_default().append(&mut v);
-                }
-                a
-            });
-
-        // Node IDs within each type list are not globally ordered after parallel
-        // reduce (each shard contributed its own range). Sort to match the
-        // previous serial behaviour — callers may assume ascending order.
-        for sources in type_sources.values_mut() {
-            sources.sort_unstable();
-        }
-
-        let mut sorted_types: Vec<u64> = type_sources.keys().copied().collect();
-        sorted_types.sort();
-        let total_sources: usize = type_sources.values().map(|v| v.len()).sum();
-
-        let mut idx_types = MmapOrVec::mapped(
-            &self.data_dir.join("conn_type_index_types.bin"),
-            sorted_types.len(),
-        )
-        .unwrap_or_else(|_| MmapOrVec::with_capacity(sorted_types.len()));
-        let mut idx_offsets = MmapOrVec::mapped(
-            &self.data_dir.join("conn_type_index_offsets.bin"),
-            sorted_types.len() + 1,
-        )
-        .unwrap_or_else(|_| MmapOrVec::with_capacity(sorted_types.len() + 1));
-        let mut idx_sources = MmapOrVec::mapped(
-            &self.data_dir.join("conn_type_index_sources.bin"),
-            total_sources,
-        )
-        .unwrap_or_else(|_| MmapOrVec::with_capacity(total_sources));
-
-        let mut offset: u64 = 0;
-        for &ct in &sorted_types {
-            idx_types.push(ct);
-            idx_offsets.push(offset);
-            if let Some(sources) = type_sources.get(&ct) {
-                for &src in sources {
-                    idx_sources.push(src);
-                }
-                offset += sources.len() as u64;
-            }
-        }
-        idx_offsets.push(offset);
-
-        self.conn_type_index_types = idx_types;
-        self.conn_type_index_offsets = idx_offsets;
-        self.conn_type_index_sources = idx_sources;
-
-        if verbose {
-            eprintln!(
-                "    Built conn-type inverted index: {} types, {} source entries ({:.1}s)",
-                sorted_types.len(),
-                total_sources,
-                idx_start.elapsed().as_secs_f64()
-            );
-        }
+        let (types, offsets, sources) = write_conn_type_index(
+            &self.out_offsets,
+            &self.out_edges,
+            &self.edge_endpoints,
+            node_bound,
+            &self.data_dir,
+            verbose,
+        );
+        self.conn_type_index_types = types;
+        self.conn_type_index_offsets = offsets;
+        self.conn_type_index_sources = sources;
     }
 
     /// Build per-(conn_type, peer) edge-count histogram. Answers unanchored
@@ -973,9 +889,6 @@ impl DiskGraph {
     }
 
     pub(super) fn build_peer_count_histogram(&mut self, verbose: bool) {
-        use rayon::prelude::*;
-        let start = std::time::Instant::now();
-
         // Use edge_endpoints.len() rather than next_edge_idx — after certain
         // build paths (compact, merge rebuilds) next_edge_idx may have been
         // reset while edge_endpoints still holds the authoritative count.
@@ -983,148 +896,258 @@ impl DiskGraph {
         if total == 0 {
             return;
         }
-        let endpoints = &self.edge_endpoints;
+        let (types, offsets, entries) =
+            write_peer_count_histogram(&self.edge_endpoints, 0, total, &self.data_dir, verbose);
+        self.peer_count_types = types;
+        self.peer_count_offsets = offsets;
+        self.peer_count_entries = entries;
+    }
+}
 
-        // Advise kernel: we're about to do one large sequential read then drop
-        // these pages. Matches the pattern in count_edges_grouped_by_peer.
-        endpoints.advise_sequential();
+/// Standalone per-segment `peer_count_*` writer — see `write_conn_type_index`.
+/// Scans `endpoints[edge_lo..edge_hi]` into a per-`(conn_type, peer)` count
+/// histogram and flushes three mmap'd files under `target_dir`.
+pub(super) fn write_peer_count_histogram(
+    endpoints: &MmapOrVec<EdgeEndpoints>,
+    edge_lo: usize,
+    edge_hi: usize,
+    target_dir: &Path,
+    verbose: bool,
+) -> (MmapOrVec<u64>, MmapOrVec<u64>, MmapOrVec<u32>) {
+    use rayon::prelude::*;
+    let start = std::time::Instant::now();
 
-        // Chunk the edge range so each Rayon task gets a contiguous slice of
-        // edge_endpoints — maximises prefetcher effectiveness and keeps
-        // per-thread working set bounded.
-        let chunk = (total / rayon::current_num_threads().max(1)).max(1 << 20);
-        let chunks: Vec<(usize, usize)> = (0..total)
-            .step_by(chunk)
-            .map(|lo| (lo, (lo + chunk).min(total)))
-            .collect();
+    let total = edge_hi.saturating_sub(edge_lo);
+    if total == 0 {
+        return (MmapOrVec::new(), MmapOrVec::new(), MmapOrVec::new());
+    }
 
-        let shard_maps: Vec<HashMap<(u64, u32), u32>> = chunks
-            .into_par_iter()
-            .map(|(lo, hi)| {
-                let mut acc: HashMap<(u64, u32), u32> = HashMap::new();
-                for i in lo..hi {
-                    let ep = endpoints.get(i);
-                    if ep.source == TOMBSTONE_EDGE {
-                        continue;
-                    }
-                    // Target is the "peer" for an outgoing-oriented aggregate.
-                    // Group-by-source queries are the symmetric case, handled
-                    // lazily — histogram is stored keyed on target only;
-                    // we add a second histogram keyed on source below.
-                    *acc.entry((ep.connection_type, ep.target)).or_insert(0) += 1;
+    // Advise kernel: we're about to do one large sequential read then drop
+    // these pages. Matches the pattern in count_edges_grouped_by_peer.
+    endpoints.advise_sequential();
+
+    let chunk = (total / rayon::current_num_threads().max(1)).max(1 << 20);
+    let chunks: Vec<(usize, usize)> = (0..total)
+        .step_by(chunk)
+        .map(|lo| (lo, (lo + chunk).min(total)))
+        .collect();
+
+    let shard_maps: Vec<HashMap<(u64, u32), u32>> = chunks
+        .into_par_iter()
+        .map(|(lo, hi)| {
+            let mut acc: HashMap<(u64, u32), u32> = HashMap::new();
+            for i in lo..hi {
+                let ep = endpoints.get(edge_lo + i);
+                if ep.source == TOMBSTONE_EDGE {
+                    continue;
                 }
-                acc
-            })
-            .collect();
-
-        // Reduce shard maps (serial — hot entries cluster fast anyway).
-        let mut combined: HashMap<(u64, u32), u32> = HashMap::new();
-        for shard in shard_maps {
-            for (k, v) in shard {
-                *combined.entry(k).or_insert(0) += v;
+                *acc.entry((ep.connection_type, ep.target)).or_insert(0) += 1;
             }
-        }
+            acc
+        })
+        .collect();
 
-        // Note: no `advise_dontneed` here. `rebuild_caches` chains this
-        // with `compute_type_connectivity`, which also scans every edge
-        // endpoint; evicting the 13.8 GB (Wikidata scale) from page
-        // cache forced a second full cold read and cost +100 s on that
-        // pass. Leaving pages resident lets the following scan hit
-        // warm cache. Harmless at save-time finalization since nothing
-        // else touches edge_endpoints between here and the final flush.
-
-        // Group by conn_type, sort peers within each group, flatten.
-        let mut by_type: HashMap<u64, Vec<(u32, u32)>> = HashMap::new();
-        for ((ct, peer), count) in combined {
-            by_type.entry(ct).or_default().push((peer, count));
-        }
-        let mut sorted_types: Vec<u64> = by_type.keys().copied().collect();
-        sorted_types.sort();
-        for pairs in by_type.values_mut() {
-            pairs.sort_unstable_by_key(|&(p, _)| p);
-        }
-
-        let total_pairs: usize = by_type.values().map(|v| v.len()).sum();
-
-        // Build in heap Vecs first so the mmap'd files can be written with
-        // the exact required size (MmapOrVec::mapped has a 64-slot minimum
-        // that leaves trailing zeros — which break binary search because
-        // the padding hashes compare less than any real FNV-1a hash).
-        let mut types_vec: Vec<u64> = Vec::with_capacity(sorted_types.len());
-        let mut offsets_vec: Vec<u64> = Vec::with_capacity(sorted_types.len() + 1);
-        let mut entries_vec: Vec<u32> = Vec::with_capacity(total_pairs * 2);
-
-        let mut cur_pairs: u64 = 0;
-        for &ct in &sorted_types {
-            types_vec.push(ct);
-            offsets_vec.push(cur_pairs);
-            if let Some(pairs) = by_type.get(&ct) {
-                for &(peer, count) in pairs {
-                    entries_vec.push(peer);
-                    entries_vec.push(count);
-                }
-                cur_pairs += pairs.len() as u64;
-            }
-        }
-        offsets_vec.push(cur_pairs);
-
-        // Write exact-size raw byte files, then re-mmap with the known length.
-        let write_u64 = |path: &Path, data: &[u64]| -> std::io::Result<()> {
-            // SAFETY: `&[u64]` is contiguous POD; reinterpreting as u8 bytes
-            // for a serialize-to-disk write is well-defined (the on-disk
-            // reader mmaps the file as u64 on the same host / endianness).
-            let bytes = unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
-            };
-            std::fs::write(path, bytes)
-        };
-        let write_u32 = |path: &Path, data: &[u32]| -> std::io::Result<()> {
-            // SAFETY: same as `write_u64` above — POD slice → u8 view.
-            let bytes = unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
-            };
-            std::fs::write(path, bytes)
-        };
-
-        let types_path = self.data_dir.join("peer_count_types.bin");
-        let offsets_path = self.data_dir.join("peer_count_offsets.bin");
-        let entries_path = self.data_dir.join("peer_count_entries.bin");
-        let _ = write_u64(&types_path, &types_vec);
-        let _ = write_u64(&offsets_path, &offsets_vec);
-        let _ = write_u32(&entries_path, &entries_vec);
-
-        let pc_types = if !types_vec.is_empty() {
-            MmapOrVec::load_mapped(&types_path, types_vec.len())
-                .unwrap_or_else(|_| MmapOrVec::from_vec(types_vec.clone()))
-        } else {
-            MmapOrVec::new()
-        };
-        let pc_offsets = if !offsets_vec.is_empty() {
-            MmapOrVec::load_mapped(&offsets_path, offsets_vec.len())
-                .unwrap_or_else(|_| MmapOrVec::from_vec(offsets_vec.clone()))
-        } else {
-            MmapOrVec::new()
-        };
-        let pc_entries = if !entries_vec.is_empty() {
-            MmapOrVec::load_mapped(&entries_path, entries_vec.len())
-                .unwrap_or_else(|_| MmapOrVec::from_vec(entries_vec.clone()))
-        } else {
-            MmapOrVec::new()
-        };
-
-        self.peer_count_types = pc_types;
-        self.peer_count_offsets = pc_offsets;
-        self.peer_count_entries = pc_entries;
-
-        if verbose {
-            eprintln!(
-                "    Built peer-count histogram: {} types, {} (peer, count) pairs ({:.1}s)",
-                sorted_types.len(),
-                total_pairs,
-                start.elapsed().as_secs_f64()
-            );
+    let mut combined: HashMap<(u64, u32), u32> = HashMap::new();
+    for shard in shard_maps {
+        for (k, v) in shard {
+            *combined.entry(k).or_insert(0) += v;
         }
     }
+
+    let mut by_type: HashMap<u64, Vec<(u32, u32)>> = HashMap::new();
+    for ((ct, peer), count) in combined {
+        by_type.entry(ct).or_default().push((peer, count));
+    }
+    let mut sorted_types: Vec<u64> = by_type.keys().copied().collect();
+    sorted_types.sort();
+    for pairs in by_type.values_mut() {
+        pairs.sort_unstable_by_key(|&(p, _)| p);
+    }
+
+    let total_pairs: usize = by_type.values().map(|v| v.len()).sum();
+
+    let mut types_vec: Vec<u64> = Vec::with_capacity(sorted_types.len());
+    let mut offsets_vec: Vec<u64> = Vec::with_capacity(sorted_types.len() + 1);
+    let mut entries_vec: Vec<u32> = Vec::with_capacity(total_pairs * 2);
+
+    let mut cur_pairs: u64 = 0;
+    for &ct in &sorted_types {
+        types_vec.push(ct);
+        offsets_vec.push(cur_pairs);
+        if let Some(pairs) = by_type.get(&ct) {
+            for &(peer, count) in pairs {
+                entries_vec.push(peer);
+                entries_vec.push(count);
+            }
+            cur_pairs += pairs.len() as u64;
+        }
+    }
+    offsets_vec.push(cur_pairs);
+
+    // Write exact-size raw byte files, then re-mmap with known lengths.
+    let write_u64 = |path: &Path, data: &[u64]| -> std::io::Result<()> {
+        // SAFETY: `&[u64]` is contiguous POD; reinterpret to bytes for raw write.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+        };
+        std::fs::write(path, bytes)
+    };
+    let write_u32 = |path: &Path, data: &[u32]| -> std::io::Result<()> {
+        // SAFETY: same as above — POD slice → u8 view.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+        };
+        std::fs::write(path, bytes)
+    };
+
+    let types_path = target_dir.join("peer_count_types.bin");
+    let offsets_path = target_dir.join("peer_count_offsets.bin");
+    let entries_path = target_dir.join("peer_count_entries.bin");
+    let _ = write_u64(&types_path, &types_vec);
+    let _ = write_u64(&offsets_path, &offsets_vec);
+    let _ = write_u32(&entries_path, &entries_vec);
+
+    let pc_types = if !types_vec.is_empty() {
+        MmapOrVec::load_mapped(&types_path, types_vec.len())
+            .unwrap_or_else(|_| MmapOrVec::from_vec(types_vec.clone()))
+    } else {
+        MmapOrVec::new()
+    };
+    let pc_offsets = if !offsets_vec.is_empty() {
+        MmapOrVec::load_mapped(&offsets_path, offsets_vec.len())
+            .unwrap_or_else(|_| MmapOrVec::from_vec(offsets_vec.clone()))
+    } else {
+        MmapOrVec::new()
+    };
+    let pc_entries = if !entries_vec.is_empty() {
+        MmapOrVec::load_mapped(&entries_path, entries_vec.len())
+            .unwrap_or_else(|_| MmapOrVec::from_vec(entries_vec.clone()))
+    } else {
+        MmapOrVec::new()
+    };
+
+    if verbose {
+        eprintln!(
+            "    Built peer-count histogram: {} types, {} (peer, count) pairs ({:.1}s)",
+            sorted_types.len(),
+            total_pairs,
+            start.elapsed().as_secs_f64()
+        );
+    }
+
+    (pc_types, pc_offsets, pc_entries)
+}
+
+// ============================================================================
+// Standalone builder helpers — reused by seal_to_new_segment (phase 5) to
+// write segment-local auxiliary indexes from segment-local array slices
+// without constructing a throwaway `DiskGraph`. Each returns the mmap'd
+// handles so the caller may use them directly if it's the DiskGraph's
+// canonical index; `seal_to_new_segment` discards the handles because it
+// only needs the files on disk.
+// ============================================================================
+
+/// Build a `conn_type_index_*` into `target_dir` from supplied CSR slices.
+/// Parallelised via Rayon: each thread scans a partition of nodes and
+/// builds a local `HashMap<conn_type, Vec<node_id>>`; the maps are merged,
+/// each type's sources sorted, then flushed to the three on-disk files.
+pub(super) fn write_conn_type_index(
+    out_offsets: &MmapOrVec<u64>,
+    out_edges: &MmapOrVec<CsrEdge>,
+    edge_endpoints: &MmapOrVec<EdgeEndpoints>,
+    node_bound: usize,
+    target_dir: &Path,
+    verbose: bool,
+) -> (MmapOrVec<u64>, MmapOrVec<u64>, MmapOrVec<u32>) {
+    use rayon::prelude::*;
+    let idx_start = std::time::Instant::now();
+
+    let effective_bound = node_bound.min(out_offsets.len().saturating_sub(1));
+
+    let mut type_sources: HashMap<u64, Vec<u32>> = (0..effective_bound)
+        .into_par_iter()
+        .fold(HashMap::<u64, Vec<u32>>::new, |mut acc, node| {
+            let start = out_offsets.get(node) as usize;
+            let end = out_offsets.get(node + 1) as usize;
+            if start == end {
+                return acc;
+            }
+            let mut last_type: u64 = u64::MAX;
+            for i in start..end {
+                let e = out_edges.get(i);
+                if e.edge_idx == TOMBSTONE_EDGE {
+                    continue;
+                }
+                let ct = edge_endpoints.get(e.edge_idx as usize).connection_type;
+                if ct != last_type {
+                    acc.entry(ct).or_default().push(node as u32);
+                    last_type = ct;
+                }
+            }
+            acc
+        })
+        .reduce(HashMap::<u64, Vec<u32>>::new, |mut a, b| {
+            for (k, mut v) in b {
+                a.entry(k).or_default().append(&mut v);
+            }
+            a
+        });
+
+    for sources in type_sources.values_mut() {
+        sources.sort_unstable();
+    }
+
+    let mut sorted_types: Vec<u64> = type_sources.keys().copied().collect();
+    sorted_types.sort();
+    let total_sources: usize = type_sources.values().map(|v| v.len()).sum();
+
+    let mut idx_types = MmapOrVec::mapped(
+        &target_dir.join("conn_type_index_types.bin"),
+        sorted_types.len(),
+    )
+    .unwrap_or_else(|_| MmapOrVec::with_capacity(sorted_types.len()));
+    let mut idx_offsets = MmapOrVec::mapped(
+        &target_dir.join("conn_type_index_offsets.bin"),
+        sorted_types.len() + 1,
+    )
+    .unwrap_or_else(|_| MmapOrVec::with_capacity(sorted_types.len() + 1));
+    let mut idx_sources = MmapOrVec::mapped(
+        &target_dir.join("conn_type_index_sources.bin"),
+        total_sources,
+    )
+    .unwrap_or_else(|_| MmapOrVec::with_capacity(total_sources));
+
+    let mut offset: u64 = 0;
+    for &ct in &sorted_types {
+        idx_types.push(ct);
+        idx_offsets.push(offset);
+        if let Some(sources) = type_sources.get(&ct) {
+            for &src in sources {
+                idx_sources.push(src);
+            }
+            offset += sources.len() as u64;
+        }
+    }
+    idx_offsets.push(offset);
+
+    // Trim each file to exact element count — `MmapOrVec::mapped` has a
+    // 64-element minimum. Phase-7's multi-segment concat uses file-size
+    // inference on these files (via `load_raw_or_zst_optional`), so stray
+    // padding would poison the inverted-index types array.
+    let _ = idx_types.trim_to_logical_length();
+    let _ = idx_offsets.trim_to_logical_length();
+    let _ = idx_sources.trim_to_logical_length();
+
+    if verbose {
+        eprintln!(
+            "    Built conn-type inverted index: {} types, {} source entries ({:.1}s)",
+            sorted_types.len(),
+            total_sources,
+            idx_start.elapsed().as_secs_f64()
+        );
+    }
+
+    (idx_types, idx_offsets, idx_sources)
 }
 
 #[cfg(test)]
