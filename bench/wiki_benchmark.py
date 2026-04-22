@@ -65,6 +65,7 @@ WIKIDATA_SUBSETS = [
     ("wiki100m", f"{DATA_DIR}/test_100M.nt.zst", 100_000_000),
     ("wiki200m", f"{DATA_DIR}/test_200M.nt.zst", 200_000_000),
     ("wiki500m", f"{DATA_DIR}/test_500M.nt.zst", 500_000_000),
+    ("wiki1000m", f"{DATA_DIR}/test_1000M.nt.zst", 1_000_000_000),
 ]
 
 TIMEOUT_MS = 10_000
