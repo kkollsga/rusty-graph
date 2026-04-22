@@ -26,16 +26,60 @@ use super::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints, TOMBSTONE_EDGE};
 use super::edge_properties::{EdgePropertyStore, EdgePropertyStoreMeta};
 use super::property_index;
 
-/// PR1 phase 4: CSR + column binaries live under this subdirectory of the
-/// graph root. Top-level files (disk_graph_meta.json, seg_manifest.json,
-/// interner.json, metadata.json) stay at the graph root. Legacy graphs
-/// gated by `DiskGraphMeta::csr_layout_version` == 0 use the flat layout
-/// (everything at the root) — see `load_from_dir`.
-pub(crate) const CSR_SUBDIR: &str = "seg_000";
+/// PR1 phase 4: CSR + column binaries live in a per-segment subdirectory
+/// of the graph root. Top-level files (disk_graph_meta.json,
+/// seg_manifest.json, interner.json, metadata.json) stay at the graph root.
+/// Legacy graphs gated by `DiskGraphMeta::csr_layout_version` == 0 use the
+/// flat layout (everything at the root) — see `load_from_dir`.
+///
+/// PR1 phase 6 parameterised the directory name on segment id so future
+/// saves can emit `seg_001/`, `seg_002/`, … next to the original
+/// `seg_000/`. Call sites format via [`segment_subdir`]; directories are
+/// discovered via [`enumerate_segment_dirs`].
+pub(crate) fn segment_subdir(id: u32) -> String {
+    // Three-digit zero-padding is enough for Wikidata-scale graphs
+    // (plan targets ~200 segments); overflow past 999 is handled by
+    // `{:03}` naturally widening without changing lexicographic ordering
+    // (seg_999 < seg_1000 still sorts as seg_1000 first, but we use the
+    // parsed u32 for ordering — see `enumerate_segment_dirs`).
+    format!("seg_{id:03}")
+}
+
+/// Discover every `seg_NNN/` subdirectory under `root`, sorted
+/// ascending by the numeric id parsed from the name. Returns
+/// `(segment_id, path)` pairs. Non-matching directory entries and
+/// unparsable `seg_*` names are skipped silently.
+///
+/// Used at load time to drive the CSR-load enumeration; at save time
+/// the next free id is `last().map(|(id, _)| id + 1).unwrap_or(0)`.
+/// PR1 phase 6 infrastructure — today every graph has exactly one
+/// segment directory (`seg_000`), so the returned Vec has length 1
+/// for non-legacy graphs. Phase 7+ will produce additional segments.
+pub(crate) fn enumerate_segment_dirs(root: &Path) -> Vec<(u32, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(u32, PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| {
+            if !e.file_type().ok()?.is_dir() {
+                return None;
+            }
+            let name = e.file_name();
+            let s = name.to_str()?;
+            let id_str = s.strip_prefix("seg_")?;
+            let id: u32 = id_str.parse().ok()?;
+            Some((id, e.path()))
+        })
+        .collect();
+    out.sort_by_key(|(id, _)| *id);
+    out
+}
 
 /// Current CSR-layout version emitted by every save. 0 = legacy flat,
-/// 1 = seg_000 subdir. Loading tolerates both via the version field
-/// in `DiskGraphMeta` (serde-defaulted to 0 for pre-phase-4 graphs).
+/// 1 = segmented (seg_NNN/ subdirs). Loading tolerates both via the
+/// version field in `DiskGraphMeta` (serde-defaulted to 0 for
+/// pre-phase-4 graphs).
 pub(crate) const CURRENT_CSR_LAYOUT_VERSION: u8 = 1;
 
 // ============================================================================
@@ -247,7 +291,7 @@ impl DiskGraph {
     /// the flat (pre-phase-4) layout continue to load — see `load_from_dir`.
     pub fn new_at_path(root_dir: &Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(root_dir)?;
-        let data_dir = root_dir.join(CSR_SUBDIR);
+        let data_dir = root_dir.join(segment_subdir(0));
         std::fs::create_dir_all(&data_dir)?;
         let data_dir = data_dir.as_path();
 
@@ -314,7 +358,7 @@ impl DiskGraph {
         use petgraph::visit::{EdgeRef, IntoEdgeReferences, NodeIndexable};
 
         std::fs::create_dir_all(root_dir)?;
-        let data_dir_buf = root_dir.join(CSR_SUBDIR);
+        let data_dir_buf = root_dir.join(segment_subdir(0));
         std::fs::create_dir_all(&data_dir_buf)?;
         let data_dir = data_dir_buf.as_path();
 
@@ -2584,10 +2628,13 @@ impl DiskGraph {
         _interner: &crate::graph::schema::StringInterner,
     ) -> std::io::Result<()> {
         std::fs::create_dir_all(target_dir)?;
-        // PR1 phase 4: CSR binaries live under seg_000/. Fresh graphs
-        // already have self.data_dir pointing at their own seg_000;
-        // save-as to a different path creates a matching subdir.
-        let csr_target = target_dir.join(CSR_SUBDIR);
+        // PR1 phase 4: CSR binaries live under a per-segment subdirectory.
+        // Fresh graphs already have self.data_dir pointing at their own
+        // seg_000/; save-as to a different path creates a matching
+        // subdir. Phase 6 parameterised the subdir name on segment id —
+        // today every save still targets id 0 until phase 7 splits
+        // writes across segments.
+        let csr_target = target_dir.join(segment_subdir(0));
         std::fs::create_dir_all(&csr_target)?;
 
         // Flush any mmap arrays that aren't already in the graph dir
@@ -2689,11 +2736,36 @@ impl DiskGraph {
         let meta_str = std::fs::read_to_string(dir.join("disk_graph_meta.json"))?;
         let meta: DiskGraphMeta = serde_json::from_str(&meta_str).map_err(std::io::Error::other)?;
 
-        // PR1 phase 4: CSR binaries live under seg_000/ when the graph
+        // PR1 phase 4: CSR binaries live under seg_NNN/ when the graph
         // was written with csr_layout_version >= 1. Legacy .kgl directories
         // (version=0, the serde default) keep the flat layout.
+        //
+        // Phase 6: drive the CSR subdir from `enumerate_segment_dirs` so
+        // phase 7 can produce additional segments without touching this
+        // block. Today every segmented graph has exactly one subdir —
+        // `seg_000/`. Multi-segment graphs aren't yet written, so we
+        // require exactly one segment here and error otherwise; the
+        // multi-segment read path lands in phase 7 alongside the multi-
+        // segment write path.
         let csr_dir: PathBuf = if meta.csr_layout_version >= 1 {
-            dir.join(CSR_SUBDIR)
+            let segs = enumerate_segment_dirs(dir);
+            match segs.len() {
+                0 => {
+                    return Err(std::io::Error::other(format!(
+                        "csr_layout_version={} but no seg_NNN/ directory found under {}",
+                        meta.csr_layout_version,
+                        dir.display()
+                    )));
+                }
+                1 => segs.into_iter().next().unwrap().1,
+                n => {
+                    return Err(std::io::Error::other(format!(
+                        "multi-segment load not yet supported ({n} segments under {}); \
+                         phase 7 adds the concatenating read path",
+                        dir.display()
+                    )));
+                }
+            }
         } else {
             dir.to_path_buf()
         };
@@ -2853,4 +2925,64 @@ fn load_compressed<T: Copy + Default + 'static>(
     let temp_path = temp_dir.join(file_name);
     std::fs::write(&temp_path, &raw)?;
     MmapOrVec::load_mapped(&temp_path, len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{enumerate_segment_dirs, segment_subdir};
+    use tempfile::TempDir;
+
+    #[test]
+    fn segment_subdir_zero_pads_three_digits() {
+        assert_eq!(segment_subdir(0), "seg_000");
+        assert_eq!(segment_subdir(1), "seg_001");
+        assert_eq!(segment_subdir(42), "seg_042");
+        assert_eq!(segment_subdir(999), "seg_999");
+        // Past 999 the name widens; enumerate sorts by parsed u32 so
+        // this still round-trips cleanly.
+        assert_eq!(segment_subdir(1234), "seg_1234");
+    }
+
+    #[test]
+    fn enumerate_segment_dirs_returns_sorted_ids() {
+        let tmp = TempDir::new().unwrap();
+        for id in [5u32, 0, 2, 17] {
+            std::fs::create_dir_all(tmp.path().join(segment_subdir(id))).unwrap();
+        }
+        let got: Vec<u32> = enumerate_segment_dirs(tmp.path())
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(got, vec![0, 2, 5, 17]);
+    }
+
+    #[test]
+    fn enumerate_segment_dirs_skips_non_matching_entries() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("seg_000")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("seg_abc")).unwrap(); // unparsable
+        std::fs::create_dir_all(tmp.path().join("not_a_segment")).unwrap();
+        // Top-level files must not be mistaken for segments.
+        std::fs::write(tmp.path().join("seg_001"), b"not-a-dir").unwrap();
+        std::fs::write(tmp.path().join("disk_graph_meta.json"), b"{}").unwrap();
+
+        let got: Vec<u32> = enumerate_segment_dirs(tmp.path())
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(got, vec![0]);
+    }
+
+    #[test]
+    fn enumerate_segment_dirs_on_missing_dir_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        assert!(enumerate_segment_dirs(&missing).is_empty());
+    }
+
+    #[test]
+    fn enumerate_segment_dirs_empty_root_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        assert!(enumerate_segment_dirs(tmp.path()).is_empty());
+    }
 }
