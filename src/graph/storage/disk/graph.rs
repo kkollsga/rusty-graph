@@ -2655,37 +2655,6 @@ impl DiskGraph {
     /// Takes `&mut self` because the edge-property store may need to drop
     /// its base mmap before overwriting the files (when target_dir equals
     /// the current data_dir).
-    /// Phase-6 gate: every live overflow edge has both source AND
-    /// target at or above `sealed_nodes_bound`. When true, the tail
-    /// can be sealed into a new segment without violating phase-7's
-    /// "each node's out_edges live in exactly one segment" invariant.
-    fn overflow_is_clean(&self) -> bool {
-        let bound = self.sealed_nodes_bound;
-        for (&src, edges) in &self.overflow_out {
-            for e in edges {
-                if e.edge_idx == TOMBSTONE_EDGE {
-                    continue;
-                }
-                let ep = self.edge_endpoints.get(e.edge_idx as usize);
-                if src < bound || ep.target < bound {
-                    return false;
-                }
-            }
-        }
-        for (&tgt, edges) in &self.overflow_in {
-            for e in edges {
-                if e.edge_idx == TOMBSTONE_EDGE {
-                    continue;
-                }
-                let ep = self.edge_endpoints.get(e.edge_idx as usize);
-                if tgt < bound || ep.source < bound {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
     pub fn save_to_dir(
         &mut self,
         target_dir: &Path,
@@ -2693,27 +2662,16 @@ impl DiskGraph {
     ) -> std::io::Result<()> {
         std::fs::create_dir_all(target_dir)?;
 
-        // 0.8.12 phase-6: auto-wire `seal_to_new_segment`. When the
-        // graph has a non-empty tail above `sealed_nodes_bound` AND
-        // the overflow is "clean" (every live edge has both endpoints
-        // in the tail's node range), write just a new seg_NNN/ and
-        // return. Replaces the compact+rewrite path's O(total) cost
-        // with O(tail) for incremental-ingest workloads that add
-        // node batches without touching older nodes.
-        //
-        // Fall through to compact-and-rewrite when:
+        // Phase 6 + 7 auto-wire. `seal_to_new_segment` now handles
+        // both clean-tail (segment-local) and cross-segment
+        // (full-range) overflow — the `overflow_is_clean` gate from
+        // phase 6 is gone. Fall through to compact-and-rewrite when:
         //   - no tail (nothing new to seal)
-        //   - overflow has cross-segment edges (phase 7's relaxation)
-        //   - target_dir differs from the graph's root (save-as to a
-        //     new location can't append to a non-existent manifest)
+        //   - target_dir differs from the graph's root (save-as)
         //   - segment_manifest has never been persisted (initial save)
         let have_prior_save = !self.segment_manifest.is_empty();
         let same_dir = target_dir == self.data_dir.parent().unwrap_or(target_dir);
-        if have_prior_save
-            && same_dir
-            && self.sealed_nodes_bound < self.node_count as u32
-            && self.overflow_is_clean()
-        {
+        if have_prior_save && same_dir && self.sealed_nodes_bound < self.node_count as u32 {
             let _seg_id = self.seal_to_new_segment(target_dir)?;
             return Ok(());
         }
@@ -2841,56 +2799,44 @@ impl DiskGraph {
     }
 
     /// Seal the still-mutable tail of the graph — nodes in
-    /// `[sealed_nodes_bound, node_count)` plus the overflow edges
-    /// between them — into a fresh `seg_NNN/` directory under `root`.
-    /// Advances `sealed_nodes_bound` to `node_count`, clears the
-    /// consumed overflow entries, appends a [`SegmentSummary`] to the
-    /// on-disk manifest, and rewrites `disk_graph_meta.json`.
+    /// `[sealed_nodes_bound, node_count)` plus overflow edges — into a
+    /// fresh `seg_NNN/` directory under `root`. Advances
+    /// `sealed_nodes_bound` to `node_count`, clears consumed overflow,
+    /// appends a [`SegmentSummary`] to the on-disk manifest, and
+    /// rewrites `disk_graph_meta.json`.
     ///
-    /// PR1 phase 8 — the multi-segment write path. Lets incremental
-    /// ingest add a batch of new entities and persist them without
-    /// rewriting the existing sealed CSR (`save_to_dir`'s compact +
-    /// rebuild). The new segment's CSR is segment-local: its
-    /// `out_offsets` / `in_offsets` are zero-based, its `edge_idx`
-    /// values span `0..|edges|`. Phase 7's `concat_segment_csrs`
-    /// stitches these onto the combined view at load time.
+    /// ## Two output modes (phase 7)
     ///
-    /// ## Constraints (enforced)
+    /// The new segment is written in one of two modes depending on
+    /// whether the overflow contains cross-segment edges:
     ///
-    /// Phase 7's concat assumes each node lives in exactly one segment
-    /// and each segment's CSR owns the edges originating from its
-    /// nodes. That forbids cross-segment edges for now: an overflow
-    /// edge whose source or target is `< sealed_nodes_bound` cannot
-    /// land in a new segment without breaking the invariant that
-    /// each node's outgoing edges are all in one place. This method
-    /// returns an `io::Error` in that case — the user must flush such
-    /// edges via compact + `save_to_dir` (full rewrite) instead. A
-    /// future phase will relax this once the concat model knows how
-    /// to union a node's out_edges across segments.
+    /// - **Segment-local** (phase 8 default): all overflow edges have
+    ///   both source AND target in `[tail_lo, tail_hi)`. The new
+    ///   segment's `out_offsets` / `in_offsets` have length
+    ///   `tail_len + 1` and index by the segment's node_slots
+    ///   positions (0..tail_len). This is what clean-tail workloads
+    ///   (phase 6's `save_to_dir` auto-wire) produce.
     ///
-    /// ## Not wired from save_to_dir
+    /// - **Full-range** (phase 7): at least one overflow edge has an
+    ///   endpoint below `tail_lo`. The segment's `out_offsets` /
+    ///   `in_offsets` have length `node_count + 1` and index by
+    ///   global node id — nodes without edges in this seal get
+    ///   zero-length ranges. Allows a single segment to carry edges
+    ///   whose source / target is in any prior segment's node range.
     ///
-    /// `save_to_dir` still takes the traditional compact-and-rewrite
-    /// path. `seal_to_new_segment` is an explicit call — phase 8 ships
-    /// the mechanism; phase 9 ties it to the save path once the
-    /// auxiliary-index story (conn_type_index, peer_count, edge
-    /// properties for sealed edges) lands.
+    /// `concat_segment_csrs` at load time distinguishes the two modes
+    /// by comparing `out_offsets.len()` to `node_slots.len() + 1`. In
+    /// full-range mode it unions per-node contributions across
+    /// segments; in segment-local mode it preserves the phase-7
+    /// "each node's edges live in exactly one segment" invariant.
     ///
-    /// ## Known phase-8 limitations
+    /// ## Auxiliary indexes (phase 5)
     ///
-    /// The sealed segment writes **only** the six core CSR arrays
-    /// (`node_slots`, `out_offsets`, `out_edges`, `in_offsets`,
-    /// `in_edges`, `edge_endpoints`). It does not write its own
-    /// `conn_type_index_*`, `peer_count_*`, or `edge_prop_*` files.
-    /// Consequences for a graph loaded with ≥2 segments:
-    ///   - Untyped edge scans (`MATCH (a)-[]->(b)`) work correctly.
-    ///   - Typed-edge matches (`MATCH (a)-[:T]->(b)`) miss edges in
-    ///     non-seg-0 segments (the inverted index only covers seg 0).
-    ///   - `edge_weight()` on sealed edges returns `None`.
-    ///   - `peer_count` aggregates undercount for sealed edges.
-    ///
-    /// These are deliberate phase-8 scope boundaries — the write path
-    /// mechanism is what's shipping; phase 9 addresses the auxiliaries.
+    /// Every seal — segment-local or full-range — writes its own
+    /// `conn_type_index_*`, `peer_count_*`, and flushes the
+    /// `edge_properties` overlay. Reload merges all three across
+    /// segments, so typed-edge matches, peer aggregates, and
+    /// `edge_weight()` all work correctly on sealed edges.
     pub fn seal_to_new_segment(&mut self, root: &Path) -> std::io::Result<u32> {
         use super::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints};
 
@@ -2903,37 +2849,24 @@ impl DiskGraph {
         }
         let tail_len = (tail_hi - tail_lo) as usize;
 
-        // Validate overflow edges up front — iterate both overflow_out
-        // and overflow_in so we catch cross-segment edges regardless
-        // of which side owns a given entry.
-        for (&src_global, edges) in &self.overflow_out {
+        // Classify overflow: segment-local (all endpoints in tail) or
+        // cross-segment (at least one edge has an endpoint below
+        // tail_lo). Also catches tombstoned entries so they're dropped
+        // silently rather than written.
+        let mut has_cross_segment = false;
+        for edges in self.overflow_out.values() {
             for e in edges {
                 if e.edge_idx == TOMBSTONE_EDGE {
                     continue;
                 }
                 let ep = self.edge_endpoints.get(e.edge_idx as usize);
-                if src_global < tail_lo || ep.target < tail_lo {
-                    return Err(std::io::Error::other(format!(
-                        "seal_to_new_segment: edge {}→{} (edge_idx {}) crosses \
-                         segment boundary (watermark {}); compact+save instead",
-                        ep.source, ep.target, e.edge_idx, tail_lo
-                    )));
+                if ep.source < tail_lo || ep.target < tail_lo {
+                    has_cross_segment = true;
+                    break;
                 }
             }
-        }
-        for (&tgt_global, edges) in &self.overflow_in {
-            for e in edges {
-                if e.edge_idx == TOMBSTONE_EDGE {
-                    continue;
-                }
-                let ep = self.edge_endpoints.get(e.edge_idx as usize);
-                if tgt_global < tail_lo || ep.source < tail_lo {
-                    return Err(std::io::Error::other(format!(
-                        "seal_to_new_segment: edge {}→{} (edge_idx {}) crosses \
-                         segment boundary (watermark {}); compact+save instead",
-                        ep.source, ep.target, e.edge_idx, tail_lo
-                    )));
-                }
+            if has_cross_segment {
+                break;
             }
         }
 
@@ -2950,14 +2883,12 @@ impl DiskGraph {
         let seg_dir = root.join(segment_subdir(next_id));
         std::fs::create_dir_all(&seg_dir)?;
 
-        // Collect overflow edges into a flat list, sorted by
-        // (segment-local-source, connection_type). This matches the
-        // layout `csr_sorted_by_type` promises — so typed-edge binary
-        // search still works within a segment's CSR slice once phase
-        // 9 wires the per-segment conn_type index.
+        // Collect overflow edges. Each entry records GLOBAL source /
+        // target so full-range mode can index by global id; segment-
+        // local mode subtracts `tail_lo` on write.
         struct SealEdge {
-            local_src: u32,
-            local_tgt: u32, // segment-local target (global - tail_lo)
+            src_global: u32,
+            tgt_global: u32,
             conn_type: u64,
         }
         let mut seal_edges: Vec<SealEdge> = Vec::new();
@@ -2968,48 +2899,65 @@ impl DiskGraph {
                 }
                 let ep = self.edge_endpoints.get(e.edge_idx as usize);
                 seal_edges.push(SealEdge {
-                    local_src: src_global - tail_lo,
-                    local_tgt: ep.target - tail_lo,
+                    src_global,
+                    tgt_global: ep.target,
                     conn_type: ep.connection_type,
                 });
             }
         }
-        seal_edges.sort_by_key(|e| (e.local_src, e.conn_type));
+        // Sort by (source, conn_type) — identical to pre-phase-7
+        // behaviour for segment-local; full-range uses the same order
+        // so offsets can be built in one sweep.
+        seal_edges.sort_by_key(|e| (e.src_global, e.conn_type));
         let n_edges = seal_edges.len();
 
-        // ─── Build segment-local arrays in memory (Heap-backed). ───
-        //
-        // node_slots: concat of self.node_slots[tail_lo..tail_hi].
+        // In full-range mode the offset arrays span every global node.
+        // In segment-local mode they span only the tail.
+        let offsets_len = if has_cross_segment {
+            self.node_count + 1
+        } else {
+            tail_len + 1
+        };
+
+        // ─── node_slots — unchanged: tail only. ───
         let mut node_slots: MmapOrVec<DiskNodeSlot> = MmapOrVec::with_capacity(tail_len);
         for i in 0..tail_len {
             node_slots.push(self.node_slots.get(tail_lo as usize + i));
         }
 
-        // edge_endpoints: one per sealed edge, global source/target.
-        // Segment-local edge_idx runs 0..n_edges parallel to the
-        // sorted `seal_edges` order, so `edge_endpoints[local_idx]`
-        // describes `seal_edges[local_idx]`.
+        // ─── edge_endpoints: global source/target, segment-local
+        //     edge_idx 0..n_edges (same as before). ───
         let mut edge_endpoints: MmapOrVec<EdgeEndpoints> = MmapOrVec::with_capacity(n_edges);
         for e in &seal_edges {
             edge_endpoints.push(EdgeEndpoints {
-                source: e.local_src + tail_lo,
-                target: e.local_tgt + tail_lo,
+                source: e.src_global,
+                target: e.tgt_global,
                 connection_type: e.conn_type,
             });
         }
 
-        // out_offsets / out_edges: CSR keyed by segment-local source.
-        // Since `seal_edges` is pre-sorted by local_src, we can sweep
-        // once to fill offsets + edges together.
-        let mut out_offsets: MmapOrVec<u64> = MmapOrVec::with_capacity(tail_len + 1);
+        // ─── out_offsets / out_edges: CSR keyed by (segment-local
+        //     or global) source. For segment-local mode the offset
+        //     index is `src - tail_lo`; for full-range it's `src`
+        //     directly. Phase 7's concat uses `offsets_len` vs
+        //     `node_slots.len() + 1` to distinguish modes. ───
+        let offset_key = |s: u32| -> u32 {
+            if has_cross_segment {
+                s
+            } else {
+                s - tail_lo
+            }
+        };
+
+        let mut out_offsets: MmapOrVec<u64> = MmapOrVec::with_capacity(offsets_len);
         let mut out_edges: MmapOrVec<CsrEdge> = MmapOrVec::with_capacity(n_edges);
         let mut cursor = 0usize;
-        for node_local in 0..tail_len as u32 {
+        for k in 0..(offsets_len - 1) as u32 {
             out_offsets.push(cursor as u64);
-            while cursor < n_edges && seal_edges[cursor].local_src == node_local {
+            while cursor < n_edges && offset_key(seal_edges[cursor].src_global) == k {
                 let e = &seal_edges[cursor];
                 out_edges.push(CsrEdge {
-                    peer: e.local_tgt + tail_lo, // peer stores GLOBAL node id
+                    peer: e.tgt_global,
                     edge_idx: cursor as u32,
                 });
                 cursor += 1;
@@ -3017,26 +2965,24 @@ impl DiskGraph {
         }
         out_offsets.push(cursor as u64);
 
-        // in_offsets / in_edges: same sweep but keyed by local target.
-        // Sort by (local_tgt, conn_type) for a matching layout on the
-        // incoming side.
-        let mut by_target: Vec<(u32, u32, u64)> = seal_edges
+        // ─── in_offsets / in_edges: mirror keyed by target. ───
+        let mut by_target: Vec<(u32, u32)> = seal_edges
             .iter()
             .enumerate()
-            .map(|(orig_idx, e)| (e.local_tgt, orig_idx as u32, e.conn_type))
+            .map(|(orig_idx, e)| (e.tgt_global, orig_idx as u32))
             .collect();
-        by_target.sort_by_key(|(t, _, ct)| (*t, *ct));
+        by_target.sort_by_key(|(t, _)| *t);
 
-        let mut in_offsets: MmapOrVec<u64> = MmapOrVec::with_capacity(tail_len + 1);
+        let mut in_offsets: MmapOrVec<u64> = MmapOrVec::with_capacity(offsets_len);
         let mut in_edges: MmapOrVec<CsrEdge> = MmapOrVec::with_capacity(n_edges);
         let mut tcursor = 0usize;
-        for node_local in 0..tail_len as u32 {
+        for k in 0..(offsets_len - 1) as u32 {
             in_offsets.push(tcursor as u64);
-            while tcursor < n_edges && by_target[tcursor].0 == node_local {
-                let (_, orig_idx, _) = by_target[tcursor];
-                let src_peer = seal_edges[orig_idx as usize].local_src + tail_lo;
+            while tcursor < n_edges && offset_key(by_target[tcursor].0) == k {
+                let (_, orig_idx) = by_target[tcursor];
+                let src_peer = seal_edges[orig_idx as usize].src_global;
                 in_edges.push(CsrEdge {
-                    peer: src_peer, // global source id
+                    peer: src_peer,
                     edge_idx: orig_idx,
                 });
                 tcursor += 1;
@@ -3066,11 +3012,15 @@ impl DiskGraph {
         // / out_edges / edge_endpoints vectors above. All are
         // `MmapOrVec::Heap` — no file handles — so the builders don't
         // race with anything mmap'd under `self.data_dir`.
+        // conn_type_index is keyed by offset-array index (segment-local
+        // in segment-local mode, global in full-range mode). The
+        // builder's `node_bound` argument must match the offsets
+        // indexing so it walks the full offset range.
         let _ = super::builder::write_conn_type_index(
             &out_offsets,
             &out_edges,
             &edge_endpoints,
-            tail_len,
+            offsets_len - 1,
             &seg_dir,
             false,
         );
@@ -3685,57 +3635,99 @@ pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> SegmentCsr {
             let mut in_offsets: MmapOrVec<u64> = MmapOrVec::with_capacity(total_nodes + 1);
             let mut in_edges: MmapOrVec<CsrEdge> = MmapOrVec::with_capacity(total_in_edges);
 
-            // Offsets are cumulative: offset[0] = 0 for the first segment,
-            // and each subsequent segment's local offsets get shifted by
-            // the prior segments' edge-array length.
-            out_offsets.push(0);
-            in_offsets.push(0);
-
-            let mut out_edge_base: u64 = 0;
-            let mut in_edge_base: u64 = 0;
-            let mut endpoint_base: u32 = 0;
-
+            // Per-segment metadata for the per-node walk below.
+            //   node_lo[k]..node_hi[k]   : combined-index range owned by segment k
+            //   endpoint_base[k]         : edge_idx shift for segment k's CsrEdges
+            //   is_full_range[k]         : out_offsets covers all nodes (phase 7
+            //                              cross-segment seal) vs just its own
+            let mut node_lo: Vec<usize> = Vec::with_capacity(segments.len());
+            let mut node_hi: Vec<usize> = Vec::with_capacity(segments.len());
+            let mut endpoint_base: Vec<u32> = Vec::with_capacity(segments.len());
+            let mut is_full: Vec<bool> = Vec::with_capacity(segments.len());
+            let mut node_cursor = 0usize;
+            let mut ep_cursor: u32 = 0;
             for seg in &segments {
-                // Node slots: straight concat.
+                node_lo.push(node_cursor);
+                node_cursor += seg.node_slots.len();
+                node_hi.push(node_cursor);
+                endpoint_base.push(ep_cursor);
+                ep_cursor += seg.edge_endpoints.len() as u32;
+                // Full-range segments have an offset entry per GLOBAL
+                // node (produced by phase 7's cross-segment seal). The
+                // total node count isn't known inside the writer at
+                // seal time, but it's always ≥ node_slots.len(); so
+                // `out_offsets.len() > node_slots.len() + 1` uniquely
+                // signals full-range here.
+                is_full.push(seg.out_offsets.len() > seg.node_slots.len() + 1);
+            }
+
+            // Node slots + edge endpoints: straight concat (unchanged from
+            // phase 7). Segment ownership of nodes is the same; only the
+            // edge-index mapping differs under full-range.
+            for seg in &segments {
                 for i in 0..seg.node_slots.len() {
                     node_slots.push(seg.node_slots.get(i));
                 }
-
-                // Edge endpoints: straight concat — source/target are
-                // already global node ids.
                 for i in 0..seg.edge_endpoints.len() {
                     edge_endpoints.push(seg.edge_endpoints.get(i));
                 }
+            }
 
-                // out_offsets: append entries [1..=n_k] of the segment's
-                // local offsets, each shifted by `out_edge_base`.
-                // Element 0 of every segment is 0, which is subsumed by
-                // the previous segment's last entry after the shift.
-                let n_nodes_k = seg.node_slots.len();
-                for i in 1..=n_nodes_k {
-                    out_offsets.push(seg.out_offsets.get(i) + out_edge_base);
+            // Walk every combined node id and UNION each segment's
+            // out_edges / in_edges contributions for that node. Per
+            // node, a segment contributes when:
+            //   - segment-local & node id in [node_lo, node_hi)  → key = gid - node_lo
+            //   - full-range                                       → key = gid  (cap: offsets len)
+            out_offsets.push(0);
+            in_offsets.push(0);
+            for gid in 0..total_nodes {
+                for (k, seg) in segments.iter().enumerate() {
+                    let key: Option<usize> = if is_full[k] {
+                        if gid + 1 < seg.out_offsets.len() {
+                            Some(gid)
+                        } else {
+                            None
+                        }
+                    } else if gid >= node_lo[k] && gid < node_hi[k] {
+                        Some(gid - node_lo[k])
+                    } else {
+                        None
+                    };
+                    if let Some(key) = key {
+                        let start = seg.out_offsets.get(key) as usize;
+                        let end = seg.out_offsets.get(key + 1) as usize;
+                        for i in start..end {
+                            let mut e = seg.out_edges.get(i);
+                            e.edge_idx = e.edge_idx.wrapping_add(endpoint_base[k]);
+                            out_edges.push(e);
+                        }
+                    }
                 }
-                for i in 1..=n_nodes_k {
-                    in_offsets.push(seg.in_offsets.get(i) + in_edge_base);
-                }
+                out_offsets.push(out_edges.len() as u64);
 
-                // out_edges / in_edges: concat, shifting each entry's
-                // segment-local edge_idx onto the combined endpoint
-                // numbering.
-                for i in 0..seg.out_edges.len() {
-                    let mut e = seg.out_edges.get(i);
-                    e.edge_idx = e.edge_idx.wrapping_add(endpoint_base);
-                    out_edges.push(e);
+                for (k, seg) in segments.iter().enumerate() {
+                    let key: Option<usize> = if is_full[k] {
+                        if gid + 1 < seg.in_offsets.len() {
+                            Some(gid)
+                        } else {
+                            None
+                        }
+                    } else if gid >= node_lo[k] && gid < node_hi[k] {
+                        Some(gid - node_lo[k])
+                    } else {
+                        None
+                    };
+                    if let Some(key) = key {
+                        let start = seg.in_offsets.get(key) as usize;
+                        let end = seg.in_offsets.get(key + 1) as usize;
+                        for i in start..end {
+                            let mut e = seg.in_edges.get(i);
+                            e.edge_idx = e.edge_idx.wrapping_add(endpoint_base[k]);
+                            in_edges.push(e);
+                        }
+                    }
                 }
-                for i in 0..seg.in_edges.len() {
-                    let mut e = seg.in_edges.get(i);
-                    e.edge_idx = e.edge_idx.wrapping_add(endpoint_base);
-                    in_edges.push(e);
-                }
-
-                out_edge_base += seg.out_edges.len() as u64;
-                in_edge_base += seg.in_edges.len() as u64;
-                endpoint_base += seg.edge_endpoints.len() as u32;
+                in_offsets.push(in_edges.len() as u64);
             }
 
             // ─── Phase 5: auxiliary index merge ───────────────────────────
@@ -4269,7 +4261,11 @@ mod tests {
     }
 
     #[test]
-    fn seal_rejects_cross_segment_edges() {
+    fn seal_accepts_cross_segment_edges_via_full_range() {
+        // Phase 7: cross-segment overflow no longer errors. The new
+        // segment writes full-range out_offsets (indexed by global
+        // node id) so an edge from a seg_0 source into a tail target
+        // — or between two seg_0 sources — is reachable after reload.
         let tmp = TempDir::new().unwrap();
         let mut interner = StringInterner::new();
         let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();
@@ -4280,16 +4276,37 @@ mod tests {
         dg.build_csr_from_pending();
         dg.save_to_dir(tmp.path(), &interner).unwrap();
 
-        // Add a new node + a cross-segment edge (old n0 → new n2).
-        // That edge has source below the watermark after save, so
-        // seal should refuse.
+        // Add a new node and a cross-segment edge (seg_0's n0 → new n2).
         let n2 = dg.add_node(seal_test_node(&mut interner, 2, "A"));
         dg.add_edge(n0, n2, seal_test_edge(&mut interner, "T"));
-        let err = dg.seal_to_new_segment(tmp.path()).unwrap_err();
-        assert!(
-            err.to_string().contains("crosses segment boundary"),
-            "unexpected error: {err}"
+
+        let seg_id = dg.seal_to_new_segment(tmp.path()).unwrap();
+        assert_eq!(seg_id, 1);
+
+        // seg_001's out_offsets must cover every global node (4 entries
+        // for node_count=3) so concat can locate the n0→n2 edge.
+        let out_offsets_size = std::fs::metadata(tmp.path().join("seg_001/out_offsets.bin"))
+            .unwrap()
+            .len();
+        assert_eq!(
+            out_offsets_size,
+            (3 + 1) * 8,
+            "seg_001 must be full-range (4 u64 offsets covering 3 global nodes)"
         );
+
+        // Reload and verify the combined CSR sees BOTH seg_0's n0→n1 and
+        // seg_1's n0→n2 as outgoing edges of node 0.
+        drop(dg);
+        let mut interner2 = StringInterner::new();
+        let (reloaded, _tmp_zst) =
+            super::DiskGraph::load_from_dir(tmp.path(), &mut interner2).unwrap();
+        let start = reloaded.out_offsets.get(0) as usize;
+        let end = reloaded.out_offsets.get(1) as usize;
+        let peers: Vec<u32> = (start..end)
+            .map(|i| reloaded.out_edges.get(i).peer)
+            .collect();
+        assert!(peers.contains(&1), "missing seg_0 edge n0→n1");
+        assert!(peers.contains(&2), "missing seg_1 cross-segment edge n0→n2");
     }
 
     #[test]
@@ -4533,9 +4550,11 @@ mod tests {
     }
 
     #[test]
-    fn save_to_dir_falls_back_when_overflow_crosses_segment_boundary() {
-        // Phase 6: cross-segment overflow must force the compact+
-        // rewrite fallback, not attempt an unsafe seal.
+    fn save_to_dir_seals_cross_segment_overflow_as_full_range() {
+        // Phase 7: cross-segment overflow is now handled by the full-
+        // range seal, not the compact fallback. save_to_dir should
+        // produce seg_001/ even when the overflow has an old→new edge,
+        // and reload must see both segments' edges combined.
         let tmp = TempDir::new().unwrap();
         let mut interner = StringInterner::new();
         let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();
@@ -4546,15 +4565,23 @@ mod tests {
         dg.build_csr_from_pending();
         dg.save_to_dir(tmp.path(), &interner).unwrap();
 
-        // Cross-segment edge (old → new) — overflow_is_clean returns false.
+        // Cross-segment edge (old n0 → new n2) + a purely-tail edge.
         let n2 = dg.add_node(seal_test_node(&mut interner, 2, "B"));
+        let n3 = dg.add_node(seal_test_node(&mut interner, 3, "B"));
         dg.add_edge(n0, n2, seal_test_edge(&mut interner, "T"));
+        dg.add_edge(n2, n3, seal_test_edge(&mut interner, "U"));
 
-        // Save should NOT produce seg_001; it falls through to rewrite.
         dg.save_to_dir(tmp.path(), &interner).unwrap();
         assert!(
-            !tmp.path().join("seg_001").exists(),
-            "cross-segment overflow must NOT trigger seal"
+            tmp.path().join("seg_001").exists(),
+            "phase-7 save_to_dir should seal cross-segment overflow"
         );
+
+        drop(dg);
+        let mut interner2 = StringInterner::new();
+        let (reloaded, _tmp_zst) =
+            super::DiskGraph::load_from_dir(tmp.path(), &mut interner2).unwrap();
+        assert_eq!(reloaded.node_count, 4);
+        assert_eq!(reloaded.edge_count, 3);
     }
 }
