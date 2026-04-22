@@ -100,7 +100,7 @@ impl ColumnarBase {
 }
 
 /// Decode a single slot's bytes into `(InternedKey, Value)` pairs.
-/// Assumes bytes were produced by `encode_props` at save time.
+/// Assumes bytes were produced by `encode_props_into` at save time.
 fn decode_props(bytes: &[u8]) -> Option<Vec<(InternedKey, Value)>> {
     let raw: Vec<(u64, Value)> = bincode::deserialize(bytes).ok()?;
     Some(
@@ -110,11 +110,18 @@ fn decode_props(bytes: &[u8]) -> Option<Vec<(InternedKey, Value)>> {
     )
 }
 
-/// Encode `(InternedKey, Value)` pairs for the columnar heap. The
-/// interner is not consulted — we store the raw u64 hash.
-fn encode_props(props: &[(InternedKey, Value)]) -> io::Result<Vec<u8>> {
+/// Encode `(InternedKey, Value)` pairs directly into the provided heap
+/// buffer. Avoids the per-edge `Vec<u8>` allocation that dominated
+/// save-path cost during PR2 phase-2 benchmarking. The interner is not
+/// consulted — we store the raw u64 hash.
+fn encode_props_into(props: &[(InternedKey, Value)], heap: &mut Vec<u8>) -> io::Result<()> {
+    // bincode's default config encodes Vec<T> as a u64 length prefix +
+    // N × T-encoded. We mirror that layout by serializing a
+    // Vec<(u64, &Value)> — but by writing directly into `heap` via
+    // `serialize_into`, we save one Vec<u8> allocation per edge (1M+
+    // allocations on a million-edge save).
     let raw: Vec<(u64, &Value)> = props.iter().map(|(k, v)| (k.as_u64(), v)).collect();
-    bincode::serialize(&raw).map_err(io::Error::other)
+    bincode::serialize_into(heap, &raw).map_err(io::Error::other)
 }
 
 /// Edge-property store: columnar disk base + in-memory mutation overlay.
@@ -223,6 +230,22 @@ impl EdgePropertyStore {
         self.overlay.values().all(|v| v.is_none())
     }
 
+    /// Smallest exclusive upper bound on edge_idx values that *might*
+    /// have properties in this store. Used by callers (like `compact_edges`)
+    /// that need to iterate every potentially-populated slot to remap
+    /// indices. The returned value is `max(base.len(), max_overlay_idx + 1)`.
+    pub fn upper_bound(&self) -> u32 {
+        let base_upper = self.base.as_ref().map(|b| b.len()).unwrap_or(0);
+        let overlay_upper = self
+            .overlay
+            .keys()
+            .max()
+            .copied()
+            .map(|k| k.saturating_add(1))
+            .unwrap_or(0);
+        base_upper.max(overlay_upper)
+    }
+
     /// Deep clone — for `shallow_copy()` paths in DiskGraph that produce
     /// a fresh in-memory graph from a disk-backed one.
     ///
@@ -272,14 +295,19 @@ impl EdgePropertyStore {
         }
 
         let mut offsets: Vec<u64> = Vec::with_capacity(upper_bound as usize + 1);
-        let mut heap: Vec<u8> = Vec::new();
+        // Pre-size heap based on overlay content — avoids repeated realloc.
+        let heap_hint: usize = self
+            .overlay
+            .values()
+            .map(|v| v.as_ref().map_or(0, |p| 32 + 16 * p.len()))
+            .sum();
+        let mut heap: Vec<u8> = Vec::with_capacity(heap_hint);
 
         for edge_idx in 0..upper_bound {
             offsets.push(heap.len() as u64);
             if let Some(cow) = self.get(edge_idx) {
                 if !cow.is_empty() {
-                    let blob = encode_props(cow.as_ref())?;
-                    heap.extend_from_slice(&blob);
+                    encode_props_into(cow.as_ref(), &mut heap)?;
                 }
             }
         }

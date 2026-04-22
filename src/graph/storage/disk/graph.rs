@@ -17,11 +17,13 @@ use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::Direction;
+use std::borrow::Cow;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints, TOMBSTONE_EDGE};
+use super::edge_properties::{EdgePropertyStore, EdgePropertyStoreMeta};
 use super::property_index;
 // ============================================================================
 // DiskGraph
@@ -59,8 +61,10 @@ pub struct DiskGraph {
     pub(crate) edge_count: usize,
     pub(crate) next_edge_idx: u32,
 
-    // ── Edge properties (sparse, in heap) ──
-    edge_properties: HashMap<u32, Vec<(InternedKey, Value)>>,
+    // ── Edge properties (columnar base + mutation overlay) ──
+    // PR2: heap-only HashMap replaced by disk-backed columnar store.
+    // Overlay grows with mutations, base is mmap'd. See edge_properties.rs.
+    edge_properties: EdgePropertyStore,
 
     // ── Edge materialization arena (Mutex + Box for Rayon thread safety) ──
     // Box gives stable heap pointers that survive Vec reallocation.
@@ -227,7 +231,7 @@ impl DiskGraph {
             edge_endpoints: MmapOrVec::new(),
             edge_count: 0,
             next_edge_idx: 0,
-            edge_properties: HashMap::new(),
+            edge_properties: EdgePropertyStore::new(),
             edge_arena: std::sync::Mutex::new(Vec::with_capacity(256)),
             edge_mut_cache: HashMap::new(),
             pending_edges: UnsafeCell::new(
@@ -392,7 +396,7 @@ impl DiskGraph {
             edge_endpoints: edge_endpoints_vec,
             edge_count,
             next_edge_idx: edge_idx,
-            edge_properties,
+            edge_properties: EdgePropertyStore::from_overlay(edge_properties),
             edge_arena: std::sync::Mutex::new(Vec::with_capacity(1024)),
             edge_mut_cache: HashMap::new(),
             pending_edges: UnsafeCell::new(MmapOrVec::new()),
@@ -764,8 +768,8 @@ impl DiskGraph {
             Vec::new()
         } else {
             self.edge_properties
-                .get(&edge_idx)
-                .cloned()
+                .get(edge_idx)
+                .map(|cow| cow.into_owned())
                 .unwrap_or_default()
         };
         let boxed = Box::new(EdgeData {
@@ -1242,9 +1246,13 @@ impl DiskGraph {
     /// Borrow an edge's property slice without materializing `EdgeData`.
     /// Returns `None` when the edge has no custom properties (common case).
     /// Safe to call in hot loops — does not push into `edge_arena`.
+    ///
+    /// The returned `Cow` is `Borrowed` for overlay hits (zero copy) and
+    /// `Owned` for columnar-base hits (one bincode deserialize). Callers
+    /// that need `&[(InternedKey, Value)]` can use `.as_deref()`.
     #[inline]
-    pub fn edge_properties_at(&self, edge_idx: u32) -> Option<&[(InternedKey, Value)]> {
-        self.edge_properties.get(&edge_idx).map(|v| v.as_slice())
+    pub fn edge_properties_at(&self, edge_idx: u32) -> Option<Cow<'_, [(InternedKey, Value)]>> {
+        self.edge_properties.get(edge_idx)
     }
 
     pub fn prefetch_hot_regions(&self) {
@@ -1270,7 +1278,7 @@ impl DiskGraph {
         // Flush modified edge properties from edge_weight_mut cache
         for (edge_idx, edge_data) in self.edge_mut_cache.drain() {
             if edge_data.properties.is_empty() {
-                self.edge_properties.remove(&edge_idx);
+                self.edge_properties.remove(edge_idx);
             } else {
                 self.edge_properties.insert(edge_idx, edge_data.properties);
             }
@@ -1376,8 +1384,8 @@ impl DiskGraph {
         let ct = InternedKey::from_u64(ep.connection_type);
         let props = self
             .edge_properties
-            .get(&(ei as u32))
-            .cloned()
+            .get(ei as u32)
+            .map(|cow| cow.into_owned())
             .unwrap_or_default();
         self.edge_mut_cache.entry(ei as u32).or_insert(EdgeData {
             connection_type: ct,
@@ -1460,10 +1468,7 @@ impl DiskGraph {
         }
 
         let ct = InternedKey::from_u64(ep.connection_type);
-        let props = self
-            .edge_properties
-            .remove(&(ei as u32))
-            .unwrap_or_default();
+        let props = self.edge_properties.take(ei as u32).unwrap_or_default();
         let result = EdgeData {
             connection_type: ct,
             properties: props,
@@ -1704,14 +1709,22 @@ impl DiskGraph {
             }
         }
 
-        // Remap edge properties to new indices
+        // Remap edge properties to new indices.
+        // `mem::take` gives us ownership of the old store (base mmaps
+        // stay live until we drop it at end of scope); we iterate every
+        // potentially-populated slot and re-insert survivors into the
+        // fresh store. Properties of tombstoned edges are discarded.
         let old_props = std::mem::take(&mut self.edge_properties);
-        for (old_idx, props) in old_props {
-            let new_idx = idx_remap[old_idx as usize];
-            if new_idx != TOMBSTONE_EDGE {
-                self.edge_properties.insert(new_idx, props);
+        let upper = old_props.upper_bound();
+        for old_idx in 0..upper {
+            if let Some(cow) = old_props.get(old_idx) {
+                let new_idx = idx_remap[old_idx as usize];
+                if new_idx != TOMBSTONE_EDGE {
+                    self.edge_properties.insert(new_idx, cow.into_owned());
+                }
             }
         }
+        drop(old_props);
 
         // Clear overflow and free slots
         self.overflow_out.clear();
@@ -1812,7 +1825,7 @@ impl DiskGraph {
                             connection_type: 0,
                         },
                     );
-                    self.edge_properties.remove(&ei);
+                    self.edge_properties.remove(ei);
                     self.edge_count -= 1;
                     self.free_edge_slots.push(ei);
                 }
@@ -1838,7 +1851,7 @@ impl DiskGraph {
                             connection_type: 0,
                         },
                     );
-                    self.edge_properties.remove(&ei);
+                    self.edge_properties.remove(ei);
                     self.edge_count -= 1;
                     self.free_edge_slots.push(ei);
                 }
@@ -1858,7 +1871,7 @@ impl DiskGraph {
                             connection_type: 0,
                         },
                     );
-                    self.edge_properties.remove(&e.edge_idx);
+                    self.edge_properties.remove(e.edge_idx);
                     self.edge_count -= 1;
                     self.free_edge_slots.push(e.edge_idx);
                 }
@@ -1876,7 +1889,7 @@ impl DiskGraph {
                             connection_type: 0,
                         },
                     );
-                    self.edge_properties.remove(&e.edge_idx);
+                    self.edge_properties.remove(e.edge_idx);
                     self.edge_count -= 1;
                     self.free_edge_slots.push(e.edge_idx);
                 }
@@ -1982,7 +1995,7 @@ impl Clone for DiskGraph {
             edge_endpoints,
             edge_count: self.edge_count,
             next_edge_idx: self.next_edge_idx,
-            edge_properties: self.edge_properties.clone(),
+            edge_properties: self.edge_properties.deep_clone(),
             edge_arena: std::sync::Mutex::new(Vec::new()),
             edge_mut_cache: HashMap::new(),
             pending_edges: UnsafeCell::new(MmapOrVec::new()),
@@ -2359,6 +2372,17 @@ struct DiskGraphMeta {
     /// as `true` (conservative) via a custom default.
     #[serde(default = "default_has_tombstones")]
     has_tombstones: bool,
+    /// Edge property storage format. 0 = legacy bincode+zstd HashMap
+    /// (edge_properties.bin.zst). 1 = columnar mmap base + overlay
+    /// (edge_prop_offsets.bin + edge_prop_heap.bin). Added in PR2 of
+    /// the disk-graph-improvement-plan; defaults to 0 for backward
+    /// compat with older .kgl directories.
+    #[serde(default)]
+    edge_properties_format: u8,
+    /// Lengths needed to mmap the columnar edge-property files. Zero
+    /// for format=0 graphs or graphs that don't have any edge properties.
+    #[serde(default)]
+    edge_properties_meta: EdgePropertyStoreMeta,
 }
 
 fn default_has_tombstones() -> bool {
@@ -2369,12 +2393,20 @@ fn default_has_tombstones() -> bool {
 
 impl DiskGraph {
     /// Write metadata JSON to the graph directory.
-    /// Called automatically after CSR build and after mutations.
+    /// Called automatically after CSR build and after mutations. Reads
+    /// the edge-property file metadata from the current data_dir so the
+    /// JSON reflects whatever was last persisted there; mutations since
+    /// then live in the overlay until the next explicit `save_to_dir`.
     pub(crate) fn write_metadata(&self) -> std::io::Result<()> {
-        self.write_metadata_to(&self.data_dir)
+        let edge_props_meta = EdgePropertyStore::meta_for(&self.data_dir);
+        self.write_metadata_to(&self.data_dir, edge_props_meta)
     }
 
-    fn write_metadata_to(&self, dir: &Path) -> std::io::Result<()> {
+    fn write_metadata_to(
+        &self,
+        dir: &Path,
+        edge_props_meta: EdgePropertyStoreMeta,
+    ) -> std::io::Result<()> {
         let meta = DiskGraphMeta {
             node_count: self.node_count,
             node_slots_len: self.node_slots.len(),
@@ -2389,6 +2421,10 @@ impl DiskGraph {
             free_edge_slots: self.free_edge_slots.clone(),
             csr_sorted_by_type: self.csr_sorted_by_type,
             has_tombstones: self.has_tombstones,
+            // PR2: format=1 = columnar. Fresh graphs always emit the new
+            // format; legacy format=0 is only ever loaded, never written.
+            edge_properties_format: 1,
+            edge_properties_meta: edge_props_meta,
         };
         let json = serde_json::to_string_pretty(&meta).map_err(std::io::Error::other)?;
         std::fs::write(dir.join("disk_graph_meta.json"), json)
@@ -2396,10 +2432,14 @@ impl DiskGraph {
 
     /// Save disk graph state. For disk mode, binary arrays are already on disk
     /// via mmap — this only flushes metadata + any in-memory overflow/properties.
+    ///
+    /// Takes `&mut self` because the edge-property store may need to drop
+    /// its base mmap before overwriting the files (when target_dir equals
+    /// the current data_dir).
     pub fn save_to_dir(
-        &self,
+        &mut self,
         target_dir: &Path,
-        interner: &crate::graph::schema::StringInterner,
+        _interner: &crate::graph::schema::StringInterner,
     ) -> std::io::Result<()> {
         std::fs::create_dir_all(target_dir)?;
 
@@ -2429,18 +2469,16 @@ impl DiskGraph {
             std::fs::write(target_dir.join("overflow_edges.bin.zst"), compressed)?;
         }
 
-        // Save edge properties (sparse, bincode + zstd)
-        if !self.edge_properties.is_empty() {
-            let _guard = crate::graph::schema::SerdeSerializeGuard::new(interner);
-            let prop_bytes =
-                bincode::serialize(&self.edge_properties).map_err(std::io::Error::other)?;
-            let compressed =
-                zstd::encode_all(prop_bytes.as_slice(), 3).map_err(std::io::Error::other)?;
-            std::fs::write(target_dir.join("edge_properties.bin.zst"), compressed)?;
-        }
+        // Save edge properties (columnar: edge_prop_offsets.bin + edge_prop_heap.bin).
+        // Always write even when empty so format=1 + zero-length files are
+        // self-consistent with the metadata. No interner/guard needed —
+        // the columnar format stores raw u64 hashes directly.
+        let upper = self.next_edge_idx;
+        self.edge_properties.save_to(target_dir, upper)?;
+        let edge_props_meta = EdgePropertyStore::meta_for(target_dir);
 
         // Save metadata to target_dir (not data_dir)
-        self.write_metadata_to(target_dir)?;
+        self.write_metadata_to(target_dir, edge_props_meta)?;
 
         // Also save optional persisted-cache files if present and target differs from data_dir
         if target_dir != self.data_dir {
@@ -2463,11 +2501,17 @@ impl DiskGraph {
     }
 
     /// Load a disk graph from a directory.
-    /// Load a disk graph from a directory.
     /// Raw .bin files are mmap'd directly from the graph dir (no temp dir needed).
     /// Also supports legacy .bin.zst files (decompressed to temp dir).
     /// Returns `(DiskGraph, temp_dir)` — temp_dir may be empty if no decompression needed.
-    pub fn load_from_dir(dir: &Path) -> std::io::Result<(Self, PathBuf)> {
+    ///
+    /// `interner` is only mutated when loading a legacy format=0 graph
+    /// whose `edge_properties.bin.zst` stores InternedKey as strings; the
+    /// new columnar format stores raw u64 hashes and never touches it.
+    pub fn load_from_dir(
+        dir: &Path,
+        interner: &mut crate::graph::schema::StringInterner,
+    ) -> std::io::Result<(Self, PathBuf)> {
         let meta_str = std::fs::read_to_string(dir.join("disk_graph_meta.json"))?;
         let meta: DiskGraphMeta = serde_json::from_str(&meta_str).map_err(std::io::Error::other)?;
 
@@ -2488,14 +2532,13 @@ impl DiskGraph {
             &temp_dir,
         )?;
 
-        // Load edge properties (sparse)
-        let edge_properties = if dir.join("edge_properties.bin.zst").exists() {
-            let compressed = std::fs::read(dir.join("edge_properties.bin.zst"))?;
-            let bytes = zstd::decode_all(compressed.as_slice()).map_err(std::io::Error::other)?;
-            bincode::deserialize(&bytes).map_err(std::io::Error::other)?
-        } else {
-            HashMap::new()
-        };
+        // Load edge properties — columnar (format=1) or legacy (format=0).
+        let edge_properties = EdgePropertyStore::load_from(
+            dir,
+            meta.edge_properties_format,
+            meta.edge_properties_meta,
+            interner,
+        )?;
 
         // Load overflow edges
         let (overflow_out, overflow_in) = if dir.join("overflow_edges.bin.zst").exists() {

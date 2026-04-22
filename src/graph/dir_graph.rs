@@ -1487,7 +1487,9 @@ impl DirGraph {
         }
 
         let dir = std::path::Path::new(path);
-        let dg = match &self.graph {
+        // save_to_dir needs &mut access so the edge-property store can
+        // drop its base mmap before overwriting (PR2).
+        let dg = match &mut self.graph {
             GraphBackend::Disk(dg) => dg,
             _ => return Err("save_disk requires disk mode".to_string()),
         };

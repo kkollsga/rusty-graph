@@ -5,12 +5,15 @@ Run all modes + compare:     python bench/api_benchmark.py
 Run single mode:             python bench/api_benchmark.py disk
 
 Ingest-measurement mode (PR0 baseline for disk-graph-improvement-plan):
+    maturin develop --release         # debug builds are 7–8× slower
     python bench/api_benchmark.py --measure-ingest
 
 Records bytes_written + peak_rss + wall_time for three scenarios
 (one-shot, incremental-10-save, mutation-stream) on the disk backend,
 streaming results to bench/ingest_baseline.csv. This is the
 measurement gate for PR1 (segmented CSR) and PR2 (edge-props off heap).
+Always use a release build — debug-mode numbers are not comparable to
+the PyPI-released baseline.
 
 Memory results are ground truth. Mismatches in mapped/disk are flagged as errors.
 """

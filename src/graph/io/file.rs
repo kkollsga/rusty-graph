@@ -497,8 +497,11 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
         }
     }
 
-    // Load DiskGraph — compressed files decompressed to temp dir, then mmap'd
-    let (disk_graph, temp_dir) = crate::graph::storage::disk::graph::DiskGraph::load_from_dir(dir)?;
+    // Load DiskGraph — compressed files decompressed to temp dir, then mmap'd.
+    // Interner is passed mutably because legacy format=0 graphs store edge
+    // property keys as strings and need to register them on read.
+    let (disk_graph, temp_dir) =
+        crate::graph::storage::disk::graph::DiskGraph::load_from_dir(dir, &mut graph.interner)?;
     // Prefetch hot mmap regions (offset arrays + node_slots) into page cache.
     // Non-blocking — kernel reads asynchronously while we continue loading metadata.
     disk_graph.prefetch_hot_regions();

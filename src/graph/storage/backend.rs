@@ -186,7 +186,13 @@ impl GraphBackend {
             GraphBackend::Disk(g) => {
                 let dg = g.as_ref();
                 dg.for_each_edge_of_conn_type(ct_u64, |src, tgt, edge_idx| {
-                    let props = dg.edge_properties_at(edge_idx).unwrap_or(&[]);
+                    // edge_properties_at returns Cow; bind to extend its
+                    // lifetime across the callback, then deref to a slice.
+                    let props_cow = dg.edge_properties_at(edge_idx);
+                    let props: &[(
+                        crate::graph::schema::InternedKey,
+                        crate::datatypes::values::Value,
+                    )] = props_cow.as_deref().unwrap_or(&[]);
                     f(src, tgt, edge_idx, props)
                 });
             }
