@@ -1854,15 +1854,6 @@ impl<'a> CypherExecutor<'a> {
             return Err("FusedMatchWithAggregate: group variable not in pattern".into());
         };
 
-        // Build single-node pattern for matching group keys
-        let group_only_pattern = crate::graph::core::pattern_matching::Pattern {
-            elements: vec![pattern.elements[group_elem_idx].clone()],
-        };
-
-        let executor = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
-            .set_deadline(self.deadline);
-        let group_matches = executor.execute(&group_only_pattern)?;
-
         // Identify group key and count items
         let mut group_key_indices = Vec::new();
         let mut count_indices = Vec::new();
@@ -1893,6 +1884,14 @@ impl<'a> CypherExecutor<'a> {
         //   MATCH (h:Q5)-[:P27]->(c) WITH c, count(h) AS k
         // this drops wall time from O(|tgt nodes| × avg in-degree) to
         // O(|distinct peers|) by consulting the pre-built histogram.
+        //
+        // The fast path is tried BEFORE computing `group_matches`
+        // because `group_matches = executor.execute(&MATCH (c))` for
+        // an untyped group target scans every node in the graph — on
+        // wiki1000m that's a 14.7 M-node full scan (~3 s) that the
+        // histogram path never looks at. Running it only when the
+        // slow path actually fires cuts `WITH P27 count` from 5.4 s
+        // to under 500 ms at 1 B triples.
         if let Some(rows) = self.try_fast_with_aggregate_via_histogram(
             pattern,
             with_clause,
@@ -1904,6 +1903,17 @@ impl<'a> CypherExecutor<'a> {
         )? {
             return Ok(ResultSet { rows, columns });
         }
+
+        // Fast path didn't apply (non-disk backend, unsupported pattern
+        // shape, etc.). Now scan the group target to enumerate group keys
+        // for the fall-back aggregation. Build single-node pattern for
+        // matching group keys.
+        let group_only_pattern = crate::graph::core::pattern_matching::Pattern {
+            elements: vec![pattern.elements[group_elem_idx].clone()],
+        };
+        let executor = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
+            .set_deadline(self.deadline);
+        let group_matches = executor.execute(&group_only_pattern)?;
 
         let mut result_rows = Vec::with_capacity(group_matches.len());
 
@@ -2043,40 +2053,87 @@ impl<'a> CypherExecutor<'a> {
 
         // Two fast paths. (A) no source constraint → precomputed
         // `peer_count_histogram`, O(distinct peers). (B) source has a
-        // type constraint → walk the edge-type's source list from
-        // `conn_type_index` (only sources that HAVE an outgoing edge
-        // of this type), filter by `node_type_of`, iterate that
-        // source's outgoing T-edges and accumulate per-peer counts.
-        // (B) is O(|T-sources| + |matching T-edges|) — much cheaper
-        // than the slow path's O(|all nodes| × in-degree) iteration.
+        // type constraint → single-pass sweep of the edge-type's
+        // matching edges via `for_each_edge_of_conn_type`, filtering
+        // sources by `node_type_of` and accumulating per-peer counts.
+        //
+        // Path (B) previously iterated per source and called
+        // `edges_directed_filtered` for each; every matching edge went
+        // through `DiskEdges::next → make_edge_ref → materialize_edge`,
+        // which heap-allocated a `Box<EdgeData>` and took the
+        // `edge_arena` Mutex for every edge. On wiki1000m (~11 M P27
+        // edges) the per-query arena growth hit an allocator-growth
+        // cliff (426 ms at 500 M → 5387 ms at 1 B). The callback form
+        // reads only the (src, tgt) pair we need — no allocation, no
+        // arena growth — and restores the expected ~2× scaling.
         let counts: std::collections::HashMap<u32, i64> = if let Some(want_key) = want_type_key {
-            let Some(srcs) = self
-                .graph
-                .graph
-                .sources_for_conn_type_bounded(conn_key, None)
-            else {
-                return Ok(None);
+            if !self.graph.has_connection_type(ct_str) {
+                return Ok(Some(Vec::new()));
+            }
+            // Disk-only: at small scale use the source-centric
+            // `for_each_edge_of_conn_type` (cheaper when matching
+            // sources are a small fraction of the graph and the
+            // `edge_endpoints` array fits in L3 cache). At large scale
+            // switch to a linear sweep of `edge_endpoints` — the
+            // source-centric path binary-searches each source's CSR
+            // slice, reading `edge_endpoints[edge_idx]` randomly; on
+            // wiki1000m (247 MB endpoints, far above the ~32 MB SLC)
+            // those reads miss cache on every comparison, blowing
+            // aggregation out to ~4.5 s. Sequential access is bound by
+            // memory bandwidth (~5 ms for 250 MB) and restores the
+            // expected ~2× scaling from 500 M → 1 B.
+            use crate::graph::storage::backend::GraphBackend;
+            let disk = match &self.graph.graph {
+                GraphBackend::Disk(dg) => dg.as_ref(),
+                _ => return Ok(None),
             };
+            let conn_u64 = conn_key.as_u64();
             let mut counts: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
-            let mut deadline_iter = 0usize;
-            for s in &srcs {
-                deadline_iter += 1;
-                // Periodic deadline checks — the inner edge loop can
-                // dominate on hub sources.
-                if deadline_iter.is_multiple_of(1 << 14) {
-                    self.check_deadline()?;
-                }
-                let s_idx = NodeIndex::new(*s as usize);
-                if self.graph.graph.node_type_of(s_idx) != Some(want_key) {
-                    continue;
-                }
-                for edge_ref in self.graph.graph.edges_directed_filtered(
-                    s_idx,
-                    Direction::Outgoing,
-                    Some(conn_key),
-                ) {
-                    *counts.entry(edge_ref.target().index() as u32).or_insert(0) += 1;
-                }
+            let mut deadline_iter: usize = 0;
+            let mut deadline_err: Option<String> = None;
+            // Threshold chosen so `edge_endpoints` (~16 B/edge) sits
+            // comfortably above L3/SLC (~32 MB on Apple Silicon, ~32–
+            // 64 MB on server CPUs) — past that the source-centric
+            // binary search's per-comparison random reads become the
+            // dominant cost. Below this, both paths are sub-200 ms on
+            // Wikidata-style data, so the choice doesn't matter.
+            const LINEAR_SCAN_EDGE_COUNT_THRESHOLD: usize = 4_000_000;
+            if disk.edge_count() >= LINEAR_SCAN_EDGE_COUNT_THRESHOLD {
+                disk.scan_edges_of_conn_type_linear(conn_u64, |src, tgt, _edge_idx| {
+                    deadline_iter = deadline_iter.wrapping_add(1);
+                    if deadline_iter & ((1 << 17) - 1) == 0 {
+                        if let Err(e) = self.check_deadline() {
+                            deadline_err = Some(e);
+                            return false;
+                        }
+                    }
+                    if disk.node_type_of(src) != Some(want_key) {
+                        return true;
+                    }
+                    *counts.entry(tgt.index() as u32).or_insert(0) += 1;
+                    true
+                });
+            } else {
+                self.graph.graph.for_each_edge_of_conn_type(
+                    conn_key,
+                    |src, tgt, _edge_idx, _props| {
+                        deadline_iter = deadline_iter.wrapping_add(1);
+                        if deadline_iter & ((1 << 14) - 1) == 0 {
+                            if let Err(e) = self.check_deadline() {
+                                deadline_err = Some(e);
+                                return false;
+                            }
+                        }
+                        if self.graph.graph.node_type_of(src) != Some(want_key) {
+                            return true;
+                        }
+                        *counts.entry(tgt.index() as u32).or_insert(0) += 1;
+                        true
+                    },
+                );
+            }
+            if let Some(e) = deadline_err {
+                return Err(e);
             }
             counts
         } else {

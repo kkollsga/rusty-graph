@@ -1359,6 +1359,49 @@ impl DiskGraph {
         self.edge_properties.get(edge_idx)
     }
 
+    /// Edge-centric sweep: scan `edge_endpoints` linearly and invoke `f`
+    /// for every edge whose `connection_type` matches. Return `false`
+    /// from the callback to stop early.
+    ///
+    /// Contrast with [`Self::for_each_edge_of_conn_type`], which walks
+    /// the source-centric `conn_type_index` and binary-searches each
+    /// source's CSR slice. The binary search reads
+    /// `edge_endpoints[edge_idx].connection_type` per comparison; at
+    /// Wikidata-1B scale (247 MB endpoints, ~11 M matching sources ×
+    /// log D comparisons) those random reads miss the system-level
+    /// cache on every iteration, blowing the aggregation out to
+    /// ~4.5 s. The linear form touches the same array in address order,
+    /// so the kernel-prefetched sequential read completes in under the
+    /// 247 MB / ~50 GB/s memory-bandwidth bound.
+    ///
+    /// Trade-off: O(|all edges|) regardless of how selective `conn_type`
+    /// is. Prefer the source-centric form when the matching source set
+    /// is small relative to total edges; prefer this when the matches
+    /// cover a meaningful fraction (≥ a few percent) and/or the graph
+    /// is too large to keep `edge_endpoints` in cache.
+    pub fn scan_edges_of_conn_type_linear<F>(&self, conn_type: u64, mut f: F)
+    where
+        F: FnMut(NodeIndex, NodeIndex, u32) -> bool,
+    {
+        let n = self.next_edge_idx as usize;
+        for edge_idx in 0..n {
+            let ep = self.edge_endpoints.get(edge_idx);
+            if ep.source == TOMBSTONE_EDGE {
+                continue;
+            }
+            if ep.connection_type != conn_type {
+                continue;
+            }
+            if !f(
+                NodeIndex::new(ep.source as usize),
+                NodeIndex::new(ep.target as usize),
+                edge_idx as u32,
+            ) {
+                return;
+            }
+        }
+    }
+
     pub fn prefetch_hot_regions(&self) {
         // Prefetch out_offsets + in_offsets (948 MB each — always needed for traversal).
         // Skip node_slots (2 GB) — prefetching it adds too much load latency.
