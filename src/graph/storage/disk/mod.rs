@@ -13,5 +13,7 @@ pub mod block_pool;
 pub mod builder;
 pub mod csr;
 #[allow(dead_code)]
+pub mod edge_properties;
+#[allow(dead_code)]
 pub mod graph;
 pub mod property_index;
