@@ -2477,6 +2477,24 @@ impl DiskGraph {
         self.edge_properties.save_to(target_dir, upper)?;
         let edge_props_meta = EdgePropertyStore::meta_for(target_dir);
 
+        // Trim the conn_type_index mmap'd files to their logical length.
+        // `MmapOrVec::mapped(path, initial_cap)` has a 64-element minimum,
+        // so a 1-type index leaves 512 bytes on disk with stale zeros that
+        // the loader can't distinguish from real u64 type hashes. Without
+        // this trim, `[r:TYPE]` typed-edge queries return 0 rows after
+        // reload (pre-existing bug on v0.8.10).
+        for field in [
+            &self.conn_type_index_types as &MmapOrVec<u64>,
+            &self.conn_type_index_offsets,
+        ] {
+            if let Some(path) = field.file_path().map(PathBuf::from) {
+                let _ = field.save_to_file(&path);
+            }
+        }
+        if let Some(path) = self.conn_type_index_sources.file_path().map(PathBuf::from) {
+            let _ = self.conn_type_index_sources.save_to_file(&path);
+        }
+
         // Save metadata to target_dir (not data_dir)
         self.write_metadata_to(target_dir, edge_props_meta)?;
 
