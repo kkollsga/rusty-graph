@@ -928,16 +928,6 @@ impl<'a> CypherExecutor<'a> {
             return Err("FusedMatchReturnAggregate: group variable not in pattern".into());
         };
 
-        // Build a single-node pattern for matching group keys
-        let group_only_pattern = crate::graph::core::pattern_matching::Pattern {
-            elements: vec![pattern.elements[group_elem_idx].clone()],
-        };
-
-        // Match group-key nodes
-        let executor = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
-            .set_deadline(self.deadline);
-        let group_matches = executor.execute(&group_only_pattern)?;
-
         // Identify which RETURN items are group keys vs aggregates
         let mut group_key_indices = Vec::new();
         let mut count_indices = Vec::new();
@@ -1305,7 +1295,20 @@ impl<'a> CypherExecutor<'a> {
             if let Some(rows) = edge_centric_rows {
                 rows
             } else {
-                // Node-centric fallback: iterate group_matches, count per node.
+                // Node-centric fallback: the only path that actually needs
+                // `group_matches`. Computing it earlier turned an untyped
+                // group target (e.g. `c` in
+                // `MATCH ()-[:P31]->(c) RETURN c.title, count(*) …`) into
+                // a full-graph node scan ahead of the histogram fast path
+                // — 14.7 M nodes on wiki1000m, ~3.5 s of work the fast
+                // path never reads. Build it here, where it's used.
+                let group_only_pattern = crate::graph::core::pattern_matching::Pattern {
+                    elements: vec![pattern.elements[group_elem_idx].clone()],
+                };
+                let executor =
+                    PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
+                        .set_deadline(self.deadline);
+                let group_matches = executor.execute(&group_only_pattern)?;
                 let mut rows = Vec::with_capacity(group_matches.len());
                 for (scan_count, m) in group_matches.iter().enumerate() {
                     if scan_count.is_multiple_of(2048) {
