@@ -17,3 +17,5 @@ pub mod edge_properties;
 #[allow(dead_code)]
 pub mod graph;
 pub mod property_index;
+#[allow(dead_code)]
+pub mod segment_summary;
