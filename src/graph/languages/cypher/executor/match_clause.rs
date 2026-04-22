@@ -885,6 +885,7 @@ impl<'a> CypherExecutor<'a> {
         match_clause: &MatchClause,
         return_clause: &ReturnClause,
         top_k: &Option<(usize, bool, usize)>,
+        candidate_emit: &Option<(usize, bool, usize)>,
         _existing: ResultSet,
     ) -> Result<ResultSet, String> {
         // The MATCH must have exactly 1 pattern with 3 or 5 elements (validated by planner)
@@ -1239,13 +1240,64 @@ impl<'a> CypherExecutor<'a> {
                         self.deadline,
                     )?
                 };
-                let mut rows = Vec::with_capacity(counts.len());
-                for (peer, count) in counts {
-                    self.check_deadline()?;
-                    let node_idx = petgraph::graph::NodeIndex::new(peer as usize);
-                    rows.push(build_row(node_idx, count)?);
-                }
-                Some(rows)
+
+                // 0.8.12 phase-4: multi-key ORDER BY LIMIT was kept in the
+                // pipeline (fusion set `candidate_emit` instead of
+                // `top_k`). Trim via a heap on the primary key, grab the
+                // threshold, then build rows only for entries whose
+                // primary count is ≥ threshold. Downstream OrderBy +
+                // Limit re-sort with the full multi-key spec and trim
+                // to K. For P31-class-counts-shaped data this drops
+                // `build_row` calls (each of which resolves `c.title`)
+                // from O(distinct peers) to O(~K).
+                let emit_rows: Vec<ResultRow> =
+                    if let Some(&(_, descending, k)) = candidate_emit.as_ref() {
+                        use std::cmp::Reverse;
+                        use std::collections::BinaryHeap;
+                        let threshold: i64 = if descending {
+                            let mut h: BinaryHeap<Reverse<i64>> = BinaryHeap::with_capacity(k + 1);
+                            for &c in counts.values() {
+                                h.push(Reverse(c));
+                                if h.len() > k {
+                                    h.pop();
+                                }
+                            }
+                            h.peek().map(|Reverse(c)| *c).unwrap_or(i64::MIN)
+                        } else {
+                            let mut h: BinaryHeap<i64> = BinaryHeap::with_capacity(k + 1);
+                            for &c in counts.values() {
+                                h.push(c);
+                                if h.len() > k {
+                                    h.pop();
+                                }
+                            }
+                            h.peek().copied().unwrap_or(i64::MAX)
+                        };
+                        let mut rows = Vec::new();
+                        for (&peer, &count) in &counts {
+                            let keep = if descending {
+                                count >= threshold
+                            } else {
+                                count <= threshold
+                            };
+                            if !keep {
+                                continue;
+                            }
+                            self.check_deadline()?;
+                            let node_idx = petgraph::graph::NodeIndex::new(peer as usize);
+                            rows.push(build_row(node_idx, count)?);
+                        }
+                        rows
+                    } else {
+                        let mut rows = Vec::with_capacity(counts.len());
+                        for (peer, count) in counts {
+                            self.check_deadline()?;
+                            let node_idx = petgraph::graph::NodeIndex::new(peer as usize);
+                            rows.push(build_row(node_idx, count)?);
+                        }
+                        rows
+                    };
+                Some(emit_rows)
             } else {
                 None
             };

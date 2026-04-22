@@ -71,9 +71,19 @@ pub enum Clause {
         match_clause: MatchClause,
         /// RETURN clause (group-by items + count aggregates)
         return_clause: ReturnClause,
-        /// Optional ORDER BY + LIMIT fusion: (count_item_index, descending, limit)
-        /// When set, uses a BinaryHeap to find top-k instead of materializing all rows.
+        /// Single-key ORDER BY + LIMIT fusion: (count_item_index, descending, limit).
+        /// When set, the executor uses a BinaryHeap to find exactly k rows;
+        /// caller has absorbed both ORDER BY and LIMIT. Mutually exclusive with
+        /// `candidate_emit`.
         top_k: Option<(usize, bool, usize)>,
+        /// Multi-key ORDER BY fusion (0.8.12 phase 4): emit the superset of
+        /// candidates whose primary sort key (the count aggregate) is
+        /// within the top-k-by-primary — boundary ties included. The
+        /// downstream OrderBy + Limit clauses are still in the pipeline and
+        /// re-sort those candidates using the full multi-key spec.
+        /// Tuple: `(count_item_index, descending, k)`. Mutually exclusive
+        /// with `top_k`.
+        candidate_emit: Option<(usize, bool, usize)>,
     },
     /// Optimizer-generated: fuse MATCH traversal + WITH count() into a single
     /// pass. Same as FusedMatchReturnAggregate but for WITH clauses (pipeline

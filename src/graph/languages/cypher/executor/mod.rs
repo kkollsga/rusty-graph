@@ -468,10 +468,12 @@ impl<'a> CypherExecutor<'a> {
                 match_clause,
                 return_clause,
                 top_k,
+                candidate_emit,
             } => self.execute_fused_match_return_aggregate(
                 match_clause,
                 return_clause,
                 top_k,
+                candidate_emit,
                 result_set,
             ),
             Clause::FusedMatchWithAggregate {

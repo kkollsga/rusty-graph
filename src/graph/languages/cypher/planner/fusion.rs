@@ -854,6 +854,7 @@ pub(super) fn fuse_match_return_aggregate(query: &mut CypherQuery) {
                 match_clause,
                 return_clause,
                 top_k: None,
+                candidate_emit: None,
             },
         );
 
@@ -899,45 +900,56 @@ pub(super) fn fuse_aggregate_order_limit(query: &mut CypherQuery) {
             }
         }
 
-        // Extract ORDER BY sort key and LIMIT value
-        let (sort_expr_idx, descending) = if let Clause::OrderBy(ob) = &query.clauses[i + 1] {
-            if ob.items.len() != 1 {
-                i += 1;
-                continue; // multi-key sort — bail
-            }
-            let sort_item = &ob.items[0];
-            // Find which RETURN item the sort key references
-            if let Clause::FusedMatchReturnAggregate { return_clause, .. } = &query.clauses[i] {
-                let mut found_idx = None;
-                for (ri, item) in return_clause.items.iter().enumerate() {
-                    // Match by alias or by expression
-                    let matches_alias =
-                        item.alias
-                            .as_ref()
-                            .is_some_and(|a| match &sort_item.expression {
-                                Expression::Variable(v) => v == a,
-                                _ => false,
-                            });
-                    if matches_alias && is_aggregate_expression(&item.expression) {
-                        found_idx = Some(ri);
-                        break;
-                    }
+        // Extract PRIMARY ORDER BY sort key + LIMIT.
+        //
+        // 0.8.12 phase-4: multi-key ORDER BY (e.g.
+        // `ORDER BY count DESC, c.title ASC LIMIT 10`) used to bail
+        // fusion outright — the executor fell through to materialising
+        // every distinct peer's title, O(seconds) at Wikidata scale.
+        // Now we handle the multi-key case via `candidate_emit`: the
+        // executor emits the threshold-qualifying superset (all
+        // candidates whose primary key is at least the Kth-largest),
+        // and the UNTOUCHED downstream OrderBy + Limit re-sort and
+        // trim those candidates using the full multi-key spec. Only
+        // K title evaluations happen in practice because the superset
+        // is ≪ |distinct peers| for typical aggregate-by-count data.
+        let (sort_expr_idx, descending, multi_key) =
+            if let Clause::OrderBy(ob) = &query.clauses[i + 1] {
+                if ob.items.is_empty() {
+                    i += 1;
+                    continue;
                 }
-                match found_idx {
-                    Some(idx) => (idx, !sort_item.ascending),
-                    None => {
-                        i += 1;
-                        continue;
+                let sort_item = &ob.items[0];
+                if let Clause::FusedMatchReturnAggregate { return_clause, .. } = &query.clauses[i] {
+                    let mut found_idx = None;
+                    for (ri, item) in return_clause.items.iter().enumerate() {
+                        let matches_alias =
+                            item.alias
+                                .as_ref()
+                                .is_some_and(|a| match &sort_item.expression {
+                                    Expression::Variable(v) => v == a,
+                                    _ => false,
+                                });
+                        if matches_alias && is_aggregate_expression(&item.expression) {
+                            found_idx = Some(ri);
+                            break;
+                        }
                     }
+                    match found_idx {
+                        Some(idx) => (idx, !sort_item.ascending, ob.items.len() > 1),
+                        None => {
+                            i += 1;
+                            continue;
+                        }
+                    }
+                } else {
+                    i += 1;
+                    continue;
                 }
             } else {
                 i += 1;
                 continue;
-            }
-        } else {
-            i += 1;
-            continue;
-        };
+            };
 
         let limit = if let Clause::Limit(l) = &query.clauses[i + 2] {
             match &l.count {
@@ -952,11 +964,22 @@ pub(super) fn fuse_aggregate_order_limit(query: &mut CypherQuery) {
             continue;
         };
 
-        // Absorb ORDER BY + LIMIT into the fused aggregate
-        query.clauses.remove(i + 2); // remove LIMIT
-        query.clauses.remove(i + 1); // remove ORDER BY
-        if let Clause::FusedMatchReturnAggregate { top_k, .. } = &mut query.clauses[i] {
-            *top_k = Some((sort_expr_idx, descending, limit));
+        if multi_key {
+            // Leave ORDER BY + LIMIT in place — the executor's
+            // `candidate_emit` path returns the threshold-qualifying
+            // superset, and the downstream clauses finalise ordering
+            // and trim to K.
+            if let Clause::FusedMatchReturnAggregate { candidate_emit, .. } = &mut query.clauses[i]
+            {
+                *candidate_emit = Some((sort_expr_idx, descending, limit));
+            }
+        } else {
+            // Single-key: heap alone orders correctly, drop both.
+            query.clauses.remove(i + 2); // remove LIMIT
+            query.clauses.remove(i + 1); // remove ORDER BY
+            if let Clause::FusedMatchReturnAggregate { top_k, .. } = &mut query.clauses[i] {
+                *top_k = Some((sort_expr_idx, descending, limit));
+            }
         }
 
         i += 1;
