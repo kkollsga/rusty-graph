@@ -3811,6 +3811,21 @@ fn merge_conn_type_index(
     segments: &[SegmentCsr],
 ) -> (MmapOrVec<u64>, MmapOrVec<u64>, MmapOrVec<u32>) {
     use std::collections::BTreeMap;
+    // Per-segment source-id shift: segment-local seals write
+    // `conn_type_index_sources` using offset-array indices
+    // (0..tail_len), since the writer walks `out_offsets` which is
+    // indexed locally. Add `node_lo` for those segments to recover the
+    // global node id. Full-range seals already store global ids so
+    // their shift is 0.
+    let mut node_lo: Vec<u32> = Vec::with_capacity(segments.len());
+    let mut is_full: Vec<bool> = Vec::with_capacity(segments.len());
+    let mut cursor: u32 = 0;
+    for seg in segments {
+        node_lo.push(cursor);
+        cursor += seg.node_slots.len() as u32;
+        is_full.push(seg.out_offsets.len() > seg.node_slots.len() + 1);
+    }
+
     // Walk each segment and accumulate: type → Vec<segment_index>.
     let mut type_to_segs: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
     for (si, seg) in segments.iter().enumerate() {
@@ -3832,6 +3847,7 @@ fn merge_conn_type_index(
         out_offsets.push(cur_off);
         for &si in seg_idxs {
             let seg = &segments[si];
+            let shift = if is_full[si] { 0 } else { node_lo[si] };
             // Find the type's [start, end) slice inside this segment.
             let n = seg.conn_type_index_types.len();
             // Linear scan — typical segment has ≤ hundreds of types,
@@ -3841,7 +3857,7 @@ fn merge_conn_type_index(
                     let start = seg.conn_type_index_offsets.get(j) as usize;
                     let end = seg.conn_type_index_offsets.get(j + 1) as usize;
                     for k in start..end {
-                        out_sources.push(seg.conn_type_index_sources.get(k));
+                        out_sources.push(seg.conn_type_index_sources.get(k) + shift);
                     }
                     cur_off += (end - start) as u64;
                     break;
@@ -4626,5 +4642,60 @@ mod tests {
             super::DiskGraph::load_from_dir(tmp.path(), &mut interner2).unwrap();
         assert_eq!(reloaded.node_count, 4);
         assert_eq!(reloaded.edge_count, 3);
+    }
+
+    #[test]
+    fn conn_type_index_sources_are_global_after_segment_local_seal() {
+        // Regression test for the 0.8.11 seal-path bug where the
+        // merged `conn_type_index_sources` stored segment-local
+        // indices (0..tail_len) instead of global node ids for
+        // segment-local segments. Symptom: post-reload,
+        // `MATCH (a)-[:T]->(b) RETURN a.id, b.id` returned no rows
+        // even though `count(*)` reported the right number — the
+        // enumeration looked up `out_offsets[0]` (empty, Person
+        // range) instead of `out_offsets[tail_lo]` (the actual
+        // TestHuman range).
+        let tmp = TempDir::new().unwrap();
+        let mut interner = StringInterner::new();
+        let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();
+        // Stay in the default `defer_csr = false` mode — mirrors the
+        // path Python mutations take (ntriples is the only caller that
+        // flips defer_csr on, and it always owns a matching
+        // build_csr_from_pending after its batch).
+        // seg_0: 5 nodes, no edges.
+        for i in 0..5 {
+            dg.add_node(seal_test_node(&mut interner, i, "A"));
+        }
+        dg.save_to_dir(tmp.path(), &interner).unwrap();
+
+        // Tail: 3 nodes + 3 intra-tail edges → segment-local seal.
+        // Edges go into overflow (defer_csr is false).
+        let n5 = dg.add_node(seal_test_node(&mut interner, 5, "B"));
+        let n6 = dg.add_node(seal_test_node(&mut interner, 6, "B"));
+        let n7 = dg.add_node(seal_test_node(&mut interner, 7, "B"));
+        dg.add_edge(n5, n6, seal_test_edge(&mut interner, "T"));
+        dg.add_edge(n6, n7, seal_test_edge(&mut interner, "T"));
+        dg.add_edge(n7, n5, seal_test_edge(&mut interner, "T"));
+        dg.save_to_dir(tmp.path(), &interner).unwrap();
+
+        drop(dg);
+        let mut interner2 = StringInterner::new();
+        let (reloaded, _tmp_zst) =
+            super::DiskGraph::load_from_dir(tmp.path(), &mut interner2).unwrap();
+
+        // The merged conn_type_index sources must be the GLOBAL ids
+        // {5, 6, 7}, not the segment-local {0, 1, 2}.
+        let t_key = interner2.get_or_intern("T").as_u64();
+        let sources = reloaded
+            .sources_for_conn_type(t_key)
+            .expect("T index should exist");
+        let mut sources = sources;
+        sources.sort_unstable();
+        assert_eq!(
+            sources,
+            vec![5u32, 6, 7],
+            "segment-local seal's conn_type_index_sources must be shifted \
+             by node_lo on merge (regression from 0.8.11 pre-fix)"
+        );
     }
 }
