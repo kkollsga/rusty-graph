@@ -730,10 +730,10 @@ fn load_column_sidecars(
         let compressed = std::fs::read(&col_file)?;
         let decoded = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
         // New format: `KGLCOLv1` + row_count: u32 + packed bytes.
-        // Old format (pre-0.8.11): raw packed bytes. Dispatch via the
+        // Old format (pre-0.8.12): raw packed bytes. Dispatch via the
         // magic tag. Old-format row_count is derived from
         // `type_indices[type].len()` — wrong after DELETE tombstones
-        // (0.8.11 CHANGELOG F2), but best effort for legacy graphs.
+        // (0.8.12 CHANGELOG F2), but best effort for legacy graphs.
         let (packed_slice, row_count): (&[u8], u32) =
             if decoded.len() >= 12 && &decoded[..8] == b"KGLCOLv1" {
                 let rc = u32::from_le_bytes(decoded[8..12].try_into().unwrap());

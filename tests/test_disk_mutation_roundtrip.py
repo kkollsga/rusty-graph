@@ -1,6 +1,6 @@
 """Mutation + save + reload roundtrip parity across memory / mapped / disk.
 
-Locks in the 0.8.11 fixes that make `save → reload` preserve:
+Locks in the 0.8.11 / 0.8.12 fixes that make `save → reload` preserve:
   - column_stores for types added post-`load_ntriples` via `add_nodes`
     (bug E; previously the columns.bin guard in `DirGraph::save_disk`
     dropped sidecars, so reloaded graphs returned `None` for every

@@ -7,6 +7,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.12] — 2026-04-24
+
+### Fixed
+
+Seven disk-backend correctness fixes stacked on top of the 0.8.11
+segmented-CSR foundation. Five cover latent save/reload regressions
+that slipped through 0.8.11's phase-1–8 coverage; two (F1 + F2) close
+the pre-existing Cypher `SET` and `DETACH DELETE` mutation holes on
+disk graphs.
+
+- **`save_disk` no longer compacts overflow away before seal.**
+  The previous `dg.has_overflow()` gate unconditionally compacted
+  before `save_to_dir`, which cleared `overflow_out`/`overflow_in`
+  and made the phase-6 seal path see empty overflow. Every edge
+  added between saves was silently lost on reload. Gating the
+  compact on "won't take the seal path" (manifest empty OR no
+  tail above the sealed watermark) preserves overflow for seal
+  and keeps the compact-rewrite semantics for the non-seal case.
+
+- **Segment-local seals merge `conn_type_index_sources` with global ids.**
+  `write_conn_type_index` walks the segment's segment-local
+  `out_offsets` (indices 0..tail_len) and stored those local
+  indices as source ids. Reload's merge needed to shift each
+  entry by `node_lo[seg]` for segment-local seals (full-range
+  seals already store global ids). Without this, post-reload
+  `MATCH (a)-[:T]->(b) RETURN a.id, b.id` returned no rows even
+  though `count(*)` via the histogram reported the correct total.
+
+- **Compact-rewrite after a prior seal cleans up stale `seg_NNN`.**
+  When `save_to_dir` falls to compact-rewrite (tombstones, edits,
+  or pure edge mutations between existing nodes), it now removes
+  every `seg_NNN > 0` under the target dir before rewriting
+  `seg_000`. Without this, `enumerate_segment_dirs` picked up the
+  stale sealed segments on reload and concat'd them against the
+  fresh seg_000, double-counting nodes and edges.
+
+- **Compact-rewrite persists heap-backed core arrays.**
+  `reconcile_seg0_csr` (called inside seal) replaces
+  `self.{node_slots, out_offsets, in_offsets, edge_endpoints}`
+  with heap-backed `MmapOrVec::Heap` copies. The same-dir
+  compact-rewrite previously relied on mmap persistence and
+  skipped explicit writes, which left the on-disk files at the
+  pre-seal trimmed sizes; reload errored with "File too small".
+  `save_to_file` is now called unconditionally for every core
+  array — it handles both backings.
+
+- **New types added via `add_nodes` persist on disk save.**
+  `DirGraph::save_disk` gated the per-type
+  `columns/<type>/columns.zst` sidecar write on the absence of
+  `columns.bin`. For disk graphs built via `load_ntriples`,
+  `columns.bin` is always present, so the sidecar branch was dead
+  code and every type added after the initial build lost its
+  column data on reload (properties read back as `None`). Save
+  now reads `columns_meta.json`/`.bin.zst` to identify the types
+  already covered by `columns.bin` and emits sidecars for the
+  remainder. Load path additively walks `columns/` after the mmap
+  fast-path to pick them up.
+
+- **Cypher `SET n.prop = X` on disk-backed graphs persists through save + reload.**
+  Pre-fix, `DiskGraph::node_weight_mut` materialised a `NodeData`
+  into `self.node_arena`; the Cypher executor mutated that arena
+  copy; `clear_arenas` dropped it without writing back to the
+  canonical `ColumnStore`. Affected SET + save + reload was a silent
+  no-op for persistence across 0.8.10 and 0.8.11.
+
+  Fix: mirror the proven `batch.rs::flush_chunk` full-`Arc`
+  replacement pattern for exact-row mutations.
+  `DiskGraph::node_weight_mut` now stages writes in a
+  `node_mut_cache` (Map-backed `NodeData`); `clear_arenas` groups
+  cached entries by type, deep-clones each affected `ColumnStore`
+  **once**, applies every staged title / property write + DELETE
+  tombstone to the clone, and replaces both
+  `DiskGraph.column_stores[ty]` and (via
+  `DirGraph::sync_column_stores_from_disk`)
+  `DirGraph.column_stores[ty]` atomically. Avoids the
+  `Arc::make_mut` → per-row clone + Arc divergence that doomed the
+  earlier attempt. Title writes diff against the current stored
+  value before calling `set_title` so that `TypedColumn::Str`'s
+  in-place-update offset-corruption bug (pre-existing) doesn't
+  trigger on unchanged titles.
+
+- **`DETACH DELETE` on disk preserves surviving nodes' property
+  values across save + reload.** Pre-fix, a disk-graph delete cycle
+  corrupted `title` reads (garbage bytes) and returned `None` for
+  some `age` values on reload. The surviving count and id set were
+  always correct — only the column-store-backed property columns
+  were affected. Root cause was in the sidecar load path, not in
+  mutation routing: `load_column_sidecars` derived `row_count` from
+  `type_indices[type].len()` (live rows only), while the sidecar
+  blob retains tombstoned rows alongside live ones. The mismatch
+  made `ColumnStore::load_packed` walk column blobs at the wrong
+  offsets and decode offset bytes as string data.
+
+  Fix: the sidecar `columns.zst` file now starts with an 8-byte
+  `KGLCOLv1` magic tag followed by `ColumnStore::row_count` (u32
+  LE) before the existing `write_packed` payload, and the loader
+  uses that stored count. Old-format sidecars (no magic tag) fall
+  through to the `type_indices.len()` derivation for backward
+  compat — best effort for legacy graphs, correct for any graph
+  saved by 0.8.12+. Locked by
+  `test_detach_delete_property_persistence_disk` (was `_xfail`).
+
+### Deferred to 0.8.13+
+
+- **Planner pruning using `SegmentManifest`.** Summaries are
+  populated and persisted since 0.8.11; the pattern matcher
+  doesn't yet consult them. Initial exploration showed the win
+  is small under the current concat-at-load architecture (typed-
+  edge queries at wiki1000m already run at sub-ms when the
+  histogram path applies, and concat'd reads are uniform).
+  Kept as a future option for 200-segment workloads once those
+  exist in practice.
+
 ## [0.8.11] — 2026-04-23
 
 ### Added (disk-graph-improvement-plan PR1, phases 1–8)
@@ -135,110 +248,6 @@ existing `.kgl` directory still loads byte-for-byte identically.
   core CSR arrays now pass through `save_to_file` on the
   same-dir save path, triggering the `file.set_len(byte_len)`
   truncation. Same bug pattern as the 0.8.10 conn_type_index trim.
-
-- **`save_disk` no longer compacts overflow away before seal.**
-  The previous `dg.has_overflow()` gate unconditionally compacted
-  before `save_to_dir`, which cleared `overflow_out`/`overflow_in`
-  and made the phase-6 seal path see empty overflow. Every edge
-  added between saves was silently lost on reload. Gating the
-  compact on "won't take the seal path" (manifest empty OR no
-  tail above the sealed watermark) preserves overflow for seal
-  and keeps the compact-rewrite semantics for the non-seal case.
-
-- **Segment-local seals merge `conn_type_index_sources` with global ids.**
-  `write_conn_type_index` walks the segment's segment-local
-  `out_offsets` (indices 0..tail_len) and stored those local
-  indices as source ids. Reload's merge needed to shift each
-  entry by `node_lo[seg]` for segment-local seals (full-range
-  seals already store global ids). Without this, post-reload
-  `MATCH (a)-[:T]->(b) RETURN a.id, b.id` returned no rows even
-  though `count(*)` via the histogram reported the correct total.
-
-- **Compact-rewrite after a prior seal cleans up stale `seg_NNN`.**
-  When `save_to_dir` falls to compact-rewrite (tombstones, edits,
-  or pure edge mutations between existing nodes), it now removes
-  every `seg_NNN > 0` under the target dir before rewriting
-  `seg_000`. Without this, `enumerate_segment_dirs` picked up the
-  stale sealed segments on reload and concat'd them against the
-  fresh seg_000, double-counting nodes and edges.
-
-- **Compact-rewrite persists heap-backed core arrays.**
-  `reconcile_seg0_csr` (called inside seal) replaces
-  `self.{node_slots, out_offsets, in_offsets, edge_endpoints}`
-  with heap-backed `MmapOrVec::Heap` copies. The same-dir
-  compact-rewrite previously relied on mmap persistence and
-  skipped explicit writes, which left the on-disk files at the
-  pre-seal trimmed sizes; reload errored with "File too small".
-  `save_to_file` is now called unconditionally for every core
-  array — it handles both backings.
-
-- **New types added via `add_nodes` persist on disk save.**
-  `DirGraph::save_disk` gated the per-type
-  `columns/<type>/columns.zst` sidecar write on the absence of
-  `columns.bin`. For disk graphs built via `load_ntriples`,
-  `columns.bin` is always present, so the sidecar branch was dead
-  code and every type added after the initial build lost its
-  column data on reload (properties read back as `None`). Save
-  now reads `columns_meta.json`/`.bin.zst` to identify the types
-  already covered by `columns.bin` and emits sidecars for the
-  remainder. Load path additively walks `columns/` after the mmap
-  fast-path to pick them up.
-
-- **Cypher `SET n.prop = X` on disk-backed graphs persists through save + reload.**
-  Pre-fix, `DiskGraph::node_weight_mut` materialised a `NodeData`
-  into `self.node_arena`; the Cypher executor mutated that arena
-  copy; `clear_arenas` dropped it without writing back to the
-  canonical `ColumnStore`. Affected SET + save + reload was a silent
-  no-op for persistence across 0.8.10.
-
-  Fix: mirror the proven `batch.rs::flush_chunk` full-`Arc`
-  replacement pattern for exact-row mutations.
-  `DiskGraph::node_weight_mut` now stages writes in a
-  `node_mut_cache` (Map-backed `NodeData`); `clear_arenas` groups
-  cached entries by type, deep-clones each affected `ColumnStore`
-  **once**, applies every staged title / property write + DELETE
-  tombstone to the clone, and replaces both
-  `DiskGraph.column_stores[ty]` and (via
-  `DirGraph::sync_column_stores_from_disk`)
-  `DirGraph.column_stores[ty]` atomically. Avoids the
-  `Arc::make_mut` → per-row clone + Arc divergence that doomed the
-  earlier attempt. Title writes diff against the current stored
-  value before calling `set_title` so that `TypedColumn::Str`'s
-  in-place-update offset-corruption bug (pre-existing) doesn't
-  trigger on unchanged titles.
-
-- **`DETACH DELETE` on disk preserves surviving nodes' property
-  values across save + reload.** Pre-fix, a disk-graph delete cycle
-  corrupted `title` reads (garbage bytes) and returned `None` for
-  some `age` values on reload. The surviving count and id set were
-  always correct — only the column-store-backed property columns
-  were affected. Root cause was in the sidecar load path, not in
-  mutation routing: `load_column_sidecars` derived `row_count` from
-  `type_indices[type].len()` (live rows only), while the sidecar
-  blob retains tombstoned rows alongside live ones. The mismatch
-  made `ColumnStore::load_packed` walk column blobs at the wrong
-  offsets and decode offset bytes as string data.
-
-  Fix: the sidecar `columns.zst` file now starts with an 8-byte
-  `KGLCOLv1` magic tag followed by `ColumnStore::row_count` (u32
-  LE) before the existing `write_packed` payload, and the loader
-  uses that stored count. Old-format sidecars (no magic tag) fall
-  through to the `type_indices.len()` derivation for backward
-  compat — best effort for legacy graphs, correct for any graph
-  saved by 0.8.11+. Locked by
-  `test_detach_delete_property_persistence_disk` (was
-  `_xfail`).
-
-### Deferred to 0.8.12+
-
-- **Planner pruning using `SegmentManifest`.** Summaries are
-  populated and persisted; the pattern matcher doesn't yet
-  consult them. Initial exploration showed the win is small
-  under the current concat-at-load architecture (typed-edge
-  queries at wiki1000m already run at sub-ms when the
-  histogram path applies, and concat'd reads are uniform).
-  Kept as a future option for 200-segment workloads once
-  those exist in practice.
 
 ## [0.8.10] — 2026-04-20
 
