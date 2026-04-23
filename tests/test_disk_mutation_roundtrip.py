@@ -10,11 +10,15 @@ Locks in the 0.8.11 fixes that make `save → reload` preserve:
   - clean segment layout (no stale `seg_NNN > 0` after compact-rewrite —
     bug C).
 
-**Not covered**: Cypher `SET n.prop = X` on disk-backed graphs. That
-path is a no-op for persistence across 0.8.10 / 0.8.11 (tracked as a
-pre-existing limitation in CHANGELOG); an `xfail` guard in
-`test_cypher_set_persists_disk_limitation_xfail` prevents silent
-regression once it's fixed.
+**Covered**: Cypher `SET n.prop = X` on disk-backed graphs now
+persists through save + reload (bug F1 fix — node_mut_cache
+clone-apply-replace flush in `DiskGraph::clear_arenas`). Asserted by
+`test_cypher_set_persists_through_save_reload`.
+
+**Not covered (still xfail)**: DETACH DELETE corrupts surviving nodes'
+title + some age values on reload — unrelated to the SET fix, likely
+a pre-existing bug in the sidecar write/load path for Str columns.
+Locked by `test_detach_delete_property_persistence_disk_xfail`.
 
 Run: pytest tests/test_disk_mutation_roundtrip.py
 """
@@ -190,9 +194,12 @@ def test_detach_delete_property_persistence_in_memory_modes(mode, tmp_path):
 
 @pytest.mark.xfail(
     reason="DETACH DELETE on disk-backed graphs corrupts surviving nodes' "
-    "title and some age values. Pre-existing since 0.8.10. Sibling of "
-    "the Cypher-SET disk limitation — same root cause (node mutation "
-    "routing). Scheduled for a follow-up release.",
+    "title column and some age values on reload. Pre-existing since "
+    "0.8.10 — unrelated to the node_mut_cache SET fix. The sidecar "
+    "write+load path emits garbage bytes for title columns after "
+    "any delete+save cycle; root cause is likely in the "
+    "write_packed/load_packed Str column encoding, not in node "
+    "mutation routing. Covered separately.",
     strict=True,
 )
 def test_detach_delete_property_persistence_disk_xfail(tmp_path):
@@ -290,33 +297,37 @@ def test_seal_then_compact_rewrite_cleans_stale_segs(mode, tmp_path):
         assert seg_dirs == ["seg_000"], f"compact-rewrite must remove stale segments; found {seg_dirs}"
 
 
-@pytest.mark.xfail(
-    reason="Cypher SET on disk-backed graphs is a no-op for persistence. "
-    "The mutation lands in an arena copy of NodeData; clear_arenas "
-    "drops it without writing back to ColumnStore. Pre-existing since "
-    "0.8.10. Fixing requires unifying the DirGraph/DiskGraph column "
-    "store Arc ownership — scheduled for a follow-up release.",
-    strict=True,
-)
-def test_cypher_set_persists_disk_limitation_xfail(tmp_path):
-    """Sentinel that flips from xfail → pass once Cypher SET persistence
-    lands for disk graphs. Keeps us from silently regressing: pytest
-    errors ("XPASS") if this test ever starts passing without the
-    xfail being removed."""
+def test_cypher_set_persists_through_save_reload(tmp_path):
+    """Cypher SET on disk-backed graphs persists through save + reload.
+
+    Locked in by the `node_mut_cache` clone-apply-replace flush in
+    `DiskGraph::clear_arenas` + the DirGraph resync in
+    `save_disk` (bug F1 fix). Previously this path was a no-op for
+    persistence across 0.8.10 and 0.8.11; the mutation landed in an
+    arena copy that `clear_arenas` dropped."""
     graph_path = str(tmp_path / "g_disk")
     kg = KnowledgeGraph(storage="disk", path=graph_path)
     kg.add_nodes(
-        pd.DataFrame([{"id": "P_0", "title": "P0", "age": 20}]),
+        pd.DataFrame([{"id": f"P_{i}", "title": f"P{i}", "age": 20 + i} for i in range(5)]),
         "Person",
         "id",
         "title",
     )
     kg.cypher(
-        "MATCH (n:Person) SET n.age = 100 RETURN count(n) AS n",
+        "MATCH (n:Person) WHERE n.age < 23 SET n.age = n.age + 100",
         timeout_ms=10_000,
     )
     kg.save(graph_path)
     del kg
     reloaded = kglite.load(graph_path)
-    age = _rows(reloaded.cypher("MATCH (n:Person) RETURN n.age", timeout_ms=10_000))[0]["n.age"]
-    assert age == 100, "SET should persist through save + reload"
+    post = _rows(
+        reloaded.cypher(
+            "MATCH (n:Person) RETURN n.id, n.title, n.age ORDER BY n.id",
+            timeout_ms=10_000,
+        )
+    )
+    assert [r["n.id"] for r in post] == [f"P_{i}" for i in range(5)]
+    assert [r["n.title"] for r in post] == [f"P{i}" for i in range(5)]
+    # P_0, P_1, P_2 match the WHERE clause and get +100; P_3, P_4 keep
+    # their original ages.
+    assert [r["n.age"] for r in post] == [120, 121, 122, 23, 24]

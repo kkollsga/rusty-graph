@@ -184,28 +184,45 @@ existing `.kgl` directory still loads byte-for-byte identically.
   remainder. Load path additively walks `columns/` after the mmap
   fast-path to pick them up.
 
+- **Cypher `SET n.prop = X` on disk-backed graphs persists through save + reload.**
+  Pre-fix, `DiskGraph::node_weight_mut` materialised a `NodeData`
+  into `self.node_arena`; the Cypher executor mutated that arena
+  copy; `clear_arenas` dropped it without writing back to the
+  canonical `ColumnStore`. Affected SET + save + reload was a silent
+  no-op for persistence across 0.8.10.
+
+  Fix: mirror the proven `batch.rs::flush_chunk` full-`Arc`
+  replacement pattern for exact-row mutations.
+  `DiskGraph::node_weight_mut` now stages writes in a
+  `node_mut_cache` (Map-backed `NodeData`); `clear_arenas` groups
+  cached entries by type, deep-clones each affected `ColumnStore`
+  **once**, applies every staged title / property write + DELETE
+  tombstone to the clone, and replaces both
+  `DiskGraph.column_stores[ty]` and (via
+  `DirGraph::sync_column_stores_from_disk`)
+  `DirGraph.column_stores[ty]` atomically. Avoids the
+  `Arc::make_mut` → per-row clone + Arc divergence that doomed the
+  earlier attempt. Title writes diff against the current stored
+  value before calling `set_title` so that `TypedColumn::Str`'s
+  in-place-update offset-corruption bug (pre-existing) doesn't
+  trigger on unchanged titles.
+
 ### Known limitations (disk backend)
 
-The mutation + save + reload roundtrip bench surfaced two
-pre-existing disk-graph limitations (present in 0.8.10 as well).
-Both are covered by `strict=True` `xfail` sentinels in
-`tests/test_disk_mutation_roundtrip.py` so a future fix trips
-pytest XPASS rather than landing silently.
+One pre-existing disk-graph mutation limitation remains, covered by
+a `strict=True` `xfail` sentinel in
+`tests/test_disk_mutation_roundtrip.py` so a future fix trips pytest
+XPASS rather than landing silently.
 
-- **Cypher `SET n.prop = X` on disk is a no-op for persistence.**
-  `DiskGraph::node_weight_mut` materialises a `NodeData` into
-  `self.node_arena`; the Cypher executor mutates that arena copy;
-  `clear_arenas` drops it without writing back to the canonical
-  `ColumnStore`. Affected tests xfail as
-  `test_cypher_set_persists_disk_limitation_xfail`. The node-side
-  analogue of the working `edge_mut_cache` flush pattern requires
-  restructuring `ColumnStore` Arc ownership so that `Arc::make_mut`
-  on `DiskGraph.column_stores[ty]` doesn't diverge from
-  `DirGraph.column_stores[ty]`; scheduled for a follow-up release.
 - **`DETACH DELETE` on disk corrupts surviving nodes' property
-  values.** Same root cause as the SET limitation. Counts and id
-  lookups round-trip correctly; `title` and some `age` values read
-  as garbage or `None` post-reload. Covered by
+  values.** `title` reads back as garbage bytes and some `age`
+  values read `None` on reload. The surviving count and id set are
+  correct; only the column-store-backed property columns are
+  corrupted. Root cause is unrelated to the F1 node-mutation
+  routing fix above — it reproduces even with the new mutation path
+  disabled — and most likely lives in the Str column's
+  `write_packed` / `load_packed` encoding (the corruption pattern
+  matches reading offset bytes as string data). Covered by
   `test_detach_delete_property_persistence_disk_xfail`.
 
 ### Deferred to 0.8.12+

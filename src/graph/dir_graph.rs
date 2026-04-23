@@ -1440,6 +1440,26 @@ impl DirGraph {
         }
     }
 
+    /// Mirror DiskGraph's column_stores back into DirGraph's
+    /// `self.column_stores`. Called after mutations that flushed
+    /// through `DiskGraph::flush_node_mut_cache` so the sidecar writer
+    /// in `save_disk` and any other DirGraph-side reader sees the
+    /// post-flush state rather than the pre-flush (stale) Arcs.
+    pub fn sync_column_stores_from_disk(&mut self) {
+        if let GraphBackend::Disk(ref dg) = self.graph {
+            let pairs: Vec<(
+                String,
+                Arc<crate::graph::storage::column_store::ColumnStore>,
+            )> = dg
+                .column_stores_iter()
+                .map(|(k, v)| (self.interner.resolve(*k).to_string(), Arc::clone(v)))
+                .collect();
+            for (name, arc) in pairs {
+                self.column_stores.insert(name, arc);
+            }
+        }
+    }
+
     /// Build CSR from pending edges if in disk mode. No-op otherwise.
     /// Called after add_connections, before queries, and before save.
     pub fn ensure_disk_edges_built(&mut self) {
@@ -1504,9 +1524,19 @@ impl DirGraph {
             _ => return Err("save_disk requires disk mode".to_string()),
         };
 
-        // Save DiskGraph files (CSR, nodes, edge properties, metadata)
+        // Save DiskGraph files (CSR, nodes, edge properties, metadata).
+        // `save_to_dir` runs `clear_arenas` internally, which drains
+        // `node_mut_cache` via the clone-apply-replace flush, updating
+        // each mutated type's Arc in `DiskGraph.column_stores`.
         dg.save_to_dir(dir, &self.interner)
             .map_err(|e| format!("DiskGraph save failed: {}", e))?;
+        // Mirror the post-flush Arcs back into `self.column_stores` so
+        // the per-type sidecar writer below sees the mutated stores
+        // rather than the pre-flush (stale) Arcs. Pre-fix, mutations
+        // landed in DiskGraph's Arcs but the sidecar writer read
+        // DirGraph's Arcs — Cypher SET and DETACH DELETE property
+        // corrections never reached disk.
+        self.sync_column_stores_from_disk();
 
         // Save DirGraph metadata as JSON
         let meta = crate::graph::io::file::build_disk_metadata(self);

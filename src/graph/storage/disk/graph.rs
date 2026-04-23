@@ -130,6 +130,16 @@ pub struct DiskGraph {
     /// Cache for edge_weight_mut: stores materialized EdgeData that may be modified.
     /// Flushed to edge_properties on next clear_arenas call.
     edge_mut_cache: HashMap<u32, EdgeData>,
+    /// Cache for `node_weight_mut`: stages Cypher-SET-style exact-row
+    /// writes as `PropertyStorage::Map`. On `clear_arenas`, drains are
+    /// grouped by type, each type's ColumnStore is cloned once, all
+    /// staged writes are applied to the clone, and the result is
+    /// inserted back into `self.column_stores` as a fresh `Arc`. This
+    /// mirrors the full-`Arc` replacement pattern that
+    /// `batch.rs::flush_chunk` uses for `add_nodes` — avoiding
+    /// `Arc::make_mut` on an `Arc` that DirGraph still holds (which
+    /// would clone + diverge, losing writes).
+    node_mut_cache: HashMap<u32, NodeData>,
 
     // ── Pending edges (UnsafeCell reserved for a planned &self CSR-build path) ──
     // File-backed (MmapOrVec) to avoid ~14 GB heap allocation at Wikidata scale.
@@ -323,6 +333,7 @@ impl DiskGraph {
             edge_properties: EdgePropertyStore::new(),
             edge_arena: std::sync::Mutex::new(Vec::with_capacity(256)),
             edge_mut_cache: HashMap::new(),
+            node_mut_cache: HashMap::new(),
             pending_edges: UnsafeCell::new(
                 MmapOrVec::mapped(&data_dir.join("_pending_edges.bin"), 1 << 20)
                     .unwrap_or_else(|_| MmapOrVec::new()),
@@ -499,6 +510,7 @@ impl DiskGraph {
             edge_properties: EdgePropertyStore::from_overlay(edge_properties),
             edge_arena: std::sync::Mutex::new(Vec::with_capacity(1024)),
             edge_mut_cache: HashMap::new(),
+            node_mut_cache: HashMap::new(),
             pending_edges: UnsafeCell::new(MmapOrVec::new()),
             overflow_out: HashMap::new(),
             overflow_in: HashMap::new(),
@@ -544,6 +556,21 @@ impl DiskGraph {
         stores: HashMap<InternedKey, Arc<crate::graph::storage::column_store::ColumnStore>>,
     ) {
         self.column_stores = stores;
+    }
+
+    /// Iterate `(type_key, store_arc)` pairs — read-only borrow.
+    /// Used by `DirGraph::sync_column_stores_from_disk` to mirror
+    /// mutations applied in `clear_arenas` back into DirGraph's side of
+    /// the Arc pair so the sidecar writer sees the post-mutation state.
+    pub fn column_stores_iter(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &InternedKey,
+            &Arc<crate::graph::storage::column_store::ColumnStore>,
+        ),
+    > {
+        self.column_stores.iter()
     }
 
     /// O(1) node type lookup from mmap'd node_slots — no materialization.
@@ -698,7 +725,6 @@ impl DiskGraph {
     }
 
     pub fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
-        self.clear_arenas();
         let i = idx.index();
         if i >= self.node_slots.len() {
             return None;
@@ -709,35 +735,49 @@ impl DiskGraph {
         }
 
         let node_type_key = InternedKey::from_u64(slot.node_type);
-        let store = self.column_stores.get(&node_type_key).cloned();
+        let key = i as u32;
 
-        // Materialize with actual values for mutation
-        let (id_val, title_val) = if let Some(ref s) = store {
-            (
-                s.get_id(slot.row_id).unwrap_or(Value::Null),
-                s.get_title(slot.row_id).unwrap_or(Value::Null),
-            )
-        } else {
-            (Value::Null, Value::Null)
+        // Stage exact-row mutations in `node_mut_cache` with
+        // `PropertyStorage::Map`, not `Columnar`. A `Columnar` variant
+        // would route `node.set_property(k, v)` through
+        // `Arc::make_mut(store)`; that clones the store when DirGraph
+        // still holds another Arc, and the mutation then lands on a
+        // detached copy. Using Map captures every write in the node's
+        // own state; `clear_arenas` groups by type, clones each
+        // ColumnStore once, applies all pending writes, and replaces
+        // the Arc — mirroring `batch.rs::flush_chunk`.
+        //
+        // Reseed path: `batch.rs::flush_chunk` (and a few similar
+        // bulk paths) assigns `node.properties = PropertyStorage::
+        // Columnar{...}` as a transient step. If the cache still holds
+        // that stale assignment next time we reach here, replace it
+        // with Map — batch already persisted via full-Arc replacement,
+        // so the stale Columnar scratch is safe to discard.
+        let needs_reseed = match self.node_mut_cache.get(&key) {
+            None => true,
+            Some(nd) => !matches!(nd.properties, crate::graph::schema::PropertyStorage::Map(_)),
         };
-
-        let arena = self.node_arena.get_mut();
-        let pos = arena.len();
-        arena.push(NodeData {
-            id: id_val,
-            title: title_val,
-            node_type: node_type_key,
-            properties: if let Some(s) = store {
-                crate::graph::schema::PropertyStorage::Columnar {
-                    store: s,
-                    row_id: slot.row_id,
-                }
+        if needs_reseed {
+            let store = self.column_stores.get(&node_type_key);
+            let (id_val, title_val) = if let Some(s) = store {
+                (
+                    s.get_id(slot.row_id).unwrap_or(Value::Null),
+                    s.get_title(slot.row_id).unwrap_or(Value::Null),
+                )
             } else {
-                crate::graph::schema::PropertyStorage::Map(HashMap::new())
-            },
-        });
-
-        Some(&mut arena[pos])
+                (Value::Null, Value::Null)
+            };
+            self.node_mut_cache.insert(
+                key,
+                NodeData {
+                    id: id_val,
+                    title: title_val,
+                    node_type: node_type_key,
+                    properties: crate::graph::schema::PropertyStorage::Map(HashMap::new()),
+                },
+            );
+        }
+        Some(self.node_mut_cache.get_mut(&key).unwrap())
     }
 
     #[inline]
@@ -1430,8 +1470,128 @@ impl DiskGraph {
                 self.edge_properties.insert(edge_idx, edge_data.properties);
             }
         }
+        // Flush staged node writes via clone-apply-replace on the
+        // affected ColumnStores. Group by type_key so each store is
+        // cloned at most once per flush, regardless of how many rows
+        // were mutated.
+        self.flush_node_mut_cache();
         self.node_arena.get_mut().clear();
         self.edge_arena.lock().unwrap().clear();
+    }
+
+    /// Drain `node_mut_cache` and apply the staged writes to
+    /// `self.column_stores` using full-`Arc` replacement:
+    ///
+    ///   let mut new_store = (**current_arc).clone();  // one deep clone
+    ///   new_store.set_title(row_id, &title);
+    ///   new_store.set(row_id, key, &value, None);     // per staged mutation
+    ///   self.column_stores.insert(type_key, Arc::new(new_store));
+    ///
+    /// Dead slots (tombstoned via `remove_node`) flush a
+    /// `store.tombstone(row_id)` instead. This is the node analogue of
+    /// `batch.rs::flush_chunk`'s deferred-columnar pass — the only
+    /// pattern that's proven to survive the Arc sharing between
+    /// DirGraph and DiskGraph.
+    fn flush_node_mut_cache(&mut self) {
+        if self.node_mut_cache.is_empty() {
+            return;
+        }
+        use crate::graph::schema::PropertyStorage;
+        // Group drained entries by type_key.
+        let drained: Vec<(u32, NodeData)> = self.node_mut_cache.drain().collect();
+        let mut by_type: HashMap<InternedKey, Vec<(u32, NodeData)>> = HashMap::new();
+        for (i, nd) in drained {
+            if (i as usize) >= self.node_slots.len() {
+                continue;
+            }
+            let slot = self.node_slots.get(i as usize);
+            let type_key = InternedKey::from_u64(slot.node_type);
+            by_type.entry(type_key).or_default().push((i, nd));
+        }
+        for (type_key, updates) in by_type {
+            let Some(current_arc) = self.column_stores.get(&type_key) else {
+                continue;
+            };
+            // Check whether any entry would actually write anything
+            // before paying the clone + Arc-replace cost. Entries from
+            // `batch.rs::flush_chunk` leave behind `PropertyStorage::
+            // Columnar` scratch in the cache (batch persists via its
+            // own full-Arc replacement); those yield nothing to flush.
+            // Dead slots still need a tombstone so they contribute
+            // work. Entries with Map-form properties or a non-null
+            // title also contribute.
+            let any_writes_needed = updates.iter().any(|(i, nd)| {
+                let slot = self.node_slots.get(*i as usize);
+                if !slot.is_alive() {
+                    return true;
+                }
+                if let PropertyStorage::Map(map) = &nd.properties {
+                    if !map.is_empty() {
+                        return true;
+                    }
+                }
+                // Title write only counts when it differs from the
+                // current store — otherwise `Str::set`'s offset update
+                // would corrupt neighbouring rows and we'd skip it
+                // anyway below.
+                if !matches!(nd.title, Value::Null) {
+                    let current = current_arc.get_title(slot.row_id);
+                    return match (current, &nd.title) {
+                        (Some(a), b) => a != *b,
+                        (None, _) => true,
+                    };
+                }
+                false
+            });
+            if !any_writes_needed {
+                continue;
+            }
+            // One explicit deep clone — the clone has refcount 1 so
+            // `ColumnStore::set` / `set_title` / `tombstone` operate
+            // in place with no further Arc work.
+            let mut new_store: crate::graph::storage::column_store::ColumnStore =
+                (**current_arc).clone();
+            for (i, nd) in updates {
+                let slot = self.node_slots.get(i as usize);
+                let row_id = slot.row_id;
+                if !slot.is_alive() {
+                    // Tombstoned by `remove_node` — mark the row dead
+                    // in the ColumnStore so reloads skip it.
+                    new_store.tombstone(row_id);
+                    continue;
+                }
+                // Title is in its own column. Only write through the
+                // cached value when it actually differs from what's
+                // already in the store — `TypedColumn::Str::set`
+                // corrupts offsets on same-row overwrite (it only
+                // updates offsets[idx]/offsets[idx+1] rather than
+                // shifting the tail), so a naive always-write would
+                // break every other row's title on reload. The
+                // deep-clone's title column still has the original
+                // string; skip the write when cached title == stored
+                // title to avoid corrupting the column.
+                if !matches!(nd.title, Value::Null) {
+                    let current = new_store.get_title(row_id);
+                    let differs = match (&current, &nd.title) {
+                        (Some(a), b) => a != b,
+                        (None, _) => true,
+                    };
+                    if differs {
+                        let _ = new_store.set_title(row_id, &nd.title);
+                    }
+                }
+                if let PropertyStorage::Map(map) = &nd.properties {
+                    for (key, value) in map {
+                        let _ = new_store.set(row_id, *key, value, None);
+                    }
+                }
+            }
+            // Replace the Arc wholesale. DirGraph's Arc is re-synced
+            // from DiskGraph's post-save via
+            // `DirGraph::sync_column_stores_from_disk`.
+            self.column_stores
+                .insert(type_key, std::sync::Arc::new(new_store));
+        }
     }
 
     /// Reset materialization arenas between queries to prevent unbounded growth.
@@ -2145,6 +2305,7 @@ impl Clone for DiskGraph {
             edge_properties: self.edge_properties.deep_clone(),
             edge_arena: std::sync::Mutex::new(Vec::new()),
             edge_mut_cache: HashMap::new(),
+            node_mut_cache: HashMap::new(),
             pending_edges: UnsafeCell::new(MmapOrVec::new()),
             overflow_out: self.overflow_out.clone(),
             overflow_in: self.overflow_in.clone(),
@@ -2703,6 +2864,15 @@ impl DiskGraph {
         target_dir: &Path,
         _interner: &crate::graph::schema::StringInterner,
     ) -> std::io::Result<()> {
+        // Drain mutation caches before writing:
+        //   - `edge_mut_cache` → `edge_properties` (existing behavior,
+        //     edge props have been persisting correctly because
+        //     `edge_properties` is owned by DiskGraph).
+        //   - `node_mut_cache` → `self.column_stores` via the
+        //     clone-apply-replace flush. The caller
+        //     (`DirGraph::save_disk`) mirrors the post-flush Arcs back
+        //     into its own side immediately after.
+        self.clear_arenas();
         std::fs::create_dir_all(target_dir)?;
 
         // Phase 6 + 7 auto-wire. `seal_to_new_segment` now handles
@@ -3380,6 +3550,7 @@ impl DiskGraph {
                 edge_properties,
                 edge_arena: std::sync::Mutex::new(Vec::with_capacity(1024)),
                 edge_mut_cache: HashMap::new(),
+                node_mut_cache: HashMap::new(),
                 pending_edges: UnsafeCell::new(MmapOrVec::new()),
                 overflow_out,
                 overflow_in,
