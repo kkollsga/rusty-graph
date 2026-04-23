@@ -2728,22 +2728,43 @@ impl DiskGraph {
         let csr_target = target_dir.join(segment_subdir(0));
         std::fs::create_dir_all(&csr_target)?;
 
-        // Flush any mmap arrays that aren't already in the graph dir
-        // (e.g. node_slots from new_at_path, or if csr_target differs from data_dir)
-        if csr_target != self.data_dir {
-            self.node_slots
-                .save_to_file(&csr_target.join("node_slots.bin"))?;
-            self.out_offsets
-                .save_to_file(&csr_target.join("out_offsets.bin"))?;
-            self.out_edges
-                .save_to_file(&csr_target.join("out_edges.bin"))?;
-            self.in_offsets
-                .save_to_file(&csr_target.join("in_offsets.bin"))?;
-            self.in_edges
-                .save_to_file(&csr_target.join("in_edges.bin"))?;
-            self.edge_endpoints
-                .save_to_file(&csr_target.join("edge_endpoints.bin"))?;
+        // The compact-rewrite path consolidates the full in-memory
+        // graph into seg_000. If a prior seal produced seg_NNN > 0
+        // dirs, they carried a subset of the now-consolidated state;
+        // leaving them on disk causes the next reload's
+        // `enumerate_segment_dirs` to pick them up and concat against
+        // the fresh seg_000 — double-counting nodes and edges. Remove
+        // every seg_NNN for N > 0 before rewriting seg_000.
+        if csr_target == self.data_dir {
+            for (seg_id, seg_path) in enumerate_segment_dirs(target_dir) {
+                if seg_id > 0 {
+                    let _ = std::fs::remove_dir_all(&seg_path);
+                }
+            }
         }
+
+        // Always persist the core CSR arrays, regardless of mmap vs
+        // heap backing. Previously this path skipped writes when
+        // `csr_target == self.data_dir` and relied on mmap file
+        // persistence. After a prior seal (`reconcile_seg0_csr`)
+        // these arrays are heap-backed, so mmap persistence doesn't
+        // apply — the on-disk file stays at the pre-seal trimmed size
+        // while the in-memory Vec carries the full state. On reload
+        // the meta → file-length mismatch fails loudly. `save_to_file`
+        // handles both backings: Heap writes bytes; Mapped-same-path
+        // truncates to logical length.
+        self.node_slots
+            .save_to_file(&csr_target.join("node_slots.bin"))?;
+        self.out_offsets
+            .save_to_file(&csr_target.join("out_offsets.bin"))?;
+        self.out_edges
+            .save_to_file(&csr_target.join("out_edges.bin"))?;
+        self.in_offsets
+            .save_to_file(&csr_target.join("in_offsets.bin"))?;
+        self.in_edges
+            .save_to_file(&csr_target.join("in_edges.bin"))?;
+        self.edge_endpoints
+            .save_to_file(&csr_target.join("edge_endpoints.bin"))?;
 
         // Save overflow edges (bincode + zstd)
         if !self.overflow_out.is_empty() || !self.overflow_in.is_empty() {
@@ -3919,6 +3940,7 @@ mod tests {
     use super::{concat_segment_csrs, enumerate_segment_dirs, segment_subdir, SegmentCsr};
     use crate::graph::storage::disk::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints};
     use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
+    use petgraph::graph::NodeIndex;
     use tempfile::TempDir;
 
     // ------------- fixture helpers -------------
@@ -4697,5 +4719,70 @@ mod tests {
             "segment-local seal's conn_type_index_sources must be shifted \
              by node_lo on merge (regression from 0.8.11 pre-fix)"
         );
+    }
+
+    #[test]
+    fn compact_rewrite_after_seal_cleans_stale_segs_and_persists_heap_arrays() {
+        // Regression test for the 0.8.11 seal-path bugs C and D. Flow
+        // that used to fail:
+        //   1. Build + save       → seg_000
+        //   2. Add nodes + edges  → overflow
+        //   3. Save               → seal creates seg_001; reconcile_seg0_csr
+        //                           replaces self.{node_slots, …} with
+        //                           `MmapOrVec::Heap` copies
+        //   4. Add more overflow edges between *existing* nodes (no new
+        //                           nodes, so `sealed_nodes_bound ==
+        //                           node_count` → falls to compact-rewrite)
+        //   5. Save again         → compact-rewrite path
+        //
+        // Before the fixes, step 5 (a) left seg_001 on disk so reload's
+        // `enumerate_segment_dirs` double-counted, and (b) relied on mmap
+        // persistence for the core arrays — which was impossible after
+        // reconcile made them heap-backed — so the on-disk node_slots /
+        // edge_endpoints files stayed at the pre-seal trimmed sizes and
+        // reload errored with "File too small".
+        let tmp = TempDir::new().unwrap();
+        let mut interner = StringInterner::new();
+        let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();
+        // seg_0: 5 nodes.
+        for i in 0..5 {
+            dg.add_node(seal_test_node(&mut interner, i, "A"));
+        }
+        dg.save_to_dir(tmp.path(), &interner).unwrap();
+
+        // Tail: add 3 nodes + intra-tail edges.
+        let n5 = dg.add_node(seal_test_node(&mut interner, 5, "B"));
+        let n6 = dg.add_node(seal_test_node(&mut interner, 6, "B"));
+        let n7 = dg.add_node(seal_test_node(&mut interner, 7, "B"));
+        dg.add_edge(n5, n6, seal_test_edge(&mut interner, "T"));
+        dg.add_edge(n6, n7, seal_test_edge(&mut interner, "T"));
+        dg.save_to_dir(tmp.path(), &interner).unwrap(); // seal → seg_001
+
+        assert!(
+            tmp.path().join("seg_001").exists(),
+            "phase-6 seal should have produced seg_001"
+        );
+
+        // Now add *edges* between existing nodes only — `sealed_nodes_bound
+        // == node_count` so this next save will take the compact-rewrite
+        // path, not another seal.
+        let n0 = NodeIndex::new(0);
+        dg.add_edge(n0, n5, seal_test_edge(&mut interner, "T"));
+        dg.save_to_dir(tmp.path(), &interner).unwrap();
+
+        // Fix C: stale seg_001 must be removed.
+        assert!(
+            !tmp.path().join("seg_001").exists(),
+            "compact-rewrite must clean up stale seg_NNN dirs"
+        );
+
+        // Fix D: reload must succeed — the heap-backed arrays from
+        // reconcile must have been explicitly persisted by save_to_file.
+        drop(dg);
+        let mut interner2 = StringInterner::new();
+        let (reloaded, _tmp_zst) =
+            super::DiskGraph::load_from_dir(tmp.path(), &mut interner2).unwrap();
+        assert_eq!(reloaded.node_count, 8, "all 8 nodes must survive");
+        assert_eq!(reloaded.edge_count, 3, "3 T-edges must survive");
     }
 }
