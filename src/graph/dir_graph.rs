@@ -1473,8 +1473,18 @@ impl DirGraph {
         // peer_count_histogram reflect every live edge. Skipped during
         // builds; done here as a one-shot so users only pay the cost at
         // save time, not per add_connections batch.
+        //
+        // Gate: the phase-6 seal path in `save_to_dir` consumes
+        // `overflow_out` / `overflow_in` directly. Running `compact()`
+        // first moves those edges into the CSR (clearing overflow),
+        // which causes seal to write an empty segment and lose the
+        // new edges on reload. Only compact when we're taking the
+        // compact-rewrite path (no prior save, or no tail above the
+        // sealed watermark).
         if let GraphBackend::Disk(ref mut dg) = self.graph {
-            if dg.has_overflow() {
+            let will_seal =
+                !dg.segment_manifest.is_empty() && dg.sealed_nodes_bound < dg.node_count() as u32;
+            if !will_seal && dg.has_overflow() {
                 dg.compact();
             }
             // Auto-build the cross-type global title index so that
