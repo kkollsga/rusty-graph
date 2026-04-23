@@ -207,23 +207,27 @@ existing `.kgl` directory still loads byte-for-byte identically.
   in-place-update offset-corruption bug (pre-existing) doesn't
   trigger on unchanged titles.
 
-### Known limitations (disk backend)
+- **`DETACH DELETE` on disk preserves surviving nodes' property
+  values across save + reload.** Pre-fix, a disk-graph delete cycle
+  corrupted `title` reads (garbage bytes) and returned `None` for
+  some `age` values on reload. The surviving count and id set were
+  always correct — only the column-store-backed property columns
+  were affected. Root cause was in the sidecar load path, not in
+  mutation routing: `load_column_sidecars` derived `row_count` from
+  `type_indices[type].len()` (live rows only), while the sidecar
+  blob retains tombstoned rows alongside live ones. The mismatch
+  made `ColumnStore::load_packed` walk column blobs at the wrong
+  offsets and decode offset bytes as string data.
 
-One pre-existing disk-graph mutation limitation remains, covered by
-a `strict=True` `xfail` sentinel in
-`tests/test_disk_mutation_roundtrip.py` so a future fix trips pytest
-XPASS rather than landing silently.
-
-- **`DETACH DELETE` on disk corrupts surviving nodes' property
-  values.** `title` reads back as garbage bytes and some `age`
-  values read `None` on reload. The surviving count and id set are
-  correct; only the column-store-backed property columns are
-  corrupted. Root cause is unrelated to the F1 node-mutation
-  routing fix above — it reproduces even with the new mutation path
-  disabled — and most likely lives in the Str column's
-  `write_packed` / `load_packed` encoding (the corruption pattern
-  matches reading offset bytes as string data). Covered by
-  `test_detach_delete_property_persistence_disk_xfail`.
+  Fix: the sidecar `columns.zst` file now starts with an 8-byte
+  `KGLCOLv1` magic tag followed by `ColumnStore::row_count` (u32
+  LE) before the existing `write_packed` payload, and the loader
+  uses that stored count. Old-format sidecars (no magic tag) fall
+  through to the `type_indices.len()` derivation for backward
+  compat — best effort for legacy graphs, correct for any graph
+  saved by 0.8.11+. Locked by
+  `test_detach_delete_property_persistence_disk` (was
+  `_xfail`).
 
 ### Deferred to 0.8.12+
 

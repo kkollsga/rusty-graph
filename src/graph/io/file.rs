@@ -728,7 +728,24 @@ fn load_column_sidecars(
             continue;
         }
         let compressed = std::fs::read(&col_file)?;
-        let packed = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+        let decoded = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+        // New format: `KGLCOLv1` + row_count: u32 + packed bytes.
+        // Old format (pre-0.8.11): raw packed bytes. Dispatch via the
+        // magic tag. Old-format row_count is derived from
+        // `type_indices[type].len()` — wrong after DELETE tombstones
+        // (0.8.11 CHANGELOG F2), but best effort for legacy graphs.
+        let (packed_slice, row_count): (&[u8], u32) =
+            if decoded.len() >= 12 && &decoded[..8] == b"KGLCOLv1" {
+                let rc = u32::from_le_bytes(decoded[8..12].try_into().unwrap());
+                (&decoded[12..], rc)
+            } else {
+                let rc = graph
+                    .type_indices
+                    .get(&type_name)
+                    .map(|v| v.len() as u32)
+                    .unwrap_or(0);
+                (decoded.as_slice(), rc)
+            };
         let schema = graph
             .type_schemas
             .get(&type_name)
@@ -739,16 +756,11 @@ fn load_column_sidecars(
             .get(&type_name)
             .cloned()
             .unwrap_or_default();
-        let row_count = graph
-            .type_indices
-            .get(&type_name)
-            .map(|v| v.len() as u32)
-            .unwrap_or(0);
         let store = crate::graph::storage::column_store::ColumnStore::load_packed(
             schema,
             &type_meta,
             &graph.interner,
-            &packed,
+            packed_slice,
             row_count,
             None,
         )?;

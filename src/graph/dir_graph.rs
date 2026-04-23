@@ -1631,7 +1631,27 @@ impl DirGraph {
             let packed = store
                 .write_packed(&self.interner)
                 .map_err(|e| format!("Column pack failed: {}", e))?;
-            let compressed = zstd::encode_all(packed.as_slice(), 3)
+            // Prefix with a magic tag + the ColumnStore's row_count so
+            // `load_column_sidecars` can pass the correct row count to
+            // `ColumnStore::load_packed`. Pre-fix the loader derived
+            // row_count from `type_indices[type].len()`, which counts
+            // only *live* rows — after a DETACH DELETE that leaves
+            // tombstoned rows in the store, the mismatch caused
+            // `load_packed` to read column blobs at the wrong offsets
+            // and produce garbage titles / null ages on reload.
+            //
+            // Format:
+            //   magic: 8 bytes b"KGLCOLv1"
+            //   row_count: u32 LE
+            //   packed: existing `write_packed` output
+            //
+            // Old-format sidecars (no magic tag) stay loadable via a
+            // fallback in the load path.
+            let mut framed: Vec<u8> = Vec::with_capacity(12 + packed.len());
+            framed.extend_from_slice(b"KGLCOLv1");
+            framed.extend_from_slice(&store.row_count().to_le_bytes());
+            framed.extend_from_slice(&packed);
+            let compressed = zstd::encode_all(framed.as_slice(), 3)
                 .map_err(|e| format!("Column compression failed: {}", e))?;
             std::fs::write(type_dir.join("columns.zst"), compressed)
                 .map_err(|e| format!("Failed to write columns: {}", e))?;

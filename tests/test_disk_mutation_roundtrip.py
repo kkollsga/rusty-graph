@@ -15,10 +15,11 @@ persists through save + reload (bug F1 fix — node_mut_cache
 clone-apply-replace flush in `DiskGraph::clear_arenas`). Asserted by
 `test_cypher_set_persists_through_save_reload`.
 
-**Not covered (still xfail)**: DETACH DELETE corrupts surviving nodes'
-title + some age values on reload — unrelated to the SET fix, likely
-a pre-existing bug in the sidecar write/load path for Str columns.
-Locked by `test_detach_delete_property_persistence_disk_xfail`.
+**Covered**: DETACH DELETE on disk preserves surviving nodes' full
+property values through save + reload (bug F2 fix — sidecar format
+prefixes `row_count` so the loader uses the true stored row count
+instead of `type_indices.len()` which undercounts tombstoned rows).
+Asserted by `test_detach_delete_property_persistence_disk`.
 
 Run: pytest tests/test_disk_mutation_roundtrip.py
 """
@@ -192,20 +193,19 @@ def test_detach_delete_property_persistence_in_memory_modes(mode, tmp_path):
         assert r["n.age"] == 20 + idx, f"{mode}: age mismatch for {r['n.id']}"
 
 
-@pytest.mark.xfail(
-    reason="DETACH DELETE on disk-backed graphs corrupts surviving nodes' "
-    "title column and some age values on reload. Pre-existing since "
-    "0.8.10 — unrelated to the node_mut_cache SET fix. The sidecar "
-    "write+load path emits garbage bytes for title columns after "
-    "any delete+save cycle; root cause is likely in the "
-    "write_packed/load_packed Str column encoding, not in node "
-    "mutation routing. Covered separately.",
-    strict=True,
-)
-def test_detach_delete_property_persistence_disk_xfail(tmp_path):
-    """Sentinel for disk-mode DELETE property-persistence fix. Flips
-    from xfail → pass when the column-store mutation routing is
-    unified."""
+def test_detach_delete_property_persistence_disk(tmp_path):
+    """DETACH DELETE on disk preserves surviving nodes' full property
+    values. Bug F2 regression.
+
+    Pre-fix, the sidecar load path derived `row_count` from
+    `type_indices[type].len()` — which after a DELETE reflects only
+    the live rows, while the sidecar blob still contains the
+    tombstoned-but-retained rows. The mismatch made `load_packed`
+    read column blobs at the wrong offsets and return garbage titles
+    / null ages. Fix: sidecar format prefixes the stored
+    `ColumnStore::row_count` with a `KGLCOLv1` magic tag so the
+    loader uses the true row count regardless of live-vs-stored
+    divergence."""
     graph_path = str(tmp_path / "g_disk")
     kg = KnowledgeGraph(storage="disk", path=graph_path)
     kg.add_nodes(
