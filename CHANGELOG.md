@@ -136,6 +136,78 @@ existing `.kgl` directory still loads byte-for-byte identically.
   same-dir save path, triggering the `file.set_len(byte_len)`
   truncation. Same bug pattern as the 0.8.10 conn_type_index trim.
 
+- **`save_disk` no longer compacts overflow away before seal.**
+  The previous `dg.has_overflow()` gate unconditionally compacted
+  before `save_to_dir`, which cleared `overflow_out`/`overflow_in`
+  and made the phase-6 seal path see empty overflow. Every edge
+  added between saves was silently lost on reload. Gating the
+  compact on "won't take the seal path" (manifest empty OR no
+  tail above the sealed watermark) preserves overflow for seal
+  and keeps the compact-rewrite semantics for the non-seal case.
+
+- **Segment-local seals merge `conn_type_index_sources` with global ids.**
+  `write_conn_type_index` walks the segment's segment-local
+  `out_offsets` (indices 0..tail_len) and stored those local
+  indices as source ids. Reload's merge needed to shift each
+  entry by `node_lo[seg]` for segment-local seals (full-range
+  seals already store global ids). Without this, post-reload
+  `MATCH (a)-[:T]->(b) RETURN a.id, b.id` returned no rows even
+  though `count(*)` via the histogram reported the correct total.
+
+- **Compact-rewrite after a prior seal cleans up stale `seg_NNN`.**
+  When `save_to_dir` falls to compact-rewrite (tombstones, edits,
+  or pure edge mutations between existing nodes), it now removes
+  every `seg_NNN > 0` under the target dir before rewriting
+  `seg_000`. Without this, `enumerate_segment_dirs` picked up the
+  stale sealed segments on reload and concat'd them against the
+  fresh seg_000, double-counting nodes and edges.
+
+- **Compact-rewrite persists heap-backed core arrays.**
+  `reconcile_seg0_csr` (called inside seal) replaces
+  `self.{node_slots, out_offsets, in_offsets, edge_endpoints}`
+  with heap-backed `MmapOrVec::Heap` copies. The same-dir
+  compact-rewrite previously relied on mmap persistence and
+  skipped explicit writes, which left the on-disk files at the
+  pre-seal trimmed sizes; reload errored with "File too small".
+  `save_to_file` is now called unconditionally for every core
+  array — it handles both backings.
+
+- **New types added via `add_nodes` persist on disk save.**
+  `DirGraph::save_disk` gated the per-type
+  `columns/<type>/columns.zst` sidecar write on the absence of
+  `columns.bin`. For disk graphs built via `load_ntriples`,
+  `columns.bin` is always present, so the sidecar branch was dead
+  code and every type added after the initial build lost its
+  column data on reload (properties read back as `None`). Save
+  now reads `columns_meta.json`/`.bin.zst` to identify the types
+  already covered by `columns.bin` and emits sidecars for the
+  remainder. Load path additively walks `columns/` after the mmap
+  fast-path to pick them up.
+
+### Known limitations (disk backend)
+
+The mutation + save + reload roundtrip bench surfaced two
+pre-existing disk-graph limitations (present in 0.8.10 as well).
+Both are covered by `strict=True` `xfail` sentinels in
+`tests/test_disk_mutation_roundtrip.py` so a future fix trips
+pytest XPASS rather than landing silently.
+
+- **Cypher `SET n.prop = X` on disk is a no-op for persistence.**
+  `DiskGraph::node_weight_mut` materialises a `NodeData` into
+  `self.node_arena`; the Cypher executor mutates that arena copy;
+  `clear_arenas` drops it without writing back to the canonical
+  `ColumnStore`. Affected tests xfail as
+  `test_cypher_set_persists_disk_limitation_xfail`. The node-side
+  analogue of the working `edge_mut_cache` flush pattern requires
+  restructuring `ColumnStore` Arc ownership so that `Arc::make_mut`
+  on `DiskGraph.column_stores[ty]` doesn't diverge from
+  `DirGraph.column_stores[ty]`; scheduled for a follow-up release.
+- **`DETACH DELETE` on disk corrupts surviving nodes' property
+  values.** Same root cause as the SET limitation. Counts and id
+  lookups round-trip correctly; `title` and some `age` values read
+  as garbage or `None` post-reload. Covered by
+  `test_detach_delete_property_persistence_disk_xfail`.
+
 ### Deferred to 0.8.12+
 
 - **Planner pruning using `SegmentManifest`.** Summaries are
