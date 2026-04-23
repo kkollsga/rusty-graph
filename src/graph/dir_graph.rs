@@ -1526,39 +1526,86 @@ impl DirGraph {
         std::fs::write(dir.join("interner.json"), interner_json)
             .map_err(|e| format!("Failed to write interner: {}", e))?;
 
-        // Save column stores (per type, legacy format) — only when the
-        // v3 single-file `columns.bin` is absent. The v3 format is
-        // written by the N-Triples builder's Phase 1b during
-        // `load_ntriples` + streaming-write disk builds, making this
-        // per-type loop redundant (and multi-minute on Wikidata-scale
-        // graphs with 88k+ types). `load_file` prefers the v3 path
-        // (`file.rs:580`), falling back to `columns/<type>/columns.zst`
-        // only when v3 is missing (pre-Phase-4 graphs, or DirGraph → disk
-        // saves that never went through the streaming builder).
+        // Save column stores (per type, sidecar format). Two modes:
+        //
+        // 1. **No `columns.bin`** — DirGraph → disk saves that never
+        //    went through the N-Triples streaming builder. Write every
+        //    column store as a sidecar.
+        //
+        // 2. **`columns.bin` exists** — N-Triples-built disk graphs.
+        //    The single-file v3 layout covers every type that was
+        //    present at ingest time, and reloading it via the mmap fast
+        //    path (`file.rs:580`) is dramatically cheaper than walking
+        //    per-type sidecars on a 88k-type wiki graph. BUT: types
+        //    added post-build via `add_nodes` / `add_node` are not in
+        //    `columns.bin` and were silently dropped on save before
+        //    this fix. Emit sidecars *only* for those types — keeps the
+        //    fast path for initial types, makes mutation persistence
+        //    correct for new ones.
         //
         // 0.8.12 phase-1: PR1 phase 4 moved `columns.bin` under
-        // `seg_000/`, so this guard started missing on every disk save —
-        // the per-type legacy fallback was running unconditionally and
-        // ate ~3s on a wiki100m graph. Check both the root (legacy
+        // `seg_000/`, so the presence check covers both the root (legacy
         // flat layout) and `seg_000/` (post-phase-4 segmented layout).
-        let columns_bin_present =
-            dir.join("columns.bin").exists() || dir.join("seg_000/columns.bin").exists();
-        if !columns_bin_present {
-            let columns_dir = dir.join("columns");
-            std::fs::create_dir_all(&columns_dir)
-                .map_err(|e| format!("Failed to create columns dir: {}", e))?;
-            for (type_name, store) in &self.column_stores {
-                let type_dir = columns_dir.join(type_name);
-                std::fs::create_dir_all(&type_dir)
-                    .map_err(|e| format!("Failed to create type dir: {}", e))?;
-                let packed = store
-                    .write_packed(&self.interner)
-                    .map_err(|e| format!("Column pack failed: {}", e))?;
-                let compressed = zstd::encode_all(packed.as_slice(), 3)
-                    .map_err(|e| format!("Column compression failed: {}", e))?;
-                std::fs::write(type_dir.join("columns.zst"), compressed)
-                    .map_err(|e| format!("Failed to write columns: {}", e))?;
+        let columns_meta_path = {
+            let seg0_bin = dir.join("seg_000/columns_meta.bin.zst");
+            let seg0_json = dir.join("seg_000/columns_meta.json");
+            let root_bin = dir.join("columns_meta.bin.zst");
+            let root_json = dir.join("columns_meta.json");
+            if seg0_bin.exists() {
+                Some(seg0_bin)
+            } else if seg0_json.exists() {
+                Some(seg0_json)
+            } else if root_bin.exists() {
+                Some(root_bin)
+            } else if root_json.exists() {
+                Some(root_json)
+            } else {
+                None
             }
+        };
+        let types_in_columns_bin: std::collections::HashSet<String> =
+            if let Some(meta_path) = &columns_meta_path {
+                use crate::graph::io::ntriples::ColumnTypeMeta;
+                let metas: Vec<ColumnTypeMeta> =
+                    if meta_path.extension().and_then(|s| s.to_str()) == Some("zst") {
+                        let compressed = std::fs::read(meta_path)
+                            .map_err(|e| format!("read {}: {}", meta_path.display(), e))?;
+                        let bytes = zstd::decode_all(compressed.as_slice())
+                            .map_err(|e| format!("decompress columns_meta: {}", e))?;
+                        bincode::deserialize(&bytes)
+                            .map_err(|e| format!("parse columns_meta.bin: {}", e))?
+                    } else {
+                        let json = std::fs::read_to_string(meta_path)
+                            .map_err(|e| format!("read {}: {}", meta_path.display(), e))?;
+                        serde_json::from_str(&json)
+                            .map_err(|e| format!("parse columns_meta.json: {}", e))?
+                    };
+                metas.into_iter().map(|tm| tm.type_name).collect()
+            } else {
+                std::collections::HashSet::new()
+            };
+
+        let columns_dir = dir.join("columns");
+        let mut sidecars_written = 0usize;
+        for (type_name, store) in &self.column_stores {
+            if types_in_columns_bin.contains(type_name) {
+                continue; // covered by the fast mmap path on reload
+            }
+            if sidecars_written == 0 {
+                std::fs::create_dir_all(&columns_dir)
+                    .map_err(|e| format!("Failed to create columns dir: {}", e))?;
+            }
+            let type_dir = columns_dir.join(type_name);
+            std::fs::create_dir_all(&type_dir)
+                .map_err(|e| format!("Failed to create type dir: {}", e))?;
+            let packed = store
+                .write_packed(&self.interner)
+                .map_err(|e| format!("Column pack failed: {}", e))?;
+            let compressed = zstd::encode_all(packed.as_slice(), 3)
+                .map_err(|e| format!("Column compression failed: {}", e))?;
+            std::fs::write(type_dir.join("columns.zst"), compressed)
+                .map_err(|e| format!("Failed to write columns: {}", e))?;
+            sidecars_written += 1;
         }
 
         // Save type_indices and id_indices (previously only written by N-Triples builder)

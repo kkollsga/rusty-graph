@@ -632,50 +632,16 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
             );
             graph.column_stores.insert(tm.type_name, Arc::new(cs));
         }
+
+        // Additively load sidecars for types added post-`load_ntriples`
+        // via `add_nodes`. The sidecar writer in `DirGraph::save_disk`
+        // emits `columns/<type>/columns.zst` only for types NOT in
+        // `columns_meta`, so the two paths don't clash — but we still
+        // check before overwriting out of caution.
+        load_column_sidecars(dir, &mut graph)?;
     } else {
         // Legacy path: load from columns/<type>/columns.zst files
-        let columns_dir = dir.join("columns");
-        if columns_dir.exists() {
-            for entry in std::fs::read_dir(&columns_dir)? {
-                let entry = entry?;
-                if entry.file_type()?.is_dir() {
-                    let type_name = entry.file_name().to_string_lossy().to_string();
-                    let col_file = entry.path().join("columns.zst");
-                    if col_file.exists() {
-                        let compressed = std::fs::read(&col_file)?;
-                        let packed =
-                            zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
-                        let schema =
-                            graph
-                                .type_schemas
-                                .get(&type_name)
-                                .cloned()
-                                .unwrap_or_else(|| {
-                                    std::sync::Arc::new(crate::graph::schema::TypeSchema::new())
-                                });
-                        let type_meta = graph
-                            .node_type_metadata
-                            .get(&type_name)
-                            .cloned()
-                            .unwrap_or_default();
-                        let row_count = graph
-                            .type_indices
-                            .get(&type_name)
-                            .map(|v| v.len() as u32)
-                            .unwrap_or(0);
-                        let store = crate::graph::storage::column_store::ColumnStore::load_packed(
-                            schema,
-                            &type_meta,
-                            &graph.interner,
-                            &packed,
-                            row_count,
-                            None,
-                        )?;
-                        graph.column_stores.insert(type_name, Arc::new(store));
-                    }
-                }
-            }
-        }
+        load_column_sidecars(dir, &mut graph)?;
     }
 
     // Sync column stores to DiskGraph
@@ -732,6 +698,63 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
         default_timeout_ms: None,
         default_max_rows: None,
     })
+}
+
+/// Load `columns/<type>/columns.zst` sidecars into `graph.column_stores`.
+/// Skips entries whose type is already loaded (from `columns.bin`'s mmap
+/// fast path). Used by both the legacy flat layout and the additive
+/// post-`columns.bin` path that covers types added post-build via
+/// `add_nodes`.
+fn load_column_sidecars(
+    dir: &std::path::Path,
+    graph: &mut crate::graph::dir_graph::DirGraph,
+) -> io::Result<()> {
+    let columns_dir = dir.join("columns");
+    if !columns_dir.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&columns_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let type_name = entry.file_name().to_string_lossy().to_string();
+        if graph.column_stores.contains_key(&type_name) {
+            // columns.bin mmap path already loaded this type.
+            continue;
+        }
+        let col_file = entry.path().join("columns.zst");
+        if !col_file.exists() {
+            continue;
+        }
+        let compressed = std::fs::read(&col_file)?;
+        let packed = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+        let schema = graph
+            .type_schemas
+            .get(&type_name)
+            .cloned()
+            .unwrap_or_else(|| std::sync::Arc::new(crate::graph::schema::TypeSchema::new()));
+        let type_meta = graph
+            .node_type_metadata
+            .get(&type_name)
+            .cloned()
+            .unwrap_or_default();
+        let row_count = graph
+            .type_indices
+            .get(&type_name)
+            .map(|v| v.len() as u32)
+            .unwrap_or(0);
+        let store = crate::graph::storage::column_store::ColumnStore::load_packed(
+            schema,
+            &type_meta,
+            &graph.interner,
+            &packed,
+            row_count,
+            None,
+        )?;
+        graph.column_stores.insert(type_name, Arc::new(store));
+    }
+    Ok(())
 }
 
 /// Load v3 columnar format.
