@@ -404,6 +404,40 @@ pub(crate) fn read_type_indices_bin(
     Ok(Some(out))
 }
 
+// ─── interner.bin.zst (0.8.13 fast-load) ─────────────────────────────────────
+//
+// Replaces `interner.json` (a `HashMap<String, String>` of
+// hash-to-original) with bincode-serialised `Vec<String>` of the
+// original strings, zstd-compressed. The hash is re-derived on load
+// by `interner.get_or_intern` — FNV of the string is deterministic.
+// Dropping the hash halves the on-disk size and eliminates JSON
+// parse overhead.
+
+pub(crate) fn write_interner_bin(dir: &std::path::Path, graph: &DirGraph) -> Result<(), String> {
+    let originals: Vec<String> = graph.interner.iter().map(|(_, v)| v.to_string()).collect();
+    let bytes = bincode::serialize(&originals)
+        .map_err(|e| format!("interner serialization failed: {}", e))?;
+    let compressed = zstd::encode_all(bytes.as_slice(), 3)
+        .map_err(|e| format!("interner compression failed: {}", e))?;
+    std::fs::write(dir.join("interner.bin.zst"), compressed)
+        .map_err(|e| format!("Failed to write interner.bin.zst: {}", e))?;
+    Ok(())
+}
+
+pub(crate) fn read_interner_bin(dir: &std::path::Path, graph: &mut DirGraph) -> io::Result<bool> {
+    let path = dir.join("interner.bin.zst");
+    if !path.exists() {
+        return Ok(false);
+    }
+    let compressed = std::fs::read(&path)?;
+    let bytes = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+    let originals: Vec<String> = bincode::deserialize(&bytes).map_err(io::Error::other)?;
+    for s in &originals {
+        graph.interner.get_or_intern(s);
+    }
+    Ok(true)
+}
+
 // ─── id_indices.bin.zst (0.8.13 fast-load) ───────────────────────────────────
 //
 // Replaces bincode `HashMap<String, TypeIdIndex>` with per-variant
@@ -942,9 +976,12 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
     }
     log_stage("metadata_json", t);
 
-    // Load interner from JSON map { hash_string: original_string }
+    // Load interner. 0.8.13 prefers `interner.bin.zst` (bincode
+    // `Vec<String>` + zstd); old `interner.json` is the backward-compat
+    // fallback for 0.8.12-and-earlier graphs.
     let t = stage_timer();
-    if dir.join("interner.json").exists() {
+    let loaded_from_bin = read_interner_bin(dir, &mut graph)?;
+    if !loaded_from_bin && dir.join("interner.json").exists() {
         let interner_str = std::fs::read_to_string(dir.join("interner.json"))?;
         let interner_map: std::collections::HashMap<String, String> =
             serde_json::from_str(&interner_str)

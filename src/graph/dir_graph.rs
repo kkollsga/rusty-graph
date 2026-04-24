@@ -1555,16 +1555,12 @@ impl DirGraph {
         // graph root; no-op when the cache is empty.
         crate::graph::io::file::write_type_connectivity_bin(dir, self)?;
 
-        // Save interner as JSON map { hash_u64_string: original_string }
-        let interner_map: HashMap<String, String> = self
-            .interner
-            .iter()
-            .map(|(k, v)| (k.as_u64().to_string(), v.to_string()))
-            .collect();
-        let interner_json = serde_json::to_string(&interner_map)
-            .map_err(|e| format!("Interner serialization failed: {}", e))?;
-        std::fs::write(dir.join("interner.json"), interner_json)
-            .map_err(|e| format!("Failed to write interner: {}", e))?;
+        // 0.8.13: interner switches from JSON (hash → original) to
+        // bincode `Vec<String>` of originals. The hash is re-derived
+        // deterministically on load via `get_or_intern`. Loader falls
+        // back to `interner.json` for graphs saved by 0.8.12 and
+        // earlier.
+        crate::graph::io::file::write_interner_bin(dir, self)?;
 
         // Save column stores (per type, sidecar format). Two modes:
         //
