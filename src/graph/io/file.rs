@@ -192,7 +192,12 @@ impl FileMetadata {
             } else {
                 None
             },
-            // Persist type connectivity if computed
+            // Persist type connectivity if computed.
+            // 0.8.13: `DirGraph::save_disk` strips this field from the
+            // disk-mode metadata.json and writes
+            // `type_connectivity.bin.zst` separately (3.17 M-entry JSON
+            // list → packed binary). In-memory .kgl saves keep embedding
+            // it here for single-file portability.
             type_connectivity: graph.get_type_connectivity(),
         }
     }
@@ -255,6 +260,134 @@ impl FileMetadata {
 /// Build metadata for disk-mode save (reuses the same FileMetadata structure).
 pub(crate) fn build_disk_metadata(graph: &DirGraph) -> FileMetadata {
     FileMetadata::from_graph(graph)
+}
+
+/// Strip `type_connectivity` from FileMetadata so the disk-mode save
+/// path can emit it into `type_connectivity.bin.zst` instead. The
+/// in-memory `.kgl` save path keeps the embedded form.
+pub(crate) fn strip_type_connectivity(meta: &mut FileMetadata) {
+    meta.type_connectivity = None;
+}
+
+// ─── type_connectivity.bin.zst (0.8.13 fast-load) ────────────────────────────
+//
+// Replaces a 266 MB JSON array of `ConnectivityTriple { src: String, conn:
+// String, tgt: String, count: usize }` embedded inside metadata.json with
+// a compact binary file at the graph root. The old metadata.json path
+// still loads on fallback so graphs saved by 0.8.11 / 0.8.12 continue to
+// open without a rebuild.
+//
+// Payload (pre-zstd):
+//   [ 0..  8]  magic   = b"KGLTCN1\0"
+//   [ 8.. 12]  version = u32 LE (= 1)
+//   [12.. 16]  n       = u32 LE
+//   [16.. n*32+16]  entries: (u64 src_key, u64 conn_key, u64 tgt_key, u64 count) * n
+//
+// `src_key`/`conn_key`/`tgt_key` are interner hashes produced by
+// `InternedKey::as_u64()`; the load path resolves them via
+// `graph.interner.try_resolve`. The interner is always loaded before
+// this file on the disk-load path (`load_disk_dir`).
+
+const TYPE_CONN_MAGIC: &[u8; 8] = b"KGLTCN1\0";
+const TYPE_CONN_VERSION: u32 = 1;
+
+/// Writer for `type_connectivity.bin.zst`. Idempotent — no-op if the
+/// cache is empty. Called from `DirGraph::save_disk` after
+/// `metadata.json` is emitted.
+pub(crate) fn write_type_connectivity_bin(
+    dir: &std::path::Path,
+    graph: &DirGraph,
+) -> Result<(), String> {
+    let Some(triples) = graph.get_type_connectivity() else {
+        return Ok(());
+    };
+    if triples.is_empty() {
+        return Ok(());
+    }
+    let n = triples.len() as u32;
+    let mut payload: Vec<u8> = Vec::with_capacity(16 + (triples.len() * 32));
+    payload.extend_from_slice(TYPE_CONN_MAGIC);
+    payload.extend_from_slice(&TYPE_CONN_VERSION.to_le_bytes());
+    payload.extend_from_slice(&n.to_le_bytes());
+    // Intern each string once; avoids 3*N lookups if the interner's
+    // `get_or_intern` hashes the string internally.
+    let mut interner = graph.interner.clone();
+    for t in &triples {
+        let src_key = interner.get_or_intern(&t.src).as_u64();
+        let conn_key = interner.get_or_intern(&t.conn).as_u64();
+        let tgt_key = interner.get_or_intern(&t.tgt).as_u64();
+        payload.extend_from_slice(&src_key.to_le_bytes());
+        payload.extend_from_slice(&conn_key.to_le_bytes());
+        payload.extend_from_slice(&tgt_key.to_le_bytes());
+        payload.extend_from_slice(&(t.count as u64).to_le_bytes());
+    }
+    let compressed = zstd::encode_all(payload.as_slice(), 3)
+        .map_err(|e| format!("type_connectivity compression failed: {}", e))?;
+    std::fs::write(dir.join("type_connectivity.bin.zst"), compressed)
+        .map_err(|e| format!("Failed to write type_connectivity.bin.zst: {}", e))?;
+    Ok(())
+}
+
+/// Reader for `type_connectivity.bin.zst`. Returns `Ok(None)` if the
+/// file is absent or has an unrecognised magic tag (caller falls back
+/// to the legacy JSON path).
+pub(crate) fn read_type_connectivity_bin(
+    dir: &std::path::Path,
+    graph: &DirGraph,
+) -> io::Result<Option<Vec<crate::graph::schema::ConnectivityTriple>>> {
+    let path = dir.join("type_connectivity.bin.zst");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let compressed = std::fs::read(&path)?;
+    let payload = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+    if payload.len() < 16 || &payload[..8] != TYPE_CONN_MAGIC {
+        return Ok(None);
+    }
+    let version = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+    if version != TYPE_CONN_VERSION {
+        return Ok(None);
+    }
+    let n = u32::from_le_bytes(payload[12..16].try_into().unwrap()) as usize;
+    let entry_bytes = 32usize;
+    let expected_len = 16 + n * entry_bytes;
+    if payload.len() < expected_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "type_connectivity.bin.zst is truncated",
+        ));
+    }
+    let mut triples = Vec::with_capacity(n);
+    for i in 0..n {
+        let base = 16 + i * entry_bytes;
+        let src_key = u64::from_le_bytes(payload[base..base + 8].try_into().unwrap());
+        let conn_key = u64::from_le_bytes(payload[base + 8..base + 16].try_into().unwrap());
+        let tgt_key = u64::from_le_bytes(payload[base + 16..base + 24].try_into().unwrap());
+        let count = u64::from_le_bytes(payload[base + 24..base + 32].try_into().unwrap());
+        let src = graph
+            .interner
+            .try_resolve(crate::graph::schema::InternedKey::from_u64(src_key))
+            .map(|s| s.to_string());
+        let conn = graph
+            .interner
+            .try_resolve(crate::graph::schema::InternedKey::from_u64(conn_key))
+            .map(|s| s.to_string());
+        let tgt = graph
+            .interner
+            .try_resolve(crate::graph::schema::InternedKey::from_u64(tgt_key))
+            .map(|s| s.to_string());
+        if let (Some(src), Some(conn), Some(tgt)) = (src, conn, tgt) {
+            triples.push(crate::graph::schema::ConnectivityTriple {
+                src,
+                conn,
+                tgt,
+                count: count as usize,
+            });
+        }
+        // Missing interner entry → silently skip. The interner is loaded
+        // before this file, so this only trips on truly corrupted input.
+    }
+    Ok(Some(triples))
 }
 
 // ─── Save ────────────────────────────────────────────────────────────────────
@@ -675,6 +808,19 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
         }
     }
     log_stage("id_indices_load", t);
+
+    // 0.8.13: type_connectivity loads from a packed binary when present.
+    // The load path seeds `type_connectivity_cache` iff `FileMetadata::apply_to`
+    // left it empty (new-format metadata.json no longer carries the field).
+    let t = stage_timer();
+    if !graph.has_type_connectivity_cache() {
+        if let Ok(Some(triples)) = read_type_connectivity_bin(dir, &graph) {
+            if !triples.is_empty() {
+                *graph.type_connectivity_cache.write().unwrap() = Some(triples);
+            }
+        }
+    }
+    log_stage("type_connectivity_load", t);
 
     // Load embeddings if present
     let emb_path = dir.join("embeddings.bin.zst");

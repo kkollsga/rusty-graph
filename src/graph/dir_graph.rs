@@ -1538,12 +1538,22 @@ impl DirGraph {
         // corrections never reached disk.
         self.sync_column_stores_from_disk();
 
-        // Save DirGraph metadata as JSON
-        let meta = crate::graph::io::file::build_disk_metadata(self);
+        // Save DirGraph metadata as JSON. 0.8.13: strip
+        // `type_connectivity` here — on the 81 GB Wikidata graph, this
+        // field alone is 266 MB of a 415 MB metadata.json (3.17 M
+        // entries × JSON strings). Persisted separately via
+        // `write_type_connectivity_bin`. In-memory .kgl saves keep the
+        // embedded form.
+        let mut meta = crate::graph::io::file::build_disk_metadata(self);
+        crate::graph::io::file::strip_type_connectivity(&mut meta);
         let meta_json = serde_json::to_string_pretty(&meta)
             .map_err(|e| format!("Metadata serialization failed: {}", e))?;
         std::fs::write(dir.join("metadata.json"), meta_json)
             .map_err(|e| format!("Failed to write metadata: {}", e))?;
+
+        // Emit the packed binary `type_connectivity.bin.zst` at the
+        // graph root; no-op when the cache is empty.
+        crate::graph::io::file::write_type_connectivity_bin(dir, self)?;
 
         // Save interner as JSON map { hash_u64_string: original_string }
         let interner_map: HashMap<String, String> = self
