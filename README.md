@@ -22,19 +22,33 @@ pip install kglite
 ```
 
 ```python
+import pandas as pd
 import kglite
 
+# Three storage modes — pick by graph size:
+#   default (in-memory)   — small/medium graphs, fastest queries
+#   storage="mapped"      — mmap columns, RAM-friendly as you grow
+#   storage="disk", path=…  — 100M+ nodes, Wikidata-scale, loaded lazily
 graph = kglite.KnowledgeGraph()
 
-# Create nodes and relationships
-graph.cypher("CREATE (:Person {name: 'Alice', age: 28, city: 'Oslo'})")
-graph.cypher("CREATE (:Person {name: 'Bob', age: 35, city: 'Bergen'})")
-graph.cypher("""
-    MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
-    CREATE (a)-[:KNOWS]->(b)
-""")
+# Bulk-load nodes from a DataFrame (also: add_nodes_bulk, from_blueprint,
+# load_ntriples, or Cypher CREATE for ad-hoc inserts).
+people = pd.DataFrame({
+    "id":   ["alice", "bob", "eve"],
+    "name": ["Alice", "Bob", "Eve"],
+    "age":  [28, 35, 41],
+    "city": ["Oslo", "Bergen", "Trondheim"],
+})
+graph.add_nodes(people, node_type="Person", unique_id_field="id", node_title_field="name")
 
-# Query — returns a ResultView (lazy; data stays in Rust until accessed)
+# Bulk-load relationships the same way (also: add_connections_bulk,
+# add_connections_from_source for auto-filter by loaded types).
+knows = pd.DataFrame({"src": ["alice", "bob"], "tgt": ["bob", "eve"]})
+graph.add_connections(knows, connection_type="KNOWS",
+                      source_type="Person", source_id_field="src",
+                      target_type="Person", target_id_field="tgt")
+
+# Query — returns a ResultView (lazy; data stays in Rust until accessed).
 result = graph.cypher("""
     MATCH (p:Person) WHERE p.age > 30
     RETURN p.name AS name, p.city AS city
@@ -43,55 +57,101 @@ result = graph.cypher("""
 for row in result:
     print(row['name'], row['city'])
 
-# Or get a pandas DataFrame
+# Or get a pandas DataFrame directly.
 df = graph.cypher("MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age", to_df=True)
 
-# Persist to disk and reload
+# Persist to disk and reload.
 graph.save("my_graph.kgl")
 loaded = kglite.load("my_graph.kgl")
 ```
 
 ## Use Cases
 
-### RAG & Retrieval Pipelines
+### Codebase analysis
 
-Store documents, chunks, and entities as a knowledge graph. Use `text_score()` for semantic similarity search and Cypher for structured retrieval — combine both for hybrid RAG.
+Parse Python, Rust, TypeScript, Go, Java, C#, and C++ into a graph of
+functions, classes, calls, and imports. Trace who-calls-what, find
+dead code, and review structure without leaving your editor. Pairs
+naturally with the MCP server so an agent can reason over your repo.
+
+```python
+from kglite.code_tree import build
+
+graph = build(".")                                # parse current directory
+graph.cypher("""
+    MATCH (f:Function)-[:CALLS]->(g:Function)
+    RETURN g.name, count(f) AS callers
+    ORDER BY callers DESC LIMIT 10
+""")
+```
+
+### Agentic AI — memory and tool use
+
+Give an LLM a structured memory it can query. `describe()` emits a
+compact XML schema that fits in a system prompt, and the bundled MCP
+server exposes the whole graph as a Cypher tool — drop-in for Claude,
+Cursor, or any MCP-capable agent.
+
+```python
+xml = graph.describe()                            # schema for the agent's context
+prompt = f"You have a knowledge graph:\n{xml}\nAnswer via graph.cypher()."
+# Or: python examples/mcp_server.py path/to/graph.kgl
+```
+
+### RAG retrieval
+
+Store documents, chunks, and entities together as one graph. Combine
+`text_score()` semantic similarity with Cypher structure — hybrid
+retrieval in one query, no second vector DB.
 
 ```python
 graph.cypher("""
-    MATCH (c:Chunk)
-    RETURN c.text, text_score(c.embedding, $query_vec) AS score
+    MATCH (c:Chunk)-[:IN_DOC]->(d:Document)
+    RETURN c.text, d.title,
+           text_score(c.embedding, $query_vec) AS score
     ORDER BY score DESC LIMIT 5
 """, params={"query_vec": query_embedding})
 ```
 
-### AI Agent Memory & Tool Use
+### Data exploration and analysis
 
-Give LLM agents a structured, queryable memory. `describe()` generates a progressive-disclosure schema that agents can reason over, and the included MCP server exposes the graph as a tool.
-
-```python
-xml = graph.describe()  # schema for agent context
-prompt = f"You have a knowledge graph:\n{xml}\nAnswer using graph.cypher()."
-```
-
-### Data Exploration & Analysis
-
-Load CSVs or DataFrames, explore relationships, run graph algorithms (shortest path, centrality, community detection), and export results — all without leaving your notebook.
+Load CSVs or DataFrames, walk relationships, run graph algorithms
+(shortest path, centrality, community detection), and export — all
+from a notebook.
 
 ```python
-graph.add_nodes(data=users_df, node_type='User', unique_id_field='user_id', node_title_field='name')
-graph.cypher("MATCH path = shortestPath((a:User {name:'Alice'})-[*]-(b:User {name:'Eve'})) RETURN path")
+graph.add_nodes(users_df, node_type="User", unique_id_field="user_id", node_title_field="name")
+graph.cypher("""
+    MATCH path = shortestPath((a:User {name:'Alice'})-[*]-(b:User {name:'Eve'}))
+    RETURN path
+""")
 ```
 
-### Codebase Analysis
+## Examples
 
-Parse Python and Rust codebases into a knowledge graph with functions, classes, calls, and imports. Search, trace dependencies, and review code structure.
+The [`examples/`](https://github.com/kkollsga/kglite/tree/main/examples)
+directory has runnable, self-contained scripts covering each of the
+use cases above:
 
-```python
-from kglite.code_tree import build
-graph = build(".")
-graph.cypher("MATCH (f:Function) RETURN f.name, f.file ORDER BY f.name")
-```
+- **[`code_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/code_graph.py)**
+  — build a code knowledge graph from a source directory via
+  `code_tree.build`. Produces `Function`, `Class`, `Module`, `File`
+  nodes with `CALLS`, `DEFINES`, `IMPORTS` edges.
+- **[`legal_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/legal_graph.py)**
+  — end-to-end `add_nodes` / `add_connections` from pandas DataFrames,
+  covering laws, regulations, and court decisions with citation
+  relationships. Good template for adapting to your own domain.
+- **[`mcp_server.py`](https://github.com/kkollsga/kglite/blob/main/examples/mcp_server.py)**
+  — drop-in MCP server that exposes any `.kgl` file to an LLM (Claude,
+  Cursor, …) as a Cypher query tool, with schema disclosure and
+  code-graph–aware helpers.
+- **[`spatial_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/spatial_graph.py)**
+  — declarative CSV→graph loading via a JSON blueprint; regions,
+  facilities, and sensors with lat/lon coordinates and pipeline-path
+  traversal queries.
+- **[`wikidata_disk.py`](https://github.com/kkollsga/kglite/blob/main/examples/wikidata_disk.py)**
+  — Wikidata-scale build + disk-mode storage; loads hundreds of
+  millions of triples via `load_ntriples` into a mmap-backed graph.
 
 ## Key Features
 

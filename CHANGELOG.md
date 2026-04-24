@@ -7,6 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.14] — 2026-04-24
+
+### Performance — disk-graph `kglite.load()` fast-load series
+
+Four independent on-disk format changes aimed at the serde overhead
+that dominates `kglite.load()` on large disk-mode graphs. Profiling
+the 124 M-node, 863 M-edge Wikidata graph
+(`wikidata_disk_graph_0.8.11`, 81 GB on disk) showed zstd
+decompression + mmap setup account for only ~5–6 s of a ~77 s cold
+load; the remaining ~70 s is serde rebuild cost on three bulk
+structures, plus a 266 MB JSON array inside `metadata.json`. Each
+format change replaces that cost with flat packed slices + exact
+`HashMap::with_capacity` sizing — same in-memory representation,
+zero consumer surface change.
+
+- **`type_connectivity` out of `metadata.json` into a packed binary.**
+  On the 81 GB graph this field was 266 MB of a 415 MB JSON file
+  (3,176,503 `ConnectivityTriple` entries). The new
+  `type_connectivity.bin.zst` at the graph root is:
+
+  ```
+  [ 0.. 8]  magic       = b"KGLTCN1\0"
+  [ 8..12]  version     = u32 LE (= 1)
+  [12..16]  num_entries = u32 LE
+  [16..n*32+16]  entries: (u64 src_key, u64 conn_key, u64 tgt_key, u64 count) × n
+  ```
+
+  Keys are interner hashes (`InternedKey::as_u64()`). Disk-mode save
+  strips the field from metadata.json; in-memory `.kgl` saves keep
+  embedding it for single-file portability.
+
+- **`type_indices.bin.zst` flat CSR binary, interner-keyed.** Replaces
+  bincode `HashMap<String, Vec<NodeIndex>>` with three packed slices:
+
+  ```
+  [ 0.. 8]  magic       = b"KGLTIDX1"
+  [ 8..12]  version     = u32 LE (= 1)
+  [12..16]  num_types   = u32 LE
+  [16..24]  total_nodes = u64 LE
+  [24..24 + 8·num_types]        type_keys: [u64]
+  [next..next + 8·(num_types+1)]  offsets:  [u64]   (CSR)
+  [next..next + 4·total_nodes]   nodes:    [u32]
+  ```
+
+  HashMap capacity is sized exactly from `num_types`, and each type's
+  `Vec<NodeIndex>` is built from a contiguous u32 slice rather than
+  bincode's per-field serde calls.
+
+- **`id_indices.bin.zst` per-variant flat binary.** Replaces bincode
+  `HashMap<String, TypeIdIndex>` with:
+
+  ```
+  [ 0.. 8]  magic     = b"KGLIIDX1"
+  [ 8..12]  version   = u32 LE (= 1)
+  [12..16]  num_types = u32 LE
+  per-type block:
+    [ 0.. 8]  type_key:    u64 LE
+    [ 8.. 9]  variant_tag: u8  (0 = Integer, 1 = General)
+    [ 9..16]  padding:     [u8; 7]
+    [16..24]  num_entries: u64 LE
+    payload:
+      Integer (tag=0):  keys: [u32], node_idxs: [u32]
+      General (tag=1):  blob_len: u64 + bincode HashMap<Value, NodeIndex>
+  ```
+
+  The Integer variant dominates Wikidata-style graphs (Q-number ids
+  strip to u32), so the bulk of the 997 MB decompressed bincode blob
+  collapses to two flat u32 arrays per type.
+
+- **`interner.bin.zst` replaces `interner.json`.** The hash→string
+  JSON map becomes a zstd-compressed bincode `Vec<String>` of just
+  the originals; hashes are re-derived deterministically on load via
+  `get_or_intern`. On the 81 GB graph this drops from ~7 MB JSON to
+  ~3 MB bincode and eliminates one JSON parse on the critical path.
+
+- **`KGLITE_LOAD_TIMING=1` stage instrumentation.** Gated per-stage
+  wall-clock timing in `load_disk_dir`; off by default (zero
+  overhead). Emits one `[TIMING] stage=<name> dur_ms=<ms>` line to
+  stderr per major phase (`metadata_json`, `interner_load`,
+  `disk_graph_load`, `type_indices_load`, `column_stores_load`,
+  `id_indices_load`, `type_connectivity_load`). Used as the
+  measurement harness for the four format changes.
+
+**Backward compatibility.** All four loaders fall back to the old
+format on a missing file or magic-byte mismatch:
+
+- Missing `type_connectivity.bin.zst` → loader reads embedded JSON
+  from `metadata.json`, then derives from `connection_type_metadata`.
+- `type_indices.bin.zst` without `KGLTIDX1` magic → old bincode
+  `HashMap<String, Vec<NodeIndex>>` path.
+- `id_indices.bin.zst` without `KGLIIDX1` magic → old bincode
+  `HashMap<String, TypeIdIndex>` path.
+- Missing `interner.bin.zst` → old `interner.json` path.
+
+Graphs saved by 0.8.11 and 0.8.12 continue to load without a rewrite.
+Re-saving an old-format graph with 0.8.13 produces all four new files
+automatically.
+
+**Non-goals / out of scope.** No change to query execution, pattern
+matcher, mutation paths, `node_mut_cache` / F1 / F2 flow, segmented
+CSR layout (`seg_NNN/`), or the `KGLCOLv1` sidecar format. In-memory
+representation of every touched structure is byte-identical to
+0.8.12 — zero possibility of query-side regression.
+
 ## [0.8.12] — 2026-04-24
 
 ### Fixed
