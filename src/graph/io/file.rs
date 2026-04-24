@@ -466,7 +466,10 @@ pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
 
 /// Load a disk-mode graph from a directory.
 fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
+    use crate::graph::io::load_timing::{log_stage, stage_timer};
     use crate::graph::schema::GraphBackend;
+
+    let _load_t = stage_timer();
 
     // Verify this is a disk graph directory
     if !dir.join("disk_graph_meta.json").exists() {
@@ -479,14 +482,17 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
     let mut graph = DirGraph::new();
 
     // Load DirGraph metadata
+    let t = stage_timer();
     if dir.join("metadata.json").exists() {
         let meta_str = std::fs::read_to_string(dir.join("metadata.json"))?;
         let meta: FileMetadata = serde_json::from_str(&meta_str)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         meta.apply_to(&mut graph);
     }
+    log_stage("metadata_json", t);
 
     // Load interner from JSON map { hash_string: original_string }
+    let t = stage_timer();
     if dir.join("interner.json").exists() {
         let interner_str = std::fs::read_to_string(dir.join("interner.json"))?;
         let interner_map: std::collections::HashMap<String, String> =
@@ -496,15 +502,18 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
             graph.interner.get_or_intern(original);
         }
     }
+    log_stage("interner_load", t);
 
     // Load DiskGraph — compressed files decompressed to temp dir, then mmap'd.
     // Interner is passed mutably because legacy format=0 graphs store edge
     // property keys as strings and need to register them on read.
+    let t = stage_timer();
     let (disk_graph, temp_dir) =
         crate::graph::storage::disk::graph::DiskGraph::load_from_dir(dir, &mut graph.interner)?;
     // Prefetch hot mmap regions (offset arrays + node_slots) into page cache.
     // Non-blocking — kernel reads asynchronously while we continue loading metadata.
     disk_graph.prefetch_hot_regions();
+    log_stage("disk_graph_load", t);
     // Phase 5: this is the `.kgl` → `KnowledgeGraph` construction boundary;
     // assembling the backend variant here is analogous to the PyO3 boundary
     // the storage refactor exempts. Stays as an enum literal.
@@ -522,6 +531,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
     // `impl GraphRead for DiskGraph` that Phase 5 adds will let this
     // scan move into disk-backend code, collapsing the enum pattern. Until
     // then, `GraphBackend::Disk(ref dg)` destructuring is required.
+    let t = stage_timer();
     if let GraphBackend::Disk(ref dg) = graph.graph {
         let ti_path = dir.join("type_indices.bin.zst");
         let mut loaded = false;
@@ -556,6 +566,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
             graph.type_indices = new_type_indices;
         }
     }
+    log_stage("type_indices_load", t);
 
     // Build type_schemas from node_type_metadata (needed for column loading)
     for (node_type, props) in &graph.node_type_metadata {
@@ -601,6 +612,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
         }
     };
     let has_mmap = mmap_path.exists() && (meta_bin_path.exists() || meta_json_path.exists());
+    let t = stage_timer();
     if has_mmap {
         use crate::graph::io::ntriples::ColumnTypeMeta;
         use memmap2::MmapMut;
@@ -643,11 +655,13 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
         // Legacy path: load from columns/<type>/columns.zst files
         load_column_sidecars(dir, &mut graph)?;
     }
+    log_stage("column_stores_load", t);
 
     // Sync column stores to DiskGraph
     graph.sync_disk_column_stores();
 
     // Load id_indices from disk (saved during build as bincode + zstd).
+    let t = stage_timer();
     if crate::graph::storage::GraphRead::is_disk(&graph.graph) {
         let id_indices_path = dir.join("id_indices.bin.zst");
         if id_indices_path.exists() {
@@ -660,6 +674,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
             }
         }
     }
+    log_stage("id_indices_load", t);
 
     // Load embeddings if present
     let emb_path = dir.join("embeddings.bin.zst");
@@ -687,6 +702,8 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
             }
         }
     }
+
+    log_stage("load_disk_dir_total", _load_t);
 
     Ok(KnowledgeGraph {
         inner: Arc::new(graph),
