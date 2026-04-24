@@ -269,6 +269,141 @@ pub(crate) fn strip_type_connectivity(meta: &mut FileMetadata) {
     meta.type_connectivity = None;
 }
 
+// ─── type_indices.bin.zst (0.8.13 fast-load) ─────────────────────────────────
+//
+// Replaces a bincode-serialised `HashMap<String, Vec<NodeIndex>>` with a
+// CSR-shaped packed binary keyed by interner hashes. On the 81 GB
+// Wikidata graph this drops the load from bincode-rebuilt HashMap
+// (88 k String keys + 124 M NodeIndex pushes spread across 88 k
+// `Vec`s) to three packed slices + one exact-capacity HashMap build.
+//
+// Payload (pre-zstd):
+//   [ 0.. 8]  magic       = b"KGLTIDX1"
+//   [ 8..12]  version     = u32 LE (= 1)
+//   [12..16]  num_types   = u32 LE
+//   [16..24]  total_nodes = u64 LE
+//   [24..24 + 8·num_types]             type_keys: [u64; num_types]
+//   [next..next + 8·(num_types+1)]     offsets:   [u64; num_types+1]
+//   [next..next + 4·total_nodes]       nodes:     [u32; total_nodes]
+//
+// `type_keys[i]` is `InternedKey::as_u64()` for the ith type name
+// (sorted ascending by interner key for deterministic output).
+// `nodes[offsets[i]..offsets[i+1]]` is the `NodeIndex` list for that
+// type, stored as `NodeIndex::index() as u32` (graphs with >4 B
+// nodes would need a bump here).
+
+const TYPE_INDICES_MAGIC: &[u8; 8] = b"KGLTIDX1";
+const TYPE_INDICES_VERSION: u32 = 1;
+
+/// Writer for `type_indices.bin.zst` in the new flat-CSR format.
+pub(crate) fn write_type_indices_bin(
+    dir: &std::path::Path,
+    graph: &DirGraph,
+) -> Result<(), String> {
+    let type_indices = &graph.type_indices;
+    // Sort type names by interner key for deterministic layout.
+    let mut entries: Vec<(u64, &String, &Vec<petgraph::graph::NodeIndex>)> =
+        Vec::with_capacity(type_indices.len());
+    let mut interner = graph.interner.clone();
+    for (name, nodes) in type_indices {
+        let key = interner.get_or_intern(name).as_u64();
+        entries.push((key, name, nodes));
+    }
+    entries.sort_by_key(|(k, _, _)| *k);
+
+    let num_types = entries.len() as u32;
+    let total_nodes: usize = entries.iter().map(|(_, _, v)| v.len()).sum();
+    let header_size = 24usize;
+    let type_keys_size = 8 * num_types as usize;
+    let offsets_size = 8 * (num_types as usize + 1);
+    let nodes_size = 4 * total_nodes;
+    let mut payload: Vec<u8> =
+        Vec::with_capacity(header_size + type_keys_size + offsets_size + nodes_size);
+
+    payload.extend_from_slice(TYPE_INDICES_MAGIC);
+    payload.extend_from_slice(&TYPE_INDICES_VERSION.to_le_bytes());
+    payload.extend_from_slice(&num_types.to_le_bytes());
+    payload.extend_from_slice(&(total_nodes as u64).to_le_bytes());
+
+    for (k, _, _) in &entries {
+        payload.extend_from_slice(&k.to_le_bytes());
+    }
+    let mut cum: u64 = 0;
+    payload.extend_from_slice(&cum.to_le_bytes());
+    for (_, _, v) in &entries {
+        cum += v.len() as u64;
+        payload.extend_from_slice(&cum.to_le_bytes());
+    }
+    for (_, _, v) in &entries {
+        for n in v.iter() {
+            payload.extend_from_slice(&(n.index() as u32).to_le_bytes());
+        }
+    }
+
+    let compressed = zstd::encode_all(payload.as_slice(), 3)
+        .map_err(|e| format!("type_indices compression failed: {}", e))?;
+    std::fs::write(dir.join("type_indices.bin.zst"), compressed)
+        .map_err(|e| format!("Failed to write type_indices.bin.zst: {}", e))?;
+    Ok(())
+}
+
+/// Reader for `type_indices.bin.zst` in the new flat-CSR format.
+/// Returns `Ok(None)` if the payload does not start with the
+/// `KGLTIDX1` magic (caller falls back to the legacy bincode path).
+pub(crate) fn read_type_indices_bin(
+    payload: &[u8],
+    interner: &crate::graph::storage::interner::StringInterner,
+) -> io::Result<Option<std::collections::HashMap<String, Vec<petgraph::graph::NodeIndex>>>> {
+    if payload.len() < 24 || &payload[..8] != TYPE_INDICES_MAGIC {
+        return Ok(None);
+    }
+    let version = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+    if version != TYPE_INDICES_VERSION {
+        return Ok(None);
+    }
+    let num_types = u32::from_le_bytes(payload[12..16].try_into().unwrap()) as usize;
+    let total_nodes = u64::from_le_bytes(payload[16..24].try_into().unwrap()) as usize;
+
+    let type_keys_offset = 24usize;
+    let offsets_offset = type_keys_offset + 8 * num_types;
+    let nodes_offset = offsets_offset + 8 * (num_types + 1);
+    let expected_len = nodes_offset + 4 * total_nodes;
+    if payload.len() < expected_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "type_indices.bin.zst is truncated",
+        ));
+    }
+
+    let mut out =
+        std::collections::HashMap::<String, Vec<petgraph::graph::NodeIndex>>::with_capacity(
+            num_types,
+        );
+    for i in 0..num_types {
+        let tkey_base = type_keys_offset + i * 8;
+        let type_key = u64::from_le_bytes(payload[tkey_base..tkey_base + 8].try_into().unwrap());
+        let off_base = offsets_offset + i * 8;
+        let off_start =
+            u64::from_le_bytes(payload[off_base..off_base + 8].try_into().unwrap()) as usize;
+        let off_end =
+            u64::from_le_bytes(payload[off_base + 8..off_base + 16].try_into().unwrap()) as usize;
+        let name = match interner.try_resolve(crate::graph::schema::InternedKey::from_u64(type_key))
+        {
+            Some(s) => s.to_string(),
+            None => continue, // missing interner entry; skip rather than fail
+        };
+        let nodes_start = nodes_offset + off_start * 4;
+        let nodes_end = nodes_offset + off_end * 4;
+        let mut vec = Vec::with_capacity(off_end - off_start);
+        for chunk in payload[nodes_start..nodes_end].chunks_exact(4) {
+            let idx = u32::from_le_bytes(chunk.try_into().unwrap()) as usize;
+            vec.push(petgraph::graph::NodeIndex::new(idx));
+        }
+        out.insert(name, vec);
+    }
+    Ok(Some(out))
+}
+
 // ─── type_connectivity.bin.zst (0.8.13 fast-load) ────────────────────────────
 //
 // Replaces a 266 MB JSON array of `ConnectivityTriple { src: String, conn:
@@ -671,9 +806,19 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
         if ti_path.exists() {
             if let Ok(compressed) = std::fs::read(&ti_path) {
                 if let Ok(bytes) = zstd::decode_all(compressed.as_slice()) {
-                    if let Ok(indices) = bincode::deserialize(&bytes) {
-                        graph.type_indices = indices;
-                        loaded = true;
+                    // 0.8.13 flat-CSR format first; fall back to bincode
+                    // for graphs saved by 0.8.12 and earlier.
+                    match read_type_indices_bin(&bytes, &graph.interner) {
+                        Ok(Some(indices)) => {
+                            graph.type_indices = indices;
+                            loaded = true;
+                        }
+                        _ => {
+                            if let Ok(indices) = bincode::deserialize(&bytes) {
+                                graph.type_indices = indices;
+                                loaded = true;
+                            }
+                        }
                     }
                 }
             }
