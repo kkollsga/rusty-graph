@@ -404,6 +404,189 @@ pub(crate) fn read_type_indices_bin(
     Ok(Some(out))
 }
 
+// ─── id_indices.bin.zst (0.8.13 fast-load) ───────────────────────────────────
+//
+// Replaces bincode `HashMap<String, TypeIdIndex>` with per-variant
+// flat blocks keyed by interner hashes. `TypeIdIndex::Integer` becomes
+// two u32-packed arrays; `TypeIdIndex::General` keeps a
+// length-prefixed bincode blob (used only for mixed-id graphs).
+//
+// Payload (pre-zstd):
+//   [ 0.. 8]  magic     = b"KGLIIDX1"
+//   [ 8..12]  version   = u32 LE (= 1)
+//   [12..16]  num_types = u32 LE
+//   per-type block (repeated num_types times, 8-aligned on each start):
+//     [ 0.. 8]  type_key:    u64 LE   (InternedKey)
+//     [ 8.. 9]  variant_tag: u8       (0 = Integer, 1 = General)
+//     [ 9..16]  padding:     [u8; 7]
+//     [16..24]  num_entries: u64 LE
+//     payload:
+//       Integer (tag=0):
+//         keys:      [u32; num_entries]
+//         node_idxs: [u32; num_entries]
+//       General (tag=1):
+//         blob_len: u64 LE
+//         blob:     [u8; blob_len]   (bincode of HashMap<Value, NodeIndex>)
+
+const ID_INDICES_MAGIC: &[u8; 8] = b"KGLIIDX1";
+const ID_INDICES_VERSION: u32 = 1;
+
+pub(crate) fn write_id_indices_bin(dir: &std::path::Path, graph: &DirGraph) -> Result<(), String> {
+    use crate::graph::schema::TypeIdIndex;
+
+    let id_indices = &graph.id_indices;
+    // Sort by interner key for deterministic output.
+    let mut interner = graph.interner.clone();
+    let mut entries: Vec<(u64, &String, &TypeIdIndex)> = id_indices
+        .iter()
+        .map(|(name, idx)| (interner.get_or_intern(name).as_u64(), name, idx))
+        .collect();
+    entries.sort_by_key(|(k, _, _)| *k);
+
+    let num_types = entries.len() as u32;
+    let mut payload: Vec<u8> = Vec::new();
+    payload.extend_from_slice(ID_INDICES_MAGIC);
+    payload.extend_from_slice(&ID_INDICES_VERSION.to_le_bytes());
+    payload.extend_from_slice(&num_types.to_le_bytes());
+
+    for (type_key, _, idx) in entries {
+        payload.extend_from_slice(&type_key.to_le_bytes());
+        match idx {
+            TypeIdIndex::Integer(map) => {
+                payload.push(0u8);
+                payload.extend_from_slice(&[0u8; 7]);
+                payload.extend_from_slice(&(map.len() as u64).to_le_bytes());
+                // Sort for deterministic output; id_indices.bin.zst is
+                // the stable canonical form, saves reload-diff churn.
+                let mut pairs: Vec<(&u32, &petgraph::graph::NodeIndex)> = map.iter().collect();
+                pairs.sort_by_key(|(k, _)| **k);
+                for (k, _) in &pairs {
+                    payload.extend_from_slice(&k.to_le_bytes());
+                }
+                for (_, v) in &pairs {
+                    payload.extend_from_slice(&(v.index() as u32).to_le_bytes());
+                }
+            }
+            TypeIdIndex::General(map) => {
+                payload.push(1u8);
+                payload.extend_from_slice(&[0u8; 7]);
+                payload.extend_from_slice(&(map.len() as u64).to_le_bytes());
+                let blob = bincode::serialize(map)
+                    .map_err(|e| format!("id_indices General-variant bincode failed: {}", e))?;
+                payload.extend_from_slice(&(blob.len() as u64).to_le_bytes());
+                payload.extend_from_slice(&blob);
+            }
+        }
+    }
+
+    let compressed = zstd::encode_all(payload.as_slice(), 3)
+        .map_err(|e| format!("id_indices compression failed: {}", e))?;
+    std::fs::write(dir.join("id_indices.bin.zst"), compressed)
+        .map_err(|e| format!("Failed to write id_indices.bin.zst: {}", e))?;
+    Ok(())
+}
+
+pub(crate) fn read_id_indices_bin(
+    payload: &[u8],
+    interner: &crate::graph::storage::interner::StringInterner,
+) -> io::Result<Option<std::collections::HashMap<String, crate::graph::schema::TypeIdIndex>>> {
+    use crate::graph::schema::TypeIdIndex;
+
+    if payload.len() < 16 || &payload[..8] != ID_INDICES_MAGIC {
+        return Ok(None);
+    }
+    let version = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+    if version != ID_INDICES_VERSION {
+        return Ok(None);
+    }
+    let num_types = u32::from_le_bytes(payload[12..16].try_into().unwrap()) as usize;
+    let mut out = std::collections::HashMap::<String, TypeIdIndex>::with_capacity(num_types);
+
+    let mut cursor = 16usize;
+    for _ in 0..num_types {
+        if cursor + 24 > payload.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "id_indices.bin.zst truncated at block header",
+            ));
+        }
+        let type_key = u64::from_le_bytes(payload[cursor..cursor + 8].try_into().unwrap());
+        let variant_tag = payload[cursor + 8];
+        // payload[cursor+9..cursor+16] is padding (7 bytes).
+        let num_entries =
+            u64::from_le_bytes(payload[cursor + 16..cursor + 24].try_into().unwrap()) as usize;
+        cursor += 24;
+
+        let name = interner
+            .try_resolve(crate::graph::schema::InternedKey::from_u64(type_key))
+            .map(|s| s.to_string());
+
+        match variant_tag {
+            0 => {
+                let keys_size = 4 * num_entries;
+                let idxs_size = 4 * num_entries;
+                if cursor + keys_size + idxs_size > payload.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "id_indices Integer block truncated",
+                    ));
+                }
+                let keys_bytes = &payload[cursor..cursor + keys_size];
+                let idxs_bytes = &payload[cursor + keys_size..cursor + keys_size + idxs_size];
+                cursor += keys_size + idxs_size;
+                if let Some(name) = name {
+                    let mut map =
+                        std::collections::HashMap::<u32, petgraph::graph::NodeIndex>::with_capacity(
+                            num_entries,
+                        );
+                    for i in 0..num_entries {
+                        let k =
+                            u32::from_le_bytes(keys_bytes[i * 4..i * 4 + 4].try_into().unwrap());
+                        let v = u32::from_le_bytes(idxs_bytes[i * 4..i * 4 + 4].try_into().unwrap())
+                            as usize;
+                        map.insert(k, petgraph::graph::NodeIndex::new(v));
+                    }
+                    out.insert(name, TypeIdIndex::Integer(map));
+                }
+            }
+            1 => {
+                if cursor + 8 > payload.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "id_indices General block missing blob length",
+                    ));
+                }
+                let blob_len =
+                    u64::from_le_bytes(payload[cursor..cursor + 8].try_into().unwrap()) as usize;
+                cursor += 8;
+                if cursor + blob_len > payload.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "id_indices General blob truncated",
+                    ));
+                }
+                let blob = &payload[cursor..cursor + blob_len];
+                cursor += blob_len;
+                if let Some(name) = name {
+                    let inner: std::collections::HashMap<
+                        crate::datatypes::values::Value,
+                        petgraph::graph::NodeIndex,
+                    > = bincode::deserialize(blob).map_err(io::Error::other)?;
+                    let _ = num_entries; // redundant with inner.len(), kept for format symmetry
+                    out.insert(name, TypeIdIndex::General(inner));
+                }
+            }
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("id_indices unknown variant tag {}", other),
+                ));
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
 // ─── type_connectivity.bin.zst (0.8.13 fast-load) ────────────────────────────
 //
 // Replaces a 266 MB JSON array of `ConnectivityTriple { src: String, conn:
@@ -938,15 +1121,22 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
     // Sync column stores to DiskGraph
     graph.sync_disk_column_stores();
 
-    // Load id_indices from disk (saved during build as bincode + zstd).
+    // Load id_indices from disk.
     let t = stage_timer();
     if crate::graph::storage::GraphRead::is_disk(&graph.graph) {
         let id_indices_path = dir.join("id_indices.bin.zst");
         if id_indices_path.exists() {
             if let Ok(compressed) = std::fs::read(&id_indices_path) {
                 if let Ok(bytes) = zstd::decode_all(compressed.as_slice()) {
-                    if let Ok(indices) = bincode::deserialize(&bytes) {
-                        graph.id_indices = indices;
+                    // 0.8.13 per-variant flat format first; fall back to
+                    // bincode for graphs saved by 0.8.12 and earlier.
+                    match read_id_indices_bin(&bytes, &graph.interner) {
+                        Ok(Some(indices)) => graph.id_indices = indices,
+                        _ => {
+                            if let Ok(indices) = bincode::deserialize(&bytes) {
+                                graph.id_indices = indices;
+                            }
+                        }
                     }
                 }
             }

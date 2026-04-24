@@ -1669,18 +1669,12 @@ impl DirGraph {
         }
 
         // 0.8.13: type_indices uses a flat CSR binary keyed by interner
-        // hashes (old bincode HashMap took ~15–25 s on 124 M entries in
-        // the Wikidata graph). Backward-compat: old graphs keep loading
-        // via the bincode path — see `load_disk_dir`.
+        // hashes. id_indices uses per-variant flat blocks (Integer =
+        // two u32 arrays, General = length-prefixed bincode blob).
+        // Backward-compat readers fall through to the old bincode path
+        // on magic-byte mismatch — see `load_disk_dir`.
         crate::graph::io::file::write_type_indices_bin(dir, self)?;
-
-        // id_indices still bincode (Fix 3 in the fast-load plan).
-        let ii_bytes = bincode::serialize(&self.id_indices)
-            .map_err(|e| format!("id_indices serialization failed: {}", e))?;
-        let ii_compressed = zstd::encode_all(ii_bytes.as_slice(), 3)
-            .map_err(|e| format!("id_indices compression failed: {}", e))?;
-        std::fs::write(dir.join("id_indices.bin.zst"), ii_compressed)
-            .map_err(|e| format!("Failed to write id_indices: {}", e))?;
+        crate::graph::io::file::write_id_indices_bin(dir, self)?;
 
         // Save embeddings if any (matches write_graph_v3 behavior for in-memory saves)
         if !self.embeddings.is_empty() {
