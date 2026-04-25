@@ -249,10 +249,15 @@ fn make_traversal_fast(
             }
         };
 
-        // Process edges based on direction
+        // Process edges based on direction. Use edges_directed_filtered so
+        // disk backends can binary-search the CSR range by connection type
+        // (O(log D) on csr_sorted_by_type graphs vs O(D) unfiltered scan).
+        // Heap backends ignore the hint; post-filter still covers them.
         match direction {
             Some(Direction::Outgoing) => {
-                for edge in g.edges_directed(source_node, Direction::Outgoing) {
+                for edge in
+                    g.edges_directed_filtered(source_node, Direction::Outgoing, Some(conn_key))
+                {
                     if edge.weight().connection_type == conn_key {
                         let t = edge.target();
                         if type_ok(t) {
@@ -262,7 +267,9 @@ fn make_traversal_fast(
                 }
             }
             Some(Direction::Incoming) => {
-                for edge in g.edges_directed(source_node, Direction::Incoming) {
+                for edge in
+                    g.edges_directed_filtered(source_node, Direction::Incoming, Some(conn_key))
+                {
                     if edge.weight().connection_type == conn_key {
                         let t = edge.source();
                         if type_ok(t) {
@@ -273,7 +280,9 @@ fn make_traversal_fast(
             }
             None => {
                 // Both directions
-                for edge in g.edges_directed(source_node, Direction::Outgoing) {
+                for edge in
+                    g.edges_directed_filtered(source_node, Direction::Outgoing, Some(conn_key))
+                {
                     if edge.weight().connection_type == conn_key {
                         let t = edge.target();
                         if type_ok(t) {
@@ -281,7 +290,9 @@ fn make_traversal_fast(
                         }
                     }
                 }
-                for edge in g.edges_directed(source_node, Direction::Incoming) {
+                for edge in
+                    g.edges_directed_filtered(source_node, Direction::Incoming, Some(conn_key))
+                {
                     if edge.weight().connection_type == conn_key {
                         let t = edge.source();
                         if type_ok(t) {
@@ -429,11 +440,14 @@ fn make_traversal_full(
             }
         };
 
-        // Process edges based on direction
+        // Process edges based on direction. See make_traversal_fast for the
+        // rationale behind edges_directed_filtered.
         for &source_node in source_nodes {
             match direction {
                 Some(Direction::Outgoing) => {
-                    for edge in g.edges_directed(source_node, Direction::Outgoing) {
+                    for edge in
+                        g.edges_directed_filtered(source_node, Direction::Outgoing, Some(conn_key))
+                    {
                         if edge.weight().connection_type == conn_key {
                             if let Some(conn_filter) = filter_connection {
                                 if !edge_matches_conditions(&edge.weight().properties, conn_filter)
@@ -454,7 +468,9 @@ fn make_traversal_full(
                     }
                 }
                 Some(Direction::Incoming) => {
-                    for edge in g.edges_directed(source_node, Direction::Incoming) {
+                    for edge in
+                        g.edges_directed_filtered(source_node, Direction::Incoming, Some(conn_key))
+                    {
                         if edge.weight().connection_type == conn_key {
                             if let Some(conn_filter) = filter_connection {
                                 if !edge_matches_conditions(&edge.weight().properties, conn_filter)
@@ -476,7 +492,9 @@ fn make_traversal_full(
                 }
                 None => {
                     // Both directions
-                    for edge in g.edges_directed(source_node, Direction::Outgoing) {
+                    for edge in
+                        g.edges_directed_filtered(source_node, Direction::Outgoing, Some(conn_key))
+                    {
                         if edge.weight().connection_type == conn_key {
                             if let Some(conn_filter) = filter_connection {
                                 if !edge_matches_conditions(&edge.weight().properties, conn_filter)
@@ -495,7 +513,9 @@ fn make_traversal_full(
                             }
                         }
                     }
-                    for edge in g.edges_directed(source_node, Direction::Incoming) {
+                    for edge in
+                        g.edges_directed_filtered(source_node, Direction::Incoming, Some(conn_key))
+                    {
                         if edge.weight().connection_type == conn_key {
                             if let Some(conn_filter) = filter_connection {
                                 if !edge_matches_conditions(&edge.weight().properties, conn_filter)

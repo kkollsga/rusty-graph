@@ -5,15 +5,34 @@
 [![License: MIT](https://img.shields.io/pypi/l/kglite)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
 [![Docs](https://img.shields.io/readthedocs/kglite)](https://kglite.readthedocs.io)
 
-An embedded, in-memory knowledge graph database for Python — built in Rust for speed, with a Cypher query engine, semantic search, and first-class support for RAG pipelines and AI agents. No server, no setup, no infrastructure. Just `pip install kglite` and go.
+KGLite is an embedded knowledge graph for Python: `pip install`, no
+server, no setup. It speaks Cypher, loads pandas DataFrames, and
+ships with the connective tissue for AI agents — an MCP server so
+Claude / Cursor / any MCP-capable LLM can query your graph as a
+tool, a `describe()` method that emits a compact XML schema for
+system prompts, and a `code_tree` parser that turns any source
+directory into a graph of functions, classes, calls, and imports
+across 9 languages.
+
+Three storage modes scale from in-memory (millisecond queries on
+small graphs) to mmap-backed on disk (1 B+ edges, Wikidata-scale).
 
 ## Why KGLite?
 
-- **Zero infrastructure** — runs inside your Python process. No database server to install, configure, or maintain.
-- **Fast** — Rust core (via PyO3 + petgraph) with zero-copy where possible. Load millions of nodes without leaving Python.
-- **Query with Cypher** — familiar graph query language for pattern matching, mutations, aggregations, and traversals.
-- **Built for AI** — semantic search with `text_score()`, schema introspection via `describe()`, and a ready-made MCP server for LLM tool use.
-- **DataFrames in, DataFrames out** — bulk-load from pandas, query results as DataFrames. Fits naturally into data science workflows.
+- **Built for LLM agents** — `describe()` XML schema, bundled MCP
+  server, and an agent-oriented query surface (`cypher()`,
+  `graph.select(...).traverse(...)`).
+- **Codebase → graph in one line** — `kglite.code_tree.build(".")`
+  parses Python, Rust, TypeScript, Go, Java, C#, C++, and more
+  into `Function` / `Class` / `Module` nodes with `CALLS` /
+  `DEFINES` / `IMPORTS` edges.
+- **Scales without leaving Python** — in-memory for prototyping,
+  mmap-backed for notebook-scale, disk-mode CSR for graphs too
+  large for RAM. Same API across modes.
+- **Query with Cypher** — `MATCH`, `MERGE`, `OPTIONAL MATCH`,
+  aggregations, parameters, semantic search via `text_score()`.
+- **DataFrames in, DataFrames out** — bulk-load from pandas, query
+  results as DataFrames.
 
 ## Quick Start
 
@@ -152,6 +171,38 @@ use cases above:
 - **[`wikidata_disk.py`](https://github.com/kkollsga/kglite/blob/main/examples/wikidata_disk.py)**
   — Wikidata-scale build + disk-mode storage; loads hundreds of
   millions of triples via `load_ntriples` into a mmap-backed graph.
+
+## Benchmarks
+
+KGLite builds and queries Wikidata-scale graphs on a laptop.
+Measured with
+[`bench/wiki_benchmark.py`](https://github.com/kkollsga/kglite/blob/main/bench/wiki_benchmark.py)
+on an M-series MacBook.
+
+**Ingest** — full pipeline from compressed N-Triples to a queryable graph:
+
+| dataset   | triples | nodes  | edges  | ingest  | throughput       | peak RAM |
+|-----------|--------:|-------:|-------:|--------:|------------------|---------:|
+| wiki100m  |  100 M  |  938 K |  748 K |   29 s  | 3.4 M triples/s  |  1.3 GB  |
+| wiki500m  |  500 M  |  5.6 M |  6.7 M |  157 s  | 3.2 M triples/s  |  5.2 GB  |
+| wiki1000m |    1 B  | 14.7 M | 15.4 M |  395 s  | 2.5 M triples/s  |  7.0 GB  |
+
+Reloading a saved 1 B-triple graph from disk (7 GB on-disk): **3.5 s**.
+
+**Query latency on the 1 B-triple graph** (mapped storage):
+
+| Cypher                                                          |     wall |
+|-----------------------------------------------------------------|---------:|
+| `MATCH (n)-[:P31]->(:Q5) RETURN count(n)` — typed aggregation   |   0.5 ms |
+| `MATCH (a)-[:P31]->(b)-[:P279]->(c) LIMIT 10` — 2-hop typed     |   0.9 ms |
+| `MATCH (a)-[:P31]->(b {nid:'Q64'}) RETURN a LIMIT 20` — pivot   |     1 ms |
+| `MATCH (a)-[:P31]->(:Q5)` `MATCH (a)-[:P27]->(c) LIMIT 10` — join |   44 ms |
+
+Disk and mapped storage track within 1 % on build; mapped wins on
+query shapes backed by its in-memory inverted index, disk wins on
+unbounded typed traversals by staying on sorted-CSR mmap I/O.
+
+No server, no tuning, same Python process as your code.
 
 ## Key Features
 

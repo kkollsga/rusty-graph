@@ -205,6 +205,11 @@ pub(super) fn expression_to_string(expr: &Expression) -> String {
         Expression::ExprPropertyAccess { expr, property } => {
             format!("{}.{}", expression_to_string(expr), property)
         }
+        Expression::CountSubquery { .. } => {
+            // Used as a column label (e.g. in a `WITH ... AS alias` projection).
+            // Patterns don't render usefully here, so emit the subquery marker.
+            "count{...}".to_string()
+        }
     }
 }
 

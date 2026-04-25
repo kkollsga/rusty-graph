@@ -7,6 +7,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.15] — 2026-04-25
+
+### Performance
+
+- **Mapped-mode property index — `MATCH (n:Type {prop: val})` in O(log N).**
+  `MappedGraph` now carries a lazy per-`(node_type, property)` and
+  cross-type property index alongside the 0.8.15 conn_type index. On
+  first `lookup_by_property_eq` / `lookup_by_property_prefix` /
+  `*_any_type` hit the backend iterates nodes once, emits a sorted
+  `(key, NodeIndex)` array — same layout as disk's persistent
+  `PropertyIndex` — and caches it behind an `Arc<RwLock<…>>`;
+  subsequent queries binary-search that array. Alias handling
+  matches disk (reads from `node.title` for `title`/`label`/`name`
+  and `node.id` for `id`/`nid`/`qid` so the `add_nodes(...,
+  node_title_field=...)` pipeline "just works"). Invalidated on
+  `add_node`/`remove_node`/`node_weight_mut`. Measured on a 938 k
+  node / 212 k Q5 subset (wiki100m Wikidata humans):
+  `MATCH (n:Q5 {title: 'Douglas Adams'})` — **37 ms first call
+  (builds the index), 0.1 ms warm** (index hit). Prefix scans stay
+  in the single-digit-ms range. Correctness pinned by
+  `tests/test_mapped_property_index.py` against both memory and disk.
+
+### Added
+
+- **Cypher `count { <pattern> }` subquery expression.** `count { ... }`
+  in `WITH` / `RETURN` / `ORDER BY` / `WHERE` now evaluates to the
+  number of matches of the inner pattern, scoped to the outer row's
+  bindings. Previously the parser rejected the shape with
+  *"Expected property name or .property in map projection, got
+  Some(LParen)"* because the identifier-followed-by-brace dispatch
+  routed to map projection (`n { .prop1, .prop2 }`) unconditionally;
+  the parser now special-cases `count` and routes to a new
+  `parse_count_subquery` that mirrors the existing `EXISTS { ... }`
+  grammar. New AST variant `Expression::CountSubquery`; the executor
+  runs the pattern via the shared `PatternExecutor`, bindings-
+  compatible with the outer row, with optional inline `WHERE`.
+  Parity across all three storage modes verified by
+  `tests/test_cypher_count_subquery.py`. Cypher shapes like
+  `WITH a, count{(a)-[:REL]->()} AS n` now work out of the box.
+
+### Performance
+
+- **Mapped-mode query acceleration — lazy per-connection-type index.**
+  `MappedGraph` was a bare `StableDiGraph` wrapper with none of the
+  inverted indexes that make disk-mode fast (`conn_type_index_*`,
+  `peer_count_*`, CSR sorted by type). Cypher queries that depend on
+  those structures on disk did full-graph scans on mapped — 2-10×
+  slower than disk despite every byte being in RAM. 0.8.15 adds a lazy
+  `MappedTypeIndex` populated on first typed-edge query per connection
+  type: CSR-style sorted source lists, per-peer count histograms, and
+  per-source edge slices. Overrides `sources_for_conn_type_bounded`,
+  `lookup_peer_counts`, and `count_edges_grouped_by_peer` on the
+  mapped `GraphRead` impl; `filter_by_connection` (powering
+  `where_connected`) now hoists the source list into a `HashSet` once
+  per call instead of probing `edges_directed_filtered` per node.
+  Measured on wiki1000m (1 B triples):
+  - Cypher `P31 class counts`: **150 ms → 0.5 ms (300×)**.
+  - Cypher `2-hop P31 + P279`: **180 ms → 0.9 ms (200×)**.
+  - Cypher `P31 LIMIT 50`: **5.6 s → 0.8-1.1 s (5-7×)**, now **beats
+    disk at every subset** (disk wiki1000m was 1.40 s).
+  - Cypher `Q5 (human) lookup`: 77 ms → 50-54 ms (1.5×).
+  - Fluent `traverse P31 out unlimited`: unchanged (74 ms; bare
+    petgraph scan is already optimal for sparse-degree nodes and
+    avoids the ~100 ns/call index-lookup overhead).
+  Correctness preserved: same row counts across storage modes on
+  every benchmarked query. Index is built lazily per conn_type,
+  amortised across subsequent queries of the same type, and
+  invalidated on any edge mutation.
+
+- **Mapped-mode `load_ntriples` routes through the disk fast path.**
+  Previously `storage="mapped"` fell through to `DirGraph::enable_columnar`,
+  which iterates every node once, clones each property map into a `Vec`,
+  and pushes row-by-row into per-column `MmapOrVec` instances that grow
+  via `set_len` + remap; each schema extension additionally triggered
+  `Arc::make_mut` store clones. On wiki50m (377 k nodes / 282 k edges)
+  this ran at ~430 k triples/s with a 5.1 GB peak RSS. Mapped now shares
+  the disk path's property-log + single-`columns.bin` pipeline:
+  properties stream to a zstd-compressed log during Phase 1, Phase 1b
+  replays the log once into a pre-allocated mmap, and a new second-pass
+  links each node's `PropertyStorage` to the shared
+  `Arc<ColumnStore>` by row_id. Measured (bench/wiki_benchmark_mapped):
+  - wiki50m build: **116 s → 13.5 s (8.6× faster)**, peak RSS
+    **5073 MB → 828 MB (6× less memory)**.
+  - wiki100m build: **? → 29 s**, peak RSS **? → 1.5 GB** — now
+    within 1% of disk-mode build time.
+  - Same Cypher + fluent rowsets across modes (round-trip oracle in
+    `tests/test_incremental_columnar.py::TestNTriplesColumnar`).
+  Memory-mode N-Triples load (`storage=default`) is unchanged — still
+  goes through the non-columnar `PropertyStorage::Map/Compact` path.
+
+- **Fluent traverse + `where_connected` use CSR-filtered edge iterator.**
+  `core/traversal.rs` (`make_traversal_fast`, `make_traversal_full`) and
+  `core/filtering.rs` (`filter_by_connection`, i.e. `.where_connected()`)
+  previously called `graph.edges_directed(node, dir)` and post-filtered on
+  `connection_type`. On disk-mode graphs with `csr_sorted_by_type=true`
+  (the `merge_sort` algo that the `wikidata_disk.py` example uses), we now
+  pass the connection key into `edges_directed_filtered` so the DiskEdges
+  iterator can binary-search the CSR range — O(log D) instead of O(D) plus
+  per-edge `EdgeData` materialisation. This is the same fast path the
+  Cypher executor has used since 0.8.0 and targets the shape that the
+  Wikidata fluent suite regressed on: `select("Entity").traverse("P31",
+  limit=100)` was ~71 s, `.where_connected("P31")` was ~887 s, and
+  `traverse P31 in limit 50` was ~2171 s. Heap backends ignore the hint;
+  correctness is preserved by the existing post-filter.
+
+### Changed
+
+- **`load_ntriples` verbose output is no longer per-type.** Phase 1b used
+  to print one `N dense cols, M overflow cols` line per type with any
+  overflow and one `overflow bag X MB for N sparse cols` line per type
+  with a non-empty overflow bag. On Wikidata this was ~90 k lines. Both
+  are now collapsed into a single Phase 1b summary per pass (`columns — N
+  dense, M overflow across K types with sparse cols` and `overflow bags —
+  X.X MB across N types, M sparse cols total`).
+- **Load-phase progress lines throttled to time (≥ 15 s), not bucket.**
+  The loader used to emit a progress line every 5 M triples, which was
+  ~2× per second on a fast machine and scrolled the interesting phase-
+  timing lines off screen. Now the 5 M bucket is still a cheap fast-loop
+  counter but the line only fires when ≥ 15 s have passed since the last
+  one. Lines now prefix `[T+NNNNs]` so they interleave cleanly with the
+  existing phase-timing output.
+
+### Fixed
+
+- **`examples/wikidata_disk.py`** — the fluent cases called `.where_(...)`,
+  but the PyO3 binding exposes the method as `.where(...)`; on a large
+  graph this masked the real traversal slowness behind an
+  `AttributeError`. Expanded the Cypher/fluent suites with 23 + 15 more
+  diverse queries (typed 1-hop, 2-hop chains, parameter binding,
+  `ORDER BY` on bounded scans, and string-prefix/contains filters). The
+  fluent suite now introspects via `g.node_type_counts()` and skips
+  unavailable types instead of raising.
+
 ## [0.8.14] — 2026-04-24
 
 ### Performance — disk-graph `kglite.load()` fast-load series

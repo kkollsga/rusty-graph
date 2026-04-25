@@ -491,6 +491,55 @@ impl<'a> CypherExecutor<'a> {
                     _ => Ok(Value::Null),
                 }
             }
+            Expression::CountSubquery {
+                patterns,
+                where_clause,
+            } => {
+                // Evaluate each pattern scoped to the outer row's
+                // bindings; sum the match counts. Mirrors the
+                // `Predicate::Exists` execution in `where_clause.rs`
+                // but counts (not short-circuits).
+                use crate::graph::core::pattern_matching::PatternExecutor;
+                let mut total = 0i64;
+                for pattern in patterns {
+                    let resolved;
+                    let pat = if Self::pattern_has_vars(pattern) {
+                        resolved = self.resolve_pattern_vars(pattern, row);
+                        &resolved
+                    } else {
+                        pattern
+                    };
+                    let executor = PatternExecutor::with_bindings_and_params(
+                        self.graph,
+                        None,
+                        &row.node_bindings,
+                        self.params,
+                    )
+                    .set_deadline(self.deadline);
+                    let matches = executor.execute(pat)?;
+                    let count = if let Some(ref where_pred) = where_clause {
+                        matches
+                            .iter()
+                            .filter(|m| {
+                                if !self.bindings_compatible(row, m) {
+                                    return false;
+                                }
+                                let mut combined = row.clone();
+                                self.merge_match_into_row(&mut combined, m);
+                                self.evaluate_predicate(where_pred, &combined)
+                                    .unwrap_or(false)
+                            })
+                            .count()
+                    } else {
+                        matches
+                            .iter()
+                            .filter(|m| self.bindings_compatible(row, m))
+                            .count()
+                    };
+                    total += count as i64;
+                }
+                Ok(Value::Int64(total))
+            }
         }
     }
 

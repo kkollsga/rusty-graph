@@ -358,9 +358,18 @@ impl CypherParser {
                         _ => Err("Expected property name after '.'".to_string()),
                     }
                 }
-                // Check for map projection: identifier { .prop1, .prop2, alias: expr }
+                // Identifier followed by `{` is ambiguous between two shapes:
+                //   1. Map projection: `n { .prop1, .prop2, alias: expr }`
+                //   2. Subquery expression: `count { (a)-[:REL]->() }`
+                // Disambiguate on the identifier name — openCypher reserves
+                // `count { ... }` for the subquery form. Any other identifier
+                // stays on the map-projection path.
                 else if self.check(&CypherToken::LBrace) {
-                    self.parse_map_projection(name)
+                    if name.eq_ignore_ascii_case("count") {
+                        self.parse_count_subquery()
+                    } else {
+                        self.parse_map_projection(name)
+                    }
                 } else {
                     Ok(Expression::Variable(name))
                 }
@@ -479,6 +488,32 @@ impl CypherParser {
             name,
             args,
             distinct,
+        })
+    }
+
+    // ========================================================================
+    // Count subquery
+    // ========================================================================
+
+    /// Parse `count { <pattern(s)> [WHERE <pred>] }` after the `count`
+    /// identifier has been consumed; LBrace is next. Mirrors the
+    /// `EXISTS { ... }` parse body in
+    /// [`super::predicate::parse_comparison_predicate`], but wrapped
+    /// as an [`Expression::CountSubquery`] for use in WITH / RETURN /
+    /// ORDER BY etc.
+    pub(super) fn parse_count_subquery(&mut self) -> Result<Expression, String> {
+        self.expect(&CypherToken::LBrace)?;
+        let patterns = self.parse_exists_patterns()?;
+        let where_clause = if self.check(&CypherToken::Where) {
+            self.advance(); // consume WHERE
+            Some(Box::new(self.parse_predicate()?))
+        } else {
+            None
+        };
+        self.expect(&CypherToken::RBrace)?;
+        Ok(Expression::CountSubquery {
+            patterns,
+            where_clause,
         })
     }
 

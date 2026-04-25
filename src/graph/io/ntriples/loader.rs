@@ -97,11 +97,18 @@ pub fn load_ntriples(
     // final_mode was graph.storage_mode; now read from graph.graph variant
     let mapped = false;
     let mut current: Option<EntityAccumulator> = None;
-    let use_compact = graph.graph.is_disk();
+    // Mapped mode reuses the disk path's Phase 1 streaming: a spill-backed
+    // property log + packed `EdgeBuffer::Compact` in place of the slow
+    // per-entity `PropertyStorage::Map` + `EdgeBuffer::Strings` path.
+    // Phase 1b then routes through `build_columns_direct`, writing a single
+    // `columns.bin` instead of the per-entity `enable_columnar()` loop.
+    let use_streaming_build = graph.graph.is_disk() || graph.graph.is_mapped();
+    let use_compact = use_streaming_build;
 
-    // Property log for Disk mode: serialize properties during Phase 1, replay in Phase 1b
+    // Property log for streaming builds: serialize properties during Phase 1,
+    // replay in Phase 1b. Used by both disk and mapped modes.
     let mut prop_log: Option<crate::graph::storage::memory::property_log::PropertyLogWriter> =
-        if graph.graph.is_disk() {
+        if use_streaming_build {
             let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
                 std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
             });
@@ -160,7 +167,7 @@ pub fn load_ntriples(
             None
         };
     let mut edge_buffer = if use_compact {
-        if graph.graph.is_disk() {
+        if use_streaming_build {
             // File-backed edge buffer: avoids holding ~14 GB in RAM during Phase 1b
             let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
                 std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
@@ -222,7 +229,12 @@ pub fn load_ntriples(
     };
 
     let mut entity_limit_reached = false;
-    let mut progress_countdown = 5_000_000u64;
+    // Cheap bucket counter (decrement in the hot loop); every 5M triples we
+    // check wall time and only log if >=15s have elapsed since the last line.
+    let mut progress_countdown: u64 = 5_000_000;
+    let mut last_progress_log = Instant::now();
+    const PROGRESS_BUCKET: u64 = 5_000_000;
+    const PROGRESS_INTERVAL_SECS: f64 = 15.0;
     let include_labels = true;
     const ENTITY_PREFIX: &[u8] = b"<http://www.wikidata.org/entity/Q";
 
@@ -237,17 +249,21 @@ pub fn load_ntriples(
             if config.verbose {
                 progress_countdown -= 1;
                 if progress_countdown == 0 {
-                    progress_countdown = 5_000_000;
-                    let elapsed = start.elapsed().as_secs_f64();
-                    let rate = stats.triples_scanned as f64 / elapsed;
-                    let buf_len = edge_buffer.len() as u64;
-                    eprintln!(
-                    "  {:>12} triples | {:>8} entities | {:>8} edges buffered | {:.0} triples/s",
-                    format_count(stats.triples_scanned),
-                    format_count(stats.entities_created),
-                    format_count(buf_len),
-                    rate,
-                );
+                    progress_countdown = PROGRESS_BUCKET;
+                    if last_progress_log.elapsed().as_secs_f64() >= PROGRESS_INTERVAL_SECS {
+                        let elapsed = start.elapsed().as_secs_f64();
+                        let rate = stats.triples_scanned as f64 / elapsed;
+                        let buf_len = edge_buffer.len() as u64;
+                        eprintln!(
+                            "  [T+{:>5.0}s] {:>12} triples | {:>8} entities | {:>8} edges buffered | {:.0} triples/s",
+                            elapsed,
+                            format_count(stats.triples_scanned),
+                            format_count(stats.entities_created),
+                            format_count(buf_len),
+                            rate,
+                        );
+                        last_progress_log = Instant::now();
+                    }
                 }
             }
 
@@ -601,18 +617,17 @@ pub fn load_ntriples(
                 conv_start.elapsed().as_secs_f64()
             );
         }
-    } else if graph.graph.is_mapped() {
-        if config.verbose {
-            eprintln!("  Phase 1b: converting to columnar storage...");
-        }
-        let conv_start = Instant::now();
-        graph.enable_columnar();
-        if config.verbose {
-            eprintln!(
-                "  Phase 1b done ({:.1}s)",
-                conv_start.elapsed().as_secs_f64()
-            );
-        }
+    } else {
+        // Mapped mode now goes through the `Some(log_writer)` arm above
+        // (the disk path). The prior `enable_columnar()` per-entity loop
+        // was the 7× bottleneck vs disk builds and has been retired for
+        // N-Triples builds. Memory mode lands here and intentionally
+        // does nothing — its columnar conversion is triggered on demand
+        // elsewhere.
+        debug_assert!(
+            !graph.graph.is_mapped(),
+            "mapped load_ntriples must populate prop_log and use build_columns_direct"
+        );
     }
 
     // Free everything not needed for Phase 2+3 to maximize page cache.
@@ -1155,11 +1170,16 @@ fn build_columns_direct(
 
     let alloc_start = Instant::now();
 
-    // Get data_dir for placing the final columns.bin
+    // Get data_dir for placing the final columns.bin. Disk graphs have a
+    // persistent user-provided data_dir; mapped graphs reuse the same
+    // per-process spill-dir scheme as the property log and edge buffer.
+    // The resulting mmap'd `columns.bin` stays alive until graph drop.
     let data_dir = if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
         dg.data_dir.clone()
     } else {
-        std::path::PathBuf::from("/tmp/kglite_columns")
+        graph.spill_dir.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
+        })
     };
     let _ = std::fs::create_dir_all(&data_dir);
 
@@ -1258,6 +1278,17 @@ fn build_columns_direct(
     let mut null_regions: Vec<Region> = Vec::new();
     let mut cursor: usize = 0;
 
+    // Keys with fill rate < threshold are routed to the overflow bag instead
+    // of a dense column. Hoisted here so the Phase 1b summary below can cite
+    // the same threshold the per-type loop applies.
+    const FILL_RATE_THRESHOLD: f64 = 0.05;
+
+    // Aggregate per-type column-layout stats instead of printing one line per
+    // type. On Wikidata this replaced 88 k spam lines with a single summary.
+    let mut types_with_overflow: u32 = 0;
+    let mut total_dense_cols: u64 = 0;
+    let mut total_overflow_cols: u64 = 0;
+
     for (type_name, meta) in type_meta {
         let rc = meta.row_count as usize;
         let id_is_string = meta.id_is_string;
@@ -1330,8 +1361,8 @@ fn build_columns_direct(
         null_regions.push(title_nulls);
         cursor += title_nulls.len;
 
-        // Property columns — split into dense (>= 5% fill) and overflow (< 5% fill)
-        const FILL_RATE_THRESHOLD: f64 = 0.05;
+        // Property columns — split into dense (>= 5% fill) and overflow (< 5% fill).
+        // Threshold hoisted above the per-type loop so the Phase 1b summary can reuse it.
         let mut col_map: HashMap<InternedKey, (ColType, usize)> = HashMap::new();
         let mut fixed_cols: Vec<FixedColLayout> = Vec::new();
         let mut str_cols: Vec<StrColLayout> = Vec::new();
@@ -1408,18 +1439,10 @@ fn build_columns_direct(
             }
         }
 
-        if verbose && overflow_count > 0 {
-            eprintln!(
-                "    {}: {} dense cols, {} overflow cols (< {:.0}% fill)",
-                if type_name.len() > 40 {
-                    &type_name[..40]
-                } else {
-                    type_name
-                },
-                dense_count,
-                overflow_count,
-                FILL_RATE_THRESHOLD * 100.0,
-            );
+        total_dense_cols += dense_count as u64;
+        total_overflow_cols += overflow_count as u64;
+        if overflow_count > 0 {
+            types_with_overflow += 1;
         }
 
         writers.insert(
@@ -1457,6 +1480,13 @@ fn build_columns_direct(
             total_bytes as f64 / (1u64 << 30) as f64,
             writers.len(),
             alloc_start.elapsed().as_secs_f64(),
+        );
+        eprintln!(
+            "  Phase 1b: columns — {} dense, {} overflow across {} types with sparse (< {:.0}%) cols",
+            total_dense_cols,
+            total_overflow_cols,
+            types_with_overflow,
+            FILL_RATE_THRESHOLD * 100.0,
         );
         // Show top 10 types by space consumption
         let mut type_sizes: Vec<(&str, u64, u32)> = Vec::new();
@@ -1963,25 +1993,21 @@ fn build_columns_direct(
         // re-mmapping the full length is safe.
         mmap = unsafe { MmapMut::map_mut(&file)? };
 
-        // Write overflow data and record regions
+        // Write overflow data and record regions. Accumulate summary stats
+        // instead of printing one line per type (Wikidata triggered ~90 k
+        // lines of mostly-noise here pre-0.8.15).
+        let mut overflow_types: u32 = 0;
+        let mut overflow_sparse_cols: u64 = 0;
+        let mut overflow_bytes_total: u64 = 0;
         let mut cursor = align8(current_len);
         for writer in writers.values_mut() {
             if writer.overflow_keys.is_empty() || writer.overflow_bag_data.is_empty() {
                 continue;
             }
 
-            if verbose {
-                eprintln!(
-                    "    {}: overflow bag {:.1} MB for {} sparse cols",
-                    if writer.overflow_keys.len() > 40 {
-                        "..."
-                    } else {
-                        "type"
-                    },
-                    writer.overflow_bag_data.len() as f64 / (1024.0 * 1024.0),
-                    writer.overflow_keys.len(),
-                );
-            }
+            overflow_types += 1;
+            overflow_sparse_cols += writer.overflow_keys.len() as u64;
+            overflow_bytes_total += writer.overflow_bag_data.len() as u64;
 
             // Write overflow offsets
             cursor = align8(cursor);
@@ -2007,6 +2033,15 @@ fn build_columns_direct(
             // Store regions back into writer for MmapColumnStore creation
             writer.overflow_offsets_region = offsets_region;
             writer.overflow_data_region = data_region;
+        }
+
+        if verbose && overflow_types > 0 {
+            eprintln!(
+                "  Phase 1b: overflow bags — {:.1} MB across {} types, {} sparse cols total",
+                overflow_bytes_total as f64 / (1024.0 * 1024.0),
+                overflow_types,
+                overflow_sparse_cols,
+            );
         }
     }
 
@@ -2160,11 +2195,21 @@ fn build_columns_direct(
         );
     }
 
-    // ── Step 5: Fix up DiskNodeSlot row_ids ────────────────────────────────
+    // ── Step 5: Link nodes to their column store row_ids ───────────────────
     //
-    // `update_row_id` is on `GraphWrite` (disk override, default no-op on
-    // memory/mapped). Phase 2 introduced this exactly to replace the
-    // enum-match here.
+    // Disk backend: `update_row_id` writes into the DiskNodeSlot array so
+    // later reads resolve `(type, row_id)` → column data.
+    //
+    // Mapped backend: replace each node's `PropertyStorage::Map` with
+    // `PropertyStorage::Columnar { store, row_id }`, mirroring the second
+    // pass in `DirGraph::enable_columnar`. Without this linkage the nodes
+    // in MappedGraph's petgraph would have empty properties and queries
+    // like `MATCH (n {id: "Q42"}) RETURN n.description` would return
+    // `None`.
+    //
+    // Memory backend: `update_row_id` is a default no-op and mapped
+    // linkage is skipped — memory-mode N-Triples builds don't go through
+    // this path (they keep `PropertyStorage::Map/Compact` unchanged).
     if GraphRead::is_disk(&graph.graph) {
         for &(node_idx, row_id) in &row_ids {
             GraphWrite::update_row_id(&mut graph.graph, node_idx, row_id);
@@ -2173,6 +2218,47 @@ fn build_columns_direct(
             eprintln!(
                 "  Phase 1b: fixed up {} row_ids",
                 format_count(row_ids.len() as u64),
+            );
+        }
+    } else if GraphRead::is_mapped(&graph.graph) {
+        // Snapshot the Arc<ColumnStore> per type once so the inner loop
+        // only does a HashMap lookup; avoids a clone on every node.
+        let type_name_by_key: HashMap<InternedKey, String> = graph
+            .column_stores
+            .keys()
+            .filter_map(|t| graph.interner.try_resolve_to_key(t).map(|k| (k, t.clone())))
+            .collect();
+        let stores_snapshot: HashMap<
+            String,
+            Arc<crate::graph::storage::column_store::ColumnStore>,
+        > = graph
+            .column_stores
+            .iter()
+            .map(|(t, s)| (t.clone(), Arc::clone(s)))
+            .collect();
+        let mut linked = 0u64;
+        for &(node_idx, row_id) in &row_ids {
+            let type_key = match GraphRead::node_type_of(&graph.graph, node_idx) {
+                Some(k) => k,
+                None => continue,
+            };
+            let type_name = match type_name_by_key.get(&type_key) {
+                Some(n) => n,
+                None => continue,
+            };
+            let store = match stores_snapshot.get(type_name) {
+                Some(s) => Arc::clone(s),
+                None => continue,
+            };
+            if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
+                node.properties = PropertyStorage::Columnar { store, row_id };
+                linked += 1;
+            }
+        }
+        if verbose {
+            eprintln!(
+                "  Phase 1b: linked {} mapped nodes to column stores",
+                format_count(linked),
             );
         }
     }

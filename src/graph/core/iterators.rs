@@ -219,6 +219,81 @@ impl<'a> Iterator for GraphNodeIndices<'a> {
 pub enum GraphEdges<'a> {
     InMemory(petgraph::stable_graph::Edges<'a, EdgeData, petgraph::Directed, u32>),
     Disk(DiskEdges<'a>),
+    /// Lazily materialised matches produced by `MappedGraph::edges_directed_filtered`
+    /// using its per-conn-type CSR index. Holds the `Arc<MappedTypeIndex>`
+    /// alive so we can borrow a slice of edge indices into it without
+    /// allocating a per-call Vec. Hot loops like `filter_by_connection`
+    /// short-circuit on `.any()`, so keeping the iterator lazy avoids
+    /// per-call allocation and makes the warm path faster than a plain
+    /// petgraph scan.
+    MappedFiltered(MappedFilteredEdges<'a>),
+}
+
+pub struct MappedFilteredEdges<'a> {
+    graph: &'a petgraph::stable_graph::StableDiGraph<NodeData, EdgeData>,
+    /// Kept alive so `edges_slice` stays valid for the iterator's lifetime.
+    _index: std::sync::Arc<crate::graph::storage::MappedTypeIndex>,
+    /// Direct pointer into the CSR flat-edge Vec inside `_index`. Valid for
+    /// `'a` because `_index` anchors it.
+    edges_slice: &'a [EdgeIndex],
+    pos: usize,
+}
+
+impl<'a> MappedFilteredEdges<'a> {
+    pub fn new(
+        graph: &'a petgraph::stable_graph::StableDiGraph<NodeData, EdgeData>,
+        index: std::sync::Arc<crate::graph::storage::MappedTypeIndex>,
+        start: usize,
+        end: usize,
+        out: bool,
+    ) -> Self {
+        // SAFETY: `_index` owns the Vec; extending the lifetime to 'a is
+        // safe because the Arc stays with the iterator. This is the
+        // standard self-referencing-via-Arc pattern.
+        let flat: &[EdgeIndex] = if out {
+            &index.out_edges[start..end]
+        } else {
+            &index.in_edges[start..end]
+        };
+        let slice: &'a [EdgeIndex] =
+            unsafe { std::slice::from_raw_parts(flat.as_ptr(), flat.len()) };
+        Self {
+            graph,
+            _index: index,
+            edges_slice: slice,
+            pos: 0,
+        }
+    }
+
+    pub fn empty(graph: &'a petgraph::stable_graph::StableDiGraph<NodeData, EdgeData>) -> Self {
+        // Empty iterator: use a dummy Arc. Build a minimal default to
+        // avoid synthesising a borrow on nothing.
+        Self {
+            graph,
+            _index: std::sync::Arc::new(crate::graph::storage::MappedTypeIndex::default()),
+            edges_slice: &[],
+            pos: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for MappedFilteredEdges<'a> {
+    type Item = GraphEdgeRef<'a>;
+    fn next(&mut self) -> Option<GraphEdgeRef<'a>> {
+        if self.pos >= self.edges_slice.len() {
+            return None;
+        }
+        let ei = self.edges_slice[self.pos];
+        self.pos += 1;
+        let weight = self.graph.edge_weight(ei)?;
+        let (src, tgt) = self.graph.edge_endpoints(ei)?;
+        Some(GraphEdgeRef::new(src, tgt, ei, weight))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.edges_slice.len().saturating_sub(self.pos);
+        (0, Some(remaining))
+    }
 }
 
 /// Iterates CSR edges for a specific node, materializing EdgeData on the fly.
@@ -387,6 +462,7 @@ impl<'a> Iterator for GraphEdges<'a> {
                 .next()
                 .map(|er| GraphEdgeRef::new(er.source(), er.target(), er.id(), er.weight())),
             GraphEdges::Disk(iter) => iter.next(),
+            GraphEdges::MappedFiltered(iter) => iter.next(),
         }
     }
 
@@ -395,6 +471,7 @@ impl<'a> Iterator for GraphEdges<'a> {
         match self {
             GraphEdges::InMemory(iter) => iter.size_hint(),
             GraphEdges::Disk(iter) => iter.size_hint(),
+            GraphEdges::MappedFiltered(iter) => Iterator::size_hint(iter),
         }
     }
 }

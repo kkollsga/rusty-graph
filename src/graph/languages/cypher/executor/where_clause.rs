@@ -970,7 +970,8 @@ impl<'a> CypherExecutor<'a> {
             | Expression::QuantifiedList { .. }
             | Expression::WindowFunction { .. }
             | Expression::PredicateExpr(_)
-            | Expression::ExprPropertyAccess { .. } => false,
+            | Expression::ExprPropertyAccess { .. }
+            | Expression::CountSubquery { .. } => false,
         }
     }
 

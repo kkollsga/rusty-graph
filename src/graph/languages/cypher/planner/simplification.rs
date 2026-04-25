@@ -633,6 +633,14 @@ impl TextScoreCollector {
             }
             Expression::PredicateExpr(pred) => self.rewrite_pred(pred, params),
             Expression::ExprPropertyAccess { expr, .. } => self.rewrite_expr(expr, params),
+            Expression::CountSubquery { where_clause, .. } => {
+                // Patterns don't carry text_score() calls; only the
+                // optional WHERE predicate might. Rewrite it if present.
+                if let Some(pred) = where_clause.as_deref_mut() {
+                    self.rewrite_pred(pred, params)?;
+                }
+                Ok(())
+            }
         }
     }
 

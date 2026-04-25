@@ -774,20 +774,39 @@ pub fn filter_by_connection(
         .ok_or_else(|| "No active selection level".to_string())?;
 
     let conn_key = InternedKey::from_str(connection_type);
+    // Fast path: if the backend exposes a bulk source list for this
+    // conn type (disk's persisted `conn_type_index_*`, mapped's lazy
+    // `MappedTypeIndex` built on first hit), hoist it into a HashSet
+    // before the per-node loop so `has_conn` is O(1) per node instead
+    // of one `edges_directed_filtered` iterator per node. Avoids
+    // 80k+ per-call lock + alloc on mapped `where_connected` shapes.
+    // Outgoing-only today — the disk index is outgoing-keyed; the
+    // incoming side still falls back to the per-node scan.
+    let out_sources: Option<HashSet<u32>> = graph
+        .graph
+        .sources_for_conn_type_bounded(conn_key, None)
+        .map(|v| v.into_iter().collect());
     let has_conn = |idx: NodeIndex| -> bool {
-        match direction {
-            Some(dir) => graph
-                .graph
-                .edges_directed(idx, dir)
-                .any(|e| e.weight().connection_type == conn_key),
-            None => {
+        let outgoing_hit = out_sources
+            .as_ref()
+            .map(|set| set.contains(&(idx.index() as u32)))
+            .unwrap_or_else(|| {
                 graph
                     .graph
-                    .edges_directed(idx, petgraph::Direction::Outgoing)
+                    .edges_directed_filtered(idx, petgraph::Direction::Outgoing, Some(conn_key))
                     .any(|e| e.weight().connection_type == conn_key)
+            });
+        match direction {
+            Some(petgraph::Direction::Outgoing) => outgoing_hit,
+            Some(petgraph::Direction::Incoming) => graph
+                .graph
+                .edges_directed_filtered(idx, petgraph::Direction::Incoming, Some(conn_key))
+                .any(|e| e.weight().connection_type == conn_key),
+            None => {
+                outgoing_hit
                     || graph
                         .graph
-                        .edges_directed(idx, petgraph::Direction::Incoming)
+                        .edges_directed_filtered(idx, petgraph::Direction::Incoming, Some(conn_key))
                         .any(|e| e.weight().connection_type == conn_key)
             }
         }

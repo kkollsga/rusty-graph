@@ -381,6 +381,16 @@ pub enum Expression {
         partition_by: Vec<Expression>,
         order_by: Vec<OrderItem>,
     },
+    /// Cypher subquery expression: `count { <pattern(s)> [WHERE <pred>] }`.
+    /// Evaluates to the number of matches for the pattern(s), scoped to
+    /// the current row's outer bindings. The parser routes
+    /// `count { ... }` here (vs the `count(...)` aggregate-function form).
+    /// `EXISTS { ... }` stays on the separate predicate path at
+    /// `Predicate::Exists`.
+    CountSubquery {
+        patterns: Vec<crate::graph::core::pattern_matching::Pattern>,
+        where_clause: Option<Box<Predicate>>,
+    },
 }
 
 /// Quantifier type for list predicate functions

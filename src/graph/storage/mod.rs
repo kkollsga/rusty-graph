@@ -30,9 +30,11 @@ use crate::graph::core::iterators::GraphEdgeRef;
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
+use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use petgraph::Direction;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -433,11 +435,130 @@ pub struct MemoryGraph(pub(crate) StableDiGraph<NodeData, EdgeData>);
 
 /// Memory-mapped in-memory graph backend — Phase 5 promoted this to a
 /// distinct struct (previously a type alias for [`MemoryGraph`]) so
-/// per-backend trait impls can diverge. Today its shape matches
-/// `MemoryGraph` but the `GraphBackend::Mapped` variant carries its
-/// own identity, letting the column-store ownership split cleanly.
-#[derive(Clone, Debug, Default)]
-pub struct MappedGraph(pub(crate) StableDiGraph<NodeData, EdgeData>);
+/// per-backend trait impls can diverge. 0.8.15 added a lazy per-
+/// connection-type index to accelerate typed edge traversals and
+/// aggregations — `MappedGraph` builds per-type inverted indexes on
+/// first use, mirroring the `conn_type_index_*` / `peer_count_*`
+/// structures `DiskGraph` persists on save but materialising them
+/// in-memory from `StableDiGraph::edge_references()`.
+#[derive(Debug, Default)]
+pub struct MappedGraph {
+    pub(crate) inner: StableDiGraph<NodeData, EdgeData>,
+    /// Lazy per-conn-type index. Populated on first typed-edge query;
+    /// cleared on any edge mutation. Each entry is `Arc` so the outer
+    /// `RwLock` can be released before callers iterate the block.
+    pub(crate) type_index: RwLock<HashMap<u64, Arc<MappedTypeIndex>>>,
+    /// Lazy per-(node_type, property) string-value index. Mirrors the
+    /// disk `PropertyIndex` and gives `MATCH (n:Type {prop: val})` a
+    /// binary-search path instead of a full scan. Built on first
+    /// `lookup_by_property_eq` / `_prefix` hit; cleared on any node
+    /// mutation.
+    pub(crate) property_index: RwLock<HashMap<(String, String), Arc<MappedPropertyIndex>>>,
+    /// Lazy cross-type property index keyed by property name only.
+    /// Backs `lookup_by_property_eq_any_type` / `_prefix_any_type`
+    /// (used by untyped patterns like `MATCH (n {title: 'X'})`).
+    pub(crate) global_property_index: RwLock<HashMap<String, Arc<MappedPropertyIndex>>>,
+}
+
+/// Per-conn-type edge index for `MappedGraph`. CSR-style layout
+/// mirrors the disk backend's `conn_type_index_*` arrays but holds
+/// `NodeIndex` / `EdgeIndex` directly (no id→index lookup needed —
+/// `StableDiGraph`'s indices *are* the heap identity).
+#[derive(Debug, Default)]
+pub struct MappedTypeIndex {
+    /// Distinct source nodes with ≥ 1 outgoing edge of this conn_type,
+    /// sorted ascending. Binary-searchable in `edges_directed_filtered`.
+    pub out_sources: Vec<NodeIndex>,
+    /// CSR offsets into `out_edges`. Length = `out_sources.len() + 1`.
+    pub out_offsets: Vec<u32>,
+    /// Flat edge list. `out_edges[out_offsets[i]..out_offsets[i+1]]`
+    /// are the outgoing edges from `out_sources[i]` of this conn_type.
+    pub out_edges: Vec<EdgeIndex>,
+    /// Same three, but for incoming edges keyed by target.
+    pub in_sources: Vec<NodeIndex>,
+    pub in_offsets: Vec<u32>,
+    pub in_edges: Vec<EdgeIndex>,
+    /// target → count of outgoing edges of this conn_type landing there.
+    /// Powers `count_edges_grouped_by_peer(conn, Outgoing)`.
+    pub out_peer_counts: HashMap<NodeIndex, i64>,
+    /// source → count of outgoing edges of this conn_type from there.
+    /// Powers `count_edges_grouped_by_peer(conn, Incoming)` (peer is
+    /// the source per the trait's `dir=Incoming` semantics).
+    pub in_peer_counts: HashMap<NodeIndex, i64>,
+}
+
+/// Sorted in-memory property index for `MappedGraph`. Mirrors the
+/// parallel-array layout of disk's `PropertyIndex` (`keys` + `nodes`
+/// sorted by `(key, node_idx)`) so equality and prefix lookups reduce
+/// to the same binary-search + linear-scan primitives.
+#[derive(Debug, Default)]
+pub struct MappedPropertyIndex {
+    /// Property string values, sorted lexicographically (ties broken
+    /// by `nodes[i]`). Duplicates are adjacent, as in the disk layout.
+    pub keys: Vec<String>,
+    /// Parallel to `keys`. `nodes[i]` is the `NodeIndex` whose
+    /// property value was `keys[i]`.
+    pub nodes: Vec<NodeIndex>,
+}
+
+impl MappedPropertyIndex {
+    /// Binary-search lower bound: index of first key >= `target`.
+    fn lower_bound(&self, target: &str) -> usize {
+        let mut lo = 0usize;
+        let mut hi = self.keys.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.keys[mid].as_str() < target {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    pub fn lookup_eq(&self, value: &str) -> Vec<NodeIndex> {
+        let start = self.lower_bound(value);
+        let mut out = Vec::new();
+        let mut i = start;
+        while i < self.keys.len() && self.keys[i] == value {
+            out.push(self.nodes[i]);
+            i += 1;
+        }
+        out
+    }
+
+    pub fn lookup_prefix(&self, prefix: &str, limit: usize) -> Vec<NodeIndex> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let start = self.lower_bound(prefix);
+        let mut out = Vec::with_capacity(limit.min(16));
+        let mut i = start;
+        while i < self.keys.len() && out.len() < limit {
+            if !self.keys[i].starts_with(prefix) {
+                break;
+            }
+            out.push(self.nodes[i]);
+            i += 1;
+        }
+        out
+    }
+}
+
+impl Clone for MappedGraph {
+    fn clone(&self) -> Self {
+        // All lazy indexes are derived state; drop them on clone and
+        // let the clone rebuild on demand. Avoids `RwLock` clone
+        // plumbing.
+        Self {
+            inner: self.inner.clone(),
+            type_index: RwLock::new(HashMap::new()),
+            property_index: RwLock::new(HashMap::new()),
+            global_property_index: RwLock::new(HashMap::new()),
+        }
+    }
+}
 
 impl MemoryGraph {
     #[inline]
@@ -468,27 +589,245 @@ impl MemoryGraph {
 impl MappedGraph {
     #[inline]
     pub fn new() -> Self {
-        Self(StableDiGraph::new())
+        Self {
+            inner: StableDiGraph::new(),
+            type_index: RwLock::new(HashMap::new()),
+            property_index: RwLock::new(HashMap::new()),
+            global_property_index: RwLock::new(HashMap::new()),
+        }
     }
 
     #[inline]
     #[allow(dead_code)]
     pub fn with_capacity(nodes: usize, edges: usize) -> Self {
-        Self(StableDiGraph::with_capacity(nodes, edges))
+        Self {
+            inner: StableDiGraph::with_capacity(nodes, edges),
+            type_index: RwLock::new(HashMap::new()),
+            property_index: RwLock::new(HashMap::new()),
+            global_property_index: RwLock::new(HashMap::new()),
+        }
     }
 
     /// Borrow the inner `StableDiGraph`. Shared with [`MemoryGraph`]
     /// for match arms that need the heap backend's petgraph view.
     #[inline]
     pub fn inner(&self) -> &StableDiGraph<NodeData, EdgeData> {
-        &self.0
+        &self.inner
     }
 
     /// Mutable borrow of the inner `StableDiGraph`.
     #[inline]
     pub fn inner_mut(&mut self) -> &mut StableDiGraph<NodeData, EdgeData> {
-        &mut self.0
+        &mut self.inner
     }
+
+    /// Drop the cached type index. Called by `GraphWrite` mutation
+    /// methods; subsequent typed-edge queries will rebuild the affected
+    /// conn_types on first hit.
+    #[inline]
+    pub(crate) fn invalidate_type_index(&mut self) {
+        if let Ok(mut map) = self.type_index.write() {
+            map.clear();
+        }
+    }
+
+    /// Drop the cached property indexes (both per-type and global).
+    /// Called by node-mutation paths (`add_node`, `remove_node`,
+    /// `node_weight_mut`) since any of those can change the set of
+    /// `(value, node_idx)` pairs an index is built from.
+    #[inline]
+    pub(crate) fn invalidate_property_index(&mut self) {
+        if let Ok(mut map) = self.property_index.write() {
+            map.clear();
+        }
+        if let Ok(mut map) = self.global_property_index.write() {
+            map.clear();
+        }
+    }
+
+    /// Fetch or build the per-(node_type, property) property index.
+    /// Build cost: O(|nodes_of_type|) on first hit; subsequent queries
+    /// on the same `(node_type, property)` return the cached `Arc`.
+    pub(crate) fn ensure_property_index(
+        &self,
+        node_type: &str,
+        property: &str,
+    ) -> Arc<MappedPropertyIndex> {
+        let key = (node_type.to_string(), property.to_string());
+        if let Ok(map) = self.property_index.read() {
+            if let Some(block) = map.get(&key) {
+                return Arc::clone(block);
+            }
+        }
+        let built = Arc::new(self.build_property_index_block(Some(node_type), property));
+        let mut map = match self.property_index.write() {
+            Ok(m) => m,
+            Err(_) => return built,
+        };
+        let block = map.entry(key).or_insert_with(|| Arc::clone(&built));
+        Arc::clone(block)
+    }
+
+    /// Fetch or build a cross-type global property index keyed by
+    /// property name only. Iterates every alive node; use for
+    /// `MATCH (n {prop: val})` with no label.
+    pub(crate) fn ensure_global_property_index(&self, property: &str) -> Arc<MappedPropertyIndex> {
+        let key = property.to_string();
+        if let Ok(map) = self.global_property_index.read() {
+            if let Some(block) = map.get(&key) {
+                return Arc::clone(block);
+            }
+        }
+        let built = Arc::new(self.build_property_index_block(None, property));
+        let mut map = match self.global_property_index.write() {
+            Ok(m) => m,
+            Err(_) => return built,
+        };
+        let block = map.entry(key).or_insert_with(|| Arc::clone(&built));
+        Arc::clone(block)
+    }
+
+    /// Build a property index from the live nodes of `node_type`
+    /// (or every node when `node_type` is `None`). Only `Value::String`
+    /// values are indexed — mirrors disk's `PropertyIndex` semantics.
+    ///
+    /// `InternedKey::from_str` is a deterministic FNV hash so we don't
+    /// need access to `DirGraph.interner` here; the result matches what
+    /// the nodes themselves stored under.
+    ///
+    /// Alias handling: the `add_nodes` bulk loader moves the
+    /// `node_title_field` column into `NodeData.title` (not into
+    /// `properties`), and `unique_id_field` into `NodeData.id`. Disk's
+    /// per-type build mirrors this by reading the title/id columns
+    /// when the requested property matches an alias
+    /// (`title` / `label` / `name`, `id` / `nid` / `qid`). We do the
+    /// same here so `lookup_by_property_eq("Person", "name", "Alice")`
+    /// finds rows whose name was stored as the title.
+    fn build_property_index_block(
+        &self,
+        node_type: Option<&str>,
+        property: &str,
+    ) -> MappedPropertyIndex {
+        use crate::graph::schema::InternedKey;
+        let type_key = node_type.map(InternedKey::from_str);
+        let prop_key = InternedKey::from_str(property);
+        let is_title_alias = matches!(property, "title" | "label" | "name");
+        let is_id_alias = matches!(property, "id" | "nid" | "qid");
+        let mut entries: Vec<(String, NodeIndex)> = Vec::new();
+        for idx in self.inner.node_indices() {
+            let Some(nd) = self.inner.node_weight(idx) else {
+                continue;
+            };
+            if let Some(tk) = type_key {
+                if nd.node_type != tk {
+                    continue;
+                }
+            }
+            // Regular property lookup via InternedKey hash.
+            if let Some(Value::String(s)) = nd.properties.get_value(prop_key) {
+                entries.push((s, idx));
+                continue;
+            }
+            // Title/id aliases: pull from the dedicated slots.
+            if is_title_alias {
+                if let Value::String(s) = nd.title().into_owned() {
+                    entries.push((s, idx));
+                    continue;
+                }
+            }
+            if is_id_alias {
+                if let Value::String(s) = nd.id().into_owned() {
+                    entries.push((s, idx));
+                }
+            }
+        }
+        // Sort by (key, node_idx) for parity with disk's layout.
+        entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.index().cmp(&b.1.index())));
+        let (keys, nodes): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        MappedPropertyIndex { keys, nodes }
+    }
+
+    /// Fetch or build the per-conn-type index block.
+    ///
+    /// Build cost on first hit: O(|E|) — we scan every edge in the
+    /// graph filtering by `conn_type`. Subsequent queries on the same
+    /// conn_type reuse the `Arc` in amortised O(1). Memory per block is
+    /// ~(2 × 4 bytes × |edges_of_type|) + a peer-count HashMap — for
+    /// Wikidata P31 on wiki100m that's ~750 k edges = ~18 MB.
+    pub(crate) fn ensure_type_index(&self, conn_type: InternedKey) -> Arc<MappedTypeIndex> {
+        let key = conn_type.as_u64();
+        // Fast path: already built.
+        if let Ok(map) = self.type_index.read() {
+            if let Some(block) = map.get(&key) {
+                return Arc::clone(block);
+            }
+        }
+        // Slow path: build. Another writer might win the race; that's
+        // fine — we just discard our build and use theirs.
+        let built = Arc::new(self.build_type_index_block(conn_type));
+        let mut map = match self.type_index.write() {
+            Ok(m) => m,
+            Err(_) => return built,
+        };
+        let block = map.entry(key).or_insert_with(|| Arc::clone(&built));
+        Arc::clone(block)
+    }
+
+    fn build_type_index_block(&self, conn_type: InternedKey) -> MappedTypeIndex {
+        // Per-source and per-target edge lists (grown via Vec<EdgeIndex>).
+        let mut out_map: HashMap<NodeIndex, Vec<EdgeIndex>> = HashMap::new();
+        let mut in_map: HashMap<NodeIndex, Vec<EdgeIndex>> = HashMap::new();
+        let mut out_peer_counts: HashMap<NodeIndex, i64> = HashMap::new();
+        let mut in_peer_counts: HashMap<NodeIndex, i64> = HashMap::new();
+
+        for er in self.inner.edge_references() {
+            if er.weight().connection_type != conn_type {
+                continue;
+            }
+            let src = er.source();
+            let tgt = er.target();
+            let ei = er.id();
+            out_map.entry(src).or_default().push(ei);
+            in_map.entry(tgt).or_default().push(ei);
+            // Outgoing dir → peer = target (edges land on target).
+            *out_peer_counts.entry(tgt).or_insert(0) += 1;
+            // Incoming dir → peer = source (edges originate at source).
+            *in_peer_counts.entry(src).or_insert(0) += 1;
+        }
+
+        // Materialise CSR arrays sorted by NodeIndex for binary search.
+        let (out_sources, out_offsets, out_edges) = flatten_to_csr(out_map);
+        let (in_sources, in_offsets, in_edges) = flatten_to_csr(in_map);
+
+        MappedTypeIndex {
+            out_sources,
+            out_offsets,
+            out_edges,
+            in_sources,
+            in_offsets,
+            in_edges,
+            out_peer_counts,
+            in_peer_counts,
+        }
+    }
+}
+
+fn flatten_to_csr(
+    mut map: HashMap<NodeIndex, Vec<EdgeIndex>>,
+) -> (Vec<NodeIndex>, Vec<u32>, Vec<EdgeIndex>) {
+    let mut sources: Vec<NodeIndex> = map.keys().copied().collect();
+    sources.sort_by_key(|n| n.index());
+    let mut offsets: Vec<u32> = Vec::with_capacity(sources.len() + 1);
+    let total: usize = map.values().map(|v| v.len()).sum();
+    let mut flat: Vec<EdgeIndex> = Vec::with_capacity(total);
+    offsets.push(0);
+    for src in &sources {
+        if let Some(edges) = map.remove(src) {
+            flat.extend(edges);
+        }
+        offsets.push(flat.len() as u32);
+    }
+    (sources, offsets, flat)
 }
 
 impl Deref for MemoryGraph {
@@ -510,14 +849,14 @@ impl Deref for MappedGraph {
     type Target = StableDiGraph<NodeData, EdgeData>;
     #[inline]
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.inner
     }
 }
 
 impl DerefMut for MappedGraph {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.inner
     }
 }
 
@@ -537,13 +876,18 @@ impl<'de> serde::Deserialize<'de> for MemoryGraph {
 
 impl serde::Serialize for MappedGraph {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize(ser)
+        self.inner.serialize(ser)
     }
 }
 
 impl<'de> serde::Deserialize<'de> for MappedGraph {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        StableDiGraph::deserialize(de).map(MappedGraph)
+        StableDiGraph::deserialize(de).map(|inner| MappedGraph {
+            inner,
+            type_index: RwLock::new(HashMap::new()),
+            property_index: RwLock::new(HashMap::new()),
+            global_property_index: RwLock::new(HashMap::new()),
+        })
     }
 }
 
