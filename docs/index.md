@@ -34,6 +34,7 @@ getting-started
 
 guides/cypher
 guides/data-loading
+guides/datasets
 guides/blueprints
 guides/querying
 guides/traversal-hierarchy

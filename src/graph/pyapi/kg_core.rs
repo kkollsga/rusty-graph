@@ -9,6 +9,7 @@ use crate::datatypes::values::Value;
 use crate::datatypes::{py_in, py_out};
 use crate::graph::introspection::{self, reporting::OperationReport};
 use crate::graph::io;
+use crate::graph::io::ntriples::{Cancelled, ProgressEvent, ProgressSink, ProgressValue};
 use crate::graph::languages::cypher;
 use crate::graph::pyapi::transaction::Transaction;
 use crate::graph::schema::{
@@ -21,6 +22,79 @@ use pyo3::types::{PyDict, PyList};
 use pyo3::{Bound, IntoPyObjectExt};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Adapter: routes pure-Rust [`ProgressEvent`]s into a Python callable.
+/// Errors raised by the callback are swallowed — a broken UI must not
+/// kill a multi-hour build. Lives in the pyapi layer so the loader
+/// itself never touches PyO3 types.
+struct PyProgressSink {
+    callback: Py<PyAny>,
+}
+
+impl ProgressSink for PyProgressSink {
+    fn emit(&self, event: ProgressEvent<'_>) -> Result<(), Cancelled> {
+        Python::attach(|py| {
+            // Briefly reacquiring the GIL inside `py.detach()` lets
+            // Python observe a pending SIGINT (Ctrl+C). check_signals
+            // returns Err if the user pressed Ctrl+C; we surface that
+            // up as `Cancelled` so the loader can stop cleanly.
+            if py.check_signals().is_err() {
+                return Err(Cancelled);
+            }
+            let d = PyDict::new(py);
+            let _ = match event {
+                ProgressEvent::Start {
+                    phase,
+                    label,
+                    total,
+                    unit,
+                } => {
+                    let _ = d.set_item("kind", "start");
+                    let _ = d.set_item("phase", phase);
+                    let _ = d.set_item("label", label);
+                    let _ = d.set_item("unit", unit);
+                    match total {
+                        Some(t) => d.set_item("total", t),
+                        None => d.set_item("total", py.None()),
+                    }
+                }
+                ProgressEvent::Update {
+                    phase,
+                    current,
+                    fields,
+                } => {
+                    let _ = d.set_item("kind", "update");
+                    let _ = d.set_item("phase", phase);
+                    let _ = d.set_item("current", current);
+                    set_fields(&d, fields)
+                }
+                ProgressEvent::Complete {
+                    phase,
+                    elapsed_s,
+                    fields,
+                } => {
+                    let _ = d.set_item("kind", "complete");
+                    let _ = d.set_item("phase", phase);
+                    let _ = d.set_item("elapsed_s", elapsed_s);
+                    set_fields(&d, fields)
+                }
+            };
+            let _ = self.callback.call1(py, (d,));
+            Ok(())
+        })
+    }
+}
+
+fn set_fields(d: &Bound<'_, PyDict>, fields: &[(&str, ProgressValue<'_>)]) -> PyResult<()> {
+    for (k, v) in fields {
+        match v {
+            ProgressValue::U64(n) => d.set_item(*k, *n)?,
+            ProgressValue::F64(n) => d.set_item(*k, *n)?,
+            ProgressValue::Str(s) => d.set_item(*k, *s)?,
+        }
+    }
+    Ok(())
+}
 
 #[pymethods]
 impl KnowledgeGraph {
@@ -305,19 +379,33 @@ impl KnowledgeGraph {
 
     /// Load an N-Triples file (supports .bz2, .gz, plain) into the graph.
     /// Designed for Wikidata truthy dumps but works with any N-Triples file.
-    #[pyo3(signature = (path, *, predicates=None, languages=None, node_types=None, predicate_labels=None, max_entities=None, verbose=false))]
+    #[pyo3(signature = (path, *, predicates=None, languages=None, node_types=None, predicate_labels=None, max_entities=None, max_triples=None, verbose=false, progress=None))]
     #[allow(clippy::too_many_arguments)]
     fn load_ntriples(
         &mut self,
+        py: Python<'_>,
         path: &str,
         predicates: Option<Vec<String>>,
         languages: Option<Vec<String>>,
         node_types: Option<&Bound<'_, PyDict>>,
         predicate_labels: Option<&Bound<'_, PyDict>>,
         max_entities: Option<usize>,
+        max_triples: Option<u64>,
         verbose: bool,
+        progress: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         use std::collections::HashSet;
+
+        if let Some(ref cb) = progress {
+            if !cb.bind(py).is_callable() {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "progress must be callable",
+                ));
+            }
+        }
+
+        let progress_sink: Option<Box<dyn ProgressSink>> =
+            progress.map(|cb| Box::new(PyProgressSink { callback: cb }) as Box<dyn ProgressSink>);
 
         let config = crate::graph::io::ntriples::NTriplesConfig {
             predicates: predicates.map(|v| v.into_iter().collect::<HashSet<_>>()),
@@ -341,13 +429,30 @@ impl KnowledgeGraph {
                 })
                 .unwrap_or_default(),
             max_entities,
+            max_triples,
             verbose,
             auto_type: true,
+            progress: progress_sink,
         };
 
         let graph = Arc::make_mut(&mut self.inner);
-        let stats = crate::graph::io::ntriples::load_ntriples(graph, path, &config)
-            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
+        // Release the GIL during the multi-minute load so Python
+        // heartbeat threads (download/build progress monitors) can run.
+        // Cancellation: when the progress sink notices a pending SIGINT
+        // (Python::check_signals), the loader returns the literal
+        // `<cancelled>` sentinel — translate that into the KeyboardInterrupt
+        // the user actually expects, instead of a generic RuntimeError.
+        let stats = py
+            .detach(|| crate::graph::io::ntriples::load_ntriples(graph, path, &config))
+            .map_err(|e| {
+                if e == "<cancelled>" {
+                    PyErr::new::<pyo3::exceptions::PyKeyboardInterrupt, _>(
+                        "load_ntriples cancelled",
+                    )
+                } else {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e)
+                }
+            })?;
 
         Python::attach(|py| {
             let dict = PyDict::new(py);

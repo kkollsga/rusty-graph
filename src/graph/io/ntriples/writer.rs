@@ -8,17 +8,46 @@ use crate::graph::storage::{GraphRead, GraphWrite};
 use std::collections::{HashMap, HashSet};
 
 use super::parser::{parse_qcode_number, EdgeBuffer};
-use super::NTriplesStats;
+use super::{Cancelled, NTriplesStats, ProgressEvent, ProgressSink, ProgressValue as PV};
+
+/// Edges between Phase 2 progress callbacks. Roughly ~200 ms apart at
+/// in-memory edge-creation rates (~5 M edges/s), which gives Ctrl+C a
+/// responsive cancel point and tqdm a smoothly-moving bar.
+const PHASE2_TICK: usize = 1_000_000;
+
+/// Helper used inside the hot loops below: emit an `update` event for
+/// Phase 2 and propagate `Cancelled` (Ctrl+C) up as a string error.
+#[inline]
+fn phase2_tick(
+    sink: Option<&dyn ProgressSink>,
+    current: u64,
+    edges_created: u64,
+    edges_skipped: u64,
+) -> Result<(), String> {
+    if let Some(s) = sink {
+        s.emit(ProgressEvent::Update {
+            phase: "phase2",
+            current,
+            fields: &[
+                ("edges_created", PV::U64(edges_created)),
+                ("edges_skipped", PV::U64(edges_skipped)),
+            ],
+        })
+        .map_err(|Cancelled| "<cancelled>".to_string())?;
+    }
+    Ok(())
+}
 
 pub(super) fn create_edges_with_qnum_map(
     graph: &mut DirGraph,
     edge_buffer: &EdgeBuffer,
     stats: &mut NTriplesStats,
     qnum_to_idx: &MmapOrVec<u32>,
-) {
+    sink: Option<&dyn ProgressSink>,
+) -> Result<(), String> {
     let buf = match edge_buffer {
         EdgeBuffer::Compact(b) => b,
-        EdgeBuffer::Strings(_) => return, // shouldn't happen for disk mode
+        EdgeBuffer::Strings(_) => return Ok(()), // shouldn't happen for disk mode
     };
 
     let qnum_len = qnum_to_idx.len();
@@ -51,6 +80,14 @@ pub(super) fn create_edges_with_qnum_map(
             } else {
                 stats.edges_skipped += 1;
             }
+            if (i + 1) % PHASE2_TICK == 0 {
+                phase2_tick(
+                    sink,
+                    (i + 1) as u64,
+                    stats.edges_created,
+                    stats.edges_skipped,
+                )?;
+            }
         }
     }
 
@@ -60,16 +97,18 @@ pub(super) fn create_edges_with_qnum_map(
         graph.connection_type_metadata.entry(conn_name).or_default();
     }
     graph.invalidate_edge_type_counts_cache();
+    Ok(())
 }
 
 pub(super) fn create_edges_from_buffer(
     graph: &mut DirGraph,
     edge_buffer: &EdgeBuffer,
     stats: &mut NTriplesStats,
-) {
+    sink: Option<&dyn ProgressSink>,
+) -> Result<(), String> {
     match edge_buffer {
-        EdgeBuffer::Compact(buf) => create_edges_compact(graph, buf, stats),
-        EdgeBuffer::Strings(buf) => create_edges_strings(graph, buf, stats),
+        EdgeBuffer::Compact(buf) => create_edges_compact(graph, buf, stats, sink),
+        EdgeBuffer::Strings(buf) => create_edges_strings(graph, buf, stats, sink),
     }
 }
 
@@ -80,7 +119,8 @@ pub(super) fn create_edges_compact(
     graph: &mut DirGraph,
     buf: &MmapOrVec<(u32, u32, InternedKey)>,
     stats: &mut NTriplesStats,
-) {
+    sink: Option<&dyn ProgressSink>,
+) -> Result<(), String> {
     // Build dense Vec lookup: Q-number → NodeIndex.
     // Much faster than HashMap for Wikidata's dense Q-number space.
     let mut max_qnum: u32 = 0;
@@ -170,6 +210,14 @@ pub(super) fn create_edges_compact(
                 } else {
                     stats.edges_skipped += 1;
                 }
+                if (i + 1) % PHASE2_TICK == 0 {
+                    phase2_tick(
+                        sink,
+                        (i + 1) as u64,
+                        stats.edges_created,
+                        stats.edges_skipped,
+                    )?;
+                }
             }
         }
     } else {
@@ -189,6 +237,14 @@ pub(super) fn create_edges_compact(
             } else {
                 stats.edges_skipped += 1;
             }
+            if (i + 1) % PHASE2_TICK == 0 {
+                phase2_tick(
+                    sink,
+                    (i + 1) as u64,
+                    stats.edges_created,
+                    stats.edges_skipped,
+                )?;
+            }
         }
     }
 
@@ -206,6 +262,7 @@ pub(super) fn create_edges_compact(
     if let Some(path) = qnum_path {
         let _ = std::fs::remove_file(path);
     }
+    Ok(())
 }
 
 /// String path: edges stored as (String, String, String).
@@ -213,7 +270,8 @@ pub(super) fn create_edges_strings(
     graph: &mut DirGraph,
     buf: &[(String, String, String)],
     stats: &mut NTriplesStats,
-) {
+    sink: Option<&dyn ProgressSink>,
+) -> Result<(), String> {
     // Build Q-code string → NodeIndex lookup
     let mut qcode_to_idx: HashMap<String, petgraph::graph::NodeIndex> = HashMap::new();
     for id_map in graph.id_indices.values() {
@@ -228,7 +286,7 @@ pub(super) fn create_edges_strings(
 
     let mut conn_type_pairs: HashMap<String, (HashSet<String>, HashSet<String>)> = HashMap::new();
 
-    for (source_qcode, target_qcode, pred_label) in buf {
+    for (i, (source_qcode, target_qcode, pred_label)) in buf.iter().enumerate() {
         let source_idx = qcode_to_idx.get(source_qcode.as_str());
         let target_idx = qcode_to_idx.get(target_qcode.as_str());
 
@@ -258,6 +316,14 @@ pub(super) fn create_edges_strings(
                 stats.edges_skipped += 1;
             }
         }
+        if (i + 1) % PHASE2_TICK == 0 {
+            phase2_tick(
+                sink,
+                (i + 1) as u64,
+                stats.edges_created,
+                stats.edges_skipped,
+            )?;
+        }
     }
 
     for (conn_type, (source_types, target_types)) in conn_type_pairs {
@@ -274,4 +340,5 @@ pub(super) fn create_edges_strings(
     }
 
     graph.invalidate_edge_type_counts_cache();
+    Ok(())
 }

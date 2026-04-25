@@ -18,6 +18,26 @@ KGLite stores nodes and relationships in a Rust graph structure ([petgraph](http
 - **Fluent API** chains build a *selection* (a set of node indices) — no data is copied until you call `collect()`, `to_df()`, etc.
 - **Persistence** is via `save()`/`load()` binary snapshots — there is no WAL or auto-save
 
+## Storage Modes
+
+KGLite has three storage backends. The Python API is identical
+across all three; the trade-off is in-memory speed vs. on-disk
+scalability.
+
+| Mode | Construct | Where data lives | Best for |
+|---|---|---|---|
+| **Default (in-memory)** | `KnowledgeGraph()` | Heap | Small / medium graphs (<5 M nodes), prototyping, fastest queries |
+| **Mapped** | `KnowledgeGraph(storage="mapped")` | mmap-backed columnar files | RAM-friendly as the graph grows; same query speed as in-memory for typed lookups (O(log N) property index) |
+| **Disk** | `KnowledgeGraph(storage="disk", path="/data/g")` | mmap CSR + segments | 100 M+ nodes (Wikidata-scale); kept lazy-loaded so the OS pages in only what queries touch |
+
+Save/load works for all three. For disk mode, `save()` consolidates
+segment artifacts into a top-level `disk_graph_meta.json` so
+`kglite.load(path)` can reconstitute the graph.
+
+**When optimizing**, in-memory wins. Disk and mapped exist for
+data that's too big to keep on the heap; they're not "faster"
+backends. For Wikidata-scale workflows, see {doc}`guides/datasets`.
+
 ## Return Types
 
 All node-related methods use a consistent key order: **`type`, `title`, `id`**, then other properties.

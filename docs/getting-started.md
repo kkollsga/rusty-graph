@@ -70,3 +70,34 @@ graph.add_connections(data=edges_df, connection_type='KNOWS', source_type='User'
 
 graph.cypher("MATCH (u:User) WHERE u.age > 30 RETURN u.name, u.age")
 ```
+
+## Loading a Public Dataset
+
+KGLite ships one-call wrappers for well-known public sources. Each
+handles download, caching, cooldown, and graph build:
+
+```python
+from kglite.datasets import wikidata, sodir
+
+# Wikidata: parallel-decoded multistream bz2 → disk-cached graph
+g = wikidata.open("/data/wd")                              # full graph
+g = wikidata.open("/data/wd", entity_limit_millions=100)   # 100M slice
+
+# Sodir: petroleum-domain graph, in-memory by default
+g = sodir.open("/data/sodir")
+```
+
+Re-running just loads the cached graph — sub-second on Wikidata
+slices, ~2 s for the full Sodir graph. See {doc}`guides/datasets`
+for the full API including cooldown semantics, complement
+blueprints, and parallel-fetch tuning.
+
+## Next Steps
+
+- {doc}`guides/cypher` — full Cypher coverage, parameters, count
+  subqueries, semantic search.
+- {doc}`guides/data-loading` — bulk-load DataFrames, N-Triples,
+  blueprint-driven CSV ingest.
+- {doc}`guides/datasets` — Wikidata + Sodir lifecycle wrappers.
+- {doc}`core-concepts` — storage modes, return types, the
+  fluent / Cypher split.

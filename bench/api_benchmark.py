@@ -67,7 +67,11 @@ WIKIDATA_SUBSETS = [
     ("wiki1000m", WIKIDATA_1000M, 1_000_000_000),
 ]
 
-TIMEOUT_MS = 10_000
+# Language filter for the auto_type rename pass (see WIKIDATA_QUERIES note).
+# Override at the CLI with `--languages en,de` or `--languages ""` for all.
+WIKIDATA_LANGUAGES: list[str] = ["en"]
+
+TIMEOUT_MS = 30_000
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +151,10 @@ def build_wikidata(mode, nt_path, label):
     """Build wikidata graph from N-Triples."""
     disk_path = _save_path(label, mode) if mode == "disk" else None
     g = _make_graph(mode, disk_path)
-    g.load_ntriples(nt_path)
+    load_kwargs: dict = {}
+    if WIKIDATA_LANGUAGES:
+        load_kwargs["languages"] = list(WIKIDATA_LANGUAGES)
+    g.load_ntriples(nt_path, **load_kwargs)
     return g
 
 
@@ -233,17 +240,21 @@ PROSPECT_QUERIES = [
     ),
 ]
 
+# Queries assume the build was run with `languages=["en"]` so the
+# auto_type rename produces English type names (Q5 → "human", etc.).
+# Larger queries are anchored to Q42 (Douglas Adams) so the cost is
+# bounded at every dataset scale instead of doing a full-graph sort.
 WIKIDATA_QUERIES = [
-    # Anchor on edge type — simple walk, works on every wiki subset size.
+    # Anchored 1-hop: bounded cost regardless of graph size.
     (
-        "P31 LIMIT 50",
-        "MATCH (a)-[:P31]->(b) RETURN a.title, b.title ORDER BY a.title, b.title LIMIT 50",
+        "P31 from Q42 LIMIT 50",
+        "MATCH (a {nid: 'Q42'})-[:P31]->(b) RETURN a.title, b.title LIMIT 50",
         True,
     ),
-    # Anchor on node type (Q5 = human, the most populated class in Wikidata).
+    # Node-type lookup — uses the English label `human` (was Q5 pre-rename).
     (
-        "Q5 (human) lookup",
-        "MATCH (h:Q5) RETURN h.title ORDER BY h.title LIMIT 10",
+        "human (Q5) lookup",
+        "MATCH (h:human) RETURN h.title ORDER BY h.title LIMIT 10",
         True,
     ),
     # Aggregation with LIMIT — counts every :P31 edge and returns top 10 classes.
@@ -252,39 +263,34 @@ WIKIDATA_QUERIES = [
         "MATCH ()-[:P31]->(c) RETURN c.title, count(*) AS k ORDER BY k DESC, c.title LIMIT 10",
         True,
     ),
-    # Two-hop through the type hierarchy (instance-of → subclass-of).
+    # Two-hop through the type hierarchy, anchored.
     (
-        "2-hop P31 + P279",
-        "MATCH (a)-[:P31]->(b)-[:P279]->(c) "
-        "RETURN a.title, c.title ORDER BY a.title, c.title LIMIT 10",
+        "2-hop P31 + P279 from Q42",
+        "MATCH (a {nid: 'Q42'})-[:P31]->(b)-[:P279]->(c) RETURN a.title, c.title LIMIT 10",
         True,
     ),
-    # Different edge type (P27 = citizenship) anchored on Q5.
+    # Different edge type (P27 = citizenship) anchored on type human.
     (
         "Human citizenship (P27)",
-        "MATCH (h:Q5)-[:P27]->(c) "
-        "RETURN h.title, c.title ORDER BY h.title, c.title LIMIT 10",
+        "MATCH (h:human)-[:P27]->(c) RETURN h.title, c.title ORDER BY h.title, c.title LIMIT 10",
         True,
     ),
-    # OPTIONAL MATCH path — left-joins P27 onto every Q5.
+    # OPTIONAL MATCH path — left-joins P27 onto every human.
     (
         "OPTIONAL citizenship",
-        "MATCH (h:Q5) OPTIONAL MATCH (h)-[:P27]->(c) "
-        "RETURN h.title, c.title ORDER BY h.title LIMIT 10",
+        "MATCH (h:human) OPTIONAL MATCH (h)-[:P27]->(c) RETURN h.title, c.title ORDER BY h.title LIMIT 10",
         True,
     ),
     # EXISTS subquery — humans with any citizenship edge.
     (
         "EXISTS P27",
-        "MATCH (h:Q5) WHERE EXISTS { MATCH (h)-[:P27]->() } "
-        "RETURN h.title ORDER BY h.title LIMIT 10",
+        "MATCH (h:human) WHERE EXISTS { MATCH (h)-[:P27]->() } RETURN h.title ORDER BY h.title LIMIT 10",
         True,
     ),
     # WITH + post-aggregation sort — countries by number of citizens.
     (
         "WITH P27 count",
-        "MATCH (h:Q5)-[:P27]->(c) WITH c, count(h) AS k "
-        "RETURN c.title, k ORDER BY k DESC, c.title LIMIT 10",
+        "MATCH (h:human)-[:P27]->(c) WITH c, count(h) AS k RETURN c.title, k ORDER BY k DESC, c.title LIMIT 10",
         True,
     ),
 ]
@@ -351,8 +357,7 @@ def run_dataset(mode, dataset, build_fn, extra_queries, build_metadata=None):
     results = []
     build_metadata = build_metadata or {}
 
-    def record(test_name, time_ms, status="ok", row_count=None, cs=None, error=None,
-               extra=None):
+    def record(test_name, time_ms, status="ok", row_count=None, cs=None, error=None, extra=None):
         tag = f"{time_ms:>8.1f}ms" if status == "ok" else f"{status:>8s}"
         row_str = f" rows={row_count}" if row_count is not None else ""
         err_str = f"  {error[:50]}" if error else ""
@@ -590,10 +595,7 @@ def compare(all_results):
         print(f"  {'-' * 12} {'-' * 8} {'-' * 12} {'-' * 10} {'-' * 14}")
         for ds, mode, n_tri, ms in sorted(wiki_rows):
             rate = n_tri / (ms / 1000.0) if ms > 0 else 0
-            print(
-                f"  {ds:<12s} {mode:<8s} {n_tri:>12,} "
-                f"{ms / 1000.0:>10.2f} {rate:>14,.0f}"
-            )
+            print(f"  {ds:<12s} {mode:<8s} {n_tri:>12,} {ms / 1000.0:>10.2f} {rate:>14,.0f}")
 
 
 # ---------------------------------------------------------------------------
@@ -856,9 +858,7 @@ def _scenario_mutation_stream(mode: str, dataset: str, n_mutations: int = 100) -
 
     source = os.environ.get("INGEST_PREBUILT_SOURCE")
     if not source or not Path(source).exists():
-        raise RuntimeError(
-            "mutation_stream requires INGEST_PREBUILT_SOURCE env var pointing at a pre-built graph"
-        )
+        raise RuntimeError("mutation_stream requires INGEST_PREBUILT_SOURCE env var pointing at a pre-built graph")
 
     # Copy pre-built graph to a working path so the pristine source can be
     # reused (or cleaned up) by the orchestrator. Copy time is outside
@@ -934,7 +934,7 @@ def _run_scenario_in_subprocess(scenario: str, mode: str, dataset: str, env_extr
         )
     for line in proc.stdout.splitlines():
         if line.startswith(_RESULT_SENTINEL):
-            return json.loads(line[len(_RESULT_SENTINEL):])
+            return json.loads(line[len(_RESULT_SENTINEL) :])
     raise RuntimeError(f"scenario subprocess produced no result marker. stdout:\n{proc.stdout}")
 
 
@@ -995,9 +995,34 @@ def run_ingest_measurement(mode: str = "disk", dataset: str = "synth500k") -> No
 # CLI
 # ---------------------------------------------------------------------------
 def main():
+    global WIKIDATA_LANGUAGES
+
     print(f"KGLite v{kglite.__version__} API Benchmark")
 
     args = sys.argv[1:]
+
+    # Pull --languages=<csv> out of argv before mode parsing. Subprocess
+    # paths (--_run-scenario / --measure-ingest) don't see this flag, but
+    # they inherit WIKIDATA_LANGUAGES via the parent process's mutation
+    # only when running in-process; subprocesses re-import the module and
+    # use the default. Forward via env var for those paths.
+    cli_langs: list[str] | None = None
+    rest: list[str] = []
+    for a in args:
+        if a.startswith("--languages="):
+            cli_langs = [c.strip() for c in a.split("=", 1)[1].split(",") if c.strip()]
+        else:
+            rest.append(a)
+    args = rest
+
+    env_langs = os.environ.get("KGLITE_BENCH_LANGUAGES")
+    if cli_langs is not None:
+        WIKIDATA_LANGUAGES = cli_langs
+    elif env_langs is not None:
+        WIKIDATA_LANGUAGES = [c.strip() for c in env_langs.split(",") if c.strip()]
+    print(f"  wikidata languages: {WIKIDATA_LANGUAGES or '(all)'}")
+    # Propagate to subprocess scenarios (run_ingest_measurement spawns).
+    os.environ["KGLITE_BENCH_LANGUAGES"] = ",".join(WIKIDATA_LANGUAGES)
 
     # Internal: run a single scenario and emit its result as a sentinel-prefixed
     # JSON line. Used by run_ingest_measurement() for subprocess isolation.

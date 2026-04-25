@@ -15,8 +15,8 @@ from kglite import KnowledgeGraph, load
 NT_FILE = "/Volumes/EksternalHome/Data/Wikidata/test_5M.nt.zst"
 TEMP_DIR = "/tmp/kglite_bench_modes"
 
-# Enable CSR verbose for disk mode
-os.environ["KGLITE_CSR_VERBOSE"] = "1"
+# Enable build sub-step debug output (CSR step timings, etc.)
+os.environ["KGLITE_BUILD_DEBUG"] = "1"
 
 CYPHER_QUERIES = [
     ("Count nodes", "MATCH (n) RETURN count(n) AS c"),

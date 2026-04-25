@@ -16,12 +16,17 @@ across 9 languages.
 
 Three storage modes scale from in-memory (millisecond queries on
 small graphs) to mmap-backed on disk (1 B+ edges, Wikidata-scale).
+Bundled dataset wrappers turn `pip install kglite` into a queryable
+Wikidata or petroleum-domain graph in one line.
 
 ## Why KGLite?
 
 - **Built for LLM agents** — `describe()` XML schema, bundled MCP
   server, and an agent-oriented query surface (`cypher()`,
   `graph.select(...).traverse(...)`).
+- **One-line public datasets** — `wikidata.open(path)` and
+  `sodir.open(path)` handle fetch, parallel build, and caching;
+  re-runs reload the cached graph instantly.
 - **Codebase → graph in one line** — `kglite.code_tree.build(".")`
   parses Python, Rust, TypeScript, Go, Java, C#, C++, and more
   into `Function` / `Class` / `Module` nodes with `CALLS` /
@@ -84,7 +89,67 @@ graph.save("my_graph.kgl")
 loaded = kglite.load("my_graph.kgl")
 ```
 
+## Try it instantly: ready-to-query datasets
+
+Two bundled wrappers turn well-known public sources into queryable
+graphs without writing a loader. Each call handles the *fetch +
+build + cache* cycle, returns a `KnowledgeGraph` you can `cypher()`
+against, and respects a per-dataset cooldown so re-running just
+loads the cached graph in seconds. KGLite is independent of the
+upstream organisations — see each module docstring for
+non-affiliation notes.
+
+### Wikidata
+
+Single-stream `latest-truthy.nt.bz2` from
+[dumps.wikimedia.org](https://dumps.wikimedia.org/wikidatawiki/entities/) —
+parallel-decoded with a bit-level block scanner, parsed, built into a
+queryable graph in one call:
+
+```python
+from kglite.datasets import wikidata
+
+g = wikidata.open("/data/wd")                                    # full graph
+g = wikidata.open("/data/wd", entity_limit_millions=100)         # 100M slice
+g = wikidata.open("/data/wd", storage="memory",                  # in-memory, fast tests
+                  entity_limit_millions=10)
+```
+
+### Sodir (Norwegian Offshore Directorate)
+
+Petroleum-domain graph from the public ArcGIS REST FeatureServer at
+[factmaps.sodir.no](https://factmaps.sodir.no/api/rest/services/DataService) —
+33 baseline node types (Field, Wellbore, Discovery, Licence,
+Stratigraphy, …), ~480 k nodes, parallel-fetched and built in
+seconds:
+
+```python
+from kglite.datasets import sodir
+
+g = sodir.open("/data/sodir")  # in-memory by default; ~30s first run
+g = sodir.open("/data/sodir", complement_blueprint="my_extras.json")  # extend
+```
+
+Two-tier cooldown — cheap row-count probes every 14 days; full
+per-dataset re-fetch every 30 days. Add a *complement blueprint* to
+extend the baseline (new node types, custom edges) without touching
+the canonical schema; the file is persisted into the workdir on
+first use and auto-loaded after.
+
 ## Use Cases
+
+### Agentic AI — memory and tool use
+
+Give an LLM a structured memory it can query. `describe()` emits a
+compact XML schema that fits in a system prompt, and the bundled MCP
+server exposes the whole graph as a Cypher tool — drop-in for Claude,
+Cursor, or any MCP-capable agent.
+
+```python
+xml = graph.describe()                            # schema for the agent's context
+prompt = f"You have a knowledge graph:\n{xml}\nAnswer via graph.cypher()."
+# Or: python examples/mcp_server.py path/to/graph.kgl
+```
 
 ### Codebase analysis
 
@@ -102,19 +167,6 @@ graph.cypher("""
     RETURN g.name, count(f) AS callers
     ORDER BY callers DESC LIMIT 10
 """)
-```
-
-### Agentic AI — memory and tool use
-
-Give an LLM a structured memory it can query. `describe()` emits a
-compact XML schema that fits in a system prompt, and the bundled MCP
-server exposes the whole graph as a Cypher tool — drop-in for Claude,
-Cursor, or any MCP-capable agent.
-
-```python
-xml = graph.describe()                            # schema for the agent's context
-prompt = f"You have a knowledge graph:\n{xml}\nAnswer via graph.cypher()."
-# Or: python examples/mcp_server.py path/to/graph.kgl
 ```
 
 ### RAG retrieval
@@ -168,9 +220,10 @@ use cases above:
   — declarative CSV→graph loading via a JSON blueprint; regions,
   facilities, and sensors with lat/lon coordinates and pipeline-path
   traversal queries.
-- **[`wikidata_disk.py`](https://github.com/kkollsga/kglite/blob/main/examples/wikidata_disk.py)**
-  — Wikidata-scale build + disk-mode storage; loads hundreds of
-  millions of triples via `load_ntriples` into a mmap-backed graph.
+
+For Wikidata- and Sodir-scale builds, see the [Public datasets](#public-datasets)
+section above — `kglite.datasets.wikidata.open(...)` and
+`kglite.datasets.sodir.open(...)` cover those workflows in one call.
 
 ## Benchmarks
 
@@ -189,14 +242,16 @@ on an M-series MacBook.
 
 Reloading a saved 1 B-triple graph from disk (7 GB on-disk): **3.5 s**.
 
-**Query latency on the 1 B-triple graph** (mapped storage):
+**Query latency on the 1 B-triple graph** (mapped storage). Type names
+match the labels Wikidata ships per language — with `languages=["en"]`
+(the default), `Q5` is renamed to `human`:
 
-| Cypher                                                          |     wall |
-|-----------------------------------------------------------------|---------:|
-| `MATCH (n)-[:P31]->(:Q5) RETURN count(n)` — typed aggregation   |   0.5 ms |
-| `MATCH (a)-[:P31]->(b)-[:P279]->(c) LIMIT 10` — 2-hop typed     |   0.9 ms |
-| `MATCH (a)-[:P31]->(b {nid:'Q64'}) RETURN a LIMIT 20` — pivot   |     1 ms |
-| `MATCH (a)-[:P31]->(:Q5)` `MATCH (a)-[:P27]->(c) LIMIT 10` — join |   44 ms |
+| Cypher                                                              |     wall |
+|---------------------------------------------------------------------|---------:|
+| `MATCH (n)-[:P31]->(:human) RETURN count(n)` — typed aggregation    |   0.5 ms |
+| `MATCH (a)-[:P31]->(b)-[:P279]->(c) LIMIT 10` — 2-hop typed         |   0.9 ms |
+| `MATCH (a)-[:P31]->(b {nid:'Q64'}) RETURN a LIMIT 20` — pivot       |     1 ms |
+| `MATCH (a)-[:P31]->(:human)` `MATCH (a)-[:P27]->(c) LIMIT 10` — join |   44 ms |
 
 Disk and mapped storage track within 1 % on build; mapped wins on
 query shapes backed by its in-memory inverted index, disk wins on

@@ -35,16 +35,16 @@ backend.
 
 import argparse
 import csv
+from datetime import datetime, timezone
 import json
 import os
+from pathlib import Path
 import resource
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
-from pathlib import Path
 
 # IMPORTANT: do NOT prepend the repo root to sys.path. When running this
 # benchmark under a per-version venv (e.g. `kglite==0.8.0` installed via
@@ -68,49 +68,50 @@ WIKIDATA_SUBSETS = [
     ("wiki1000m", f"{DATA_DIR}/test_1000M.nt.zst", 1_000_000_000),
 ]
 
-TIMEOUT_MS = 10_000
+TIMEOUT_MS = 30_000
 
 # Same Cypher suite as bench/api_benchmark.py WIKIDATA_QUERIES (kept in
 # sync so per-query times are directly comparable across the two
 # benchmarks).
+#
+# Queries assume the build was run with `languages=["en"]` so the
+# auto_type rename produces English type names (e.g. Q5 → "human").
+# Unanchored `ORDER BY a.title` patterns timed out at 10s on the full
+# 124M-node graph, so the larger queries are anchored to a Q-code
+# (Q42 = Douglas Adams) — gives a deterministic, finite-cost benchmark
+# at every scale instead of a random-walk-style full scan.
 WIKIDATA_QUERIES = [
     (
-        "P31 LIMIT 50",
-        "MATCH (a)-[:P31]->(b) RETURN a.title, b.title ORDER BY a.title, b.title LIMIT 50",
+        "P31 from Q42 LIMIT 50",
+        "MATCH (a {nid: 'Q42'})-[:P31]->(b) RETURN a.title, b.title LIMIT 50",
     ),
     (
-        "Q5 (human) lookup",
-        "MATCH (h:Q5) RETURN h.title ORDER BY h.title LIMIT 10",
+        "human (Q5) lookup",
+        "MATCH (h:human) RETURN h.title ORDER BY h.title LIMIT 10",
     ),
     (
         "P31 class counts",
-        "MATCH ()-[:P31]->(c) RETURN c.title, count(*) AS k "
-        "ORDER BY k DESC, c.title LIMIT 10",
+        "MATCH ()-[:P31]->(c) RETURN c.title, count(*) AS k ORDER BY k DESC, c.title LIMIT 10",
     ),
     (
-        "2-hop P31 + P279",
-        "MATCH (a)-[:P31]->(b)-[:P279]->(c) "
-        "RETURN a.title, c.title ORDER BY a.title, c.title LIMIT 10",
+        "2-hop P31 + P279 from Q42",
+        "MATCH (a {nid: 'Q42'})-[:P31]->(b)-[:P279]->(c) RETURN a.title, c.title LIMIT 10",
     ),
     (
         "Human citizenship (P27)",
-        "MATCH (h:Q5)-[:P27]->(c) "
-        "RETURN h.title, c.title ORDER BY h.title, c.title LIMIT 10",
+        "MATCH (h:human)-[:P27]->(c) RETURN h.title, c.title ORDER BY h.title, c.title LIMIT 10",
     ),
     (
         "OPTIONAL citizenship",
-        "MATCH (h:Q5) OPTIONAL MATCH (h)-[:P27]->(c) "
-        "RETURN h.title, c.title ORDER BY h.title LIMIT 10",
+        "MATCH (h:human) OPTIONAL MATCH (h)-[:P27]->(c) RETURN h.title, c.title ORDER BY h.title LIMIT 10",
     ),
     (
         "EXISTS P27",
-        "MATCH (h:Q5) WHERE EXISTS { MATCH (h)-[:P27]->() } "
-        "RETURN h.title ORDER BY h.title LIMIT 10",
+        "MATCH (h:human) WHERE EXISTS { MATCH (h)-[:P27]->() } RETURN h.title ORDER BY h.title LIMIT 10",
     ),
     (
         "WITH P27 count",
-        "MATCH (h:Q5)-[:P27]->(c) WITH c, count(h) AS k "
-        "RETURN c.title, k ORDER BY k DESC, c.title LIMIT 10",
+        "MATCH (h:human)-[:P27]->(c) WITH c, count(h) AS k RETURN c.title, k ORDER BY k DESC, c.title LIMIT 10",
     ),
 ]
 
@@ -180,7 +181,7 @@ def _emit(version, label, test, wall_ms, **extra):
     print(RESULT_PREFIX + json.dumps(row), flush=True)
 
 
-def _run_scenario(version, label, nt_path, n_triples, data_dir):
+def _run_scenario(version, label, nt_path, n_triples, data_dir, languages):
     """Disk-only build + save + load + cypher. Emits one RESULT: line per step."""
     import kglite  # noqa: F401 — surface import failures clearly
     from kglite import KnowledgeGraph, load
@@ -196,7 +197,10 @@ def _run_scenario(version, label, nt_path, n_triples, data_dir):
     try:
         t0 = time.perf_counter()
         g = KnowledgeGraph(storage="disk", path=str(data_dir))
-        g.load_ntriples(nt_path)
+        load_kwargs: dict = {}
+        if languages:
+            load_kwargs["languages"] = languages
+        g.load_ntriples(nt_path, **load_kwargs)
         # rebuild_caches populates type connectivity and edge counts that
         # the Cypher planner consults — omitting it makes later query
         # numbers incomparable across versions. If the installed version
@@ -276,7 +280,7 @@ def _run_scenario(version, label, nt_path, n_triples, data_dir):
 # ---------------------------------------------------------------------------
 # Parent orchestration
 # ---------------------------------------------------------------------------
-def _spawn_scenario(version, label, nt_path, n_triples):
+def _spawn_scenario(version, label, nt_path, n_triples, languages):
     """Run _run_scenario in a subprocess, stream its RESULT lines back."""
     data_dir = Path(tempfile.gettempdir()) / f"wikibench_{label}"
     shutil.rmtree(data_dir, ignore_errors=True)
@@ -291,11 +295,18 @@ def _spawn_scenario(version, label, nt_path, n_triples):
             "-P",
             __file__,
             "--_scenario",
-            "--version", version,
-            "--label", label,
-            "--path", nt_path,
-            "--triples", str(n_triples),
-            "--data-dir", str(data_dir),
+            "--version",
+            version,
+            "--label",
+            label,
+            "--path",
+            nt_path,
+            "--triples",
+            str(n_triples),
+            "--data-dir",
+            str(data_dir),
+            "--languages",
+            ",".join(languages),
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -308,7 +319,7 @@ def _spawn_scenario(version, label, nt_path, n_triples):
     assert proc.stdout is not None
     for line in proc.stdout:
         if line.startswith(RESULT_PREFIX):
-            rows.append(json.loads(line[len(RESULT_PREFIX):]))
+            rows.append(json.loads(line[len(RESULT_PREFIX) :]))
         else:
             # Echo non-RESULT stderr/stdout so the user sees progress
             # (e.g., verbose load_ntriples output if the version prints it).
@@ -364,16 +375,32 @@ def main():
         help="Comma-separated subset labels (e.g. wiki50m,wiki100m). Default: every subset whose file exists.",
     )
     parser.add_argument("--out", default=str(DEFAULT_CSV), help="Output CSV path.")
+    parser.add_argument(
+        "--languages",
+        default="en",
+        metavar="CODES",
+        help=(
+            "Comma-separated language codes for label/description filtering "
+            "(default: en). Pass an empty string to keep all languages — "
+            "warning: that yields non-deterministic node-type names because "
+            "the auto_type rename picks whichever label was seen first, so "
+            "the canonical Cypher suite (which expects English type names "
+            "like :human) will return 0 rows."
+        ),
+    )
     args = parser.parse_args()
 
+    languages = [c.strip() for c in args.languages.split(",") if c.strip()]
     wanted = {s.strip() for s in args.datasets.split(",") if s.strip()}
     subsets = WIKIDATA_SUBSETS
     if wanted:
         subsets = [s for s in subsets if s[0] in wanted]
 
     import kglite
+
     print(f"KGLite v{kglite.__version__} — wiki disk benchmark")
     print(f"version label: {args.version}")
+    print(f"languages:     {languages or '(all)'}")
     print(f"output CSV:    {args.out}")
 
     for label, path, n_triples in subsets:
@@ -381,7 +408,7 @@ def main():
             print(f"\n  [{label}] skipped — {path} not present")
             continue
         print(f"\n  [{label}]  ({n_triples:,} nominal triples, source={Path(path).name})")
-        rows = _spawn_scenario(args.version, label, path, n_triples)
+        rows = _spawn_scenario(args.version, label, path, n_triples, languages)
         for r in rows:
             _print_row(r)
             _append_row(args.out, r)
@@ -397,7 +424,9 @@ if __name__ == "__main__":
         ap.add_argument("--path", required=True)
         ap.add_argument("--triples", type=int, required=True)
         ap.add_argument("--data-dir", required=True)
+        ap.add_argument("--languages", default="en")
         a = ap.parse_args()
-        _run_scenario(a.version, a.label, a.path, a.triples, a.data_dir)
+        langs = [c.strip() for c in a.languages.split(",") if c.strip()]
+        _run_scenario(a.version, a.label, a.path, a.triples, a.data_dir, langs)
     else:
         main()

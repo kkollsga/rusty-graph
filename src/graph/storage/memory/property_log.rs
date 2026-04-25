@@ -82,6 +82,7 @@ impl PropertyLogWriter {
     }
 
     /// Number of entities written.
+    #[allow(dead_code)] // Kept for direct use by tests + as the sync fallback API.
     pub fn count(&self) -> u64 {
         self.count
     }
@@ -155,6 +156,117 @@ impl Iterator for PropertyLogReader {
                 }))
             }
             Err(e) => Some(Err(io::Error::other(e))),
+        }
+    }
+}
+
+// ─── AsyncPropertyLogWriter ────────────────────────────────────────────────
+
+// `dead_code` allow-list: this is currently unused — measured slower
+// than the sync writer because cross-thread mimalloc cache migration
+// (alloc on loader, free on writer) costs more than the parallelism
+// recovers. Kept as a reference implementation in case the cost
+// balance shifts (e.g., with a per-thread arena or Vec recycling pool
+// for log entries).
+#[allow(dead_code)]
+/// Drop-in replacement for [`PropertyLogWriter`] that performs the
+/// zstd compression + file write on a dedicated background thread.
+///
+/// The N-Triples loader is single-threaded for entity flushing, and
+/// `samply` showed the synchronous zstd compress + bincode serialize
+/// path costing ~3-5% of loader CPU at scale. By moving that work off
+/// the loader thread, the loader can produce entities while the writer
+/// thread streams them to disk in parallel — an additional core that
+/// would otherwise be idle (most of the rayon bzip2-rs workers are
+/// underutilized, and we have headroom).
+///
+/// The interface intentionally mirrors `PropertyLogWriter` so the
+/// loader can swap implementations with no other changes.
+pub struct AsyncPropertyLogWriter {
+    tx: Option<std::sync::mpsc::SyncSender<AsyncMsg>>,
+    handle: Option<std::thread::JoinHandle<io::Result<PathBuf>>>,
+    count: u64,
+}
+
+#[allow(dead_code)]
+enum AsyncMsg {
+    Write(LogEntry),
+    Finish,
+}
+
+#[allow(dead_code)]
+impl AsyncPropertyLogWriter {
+    pub fn new(path: &Path, compression_level: i32) -> io::Result<Self> {
+        let mut writer = PropertyLogWriter::new(path, compression_level)?;
+        // Bounded channel: 64 buffered entries keeps the writer thread
+        // busy without growing memory unboundedly when the loader is
+        // ahead. Each `LogEntry` is small (a few hundred bytes), so
+        // 64 is ~tens of kB cap.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<AsyncMsg>(64);
+        let handle = std::thread::spawn(move || -> io::Result<PathBuf> {
+            for msg in rx {
+                match msg {
+                    AsyncMsg::Write(entry) => {
+                        writer.write_entity(
+                            entry.node_type,
+                            entry.node_idx,
+                            &entry.id,
+                            &entry.title,
+                            &entry.properties,
+                        )?;
+                    }
+                    AsyncMsg::Finish => break,
+                }
+            }
+            writer.finish()
+        });
+        Ok(Self {
+            tx: Some(tx),
+            handle: Some(handle),
+            count: 0,
+        })
+    }
+
+    pub fn write_entity(
+        &mut self,
+        node_type: InternedKey,
+        node_idx: NodeIndex,
+        id: &Value,
+        title: &Value,
+        properties: &[(InternedKey, Value)],
+    ) -> io::Result<()> {
+        let entry = LogEntry {
+            node_type,
+            node_idx,
+            id: id.clone(),
+            title: title.clone(),
+            properties: properties.to_vec(),
+        };
+        match self.tx.as_ref().unwrap().send(AsyncMsg::Write(entry)) {
+            Ok(()) => {
+                self.count += 1;
+                Ok(())
+            }
+            Err(_) => Err(io::Error::other("property log writer thread terminated")),
+        }
+    }
+
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    pub fn finish(mut self) -> io::Result<PathBuf> {
+        // Send Finish then drop the sender so the writer breaks out of
+        // its loop and runs `writer.finish()` (flushes zstd encoder).
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(AsyncMsg::Finish);
+            drop(tx);
+        }
+        match self.handle.take() {
+            Some(h) => h
+                .join()
+                .map_err(|_| io::Error::other("property log writer thread panicked"))?,
+            None => Err(io::Error::other("no property log writer thread to join")),
         }
     }
 }

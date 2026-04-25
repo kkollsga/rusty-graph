@@ -1957,7 +1957,7 @@ impl DiskGraph {
 
         let node_bound = self.node_slots.len();
         let edge_count = pending.len();
-        let verbose = std::env::var("KGLITE_CSR_VERBOSE").is_ok();
+        let verbose = std::env::var("KGLITE_BUILD_DEBUG").is_ok();
         let use_merge_sort = std::env::var("KGLITE_CSR_ALGO").is_ok_and(|v| v == "merge_sort");
         if use_merge_sort {
             self.build_csr_merge_sort(node_bound, edge_count, verbose);
@@ -1978,7 +1978,7 @@ impl DiskGraph {
             return 0;
         }
 
-        let verbose = std::env::var("KGLITE_CSR_VERBOSE").is_ok();
+        let verbose = std::env::var("KGLITE_BUILD_DEBUG").is_ok();
         if verbose {
             eprintln!(
                 "Compacting: {} CSR edges + {} overflow edges",

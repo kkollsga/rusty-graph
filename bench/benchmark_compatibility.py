@@ -8,10 +8,9 @@ Run:  python bench/benchmark_compatibility.py
 """
 
 import os
+from pathlib import Path
 import sys
 import time
-import traceback
-from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import kglite
@@ -27,10 +26,17 @@ MAPPED_ISSUES = []
 
 
 def record(graph_name, mode, test_name, time_ms, rows=None, status="ok", error=None):
-    RESULTS.append({
-        "graph": graph_name, "mode": mode, "test": test_name,
-        "time_ms": round(time_ms, 1), "rows": rows, "status": status, "error": error,
-    })
+    RESULTS.append(
+        {
+            "graph": graph_name,
+            "mode": mode,
+            "test": test_name,
+            "time_ms": round(time_ms, 1),
+            "rows": rows,
+            "status": status,
+            "error": error,
+        }
+    )
     tag = f"{time_ms:>8.1f}ms" if status == "ok" else f"{status:>8s}"
     row_str = f" rows={rows}" if rows is not None else ""
     err_str = f"  {error[:40]}" if error else ""
@@ -69,32 +75,83 @@ def test_legal_graph(g, mode):
     """Test legal graph — in-memory, moderate size."""
     name = "legal"
     info = g.graph_info()
-    print(f"\n  Legal graph ({mode}): {info.get('node_count',0):,} nodes, {info.get('edge_count',0):,} edges")
+    print(f"\n  Legal graph ({mode}): {info.get('node_count', 0):,} nodes, {info.get('edge_count', 0):,} edges")
 
     # Simple queries
     run_query(g, name, mode, "count(n)", "MATCH (n) RETURN count(n)")
     run_query(g, name, mode, "count by type", "MATCH (n) RETURN n.type, count(n) AS c ORDER BY c DESC LIMIT 10")
-    run_query(g, name, mode, "edge count by type", "MATCH ()-[r]->() RETURN type(r), count(*) AS c ORDER BY c DESC LIMIT 10")
+    run_query(
+        g, name, mode, "edge count by type", "MATCH ()-[r]->() RETURN type(r), count(*) AS c ORDER BY c DESC LIMIT 10"
+    )
 
     # ID lookups
     run_query(g, name, mode, "lookup Law by id", "MATCH (n:Law) RETURN n.id, n.title LIMIT 1")
 
     # Traversal
-    run_query(g, name, mode, "Law sections", "MATCH (l:Law)-[:SECTION_OF]->(s:LawSection) RETURN l.title, s.title LIMIT 10")
-    run_query(g, name, mode, "Court cites Law", "MATCH (d:CourtDecision)-[:CITES]->(s:LawSection) RETURN d.title, s.title LIMIT 10")
-    run_query(g, name, mode, "2-hop cites", "MATCH (d:CourtDecision)-[:CITES]->(s:LawSection)-[:SECTION_OF]->(l:Law) RETURN d.title, l.title LIMIT 10")
+    run_query(
+        g, name, mode, "Law sections", "MATCH (l:Law)-[:SECTION_OF]->(s:LawSection) RETURN l.title, s.title LIMIT 10"
+    )
+    run_query(
+        g,
+        name,
+        mode,
+        "Court cites Law",
+        "MATCH (d:CourtDecision)-[:CITES]->(s:LawSection) RETURN d.title, s.title LIMIT 10",
+    )
+    run_query(
+        g,
+        name,
+        mode,
+        "2-hop cites",
+        "MATCH (d:CourtDecision)-[:CITES]->(s:LawSection)-[:SECTION_OF]->(l:Law) RETURN d.title, l.title LIMIT 10",
+    )
 
     # Aggregation
-    run_query(g, name, mode, "cases per keyword", "MATCH (d:CourtDecision)-[:HAS_KEYWORD]->(k:Keyword) RETURN k.title, count(d) AS c ORDER BY c DESC LIMIT 10")
-    run_query(g, name, mode, "most cited laws", "MATCH (d:CourtDecision)-[:CITES]->(s:LawSection)-[:SECTION_OF]->(l:Law) RETURN l.title, count(d) AS c ORDER BY c DESC LIMIT 10")
+    run_query(
+        g,
+        name,
+        mode,
+        "cases per keyword",
+        "MATCH (d:CourtDecision)-[:HAS_KEYWORD]->(k:Keyword) RETURN k.title, count(d) AS c ORDER BY c DESC LIMIT 10",
+    )
+    run_query(
+        g,
+        name,
+        mode,
+        "most cited laws",
+        "MATCH (d:CourtDecision)-[:CITES]->(s:LawSection)-[:SECTION_OF]->(l:Law) RETURN l.title, count(d) AS c ORDER BY c DESC LIMIT 10",
+    )
 
     # Advanced
-    run_query(g, name, mode, "OPTIONAL MATCH", "MATCH (l:Law) OPTIONAL MATCH (l)-[:GOVERNED_BY]->(d:Department) RETURN l.title, d.title LIMIT 10")
-    run_query(g, name, mode, "EXISTS subquery", "MATCH (d:CourtDecision) WHERE EXISTS { MATCH (d)-[:CITES]->() } RETURN d.title LIMIT 5")
-    run_query(g, name, mode, "WITH pipeline", "MATCH (d:CourtDecision)-[:CITES]->(s) WITH s, count(d) AS citations WHERE citations > 5 RETURN s.title, citations ORDER BY citations DESC LIMIT 10")
+    run_query(
+        g,
+        name,
+        mode,
+        "OPTIONAL MATCH",
+        "MATCH (l:Law) OPTIONAL MATCH (l)-[:GOVERNED_BY]->(d:Department) RETURN l.title, d.title LIMIT 10",
+    )
+    run_query(
+        g,
+        name,
+        mode,
+        "EXISTS subquery",
+        "MATCH (d:CourtDecision) WHERE EXISTS { MATCH (d)-[:CITES]->() } RETURN d.title LIMIT 5",
+    )
+    run_query(
+        g,
+        name,
+        mode,
+        "WITH pipeline",
+        "MATCH (d:CourtDecision)-[:CITES]->(s) WITH s, count(d) AS citations WHERE citations > 5 RETURN s.title, citations ORDER BY citations DESC LIMIT 10",
+    )
 
     # Describe
-    run_describe(g, name, mode, "describe()", )
+    run_describe(
+        g,
+        name,
+        mode,
+        "describe()",
+    )
     run_describe(g, name, mode, "describe(types=[Law])", types=["Law"])
 
     # Exploding queries (should not crash)
@@ -103,7 +160,9 @@ def test_legal_graph(g, mode):
 
     # Vector search (if embeddings loaded)
     try:
-        r = g.cypher("MATCH (n:CourtDecision) RETURN n.title, vector_score(n.summary, 'erstatningsrett') AS score ORDER BY score DESC LIMIT 5")
+        r = g.cypher(
+            "MATCH (n:CourtDecision) RETURN n.title, vector_score(n.summary, 'erstatningsrett') AS score ORDER BY score DESC LIMIT 5"
+        )
         ms = 0  # already timed inside
         record(name, mode, "vector_search", 0, rows=len(r) if r else 0)
     except Exception as e:
@@ -114,13 +173,15 @@ def test_prospect_graph(g, mode):
     """Test prospect/Sodir graph — smaller, spatial."""
     name = "prospect"
     info = g.graph_info()
-    print(f"\n  Prospect graph ({mode}): {info.get('node_count',0):,} nodes, {info.get('edge_count',0):,} edges")
+    print(f"\n  Prospect graph ({mode}): {info.get('node_count', 0):,} nodes, {info.get('edge_count', 0):,} edges")
 
     run_query(g, name, mode, "count(n)", "MATCH (n) RETURN count(n)")
     run_query(g, name, mode, "count by type", "MATCH (n) RETURN n.type, count(n) AS c ORDER BY c DESC")
     run_query(g, name, mode, "Wellbore lookup", "MATCH (w:Wellbore) RETURN w.title LIMIT 5")
     run_query(g, name, mode, "Field production", "MATCH (f:Field) RETURN f.title LIMIT 5")
-    run_query(g, name, mode, "Licence connections", "MATCH (l:Licence)-[r]->(n) RETURN l.title, type(r), n.title LIMIT 10")
+    run_query(
+        g, name, mode, "Licence connections", "MATCH (l:Licence)-[r]->(n) RETURN l.title, type(r), n.title LIMIT 10"
+    )
     run_query(g, name, mode, "describe()", "EXPLAIN MATCH (n) RETURN count(n)")
     run_describe(g, name, mode, "describe()")
 
@@ -129,14 +190,16 @@ def test_ntriples_graph(g, mode, label):
     """Test N-Triples graph (500K or 5M)."""
     name = label
     info = g.graph_info()
-    print(f"\n  {label} ({mode}): {info.get('node_count',0):,} nodes, {info.get('edge_count',0):,} edges")
+    print(f"\n  {label} ({mode}): {info.get('node_count', 0):,} nodes, {info.get('edge_count', 0):,} edges")
 
     # Disk/mapped store IDs as integers (42), memory stores as strings ('Q42')
     id_val = 42 if mode in ("disk", "mapped") else "'Q42'"
 
     run_query(g, name, mode, "count(n)", "MATCH (n) RETURN count(n)")
     run_query(g, name, mode, "count by type", "MATCH (n) RETURN n.type, count(n) AS c ORDER BY c DESC LIMIT 10")
-    run_query(g, name, mode, "edge count by type", "MATCH ()-[r]->() RETURN type(r), count(*) AS c ORDER BY c DESC LIMIT 10")
+    run_query(
+        g, name, mode, "edge count by type", "MATCH ()-[r]->() RETURN type(r), count(*) AS c ORDER BY c DESC LIMIT 10"
+    )
     run_query(g, name, mode, "id lookup", f"MATCH (n {{id: {id_val}}}) RETURN n.id, n.title, n.type")
     run_query(g, name, mode, "P31 hop", f"MATCH ({{id:{id_val}}})-[:P31]->(m) RETURN m.title")
     run_query(g, name, mode, "2-hop LIM20", f"MATCH ({{id:{id_val}}})-[]->(b)-[]->(c) RETURN b.title, c.title LIMIT 20")
@@ -174,9 +237,10 @@ def build_ntriples(path, mode, label):
 # Main
 # ═══════════════════════════════════════════════════════════════════
 
+
 def main():
     print(f"KGLite v{kglite.__version__}")
-    print(f"=" * 70)
+    print("=" * 70)
 
     # ── 1. Legal Graph (memory mode) ──
     print("\n" + "=" * 70)
@@ -273,14 +337,14 @@ def main():
             f.write("# Mapped Graph Issues\n\n")
             for issue in MAPPED_ISSUES:
                 f.write(f"- {issue}\n")
-        print(f"\n  Written to mapped-graph-issues.md")
+        print("\n  Written to mapped-graph-issues.md")
 
     # Print failures
     failures = [r for r in RESULTS if r["status"] in ("TIMEOUT", "ERROR")]
     if failures:
-        print(f"\n  Failures:")
+        print("\n  Failures:")
         for r in failures:
-            print(f"    [{r['graph']}/{r['mode']}] {r['test']}: {r['status']} {r.get('error','')}")
+            print(f"    [{r['graph']}/{r['mode']}] {r['test']}: {r['status']} {r.get('error', '')}")
 
     print("\nDone.")
 

@@ -884,7 +884,7 @@ impl DiskGraph {
     /// the current `edge_endpoints`. Safe to call on a loaded graph; writes
     /// `peer_count_*.bin` files next to the other disk artifacts.
     pub fn rebuild_peer_count_histogram(&mut self) {
-        let verbose = std::env::var("KGLITE_CSR_VERBOSE").is_ok();
+        let verbose = std::env::var("KGLITE_BUILD_DEBUG").is_ok();
         self.build_peer_count_histogram(verbose);
     }
 

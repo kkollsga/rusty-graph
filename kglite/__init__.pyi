@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional, Protocol, Union, overload, runtime_checkable
+from typing import Any, Callable, Optional, Protocol, Union, overload, runtime_checkable
 
 import pandas as pd
 
@@ -978,10 +978,10 @@ class KnowledgeGraph:
             # Discovery(123, Johan Sverdrup)
 
             print(graph.select("Discovery")
-                .traverse("HAS_DEPOSIT_PROSPECT")
-                .traverse("TESTED_BY_WELLBORE")
+                .traverse("IN_FIELD")
+                .traverse("DISCOVERY_WELLBORE")
                 .show(["id"]))
-            # Discovery(123) -> Prospect(456) -> Wellbore(789)
+            # Discovery(123) -> Field(456) -> Wellbore(789)
         """
         ...
 
@@ -2113,7 +2113,9 @@ class KnowledgeGraph:
         node_types: dict[str, str] | None = None,
         predicate_labels: dict[str, str] | None = None,
         max_entities: int | None = None,
+        max_triples: int | None = None,
         verbose: bool = False,
+        progress: Callable[[dict], None] | None = None,
     ) -> dict:
         """Load an N-Triples file into the graph.
 
@@ -2146,7 +2148,19 @@ class KnowledgeGraph:
                 Unmapped predicates use the raw P-code.
             max_entities: Stop after creating this many nodes. Useful for
                 exploratory loading of large dumps.
+            max_triples: Stop after scanning this many triples (entity and
+                non-entity lines alike). Applied alongside ``max_entities``;
+                whichever fires first wins. Useful for benchmarking the
+                bz2/gz/plain decompression + parser pipeline at a fixed
+                wall-time-friendly slice.
             verbose: Print progress to stderr every 5M triples.
+            progress: Optional callable receiving structured per-phase
+                events. The callback is invoked with a single dict whose
+                ``"kind"`` is ``"start"``, ``"update"``, or ``"complete"``
+                and whose ``"phase"`` is one of ``"phase1"``, ``"phase1b"``,
+                ``"phase2"``, ``"phase3"``, ``"finalising"``. See
+                ``kglite.progress.TqdmBuildProgress`` for a tqdm-backed
+                reporter. Errors raised by the callback are swallowed.
 
         Returns:
             A dict with load statistics::

@@ -39,6 +39,53 @@ pub(super) enum Object<'a> {
     Other,
 }
 
+// ─── Line batch (cache-friendly transport from reader → loader) ────────────
+
+/// A batch of N-triples lines packed into one contiguous buffer plus an
+/// offset table. Replaces `Vec<String>` for the reader-thread → loader
+/// channel: one allocation per batch instead of 200k separately-heap-
+/// allocated `String` objects, and the loader iterates via byte-offset
+/// math instead of pointer-chasing scattered heap addresses.
+///
+/// Each entry occupies `data[offsets[i]..offsets[i + 1]]` (or
+/// `data[offsets.last()..data.len()]` for the final line). Lines retain
+/// their trailing `\n`; `parse_line` already trims it.
+pub(super) struct LineBuffer {
+    pub(super) data: Vec<u8>,
+    pub(super) offsets: Vec<u32>,
+}
+
+impl LineBuffer {
+    pub(super) fn with_capacity(line_cap: usize, byte_cap: usize) -> Self {
+        Self {
+            data: Vec::with_capacity(byte_cap),
+            offsets: Vec::with_capacity(line_cap),
+        }
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.offsets.is_empty()
+    }
+
+    pub(super) fn push_line(&mut self, line: &[u8]) {
+        let start = self.data.len() as u32;
+        self.data.extend_from_slice(line);
+        self.offsets.push(start);
+    }
+
+    /// Byte slice of line `i`. Caller must ensure `i < self.offsets.len()`.
+    #[inline]
+    pub(super) fn line(&self, i: usize) -> &[u8] {
+        let start = self.offsets[i] as usize;
+        let end = if i + 1 < self.offsets.len() {
+            self.offsets[i + 1] as usize
+        } else {
+            self.data.len()
+        };
+        &self.data[start..end]
+    }
+}
+
 // ─── Edge buffer ────────────────────────────────────────────────────────────
 
 /// Edge buffer: String-based (default mode) or compact u32-based (mapped mode).
@@ -78,13 +125,17 @@ pub(super) struct EntityAccumulator {
 
 impl EntityAccumulator {
     pub(super) fn new(id: String) -> Self {
+        // Preallocate typical Wikidata entity sizes — most have 10-30
+        // properties and a handful of outgoing edges. Avoids the
+        // `RawVecInner::finish_grow` reallocs the loader profile showed
+        // at ~2% of total CPU.
         Self {
             id,
             label: None,
             description: None,
             type_qcode: None,
-            properties: HashMap::new(),
-            outgoing_edges: Vec::new(),
+            properties: HashMap::with_capacity(32),
+            outgoing_edges: Vec::with_capacity(8),
         }
     }
 }
@@ -99,22 +150,47 @@ const SKOS_ALT: &str = "http://www.w3.org/2004/02/skos/core#altLabel";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
 /// Parse a single N-Triples line into (subject, predicate, object).
-/// Returns borrowed slices into the input line — zero heap allocations
+/// Returns borrowed slices into the input line — zero heap allocations.
+///
+/// Hot-path implementation: scans at the byte level using `memchr` to
+/// locate URI boundaries (`>`), avoiding `str::find("> ")`'s
+/// `TwoWaySearcher` setup which showed up at ~10% of loader CPU under
+/// `samply`. N-triples URIs are guaranteed not to contain `>`, so a
+/// single `memchr(b'>')` is sufficient — no two-byte needle search.
 pub(super) fn parse_line(line: &str) -> Option<(Subject<'_>, Predicate<'_>, Object<'_>)> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
+    // Manual byte-level trim — `str::trim()` has O(n) startup overhead.
+    let bytes = line.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    let mut end = bytes.len();
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    if start >= end {
+        return None;
+    }
+    let bytes = &bytes[start..end];
+
+    // Skip comments + non-URI lines fast.
+    if bytes[0] == b'#' || bytes[0] != b'<' {
         return None;
     }
 
-    if !line.starts_with('<') {
+    // Subject URI: find closing `>` at any offset >= 1. URIs in N-triples
+    // cannot contain `>`, so a single memchr is correct without the
+    // two-byte "> " search the previous version used.
+    let subj_end = 1 + memchr::memchr(b'>', &bytes[1..])?;
+    if bytes.get(subj_end + 1) != Some(&b' ') {
         return None;
     }
-    let subj_end = line.find("> ")?;
-    let subj_uri = &line[1..subj_end];
-
+    // SAFETY: we sliced from a valid &str on byte boundaries; URI text
+    // is ASCII so the boundary is preserved.
+    let subj_uri = unsafe { std::str::from_utf8_unchecked(&bytes[1..subj_end]) };
     let subject = if let Some(qcode) = subj_uri.strip_prefix(WD_ENTITY) {
         if qcode.starts_with('Q') {
-            Subject::Entity(qcode) // borrow, no allocation
+            Subject::Entity(qcode)
         } else {
             Subject::Other
         }
@@ -122,16 +198,20 @@ pub(super) fn parse_line(line: &str) -> Option<(Subject<'_>, Predicate<'_>, Obje
         Subject::Other
     };
 
-    let rest = &line[subj_end + 2..];
-    if !rest.starts_with('<') {
+    // Predicate URI starts at subj_end + 2 ("> ").
+    let pred_start = subj_end + 2;
+    if bytes.get(pred_start) != Some(&b'<') {
         return None;
     }
-    let pred_end = rest.find("> ")?;
-    let pred_uri = &rest[1..pred_end];
-
+    let pred_end_rel = memchr::memchr(b'>', &bytes[pred_start + 1..])?;
+    let pred_end = pred_start + 1 + pred_end_rel;
+    if bytes.get(pred_end + 1) != Some(&b' ') {
+        return None;
+    }
+    let pred_uri = unsafe { std::str::from_utf8_unchecked(&bytes[pred_start + 1..pred_end]) };
     let predicate = if let Some(pcode) = pred_uri.strip_prefix(WD_PROP_DIRECT) {
         if pcode.starts_with('P') {
-            Predicate::WikidataDirect(pcode) // borrow, no allocation
+            Predicate::WikidataDirect(pcode)
         } else {
             Predicate::Other
         }
@@ -147,9 +227,25 @@ pub(super) fn parse_line(line: &str) -> Option<(Subject<'_>, Predicate<'_>, Obje
         Predicate::Other
     };
 
-    let obj_str = rest[pred_end + 2..].trim_end();
-    let obj_str = obj_str.strip_suffix('.')?.trim_end();
-
+    // Object section — strip trailing whitespace + final `.`.
+    let mut obj_end = bytes.len();
+    while obj_end > 0 && bytes[obj_end - 1].is_ascii_whitespace() {
+        obj_end -= 1;
+    }
+    if obj_end == 0 || bytes[obj_end - 1] != b'.' {
+        return None;
+    }
+    obj_end -= 1;
+    while obj_end > 0 && bytes[obj_end - 1].is_ascii_whitespace() {
+        obj_end -= 1;
+    }
+    let obj_start = pred_end + 2;
+    if obj_start >= obj_end {
+        return None;
+    }
+    // The object portion may include UTF-8 inside a quoted literal, so
+    // we use checked from_utf8 here (parse_object expects &str).
+    let obj_str = std::str::from_utf8(&bytes[obj_start..obj_end]).ok()?;
     let object = parse_object(obj_str);
 
     Some((subject, predicate, object))

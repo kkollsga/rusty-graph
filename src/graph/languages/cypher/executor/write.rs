@@ -649,9 +649,20 @@ fn execute_delete(
         }
     }
 
-    // Invalidate edge type count cache if any edges were deleted
+    // Invalidate edge-type-related caches when edges are deleted.
+    // The lazy `connection_types` HashSet is consulted *first* by
+    // `has_connection_type`; if it was populated before the delete it
+    // may now contain stale entries (or — worse — be missing nothing
+    // but be checked authoritatively despite this graph having more
+    // types than the cache reflects). Clearing it forces the next
+    // `has_connection_type` call to re-walk metadata + the disk-side
+    // `conn_type_index_*`, which stay live across DETACH DELETE.
+    // 0.8.16 — without this clear, `traverse(conn)` after a DETACH
+    // DELETE on disk graphs errors with "Connection type … does not
+    // exist in graph" even when the conn type still has live edges.
     if stats.relationships_deleted > 0 {
         graph.invalidate_edge_type_counts_cache();
+        graph.connection_types.clear();
     }
 
     // Phase 5: collect node types before deletion (for index cleanup)

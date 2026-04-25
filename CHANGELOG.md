@@ -7,6 +7,282 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.16] — 2026-04-26
+
+### Performance
+
+- **Phase 1 N-Triples loader is ~1.7× faster.** Steady-state on
+  Wikidata's `latest-truthy.nt.bz2` went from ~2.4 M tri/s to
+  **~4.1 M tri/s** (`--size 50` build dropped 20.83 s → 15.96 s; full
+  Wikidata Phase 1 projects from ~2 h to **~70 min**). Profiling with
+  `samply` showed the loader thread spending ~32% of CPU in
+  `libsystem_malloc` and ~10.7% in `core::str::pattern::TwoWaySearcher`
+  (used by `str::find`). Four targeted changes:
+  - **Byte-level `parse_line`** (`src/graph/io/ntriples/parser.rs`):
+    swap `line.find("> ")` for `memchr::memchr(b'>')`. URIs in
+    N-triples cannot contain `>`, so a single byte scan is sufficient.
+  - **`EntityAccumulator` capacity preallocation**
+    (`HashMap::with_capacity(32)`, `Vec::with_capacity(8)`):
+    eliminates `RawVecInner::finish_grow` reallocs in the per-entity
+    accumulator.
+  - **`scratch_props` reuse in `flush_entity`**: hoist the
+    `Vec<(InternedKey, Value)>` out of the function so the alloc cost
+    is paid once per build instead of per entity.
+  - **`mimalloc` as global allocator** (`src/lib.rs`): pure Rust /
+    build-time-only dependency; ~10% wall-time win on the loader on
+    top of the parser-side changes.
+- **Reader-thread channel batches 50k → 200k.** Reduces per-batch
+  sync overhead 4× without growing peak RSS meaningfully.
+
+### Added
+
+- **Block-level parallel decoder for single-stream `.bz2` files.** Wikidata
+  ships `latest-truthy.nt.bz2` as a single bz2 stream, so the existing
+  stream-level scanner in `parallel_bz2.rs` was falling through to a
+  single-threaded `MultiBzDecoder` (~1 M triples/s ceiling). The new
+  single-stream path delegates to `bzip2_rs::ParallelDecoderReader`
+  (paolobarbolini/bzip2-rs, MIT/Apache-2.0), which finds bit-aligned
+  block magics inside one stream and decodes blocks on rayon workers.
+  Measured Phase 1 throughput on Wikidata: **~1.0 M tri/s → ~3.3 M tri/s
+  (3.3× speedup)** at the same memory ceiling. Multistream files still
+  use the existing stream-level path. Pinned to a git rev because the
+  published 0.1.2 crate ships an older `Cargo.toml` without the `rayon`
+  feature flag.
+- **Phase 1 progress bar now shows ETA when `max_entities` is set.**
+  When the caller has set an entity cap, the loader emits the bar
+  position as `entities_created` against `total = max_entities`, so
+  tqdm can compute ETA from the entity rate. Without a cap the bar
+  still tracks triples (no total → no ETA, just rate). The unused
+  counter ships in the event's `fields` dict either way.
+- **Ctrl+C cancellation of `load_ntriples` builds.** Phase 1 runs
+  inside `py.detach()` (GIL released so Python heartbeat threads can
+  run), which previously meant SIGINT couldn't reach Python until the
+  Rust call returned — i.e. Ctrl+C did nothing during a multi-hour
+  Wikidata build. The progress sink now reacquires the GIL on every
+  update event and calls `Python::check_signals`; a pending SIGINT
+  flows back through a new `Cancelled` marker on `ProgressSink::emit`,
+  unwinds the loader cleanly, and surfaces as `KeyboardInterrupt` on
+  the Python side. Cancellation requires a `progress=` callback (which
+  is the default in the bench script and dataset wrappers).
+
+### Changed
+
+- **`bench/wikidata_e2e.py` CLI overhaul.** `--progress` is now the
+  default (use `--legacy-progress` for the old `[Phase X]` stderr
+  output). Removed `--quiet` — wrapper-level status messages
+  (cooldown checks, cache hits) print regardless; the loader's
+  per-phase eplog lines are auto-silenced when tqdm is active so they
+  don't fight the bar. Renamed `--size` to `--entities-m` to make it
+  clear the cap is in millions of *entities*, not triples (`--size`
+  remains as a deprecated alias).
+- **`kglite.datasets.wikidata.open` auto-silences the loader when
+  `progress=` is set.** Wrapper-level `verbose=True` controls the
+  cache-hit / cooldown messages; loader `verbose` is forced off when
+  a progress callback is wired so tqdm owns the terminal.
+
+### Added (continued)
+
+- **Structured build-phase progress callback for `load_ntriples`.** New
+  `progress=` kwarg accepts a Python callable that receives one dict
+  per phase event (`start` / `update` / `complete`) for each of
+  `phase1` (streaming), `phase1b` (columnar build), `phase2` (edges),
+  `phase3` (CSR), and `finalising`. Phase 1 fires updates every 5M
+  triples (decoupled from the 60s stderr gate) so a UI driven by the
+  callback stays live. Errors raised by the callback are swallowed so
+  a broken UI cannot kill a multi-hour build.
+  Pure-Rust trait `ProgressSink` lives in
+  `src/graph/io/ntriples/mod.rs`; the PyO3 adapter that translates a
+  Python callable into a sink lives in `src/graph/pyapi/kg_core.rs`,
+  keeping the loader free of `pyo3` types.
+- **`kglite.progress.TqdmBuildProgress`** — drop-in tqdm-backed
+  reporter. One bar per phase, with RSS (via `psutil`) and per-phase
+  counters in the postfix. `pip install tqdm psutil` to use.
+- **`bench/wikidata_e2e.py --progress`** — opt-in flag that wires
+  `TqdmBuildProgress` into the e2e benchmark.
+
+### Fixed
+
+- **`load_ntriples` no longer panics with `slice index starts at A
+  but ends at B` on large disk/mapped builds.** Wikidata builds past
+  ~450 M triples crashed in `MmapColumnStore::read_str` on reload.
+  Root cause: `flush_entity` for entities whose ID didn't parse as a
+  Q-code wrote `Value::String(acc.id)` into the `nid` column, which
+  flipped that column's `id_is_string=true`. Subsequent entities with
+  `Value::UniqueId` left their string offsets uninitialised (zero), so
+  reload hit `start > end` decoding them. Fix: in disk/mapped mode,
+  skip entities whose ID is not a parseable Q-code at the top of
+  `flush_entity` (these were unreachable in the canonical Wikidata
+  query surface anyway). In-memory mode is unaffected.
+- **Cypher `DETACH DELETE` no longer breaks subsequent typed-edge
+  traversals.** Pre-fix, after a Cypher `DETACH DELETE`, fluent
+  `g.select(t).traverse(conn_type, ...)` (and any `make_traversal`
+  caller) would throw *"Connection type 'X' does not exist in
+  graph"* even when `X` still had millions of live edges. The
+  Cypher executor's `execute_delete` invalidated the
+  `edge_type_counts_cache` but left the `connection_types`
+  HashSet alone — `has_connection_type()` consults the HashSet
+  first and returned a stale negative. Fix: clear the
+  `connection_types` cache on Cypher delete, and add a final
+  fall-through in `has_connection_type()` to the disk backend's
+  authoritative `conn_type_index_*` arrays.
+  Surfaced by `bench/benchmark_full.py` against every disk row.
+
+### Performance
+
+- **Parallel multistream `.bz2` decoder for `load_ntriples` —
+  closes the gap with `.zst`.** Wikidata / pbzip2 dumps are a
+  concatenation of independent bz2 streams; the previous
+  `bzip2::read::MultiBzDecoder` walked them sequentially on a
+  single core. New `parallel_bz2::open()` (in
+  `src/graph/io/ntriples/parallel_bz2.rs`) scans the file for
+  `BZh[1-9]` + 6-byte block magic, dispatches streams to a
+  worker pool sized by a memory budget (256 MB default, after
+  pbzip2's `NumBufferedBlocksMax`), and re-orders the
+  decompressed chunks behind a single `Read` surface. Single-
+  stream `.bz2` files take a fast path through `MultiBzDecoder`
+  with no thread-pool overhead. Workers join before
+  `load_ntriples` exits Phase 1, so no parallelism leaks into
+  the Phase-2/3 rayon pool.
+  Measured: wiki100m bz2 **99 s → 34 s (2.9×)**, wiki200m
+  **199 s → 71 s (2.8×)**. bz2/zst ratio 3.4× → 1.19×.
+- **`enable_columnar()` is now idempotent on the already-columnar
+  fast path.** Previously, every `g.save()` re-ran the full
+  per-node columnar rebuild — even when the graph was already
+  columnar and unmodified. At wiki100m memory mode this cost
+  ~257 s of pure waste on consecutive saves. Now `enable_columnar`
+  walks every node once (O(N) cheap matches) and short-circuits
+  if all nodes are `PropertyStorage::Columnar` AND their
+  `Arc<ColumnStore>` matches `graph.column_stores` for the type
+  (the Arc-pointer check catches the common
+  `add_nodes(conflict_handling="update")` fork pattern that would
+  otherwise lose updates on save). Measured wiki5m: consecutive
+  `save()` 455 ms → **177 ms (2.6×)**.
+
+### Changed
+
+- **`verbose=True` on `load_ntriples` is now phase-oriented.** Previous
+  output was a mix of `[T+30s]` timestamps and ad-hoc sub-step prints;
+  Phase 2/3 output in particular was developer-grade noise. The new
+  output is a small set of `[Phase N]` gate messages — open/close
+  pairs around each major stage of the build:
+  ```
+  [Phase 1] Streaming and parsing N-triples (...)
+  [Phase 1] 12.3M triples, 2.8M entities, 8.5M edges buffered — 205k triples/s
+  [Phase 1] Complete: ... in 47m18s
+  [Phase 1b] Building columnar storage (...)
+  [Phase 1b] Complete in 8m42s
+  [Phase 2] Creating edges
+  [Phase 2] Complete: ... edges in 11m22s
+  [Phase 3] Building CSR edge index
+  [Phase 3] Complete in 2m04s
+  [Finalising] Building auxiliary indexes + saving metadata
+  [Finalising] Complete in 32s
+  [Build] Total elapsed: 1h09m54s
+  ```
+  Sub-step timings (CSR step 1/4, peer-count histogram, mmap layout,
+  per-type flush logs, interner save timings, Q-code resolution
+  timings, …) move behind `KGLITE_BUILD_DEBUG=1`. The legacy
+  `KGLITE_CSR_VERBOSE` env var is replaced by `KGLITE_BUILD_DEBUG`
+  (one flag for all build sub-step output).
+
+### Added
+
+- **`kglite.datasets.sodir.open(workdir, ...)` — one-call lifecycle for
+  Sodir factmaps petroleum data.** Resolves CSVs from the public
+  ArcGIS FeatureServer at
+  `https://factmaps.sodir.no/api/rest/services/DataService`, applies
+  the FK pre-processing the existing build script does, and builds
+  the graph via the packaged blueprint. Default storage is
+  ``memory`` — Sodir is small enough that disk caching adds little
+  on top of CSV caching:
+
+      g = sodir.open("/data/sodir")  # memory; index_cooldown_days=14, dataset_cooldown_days=30
+      g = sodir.open("/data/sodir", storage="disk")  # opt-in for cross-process reuse
+
+  Workdir layout: `csv/` (fetched datasets, flat), `sodir_index.json`
+  (per-dataset row count + timestamps), `graph/` (disk-mode only).
+  Index sweep cheaply re-checks remote row counts every 14 days; only
+  changed datasets re-download. Hard cooldown forces full per-dataset
+  refresh every 30 days even if counts match.
+
+  **Complement blueprints**: pass
+  ``complement_blueprint=path/to/extra.json`` to add new node types
+  / edges on top of the packaged baseline. The file is persisted to
+  ``workdir/blueprint_complement.json`` on first call and auto-loaded
+  on subsequent calls. Pass ``use_complement=False`` to skip it for a
+  single call, or ``sodir.remove_complement(workdir)`` to drop it
+  permanently. Deep merge with **base-wins on key collisions by
+  default** (the packaged baseline tracks the canonical Sodir REST
+  catalog and stays authoritative); set
+  ``complement_overrides=True`` to flip when the complement should
+  win.
+
+  The blueprint walker auto-detects which datasets are referenced and
+  fetches only those — adding new node types to the blueprint
+  triggers fetches the next time `open()` runs. The packaged
+  baseline ships only the 33 node types whose CSVs are fetchable
+  from REST (no sideloaded prospect / play / ocean data); use a
+  complement to layer those in.
+
+  **Parallel fetcher**: ``workers`` parameter (default 4) drives a
+  thread-pool that pulls dataset jobs off a shared backlog. tqdm
+  progress bar replaces per-dataset prints so verbose output stays
+  one line tall. Geometry handler is defensive against empty
+  ``coordinates: []`` (some pre-1970 Sodir wellbores) — drops those
+  features' geometry without aborting the fetch. KGLite is independent of Sodir / the
+  Norwegian Offshore Directorate; see module docstring. Catalog
+  (LAYERS / TABLES / FACTMAPS_LAYERS) vendored from
+  `kkollsga/factpages-py`.
+
+- **`kglite.datasets.wikidata.open(workdir, ...)` — one-call lifecycle
+  for Wikidata `latest-truthy` graphs.** Resolves the dump (download,
+  resume `.part`, refresh on cooldown), builds the disk or in-memory
+  graph, and returns it. Subsequent calls cache-hit on the saved
+  graph at `workdir/graph[_<N>m]/`. Two storage backends:
+
+      g_full = wikidata.open("/data/wd")                        # disk graph
+      g_100m = wikidata.open("/data/wd", entity_limit_millions=100)
+      g_mem  = wikidata.open("/data/wd", storage="memory",      # rebuild every call
+                              entity_limit_millions=10)
+
+  Sized slices (`entity_limit_millions=100/200/...`) live alongside
+  the full graph (`graph_100m/`, `graph_200m/`, `graph/`) and all
+  share the same `latest-truthy.nt.bz2` dump under `workdir`.
+
+  Also exports `fetch_truthy(workdir, cooldown_days=31)` for the
+  dump-only path. KGLite is independent of the Wikimedia Foundation;
+  see module docstring.
+
+- **`load_ntriples` releases the GIL.** Multi-minute loads no longer
+  block Python threads — heartbeat / progress monitors and other
+  background workers run on schedule throughout the build. Required
+  for the new minute-cadence reporting in
+  `examples/wikidata_disk.py`.
+- **`bench/benchmark_full.py`** — full-stack lifecycle benchmark
+  (build / save / load / mutate / resave / Cypher / fluent) across
+  every storage mode × Wikidata subset. Wide-pivot CSV output —
+  one row per (run, mode, dataset). Errors preserved both in the
+  `errors` column (truncated, semicolon-separated) and in a
+  sidecar `bench/benchmark_full.errors.log` (full text,
+  tab-separated for `cut`-friendly inspection).
+- **`bench/results.py`** — pandas-backed analysis tool over the
+  bench CSV. Three commands: `latest` (most recent measurement
+  per cell), `trends` (per-run time-series for filtered cells),
+  `deltas` (consecutive-run deltas — surfaces regressions). Use
+  `--mode` / `--dataset` / `--cols` filters.
+- **`--languages` CLI flag on `bench/wiki_benchmark.py` and
+  `bench/api_benchmark.py`** (default `en`). Matches the existing
+  flag on `bench/wikidata_e2e.py`. Threads through subprocess
+  scenarios via argv (wiki_benchmark) and `KGLITE_BENCH_LANGUAGES`
+  env (api_benchmark, which uses positional args). Pass
+  `--languages ""` to keep all languages, but the canonical query
+  suite expects English type names like `:human` and will return
+  zero rows otherwise.
+- **Post-build SANITY PROBE in `bench/wikidata_e2e.py`.** Quick Q42
+  title/description lookup + top-5 type histogram printed after
+  every build, even with `--no-queries`. Catches language-filter or
+  auto-type-rename regressions immediately, before query-suite time.
+
 ## [0.8.15] — 2026-04-25
 
 ### Performance

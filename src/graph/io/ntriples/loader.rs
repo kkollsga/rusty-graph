@@ -9,7 +9,6 @@ use crate::graph::schema::{DirGraph, InternedKey, NodeData, PropertyStorage, Typ
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use crate::graph::storage::type_build_meta::{ColType, TypeBuildMeta};
 use crate::graph::storage::{GraphRead, GraphWrite};
-use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -23,7 +22,33 @@ use super::parser::{
     EdgeBuffer, EntityAccumulator, Object, Predicate, Subject,
 };
 use super::writer::{create_edges_from_buffer, create_edges_with_qnum_map};
-use super::{NTriplesConfig, NTriplesStats};
+use super::{
+    Cancelled, NTriplesConfig, NTriplesStats, ProgressEvent, ProgressSink, ProgressValue as PV,
+};
+
+macro_rules! eplog {
+    ($($arg:tt)*) => {
+        eprintln!("[{}] {}", chrono::Local::now().format("%H:%M:%S"), format_args!($($arg)*))
+    };
+}
+
+/// Sentinel string returned from `load_ntriples` when the configured
+/// `ProgressSink` requests cancellation. The pyapi layer maps this to
+/// `PyKeyboardInterrupt` so users see the right exception type.
+const CANCELLED_TOKEN: &str = "<cancelled>";
+
+/// Forward an event to the configured sink, if any. The sink may
+/// request cancellation by returning `Err(Cancelled)`; the loader
+/// surfaces that as `Err("<cancelled>")` so it can short-circuit at
+/// the next safe point.
+#[inline]
+fn emit(sink: Option<&dyn ProgressSink>, event: ProgressEvent<'_>) -> Result<(), String> {
+    if let Some(s) = sink {
+        s.emit(event)
+            .map_err(|Cancelled| CANCELLED_TOKEN.to_string())?;
+    }
+    Ok(())
+}
 
 pub fn load_ntriples(
     graph: &mut DirGraph,
@@ -34,26 +59,40 @@ pub fn load_ntriples(
     let path_obj = Path::new(path);
 
     // Open decompression reader
-    let file = File::open(path_obj).map_err(|e| format!("Cannot open {}: {}", path, e))?;
     let reader: Box<dyn Read + Send> = if path.ends_with(".bz2") {
-        Box::new(BzDecoder::new(BufReader::new(file)))
-    } else if path.ends_with(".gz") {
-        Box::new(GzDecoder::new(BufReader::new(file)))
-    } else if path.ends_with(".zst") || path.ends_with(".zstd") {
-        Box::new(
-            zstd::Decoder::new(BufReader::new(file))
-                .map_err(|e| format!("zstd decoder error: {}", e))?,
-        )
+        // Multistream bz2 (pbzip2 / Wikidata dumps) decompresses
+        // in parallel; single-stream files fall through to
+        // `MultiBzDecoder` inside `parallel_bz2::open`.
+        super::parallel_bz2::open(path_obj).map_err(|e| format!("Cannot open {}: {}", path, e))?
     } else {
-        Box::new(file)
+        let file = File::open(path_obj).map_err(|e| format!("Cannot open {}: {}", path, e))?;
+        if path.ends_with(".gz") {
+            Box::new(GzDecoder::new(BufReader::new(file)))
+        } else if path.ends_with(".zst") || path.ends_with(".zstd") {
+            Box::new(
+                zstd::Decoder::new(BufReader::new(file))
+                    .map_err(|e| format!("zstd decoder error: {}", e))?,
+            )
+        } else {
+            Box::new(file)
+        }
     };
-    // Reader thread: decompresses + reads lines via channel (hides I/O latency)
-    const BATCH_SIZE: usize = 50_000;
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<String>>(8);
+    // Reader thread: decompresses + reads lines via channel (hides I/O latency).
+    //
+    // Each batch packs lines into a single `LineBuffer` (contiguous bytes
+    // + offset table) instead of `Vec<String>` with 200k separately
+    // heap-allocated `String`s. Cache-friendly iteration on the loader
+    // side, no per-line allocation in the reader, and the channel
+    // transports one buffer at a time. Channel capacity 32 × ~16 MB =
+    // ~512 MB ceiling on in-flight bytes — well within memory budget,
+    // smooths out short loader stalls.
+    const BATCH_SIZE: usize = 200_000;
+    const TARGET_BATCH_BYTES: usize = 16 * 1024 * 1024;
+    let (tx, rx) = std::sync::mpsc::sync_channel::<super::parser::LineBuffer>(32);
     let reader_handle = std::thread::spawn(move || {
         let mut reader = BufReader::with_capacity(8 * 1024 * 1024, reader);
         let mut raw = Vec::with_capacity(512);
-        let mut batch = Vec::with_capacity(BATCH_SIZE);
+        let mut batch = super::parser::LineBuffer::with_capacity(BATCH_SIZE, TARGET_BATCH_BYTES);
         let prefix: &[u8] = b"<http://www.wikidata.org/entity/Q";
 
         loop {
@@ -65,19 +104,19 @@ pub fn load_ntriples(
                 break;
             }
 
-            // Fast reject at byte level — skip non-entity lines without String allocation
+            // Fast reject at byte level — skip non-entity lines.
             if !raw.starts_with(prefix) {
                 continue;
             }
 
-            // Only allocate String for entity lines
-            let line = String::from_utf8_lossy(&raw).into_owned();
-            batch.push(line);
-            if batch.len() >= BATCH_SIZE {
-                if tx.send(batch).is_err() {
+            // Append raw bytes to the current batch; no `String` allocation.
+            batch.push_line(&raw);
+            if batch.offsets.len() >= BATCH_SIZE || batch.data.len() >= TARGET_BATCH_BYTES {
+                let next = super::parser::LineBuffer::with_capacity(BATCH_SIZE, TARGET_BATCH_BYTES);
+                let full = std::mem::replace(&mut batch, next);
+                if tx.send(full).is_err() {
                     break;
                 }
-                batch = Vec::with_capacity(BATCH_SIZE);
             }
         }
     });
@@ -156,8 +195,8 @@ pub fn load_ntriples(
                 }
             }
             let log_path = spill_dir.join("properties.log.zst");
-            if config.verbose {
-                eprintln!("  Property log: {}", log_path.display());
+            if build_debug() {
+                eplog!("  Property log: {}", log_path.display());
             }
             Some(
                 crate::graph::storage::memory::property_log::PropertyLogWriter::new(&log_path, 1)
@@ -229,49 +268,108 @@ pub fn load_ntriples(
     };
 
     let mut entity_limit_reached = false;
+    // Reusable scratch buffer for `flush_entity`'s property-log
+    // `Vec<(InternedKey, Value)>`. Hoisted out of `flush_entity` so the
+    // alloc + grow cost is paid once, not per entity (~2% of loader CPU
+    // under samply).
+    let mut scratch_props: Vec<(InternedKey, Value)> = Vec::with_capacity(64);
     // Cheap bucket counter (decrement in the hot loop); every 5M triples we
-    // check wall time and only log if >=15s have elapsed since the last line.
+    // check wall time and only log a `[Phase 1]` progress line if at least
+    // PROGRESS_INTERVAL_SECS have elapsed since the last line.
     let mut progress_countdown: u64 = 5_000_000;
     let mut last_progress_log = Instant::now();
     const PROGRESS_BUCKET: u64 = 5_000_000;
-    const PROGRESS_INTERVAL_SECS: f64 = 15.0;
+    const PROGRESS_INTERVAL_SECS: f64 = 60.0;
     let include_labels = true;
-    const ENTITY_PREFIX: &[u8] = b"<http://www.wikidata.org/entity/Q";
+
+    if config.verbose {
+        eplog!("[Phase 1] Streaming and parsing N-triples ({})", path);
+    }
+    let sink = config.progress.as_deref();
+    // The bar tracks triples — the loop's natural unit. When the
+    // caller has set `max_triples` we use that as the bar's total so
+    // tqdm shows ETA; otherwise the bar runs unbounded.
+    let phase1_label = format!(
+        "Phase 1: Streaming N-triples ({})",
+        path_obj
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(path)
+    );
+    emit(
+        sink,
+        ProgressEvent::Start {
+            phase: "phase1",
+            label: &phase1_label,
+            total: config.max_triples,
+            unit: "tri",
+        },
+    )?;
 
     'outer: for batch in &rx {
-        for line in &batch {
+        let n_lines = batch.offsets.len();
+        for i in 0..n_lines {
+            // Slice into the batch's contiguous buffer — pointer math,
+            // no per-line heap dereference. SAFETY: bytes originated
+            // from a UTF-8 input stream; `parse_line` re-validates the
+            // sub-slices it actually returns.
+            let line = unsafe { std::str::from_utf8_unchecked(batch.line(i)) };
             if entity_limit_reached && current.is_none() {
                 break 'outer;
+            }
+            // `max_triples` short-circuit: hard-stop after N triples
+            // scanned, regardless of entity progress. Unlike the
+            // `max_entities` check above we don't gate on
+            // `current.is_none()` — `current` is essentially always
+            // `Some` during steady-state Wikidata reading (subject-sorted
+            // dump = always mid-entity), so the gate would never trip.
+            // We trade losing one in-progress entity for a deterministic
+            // triple cap; that's the right call for a perf benchmark.
+            if let Some(cap) = config.max_triples {
+                if stats.triples_scanned >= cap {
+                    break 'outer;
+                }
             }
 
             stats.triples_scanned += 1;
 
-            if config.verbose {
-                progress_countdown -= 1;
-                if progress_countdown == 0 {
-                    progress_countdown = PROGRESS_BUCKET;
-                    if last_progress_log.elapsed().as_secs_f64() >= PROGRESS_INTERVAL_SECS {
-                        let elapsed = start.elapsed().as_secs_f64();
-                        let rate = stats.triples_scanned as f64 / elapsed;
-                        let buf_len = edge_buffer.len() as u64;
-                        eprintln!(
-                            "  [T+{:>5.0}s] {:>12} triples | {:>8} entities | {:>8} edges buffered | {:.0} triples/s",
-                            elapsed,
-                            format_count(stats.triples_scanned),
-                            format_count(stats.entities_created),
-                            format_count(buf_len),
-                            rate,
-                        );
-                        last_progress_log = Instant::now();
-                    }
+            progress_countdown -= 1;
+            if progress_countdown == 0 {
+                progress_countdown = PROGRESS_BUCKET;
+                let buf_len = edge_buffer.len() as u64;
+                // Callback fires on every bucket so tqdm stays live;
+                // the sink may also signal cancellation here (Ctrl+C).
+                emit(
+                    sink,
+                    ProgressEvent::Update {
+                        phase: "phase1",
+                        current: stats.triples_scanned,
+                        fields: &[
+                            ("entities", PV::U64(stats.entities_created)),
+                            ("edges_buffered", PV::U64(buf_len)),
+                        ],
+                    },
+                )?;
+                // eplog stays on the 60s gate so terminal output isn't spammed.
+                if config.verbose
+                    && last_progress_log.elapsed().as_secs_f64() >= PROGRESS_INTERVAL_SECS
+                {
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let rate = stats.triples_scanned as f64 / elapsed;
+                    eplog!(
+                        "[Phase 1] {} triples, {} entities, {} edges buffered — {:.0}k triples/s",
+                        format_count(stats.triples_scanned),
+                        format_count(stats.entities_created),
+                        format_count(buf_len),
+                        rate / 1000.0,
+                    );
+                    last_progress_log = Instant::now();
                 }
             }
 
-            // Fast reject: skip non-entity lines before parsing (~60-80% of all lines)
-            if !line.as_bytes().starts_with(ENTITY_PREFIX) {
-                continue;
-            }
-
+            // Note: the reader thread already filters out non-entity
+            // lines via `starts_with(ENTITY_PREFIX)` before they reach
+            // the channel, so no redundant prefix check is needed here.
             let (subject, predicate, object) = match parse_line(line) {
                 Some(parsed) => parsed,
                 None => continue,
@@ -296,6 +394,7 @@ pub fn load_ntriples(
                         &mut label_writer,
                         &mut type_meta,
                         &mut qnum_to_idx,
+                        &mut scratch_props,
                     );
                 }
                 if entity_limit_reached {
@@ -373,6 +472,12 @@ pub fn load_ntriples(
             }
         } // end for line in batch
     } // end for batch in rx
+      // CRITICAL: drop `rx` before joining so the reader thread's
+      // `tx.send` returns Err (channel closed) on its next batch and
+      // exits. Without this, an early `break 'outer` (e.g. from the
+      // `max_triples` cap) leaves the reader thread blocked on a full
+      // bounded channel that nobody is draining → `join()` deadlocks.
+    drop(rx);
     let _ = reader_handle.join();
 
     // Flush last entity
@@ -388,6 +493,7 @@ pub fn load_ntriples(
             &mut label_writer,
             &mut type_meta,
             &mut qnum_to_idx,
+            &mut scratch_props,
         );
     }
 
@@ -407,8 +513,8 @@ pub fn load_ntriples(
         });
         let path = spill_dir.join("labels.bin");
         let journal_size = writer.finish().unwrap_or(0);
-        if config.verbose {
-            eprintln!(
+        if build_debug() {
+            eplog!(
                 "  Label journal: {} bytes on disk",
                 format_count(journal_size)
             );
@@ -431,9 +537,7 @@ pub fn load_ntriples(
         // forward scan; skips unwanted records without allocating.
         let label_lookup: HashMap<u32, String> = if let Some(ref path) = label_journal_path {
             super::label_spill::read_labels_for(path, &wanted).unwrap_or_else(|e| {
-                if config.verbose {
-                    eprintln!("  WARN: failed to read label journal: {}", e);
-                }
+                eplog!("  WARN: failed to read label journal: {}", e);
                 HashMap::new()
             })
         } else {
@@ -452,8 +556,8 @@ pub fn load_ntriples(
         }
         if !renames.is_empty() {
             let rename_start = std::time::Instant::now();
-            if config.verbose {
-                eprintln!(
+            if build_debug() {
+                eplog!(
                     "  Resolving {} Q-code type names to labels...",
                     renames.len()
                 );
@@ -557,44 +661,67 @@ pub fn load_ntriples(
                     unreachable!("ntriples loader does not run on a Recording-wrapped graph");
                 }
             }
-            if config.verbose {
-                eprintln!(
-                    "  [T+{:.0}s] Resolved {} Q-code types ({:.1}s)",
-                    start.elapsed().as_secs_f64(),
+            if build_debug() {
+                eplog!(
+                    "  Resolved {} Q-code types ({})",
                     renames.len(),
-                    rename_start.elapsed().as_secs_f64()
+                    fmt_dur(rename_start.elapsed().as_secs_f64())
                 );
             }
         }
     }
 
+    let phase1_elapsed = start.elapsed().as_secs_f64();
+    let phase1_buf_len = edge_buffer.len() as u64;
+    let phase1_num_types = type_meta.len() as u64;
+    let phase1_total_cols: u64 = type_meta.values().map(|m| m.columns.len() as u64).sum();
     if config.verbose {
-        let t = start.elapsed().as_secs_f64();
-        let buf_len = edge_buffer.len() as u64;
-        let num_types = type_meta.len();
-        let total_cols: usize = type_meta.values().map(|m| m.columns.len()).sum();
-        eprintln!(
-            "  [T+{:.0}s] Phase 1 done: {} entities, {} edges buffered, {} types, {} columns",
-            t,
+        eplog!(
+            "[Phase 1] Complete: {} entities, {} types ({} columns), {} edges buffered in {}",
             format_count(stats.entities_created),
-            format_count(buf_len),
-            format_count(num_types as u64),
-            format_count(total_cols as u64),
+            format_count(phase1_num_types),
+            format_count(phase1_total_cols),
+            format_count(phase1_buf_len),
+            fmt_dur(phase1_elapsed),
         );
     }
+    emit(
+        sink,
+        ProgressEvent::Complete {
+            phase: "phase1",
+            elapsed_s: phase1_elapsed,
+            fields: &[
+                ("entities", PV::U64(stats.entities_created)),
+                ("edges_buffered", PV::U64(phase1_buf_len)),
+                ("types", PV::U64(phase1_num_types)),
+                ("columns", PV::U64(phase1_total_cols)),
+                ("triples_scanned", PV::U64(stats.triples_scanned)),
+            ],
+        },
+    )?;
 
     // Phase 1b: Convert to columnar storage.
     // For Disk mode: pre-allocate columns from metadata, then direct-write from log.
     // For Mapped mode: bulk convert from HashMap properties.
     if let Some(log_writer) = prop_log.take() {
+        let phase1b_total = log_writer.count();
+        let phase1b_label = format!(
+            "Phase 1b: Building columnar storage ({} entities, {} types)",
+            format_count(phase1b_total),
+            type_meta.len(),
+        );
         if config.verbose {
-            eprintln!(
-                "  [T+{:.0}s] Phase 1b: building columns with direct-write ({} entities, {} types)...",
-                start.elapsed().as_secs_f64(),
-                format_count(log_writer.count()),
-                type_meta.len(),
-            );
+            eplog!("[Phase 1b] {}", phase1b_label);
         }
+        emit(
+            sink,
+            ProgressEvent::Start {
+                phase: "phase1b",
+                label: &phase1b_label,
+                total: Some(phase1b_total),
+                unit: "ent",
+            },
+        )?;
         let conv_start = Instant::now();
         let log_path = log_writer
             .finish()
@@ -604,19 +731,26 @@ pub fn load_ntriples(
             &log_path,
             &type_meta,
             &type_rename_map,
-            config.verbose,
+            build_debug(),
+            sink,
         )
         .map_err(|e| format!("Failed to build columns: {}", e))?;
         let _ = std::fs::remove_file(&log_path);
         if let Some(parent) = log_path.parent() {
             let _ = std::fs::remove_dir(parent);
         }
+        let phase1b_elapsed = conv_start.elapsed().as_secs_f64();
         if config.verbose {
-            eprintln!(
-                "  Phase 1b done ({:.1}s)",
-                conv_start.elapsed().as_secs_f64()
-            );
+            eplog!("[Phase 1b] Complete in {}", fmt_dur(phase1b_elapsed));
         }
+        emit(
+            sink,
+            ProgressEvent::Complete {
+                phase: "phase1b",
+                elapsed_s: phase1b_elapsed,
+                fields: &[("entities", PV::U64(phase1b_total))],
+            },
+        )?;
     } else {
         // Mapped mode now goes through the `Some(log_writer)` arm above
         // (the disk path). The prior `enable_columnar()` per-entity loop
@@ -640,42 +774,59 @@ pub fn load_ntriples(
         // type_indices: 1 GB — not needed for Phase 2/3. Rebuild from node_slots after.
         let type_indices_count = graph.type_indices.len();
         graph.type_indices.clear();
-        if config.verbose {
-            eprintln!(
-                "  [T+{:.0}s] Freed {} column stores + {} type indices before Phase 2",
-                start.elapsed().as_secs_f64(),
+        if build_debug() {
+            eplog!(
+                "  Freed {} column stores + {} type indices before Phase 2",
                 dropped_stores,
                 type_indices_count,
             );
         }
     }
 
+    let phase2_total = edge_buffer.len() as u64;
     if config.verbose {
-        eprintln!(
-            "  [T+{:.0}s] Phase 2: creating edges...",
-            start.elapsed().as_secs_f64()
-        );
+        eplog!("[Phase 2] Creating edges");
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }
+    emit(
+        sink,
+        ProgressEvent::Start {
+            phase: "phase2",
+            label: "Phase 2: Creating edges",
+            total: Some(phase2_total),
+            unit: "edge",
+        },
+    )?;
 
     // Phase 2: Create edges from buffer
     let edge_start = Instant::now();
     if let Some(ref qt) = qnum_to_idx {
         // Fast path: use pre-built qnum_to_idx from Phase 1 (disk mode)
-        create_edges_with_qnum_map(graph, &edge_buffer, &mut stats, qt);
+        create_edges_with_qnum_map(graph, &edge_buffer, &mut stats, qt, sink)?;
     } else {
-        create_edges_from_buffer(graph, &edge_buffer, &mut stats);
+        create_edges_from_buffer(graph, &edge_buffer, &mut stats, sink)?;
     }
 
+    let phase2_elapsed = edge_start.elapsed().as_secs_f64();
     if config.verbose {
-        eprintln!(
-            "  [T+{:.0}s] Phase 2 done: {} edges created, {} skipped ({:.1}s)",
-            start.elapsed().as_secs_f64(),
+        eplog!(
+            "[Phase 2] Complete: {} edges created ({} skipped) in {}",
             format_count(stats.edges_created),
             format_count(stats.edges_skipped),
-            edge_start.elapsed().as_secs_f64(),
+            fmt_dur(phase2_elapsed),
         );
     }
+    emit(
+        sink,
+        ProgressEvent::Complete {
+            phase: "phase2",
+            elapsed_s: phase2_elapsed,
+            fields: &[
+                ("edges_created", PV::U64(stats.edges_created)),
+                ("edges_skipped", PV::U64(stats.edges_skipped)),
+            ],
+        },
+    )?;
 
     // Free qnum_to_idx after Phase 2
     if let Some(qt) = qnum_to_idx.take() {
@@ -699,20 +850,47 @@ pub fn load_ntriples(
     // Phase 3: Build CSR from pending edges (disk mode)
     if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
         if config.verbose {
-            eprintln!(
-                "  [T+{:.0}s] Phase 3: building CSR from pending edges...",
-                start.elapsed().as_secs_f64()
-            );
+            eplog!("[Phase 3] Building CSR edge index");
         }
+        emit(
+            sink,
+            ProgressEvent::Start {
+                phase: "phase3",
+                label: "Phase 3: Building CSR edge index",
+                total: None,
+                unit: "step",
+            },
+        )?;
         let csr_start = Instant::now();
         dg.build_csr_from_pending();
+        let phase3_elapsed = csr_start.elapsed().as_secs_f64();
         if config.verbose {
-            eprintln!(
-                "  [T+{:.0}s] Phase 3 done ({:.1}s)",
-                start.elapsed().as_secs_f64(),
-                csr_start.elapsed().as_secs_f64()
-            );
+            eplog!("[Phase 3] Complete in {}", fmt_dur(phase3_elapsed));
         }
+        emit(
+            sink,
+            ProgressEvent::Complete {
+                phase: "phase3",
+                elapsed_s: phase3_elapsed,
+                fields: &[],
+            },
+        )?;
+    }
+
+    let finalising_start = Instant::now();
+    if config.verbose && graph.graph.is_disk() {
+        eplog!("[Finalising] Building auxiliary indexes + saving metadata");
+    }
+    if graph.graph.is_disk() {
+        emit(
+            sink,
+            ProgressEvent::Start {
+                phase: "finalising",
+                label: "Finalising: Auxiliary indexes + metadata",
+                total: None,
+                unit: "step",
+            },
+        )?;
     }
 
     // Warm edge_type_counts_cache from CSR build data (avoids 14 GB rescan on first query)
@@ -727,10 +905,9 @@ pub fn load_ntriples(
                         (name, count)
                     })
                     .collect();
-                if config.verbose {
-                    eprintln!(
-                        "  [T+{:.0}s] Cached {} edge type counts from CSR build",
-                        start.elapsed().as_secs_f64(),
+                if build_debug() {
+                    eplog!(
+                        "  Cached {} edge type counts from CSR build",
                         string_counts.len()
                     );
                 }
@@ -741,12 +918,6 @@ pub fn load_ntriples(
 
     // Rebuild type_indices from DiskNodeSlots (dropped before Phase 2 to save 1 GB)
     if graph.graph.is_disk() {
-        if config.verbose {
-            eprintln!(
-                "  [T+{:.0}s] Rebuilding type indices from node slots...",
-                start.elapsed().as_secs_f64()
-            );
-        }
         let rebuild_start = Instant::now();
         if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
             for i in 0..dg.node_slots.len() {
@@ -762,12 +933,11 @@ pub fn load_ntriples(
                 }
             }
         }
-        if config.verbose {
-            eprintln!(
-                "  [T+{:.0}s] Rebuilt {} type indices ({:.1}s)",
-                start.elapsed().as_secs_f64(),
+        if build_debug() {
+            eplog!(
+                "  Rebuilt {} type indices ({})",
                 graph.type_indices.len(),
-                rebuild_start.elapsed().as_secs_f64(),
+                fmt_dur(rebuild_start.elapsed().as_secs_f64()),
             );
         }
     }
@@ -782,12 +952,6 @@ pub fn load_ntriples(
         let mmap_path = data_dir.join("columns.bin");
         let meta_path = data_dir.join("columns_meta.json");
         if mmap_path.exists() && meta_path.exists() {
-            if config.verbose {
-                eprintln!(
-                    "  [T+{:.0}s] Reloading column stores from mmap...",
-                    start.elapsed().as_secs_f64()
-                );
-            }
             let reload_start = Instant::now();
             let reload_result: Result<(), String> = (|| {
                 let meta_json = std::fs::read_to_string(&meta_path)
@@ -822,16 +986,14 @@ pub fn load_ntriples(
             })();
 
             if let Err(e) = reload_result {
-                if config.verbose {
-                    eprintln!("  Warning: failed to reload column stores: {}", e);
-                }
+                eplog!("  Warning: failed to reload column stores: {}", e);
             }
 
-            if config.verbose {
-                eprintln!(
-                    "  Reloaded {} column stores from mmap ({:.1}s)",
+            if build_debug() {
+                eplog!(
+                    "  Reloaded {} column stores from mmap ({})",
                     graph.column_stores.len(),
-                    reload_start.elapsed().as_secs_f64(),
+                    fmt_dur(reload_start.elapsed().as_secs_f64()),
                 );
             }
         }
@@ -841,23 +1003,16 @@ pub fn load_ntriples(
     // Build id_indices for all types so WHERE id(n) = X is O(1).
     // Uses column stores directly — no node materialization, no arena growth.
     if graph.graph.is_disk() {
-        if config.verbose {
-            eprintln!(
-                "  [T+{:.0}s] Building id indices from column stores...",
-                start.elapsed().as_secs_f64()
-            );
-            let _ = std::io::Write::flush(&mut std::io::stderr());
-        }
         let id_start = Instant::now();
         let type_names: Vec<String> = graph.type_indices.keys().cloned().collect();
         for type_name in &type_names {
             graph.build_id_index_from_columns(type_name);
         }
-        if config.verbose {
-            eprintln!(
-                "  Built {} id indices ({:.1}s)",
+        if build_debug() {
+            eplog!(
+                "  Built {} id indices ({})",
                 type_names.len(),
-                id_start.elapsed().as_secs_f64(),
+                fmt_dur(id_start.elapsed().as_secs_f64()),
             );
         }
     }
@@ -892,10 +1047,9 @@ pub fn load_ntriples(
                 }
                 if !triples.is_empty() {
                     *graph.type_connectivity_cache.write().unwrap() = Some(triples);
-                    if config.verbose {
-                        eprintln!(
-                            "  [T+{:.0}s] Built type connectivity cache ({} triples)",
-                            start.elapsed().as_secs_f64(),
+                    if build_debug() {
+                        eplog!(
+                            "  Built type connectivity cache ({} triples)",
                             graph
                                 .type_connectivity_cache
                                 .read()
@@ -908,13 +1062,6 @@ pub fn load_ntriples(
                 }
             }
 
-            if config.verbose {
-                eprintln!(
-                    "  [T+{:.0}s] Saving interner + metadata...",
-                    start.elapsed().as_secs_f64()
-                );
-            }
-
             // Save interner
             let save_step = Instant::now();
             let interner_map: HashMap<String, String> = graph
@@ -925,11 +1072,11 @@ pub fn load_ntriples(
             if let Ok(json) = serde_json::to_string(&interner_map) {
                 let _ = std::fs::write(data_dir.join("interner.json"), json);
             }
-            if config.verbose {
-                eprintln!(
-                    "    interner.json ({} entries): {:.1}s",
+            if build_debug() {
+                eplog!(
+                    "  interner.json ({} entries): {}",
                     interner_map.len(),
-                    save_step.elapsed().as_secs_f64()
+                    fmt_dur(save_step.elapsed().as_secs_f64())
                 );
             }
 
@@ -939,10 +1086,10 @@ pub fn load_ntriples(
             if let Ok(json) = serde_json::to_string_pretty(&meta) {
                 let _ = std::fs::write(data_dir.join("metadata.json"), json);
             }
-            if config.verbose {
-                eprintln!(
-                    "    metadata.json: {:.1}s",
-                    save_step.elapsed().as_secs_f64()
+            if build_debug() {
+                eplog!(
+                    "  metadata.json: {}",
+                    fmt_dur(save_step.elapsed().as_secs_f64())
                 );
             }
 
@@ -955,11 +1102,11 @@ pub fn load_ntriples(
                     }
                 }
             }
-            if config.verbose {
-                eprintln!(
-                    "    id_indices.bin.zst ({} types): {:.1}s",
+            if build_debug() {
+                eplog!(
+                    "  id_indices.bin.zst ({} types): {}",
                     graph.id_indices.len(),
-                    save_step.elapsed().as_secs_f64()
+                    fmt_dur(save_step.elapsed().as_secs_f64())
                 );
             }
 
@@ -972,21 +1119,33 @@ pub fn load_ntriples(
                     }
                 }
             }
-            if config.verbose {
-                eprintln!(
-                    "    type_indices.bin.zst ({} types): {:.1}s",
+            if build_debug() {
+                eplog!(
+                    "  type_indices.bin.zst ({} types): {}",
                     graph.type_indices.len(),
-                    save_step.elapsed().as_secs_f64()
+                    fmt_dur(save_step.elapsed().as_secs_f64())
                 );
             }
-
-            if config.verbose {
-                eprintln!("  [T+{:.0}s] Save complete", start.elapsed().as_secs_f64());
-            }
         }
+
+        let finalising_elapsed = finalising_start.elapsed().as_secs_f64();
+        if config.verbose {
+            eplog!("[Finalising] Complete in {}", fmt_dur(finalising_elapsed));
+        }
+        emit(
+            sink,
+            ProgressEvent::Complete {
+                phase: "finalising",
+                elapsed_s: finalising_elapsed,
+                fields: &[],
+            },
+        )?;
     }
 
     stats.seconds = start.elapsed().as_secs_f64();
+    if config.verbose {
+        eplog!("[Build] Total elapsed: {}", fmt_dur(stats.seconds));
+    }
     Ok(stats)
 }
 
@@ -1154,12 +1313,18 @@ impl ColumnTypeMeta {
 /// Uses TypeBuildMeta (collected during Phase 1) to pre-allocate exact-sized arrays,
 /// then writes values directly to their final positions in a single pass.
 /// No BlockPool, no eviction, no intermediate compression.
+/// Entities between Phase 1b progress callbacks. Tuned so the bar
+/// moves smoothly on Wikidata-scale (~120M entities) without firing
+/// a callback on every line.
+const PHASE1B_TICK: u64 = 250_000;
+
 fn build_columns_direct(
     graph: &mut DirGraph,
     log_path: &std::path::Path,
     type_meta: &HashMap<String, TypeBuildMeta>,
     type_rename_map: &HashMap<String, String>,
     verbose: bool,
+    progress: Option<&dyn ProgressSink>,
 ) -> std::io::Result<()> {
     use crate::graph::storage::column_store::ColumnStore;
     use crate::graph::storage::mapped::column_store::{
@@ -1475,13 +1640,13 @@ fn build_columns_direct(
     // ── Step 1b: Create single file and mmap ──────────────────────────────
 
     if verbose {
-        eprintln!(
+        eplog!(
             "  Phase 1b: layout computed — {:.1} GB for {} types ({:.1}s)",
             total_bytes as f64 / (1u64 << 30) as f64,
             writers.len(),
             alloc_start.elapsed().as_secs_f64(),
         );
-        eprintln!(
+        eplog!(
             "  Phase 1b: columns — {} dense, {} overflow across {} types with sparse (< {:.0}%) cols",
             total_dense_cols,
             total_overflow_cols,
@@ -1508,7 +1673,7 @@ fn build_columns_direct(
         }
         type_sizes.sort_by_key(|t| std::cmp::Reverse(t.1));
         for (tn, sz, rc) in type_sizes.iter().take(10) {
-            eprintln!(
+            eplog!(
                 "    {:>8.1} GB  {:>10} rows  {}",
                 *sz as f64 / (1u64 << 30) as f64,
                 format_count(*rc as u64),
@@ -1518,7 +1683,7 @@ fn build_columns_direct(
     }
 
     if total_bytes == 0 && verbose {
-        eprintln!(
+        eplog!(
             "  Phase 1b: no types to pre-allocate ({:.1}s)",
             alloc_start.elapsed().as_secs_f64(),
         );
@@ -1528,7 +1693,7 @@ fn build_columns_direct(
     let mmap_path = col_dir.join("columns.bin");
     let mmap_opt: Option<MmapMut> = if total_bytes > 0 {
         if verbose {
-            eprintln!(
+            eplog!(
                 "  Phase 1b: creating {:.1} GB mmap file...",
                 total_bytes as f64 / (1u64 << 30) as f64,
             );
@@ -1546,7 +1711,7 @@ fn build_columns_direct(
         let mut mmap = unsafe { MmapMut::map_mut(&file)? };
 
         if verbose {
-            eprintln!("  Phase 1b: filling null bitmaps...");
+            eplog!("  Phase 1b: filling null bitmaps...");
             let _ = std::io::Write::flush(&mut std::io::stderr());
         }
         // Fill all null bitmap regions with 0xFF (all-null)
@@ -1560,7 +1725,7 @@ fn build_columns_direct(
     drop(null_regions);
 
     if verbose {
-        eprintln!(
+        eplog!(
             "  Phase 1b: mmap ready — {:.1} GB for {} types ({:.1}s)",
             total_bytes as f64 / (1u64 << 30) as f64,
             writers.len(),
@@ -1840,12 +2005,25 @@ fn build_columns_direct(
         entity_count += 1;
 
         if verbose && entity_count.is_multiple_of(10_000_000) {
-            eprintln!(
+            eplog!(
                 "  Phase 1b: {}/{} entities read ({:.1}s)",
                 format_count(entity_count),
                 format_count(total_entities),
                 write_start.elapsed().as_secs_f64(),
             );
+        }
+        // Phase 1b internal progress: keep tqdm bar live + responsive.
+        // Cancel-check is best-effort here — the function's signature is
+        // io::Result, so we swallow Cancelled rather than propagate (a
+        // future change could thread Cancelled through).
+        if entity_count.is_multiple_of(PHASE1B_TICK) {
+            if let Some(s) = progress {
+                let _ = s.emit(ProgressEvent::Update {
+                    phase: "phase1b",
+                    current: entity_count,
+                    fields: &[],
+                });
+            }
         }
 
         // Flush the biggest type when buffer exceeds threshold
@@ -1868,7 +2046,7 @@ fn build_columns_direct(
                 );
                 total_buffer_bytes = total_buffer_bytes.saturating_sub(flushed);
                 if verbose {
-                    eprintln!(
+                    eplog!(
                         "  Phase 1b: flushed {} ({} entries, {:.1} MB)",
                         flush_name,
                         format_count(n_entries as u64),
@@ -1890,7 +2068,7 @@ fn build_columns_direct(
         let flush_type = graph.interner.resolve(flush_key).to_string();
         flush_type_entries(&flush_type, &entries, &mut writers, &mut mmap, &mut row_ids);
         if verbose {
-            eprintln!(
+            eplog!(
                 "  Phase 1b: flushed {} ({} entries, final)",
                 flush_type,
                 format_count(n_entries as u64),
@@ -1908,7 +2086,7 @@ fn build_columns_direct(
     }
 
     if verbose {
-        eprintln!(
+        eplog!(
             "  Phase 1b: write pass done — {} entities ({:.1}s)",
             format_count(entity_count),
             write_start.elapsed().as_secs_f64(),
@@ -2036,7 +2214,7 @@ fn build_columns_direct(
         }
 
         if verbose && overflow_types > 0 {
-            eprintln!(
+            eplog!(
                 "  Phase 1b: overflow bags — {:.1} MB across {} types, {} sparse cols total",
                 overflow_bytes_total as f64 / (1024.0 * 1024.0),
                 overflow_types,
@@ -2188,7 +2366,7 @@ fn build_columns_direct(
     }
 
     if verbose {
-        eprintln!(
+        eplog!(
             "  Phase 1b: assembled {} column stores ({:.1}s)",
             graph.column_stores.len(),
             assemble_start.elapsed().as_secs_f64(),
@@ -2215,7 +2393,7 @@ fn build_columns_direct(
             GraphWrite::update_row_id(&mut graph.graph, node_idx, row_id);
         }
         if verbose {
-            eprintln!(
+            eplog!(
                 "  Phase 1b: fixed up {} row_ids",
                 format_count(row_ids.len() as u64),
             );
@@ -2256,7 +2434,7 @@ fn build_columns_direct(
             }
         }
         if verbose {
-            eprintln!(
+            eplog!(
                 "  Phase 1b: linked {} mapped nodes to column stores",
                 format_count(linked),
             );
@@ -2279,7 +2457,7 @@ fn build_columns_direct(
     }
 
     if verbose {
-        eprintln!(
+        eplog!(
             "  Phase 1b: saved columns metadata ({} types) to {}",
             columns_meta.len(),
             meta_path.display(),
@@ -2302,7 +2480,24 @@ fn flush_entity(
     label_writer: &mut Option<super::label_spill::LabelSpillWriter>,
     type_meta: &mut HashMap<String, TypeBuildMeta>,
     qnum_to_idx: &mut Option<MmapOrVec<u32>>,
+    // Reusable buffer for the property-log key/value pairs. Hoisted out
+    // of this function so the alloc cost is paid once instead of per
+    // entity (showed up at ~2% of loader CPU under samply).
+    scratch_props: &mut Vec<(InternedKey, Value)>,
 ) {
+    // Disk/mapped mode requires a `u32` Q-number. A `Value::String` id
+    // would flip `id_is_string=true` on the type's columnar metadata,
+    // and `flush_type_entries` would then leave the *other* (UniqueId)
+    // rows' offsets at zero — which makes `MmapColumnStore::read_str`
+    // panic on reload (`offsets[row-1] > offsets[row]`). Wikidata's
+    // truthy dump has a small number of non-parseable Q-codes (e.g.,
+    // entries with trailing suffixes that slip past the entity-prefix
+    // filter). They're not legitimate data — drop them.
+    let use_compact_ids = mapped || graph.graph.is_disk();
+    if use_compact_ids && parse_qcode_number(&acc.id).is_none() {
+        return;
+    }
+
     let title = acc.label.unwrap_or_else(|| acc.id.clone());
 
     // Append to the label journal for post-Phase-1 type resolution.
@@ -2383,17 +2578,20 @@ fn flush_entity(
     // then clear them before add_node (DiskGraph discards them anyway).
     let saved_id = node_data.id.clone();
     let saved_title = node_data.title.clone();
-    let saved_props: Vec<(InternedKey, Value)> = if prop_log.is_some() {
-        let pairs = node_data
-            .properties
-            .drain_to_interned_pairs(&graph.interner);
+    if prop_log.is_some() {
+        // Reuse `scratch_props` instead of allocating a fresh Vec per
+        // flush. `clear()` preserves capacity so subsequent entities
+        // skip the alloc + grow.
+        scratch_props.clear();
+        scratch_props.extend(
+            node_data
+                .properties
+                .drain_to_interned_pairs(&graph.interner),
+        );
         node_data.properties = PropertyStorage::Map(HashMap::new());
         node_data.id = Value::Null;
         node_data.title = Value::Null;
-        pairs
-    } else {
-        Vec::new()
-    };
+    }
 
     let node_idx = GraphWrite::add_node(&mut graph.graph, node_data);
 
@@ -2405,7 +2603,7 @@ fn flush_entity(
             node_idx,
             &saved_id,
             &saved_title,
-            &saved_props,
+            scratch_props,
         )
         .expect("Property log write failed");
 
@@ -2413,7 +2611,7 @@ fn flush_entity(
         type_meta
             .entry(node_type.clone())
             .or_insert_with(TypeBuildMeta::new)
-            .record_entity(&saved_id, &saved_title, &saved_props);
+            .record_entity(&saved_id, &saved_title, scratch_props);
     }
 
     // Update type_indices
@@ -2477,6 +2675,32 @@ fn format_count(n: u64) -> String {
     } else {
         format!("{}", n)
     }
+}
+
+/// Compact duration formatter for phase headers — `1h32m04s` / `47m18s` /
+/// `12.3s`. Uses the same shape as `examples/wikidata_disk.py::_fmt_dur` so
+/// users see identical wording from Rust and Python.
+fn fmt_dur(secs: f64) -> String {
+    if secs < 60.0 {
+        return format!("{:.1}s", secs);
+    }
+    let total = secs as u64;
+    let h = total / 3600;
+    let m = (total % 3600) / 60;
+    let s = total % 60;
+    if h > 0 {
+        format!("{}h{:02}m{:02}s", h, m, s)
+    } else {
+        format!("{}m{:02}s", m, s)
+    }
+}
+
+/// Dev-grade verbosity. `verbose=True` keeps the high-level `[Phase N]`
+/// gate messages clean for end users; setting `KGLITE_BUILD_DEBUG=1` adds
+/// the per-sub-step timings (interner save, CSR step 1/4, peer-count
+/// histogram timings, …) used while diagnosing build performance.
+fn build_debug() -> bool {
+    std::env::var("KGLITE_BUILD_DEBUG").is_ok()
 }
 
 #[cfg(test)]

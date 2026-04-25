@@ -1,4 +1,14 @@
 // src/lib.rs
+
+// mimalloc as the global allocator. samply profile of the N-Triples
+// build showed libsystem_malloc accounting for ~32% of loader-thread
+// CPU time. mimalloc is consistently faster than macOS's default
+// allocator on small-object-heavy workloads (Strings, HashMaps, Vecs
+// in the parser hot loop). Pure Rust dependency — no system dep, just
+// a slightly larger build artifact.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use pyo3::prelude::*;
 mod code_tree;
 mod datatypes;

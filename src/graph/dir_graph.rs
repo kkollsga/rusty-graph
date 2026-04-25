@@ -519,7 +519,19 @@ impl DirGraph {
                 .try_resolve(InternedKey::from_str(connection_type))
                 .is_some();
         }
-        false
+        // Disk-side fall-through: even when the in-memory metadata
+        // looks complete-but-stale (Cypher DETACH DELETE clears the
+        // `connection_types` set but leaves `connection_type_metadata`
+        // alone), the disk backend's `conn_type_index_*` mmap arrays
+        // are authoritative for the live edge set. Asking the trait
+        // for any source via the bounded helper is O(1) on disk —
+        // returns `Some(non-empty)` if the conn type has at least
+        // one live edge, `None` if no index for this name. 0.8.16.
+        let key = InternedKey::from_str(connection_type);
+        matches!(
+            self.graph.sources_for_conn_type_bounded(key, Some(1)),
+            Some(v) if !v.is_empty()
+        )
     }
 
     /// Register a connection type (interned) for O(1) lookups.
@@ -1737,7 +1749,50 @@ impl DirGraph {
     /// Properties are moved into per-type `ColumnStore` instances.
     /// This reduces memory usage by eliminating per-node `Value` enum overhead
     /// for homogeneous typed columns.
+    ///
+    /// Idempotent fast path: returns early when (a) every live node
+    /// is already in `PropertyStorage::Columnar`, AND (b) every
+    /// node's `Arc<ColumnStore>` is identical to the one in
+    /// `graph.column_stores` for its type. Without this guard, a
+    /// second `g.save()` after a successful first save runs the
+    /// full `for node in graph` rebuild loop against already-
+    /// Columnar properties — at wiki100m that's ~257 s
+    /// (820 µs/node × 938 k nodes) — purely wasted work. Mapped
+    /// graphs from `load_ntriples` are also already fully columnar
+    /// (linked via `build_columns_direct`'s second-pass), so the
+    /// same fast-path applies. 0.8.16.
+    ///
+    /// The Arc-pointer check is required because
+    /// `PropertyStorage::insert` for a Columnar variant does
+    /// `Arc::make_mut(store)` which forks the Arc when shared; the
+    /// node's local Arc gets the update, `graph.column_stores`
+    /// keeps the old. Without detecting that fork, an
+    /// `add_nodes(conflict_handling="update")` followed by
+    /// `g.save()` would silently drop the new properties. Walking
+    /// every node short-circuits on the first non-columnar OR
+    /// forked node, so the cost is O(N × cheap-match) at worst.
     pub fn enable_columnar(&mut self) {
+        if !self.column_stores.is_empty() && self.is_columnar() {
+            let interner = &self.interner;
+            let column_stores = &self.column_stores;
+            let any_drift = self
+                .graph
+                .node_indices()
+                .filter_map(|idx| self.graph.node_weight(idx))
+                .any(|n| match &n.properties {
+                    PropertyStorage::Columnar { store, .. } => {
+                        let type_str = n.node_type_str(interner);
+                        match column_stores.get(type_str) {
+                            Some(graph_store) => !Arc::ptr_eq(store, graph_store),
+                            None => true,
+                        }
+                    }
+                    _ => true,
+                });
+            if !any_drift {
+                return;
+            }
+        }
         use crate::graph::storage::column_store::ColumnStore;
 
         // Ensure properties are compacted first

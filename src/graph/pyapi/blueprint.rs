@@ -97,8 +97,17 @@ pub fn from_blueprint_rust(
                     );
                 }
                 if !report.warnings.is_empty() {
-                    for w in &report.warnings {
-                        eprintln!("warning: {}", w);
+                    if verbose {
+                        for w in &report.warnings {
+                            eprintln!("warning: {}", w);
+                        }
+                    } else {
+                        // Compact summary so callers running silent
+                        // still know data quality issues exist.
+                        eprintln!(
+                            "{} blueprint warning(s) — pass verbose=True for details.",
+                            report.warnings.len()
+                        );
                     }
                 }
                 if !report.errors.is_empty() {

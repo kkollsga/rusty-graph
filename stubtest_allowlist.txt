@@ -21,3 +21,24 @@ kglite.KnowledgeGraph.vector_search
 # The overloads are correct for type-checking but structurally differ from runtime.
 kglite.KnowledgeGraph.sample
 kglite.KnowledgeGraph.embeddings
+
+# Re-exports: KnowledgeGraph is imported into the dataset wrappers, so stubtest
+# re-checks the same class through each importing module. The underlying issues
+# are documented above against `kglite.KnowledgeGraph.*`.
+kglite.datasets.wikidata.KnowledgeGraph
+kglite.datasets.wikidata.KnowledgeGraph.embed_texts
+kglite.datasets.wikidata.KnowledgeGraph.search_text
+kglite.datasets.wikidata.KnowledgeGraph.vector_search
+kglite.datasets.wikidata.KnowledgeGraph.sample
+kglite.datasets.wikidata.KnowledgeGraph.embeddings
+kglite.datasets.sodir.wrapper.KnowledgeGraph
+kglite.datasets.sodir.wrapper.KnowledgeGraph.embed_texts
+kglite.datasets.sodir.wrapper.KnowledgeGraph.search_text
+kglite.datasets.sodir.wrapper.KnowledgeGraph.vector_search
+kglite.datasets.sodir.wrapper.KnowledgeGraph.sample
+kglite.datasets.sodir.wrapper.KnowledgeGraph.embeddings
+
+# `from typing import Any` at module top-level surfaces `Any` as a public
+# attribute under stubtest. Internal-only re-export, not part of the API.
+kglite.datasets.sodir.wrapper.Any
+kglite.datasets.sodir.wrapper.Any.__new__

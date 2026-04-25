@@ -111,6 +111,43 @@ graph.operation_index()   # sequential index of last operation
 graph.report_history()    # all reports
 ```
 
+## N-Triples and RDF
+
+`load_ntriples()` streams an RDF/N-Triples file directly into the
+graph — designed for Wikidata `latest-truthy` dumps but works with
+any N-Triples input:
+
+```python
+graph = kglite.KnowledgeGraph(storage="disk", path="/data/wd")
+graph.load_ntriples("latest-truthy.nt.bz2", languages=["en"], verbose=True)
+```
+
+Compressed inputs (`.bz2`, `.gz`, `.zst`, `.zstd`) are decoded
+on-the-fly. Multistream `.bz2` files (the format Wikidata ships)
+use a parallel decoder under the hood — ~3× faster than the
+single-threaded `MultiBzDecoder`.
+
+`verbose=True` emits one `[Phase N]` line at every gate
+(streaming → columnar build → edges → CSR → finalising) plus
+periodic in-phase progress for the long Phase 1. Sub-step timings
+(CSR step 1/4, peer-count histograms, mmap layout, …) live behind
+an env var:
+
+```bash
+KGLITE_BUILD_DEBUG=1 python build_graph.py
+```
+
+For Wikidata or Sodir specifically, prefer the bundled lifecycle
+wrappers — they handle download, cooldown, and resume on top of
+`load_ntriples`:
+
+```python
+from kglite.datasets import wikidata
+g = wikidata.open("/data/wd")
+```
+
+See the {doc}`datasets` guide for full coverage.
+
 ## Blueprints
 
 Build a complete graph from CSV files using a declarative JSON blueprint — see the [Blueprints guide](blueprints.md) for a full walkthrough.
