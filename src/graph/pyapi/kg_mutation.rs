@@ -937,10 +937,12 @@ impl KnowledgeGraph {
     ///     # Data source provides all possible connections
     ///     all_connections = data_source.get_all_connections()
     ///
-    ///     # Graph only has Person and Company loaded
-    ///     # This will skip connections involving other node types
-    ///     stats = graph.add_connections_from_source(all_connections)
-    ///     ```
+    /// ```text
+    /// # Graph only has Person and Company loaded
+    /// # This will skip connections involving other node types
+    /// stats = graph.add_connections_from_source(all_connections)
+    /// ```
+    /// ```
     fn add_connections_from_source(
         &mut self,
         py: Python<'_>,

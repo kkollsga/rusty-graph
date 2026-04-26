@@ -319,9 +319,11 @@ impl KnowledgeGraph {
     ///
     /// Example::
     ///
-    ///     graph.read_only(True)   # lock the graph
-    ///     graph.read_only()       # -> True
-    ///     graph.read_only(False)  # unlock
+    /// ```text
+    /// graph.read_only(True)   # lock the graph
+    /// graph.read_only()       # -> True
+    /// graph.read_only(False)  # unlock
+    /// ```
     #[pyo3(signature = (enabled=None))]
     fn read_only(&mut self, enabled: Option<bool>) -> bool {
         if let Some(v) = enabled {
@@ -340,8 +342,10 @@ impl KnowledgeGraph {
     ///
     /// Example::
     ///
-    ///     graph.lock_schema()
-    ///     graph.cypher("CREATE (p:Typo {name: 'x'})")  # raises RuntimeError
+    /// ```text
+    /// graph.lock_schema()
+    /// graph.cypher("CREATE (p:Typo {name: 'x'})")  # raises RuntimeError
+    /// ```
     fn lock_schema(&mut self) -> Self {
         let graph = get_graph_mut(&mut self.inner);
         graph.schema_locked = true;
@@ -542,12 +546,14 @@ impl KnowledgeGraph {
     ///
     /// Examples::
     ///
-    ///     g.select('Field').traverse('HAS_LICENSEE')
-    ///     g.select('Field').traverse('OF_FIELD', direction='incoming',
-    ///         target_type='ProductionProfile')
-    ///     g.select('Field').traverse('HAS_LICENSEE',
-    ///         where={'title': 'Equinor Energy AS'})
-    ///     g.select('Field').traverse('HAS_LICENSEE', at='2005')
+    /// ```text
+    /// g.select('Field').traverse('HAS_LICENSEE')
+    /// g.select('Field').traverse('OF_FIELD', direction='incoming',
+    ///     target_type='ProductionProfile')
+    /// g.select('Field').traverse('HAS_LICENSEE',
+    ///     where={'title': 'Equinor Energy AS'})
+    /// g.select('Field').traverse('HAS_LICENSEE', at='2005')
+    /// ```
     #[pyo3(signature = (connection_type, level_index=None, direction=None, filter_target=None, filter_connection=None, sort_target=None, limit=None, new_level=None, at=None, during=None, temporal=None, target_type=None, r#where=None, where_connection=None))]
     #[allow(clippy::too_many_arguments)]
     fn traverse(
@@ -733,10 +739,12 @@ impl KnowledgeGraph {
     ///
     /// Examples::
     ///
-    ///     g.select('Structure').compare('Well', 'contains')
-    ///     g.select('Well').compare('Well', {'type': 'distance', 'max_m': 5000})
-    ///     g.select('Well').compare('Well', {'type': 'text_score', 'property': 'name'})
-    ///     g.select('Well').compare('Well', {'type': 'cluster', 'k': 5})
+    /// ```text
+    /// g.select('Structure').compare('Well', 'contains')
+    /// g.select('Well').compare('Well', {'type': 'distance', 'max_m': 5000})
+    /// g.select('Well').compare('Well', {'type': 'text_score', 'property': 'name'})
+    /// g.select('Well').compare('Well', {'type': 'cluster', 'k': 5})
+    /// ```
     #[pyo3(signature = (target_type, method, *, filter=None, sort=None, limit=None, level_index=None, new_level=None))]
     #[allow(clippy::too_many_arguments)]
     fn compare(

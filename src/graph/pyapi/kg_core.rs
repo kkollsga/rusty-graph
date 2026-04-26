@@ -1109,14 +1109,16 @@ impl KnowledgeGraph {
     ///     for m in matches:
     ///         print(f"Play: {m['p']['title']}, Prospect: {m['pr']['title']}")
     ///
-    ///     # Find discoveries from specific prospects
-    ///     matches = graph.match_pattern(
-    ///         '(pr:Prospect {status: "Active"})-[:BECAME_DISCOVERY]->(d:Discovery)'
-    ///     )
+    /// ```text
+    /// # Find discoveries from specific prospects
+    /// matches = graph.match_pattern(
+    ///     '(pr:Prospect {status: "Active"})-[:BECAME_DISCOVERY]->(d:Discovery)'
+    /// )
     ///
-    ///     # Limit results
-    ///     top_10 = graph.match_pattern('(p:Person)-[:KNOWS]->(f:Person)', max_matches=10)
-    ///     ```
+    /// # Limit results
+    /// top_10 = graph.match_pattern('(p:Person)-[:KNOWS]->(f:Person)', max_matches=10)
+    /// ```
+    /// ```
     #[pyo3(signature = (pattern, max_matches=None))]
     fn match_pattern(
         &self,

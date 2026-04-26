@@ -11,6 +11,14 @@ license = "MIT"
 [lib]
 name = "kglite"
 crate-type = ["cdylib", "rlib"]
+# Disable rustdoc's auto-compilation of code blocks. The user-facing
+# `/// Example::` blocks throughout `src/graph/pyapi/*.rs` are Python
+# snippets rendered by Sphinx for the published Python API docs — they're
+# never valid Rust, so rustdoc's default doctest harness fails on every
+# single-quoted string. There's no Rust API surface that needs doctest
+# coverage here either; the `#[pyclass]` types are exercised through
+# Python tests.
+doctest = false
 
 # Standalone perf microbench for the bz2 decoder. Run with
 # `cargo run --bin bz2_bench --release -- <path>`.

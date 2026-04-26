@@ -867,12 +867,14 @@ impl KnowledgeGraph {
     ///     # Discovery(123, Johan Sverdrup)
     ///     # Discovery(456, Troll)
     ///
-    ///     print(graph.select("Discovery")
-    ///         .traverse("HAS_DEPOSIT_PROSPECT")
-    ///         .traverse("TESTED_BY_WELLBORE")
-    ///         .show(["id", "title"]))
-    ///     # Discovery(123, Johan Sverdrup) -> Prospect(456, Alpha) -> Wellbore(789, W1)
-    ///     ```
+    /// ```text
+    /// print(graph.select("Discovery")
+    ///     .traverse("HAS_DEPOSIT_PROSPECT")
+    ///     .traverse("TESTED_BY_WELLBORE")
+    ///     .show(["id", "title"]))
+    /// # Discovery(123, Johan Sverdrup) -> Prospect(456, Alpha) -> Wellbore(789, W1)
+    /// ```
+    /// ```
     #[pyo3(signature = (columns=None, limit=200))]
     fn show(&self, columns: Option<Vec<String>>, limit: usize) -> PyResult<String> {
         use crate::graph::core::value_operations::format_value_compact;

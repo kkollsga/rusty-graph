@@ -28,9 +28,11 @@ impl KnowledgeGraph {
     ///     # Create an index for faster lookups
     ///     graph.create_index('Prospect', 'geoprovince')
     ///
-    ///     # Now this filter will use the index (O(1) instead of O(n))
-    ///     graph.select('Prospect').where({'geoprovince': 'North Sea'})
-    ///     ```
+    /// ```text
+    /// # Now this filter will use the index (O(1) instead of O(n))
+    /// graph.select('Prospect').where({'geoprovince': 'North Sea'})
+    /// ```
+    /// ```
     fn create_index(
         &mut self,
         py: Python<'_>,
@@ -148,10 +150,12 @@ impl KnowledgeGraph {
     ///
     /// Example::
     ///
-    ///     graph.create_global_index('label')   # or 'title'
-    ///     hits = graph.search('Norway')
-    ///     # [{'id': 12345, 'type': 'country', 'title': 'Norway',
-    ///     #   'id_value': 'Q20'}, ...]
+    /// ```text
+    /// graph.create_global_index('label')   # or 'title'
+    /// hits = graph.search('Norway')
+    /// # [{'id': 12345, 'type': 'country', 'title': 'Norway',
+    /// #   'id_value': 'Q20'}, ...]
+    /// ```
     #[pyo3(signature = (text, *, property="title", limit=10))]
     fn search(
         &self,
@@ -382,12 +386,14 @@ impl KnowledgeGraph {
     ///     # Create an index for queries filtering on both 'geoprovince' and 'status'
     ///     graph.create_composite_index('Prospect', ['geoprovince', 'status'])
     ///
-    ///     # Now this filter is very fast:
-    ///     graph.select('Prospect').where({
-    ///         'geoprovince': 'N3',
-    ///         'status': 'Active'
-    ///     })
-    ///     ```
+    /// ```text
+    /// # Now this filter is very fast:
+    /// graph.select('Prospect').where({
+    ///     'geoprovince': 'N3',
+    ///     'status': 'Active'
+    /// })
+    /// ```
+    /// ```
     fn create_composite_index(
         &mut self,
         py: Python<'_>,
