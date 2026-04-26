@@ -134,38 +134,6 @@ def to_neo4j(
     return _to_neo4j(graph, uri, **kwargs)
 
 
-# PyO3 frozen classes (KnowledgeGraph) don't allow instance __dict__
-# assignment, and pyclass without weakref support means we can't use a
-# WeakValueDictionary either. We keep accessors in a plain dict keyed
-# by id(graph) — strong reference, small leak (~one accessor per graph
-# created in the session). Acceptable since graphs are typically
-# long-lived; mitigation via weakref support can come later.
-_ACCESSOR_CACHE: "dict[int, object]" = {}
-
-
-def _rules_property(self: "KnowledgeGraph"):
-    """Return the :class:`_RulesAccessor` for this graph (cached)."""
-    cached = _ACCESSOR_CACHE.get(id(self))
-    if cached is not None:
-        return cached
-    from .rules.accessor import _RulesAccessor
-
-    accessor = _RulesAccessor(self)
-    _ACCESSOR_CACHE[id(self)] = accessor
-    return accessor
-
-
-KnowledgeGraph.rules = property(_rules_property)
-
-
-# Rule-pack discovery via ``g.describe()`` is opt-in (slice 1.1.2):
-# ``kglite.rules`` is loaded lazily on first ``g.rules`` access and does
-# NOT push a global default. To advertise bundled packs in cold
-# ``describe()`` calls, callers explicitly run ``kglite.rules.advertise()``.
-# Per-graph state still pushes when the user calls ``g.rules.run()`` /
-# ``g.rules.load()`` — describe() shows packs for graphs that have
-# actively used them, but stays silent on untouched graphs.
-
 __all__ = [
     "__version__",
     "KnowledgeGraph",

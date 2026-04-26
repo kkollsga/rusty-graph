@@ -8,7 +8,8 @@
 const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, RETURN, WITH, HAVING, ORDER BY, UNWIND, UNION, \
     CASE, CREATE, SET, DELETE, MERGE, EXPLAIN, PROFILE, operators, functions, patterns, spatial, \
     temporal, pagerank, betweenness, degree, closeness, louvain, \
-    label_propagation, connected_components, cluster";
+    label_propagation, connected_components, cluster, orphan_node, self_loop, \
+    cycle_2step, missing_required_edge, missing_inbound_edge, duplicate_title";
 
 /// Tier 3: detailed Cypher docs for specific topics with params and examples.
 pub(super) fn write_cypher_topics(xml: &mut String, topics: &[String]) -> Result<(), String> {
@@ -48,6 +49,12 @@ pub(super) fn write_cypher_topics(xml: &mut String, topics: &[String]) -> Result
                 write_topic_connected_components(xml);
             }
             "CLUSTER" => write_topic_cluster(xml),
+            "ORPHAN_NODE" => write_topic_orphan_node(xml),
+            "SELF_LOOP" => write_topic_self_loop(xml),
+            "CYCLE_2STEP" => write_topic_cycle_2step(xml),
+            "MISSING_REQUIRED_EDGE" => write_topic_missing_required_edge(xml),
+            "MISSING_INBOUND_EDGE" => write_topic_missing_inbound_edge(xml),
+            "DUPLICATE_TITLE" => write_topic_duplicate_title(xml),
             "SPATIAL" => write_topic_spatial(xml),
             "TEMPORAL" => write_topic_temporal(xml),
             "EXPLAIN" => write_topic_explain(xml),
@@ -453,6 +460,81 @@ pub(super) fn write_topic_profile(xml: &mut String) {
     xml.push_str("    </examples>\n");
     xml.push_str("    <notes>Access stats via result.profile (list of dicts). None for non-profiled queries.</notes>\n");
     xml.push_str("  </PROFILE>\n");
+}
+
+// ── Tier 3: structural-validator rule procedures ─────────────────────────
+
+pub(super) fn write_topic_orphan_node(xml: &mut String) {
+    xml.push_str("  <orphan_node>\n");
+    xml.push_str("    <desc>Yields nodes of {type} that have zero edges in any direction. Almost always ingest artifacts.</desc>\n");
+    xml.push_str("    <syntax>CALL orphan_node({type: 'Wellbore'}) YIELD node</syntax>\n");
+    xml.push_str("    <yield>node — bound to the orphaned NodeIndex (use node.id, node.title, etc.)</yield>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"count orphans\">CALL orphan_node({type: 'Discovery'}) YIELD node RETURN count(node) AS c</ex>\n");
+    xml.push_str("      <ex desc=\"top-5 orphan ids\">CALL orphan_node({type: 'Wellbore'}) YIELD node RETURN node.id, node.title LIMIT 5</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </orphan_node>\n");
+}
+
+pub(super) fn write_topic_self_loop(xml: &mut String) {
+    xml.push_str("  <self_loop>\n");
+    xml.push_str("    <desc>Yields nodes of {type} that have an outgoing {edge} whose target is themselves. Always a data error in tree-shaped hierarchies; sometimes legitimate for self-referential domain edges.</desc>\n");
+    xml.push_str(
+        "    <syntax>CALL self_loop({type: 'Person', edge: 'KNOWS'}) YIELD node</syntax>\n",
+    );
+    xml.push_str("    <yield>node — bound to the self-looping NodeIndex</yield>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"find self-citations\">CALL self_loop({type: 'CourtDecision', edge: 'CITES'}) YIELD node RETURN node.id</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </self_loop>\n");
+}
+
+pub(super) fn write_topic_cycle_2step(xml: &mut String) {
+    xml.push_str("  <cycle_2step>\n");
+    xml.push_str("    <desc>Yields (node_a, node_b) pairs where a -[edge]-&gt; b -[edge]-&gt; a, both nodes of {type}, with id(a) &lt; id(b) (deduplicated).</desc>\n");
+    xml.push_str("    <syntax>CALL cycle_2step({type: 'Person', edge: 'KNOWS'}) YIELD node_a, node_b</syntax>\n");
+    xml.push_str("    <yield>node_a, node_b — two NodeIndex bindings (named to avoid CASE's reserved END keyword)</yield>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"find reciprocal pairs\">CALL cycle_2step({type: 'Person', edge: 'KNOWS'}) YIELD node_a, node_b RETURN node_a.name, node_b.name</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </cycle_2step>\n");
+}
+
+pub(super) fn write_topic_missing_required_edge(xml: &mut String) {
+    xml.push_str("  <missing_required_edge>\n");
+    xml.push_str("    <desc>Yields nodes of {type} that have NO outgoing {edge}. Direction-validated: refuses to execute when {type} is on the target side of {edge} in the graph's actual schema, suggesting missing_inbound_edge instead.</desc>\n");
+    xml.push_str("    <syntax>CALL missing_required_edge({type: 'Wellbore', edge: 'IN_LICENCE'}) YIELD node</syntax>\n");
+    xml.push_str("    <yield>node — bound to the violating NodeIndex</yield>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"wellbores missing licence link\">CALL missing_required_edge({type: 'Wellbore', edge: 'IN_LICENCE'}) YIELD node RETURN count(node) AS missing</ex>\n");
+    xml.push_str("      <ex desc=\"composed: PL057 wellbores missing DRILLED_BY\">MATCH (l:Licence {title: '057'})&lt;-[:IN_LICENCE]-(w:Wellbore) WITH collect(w.id) AS pl057 CALL missing_required_edge({type: 'Wellbore', edge: 'DRILLED_BY'}) YIELD node WHERE node.id IN pl057 RETURN count(*)</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </missing_required_edge>\n");
+}
+
+pub(super) fn write_topic_missing_inbound_edge(xml: &mut String) {
+    xml.push_str("  <missing_inbound_edge>\n");
+    xml.push_str("    <desc>Yields nodes of {type} that have NO incoming {edge}. Mirror of missing_required_edge with the same direction validation in reverse.</desc>\n");
+    xml.push_str("    <syntax>CALL missing_inbound_edge({type: 'Discovery', edge: 'IN_DISCOVERY'}) YIELD node</syntax>\n");
+    xml.push_str("    <yield>node — bound to the violating NodeIndex</yield>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"discoveries with no source wellbore\">CALL missing_inbound_edge({type: 'Discovery', edge: 'IN_DISCOVERY'}) YIELD node RETURN node.title</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </missing_inbound_edge>\n");
+}
+
+pub(super) fn write_topic_duplicate_title(xml: &mut String) {
+    xml.push_str("  <duplicate_title>\n");
+    xml.push_str("    <desc>Yields one row per node of {type} whose title is shared with at least one other node of the same type. Aggregate downstream to get per-group rollups.</desc>\n");
+    xml.push_str("    <syntax>CALL duplicate_title({type: 'Prospect'}) YIELD node</syntax>\n");
+    xml.push_str(
+        "    <yield>node — bound to a NodeIndex whose title appears more than once</yield>\n",
+    );
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"all duplicates\">CALL duplicate_title({type: 'Prospect'}) YIELD node RETURN count(node)</ex>\n");
+    xml.push_str("      <ex desc=\"group + count\">CALL duplicate_title({type: 'Prospect'}) YIELD node WITH node.title AS title, collect(node) AS dups WITH title, size(dups) AS n WHERE n &gt; 1 RETURN title, n ORDER BY n DESC LIMIT 20</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </duplicate_title>\n");
 }
 
 pub(super) fn write_topic_spatial(xml: &mut String) {

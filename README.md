@@ -22,8 +22,10 @@ Wikidata or petroleum-domain graph in one line.
 ## Why KGLite?
 
 - **Built for LLM agents** — `describe()` XML schema, bundled MCP
-  server, and an agent-oriented query surface (`cypher()`,
-  `graph.select(...).traverse(...)`).
+  server, an agent-oriented query surface (`cypher()`,
+  `graph.select(...).traverse(...)`), and structural validators
+  (`CALL orphan_node({type: ...}) YIELD node`) for data-integrity
+  checks that compose with the rest of Cypher.
 - **One-line public datasets** — `wikidata.open(path)` and
   `sodir.open(path)` handle fetch, parallel build, and caching;
   re-runs reload the cached graph instantly.
@@ -198,6 +200,37 @@ graph.cypher("""
 """)
 ```
 
+### Structural validators — surface data-integrity gaps in one query
+
+Six built-in `CALL` procedures find the gaps that aren't visible
+from normal queries: nodes with zero edges, missing-required-edge
+violations, two-step cycles, duplicate titles, more. They compose
+with the rest of Cypher — feed the output into `WHERE`, `ORDER BY`,
+or downstream aggregation in a single pass.
+
+```python
+# Wellbores in our sodir graph that lack a production licence
+graph.cypher("""
+    CALL missing_required_edge({type: 'Wellbore', edge: 'IN_LICENCE'}) YIELD node
+    RETURN node.id, node.title
+""")  # 502 violations on the Sodir April-2026 snapshot
+
+# Cross-reference flagged IDs against any query result, in one Cypher pass
+graph.cypher("""
+    MATCH (l:Licence {title: '057'})<-[:IN_LICENCE]-(w:Wellbore)
+    WITH collect(w.id) AS pl057
+    CALL missing_required_edge({type: 'Wellbore', edge: 'DRILLED_BY'}) YIELD node
+    WHERE node.id IN pl057
+    RETURN count(*) AS pl057_missing_drilled_by
+""")
+```
+
+`missing_required_edge` and `missing_inbound_edge` validate the
+`(type, edge)` direction against the graph's actual schema and
+refuse to execute when misused. See
+[`docs/guides/cypher.md`](https://kglite.readthedocs.io/en/latest/guides/cypher.html#structural-validator-call-procedures)
+for the full procedure list.
+
 ## Examples
 
 The [`examples/`](https://github.com/kkollsga/kglite/tree/main/examples)
@@ -266,6 +299,7 @@ No server, no tuning, same Python process as your code.
 | **Cypher queries** | MATCH, CREATE, SET, DELETE, MERGE, aggregations, ORDER BY, LIMIT, SKIP |
 | **Semantic search** | Vector embeddings + `text_score()` for similarity ranking |
 | **Graph algorithms** | Shortest path, centrality, community detection, clustering |
+| **Structural validators** | `CALL orphan_node`, `missing_required_edge`, `cycle_2step` etc. — agent-discoverable integrity checks composable with normal Cypher |
 | **Spatial** | Coordinates, WKT geometry, distance and containment queries |
 | **Timeseries** | Time-indexed data with `ts_*()` Cypher functions |
 | **Bulk loading** | Fluent API (`add_nodes` / `add_connections`) for DataFrames |

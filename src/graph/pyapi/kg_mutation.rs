@@ -72,7 +72,6 @@ impl KnowledgeGraph {
             temporal_context: TemporalContext::default(),
             default_timeout_ms: None,
             default_max_rows: None,
-            rule_packs_xml: std::sync::Mutex::new(None),
         })
     }
 

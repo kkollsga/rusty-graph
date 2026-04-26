@@ -15,7 +15,6 @@ mod datatypes;
 mod graph;
 use graph::io::file::load_file;
 use graph::pyapi::blueprint::from_blueprint_rust;
-use graph::pyapi::kg_introspection::_set_default_rule_pack_xml;
 use graph::pyapi::result_view::{ResultIter, ResultView};
 use graph::{KnowledgeGraph, Transaction};
 
@@ -30,7 +29,6 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
     m.add_function(wrap_pyfunction!(from_blueprint_rust, m)?)?;
-    m.add_function(wrap_pyfunction!(_set_default_rule_pack_xml, m)?)?;
     m.add_class::<KnowledgeGraph>()?;
     m.add_class::<Transaction>()?;
     m.add_class::<ResultView>()?;

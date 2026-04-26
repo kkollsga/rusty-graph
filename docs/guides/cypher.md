@@ -122,6 +122,59 @@ graph.cypher("""
 | **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `type`, `id`, `labels`, `coalesce`, `count`, `sum`, `avg`, `min`, `max`, `collect`, `std`, `text_score` |
 | **Spatial** | `point`, `distance`, `contains`, `intersects`, `centroid`, `area`, `perimeter`, `latitude`, `longitude` |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args |
-| **Not supported** | `CALL` / stored procedures, `FOREACH`, variable-length path filters, `SET n:Label` (label mutation), multi-label |
+| **CALL procedures** | Graph algorithms (`pagerank`, `betweenness`, `degree`, `closeness`, `louvain`, `label_propagation`, `connected_components`, `cluster`); structural validators (`orphan_node`, `self_loop`, `cycle_2step`, `missing_required_edge`, `missing_inbound_edge`, `duplicate_title`); `list_procedures` to enumerate. Map-syntax parameters: `CALL pagerank({damping_factor: 0.85})` |
+| **Not supported** | `FOREACH`, variable-length path filters, `SET n:Label` (label mutation), multi-label |
+
+## Structural-validator CALL procedures
+
+Six procedures surface data-integrity gaps without writing
+`WHERE NOT EXISTS` patterns yourself. Each binds `node` (or
+`node_a, node_b`) — compose freely with WHERE / ORDER BY / LIMIT /
+aggregation as you would any Cypher row.
+
+| Procedure | What it finds | Required params |
+|---|---|---|
+| `orphan_node` | nodes with zero edges in any direction | `type` |
+| `self_loop` | `(n)-[:edge]->(n)` self-loops | `type`, `edge` |
+| `cycle_2step` | reciprocal pairs `a-[:edge]->b-[:edge]->a` | `type`, `edge` |
+| `missing_required_edge` | nodes lacking outbound `edge` (direction-validated) | `type`, `edge` |
+| `missing_inbound_edge` | nodes lacking inbound `edge` (direction-validated) | `type`, `edge` |
+| `duplicate_title` | one row per node whose title is shared with another node of same type | `type` |
+
+```cypher
+// Standalone — find Wellbores with no production licence
+CALL missing_required_edge({type: 'Wellbore', edge: 'IN_LICENCE'})
+YIELD node
+RETURN node.id, node.title
+
+// Composed — cross-reference flagged nodes against a query result
+MATCH (l:Licence {title: '057'})<-[:IN_LICENCE]-(w:Wellbore)
+WITH collect(w.id) AS pl057
+CALL missing_required_edge({type: 'Wellbore', edge: 'DRILLED_BY'}) YIELD node
+WHERE node.id IN pl057
+RETURN count(node) AS pl057_missing_drilled_by
+
+// Aggregated duplicates — one row per group
+CALL duplicate_title({type: 'Prospect'}) YIELD node
+WITH node.title AS title, collect(node) AS dups
+WITH title, size(dups) AS dup_count
+WHERE dup_count > 1
+RETURN title, dup_count
+ORDER BY dup_count DESC LIMIT 20
+```
+
+`missing_required_edge` and `missing_inbound_edge` validate the
+`(type, edge)` pair against the graph's actual schema before
+iterating. Calling `missing_inbound_edge({type: 'Wellbore', edge:
+'IN_LICENCE'})` — where `IN_LICENCE` flows Wellbore→Licence —
+raises `DirectionMismatch` with a suggestion to use
+`missing_required_edge` instead.
+
+For per-procedure docs (params, examples), drill in:
+
+```python
+g.describe(cypher=['orphan_node'])
+g.describe(cypher=['missing_required_edge'])
+```
 
 See the [full Cypher reference](../reference/cypher-reference.md) for detailed examples of every feature.

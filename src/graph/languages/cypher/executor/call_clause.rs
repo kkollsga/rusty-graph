@@ -80,11 +80,18 @@ impl<'a> CypherExecutor<'a> {
             "connected_components" | "weakly_connected_components" => &["node", "component"],
             "cluster" => &["node", "cluster"],
             "list_procedures" => &["name", "description", "yield_columns"],
+            "orphan_node"
+            | "self_loop"
+            | "missing_required_edge"
+            | "missing_inbound_edge"
+            | "duplicate_title" => &["node"],
+            "cycle_2step" => &["node_a", "node_b"],
             _ => {
                 return Err(format!(
                     "Unknown procedure '{}'. Available: pagerank, betweenness, degree, \
                      closeness, louvain, label_propagation, connected_components, \
-                     cluster, list_procedures",
+                     cluster, list_procedures, orphan_node, self_loop, cycle_2step, \
+                     missing_required_edge, missing_inbound_edge, duplicate_title",
                     clause.procedure_name
                 ));
             }
@@ -255,6 +262,34 @@ impl<'a> CypherExecutor<'a> {
                 rows
             }
             "cluster" => self.execute_call_cluster(&params, &clause.yield_items, &existing)?,
+            "orphan_node" => super::rule_procedures::execute_orphan_node(
+                self.graph,
+                &params,
+                &clause.yield_items,
+            )?,
+            "self_loop" => {
+                super::rule_procedures::execute_self_loop(self.graph, &params, &clause.yield_items)?
+            }
+            "cycle_2step" => super::rule_procedures::execute_cycle_2step(
+                self.graph,
+                &params,
+                &clause.yield_items,
+            )?,
+            "missing_required_edge" => super::rule_procedures::execute_missing_required_edge(
+                self.graph,
+                &params,
+                &clause.yield_items,
+            )?,
+            "missing_inbound_edge" => super::rule_procedures::execute_missing_inbound_edge(
+                self.graph,
+                &params,
+                &clause.yield_items,
+            )?,
+            "duplicate_title" => super::rule_procedures::execute_duplicate_title(
+                self.graph,
+                &params,
+                &clause.yield_items,
+            )?,
             "list_procedures" => {
                 let procedures = [
                     (
@@ -296,6 +331,36 @@ impl<'a> CypherExecutor<'a> {
                         "cluster",
                         "Cluster nodes by spatial location or numeric properties (DBSCAN/K-means). Reads from preceding MATCH.",
                         "node, cluster",
+                    ),
+                    (
+                        "orphan_node",
+                        "Rule: nodes of {type} with zero edges in any direction",
+                        "node",
+                    ),
+                    (
+                        "self_loop",
+                        "Rule: nodes of {type} with a self-loop via {edge}",
+                        "node",
+                    ),
+                    (
+                        "cycle_2step",
+                        "Rule: a-{edge}->b-{edge}->a pairs where both nodes are of {type}",
+                        "node_a, node_b",
+                    ),
+                    (
+                        "missing_required_edge",
+                        "Rule: nodes of {type} with no outgoing edge of {edge} (direction-validated)",
+                        "node",
+                    ),
+                    (
+                        "missing_inbound_edge",
+                        "Rule: nodes of {type} with no incoming edge of {edge} (direction-validated)",
+                        "node",
+                    ),
+                    (
+                        "duplicate_title",
+                        "Rule: nodes of {type} whose title is shared with another node of the same type",
+                        "node",
                     ),
                     (
                         "list_procedures",

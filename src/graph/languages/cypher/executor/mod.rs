@@ -1187,6 +1187,7 @@ pub mod expression;
 pub mod helpers;
 pub mod match_clause;
 pub mod return_clause;
+pub mod rule_procedures;
 pub mod spatial_join;
 #[cfg(test)]
 pub mod tests;

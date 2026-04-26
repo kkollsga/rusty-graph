@@ -619,6 +619,7 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
         );
     }
     xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/label_propagation), component (connected_components), cluster (cluster)\"/>\n");
+    xml.push_str("    <rules hint=\"CALL proc({type, edge}) YIELD node — structural validators (orphan_node/self_loop/cycle_2step/missing_required_edge/missing_inbound_edge/duplicate_title). Compose with WHERE/RETURN/aggregation as normal Cypher rows.\"/>\n");
     xml.push_str("    <cypher hint=\"Full Cypher with extensions: ||, =~, coalesce(), CALL cluster/pagerank/louvain/..., distance(), contains(). describe(cypher=True) for reference, describe(cypher=['topic']) for detailed docs.\"/>\n");
     xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. describe(fluent=True) for reference, describe(fluent=['topic']) for detailed docs.\"/>\n");
     if graph.graph.edge_count() > 0 {
@@ -1228,6 +1229,7 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
     // Minimal extensions (skip capability-dependent hints)
     xml.push_str("  <extensions>\n");
     xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/label_propagation), component (connected_components), cluster (cluster)\"/>\n");
+    xml.push_str("    <rules hint=\"CALL proc({type, edge}) YIELD node — structural validators (orphan_node/self_loop/cycle_2step/missing_required_edge/missing_inbound_edge/duplicate_title)\"/>\n");
     xml.push_str("    <cypher hint=\"Full Cypher with extensions. describe(cypher=True) for reference, describe(cypher=['topic']) for detailed docs.\"/>\n");
     xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. describe(fluent=True) for reference.\"/>\n");
     xml.push_str("    <bug_report hint=\"bug_report(query, result, expected, description) — file a Cypher bug report.\"/>\n");
@@ -1541,7 +1543,6 @@ pub fn compute_description(
     fluent: &FluentDetail,
     type_search: Option<&str>,
     max_pairs: Option<usize>,
-    rule_packs_xml: Option<&str>,
 ) -> Result<String, String> {
     // Default cap matches pre-parameter behavior — 50 pairs is enough
     // to cover the dominant (src_type, tgt_type) relationships while
@@ -1611,31 +1612,7 @@ pub fn compute_description(
             }
         }
     };
-    Ok(inject_rule_packs(result, rule_packs_xml))
-}
-
-/// Splice a pre-rendered ``<rule_packs>...</rule_packs>`` block before the
-/// closing ``</graph>`` tag. The block is built in Python by the rules
-/// accessor (or by the bundled-pack peek on import) and pushed in via
-/// ``KnowledgeGraph._set_rule_pack_xml`` / ``_set_default_rule_pack_xml``.
-///
-/// Returns ``xml`` unchanged when no pack XML is provided or when the
-/// document doesn't end with ``</graph>`` (standalone tracks like
-/// ``<type_search>``, ``<cypher_reference>`` etc.).
-fn inject_rule_packs(mut xml: String, rule_packs_xml: Option<&str>) -> String {
-    let Some(block) = rule_packs_xml else {
-        return xml;
-    };
-    if block.is_empty() {
-        return xml;
-    }
-    let closing = "</graph>";
-    let Some(idx) = xml.rfind(closing) else {
-        return xml;
-    };
-    xml.reserve(block.len());
-    xml.insert_str(idx, block);
-    xml
+    Ok(result)
 }
 
 /// Case-insensitive substring check without allocation.

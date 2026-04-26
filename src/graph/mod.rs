@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::Bound;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub mod algorithms;
 pub mod blueprint;
@@ -155,12 +155,6 @@ pub struct KnowledgeGraph {
     /// explicitly passed. Queries exceeding this limit return an error.
     /// None = no limit (default).
     pub(crate) default_max_rows: Option<usize>,
-    /// Per-instance cached XML for the `<rule_packs>` block emitted by
-    /// `describe()`. Computed in Python by `kglite.rules.render` whenever
-    /// the rules accessor's state changes (pack load, pack run) and pushed
-    /// here via `_set_rule_pack_xml`. `None` means "fall through to the
-    /// module-level default" (set on `kglite.rules` import).
-    pub(crate) rule_packs_xml: Mutex<Option<String>>,
 }
 
 /// Temporal context for automatic date filtering on select/traverse/collect.
@@ -198,7 +192,6 @@ impl KnowledgeGraph {
             temporal_context: TemporalContext::default(),
             default_timeout_ms: None,
             default_max_rows: None,
-            rule_packs_xml: Mutex::new(None),
         }
     }
 }
@@ -214,12 +207,6 @@ impl Clone for KnowledgeGraph {
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
-            rule_packs_xml: Mutex::new(
-                self.rule_packs_xml
-                    .lock()
-                    .ok()
-                    .and_then(|guard| guard.clone()),
-            ),
         }
     }
 }

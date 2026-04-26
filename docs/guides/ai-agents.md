@@ -62,8 +62,35 @@ The model wrapper works with any provider — OpenAI, Cohere, local sentence-tra
 6. **Use parameters** (`params={'x': val}`) to prevent injection when passing user input to queries
 7. **ResultView is lazy** — agents can call `len(result)` to check row count without converting all rows
 
+## Structural Validators
+
+Six native Cypher procedures surface data-integrity gaps without the agent having to write the underlying `WHERE NOT EXISTS` patterns. They appear in `describe()` (in the `<rules hint="..."/>` extension and in `describe(cypher=True)`) so the agent can discover them inline with the schema.
+
+| Procedure | What it finds |
+|---|---|
+| `orphan_node({type})` | nodes with zero edges in any direction |
+| `self_loop({type, edge})` | self-loops via the given edge |
+| `cycle_2step({type, edge})` | reciprocal pairs `a-[:edge]->b-[:edge]->a` |
+| `missing_required_edge({type, edge})` | direction-validated outbound check |
+| `missing_inbound_edge({type, edge})` | direction-validated inbound check |
+| `duplicate_title({type})` | nodes whose title is shared with another node of the same type |
+
+Each binds `node` (or `node_a, node_b` for `cycle_2step`), so the agent can compose with WHERE / ORDER BY / aggregation in a single Cypher pass — including the cross-reference workflow where flagged IDs are checked against another query's results:
+
+```python
+graph.cypher("""
+    MATCH (l:Licence {title: '057'})<-[:IN_LICENCE]-(w:Wellbore)
+    WITH collect(w.id) AS pl057
+    CALL missing_required_edge({type: 'Wellbore', edge: 'DRILLED_BY'}) YIELD node
+    WHERE node.id IN pl057
+    RETURN count(*) AS pl057_missing_drilled_by
+""")
+```
+
+`missing_required_edge` and `missing_inbound_edge` validate the `(type, edge)` direction against the graph's actual schema and raise `DirectionMismatch` with a fix-suggesting message when the agent picks the wrong one (e.g. asking for inbound `IN_LICENCE` on a `Wellbore` when the edge flows outward). See [Cypher → Structural-validator CALL procedures](cypher.md#structural-validator-call-procedures) for the full surface and per-procedure docs via `describe(cypher=['orphan_node'])`.
+
 ## What `describe()` Returns
 
-- **Inventory mode** (`describe()`): node types as compact descriptors `TypeName[size,complexity,flags]` sorted by count, connection map, Cypher extensions. Core/supporting type tiers hide child types behind `+N` suffixes. For small graphs (≤15 types), full detail is inlined automatically.
+- **Inventory mode** (`describe()`): node types as compact descriptors `TypeName[size,complexity,flags]` sorted by count, connection map, Cypher extensions. Core/supporting type tiers hide child types behind `+N` suffixes. For small graphs (≤15 types), full detail is inlined automatically. The `<extensions>` block carries `<algorithms>` and `<rules>` hint lines pointing the agent at the available `CALL` procedures (graph algorithms + structural validators).
 - **Focused mode** (`describe(types=['Field'])`): detailed properties with types, connection topology, timeseries/spatial config, supporting children, and sample nodes.
-- **Cypher reference** (`describe(cypher=True)`): full language reference including all supported clauses, operators, built-in functions, predicates, and examples.
+- **Cypher reference** (`describe(cypher=True)`): full language reference including all supported clauses, operators, built-in functions, predicates, and procedures (including the six structural validators). Drill into a single procedure with `describe(cypher=['orphan_node'])`.
