@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.17] — 2026-04-26
+
 ### Performance
 
 - **Two-MATCH count fusion: top-K-by-degree filtered queries now run
