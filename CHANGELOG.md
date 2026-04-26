@@ -30,6 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now sums incoming + outgoing `count_edges_filtered` calls — the
   canonical "total degree" pattern. Both the new two-MATCH fusion and
   the existing single-MATCH `WITH count` benefit.
+- **Per-group-key count phase in `execute_fused_match_with_aggregate`
+  now runs in parallel** above 4 096 group keys. Each
+  `count_edges_filtered` call is a read-only mmap lookup, so rayon's
+  par_iter overlaps the per-call I/O instead of serialising it.
+  Measured on the same Wikidata top-10-by-degree query
+  (124 M nodes / 861 M edges): **24 s → 8.5 s (~2.5×)** on top of
+  the fusion win. End-to-end wall on `top_writers.py` is now 73 s,
+  vs. 510 s before any of this session's work (~7× total).
 
 ### Performance
 

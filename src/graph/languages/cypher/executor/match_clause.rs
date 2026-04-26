@@ -1976,9 +1976,13 @@ impl<'a> CypherExecutor<'a> {
             executor.execute(&group_only_pattern)?
         };
 
-        let mut result_rows = Vec::with_capacity(group_matches.len());
+        // Phase 1 — sequential: extract distinct group-key NodeIndices from
+        // the match set. Dedup applies to the two-MATCH path because M1's
+        // full execution can yield duplicate `w` bindings (one per edge
+        // satisfying M1's constraint). The single-MATCH path's
+        // group_only_pattern already produces unique nodes.
+        let mut group_keys: Vec<NodeIndex> = Vec::with_capacity(group_matches.len());
         let mut seen_group_keys: HashSet<NodeIndex> = HashSet::new();
-
         for m in &group_matches {
             let node_idx = m.bindings.iter().find_map(|(name, binding)| {
                 if name == group_var {
@@ -1995,20 +1999,53 @@ impl<'a> CypherExecutor<'a> {
             let Some(node_idx) = node_idx else {
                 continue;
             };
-            // M1's full execution can produce duplicate group keys when the
-            // pattern is non-deterministic in matches (e.g. multiple edges
-            // satisfying M1 from the same `w`). Deduplicate on the group
-            // node so the per-key count fires once per distinct key.
             if secondary_match.is_some() && !seen_group_keys.insert(node_idx) {
                 continue;
             }
+            group_keys.push(node_idx);
+        }
 
-            let mut bindings_for_count = Bindings::with_capacity(1);
-            bindings_for_count.insert(group_var.to_string(), node_idx);
-            let match_count = self
-                .try_count_simple_pattern(count_pattern, &bindings_for_count)?
-                .unwrap_or(0);
+        // Phase 2 — parallel: degree count per group key. Each
+        // try_count_simple_pattern call is read-only against the graph and
+        // independent of every other call, so rayon over many keys
+        // overlaps the per-call mmap reads instead of serialising them.
+        // Sequential fallback for small group sets so rayon overhead doesn't
+        // dominate.
+        const PARALLEL_COUNT_THRESHOLD: usize = 4_096;
+        let group_var_owned = group_var.to_string();
+        let counts: Vec<(NodeIndex, i64)> = if group_keys.len() >= PARALLEL_COUNT_THRESHOLD {
+            let parallel: Result<Vec<(NodeIndex, i64)>, String> = group_keys
+                .par_iter()
+                .map(|&idx| -> Result<(NodeIndex, i64), String> {
+                    let mut bindings = Bindings::with_capacity(1);
+                    bindings.insert(group_var_owned.clone(), idx);
+                    let c = self
+                        .try_count_simple_pattern(count_pattern, &bindings)?
+                        .unwrap_or(0);
+                    Ok((idx, c))
+                })
+                .collect();
+            parallel?
+        } else {
+            let mut sequential = Vec::with_capacity(group_keys.len());
+            for &idx in &group_keys {
+                let mut bindings = Bindings::with_capacity(1);
+                bindings.insert(group_var_owned.clone(), idx);
+                let c = self
+                    .try_count_simple_pattern(count_pattern, &bindings)?
+                    .unwrap_or(0);
+                sequential.push((idx, c));
+            }
+            sequential
+        };
 
+        // Phase 3 — sequential: project group keys + counts into result rows.
+        // Row construction uses the executor's expression evaluator which
+        // isn't trivially parallelisable; the per-row work is tiny next to
+        // the count phase, so leaving it sequential is fine.
+        let mut result_rows = Vec::with_capacity(counts.len());
+
+        for (node_idx, match_count) in counts {
             // Skip nodes with 0 matches (MATCH semantics — no outer join)
             if match_count == 0 {
                 continue;
