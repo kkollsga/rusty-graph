@@ -105,7 +105,7 @@ jobs:
         if: matrix.python-version == '3.12'
         run: |
           pip install mypy pandas-stubs
-          python -m mypy.stubtest kglite --ignore-missing-stub --mypy-config-file mypy_stubtest.ini --allowlist stubtest_allowlist.txt
+          python -m mypy.stubtest kglite --ignore-missing-stub --ignore-unused-allowlist --mypy-config-file mypy_stubtest.ini --allowlist stubtest_allowlist.txt
 
       - name: Upload coverage
         if: matrix.python-version == '3.12'

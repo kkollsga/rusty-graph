@@ -24,7 +24,9 @@ kglite.KnowledgeGraph.embeddings
 
 # Re-exports: KnowledgeGraph is imported into the dataset wrappers, so stubtest
 # re-checks the same class through each importing module. The underlying issues
-# are documented above against `kglite.KnowledgeGraph.*`.
+# are documented above against `kglite.KnowledgeGraph.*`. mypy 1.20+ no longer
+# flags these (so they appear unused there) — kept for older mypy and run with
+# `--ignore-unused-allowlist` in CI/Make so both versions stay green.
 kglite.datasets.wikidata.KnowledgeGraph
 kglite.datasets.wikidata.KnowledgeGraph.embed_texts
 kglite.datasets.wikidata.KnowledgeGraph.search_text
@@ -42,3 +44,4 @@ kglite.datasets.sodir.wrapper.KnowledgeGraph.embeddings
 # attribute under stubtest. Internal-only re-export, not part of the API.
 kglite.datasets.sodir.wrapper.Any
 kglite.datasets.sodir.wrapper.Any.__new__
+
