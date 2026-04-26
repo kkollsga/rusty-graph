@@ -96,10 +96,17 @@ pub enum Clause {
     /// `try_count_simple_pattern`. This handles the common shape:
     ///   `MATCH (a)-[:T]->(b {nid:'X'}) MATCH (a)-[r]-() WITH a, count(r) ...`
     /// without expanding 4 M edge rows from the second MATCH.
+    ///
+    /// `top_k` is set when a downstream `ORDER BY <count_alias> {DESC|ASC}
+    /// LIMIT k` only needs the K winners. The executor keeps a K-element
+    /// heap on the count and only evaluates the group-key projections
+    /// (e.g. `w.nid`, `w.title`) for those K rows — saves N×P property
+    /// reads when N is large and K is small.
     FusedMatchWithAggregate {
         match_clause: MatchClause,
         with_clause: WithClause,
         secondary_match: Option<MatchClause>,
+        top_k: Option<AggregateTopK>,
     },
     /// Optimizer-generated: fuse RETURN + ORDER BY + LIMIT into a single
     /// pass using a min-heap for O(n log k) instead of O(n log n).
@@ -188,6 +195,17 @@ pub enum Clause {
         probe_type: String,
         remainder: Option<Predicate>,
     },
+}
+
+/// Top-K hint absorbed by `FusedMatchWithAggregate` from a downstream
+/// `ORDER BY <count_alias> {DESC|ASC} LIMIT k` pipeline. The executor uses
+/// this to skip projection-expression evaluation for non-winners.
+#[derive(Debug, Clone)]
+pub struct AggregateTopK {
+    /// LIMIT k.
+    pub limit: usize,
+    /// `true` for DESC (keep k largest counts), `false` for ASC (smallest).
+    pub descending: bool,
 }
 
 // ============================================================================

@@ -38,6 +38,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (124 M nodes / 861 M edges): **24 s → 8.5 s (~2.5×)** on top of
   the fusion win. End-to-end wall on `top_writers.py` is now 73 s,
   vs. 510 s before any of this session's work (~7× total).
+- **Top-K hint absorbed into `FusedMatchWithAggregate`.** A new
+  planner pass `fuse_match_with_aggregate_top_k` recognises the
+  shape `[FusedMatchWithAggregate, Return, OrderBy(count_alias),
+  Limit(k)]` (where the RETURN is a pure pass-through projection)
+  and pushes the K-bound into the fused stage. The executor sorts
+  by count first and then evaluates the group-key projection
+  expressions only for the K winners — saves N×P
+  `evaluate_expression` calls when N is large and K is small. The
+  Wikidata top-10-by-degree query goes from materialising 416 k
+  rows to 10; per-row property reads stop being the tail cost
+  (modest 5% gain on top of the parallel-count win, but principled:
+  "only do necessary work" — projection-heavy queries get a much
+  larger benefit).
 
 ### Performance
 

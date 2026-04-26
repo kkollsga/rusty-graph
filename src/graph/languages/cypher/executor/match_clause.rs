@@ -1845,6 +1845,7 @@ impl<'a> CypherExecutor<'a> {
         match_clause: &MatchClause,
         with_clause: &WithClause,
         secondary_match: Option<&MatchClause>,
+        top_k: Option<&AggregateTopK>,
         _existing: ResultSet,
     ) -> Result<ResultSet, String> {
         let pattern = &match_clause.patterns[0];
@@ -2037,6 +2038,26 @@ impl<'a> CypherExecutor<'a> {
                 sequential.push((idx, c));
             }
             sequential
+        };
+
+        // Phase 2.5 — when the planner absorbed a downstream `ORDER BY
+        // <count_alias> {DESC|ASC} LIMIT k`, trim the count vec to the K
+        // winners *before* row construction. Property-evaluation per row
+        // is the tail cost (each `evaluate_expression` does a few mmap
+        // reads); skipping it for non-winners is the whole point of
+        // pushing the top-K hint into the fused stage.
+        let counts: Vec<(NodeIndex, i64)> = if let Some(tk) = top_k {
+            let mut filtered: Vec<(NodeIndex, i64)> =
+                counts.into_iter().filter(|&(_, c)| c > 0).collect();
+            if tk.descending {
+                filtered.sort_unstable_by_key(|a| std::cmp::Reverse(a.1));
+            } else {
+                filtered.sort_unstable_by_key(|a| a.1);
+            }
+            filtered.truncate(tk.limit);
+            filtered
+        } else {
+            counts
         };
 
         // Phase 3 — sequential: project group keys + counts into result rows.

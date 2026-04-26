@@ -1329,6 +1329,7 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
             match_clause: primary,
             with_clause,
             secondary_match: Some(secondary),
+            top_k: None,
         },
     );
     true
@@ -1528,9 +1529,166 @@ pub(super) fn fuse_match_with_aggregate(query: &mut CypherQuery) {
                 match_clause,
                 with_clause,
                 secondary_match: None,
+                top_k: None,
             },
         );
 
+        i += 1;
+    }
+}
+
+/// Push a downstream `ORDER BY <count_alias> {DESC|ASC} LIMIT k` into the
+/// preceding `FusedMatchWithAggregate` so the executor only evaluates the
+/// group-key projections (e.g. `w.nid`, `w.title`) for the K winners. This
+/// is the lazy-evaluation lever for top-K-by-degree workloads — the
+/// fused stage already emits rows row-by-row, but without the hint it
+/// builds 416 k rows on Wikidata before the downstream LIMIT throws all
+/// but 10 away.
+///
+/// Pattern matched: `[FusedMatchWithAggregate, Return, OrderBy, Limit]`
+/// where:
+/// - Return is non-DISTINCT and every item is a plain alias of a
+///   WITH-projected column (no computed expressions; otherwise we'd
+///   skip rows the user actually wanted),
+/// - OrderBy has exactly one item, and it targets a `count(...)` alias
+///   in the WITH (any other order key requires evaluating projections
+///   first to know the sort value, defeating the optimisation),
+/// - Limit is a positive integer literal.
+///
+/// On match, the absorbed clauses are *kept* in place — they'll then
+/// process at most K rows trivially. This keeps the rest of the
+/// pipeline (column shapes, downstream WHERE, etc.) unchanged.
+pub(super) fn fuse_match_with_aggregate_top_k(query: &mut CypherQuery) {
+    use super::super::ast::is_aggregate_expression;
+
+    let mut i = 0;
+    while i + 3 < query.clauses.len() {
+        if !matches!(
+            (
+                &query.clauses[i],
+                &query.clauses[i + 1],
+                &query.clauses[i + 2],
+                &query.clauses[i + 3],
+            ),
+            (
+                Clause::FusedMatchWithAggregate { .. },
+                Clause::Return(_),
+                Clause::OrderBy(_),
+                Clause::Limit(_)
+            )
+        ) {
+            i += 1;
+            continue;
+        }
+
+        // Snapshot what we need from each clause to avoid borrow conflicts
+        // with the mutable insert at the end.
+        let with_items = match &query.clauses[i] {
+            Clause::FusedMatchWithAggregate { with_clause, .. } => with_clause.items.clone(),
+            _ => unreachable!(),
+        };
+        let already_has_top_k = matches!(
+            &query.clauses[i],
+            Clause::FusedMatchWithAggregate { top_k: Some(_), .. }
+        );
+        if already_has_top_k {
+            i += 1;
+            continue;
+        }
+
+        // Collect WITH alias set, and the alias of the (single) count() item.
+        // We need that alias to validate the ORDER BY target.
+        let mut count_alias: Option<String> = None;
+        let mut count_count = 0usize;
+        let mut aliases: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for item in &with_items {
+            let alias = item
+                .alias
+                .clone()
+                .unwrap_or_else(|| match &item.expression {
+                    Expression::Variable(v) => v.clone(),
+                    Expression::PropertyAccess { variable, property } => {
+                        format!("{variable}.{property}")
+                    }
+                    _ => format!("{:?}", item.expression),
+                });
+            if is_aggregate_expression(&item.expression) {
+                count_count += 1;
+                count_alias = Some(alias.clone());
+            }
+            aliases.insert(alias);
+        }
+        if count_count != 1 {
+            // Zero aggregates → nothing to sort by; multiple aggregates →
+            // the optimisation can't pick a single sort key.
+            i += 1;
+            continue;
+        }
+        let count_alias = match count_alias {
+            Some(s) => s,
+            None => {
+                i += 1;
+                continue;
+            }
+        };
+
+        // RETURN must be a pure pass-through projection of WITH aliases.
+        // (Computed RETURN expressions could need rows we throw away.)
+        let return_ok = if let Clause::Return(r) = &query.clauses[i + 1] {
+            !r.distinct
+                && r.items.iter().all(|item| {
+                    let alias = match &item.expression {
+                        Expression::Variable(v) => v.clone(),
+                        _ => return false,
+                    };
+                    aliases.contains(&alias)
+                })
+        } else {
+            false
+        };
+        if !return_ok {
+            i += 1;
+            continue;
+        }
+
+        // ORDER BY must target the count alias and have a single item.
+        let (target_count, descending) = if let Clause::OrderBy(o) = &query.clauses[i + 2] {
+            if o.items.len() != 1 {
+                (false, false)
+            } else {
+                let target = match &o.items[0].expression {
+                    Expression::Variable(v) => v == &count_alias,
+                    _ => false,
+                };
+                (target, !o.items[0].ascending)
+            }
+        } else {
+            (false, false)
+        };
+        if !target_count {
+            i += 1;
+            continue;
+        }
+
+        // LIMIT must be a positive integer literal.
+        let limit = if let Clause::Limit(l) = &query.clauses[i + 3] {
+            match &l.count {
+                Expression::Literal(Value::Int64(n)) if *n > 0 => *n as usize,
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            }
+        } else {
+            i += 1;
+            continue;
+        };
+
+        // All checks passed — set top_k on the FusedMatchWithAggregate.
+        // Leave Return/OrderBy/Limit in place; they'll process ≤k rows.
+        if let Clause::FusedMatchWithAggregate { top_k, .. } = &mut query.clauses[i] {
+            *top_k = Some(AggregateTopK { limit, descending });
+        }
         i += 1;
     }
 }

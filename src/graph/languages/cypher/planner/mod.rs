@@ -23,8 +23,8 @@ pub mod simplification;
 use cost_model::reorder_predicates_by_cost;
 use fusion::{
     fuse_anchored_edge_count, fuse_count_short_circuits, fuse_match_return_aggregate,
-    fuse_match_with_aggregate, fuse_node_scan_aggregate, fuse_node_scan_top_k,
-    fuse_optional_match_aggregate, fuse_order_by_top_k, fuse_spatial_join,
+    fuse_match_with_aggregate, fuse_match_with_aggregate_top_k, fuse_node_scan_aggregate,
+    fuse_node_scan_top_k, fuse_optional_match_aggregate, fuse_order_by_top_k, fuse_spatial_join,
     fuse_vector_score_order_limit,
 };
 use index_selection::push_where_into_match;
@@ -47,6 +47,11 @@ pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<Stri
     fuse_optional_match_aggregate(query);
     fuse_match_return_aggregate(query);
     fuse_match_with_aggregate(query);
+    // Run top-K absorption AFTER fuse_match_with_aggregate (which produces
+    // FusedMatchWithAggregate) but BEFORE fuse_order_by_top_k (which would
+    // otherwise consume the downstream RETURN+ORDER BY+LIMIT into a
+    // FusedOrderByTopK that no longer matches our pattern).
+    fuse_match_with_aggregate_top_k(query);
     fuse_node_scan_aggregate(query);
     fuse_node_scan_top_k(query);
     fuse_vector_score_order_limit(query);

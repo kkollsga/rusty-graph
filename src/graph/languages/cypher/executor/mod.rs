@@ -480,10 +480,12 @@ impl<'a> CypherExecutor<'a> {
                 match_clause,
                 with_clause,
                 secondary_match,
+                top_k,
             } => self.execute_fused_match_with_aggregate(
                 match_clause,
                 with_clause,
                 secondary_match.as_ref(),
+                top_k.as_ref(),
                 result_set,
             ),
             Clause::FusedCountAll { alias } => {
