@@ -7,6 +7,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.18] — 2026-04-26
+
+### Changed
+
+- **Rule-pack discovery via `describe()` is now opt-in.** A fresh
+  `kglite.load(...)` produces a `describe()` with no `<rule_packs>`
+  block — graphs that don't use rule packs incur no agent-facing
+  noise. Activation is explicit:
+  - `g.rules.run(...)` or `g.rules.load(...)` activates per-graph
+    advertising (existing behaviour, unchanged).
+  - New `kglite.rules.advertise()` publishes a module-level default
+    visible to every subsequent `describe()` across all graphs. Use
+    this for MCP servers that expose a rule-pack tool. Idempotent.
+  - The `examples/mcp_server.py` `rules_run` tool is now commented
+    out; the file documents how to re-enable it for users who want
+    rule packs in their MCP surface. The default MCP example is
+    rule-pack-free.
+- **Per-rule Cypher timeout via `default_timeout_ms`.** Rules can
+  declare a YAML-level `default_timeout_ms` and the runner passes it
+  as the `timeout_ms` to `g.cypher()` per rule. A caller-supplied
+  `timeout_ms` to `g.rules.run(...)` always wins. Lets full-Wikidata
+  users set realistic budgets on rules that scan dense node types
+  (13M humans, 45M scholarly articles) without affecting the global
+  graph timeout.
+- **Rule-pack `describe()` integration moved into Rust.** Slice 1.1
+  shipped agent-discovery via a Python monkey-patch that wrapped
+  `KnowledgeGraph.describe`, called the Rust method (preserved as
+  `_describe_native`), and post-processed the XML to splice in a
+  `<rule_packs>` block. That dispatch is now native: `describe()`
+  is the Rust method again. Per-instance pack XML lives on the
+  `KnowledgeGraph` struct (`Mutex<Option<String>>`); a module-level
+  default holds the cold bundled-pack inventory. Python's role
+  shrinks to rendering the XML on pack `load()` / `run()` and
+  pushing it via the new `_set_rule_pack_xml` PyO3 method (and the
+  module-level `_set_default_rule_pack_xml`). User-visible XML and
+  behaviour are byte-compatible; the wrapper indirection and its
+  per-call `str.rfind`/slice/concat are gone.
+
+### Fixed
+
+- **`LIMIT` was applied before `WHERE` filtering, returning fewer rows
+  than expected.** A query like
+  `MATCH (n:T) WHERE NOT EXISTS { (n)-[:E]->() } RETURN n.id LIMIT 5`
+  could return 0 rows when the first 5 candidate nodes all failed the
+  WHERE predicate. Root cause: the planner pushed the LIMIT hint into
+  `PatternExecutor`, which capped *candidates* before the inline
+  WHERE filter ran. Fix: skip the limit hint at pattern-execution
+  time when an inline WHERE is present, and apply LIMIT after the
+  WHERE filter (as the surrounding executor already attempts to).
+  Affects any filtered query with LIMIT, not just `NOT EXISTS`.
+
+### Added
+
+- **Rule packs** — agent-discoverable structural validators. New
+  `g.rules` sub-namespace exposes `list()`, `load()`, `run()`, and
+  `describe()` for named YAML packs that compile to Cypher and emit a
+  structured `RuleReport`. The bundled `structural_integrity` pack
+  (v1.1) ships six universal cross-graph rules: orphan nodes,
+  self-loops, short cycles, missing-required-edge (outbound),
+  missing-inbound-edge, and duplicate titles. `g.describe()` surfaces
+  a `<rule_packs>` block so agents discover packs through the same
+  XML they consume for schema. See
+  [`docs/guides/rules.md`](docs/guides/rules.md). Reports are lazy:
+  `.summary` returns counts without materialising rows, and runs are
+  cached per `(pack_name, params, graph)`. New runtime dependency:
+  `pyyaml>=6.0`.
+- **Rule-pack ergonomics:**
+  - `summary["any_truncated"]` — top-level boolean so agents can
+    one-glance check if any rule hit its LIMIT.
+  - `report.is_suspect(node_id)` — O(1) cross-reference helper that
+    returns `[(rule_name, severity), ...]` for rules that flagged the
+    node. Built lazily; accepts string or int ids.
+  - `g.rules.list()` now reads bundled-YAML headers lazily so cold
+    inventory shows real version + rule_count + description (no
+    placeholders) before any pack has been loaded.
+  - Optional `usage_hint:` field on a pack — surfaced via
+    `g.rules.describe(name)` and as an XML attribute in
+    `g.describe()` so agents can read "use this pack when…" guidance
+    inline with the schema.
+  - `to_markdown()` truncates list-typed cells (e.g. the `ids`
+    column in `duplicate_title`) to 3 elements + " (+N more)" so
+    agent-pasted output stays readable.
+  - **Direction-aware `missing_*_edge` rules.** New optional
+    `validates_direction:` rule field (`"outbound"` or `"inbound"`).
+    The runner inspects `g.connection_types()` and refuses to execute
+    when the `(type, edge)` pair flows the wrong way in the graph's
+    actual schema, surfacing a `DirectionMismatch` error that
+    suggests the right rule. The bundled `missing_required_edge` and
+    `missing_inbound_edge` opt in. Prevents trivial rule firing where
+    e.g. asking for incoming `IN_LICENCE` on a `Wellbore` would have
+    matched every wellbore meaninglessly.
+
 ## [0.8.17] — 2026-04-26
 
 ### Performance
