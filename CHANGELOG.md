@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.19] — 2026-04-26
+
+### Changed
+
+- **Rule packs rebuilt as native Cypher CALL procedures.** The
+  Python-layer `kglite.rules` package (`g.rules.run(...)`,
+  `RuleReport`, YAML packs, ~1,200 lines) is removed; six
+  structural-validator procedures live inside the Cypher engine
+  alongside `pagerank` / `connected_components`:
+
+  ```cypher
+  CALL orphan_node({type: 'Wellbore'}) YIELD node RETURN node
+  CALL missing_required_edge({type: 'Wellbore', edge: 'IN_LICENCE'}) YIELD node ...
+  CALL missing_inbound_edge({type: 'Discovery', edge: 'IN_DISCOVERY'}) YIELD node ...
+  CALL self_loop({type: 'Person', edge: 'KNOWS'}) YIELD node ...
+  CALL cycle_2step({type: 'Person', edge: 'KNOWS'}) YIELD node_a, node_b ...
+  CALL duplicate_title({type: 'Prospect'}) YIELD node ...
+  ```
+
+  Direct graph iteration in Rust replaces the YAML→Cypher→parse round
+  trip — single rule on sodir (564k nodes) runs in **<2 ms** vs.
+  ~5 ms for the legacy Python pack runner. Composability with
+  surrounding Cypher (WHERE / ORDER BY / aggregation) collapses the
+  previous two-step `rules_run + cypher_query` flow into a single
+  pass.
+
+  Direction validation, anchored type-by-type iteration, and the
+  `DirectionMismatch` error survive — ported to Rust. Same agent
+  protection without the parallel API.
+
+  Discovery surface: rule procedures appear in
+  `describe(cypher=True)` topic list, in the
+  `<rules hint="..."/>` extension hint of `describe()`, and in
+  `CALL list_procedures() YIELD name`. Per-procedure docs via
+  `describe(cypher=['orphan_node'])`. No `<rule_packs>` block. No
+  opt-in `advertise()` function. No separate `rules_run` MCP tool —
+  agents invoke via `cypher_query`.
+
+  **Breaking change.** Code using `g.rules.run(...)` or any
+  `kglite.rules.*` import from 0.8.16–0.8.18 must migrate to the
+  CALL syntax. The migration is mechanical: one `CALL` per rule
+  with map-syntax parameters and `YIELD node` (or `YIELD node_a,
+  node_b` for `cycle_2step`).
+
+  Removed: `kglite/rules/` package, `g.rules` accessor on
+  `KnowledgeGraph`, `Rule`/`RulePack`/`RuleReport`/`_RulesAccessor`
+  classes, `kglite.rules.advertise()`, `_set_default_rule_pack_xml`
+  PyO3 function, `_set_rule_pack_xml` PyO3 method, `rule_packs_xml`
+  field on `KnowledgeGraph`, `inject_rule_packs` helper in
+  describe.rs, the `<rule_packs>` block in `describe()`, the
+  `rules_run` MCP tool from `examples/mcp_server.py` and
+  `prospect_mcp_server.py`, `pyyaml>=6.0` runtime dependency.
+
 ## [0.8.18] — 2026-04-26
 
 ### Changed
