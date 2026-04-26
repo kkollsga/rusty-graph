@@ -318,7 +318,7 @@ pub(super) fn evaluate_comparison(
 
 /// Resolve a node property, returning an owned Value directly.
 /// Uses `get_property_value()` to avoid Cow wrapping/unwrapping overhead.
-pub(super) fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> Value {
+pub(crate) fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> Value {
     let node_type_str = node.node_type_str(&graph.interner);
     let resolved = graph.resolve_alias(node_type_str, property);
     match resolved {
@@ -374,7 +374,7 @@ pub(super) fn resolve_node_property(node: &NodeData, property: &str, graph: &Dir
 }
 
 /// Resolve a property from an EdgeBinding by looking up the graph
-pub(super) fn resolve_edge_property(graph: &DirGraph, edge: &EdgeBinding, property: &str) -> Value {
+pub(crate) fn resolve_edge_property(graph: &DirGraph, edge: &EdgeBinding, property: &str) -> Value {
     let g = &graph.graph;
     if let Some(edge_data) = g.edge_weight(edge.edge_index) {
         match property {

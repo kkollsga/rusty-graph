@@ -1393,6 +1393,51 @@ impl KnowledgeGraph {
             let mut rows = result.rows;
             resolve_noderefs(&inner.graph, &mut rows);
             if output_csv {
+                // CSV consumes every cell — if the executor handed us a
+                // lazy descriptor (RETURN was flagged `lazy_eligible`),
+                // materialise it through ResultView first so to_csv()
+                // sees the actual values rather than the empty rows
+                // placeholder.
+                if let Some(lazy_desc) = result.lazy {
+                    let lazy_result = cypher::CypherResult {
+                        columns: columns.clone(),
+                        rows: Vec::new(),
+                        stats: None,
+                        profile: None,
+                        diagnostics: None,
+                        lazy: Some(lazy_desc),
+                    };
+                    let view =
+                        crate::graph::pyapi::result_view::ResultView::from_cypher_result_with_graph(
+                            lazy_result,
+                            std::sync::Arc::clone(&inner),
+                        );
+                    let materialised = view
+                        .materialise_all()
+                        .into_iter()
+                        .map(|row| {
+                            row.into_iter()
+                                .map(|pv| match pv {
+                                    cypher::py_convert::PreProcessedValue::Plain(v) => v,
+                                    cypher::py_convert::PreProcessedValue::ParsedJson(jv) => {
+                                        Value::String(
+                                            serde_json::to_string(&jv).unwrap_or_default(),
+                                        )
+                                    }
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    let csv_result = cypher::CypherResult {
+                        columns,
+                        rows: materialised,
+                        stats,
+                        profile,
+                        diagnostics: Some(diagnostics),
+                        lazy: None,
+                    };
+                    return csv_result.to_csv().into_py_any(py);
+                }
                 let csv_result = cypher::CypherResult {
                     columns,
                     rows,

@@ -511,42 +511,29 @@ impl ResultView {
     }
 }
 
-/// Resolve `node_idx . property` against the graph for the lazy path. Mirrors
-/// the simpler subset of `resolve_property` in
-/// `src/graph/languages/cypher/executor/expression.rs:888-979` — we just
-/// need the property fetch, not full row binding logic.
+/// Resolve `node_idx . property` against the graph for the lazy path.
+/// Delegates to the same `resolve_node_property` helper the eager
+/// executor uses, so virtual properties (spatial location/geometry,
+/// named points, etc.) and per-type aliases work identically.
 fn resolve_node_property_lazy(
     graph: &DirGraph,
     idx: petgraph::graph::NodeIndex,
     prop: &str,
 ) -> Value {
-    if let Some(type_key) = graph.graph.node_type_of(idx) {
-        let type_str = graph.interner.try_resolve(type_key).unwrap_or("?");
-        let resolved = graph.resolve_alias(type_str, prop);
-        let val = match resolved {
-            "id" | "nid" | "qid" => graph.graph.get_node_id(idx),
-            "title" | "name" | "label" => graph.graph.get_node_title(idx),
-            _ => {
-                let key = crate::graph::schema::InternedKey::from_str(resolved);
-                graph.graph.get_node_property(idx, key)
-            }
-        };
-        return val.unwrap_or(Value::Null);
+    use crate::graph::languages::cypher::executor::helpers::resolve_node_property;
+    if let Some(node) = graph.graph.node_weight(idx) {
+        return resolve_node_property(node, prop, graph);
     }
     Value::Null
 }
 
 fn resolve_edge_property_lazy(
-    _graph: &DirGraph,
-    _eb: &crate::graph::languages::cypher::result::EdgeBinding,
-    _prop: &str,
+    graph: &DirGraph,
+    eb: &crate::graph::languages::cypher::result::EdgeBinding,
+    prop: &str,
 ) -> Value {
-    // Edge-property lazy resolution is a smaller win and a wider surface;
-    // for the first cut we just return Null. The planner pass already
-    // skips lazy-eligibility for any RETURN that touches edge properties
-    // (every item must be a Variable or PropertyAccess on a node binding),
-    // so this path should never be reached in practice.
-    Value::Null
+    use crate::graph::languages::cypher::executor::helpers::resolve_edge_property;
+    resolve_edge_property(graph, eb, prop)
 }
 
 fn resolve_node_full_lazy(graph: &DirGraph, idx: petgraph::graph::NodeIndex) -> Value {
@@ -742,7 +729,7 @@ impl ResultView {
     /// ```
     fn to_list(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let list = pyo3::types::PyList::empty(py);
-        for i in 0..self.rows.len() {
+        for i in 0..self.effective_len() {
             list.append(self.row_to_py(py, i)?)?;
         }
         Ok(list.into_any().unbind())
@@ -758,10 +745,19 @@ impl ResultView {
     /// ```
     #[pyo3(signature = (n=5))]
     fn head(&self, n: usize) -> Self {
-        let take = n.min(self.rows.len());
+        let total = self.effective_len();
+        let take = n.min(total);
+        // For lazy results we materialise the first `take` rows so the
+        // returned view is concrete (head() callers commonly print or
+        // sample). The lazy → eager conversion is paid once.
+        let rows: Vec<Vec<PreProcessedValue>> = if self.lazy.is_some() {
+            (0..take).map(|i| self.materialise_lazy_row(i)).collect()
+        } else {
+            self.rows[..take].to_vec()
+        };
         ResultView {
             columns: self.columns.clone(),
-            rows: self.rows[..take].to_vec(),
+            rows,
             stats: None,
             profile: None,
             diagnostics: None,
@@ -780,11 +776,16 @@ impl ResultView {
     /// ```
     #[pyo3(signature = (n=5))]
     fn tail(&self, n: usize) -> Self {
-        let len = self.rows.len();
+        let len = self.effective_len();
         let start = len.saturating_sub(n);
+        let rows: Vec<Vec<PreProcessedValue>> = if self.lazy.is_some() {
+            (start..len).map(|i| self.materialise_lazy_row(i)).collect()
+        } else {
+            self.rows[start..].to_vec()
+        };
         ResultView {
             columns: self.columns.clone(),
-            rows: self.rows[start..].to_vec(),
+            rows,
             stats: None,
             profile: None,
             diagnostics: None,
@@ -805,6 +806,11 @@ impl ResultView {
     /// df.plot(x='year', y='count')
     /// ```
     fn to_df(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if self.lazy.is_some() {
+            // DataFrame consumes every cell — force lazy materialisation.
+            let materialised = self.materialise_all();
+            return preprocessed_result_to_dataframe(py, &self.columns, &materialised);
+        }
         preprocessed_result_to_dataframe(py, &self.columns, &self.rows)
     }
 
@@ -827,7 +833,12 @@ impl ResultView {
         geometry_column: &str,
         crs: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        let df = preprocessed_result_to_dataframe(py, &self.columns, &self.rows)?;
+        let df = if self.lazy.is_some() {
+            let materialised = self.materialise_all();
+            preprocessed_result_to_dataframe(py, &self.columns, &materialised)?
+        } else {
+            preprocessed_result_to_dataframe(py, &self.columns, &self.rows)?
+        };
 
         let gpd = py.import("geopandas").map_err(|_| {
             PyErr::new::<pyo3::exceptions::PyImportError, _>(
