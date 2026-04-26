@@ -1120,6 +1120,220 @@ pub(super) fn fuse_node_scan_aggregate(query: &mut CypherQuery) {
 /// pass that counts edges directly per node. Same criteria as
 /// `fuse_match_return_aggregate` but targets WITH clauses so the pipeline
 /// can continue (e.g., out-degree histogram: WITH p, count(cited) → RETURN).
+/// Try to fold `[Match(M1), Match(M2), With(W)]` at position `i` into a
+/// single `FusedMatchWithAggregate { match_clause: M1, with_clause: W,
+/// secondary_match: Some(M2) }`. Returns true on success (clauses are
+/// rewritten in place); false leaves the query unchanged for the caller's
+/// existing single-MATCH path to attempt.
+///
+/// Preconditions for fusion (all must hold):
+/// 1. The three clauses at `i`, `i+1`, `i+2` are `Match, Match, With`.
+/// 2. M1 is a 3-element pattern with no edge property filter and no
+///    var-length edge.
+/// 3. M2 is a 3-element pattern. M2's first node shares a variable with M1
+///    (M1's first or last node), so the fused executor can use the M1
+///    binding as the count anchor.
+/// 4. M2's edge has no var-length and no property filter (the count
+///    fast-path can't apply edge predicates).
+/// 5. W is non-DISTINCT, has at least one `count()` aggregate referencing
+///    M2's edge variable (or `count(*)`), and all non-aggregate items
+///    project plain variables bound by M1.
+/// 6. M2's edge variable is NOT referenced by any non-count expression in
+///    W — otherwise the count fast-path would lose information needed
+///    downstream.
+fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool {
+    use super::super::ast::is_aggregate_expression;
+
+    if i + 2 >= query.clauses.len() {
+        return false;
+    }
+    if !matches!(
+        (
+            &query.clauses[i],
+            &query.clauses[i + 1],
+            &query.clauses[i + 2]
+        ),
+        (Clause::Match(_), Clause::Match(_), Clause::With(_))
+    ) {
+        return false;
+    }
+
+    // ---- M1 inspection ----
+    let (m1_first_var, m1_second_var) = {
+        let m1 = if let Clause::Match(m) = &query.clauses[i] {
+            m
+        } else {
+            return false;
+        };
+        if m1.patterns.len() != 1 || m1.patterns[0].elements.len() != 3 {
+            return false;
+        }
+        let pat = &m1.patterns[0];
+        let edge_blocking = matches!(&pat.elements[1], PatternElement::Edge(ep) if ep.properties.is_some() || ep.var_length.is_some());
+        if edge_blocking {
+            return false;
+        }
+        let first_var = match &pat.elements[0] {
+            PatternElement::Node(np) => np.variable.clone(),
+            _ => return false,
+        };
+        let second_var = match &pat.elements[2] {
+            PatternElement::Node(np) => np.variable.clone(),
+            _ => return false,
+        };
+        (first_var, second_var)
+    };
+
+    // ---- M2 inspection ----
+    // M2 must share a variable with M1 on its first node, and have a named
+    // edge variable that the WITH count consumes.
+    let (m2_shared_var, m2_edge_var) = {
+        let m2 = if let Clause::Match(m) = &query.clauses[i + 1] {
+            m
+        } else {
+            return false;
+        };
+        if m2.patterns.len() != 1 || m2.patterns[0].elements.len() != 3 {
+            return false;
+        }
+        let pat = &m2.patterns[0];
+        let m2_first_var = match &pat.elements[0] {
+            PatternElement::Node(np) => np.variable.clone(),
+            _ => return false,
+        };
+        let edge = match &pat.elements[1] {
+            PatternElement::Edge(ep) => ep,
+            _ => return false,
+        };
+        if edge.properties.is_some() || edge.var_length.is_some() {
+            return false;
+        }
+        let edge_var = match &edge.variable {
+            Some(v) => v.clone(),
+            None => return false,
+        };
+        // M2's first node variable must match one of M1's bound vars.
+        let shared = m2_first_var.as_ref().filter(|v| {
+            m1_first_var.as_deref() == Some(v.as_str())
+                || m1_second_var.as_deref() == Some(v.as_str())
+        });
+        let shared = match shared {
+            Some(v) => v.clone(),
+            None => return false,
+        };
+        (shared, edge_var)
+    };
+
+    // ---- WITH inspection ----
+    let w = if let Clause::With(w) = &query.clauses[i + 2] {
+        w
+    } else {
+        return false;
+    };
+    if w.distinct {
+        return false;
+    }
+    let mut has_count_of_edge = false;
+    let mut group_var: Option<String> = None;
+    for item in &w.items {
+        if is_aggregate_expression(&item.expression) {
+            // Allowed: count(m2_edge_var) or count(*). Anything else bails.
+            match &item.expression {
+                Expression::FunctionCall {
+                    name,
+                    args,
+                    distinct,
+                } if name == "count" => {
+                    if *distinct {
+                        return false;
+                    }
+                    if args.len() == 1 && matches!(args[0], Expression::Star) {
+                        has_count_of_edge = true;
+                        continue;
+                    }
+                    if let Some(Expression::Variable(v)) = args.first() {
+                        if v == &m2_edge_var {
+                            has_count_of_edge = true;
+                            continue;
+                        }
+                    }
+                    return false;
+                }
+                _ => return false,
+            }
+        } else {
+            // Non-aggregate item: must reference an M1-bound variable. Two
+            // shapes are common — bare variable (`a`) or property access
+            // (`a.title`). Anything else (literal, parameter, function) is
+            // rejected to keep correctness simple.
+            let referenced = match &item.expression {
+                Expression::Variable(v) => Some(v.clone()),
+                Expression::PropertyAccess { variable, .. } => Some(variable.clone()),
+                _ => None,
+            };
+            let v = match referenced {
+                Some(v) => v,
+                None => return false,
+            };
+            // M2's edge variable must NOT appear outside count() — else the
+            // fast-path can't preserve its binding.
+            if v == m2_edge_var {
+                return false;
+            }
+            // The referenced variable must be M1-bound (a group-keyable),
+            // and consistent across non-aggregate items.
+            let m1_bound = m1_first_var.as_deref() == Some(v.as_str())
+                || m1_second_var.as_deref() == Some(v.as_str());
+            if !m1_bound {
+                return false;
+            }
+            match &group_var {
+                None => group_var = Some(v),
+                Some(existing) if existing == &v => {}
+                _ => return false, // multiple distinct group vars: bail
+            }
+        }
+    }
+    if !has_count_of_edge {
+        return false;
+    }
+    // Group var must equal M2's shared anchor (so the per-group-key count
+    // anchored on `m2_shared_var` matches the group key).
+    let group_var = match group_var {
+        Some(v) => v,
+        None => return false,
+    };
+    if group_var != m2_shared_var {
+        return false;
+    }
+
+    // ---- All checks passed: rewrite ----
+    let with_clause = if let Clause::With(w) = query.clauses.remove(i + 2) {
+        w
+    } else {
+        unreachable!()
+    };
+    let secondary = if let Clause::Match(m) = query.clauses.remove(i + 1) {
+        m
+    } else {
+        unreachable!()
+    };
+    let primary = if let Clause::Match(m) = query.clauses.remove(i) {
+        m
+    } else {
+        unreachable!()
+    };
+    query.clauses.insert(
+        i,
+        Clause::FusedMatchWithAggregate {
+            match_clause: primary,
+            with_clause,
+            secondary_match: Some(secondary),
+        },
+    );
+    true
+}
+
 pub(super) fn fuse_match_with_aggregate(query: &mut CypherQuery) {
     use super::super::ast::is_aggregate_expression;
 
@@ -1132,6 +1346,19 @@ pub(super) fn fuse_match_with_aggregate(query: &mut CypherQuery) {
             i += 1;
             continue;
         }
+
+        // Two-MATCH variant: try `[Match(M1), Match(M2), With]` first. M1
+        // produces group keys (its filters apply); M2's pattern drives the
+        // per-key degree count. The shape we recognise is:
+        //   `MATCH (a)-[:T]->(b {…}) MATCH (a)-[r]-() WITH a, count(r) ...`
+        // i.e. M2 shares M1's first node variable, M2's edge variable is
+        // only consumed by `count()` in the WITH, and the WITH groups by an
+        // M1-bound variable.
+        if try_fuse_two_match_with_aggregate(query, i) {
+            i += 1;
+            continue;
+        }
+
         let can_fuse = matches!(
             (&query.clauses[i], &query.clauses[i + 1]),
             (Clause::Match(_), Clause::With(_))
@@ -1300,6 +1527,7 @@ pub(super) fn fuse_match_with_aggregate(query: &mut CypherQuery) {
             Clause::FusedMatchWithAggregate {
                 match_clause,
                 with_clause,
+                secondary_match: None,
             },
         );
 

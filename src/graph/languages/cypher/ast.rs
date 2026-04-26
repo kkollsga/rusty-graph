@@ -88,9 +88,18 @@ pub enum Clause {
     /// Optimizer-generated: fuse MATCH traversal + WITH count() into a single
     /// pass. Same as FusedMatchReturnAggregate but for WITH clauses (pipeline
     /// continues after). Avoids materializing all edge rows before grouping.
+    ///
+    /// `secondary_match` is set when the optimizer also folds a *second*
+    /// adjacent MATCH whose edge variable is only consumed by the WITH's
+    /// count(). The primary `match_clause` enumerates group keys; the
+    /// secondary clause's pattern drives the per-group-key degree count via
+    /// `try_count_simple_pattern`. This handles the common shape:
+    ///   `MATCH (a)-[:T]->(b {nid:'X'}) MATCH (a)-[r]-() WITH a, count(r) ...`
+    /// without expanding 4 M edge rows from the second MATCH.
     FusedMatchWithAggregate {
         match_clause: MatchClause,
         with_clause: WithClause,
+        secondary_match: Option<MatchClause>,
     },
     /// Optimizer-generated: fuse RETURN + ORDER BY + LIMIT into a single
     /// pass using a min-heap for O(n log k) instead of O(n log n).

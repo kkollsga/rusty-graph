@@ -479,7 +479,13 @@ impl<'a> CypherExecutor<'a> {
             Clause::FusedMatchWithAggregate {
                 match_clause,
                 with_clause,
-            } => self.execute_fused_match_with_aggregate(match_clause, with_clause, result_set),
+                secondary_match,
+            } => self.execute_fused_match_with_aggregate(
+                match_clause,
+                with_clause,
+                secondary_match.as_ref(),
+                result_set,
+            ),
             Clause::FusedCountAll { alias } => {
                 let count = self.graph.graph.node_count() as i64;
                 let mut projected = Bindings::with_capacity(1);

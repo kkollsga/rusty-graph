@@ -461,34 +461,41 @@ impl<'a> CypherExecutor<'a> {
             .as_ref()
             .and_then(|v| bindings.get(v).copied());
 
-        // We need exactly one end bound for the fast-path to help
-        let (bound_idx, other_type, other_props, traverse_dir) = match (a_bound, b_bound) {
-            (None, Some(b_idx)) => {
-                // b is bound — traverse from b, other node is a
-                if node_b.properties.is_some() {
-                    return Ok(None); // bound node with props: fall back
+        // We need exactly one end bound for the fast-path to help.
+        // Undirected `[r]-` patterns count both incoming and outgoing — the
+        // fast path issues two `count_edges_filtered` calls and sums.
+        type CountFastPath<'p> = (
+            NodeIndex,
+            &'p Option<String>,
+            &'p Option<HashMap<String, PropertyMatcher>>,
+            &'p [Direction],
+        );
+        let (bound_idx, other_type, other_props, traverse_dirs): CountFastPath =
+            match (a_bound, b_bound) {
+                (None, Some(b_idx)) => {
+                    if node_b.properties.is_some() {
+                        return Ok(None); // bound node with props: fall back
+                    }
+                    let dirs: &[Direction] = match edge.direction {
+                        EdgeDirection::Outgoing => &[Direction::Incoming], // (a)->b: b has incoming
+                        EdgeDirection::Incoming => &[Direction::Outgoing], // (a)<-b: b has outgoing
+                        EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
+                    };
+                    (b_idx, &node_a.node_type, &node_a.properties, dirs)
                 }
-                let dir = match edge.direction {
-                    EdgeDirection::Outgoing => Direction::Incoming, // (a)->b means b has incoming
-                    EdgeDirection::Incoming => Direction::Outgoing, // (a)<-b means b has outgoing
-                    EdgeDirection::Both => return Ok(None),
-                };
-                (b_idx, &node_a.node_type, &node_a.properties, dir)
-            }
-            (Some(a_idx), None) => {
-                // a is bound — traverse from a, other node is b
-                if node_a.properties.is_some() {
-                    return Ok(None); // bound node with props: fall back
+                (Some(a_idx), None) => {
+                    if node_a.properties.is_some() {
+                        return Ok(None); // bound node with props: fall back
+                    }
+                    let dirs: &[Direction] = match edge.direction {
+                        EdgeDirection::Outgoing => &[Direction::Outgoing],
+                        EdgeDirection::Incoming => &[Direction::Incoming],
+                        EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
+                    };
+                    (a_idx, &node_b.node_type, &node_b.properties, dirs)
                 }
-                let dir = match edge.direction {
-                    EdgeDirection::Outgoing => Direction::Outgoing,
-                    EdgeDirection::Incoming => Direction::Incoming,
-                    EdgeDirection::Both => return Ok(None),
-                };
-                (a_idx, &node_b.node_type, &node_b.properties, dir)
-            }
-            _ => return Ok(None), // both bound or neither bound — fall back
-        };
+                _ => return Ok(None), // both bound or neither bound — fall back
+            };
 
         let conn_type = edge.connection_type.as_deref();
         let interned_conn = conn_type.map(InternedKey::from_str);
@@ -498,56 +505,62 @@ impl<'a> CypherExecutor<'a> {
         // count_edges_filtered which avoids EdgeData materialization entirely.
         // On disk with sorted CSR: binary search + sequential count (zero allocations).
         if other_props.is_none() {
-            let count = self.graph.graph.count_edges_filtered(
-                bound_idx,
-                traverse_dir,
-                interned_conn,
-                interned_other_type,
-                self.deadline,
-            )?;
+            let mut count: usize = 0;
+            for &dir in traverse_dirs {
+                count = count.saturating_add(self.graph.graph.count_edges_filtered(
+                    bound_idx,
+                    dir,
+                    interned_conn,
+                    interned_other_type,
+                    self.deadline,
+                )?);
+            }
             return Ok(Some(count as i64));
         }
 
         // Slow path: property filters require per-node property access.
         // This loop can iterate millions of edges for hub nodes (Q5 has ~40 M
         // incoming P31 edges), so check the deadline every 1 M iterations.
+        // For undirected `[r]-` patterns we sweep both directions and sum.
         let pe = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params);
         let mut count: i64 = 0;
         let mut iter: usize = 0;
 
-        for edge_ref in
-            self.graph
+        for &dir in traverse_dirs {
+            for edge_ref in self
                 .graph
-                .edges_directed_filtered(bound_idx, traverse_dir, interned_conn)
-        {
-            iter += 1;
-            if iter.is_multiple_of(1 << 20) {
-                self.check_deadline()?;
-            }
-            // Connection type already filtered by edges_directed_filtered
-            let other_idx = if traverse_dir == Direction::Outgoing {
-                edge_ref.target()
-            } else {
-                edge_ref.source()
-            };
+                .graph
+                .edges_directed_filtered(bound_idx, dir, interned_conn)
+            {
+                iter += 1;
+                if iter.is_multiple_of(1 << 20) {
+                    self.check_deadline()?;
+                }
+                // Connection type already filtered by edges_directed_filtered
+                let other_idx = if dir == Direction::Outgoing {
+                    edge_ref.target()
+                } else {
+                    edge_ref.source()
+                };
 
-            if let Some(required_type) = interned_other_type {
-                if let Some(nt) = self.graph.graph.node_type_of(other_idx) {
-                    if nt != required_type {
+                if let Some(required_type) = interned_other_type {
+                    if let Some(nt) = self.graph.graph.node_type_of(other_idx) {
+                        if nt != required_type {
+                            continue;
+                        }
+                    } else {
                         continue;
                     }
-                } else {
-                    continue;
                 }
-            }
 
-            if let Some(ref props) = other_props {
-                if !pe.node_matches_properties_pub(other_idx, props) {
-                    continue;
+                if let Some(ref props) = other_props {
+                    if !pe.node_matches_properties_pub(other_idx, props) {
+                        continue;
+                    }
                 }
-            }
 
-            count += 1;
+                count += 1;
+            }
         }
 
         Ok(Some(count))
@@ -1818,10 +1831,20 @@ impl<'a> CypherExecutor<'a> {
 
     /// Fused MATCH + WITH count() — same as `execute_fused_match_return_aggregate`
     /// but produces ResultSet for pipeline continuation (WITH semantics).
+    ///
+    /// When `secondary_match` is `Some`, the planner has folded a second
+    /// adjacent MATCH whose edge variable is consumed only by the WITH's
+    /// count(). The primary `match_clause` enumerates group keys (via the
+    /// fully-executed pattern, so its filters apply); the secondary clause's
+    /// pattern provides the count shape (edge type/direction/target filter).
+    /// Per group key the executor calls `try_count_simple_pattern` against
+    /// the secondary pattern, which uses the existing degree-fast-path
+    /// (count_edges_filtered) without materializing edge rows.
     pub(super) fn execute_fused_match_with_aggregate(
         &self,
         match_clause: &MatchClause,
         with_clause: &WithClause,
+        secondary_match: Option<&MatchClause>,
         _existing: ResultSet,
     ) -> Result<ResultSet, String> {
         let pattern = &match_clause.patterns[0];
@@ -1835,14 +1858,24 @@ impl<'a> CypherExecutor<'a> {
             _ => return Err("FusedMatchWithAggregate: expected node pattern".into()),
         };
 
-        // Determine which variable is the group key
+        // Determine which variable is the group key. The non-aggregate
+        // items in the WITH project either the group variable directly
+        // (`w`) or one of its properties (`w.name`); both shapes resolve
+        // to the same group key for our purposes.
         let group_var: &str = {
             let mut gv = None;
             for item in &with_clause.items {
                 if !is_aggregate_expression(&item.expression) {
-                    if let Expression::Variable(v) = &item.expression {
-                        gv = Some(v.as_str());
-                        break;
+                    match &item.expression {
+                        Expression::Variable(v) => {
+                            gv = Some(v.as_str());
+                            break;
+                        }
+                        Expression::PropertyAccess { variable, .. } => {
+                            gv = Some(variable.as_str());
+                            break;
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1895,30 +1928,56 @@ impl<'a> CypherExecutor<'a> {
         // histogram path never looks at. Running it only when the
         // slow path actually fires cuts `WITH P27 count` from 5.4 s
         // to under 500 ms at 1 B triples.
-        if let Some(rows) = self.try_fast_with_aggregate_via_histogram(
-            pattern,
-            with_clause,
-            &columns,
-            group_var,
-            group_elem_idx,
-            &group_key_indices,
-            &count_indices,
-        )? {
-            return Ok(ResultSet { rows, columns });
+        // Histogram fast path only applies to the single-MATCH shape — the
+        // two-MATCH variant has a separate pattern driving the count, so the
+        // histogram (keyed on M1's edge type) doesn't answer the right
+        // question. Skip it when secondary_match is set.
+        if secondary_match.is_none() {
+            if let Some(rows) = self.try_fast_with_aggregate_via_histogram(
+                pattern,
+                with_clause,
+                &columns,
+                group_var,
+                group_elem_idx,
+                &group_key_indices,
+                &count_indices,
+            )? {
+                return Ok(ResultSet { rows, columns });
+            }
         }
 
         // Fast path didn't apply (non-disk backend, unsupported pattern
-        // shape, etc.). Now scan the group target to enumerate group keys
-        // for the fall-back aggregation. Build single-node pattern for
-        // matching group keys.
-        let group_only_pattern = crate::graph::core::pattern_matching::Pattern {
-            elements: vec![pattern.elements[group_elem_idx].clone()],
-        };
+        // shape, two-MATCH fusion, etc.). Now enumerate group keys for the
+        // fall-back aggregation.
+        //
+        // Single-MATCH case: the group node is one end of M1's edge —
+        // execute just that node pattern. Counts via M1's full pattern
+        // filter out non-edge-target nodes downstream (count == 0 → skip).
+        //
+        // Two-MATCH case: M1 carries the constraint that defines the group
+        // key set (e.g. `(w)-[:P106]->({nid:'Q36180'})` only matches w's
+        // that are writers). Execute M1 fully so its filters apply. The
+        // count then runs against M2's pattern, which is anchored on the
+        // shared variable per group key.
         let executor = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
             .set_deadline(self.deadline);
-        let group_matches = executor.execute(&group_only_pattern)?;
+        let count_pattern: &crate::graph::core::pattern_matching::Pattern =
+            if let Some(m2) = secondary_match {
+                &m2.patterns[0]
+            } else {
+                pattern
+            };
+        let group_matches = if secondary_match.is_some() {
+            executor.execute(pattern)?
+        } else {
+            let group_only_pattern = crate::graph::core::pattern_matching::Pattern {
+                elements: vec![pattern.elements[group_elem_idx].clone()],
+            };
+            executor.execute(&group_only_pattern)?
+        };
 
         let mut result_rows = Vec::with_capacity(group_matches.len());
+        let mut seen_group_keys: HashSet<NodeIndex> = HashSet::new();
 
         for m in &group_matches {
             let node_idx = m.bindings.iter().find_map(|(name, binding)| {
@@ -1936,11 +1995,18 @@ impl<'a> CypherExecutor<'a> {
             let Some(node_idx) = node_idx else {
                 continue;
             };
+            // M1's full execution can produce duplicate group keys when the
+            // pattern is non-deterministic in matches (e.g. multiple edges
+            // satisfying M1 from the same `w`). Deduplicate on the group
+            // node so the per-key count fires once per distinct key.
+            if secondary_match.is_some() && !seen_group_keys.insert(node_idx) {
+                continue;
+            }
 
             let mut bindings_for_count = Bindings::with_capacity(1);
             bindings_for_count.insert(group_var.to_string(), node_idx);
             let match_count = self
-                .try_count_simple_pattern(pattern, &bindings_for_count)?
+                .try_count_simple_pattern(count_pattern, &bindings_for_count)?
                 .unwrap_or(0);
 
             // Skip nodes with 0 matches (MATCH semantics — no outer join)

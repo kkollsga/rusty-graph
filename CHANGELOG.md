@@ -7,7 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.8.16] — 2026-04-26
+### Performance
+
+- **Two-MATCH count fusion: top-K-by-degree filtered queries now run
+  ~20× faster.** The shape
+  `MATCH (w)-[:T]->(b {nid:'X'}) MATCH (w)-[r]-() WITH ...
+  count(r) ... ORDER BY count DESC LIMIT k`
+  used to materialise one row per edge for every group key (e.g. 4 M
+  edge rows for 416 k Wikidata writers — 494 s on the full graph).
+  The aggregation-fusion pass at
+  `src/graph/languages/cypher/planner/fusion.rs` now also recognises
+  `[Match, Match, With(count)]` and folds it into a single
+  `FusedMatchWithAggregate` whose secondary pattern drives the
+  per-group-key degree count via the existing `count_edges_filtered`
+  fast-path. Measured: top-10-by-degree on Wikidata writers
+  **494 s → 24 s (20×)**. The remaining time is one degree lookup
+  per group key (832 k mmap reads) — further wins live in storage,
+  out of scope for this session.
+- **`count_edges_filtered` fast-path now handles undirected `[r]-`
+  edges.** Previously the fast-path returned `None` for
+  `EdgeDirection::Both`, forcing the slow per-edge enumeration. It
+  now sums incoming + outgoing `count_edges_filtered` calls — the
+  canonical "total degree" pattern. Both the new two-MATCH fusion and
+  the existing single-MATCH `WITH count` benefit.
 
 ### Performance
 
