@@ -128,6 +128,7 @@ impl<'a> CypherExecutor<'a> {
         Ok(ResultSet {
             rows,
             columns: Vec::new(),
+            lazy_return_items: None,
         })
     }
 }

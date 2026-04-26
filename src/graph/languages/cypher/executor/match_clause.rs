@@ -190,6 +190,7 @@ impl<'a> CypherExecutor<'a> {
             return Ok(ResultSet {
                 rows: vec![null_row],
                 columns,
+                lazy_return_items: None,
             });
         }
 
@@ -236,6 +237,7 @@ impl<'a> CypherExecutor<'a> {
         Ok(ResultSet {
             rows: new_rows,
             columns: existing.columns,
+            lazy_return_items: None,
         })
     }
 
@@ -880,6 +882,7 @@ impl<'a> CypherExecutor<'a> {
         let mut result = ResultSet {
             rows: result_rows,
             columns: existing.columns,
+            lazy_return_items: None,
         };
 
         // Apply optional WHERE on the aggregated rows (e.g. WHERE cnt > 3)
@@ -1109,6 +1112,7 @@ impl<'a> CypherExecutor<'a> {
                             .iter()
                             .map(return_item_column_name)
                             .collect(),
+                        lazy_return_items: None,
                     });
                 }
             }
@@ -1359,6 +1363,7 @@ impl<'a> CypherExecutor<'a> {
         Ok(ResultSet {
             rows: result_rows,
             columns,
+            lazy_return_items: None,
         })
     }
 
@@ -1584,6 +1589,7 @@ impl<'a> CypherExecutor<'a> {
             return Ok(ResultSet {
                 rows: vec![ResultRow::from_projected(projected)],
                 columns,
+                lazy_return_items: None,
             });
         }
 
@@ -1682,6 +1688,7 @@ impl<'a> CypherExecutor<'a> {
         Ok(ResultSet {
             rows: result_rows,
             columns,
+            lazy_return_items: None,
         })
     }
 
@@ -1826,6 +1833,7 @@ impl<'a> CypherExecutor<'a> {
         Ok(ResultSet {
             rows: result_rows,
             columns,
+            lazy_return_items: None,
         })
     }
 
@@ -1943,7 +1951,11 @@ impl<'a> CypherExecutor<'a> {
                 &group_key_indices,
                 &count_indices,
             )? {
-                return Ok(ResultSet { rows, columns });
+                return Ok(ResultSet {
+                    rows,
+                    columns,
+                    lazy_return_items: None,
+                });
             }
         }
 
@@ -2115,6 +2127,7 @@ impl<'a> CypherExecutor<'a> {
         Ok(ResultSet {
             rows: result_rows,
             columns,
+            lazy_return_items: None,
         })
     }
 

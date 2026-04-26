@@ -495,6 +495,7 @@ impl<'a> CypherExecutor<'a> {
                 Ok(ResultSet {
                     rows: vec![ResultRow::from_projected(projected)],
                     columns: vec![alias.clone()],
+                    lazy_return_items: None,
                 })
             }
             Clause::FusedCountByType {
@@ -518,6 +519,7 @@ impl<'a> CypherExecutor<'a> {
                 Ok(ResultSet {
                     rows: result_rows,
                     columns: vec![type_alias.clone(), count_alias.clone()],
+                    lazy_return_items: None,
                 })
             }
             Clause::FusedCountEdgesByType {
@@ -535,6 +537,7 @@ impl<'a> CypherExecutor<'a> {
                 Ok(ResultSet {
                     rows: result_rows,
                     columns: vec![type_alias.clone(), count_alias.clone()],
+                    lazy_return_items: None,
                 })
             }
             Clause::FusedCountTypedNode { node_type, alias } => {
@@ -549,6 +552,7 @@ impl<'a> CypherExecutor<'a> {
                 Ok(ResultSet {
                     rows: vec![ResultRow::from_projected(projected)],
                     columns: vec![alias.clone()],
+                    lazy_return_items: None,
                 })
             }
             Clause::FusedCountTypedEdge { edge_type, alias } => {
@@ -564,6 +568,7 @@ impl<'a> CypherExecutor<'a> {
                 Ok(ResultSet {
                     rows: vec![ResultRow::from_projected(projected)],
                     columns: vec![alias.clone()],
+                    lazy_return_items: None,
                 })
             }
             Clause::FusedCountAnchoredEdges {
@@ -590,6 +595,7 @@ impl<'a> CypherExecutor<'a> {
                 Ok(ResultSet {
                     rows: vec![ResultRow::from_projected(projected)],
                     columns: vec![alias.clone()],
+                    lazy_return_items: None,
                 })
             }
             Clause::FusedNodeScanAggregate {
@@ -1005,6 +1011,7 @@ impl<'a> CypherExecutor<'a> {
         Ok(ResultSet {
             rows: result_rows,
             columns: existing.columns,
+            lazy_return_items: None,
         })
     }
 
@@ -1161,6 +1168,7 @@ impl<'a> CypherExecutor<'a> {
         Ok(ResultSet {
             rows: all_rows,
             columns: existing.columns,
+            lazy_return_items: None,
         })
     }
 }

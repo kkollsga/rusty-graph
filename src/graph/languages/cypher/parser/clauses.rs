@@ -32,6 +32,7 @@ impl CypherParser {
             items,
             distinct,
             having,
+            lazy_eligible: false,
         }))
     }
 

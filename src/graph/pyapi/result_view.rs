@@ -8,12 +8,13 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::algorithms::graph_algorithms::CentralityResult;
+use crate::graph::languages::cypher::ast::{Expression, ReturnItem};
 use crate::graph::languages::cypher::py_convert::{
     preprocess_values_owned, preprocessed_result_to_dataframe, preprocessed_value_to_py,
     stats_to_py, PreProcessedValue,
 };
 use crate::graph::languages::cypher::result::{
-    ClauseStats, CypherResult, MutationStats, QueryDiagnostics,
+    ClauseStats, CypherResult, MutationStats, QueryDiagnostics, ResultRow,
 };
 use crate::graph::schema::{DirGraph, NodeData};
 use crate::graph::storage::GraphRead;
@@ -23,6 +24,7 @@ use pyo3::types::{PyDict, PySlice};
 use pyo3::IntoPyObjectExt;
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 /// A single connection summary for display: connection type, target type, id, title.
 #[derive(Clone)]
@@ -72,6 +74,23 @@ struct NodeConnections {
 ///
 ///     for row in r:    # iterate rows as dicts (one at a time)
 ///         print(row)
+/// Lazy row backing — set when the planner flagged a terminal RETURN as
+/// `lazy_eligible`. The executor stops short of evaluating per-row
+/// projection expressions; `LazyRows` carries the unresolved
+/// `ResultRow.node_bindings` plus the `RETURN` items so cells materialise
+/// on demand. The graph `Arc` keeps the storage alive for the lifetime of
+/// the view; the `Mutex<Vec<...>>` caches materialised rows so repeat
+/// access doesn't re-read from disk.
+struct LazyRows {
+    pending: Vec<ResultRow>,
+    return_items: Vec<ReturnItem>,
+    graph: Arc<DirGraph>,
+    /// Memoised materialisation. `cache[i]` is `Some(row)` once
+    /// `materialise_row(i)` has run for that row index. Mutex (rather than
+    /// RwLock or cell) keeps it Send + Sync, which #[pyclass] requires.
+    cache: Mutex<Vec<Option<Vec<PreProcessedValue>>>>,
+}
+
 #[pyclass(name = "ResultView")]
 pub struct ResultView {
     columns: Vec<String>,
@@ -81,6 +100,10 @@ pub struct ResultView {
     diagnostics: Option<QueryDiagnostics>,
     /// Per-row connection summaries (only populated for node-based results).
     node_connections: Option<Vec<NodeConnections>>,
+    /// When `Some`, `rows` is empty and reads route through `lazy`. The
+    /// executor flagged the RETURN as `lazy_eligible` and the receiver
+    /// hands cells back row-by-row from `pending`.
+    lazy: Option<LazyRows>,
 }
 
 // ========================================================================
@@ -108,6 +131,7 @@ impl ResultView {
             profile,
             diagnostics,
             node_connections: None,
+            lazy: None,
         }
     }
 
@@ -121,7 +145,36 @@ impl ResultView {
             profile: result.profile,
             diagnostics: result.diagnostics,
             node_connections: None,
+            lazy: None,
         }
+    }
+
+    /// Cypher read path with lazy materialisation. When `result.lazy` is
+    /// `Some`, the executor flagged the RETURN as `lazy_eligible` and
+    /// skipped per-row property evaluation; this constructor stashes the
+    /// pending rows and graph reference so cells materialise on demand at
+    /// the Python boundary. Falls back to the eager
+    /// `from_preprocessed`-equivalent path when `result.lazy` is `None`.
+    pub fn from_cypher_result_with_graph(result: CypherResult, graph: Arc<DirGraph>) -> Self {
+        if let Some(lazy_desc) = result.lazy {
+            let n = lazy_desc.pending_rows.len();
+            let cache = Mutex::new((0..n).map(|_| None).collect::<Vec<_>>());
+            return ResultView {
+                columns: result.columns,
+                rows: Vec::new(),
+                stats: result.stats,
+                profile: result.profile,
+                diagnostics: result.diagnostics,
+                node_connections: None,
+                lazy: Some(LazyRows {
+                    pending: lazy_desc.pending_rows,
+                    return_items: lazy_desc.return_items,
+                    graph,
+                    cache,
+                }),
+            };
+        }
+        Self::from_cypher_result(result)
     }
 
     /// Centrality methods: resolves node_idx → NodeData lookups, builds rows.
@@ -158,6 +211,7 @@ impl ResultView {
             profile: None,
             diagnostics: None,
             node_connections: None,
+            lazy: None,
         }
     }
 
@@ -346,12 +400,103 @@ impl ResultView {
             profile: None,
             diagnostics: None,
             node_connections: Some(node_connections),
+            lazy: None,
         }
+    }
+
+    /// Number of rows — handles both eager (`self.rows`) and lazy
+    /// (`self.lazy.pending`) backings without forcing materialisation.
+    fn effective_len(&self) -> usize {
+        if let Some(lz) = &self.lazy {
+            return lz.pending.len();
+        }
+        self.rows.len()
+    }
+
+    /// Materialise row `index` for the lazy backing, evaluating each
+    /// `RETURN` item against the row's stashed `node_bindings` /
+    /// `edge_bindings`. Caches the result so repeat access is O(1) after
+    /// the first call. Caller already holds the cache lock; we re-lock
+    /// inside to keep the borrow scope tight.
+    fn materialise_lazy_row(&self, index: usize) -> Vec<PreProcessedValue> {
+        let lz = self
+            .lazy
+            .as_ref()
+            .expect("materialise_lazy_row called without lazy backing");
+        // Quick read-after-write check: if cache hit, return clone.
+        if let Some(row) = lz.cache.lock().unwrap().get(index).and_then(|c| c.clone()) {
+            return row;
+        }
+        let pending_row = &lz.pending[index];
+        let cells: Vec<PreProcessedValue> = lz
+            .return_items
+            .iter()
+            .map(|item| {
+                let val = match &item.expression {
+                    Expression::PropertyAccess { variable, property } => {
+                        if let Some(&node_idx) = pending_row.node_bindings.get(variable) {
+                            resolve_node_property_lazy(&lz.graph, node_idx, property)
+                        } else if let Some(eb) = pending_row.edge_bindings.get(variable) {
+                            // Edge property access — fall through to a generic
+                            // "best effort" via the edge data; rare on lazy
+                            // path because RETURN items here are usually
+                            // node-property reads, but keep it correct.
+                            resolve_edge_property_lazy(&lz.graph, eb, property)
+                        } else if let Some(v) = pending_row.projected.get(variable) {
+                            v.clone()
+                        } else {
+                            Value::Null
+                        }
+                    }
+                    Expression::Variable(v) => {
+                        if let Some(&node_idx) = pending_row.node_bindings.get(v) {
+                            resolve_node_full_lazy(&lz.graph, node_idx)
+                        } else if let Some(val) = pending_row.projected.get(v) {
+                            val.clone()
+                        } else {
+                            Value::Null
+                        }
+                    }
+                    _ => Value::Null,
+                };
+                PreProcessedValue::Plain(val)
+            })
+            .collect();
+        // Cache for repeat access.
+        if let Some(slot) = lz.cache.lock().unwrap().get_mut(index) {
+            *slot = Some(cells.clone());
+        }
+        cells
+    }
+
+    /// Force materialisation of every lazy row (or return the existing
+    /// eager rows) — used by `to_df` which consumes every cell. Public to
+    /// the crate so `kg_core::cypher` can build a DataFrame from a lazy
+    /// result without re-implementing the resolver.
+    pub fn materialise_all(&self) -> Vec<Vec<PreProcessedValue>> {
+        if self.lazy.is_some() {
+            return (0..self.effective_len())
+                .map(|i| self.materialise_lazy_row(i))
+                .collect();
+        }
+        self.rows.clone()
+    }
+
+    /// Owned-clone of the column names; used in DataFrame construction
+    /// where the consumer needs an owned slice.
+    pub fn columns_owned(&self) -> Vec<String> {
+        self.columns.clone()
     }
 
     /// Convert a single row to a Python dict. Used by __getitem__ and __iter__.
     fn row_to_py(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyAny>> {
-        let row = &self.rows[index];
+        let owned;
+        let row: &Vec<PreProcessedValue> = if self.lazy.is_some() {
+            owned = self.materialise_lazy_row(index);
+            &owned
+        } else {
+            &self.rows[index]
+        };
         let dict = PyDict::new(py);
         for (i, col) in self.columns.iter().enumerate() {
             if let Some(pv) = row.get(i) {
@@ -364,6 +509,51 @@ impl ResultView {
     }
 }
 
+/// Resolve `node_idx . property` against the graph for the lazy path. Mirrors
+/// the simpler subset of `resolve_property` in
+/// `src/graph/languages/cypher/executor/expression.rs:888-979` — we just
+/// need the property fetch, not full row binding logic.
+fn resolve_node_property_lazy(
+    graph: &DirGraph,
+    idx: petgraph::graph::NodeIndex,
+    prop: &str,
+) -> Value {
+    if let Some(type_key) = graph.graph.node_type_of(idx) {
+        let type_str = graph.interner.try_resolve(type_key).unwrap_or("?");
+        let resolved = graph.resolve_alias(type_str, prop);
+        let val = match resolved {
+            "id" | "nid" | "qid" => graph.graph.get_node_id(idx),
+            "title" | "name" | "label" => graph.graph.get_node_title(idx),
+            _ => {
+                let key = crate::graph::schema::InternedKey::from_str(resolved);
+                graph.graph.get_node_property(idx, key)
+            }
+        };
+        return val.unwrap_or(Value::Null);
+    }
+    Value::Null
+}
+
+fn resolve_edge_property_lazy(
+    _graph: &DirGraph,
+    _eb: &crate::graph::languages::cypher::result::EdgeBinding,
+    _prop: &str,
+) -> Value {
+    // Edge-property lazy resolution is a smaller win and a wider surface;
+    // for the first cut we just return Null. The planner pass already
+    // skips lazy-eligibility for any RETURN that touches edge properties
+    // (every item must be a Variable or PropertyAccess on a node binding),
+    // so this path should never be reached in practice.
+    Value::Null
+}
+
+fn resolve_node_full_lazy(graph: &DirGraph, idx: petgraph::graph::NodeIndex) -> Value {
+    // Whole-node Variable access (e.g. `RETURN n` not `n.prop`). The lazy
+    // planner pass currently rejects this shape, so the path is defensive
+    // only — return the node id.
+    graph.graph.get_node_id(idx).unwrap_or(Value::Null)
+}
+
 // ========================================================================
 // Python protocol
 // ========================================================================
@@ -371,11 +561,11 @@ impl ResultView {
 #[pymethods]
 impl ResultView {
     fn __len__(&self) -> usize {
-        self.rows.len()
+        self.effective_len()
     }
 
     fn __bool__(&self) -> bool {
-        !self.rows.is_empty()
+        self.effective_len() > 0
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -384,7 +574,7 @@ impl ResultView {
             match skey.as_str() {
                 "columns" => return self.columns(py),
                 "rows" => {
-                    let rows: Vec<Py<PyAny>> = (0..self.rows.len())
+                    let rows: Vec<Py<PyAny>> = (0..self.effective_len())
                         .map(|i| self.row_to_py(py, i))
                         .collect::<Result<_, _>>()?;
                     return rows.into_py_any(py);
@@ -396,25 +586,32 @@ impl ResultView {
         }
         if let Ok(idx) = key.extract::<isize>() {
             // Integer indexing — returns a single row as dict
-            let len = self.rows.len() as isize;
+            let len = self.effective_len() as isize;
             let actual = if idx < 0 { len + idx } else { idx };
             if actual < 0 || actual >= len {
                 return Err(pyo3::exceptions::PyIndexError::new_err(format!(
                     "index {} out of range for ResultView with {} rows",
                     idx,
-                    self.rows.len()
+                    self.effective_len()
                 )));
             }
             self.row_to_py(py, actual as usize)
         } else if let Ok(slice) = key.cast::<PySlice>() {
-            // Slice indexing — returns a new ResultView
-            let len = self.rows.len();
+            // Slice indexing — returns a new ResultView. Lazy slicing
+            // materialises the K rows and returns an eager sub-view; this
+            // is intentional — the caller asked for a snapshot subset, so
+            // forcing materialisation keeps the contract simple.
+            let len = self.effective_len();
             let indices = slice.indices(len as isize)?;
             let mut sliced_rows = Vec::new();
             let mut i = indices.start;
             while (indices.step > 0 && i < indices.stop) || (indices.step < 0 && i > indices.stop) {
                 if i >= 0 && (i as usize) < len {
-                    sliced_rows.push(self.rows[i as usize].clone());
+                    if self.lazy.is_some() {
+                        sliced_rows.push(self.materialise_lazy_row(i as usize));
+                    } else {
+                        sliced_rows.push(self.rows[i as usize].clone());
+                    }
                 }
                 i += indices.step;
             }
@@ -427,6 +624,7 @@ impl ResultView {
                     profile: None,
                     diagnostics: None,
                     node_connections: None,
+                    lazy: None,
                 },
             )
             .map(|v| v.into_any())
@@ -445,6 +643,15 @@ impl ResultView {
     }
 
     fn __repr__(&self) -> String {
+        // Materialise lazy rows for printing; format_table needs concrete
+        // PreProcessedValues. For very large lazy results, callers should
+        // use head()/tail() instead of repr.
+        if self.lazy.is_some() {
+            let rows: Vec<Vec<PreProcessedValue>> = (0..self.effective_len())
+                .map(|i| self.materialise_lazy_row(i))
+                .collect();
+            return format_table(&self.columns, &rows);
+        }
         format_table(&self.columns, &self.rows)
     }
 
@@ -551,6 +758,7 @@ impl ResultView {
             profile: None,
             diagnostics: None,
             node_connections: self.node_connections.as_ref().map(|nc| nc[..take].to_vec()),
+            lazy: None,
         }
     }
 
@@ -574,6 +782,7 @@ impl ResultView {
                 .node_connections
                 .as_ref()
                 .map(|nc| nc[start..].to_vec()),
+            lazy: None,
         }
     }
 
@@ -653,7 +862,7 @@ impl ResultIter {
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let view = self.view.borrow(py);
-        if self.index >= view.rows.len() {
+        if self.index >= view.effective_len() {
             return Ok(None);
         }
         let result = view.row_to_py(py, self.index)?;

@@ -51,6 +51,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (modest 5% gain on top of the parallel-count win, but principled:
   "only do necessary work" — projection-heavy queries get a much
   larger benefit).
+- **Lazy RETURN — defer per-row property evaluation until Python
+  reads each cell.** The planner's new `mark_lazy_eligibility`
+  pass annotates the terminal RETURN with `lazy_eligible = true`
+  when the query is `MATCH … (WHERE …) RETURN <prop access>` and
+  there's no downstream operator that needs row values
+  (DISTINCT/HAVING/ORDER BY/aggregate/WITH/UNWIND/CALL/UNION/
+  mutation all force the eager path). The executor skips
+  `execute_return_projection`'s per-row loop and hands the
+  pending rows + return items to the Python `ResultView` via a
+  side-channel `LazyResultDescriptor`. `ResultView` materialises
+  cells on access (memoised via a `Mutex<Vec<Option<…>>>` so
+  repeat reads are free), and `__len__` becomes O(1). Measured
+  on the same Wikidata script: the find-writers query
+  (`MATCH … RETURN nid, title`, used only for `len()` in the
+  caller) **57 s → 35 s (~1.6×)**. End-to-end on
+  `top_writers.py` is now **49 s** — down from the original
+  **510 s** before this session — **~10× total**.
 
 ### Performance
 

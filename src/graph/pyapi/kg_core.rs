@@ -1291,6 +1291,10 @@ impl KnowledgeGraph {
             let this = slf.borrow();
             cypher::optimize(&mut parsed, &this.inner, &param_map);
         }
+        // Top-level-only lazy annotation. Must run AFTER optimize() (so the
+        // clause shape is final) and OUTSIDE the recursive nested-query
+        // pass (so UNION arms don't get marked).
+        cypher::mark_lazy_eligibility(&mut parsed);
 
         // EXPLAIN: return structured query plan without executing
         if parsed.explain {
@@ -1393,8 +1397,39 @@ impl KnowledgeGraph {
                     stats,
                     profile,
                     diagnostics: Some(diagnostics),
+                    lazy: None,
                 };
                 csv_result.to_csv().into_py_any(py)
+            } else if let Some(lazy_desc) = result.lazy {
+                // Lazy path: planner flagged the terminal RETURN as eligible
+                // and the executor skipped per-row property evaluation.
+                // Hand the pending rows + return items to ResultView, which
+                // materialises cells on Python access.
+                let lazy_result = cypher::CypherResult {
+                    columns,
+                    rows: Vec::new(),
+                    stats,
+                    profile,
+                    diagnostics: Some(diagnostics),
+                    lazy: Some(lazy_desc),
+                };
+                let view =
+                    crate::graph::pyapi::result_view::ResultView::from_cypher_result_with_graph(
+                        lazy_result,
+                        std::sync::Arc::clone(&inner),
+                    );
+                if to_df {
+                    // DataFrame consumes every row — let the view materialise
+                    // its lazy rows via to_df_inner (which handles both
+                    // backings). For now, route through to_list-style
+                    // materialisation by triggering the lazy resolver per
+                    // row and rebuilding the eager form.
+                    let preprocessed = view.materialise_all();
+                    let cols = view.columns_owned();
+                    cypher::py_convert::preprocessed_result_to_dataframe(py, &cols, &preprocessed)
+                } else {
+                    Py::new(py, view).map(|v| v.into_any())
+                }
             } else {
                 let preprocessed = cypher::py_convert::preprocess_values_owned(rows);
                 if to_df {

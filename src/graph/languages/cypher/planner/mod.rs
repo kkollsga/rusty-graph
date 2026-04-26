@@ -25,11 +25,40 @@ use fusion::{
     fuse_anchored_edge_count, fuse_count_short_circuits, fuse_match_return_aggregate,
     fuse_match_with_aggregate, fuse_match_with_aggregate_top_k, fuse_node_scan_aggregate,
     fuse_node_scan_top_k, fuse_optional_match_aggregate, fuse_order_by_top_k, fuse_spatial_join,
-    fuse_vector_score_order_limit,
+    fuse_vector_score_order_limit, mark_return_lazy_eligible,
 };
 use index_selection::push_where_into_match;
 use join_order::{optimize_pattern_start_node, reorder_match_patterns};
 use simplification::{fold_or_to_in, push_distinct_into_match, push_limit_into_match};
+
+/// Annotate the top-level query's terminal RETURN with `lazy_eligible`
+/// when no downstream operator forces row materialisation. Called once
+/// after `optimize`, never recursively, so nested UNION arms don't get
+/// marked (their results pass through the union machinery, which expects
+/// fully evaluated rows).
+pub fn mark_lazy_eligibility(query: &mut CypherQuery) {
+    // Don't mark when the top-level query contains a UNION — the union
+    // machinery merges materialised rows.
+    if query.clauses.iter().any(|c| matches!(c, Clause::Union(_))) {
+        return;
+    }
+    // Don't mark for mutation queries — CREATE/SET/DELETE/REMOVE/MERGE go
+    // through `execute_mutable`, which doesn't read the lazy descriptor
+    // and would produce empty rows.
+    if query.clauses.iter().any(|c| {
+        matches!(
+            c,
+            Clause::Create(_)
+                | Clause::Set(_)
+                | Clause::Delete(_)
+                | Clause::Remove(_)
+                | Clause::Merge(_)
+        )
+    }) {
+        return;
+    }
+    mark_return_lazy_eligible(query);
+}
 
 pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<String, Value>) {
     // Recursively optimize nested queries (e.g., UNION right-arm)

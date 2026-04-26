@@ -187,6 +187,11 @@ pub struct ResultSet {
     pub rows: Vec<ResultRow>,
     /// Column names in output order (populated by RETURN)
     pub columns: Vec<String>,
+    /// Set when the executor's RETURN clause skipped per-row projection
+    /// (because the planner flagged it `lazy_eligible`). `finalize_result`
+    /// reads this to emit a lazy `CypherResult` instead of materialising
+    /// every cell. Cleared on any clause that consumes row values.
+    pub lazy_return_items: Option<Vec<super::ast::ReturnItem>>,
 }
 
 impl ResultSet {
@@ -194,6 +199,7 @@ impl ResultSet {
         ResultSet {
             rows: Vec::new(),
             columns: Vec::new(),
+            lazy_return_items: None,
         }
     }
 }
@@ -239,6 +245,18 @@ pub struct QueryDiagnostics {
     pub timeout_ms: Option<u64>,
 }
 
+/// Side-channel lazy-evaluation descriptor. When set on a `CypherResult`,
+/// `rows` is empty and the receiver should resolve cells on demand from
+/// `pending_rows` + `return_items` against the graph (held by ResultView's
+/// graph reference). Set only when the planner has flagged the terminal
+/// RETURN as `lazy_eligible` and Python's downstream consumer supports
+/// lazy materialisation (the standard ResultView path does).
+#[derive(Debug)]
+pub struct LazyResultDescriptor {
+    pub pending_rows: Vec<ResultRow>,
+    pub return_items: Vec<super::ast::ReturnItem>,
+}
+
 /// Final query result returned to Python
 #[derive(Debug)]
 pub struct CypherResult {
@@ -247,6 +265,9 @@ pub struct CypherResult {
     pub stats: Option<MutationStats>,
     pub profile: Option<Vec<ClauseStats>>,
     pub diagnostics: Option<QueryDiagnostics>,
+    /// Set when the receiver should evaluate row cells lazily; in that
+    /// case `rows` is empty.
+    pub lazy: Option<LazyResultDescriptor>,
 }
 
 impl CypherResult {
@@ -257,6 +278,7 @@ impl CypherResult {
             stats: None,
             profile: None,
             diagnostics: None,
+            lazy: None,
         }
     }
 

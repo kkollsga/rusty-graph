@@ -459,6 +459,12 @@ pub struct ReturnClause {
     pub items: Vec<ReturnItem>,
     pub distinct: bool,
     pub having: Option<Predicate>,
+    /// Planner-set: when `true`, the executor skips per-row evaluation of
+    /// the RETURN items and instead carries `node_bindings` forward into a
+    /// lazy `ResultView` that materialises each cell on Python access.
+    /// Only set when every item is `Variable` or `PropertyAccess`, no
+    /// DISTINCT/HAVING, and no downstream operator consumes row values.
+    pub lazy_eligible: bool,
 }
 
 /// A single item in RETURN: expression AS alias

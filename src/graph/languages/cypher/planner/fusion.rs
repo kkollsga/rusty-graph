@@ -1537,6 +1537,86 @@ pub(super) fn fuse_match_with_aggregate(query: &mut CypherQuery) {
     }
 }
 
+/// Annotate a terminal `RETURN` clause with `lazy_eligible = true` when no
+/// downstream operator forces row materialisation. Subsequent stages
+/// (executor + result-view) consult the flag to skip per-row property
+/// evaluation and instead defer it until Python actually accesses cells.
+///
+/// Eligible when (conservative cut for the first iteration):
+/// - The query has exactly one MATCH (or OptionalMatch) followed by an
+///   optional WHERE and a terminal RETURN. No WITH, no UNWIND, no CALL.
+///   WITH binds projected values whose property extraction goes through a
+///   different resolver path than node_bindings; until the lazy resolver
+///   handles them too, only flat MATCH...RETURN qualifies.
+/// - Every RETURN item is `PropertyAccess` (single-property reads). Plain
+///   `Variable(v)` returns a whole-node value the lazy resolver doesn't
+///   currently handle.
+/// - `distinct == false` and `having == None`.
+/// - The RETURN may be followed only by SKIP and LIMIT (truncate without
+///   reading values). Anything else after — ORDER BY, another clause —
+///   forces eager evaluation.
+pub(super) fn mark_return_lazy_eligible(query: &mut CypherQuery) {
+    let n = query.clauses.len();
+    if n == 0 {
+        return;
+    }
+    // Conservative shape: every clause must be one of MATCH /
+    // OPTIONAL MATCH / WHERE (predicate-only) / RETURN / SKIP / LIMIT. WITH
+    // / UNWIND / CALL / fused-aggregate variants all consume row values
+    // and their consumer paths haven't been audited for the lazy resolver.
+    let mut return_idx: Option<usize> = None;
+    for (i, c) in query.clauses.iter().enumerate() {
+        match c {
+            Clause::Match(_) | Clause::OptionalMatch(_) => {}
+            Clause::Return(_) => {
+                if return_idx.is_some() {
+                    return; // Multiple RETURNs.
+                }
+                return_idx = Some(i);
+            }
+            Clause::Skip(_) | Clause::Limit(_) => {}
+            _ => return,
+        }
+    }
+    let Some(idx) = return_idx else {
+        return;
+    };
+
+    // Anything after RETURN must be SKIP or LIMIT.
+    for c in &query.clauses[idx + 1..] {
+        match c {
+            Clause::Skip(_) | Clause::Limit(_) => {}
+            _ => return,
+        }
+    }
+
+    // Inspect the RETURN clause itself.
+    let r = match &query.clauses[idx] {
+        Clause::Return(r) => r,
+        _ => return,
+    };
+    if r.distinct || r.having.is_some() {
+        return;
+    }
+    // Conservative cut: only PropertyAccess is supported by the lazy
+    // resolver today. Plain `Variable(v)` returns a whole-node value which
+    // the eager path resolves via NodeRef → table-of-properties; the lazy
+    // resolver skips it. Aliases / projections without a binding are also
+    // rejected.
+    let all_simple = r
+        .items
+        .iter()
+        .all(|item| matches!(item.expression, Expression::PropertyAccess { .. }));
+    if !all_simple {
+        return;
+    }
+
+    // All gates passed — flip the flag.
+    if let Clause::Return(r) = &mut query.clauses[idx] {
+        r.lazy_eligible = true;
+    }
+}
+
 /// Push a downstream `ORDER BY <count_alias> {DESC|ASC} LIMIT k` into the
 /// preceding `FusedMatchWithAggregate` so the executor only evaluates the
 /// group-key projections (e.g. `w.nid`, `w.title`) for the K winners. This

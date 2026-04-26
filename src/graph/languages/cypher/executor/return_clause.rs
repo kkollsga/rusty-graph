@@ -82,6 +82,7 @@ impl<'a> CypherExecutor<'a> {
                     items,
                     distinct: clause.distinct,
                     having: clause.having.clone(),
+                    lazy_eligible: clause.lazy_eligible,
                 };
                 &expanded
             } else {
@@ -130,6 +131,18 @@ impl<'a> CypherExecutor<'a> {
         mut result_set: ResultSet,
     ) -> Result<ResultSet, String> {
         let columns: Vec<String> = clause.items.iter().map(return_item_column_name).collect();
+
+        // Lazy path: planner flagged this RETURN as eligible — skip the
+        // per-row property evaluation. `finalize_result` reads
+        // `result_set.lazy_return_items` and emits a LazyResultDescriptor;
+        // the Python boundary materialises cell-by-cell on access. Only
+        // fires when no downstream consumer reads row values (DISTINCT/
+        // HAVING/ORDER BY/aggregate all force eager evaluation here).
+        if clause.lazy_eligible && !clause.distinct && clause.having.is_none() {
+            result_set.lazy_return_items = Some(clause.items.clone());
+            result_set.columns = columns;
+            return Ok(result_set);
+        }
 
         // Fold constant sub-expressions once before row iteration
         let folded_exprs: Vec<Expression> = clause
@@ -203,6 +216,7 @@ impl<'a> CypherExecutor<'a> {
             return Ok(ResultSet {
                 rows: vec![ResultRow::from_projected(projected)],
                 columns,
+                lazy_return_items: None,
             });
         }
 
@@ -372,6 +386,7 @@ impl<'a> CypherExecutor<'a> {
         Ok(ResultSet {
             rows: result_rows,
             columns,
+            lazy_return_items: None,
         })
     }
 
@@ -952,6 +967,7 @@ impl<'a> CypherExecutor<'a> {
             items: clause.items.clone(),
             distinct: clause.distinct,
             having: None,
+            lazy_eligible: false,
         };
         let mut projected = self.execute_return(&return_clause, result_set)?;
 
@@ -1090,6 +1106,7 @@ impl<'a> CypherExecutor<'a> {
             return Ok(ResultSet {
                 rows: Vec::new(),
                 columns,
+                lazy_return_items: None,
             });
         }
 
@@ -1172,7 +1189,11 @@ impl<'a> CypherExecutor<'a> {
             });
         }
 
-        Ok(ResultSet { rows, columns })
+        Ok(ResultSet {
+            rows,
+            columns,
+            lazy_return_items: None,
+        })
     }
 
     // ========================================================================
@@ -1200,6 +1221,7 @@ impl<'a> CypherExecutor<'a> {
             return Ok(ResultSet {
                 rows: Vec::new(),
                 columns,
+                lazy_return_items: None,
             });
         }
 
@@ -1268,6 +1290,7 @@ impl<'a> CypherExecutor<'a> {
                     return Ok(ResultSet {
                         rows: final_rows,
                         columns,
+                        lazy_return_items: None,
                     });
                 }
                 _ => {
@@ -1407,7 +1430,11 @@ impl<'a> CypherExecutor<'a> {
             });
         }
 
-        Ok(ResultSet { rows, columns })
+        Ok(ResultSet {
+            rows,
+            columns,
+            lazy_return_items: None,
+        })
     }
 
     // ========================================================================

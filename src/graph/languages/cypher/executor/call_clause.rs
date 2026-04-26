@@ -50,6 +50,7 @@ impl<'a> CypherExecutor<'a> {
         Ok(ResultSet {
             rows: new_rows,
             columns: result_set.columns,
+            lazy_return_items: None,
         })
     }
 
@@ -333,6 +334,7 @@ impl<'a> CypherExecutor<'a> {
         Ok(ResultSet {
             rows,
             columns: Vec::new(),
+            lazy_return_items: None,
         })
     }
 
@@ -668,6 +670,7 @@ impl<'a> CypherExecutor<'a> {
         Ok(ResultSet {
             rows: combined_rows,
             columns,
+            lazy_return_items: None,
         })
     }
 
@@ -676,7 +679,7 @@ impl<'a> CypherExecutor<'a> {
     // ========================================================================
 
     /// Convert the final ResultSet into a CypherResult for Python consumption
-    pub fn finalize_result(&self, result_set: ResultSet) -> Result<CypherResult, String> {
+    pub fn finalize_result(&self, mut result_set: ResultSet) -> Result<CypherResult, String> {
         if result_set.columns.is_empty() {
             // No RETURN clause - infer columns from available bindings
             if result_set.rows.is_empty() {
@@ -726,6 +729,26 @@ impl<'a> CypherExecutor<'a> {
                 stats: None,
                 profile: None,
                 diagnostics: None,
+                lazy: None,
+            });
+        }
+
+        // Lazy path: planner flagged the RETURN as eligible, executor
+        // skipped per-row projection. Don't materialise here either —
+        // hand the pending rows + return items to the receiver, which
+        // resolves cells against the graph on demand at the Python
+        // boundary.
+        if let Some(return_items) = result_set.lazy_return_items.take() {
+            return Ok(CypherResult {
+                columns: result_set.columns,
+                rows: Vec::new(),
+                stats: None,
+                profile: None,
+                diagnostics: None,
+                lazy: Some(super::super::result::LazyResultDescriptor {
+                    pending_rows: result_set.rows,
+                    return_items,
+                }),
             });
         }
 
@@ -761,6 +784,7 @@ impl<'a> CypherExecutor<'a> {
             stats: None,
             profile: None,
             diagnostics: None,
+            lazy: None,
         })
     }
 }

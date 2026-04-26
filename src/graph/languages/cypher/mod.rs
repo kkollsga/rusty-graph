@@ -20,6 +20,7 @@ mod window;
 pub use ast::OutputFormat;
 pub use executor::{execute_mutable, is_mutation_query, CypherExecutor};
 pub use parser::parse_cypher;
+pub use planner::mark_lazy_eligibility;
 pub use planner::optimize;
 pub use planner::schema_check::validate_schema;
 pub use planner::simplification::rewrite_text_score;
@@ -369,6 +370,7 @@ pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result:
         stats: None,
         profile: None,
         diagnostics: None,
+        lazy: None,
     }
 }
 

@@ -136,6 +136,7 @@ pub fn execute_mutable(
             stats: Some(stats),
             profile,
             diagnostics: None,
+            lazy: None,
         })
     }
 }
@@ -276,6 +277,7 @@ fn execute_create(
     Ok(ResultSet {
         rows: new_rows,
         columns: existing.columns,
+        lazy_return_items: None,
     })
 }
 
@@ -818,6 +820,7 @@ fn execute_merge(
                 let temp_rs = ResultSet {
                     rows: vec![new_row.clone()],
                     columns: Vec::new(),
+                    lazy_return_items: None,
                 };
                 execute_set(graph, &set_clause, &temp_rs, params, stats)?;
             }
@@ -829,6 +832,7 @@ fn execute_merge(
             let temp_rs = ResultSet {
                 rows: vec![new_row.clone()],
                 columns: existing.columns.clone(),
+                lazy_return_items: None,
             };
             let created = execute_create(graph, &create_clause, temp_rs, params, stats)?;
 
@@ -850,6 +854,7 @@ fn execute_merge(
                 let temp_rs = ResultSet {
                     rows: vec![new_row.clone()],
                     columns: Vec::new(),
+                    lazy_return_items: None,
                 };
                 execute_set(graph, &set_clause, &temp_rs, params, stats)?;
             }
@@ -861,6 +866,7 @@ fn execute_merge(
     Ok(ResultSet {
         rows: new_rows,
         columns: existing.columns,
+        lazy_return_items: None,
     })
 }
 
