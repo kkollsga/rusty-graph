@@ -745,6 +745,15 @@ impl<'a> CypherExecutor<'a> {
         }
 
         let limit_hint = clause.limit_hint;
+        // When an inline WHERE is present, the pattern executor must NOT
+        // pre-cap candidates at limit_hint — WHERE may filter some out
+        // and we'd return fewer than `limit` rows. Apply the limit after
+        // WHERE filtering instead (see the post-filter break below).
+        let pattern_limit = if inline_where.is_some() {
+            None
+        } else {
+            limit_hint
+        };
 
         let mut result_rows = if existing.rows.is_empty() {
             // First MATCH: execute patterns to produce initial bindings
@@ -757,7 +766,7 @@ impl<'a> CypherExecutor<'a> {
                     // only enforces max_matches at the last hop.
                     let executor = PatternExecutor::new_lightweight_with_params(
                         self.graph,
-                        limit_hint,
+                        pattern_limit,
                         self.params,
                     )
                     .set_deadline(self.deadline)

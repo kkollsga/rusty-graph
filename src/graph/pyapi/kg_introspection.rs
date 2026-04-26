@@ -22,7 +22,42 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::{Bound, IntoPyObjectExt};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Module-level default ``<rule_packs>`` XML, set by the Python
+/// ``kglite.rules`` package on import. Reflects bundled-pack inventory
+/// (lazy YAML peek) for graphs that haven't loaded any packs yet.
+fn global_default_rule_pack_xml() -> &'static Mutex<Option<String>> {
+    static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+/// Resolve the ``<rule_packs>`` XML to splice into ``describe()``: prefer the
+/// per-instance value (set by the rules accessor on load/run), fall back to
+/// the module-level default. Cloning the inner ``Option<String>`` is cheap
+/// for a ~1 KB string and keeps the lock window minimal.
+fn effective_rule_packs_xml(kg: &KnowledgeGraph) -> Option<String> {
+    if let Ok(guard) = kg.rule_packs_xml.lock() {
+        if let Some(value) = guard.as_ref() {
+            return Some(value.clone());
+        }
+    }
+    if let Ok(guard) = global_default_rule_pack_xml().lock() {
+        if let Some(value) = guard.as_ref() {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+
+/// Set the module-level default ``<rule_packs>`` XML. Called by
+/// ``kglite.rules`` on import. Pass ``None`` to clear.
+#[pyfunction]
+pub fn _set_default_rule_pack_xml(xml: Option<String>) {
+    if let Ok(mut guard) = global_default_rule_pack_xml().lock() {
+        *guard = xml;
+    }
+}
 
 #[pymethods]
 impl KnowledgeGraph {
@@ -854,6 +889,7 @@ impl KnowledgeGraph {
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
+            rule_packs_xml: std::sync::Mutex::new(None),
         };
 
         // Store the report in the new graph
@@ -929,6 +965,7 @@ impl KnowledgeGraph {
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
+            rule_packs_xml: std::sync::Mutex::new(None),
         };
 
         // Record plan step
@@ -1040,6 +1077,7 @@ impl KnowledgeGraph {
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
+            rule_packs_xml: std::sync::Mutex::new(None),
         };
 
         // Store the report
@@ -1164,6 +1202,7 @@ impl KnowledgeGraph {
                         temporal_context: self.temporal_context.clone(),
                         default_timeout_ms: self.default_timeout_ms,
                         default_max_rows: self.default_max_rows,
+                        rule_packs_xml: std::sync::Mutex::new(None),
                     };
 
                     // Store the calculation report
@@ -1310,6 +1349,7 @@ impl KnowledgeGraph {
                 temporal_context: self.temporal_context.clone(),
                 default_timeout_ms: self.default_timeout_ms,
                 default_max_rows: self.default_max_rows,
+                rule_packs_xml: std::sync::Mutex::new(None),
             };
 
             // Add the report
@@ -1399,8 +1439,22 @@ impl KnowledgeGraph {
             &fluent_detail,
             type_search.as_deref(),
             max_pairs,
+            effective_rule_packs_xml(self).as_deref(),
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+    }
+
+    /// Push a pre-rendered ``<rule_packs>`` XML block onto this graph.
+    ///
+    /// Called by the Python rules accessor whenever pack state changes
+    /// (load, run). ``None`` clears the per-instance value so subsequent
+    /// ``describe()`` calls fall back to the module-level default.
+    ///
+    /// Internal API — agents should use ``g.rules.run(...)`` instead.
+    fn _set_rule_pack_xml(&self, xml: Option<String>) {
+        if let Ok(mut guard) = self.rule_packs_xml.lock() {
+            *guard = xml;
+        }
     }
 
     /// File a bug report to `reported_bugs.md`.
@@ -1467,6 +1521,7 @@ impl KnowledgeGraph {
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
+            rule_packs_xml: std::sync::Mutex::new(None),
         }
     }
 

@@ -671,3 +671,43 @@ class TestCollectNodePropertyAccess:
         # oils should be a JSON-style list string
         assert "158.185" in str(oils_str)
         assert "150.0" in str(oils_str)
+
+
+class TestLimitWithFilteringWhere:
+    """Regression: LIMIT must apply to WHERE-filtered rows, not raw candidates.
+
+    The pattern executor used to be passed limit_hint as a candidate cap,
+    so a query like::
+
+        MATCH (n:T) WHERE NOT EXISTS { (n)-[:E]->() } RETURN n.id LIMIT N
+
+    would produce <N rows when the first N candidates included rows that
+    failed the WHERE filter. Fixed by withholding limit_hint from the
+    pattern executor when an inline WHERE is present.
+    """
+
+    @pytest.fixture
+    def filter_graph(self):
+        g = rg.KnowledgeGraph()
+        # 5 nodes; only n0 has an outgoing E edge.
+        for i in range(5):
+            g.cypher(f"CREATE (n:T {{id: 'n{i}'}})")
+        g.cypher("MATCH (a:T {id: 'n0'}), (b:T {id: 'n0'}) CREATE (a)-[:E]->(b)")
+        return g
+
+    def test_not_exists_with_small_limit(self, filter_graph):
+        # n1, n2, n3, n4 should all match (no outgoing E edges) — 4 total.
+        for limit in [1, 2, 3, 4]:
+            result = filter_graph.cypher(f"MATCH (n:T) WHERE NOT EXISTS {{ (n)-[:E]->() }} RETURN n.id LIMIT {limit}")
+            assert len(result) == limit, f"LIMIT {limit} returned {len(result)} rows"
+
+    def test_simple_where_with_small_limit(self, filter_graph):
+        # 4 matching rows (n1..n4); LIMIT < 4 should still produce exactly LIMIT.
+        for limit in [1, 2, 3, 4]:
+            result = filter_graph.cypher(f"MATCH (n:T) WHERE n.id <> 'n0' RETURN n.id LIMIT {limit}")
+            assert len(result) == limit, f"LIMIT {limit} returned {len(result)} rows"
+
+    def test_no_where_limit_unaffected(self, filter_graph):
+        # No WHERE, all 5 candidates pass through; LIMIT 3 returns 3.
+        result = filter_graph.cypher("MATCH (n:T) RETURN n.id LIMIT 3")
+        assert len(result) == 3

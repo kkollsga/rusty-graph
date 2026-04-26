@@ -45,3 +45,19 @@ kglite.datasets.sodir.wrapper.KnowledgeGraph.embeddings
 kglite.datasets.sodir.wrapper.Any
 kglite.datasets.sodir.wrapper.Any.__new__
 
+# Rule pack classes are stubbed in kglite.* for ergonomic reference but live
+# at runtime under kglite.rules.*. Internal-only modules mirror the same
+# typing.Any / importlib.resources noise as elsewhere.
+kglite.Rule
+kglite.RulePack
+kglite.RuleReport
+kglite._RulesAccessor
+kglite.rules.accessor.Any
+kglite.rules.accessor.Any.__new__
+kglite.rules.accessor.KnowledgeGraph
+kglite.rules.pack.Any
+kglite.rules.pack.Any.__new__
+kglite.rules.pack.files
+kglite.rules.report.Any
+kglite.rules.report.Any.__new__
+

@@ -8,12 +8,18 @@ or any other KGLite graph.
 Tools:
     graph_overview  — progressive schema disclosure (types, connections, Cypher ref)
     cypher_query    — run any Cypher query (up to 15 rows inline, FORMAT CSV for full export)
+    search          — name-based node lookup (requires global label index)
     bug_report      — file a timestamped Cypher bug report
 
 Code graph tools (auto-enabled when the graph has Function/Class nodes):
     find_entity     — search code entities by name
     read_source     — resolve entities to source file locations
     entity_context  — get neighborhood of a code entity
+
+Optional rule-pack tooling (off by default — set ENABLE_RULE_PACKS=True
+in this file to enable):
+    rules_run       — execute a structural-validator rule pack
+    plus a <rule_packs> block in graph_overview() advertising bundled packs.
 
 Usage:
     python mcp_server.py --graph legal_graph.kgl
@@ -96,6 +102,22 @@ def _ensure_file_server():
     _file_server_port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return _file_server_port
+
+
+# -- Optional features -----------------------------------------------------
+#
+# Flip to ``True`` to expose KGLite's rule-pack tooling: a ``rules_run``
+# MCP tool plus the ``<rule_packs>`` block in ``graph_overview()`` so
+# agents discover available structural validators inline with the
+# schema. Recommended for graphs where data integrity matters (legal,
+# petroleum, ontology-quality work); leave off for code graphs and
+# small social graphs where the rules add noise without value.
+ENABLE_RULE_PACKS = False
+
+if ENABLE_RULE_PACKS:
+    import kglite.rules
+
+    kglite.rules.advertise()
 
 
 # -- MCP server ------------------------------------------------------------
@@ -216,6 +238,66 @@ def bug_report(query: str, result: str, expected: str, description: str) -> str:
         return graph.bug_report(query, result, expected, description)
     except Exception as e:
         return f"Error: {e}"
+
+
+# -- Rule packs (gated by ENABLE_RULE_PACKS at top of file) ----------------
+
+if ENABLE_RULE_PACKS:
+
+    @mcp.tool()
+    def rules_run(
+        name: str = "structural_integrity",
+        type: str | None = None,
+        edge: str | None = None,
+        only: list[str] | None = None,
+        limit: int | None = None,
+        timeout_ms: int | None = None,
+    ) -> str:
+        """Run a rule pack and return a per-rule violation summary.
+
+        Rule packs are named structural validators (orphan nodes,
+        missing-parent edges, cycles, duplicate titles, etc.) that
+        surface data-integrity gaps not visible from normal queries.
+        Available packs and per-rule parameter schemas appear in the
+        ``<rule_packs>`` block of ``graph_overview()``.
+
+        Most bundled rules take ``type`` (node label) and ``edge``
+        (relationship type). Pass ``only=['rule_a']`` to run a subset,
+        ``limit`` to override the default 1000-row cap, or
+        ``timeout_ms`` to override the per-rule timeout (useful on
+        large graphs where heavy rules need more than the graph's
+        default Cypher budget).
+        """
+        try:
+            kwargs: dict[str, object] = {}
+            if type is not None:
+                kwargs["type"] = type
+            if edge is not None:
+                kwargs["edge"] = edge
+            report = graph.rules.run(name, only=only, limit=limit, timeout_ms=timeout_ms, **kwargs)
+            s = report.summary
+            lines = [
+                f"Pack: {s['pack']} v{s['version']}",
+                f"Total violations: {s['total_violations']:,} across {s['rule_count']} rule(s)",
+            ]
+            if s.get("any_truncated"):
+                lines.append("⚠ One or more rules hit the LIMIT — re-run higher.")
+            if s["rules_with_errors"]:
+                lines.append(f"Rules with errors: {s['rules_with_errors']}")
+            sev = s["by_severity"]
+            sev_line = ", ".join(f"{k}: {v:,}" for k, v in sev.items() if v > 0)
+            if sev_line:
+                lines.append(f"By severity: {sev_line}")
+            lines.append("")
+            for rname, info in s["by_rule"].items():
+                err = f" — error: {info['error']}" if info["error"] else ""
+                trunc = " (truncated)" if info["truncated"] else ""
+                lines.append(
+                    f"  {rname} [{info['severity']}]: {info['violations']:,}{trunc} ({info['elapsed_ms']:.1f}ms){err}"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error: {e}"
 
 
 # -- Code graph tools (auto-enabled for code_tree graphs) ------------------

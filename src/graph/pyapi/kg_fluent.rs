@@ -627,6 +627,7 @@ impl KnowledgeGraph {
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
+            rule_packs_xml: std::sync::Mutex::new(None),
         };
 
         // Create and add a report

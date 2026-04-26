@@ -1,0 +1,139 @@
+name: structural_integrity
+version: "1.1"
+description: |
+  Universal structural validators that work on any property graph.
+  Catches schema-integrity gaps without domain knowledge — orphan
+  nodes, self-loops, short cycles, missing required edges (both
+  outbound and inbound), and duplicate titles.
+
+  Each rule takes the node label (and edge type, where applicable)
+  as a runtime parameter so the same pack works across different
+  domains. Run against legal: `g.rules.run("structural_integrity",
+  type="LawSection", edge="SECTION_OF")`. Against sodir:
+  `type="Wellbore", edge="IN_LICENCE"`.
+usage_hint: |
+  Run before answering structural questions about an unfamiliar graph.
+  Surface findings to the user when query results may include flagged
+  nodes — e.g. via report.is_suspect(node_id).
+
+rules:
+  - name: orphan_node
+    description: |
+      Nodes of the given type that have zero incoming and zero
+      outgoing edges.
+    description_for_agent: |
+      A node with zero edges. Almost always an ingest artifact or a
+      deliberately-disconnected reference entity. If a query result
+      includes one, cross-references will be empty — flag to user.
+    severity: medium
+    parameters:
+      type: string
+    match: |
+      MATCH (n:{type})
+      WHERE NOT EXISTS { (n)-[]-() }
+    columns:
+      - n.id AS node_id
+      - n.title AS title
+
+  - name: self_loop
+    description: |
+      Edges of the given type where source and target are the same node.
+    description_for_agent: |
+      A node connected to itself via the given edge. Always a data
+      error in tree-shaped hierarchies; sometimes legitimate in
+      domain models (e.g. self-citing CourtDecision).
+    severity: high
+    parameters:
+      type: string
+      edge: string
+    match: |
+      MATCH (n:{type})-[:{edge}]->(n)
+    columns:
+      - n.id AS node_id
+      - n.title AS title
+
+  - name: cycle_2step
+    description: |
+      Two-step cycles via the given edge type. ``a → b → a`` shapes.
+    description_for_agent: |
+      A reciprocal pair via the same edge type. In hierarchical
+      relationships this is a structural error; in symmetric ones
+      (e.g. friend-of) it's expected. Inspect the edge semantics.
+    severity: high
+    parameters:
+      type: string
+      edge: string
+    match: |
+      MATCH (a:{type})-[:{edge}]->(b)-[:{edge}]->(a)
+      WHERE id(a) < id(b)
+    columns:
+      - a.id AS node_a_id
+      - b.id AS node_b_id
+      - a.title AS node_a_title
+      - b.title AS node_b_title
+
+  - name: missing_required_edge
+    description: |
+      Nodes of the given type that lack any outgoing edge of the
+      given edge type. Use when a structural parent is expected.
+    description_for_agent: |
+      A node missing its expected structural parent edge (e.g.
+      LawSection without SECTION_OF, or Wellbore without IN_LICENCE).
+      These are the most common "broken hierarchy" cases — items
+      ingested without their context. If a query result includes
+      one, downstream cross-references may be unreliable. Flag.
+    severity: medium
+    parameters:
+      type: string
+      edge: string
+    validates_direction: outbound
+    match: |
+      MATCH (n:{type})
+      WHERE NOT EXISTS { (n)-[:{edge}]->() }
+    columns:
+      - n.id AS node_id
+      - n.title AS title
+
+  - name: missing_inbound_edge
+    description: |
+      Nodes of the given type that have no incoming edge of the
+      given edge type. The mirror of missing_required_edge.
+    description_for_agent: |
+      A node lacking an expected incoming relationship (e.g.
+      Discovery without an incoming Wellbore via IN_DISCOVERY,
+      Field without an incoming Wellbore via IN_FIELD). Use when
+      the schema implies the node should be referenced from
+      somewhere. Strong signal that the record is stranded.
+    severity: medium
+    parameters:
+      type: string
+      edge: string
+    validates_direction: inbound
+    match: |
+      MATCH (n:{type})
+      WHERE NOT EXISTS { ()-[:{edge}]->(n) }
+    columns:
+      - n.id AS node_id
+      - n.title AS title
+
+  - name: duplicate_title
+    description: |
+      Nodes of the given type that share an identical title with at
+      least one other node of the same type.
+    description_for_agent: |
+      Multiple nodes of the same type with the same title — almost
+      always either a label-collision artifact (case differences,
+      whitespace, encoding) or an unmerged duplicate. If the user's
+      query targets one title, results may include the wrong record.
+      Flag and suggest the user disambiguate by id.
+    severity: medium
+    parameters:
+      type: string
+    match: |
+      MATCH (n:{type})
+      WITH n.title AS title, collect(n.id) AS ids, count(*) AS dup_count
+      WHERE dup_count > 1
+    columns:
+      - title
+      - dup_count
+      - ids

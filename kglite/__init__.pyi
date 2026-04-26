@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol, Union, overload, runtime_checkable
 
@@ -398,10 +399,168 @@ def to_neo4j(
     """
     ...
 
+class Rule:
+    """A single structural validator within a :class:`RulePack`."""
+
+    name: str
+    description: str
+    description_for_agent: str
+    severity: str
+    parameters: dict[str, str]
+    match: str
+    columns: tuple[str, ...]
+    default_limit: int
+    unsafe_unanchored: bool
+    validates_direction: str  # "" | "outbound" | "inbound"
+    default_timeout_ms: Optional[int]
+    """Per-rule Cypher timeout in milliseconds. ``None`` defers to
+    :func:`KnowledgeGraph.cypher`'s graph-level default. Set on rules
+    that scan dense node types (e.g. millions of instances) where the
+    standard timeout is insufficient."""
+
+class RulePack:
+    """A named, versioned collection of :class:`Rule` definitions.
+
+    Loaded from a YAML file. See :func:`kglite.rules.load_pack` and
+    :func:`kglite.rules.load_bundled`.
+    """
+
+    name: str
+    version: str
+    description: str
+    rules: tuple[Rule, ...]
+    usage_hint: str
+
+    @property
+    def rule_names(self) -> tuple[str, ...]: ...
+    def get_rule(self, name: str) -> Rule: ...
+
+class RuleReport:
+    """Aggregated structural-violation findings from a rule pack run.
+
+    Most accessors are lazy — :attr:`summary` is cheap;
+    :attr:`rows` materialises a DataFrame on first call.
+    """
+
+    pack_name: str
+    pack_version: str
+
+    @property
+    def summary(self) -> dict[str, Any]:
+        """Counts, severities, per-rule status — no DataFrame materialisation."""
+        ...
+
+    @property
+    def violation_count(self) -> int: ...
+    @property
+    def has_blockers(self) -> bool:
+        """True if any rule with ``severity=blocker`` found violations."""
+        ...
+
+    @property
+    def rows(self) -> pd.DataFrame:
+        """All violations across all rules. Materialised on first access."""
+        ...
+
+    def violations_for(self, rule_name: str) -> pd.DataFrame:
+        """Return one rule's rows as a DataFrame."""
+        ...
+
+    def is_suspect(self, node_id: Any) -> builtins.list[tuple[str, str]]:
+        """Return ``[(rule_name, severity), ...]`` for rules that flagged ``node_id``.
+
+        Empty list when the node is clean. Index is built lazily on first call
+        and cached. Useful for cross-referencing query results against
+        violations: surface the flag in agent answers when query results
+        include any suspect node.
+        """
+        ...
+
+    def to_markdown(self, sample_rows: int = 5) -> str:
+        """Render an agent-pasteable markdown summary."""
+        ...
+
+class _RulesAccessor:
+    """The object returned by :attr:`KnowledgeGraph.rules`.
+
+    Loads, lists, runs, and describes rule packs — agent-discoverable
+    structural validators that compile to Cypher and produce
+    :class:`RuleReport` objects.
+    """
+
+    # ``builtins.list[...]`` (rather than bare ``list[...]``) avoids
+    # mypy resolving ``list`` to the method below within this class.
+    def list(self) -> builtins.list[dict[str, Any]]:
+        """List loaded and bundled rule packs available to ``run()``."""
+        ...
+
+    def load(self, path: str) -> RulePack:
+        """Load a YAML rule pack file and register it."""
+        ...
+
+    def describe(self, name: str) -> dict[str, Any]:
+        """Return a dict describing the pack and its rules (LLM-facing)."""
+        ...
+
+    def run(
+        self,
+        name: str,
+        *,
+        only: Optional[builtins.list[str]] = None,
+        limit: Optional[int] = None,
+        timeout_ms: Optional[int] = None,
+        **params: Any,
+    ) -> RuleReport:
+        """Execute a rule pack and return a structured :class:`RuleReport`.
+
+        Args:
+            name: Rule pack name. Loaded packs first, then bundled packs
+                (``structural_integrity``).
+            only: If given, only run the rules with these names.
+            limit: Override every rule's ``default_limit`` (1000) for
+                this run. Pass higher when you need full coverage and
+                accept the cost.
+            timeout_ms: Per-rule Cypher timeout in milliseconds. Wins
+                over each rule's ``default_timeout_ms`` when both are
+                set. ``None`` (default) defers to the rule's setting
+                and then to the graph's default timeout. Useful for
+                running heavy rules (e.g. orphan checks on dense
+                Wikidata types) with a longer budget than the graph
+                default allows.
+            **params: Rule parameters substituted into ``{...}``
+                placeholders in match/columns templates (e.g.
+                ``type='LawSection'``, ``edge='SECTION_OF'``).
+
+        Returns:
+            :class:`RuleReport` with lazy ``.summary``, ``.rows``, and
+            per-rule access via ``.violations_for(rule_name)``.
+        """
+        ...
+
 class KnowledgeGraph:
     """A high-performance knowledge graph with typed nodes, connections, and
     a fluent query API backed by Rust.
     """
+
+    @property
+    def rules(self) -> _RulesAccessor:
+        """Sub-namespace for structural-validator rule packs.
+
+        Rule packs are named, agent-discoverable structural validators
+        (orphan-node checks, missing-parent, cycle detection, etc.) that
+        compile to Cypher and produce a :class:`RuleReport`. The bundled
+        ``structural_integrity`` pack ships universal cross-graph rules.
+
+        Example::
+
+            report = g.rules.run("structural_integrity",
+                                  type="LawSection", edge="SECTION_OF")
+            report.summary           # counts + severities
+            report.violations_for("orphan_node")  # one rule's rows
+
+        See :mod:`kglite.rules` and ``docs/guides/rules.md``.
+        """
+        ...
 
     # ====================================================================
     # Constructor
