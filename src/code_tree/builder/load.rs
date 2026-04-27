@@ -232,6 +232,22 @@ fn functions_df(fns: &[FunctionInfo]) -> DataFrame {
                     .collect(),
             ),
         ),
+        (
+            "is_test",
+            ColumnType::Boolean,
+            bool_col(
+                fns.iter()
+                    .map(|f| {
+                        Some(
+                            f.metadata
+                                .get("is_test")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                        )
+                    })
+                    .collect(),
+            ),
+        ),
     ])
 }
 

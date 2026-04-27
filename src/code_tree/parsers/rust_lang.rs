@@ -555,6 +555,7 @@ impl RustParser {
         is_method: bool,
         owner: Option<&str>,
         impl_is_pymethods: bool,
+        in_test_mod: bool,
     ) -> FunctionInfo {
         let name = Self::get_name(node, source, "identifier")
             .unwrap_or("unknown")
@@ -577,12 +578,13 @@ impl RustParser {
 
         let is_pymethod = Self::is_pymethod_fn(&attrs, impl_is_pymethods);
         let is_ffi = attrs.iter().any(|a| a.contains("#[no_mangle]"));
-        let is_test = attrs.iter().any(|a| {
-            a == "#[test]"
-                || a == "#[bench]"
-                || a.contains("#[tokio::test")
-                || a.contains("#[rstest")
-        });
+        let is_test = in_test_mod
+            || attrs.iter().any(|a| {
+                a == "#[test]"
+                    || a == "#[bench]"
+                    || a.contains("#[tokio::test")
+                    || a.contains("#[rstest")
+            });
         let ffi_kind = if is_pymethod {
             Some("pyo3")
         } else if is_ffi {
@@ -646,6 +648,7 @@ impl RustParser {
         rel_path: &str,
         file_info: &mut FileInfo,
         result: &mut ParseResult,
+        in_test_mod: bool,
     ) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -659,6 +662,7 @@ impl RustParser {
                         false,
                         None,
                         false,
+                        in_test_mod,
                     ));
                 }
                 "struct_item" => {
@@ -756,6 +760,7 @@ impl RustParser {
                                         true,
                                         Some(&name),
                                         false,
+                                        in_test_mod,
                                     );
                                     trait_rel.methods.push(fn_info.clone());
                                     result.functions.push(fn_info);
@@ -828,6 +833,7 @@ impl RustParser {
                                         true,
                                         Some(self_type),
                                         pymethods,
+                                        in_test_mod,
                                     );
                                     type_rel.methods.push(fn_info.clone());
                                     result.functions.push(fn_info);
@@ -857,6 +863,8 @@ impl RustParser {
                         continue;
                     };
                     let mod_name = mod_name.to_string();
+                    let mod_attrs = Self::get_attributes(child, source);
+                    let mod_is_test = mod_attrs.iter().any(|a| a.contains("cfg(test)"));
                     let mut decl_list: Option<Node> = None;
                     let mut mc = child.walk();
                     for sub in child.children(&mut mc) {
@@ -874,6 +882,7 @@ impl RustParser {
                             rel_path,
                             file_info,
                             result,
+                            in_test_mod || mod_is_test,
                         );
                     } else {
                         file_info.submodule_declarations.push(mod_name);
@@ -1008,7 +1017,8 @@ impl LanguageParser for RustParser {
             .unwrap_or("")
             .to_string();
 
-        let is_test = stem.ends_with("_test")
+        let is_test = stem == "tests"
+            || stem.ends_with("_test")
             || stem.ends_with("_tests")
             || stem.starts_with("test_")
             || rel_path.contains("/tests/")
@@ -1030,6 +1040,10 @@ impl LanguageParser for RustParser {
         };
 
         let mut result = ParseResult::new();
+        // Top-level `is_test` (file lives under tests/, named tests.rs, etc.)
+        // propagates into the parser walk so every contained function inherits
+        // is_test=true even when the function lacks a `#[test]` attribute.
+        let in_test_mod = file_info.is_test;
         Self::parse_items(
             root,
             &source,
@@ -1037,6 +1051,7 @@ impl LanguageParser for RustParser {
             &rel_path,
             &mut file_info,
             &mut result,
+            in_test_mod,
         );
         file_info.annotations = extract_comment_annotations(root, &source, DEFAULT_COMMENT_TYPES);
         result.files.push(file_info);
