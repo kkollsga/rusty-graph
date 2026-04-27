@@ -183,10 +183,15 @@ pub fn build_uses_type_edges(
     // edge per node pair. (The graph engine keys edges by (src, type, tgt) —
     // multiple edges with same nodes would overwrite.)
     //
-    // Position bitset: bit 0 = parameter, bit 1 = return, bit 2 = signature.
+    // Position bitset: bit 0 = parameter, bit 1 = return, bit 2 = signature,
+    // bit 3 = receiver. Receiver is treated as an input position distinct
+    // from `parameter` because `func (c *Call) lock()`-style methods consume
+    // their receiver type implicitly — users querying "who consumes T" want
+    // both parameter and receiver matches, but they're semantically different.
     const POS_PARAM: u8 = 1 << 0;
     const POS_RETURN: u8 = 1 << 1;
     const POS_SIGNATURE: u8 = 1 << 2;
+    const POS_RECEIVER: u8 = 1 << 3;
 
     let per_fn: Vec<Vec<(u32, &'static str, String, &'static str)>> = functions
         .par_iter()
@@ -215,9 +220,16 @@ pub fn build_uses_type_edges(
             };
 
             // 1. Each structured parameter type — clean per-position attribution.
+            //    Receivers (Go `(c *Call)`, Rust `&self`) get POS_RECEIVER instead
+            //    of POS_PARAM so the resulting edge is labeled `position="receiver"`.
             for p in &fn_info.parameters {
                 if let Some(t) = &p.type_annotation {
-                    scan(t, POS_PARAM, &mut seen);
+                    let pos_bit = if p.kind == crate::code_tree::models::ParameterKind::Receiver {
+                        POS_RECEIVER
+                    } else {
+                        POS_PARAM
+                    };
+                    scan(t, pos_bit, &mut seen);
                 }
             }
             // 2. Return type.
@@ -236,19 +248,27 @@ pub fn build_uses_type_edges(
                 scan(&fn_info.signature, POS_SIGNATURE, &mut seen);
             }
 
-            // Collapse bitset to a single label.
+            // Collapse bitset to a single label. {param, return, receiver} are
+            // semantic positions; signature is the fallback. If two or more
+            // semantic positions fire (e.g. receiver + return on a chaining
+            // method), collapse to "both". Pure receiver-only stays "receiver".
             seen.into_iter()
                 .map(|(pat_id, bits)| {
-                    let position = match (
-                        bits & POS_PARAM != 0,
-                        bits & POS_RETURN != 0,
-                        bits & POS_SIGNATURE != 0,
-                    ) {
-                        (true, true, _) => "both",
-                        (true, false, _) => "parameter",
-                        (false, true, _) => "return",
-                        (false, false, true) => "signature",
-                        _ => unreachable!("at least one position bit must be set"),
+                    let semantic_count = (bits & POS_PARAM != 0) as u8
+                        + (bits & POS_RETURN != 0) as u8
+                        + (bits & POS_RECEIVER != 0) as u8;
+                    let position = if semantic_count >= 2 {
+                        "both"
+                    } else if bits & POS_RECEIVER != 0 {
+                        "receiver"
+                    } else if bits & POS_PARAM != 0 {
+                        "parameter"
+                    } else if bits & POS_RETURN != 0 {
+                        "return"
+                    } else if bits & POS_SIGNATURE != 0 {
+                        "signature"
+                    } else {
+                        unreachable!("at least one position bit must be set");
                     };
                     let (qname, target) = &pattern_meta[pat_id as usize];
                     (pat_id, *target, qname.clone(), position)

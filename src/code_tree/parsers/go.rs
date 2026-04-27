@@ -290,7 +290,12 @@ impl GoParser {
             .map(|b| Self::extract_calls(b, source))
             .unwrap_or_default();
         let parameters = Self::extract_parameters(node, source);
-        let param_count = Some(parameters.len() as u32);
+        let param_count = Some(
+            parameters
+                .iter()
+                .filter(|p| p.kind != ParameterKind::Receiver)
+                .count() as u32,
+        );
         let (branch_count, max_nesting) = match body {
             Some(b) => {
                 let (c, n) = compute_complexity(b, BRANCH_KINDS_GO, NESTED_SCOPES);
@@ -329,22 +334,47 @@ impl GoParser {
     }
 
     /// Extract structured parameters from a Go function/method declaration.
-    /// Uses the tree-sitter-go named field `parameters` to skip the receiver
-    /// (`method_declaration`'s `receiver` field, which is also a `parameter_list`).
-    /// `variadic_parameter_declaration` becomes `ParameterKind::Variadic`.
+    /// Uses tree-sitter-go's named fields: `parameters` for the regular argument
+    /// list (excluding the receiver) and `receiver` for the method receiver.
+    /// `variadic_parameter_declaration` → `ParameterKind::Variadic`.
+    /// Receiver entries → `ParameterKind::Receiver`, prepended so they appear
+    /// first in display order (matching source-code reading order).
     fn extract_parameters(node: Node, source: &[u8]) -> Vec<ParameterInfo> {
         let mut out = Vec::new();
-        let Some(params_node) = node.child_by_field_name("parameters") else {
-            return out;
-        };
+        // Receiver first (only present on method_declaration). Preserved at
+        // the head of `parameters` so iteration matches source order.
+        if let Some(recv) = node.child_by_field_name("receiver") {
+            Self::extract_param_list(recv, source, true, &mut out);
+        }
+        if let Some(params) = node.child_by_field_name("parameters") {
+            Self::extract_param_list(params, source, false, &mut out);
+        }
+        out
+    }
+
+    /// Walk a `parameter_list` node and append `ParameterInfo` entries.
+    /// Shared between regular parameters and method receivers — the AST shape
+    /// is identical, only the `ParameterKind` differs.
+    fn extract_param_list(
+        params_node: Node,
+        source: &[u8],
+        is_receiver: bool,
+        out: &mut Vec<ParameterInfo>,
+    ) {
         let mut pcursor = params_node.walk();
         for child in params_node.children(&mut pcursor) {
-            let (kind, is_variadic) = match child.kind() {
-                "parameter_declaration" => ("parameter_declaration", false),
-                "variadic_parameter_declaration" => ("variadic_parameter_declaration", true),
+            let is_variadic = match child.kind() {
+                "parameter_declaration" => false,
+                "variadic_parameter_declaration" => true,
                 _ => continue,
             };
-            let _ = kind;
+            let kind = if is_receiver {
+                ParameterKind::Receiver
+            } else if is_variadic {
+                ParameterKind::Variadic
+            } else {
+                ParameterKind::Positional
+            };
             // Each declaration may bind multiple names: `a, b int`.
             let mut names: Vec<String> = Vec::new();
             let mut type_ann: Option<String> = None;
@@ -365,11 +395,7 @@ impl GoParser {
                         name: "_".into(),
                         type_annotation: Some(t),
                         default: None,
-                        kind: if is_variadic {
-                            ParameterKind::Variadic
-                        } else {
-                            ParameterKind::Positional
-                        },
+                        kind,
                     });
                 }
                 continue;
@@ -379,15 +405,10 @@ impl GoParser {
                     name: n,
                     type_annotation: type_ann.clone(),
                     default: None,
-                    kind: if is_variadic {
-                        ParameterKind::Variadic
-                    } else {
-                        ParameterKind::Positional
-                    },
+                    kind,
                 });
             }
         }
-        out
     }
 }
 

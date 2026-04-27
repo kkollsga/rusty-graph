@@ -256,6 +256,35 @@ fn walk(
     }
 }
 
+// ── Macro decorator detection (C/C++) ─────────────────────────────────
+
+/// Heuristic: does this token text look like a macro attribute/decorator
+/// that the C/C++ parser should ignore when extracting names and types?
+///
+/// Matches all-uppercase identifiers with optional underscores/digits and
+/// length ≥ 2: catches `SPDLOG_INLINE`, `FMT_API`, `FMT_BEGIN_NAMESPACE`,
+/// `Q_INVOKABLE`, `BOOST_FOREACH`, `MOZ_ASSERT`, `__attribute__`-style names.
+///
+/// Excludes single-letter all-caps tokens (`T`, `K`, `N`) so generic template
+/// parameter names aren't false-positives.
+///
+/// Used by `cpp.rs` to skip macro decorators in `get_return_type`, `get_name`,
+/// and `extract_parameters` — without this, spdlog-style code like
+/// `SPDLOG_INLINE void foo()` parses with `name="unknown"` and
+/// `return_type="SPDLOG_INLINE"`.
+pub fn looks_like_macro_decorator(text: &str) -> bool {
+    if text.len() < 2 {
+        return false;
+    }
+    let mut chars = text.chars();
+    let first = chars.next().unwrap();
+    if !(first.is_ascii_uppercase() || first == '_') {
+        return false;
+    }
+    text.chars()
+        .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+}
+
 // ── Procedure annotation extraction ───────────────────────────────────
 
 fn procedure_annotation_regex() -> &'static Regex {

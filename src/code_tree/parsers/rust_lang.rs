@@ -770,8 +770,41 @@ impl RustParser {
         let function_refs = body
             .map(|b| Self::extract_function_pointer_refs(b, source))
             .unwrap_or_default();
-        let parameters = Self::extract_parameters(node, source);
-        let param_count = Some(parameters.len() as u32);
+        let mut parameters = Self::extract_parameters(node, source);
+        // For methods, prepend a Receiver entry pulled from the enclosing
+        // `impl Owner` block. tree-sitter-rust's `self_parameter` doesn't carry
+        // the type — it lives on the impl. The `&` / `&mut` prefix is preserved
+        // for display fidelity; the AC scanner only matches the bare type name
+        // anyway, so this doesn't affect USES_TYPE resolution.
+        if is_method {
+            if let Some(owner_name) = owner {
+                if let Some(self_param_text) = Self::find_self_parameter_text(node, source) {
+                    let type_ann = if self_param_text.contains("&mut") {
+                        Some(format!("&mut {}", owner_name))
+                    } else if self_param_text.contains('&') {
+                        Some(format!("&{}", owner_name))
+                    } else {
+                        Some(owner_name.to_string())
+                    };
+                    parameters.insert(
+                        0,
+                        ParameterInfo {
+                            name: "self".into(),
+                            type_annotation: type_ann,
+                            default: None,
+                            kind: ParameterKind::Receiver,
+                        },
+                    );
+                }
+            }
+        }
+        // Receivers don't count toward param_count — they aren't user-supplied.
+        let param_count = Some(
+            parameters
+                .iter()
+                .filter(|p| p.kind != ParameterKind::Receiver)
+                .count() as u32,
+        );
         let (branch_count, max_nesting) = match body {
             Some(b) => {
                 let (c, n) = compute_complexity(b, BRANCH_KINDS_RUST, NESTED_SCOPES);
@@ -810,10 +843,29 @@ impl RustParser {
         }
     }
 
+    /// Return the source text of the `self_parameter` child if the function
+    /// has one (e.g. `&self`, `&mut self`, `self`). Used by `parse_function`
+    /// to detect the receiver shape and synthesize a `ParameterInfo` from the
+    /// enclosing impl's owner type.
+    fn find_self_parameter_text<'a>(node: Node<'a>, source: &'a [u8]) -> Option<&'a str> {
+        let mut cursor = node.walk();
+        let params_node = node
+            .children(&mut cursor)
+            .find(|c| c.kind() == "parameters")?;
+        let mut pcursor = params_node.walk();
+        for child in params_node.children(&mut pcursor) {
+            if child.kind() == "self_parameter" {
+                return Some(node_text(child, source));
+            }
+        }
+        None
+    }
+
     /// Extract structured parameters from a Rust `fn` definition.
-    /// Excludes `self`/`&self`/`&mut self`. tree-sitter-rust parameter kinds:
-    /// `parameter` (regular, with type), `self_parameter` (skipped), and
-    /// (rare) `variadic_parameter` for FFI fns.
+    /// Excludes `self`/`&self`/`&mut self` — receivers are injected separately
+    /// in `parse_function` from the enclosing `impl` block's owner type.
+    /// tree-sitter-rust parameter kinds: `parameter` (regular, with type),
+    /// `self_parameter` (handled by caller), and `variadic_parameter` (FFI).
     fn extract_parameters(node: Node, source: &[u8]) -> Vec<ParameterInfo> {
         let mut out = Vec::new();
         let mut cursor = node.walk();

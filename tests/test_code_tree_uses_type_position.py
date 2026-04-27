@@ -123,6 +123,70 @@ def test_go_method_return_type_resolved(tmp_path):
     assert pos in ("return", "both"), f"expected return/both, got {pos!r}"
 
 
+def test_go_method_receiver_position(tmp_path):
+    """Go method receiver — captured via ParameterKind::Receiver, USES_TYPE
+    edge labeled position='receiver' (not 'signature' fallback)."""
+    _write(
+        tmp_path,
+        {
+            "go.mod": "module demo\n\ngo 1.21\n",
+            "main.go": """
+            package demo
+
+            type Call struct{}
+
+            func (c *Call) lock() {}
+            """,
+        },
+    )
+    g = build(str(tmp_path))
+    pos = _positions(g, ".lock", "Call")
+    assert pos == "receiver", f"expected 'receiver', got {pos!r}"
+
+
+def test_rust_method_receiver_position(tmp_path):
+    """Rust &self method — receiver type injected from owning impl block."""
+    _write(
+        tmp_path,
+        {
+            "Cargo.toml": """
+            [package]
+            name = "demo"
+            version = "0.1.0"
+            """,
+            "src/lib.rs": """
+            pub struct Foo;
+            impl Foo {
+                pub fn bar(&self) {}
+            }
+            """,
+        },
+    )
+    g = build(str(tmp_path))
+    pos = _positions(g, "::bar", "Foo")
+    assert pos == "receiver", f"expected 'receiver', got {pos!r}"
+
+
+def test_method_receiver_plus_return_collapses_to_both(tmp_path):
+    """func (c *Call) Once() *Call — receiver + return → 'both'."""
+    _write(
+        tmp_path,
+        {
+            "go.mod": "module demo\n\ngo 1.21\n",
+            "main.go": """
+            package demo
+
+            type Call struct{}
+
+            func (c *Call) Once() *Call { return c }
+            """,
+        },
+    )
+    g = build(str(tmp_path))
+    pos = _positions(g, ".Once", "Call")
+    assert pos == "both", f"expected 'both', got {pos!r}"
+
+
 def test_no_duplicate_edges_for_both_positions(tmp_path):
     """Single edge per (function, type) — position aggregated, not duplicated."""
     _write(

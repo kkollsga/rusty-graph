@@ -516,7 +516,12 @@ impl JstsParser {
             .map(|b| Self::extract_calls(b, source))
             .unwrap_or_default();
         let parameters = Self::extract_parameters(node, source);
-        let param_count = Some(parameters.len() as u32);
+        let param_count = Some(
+            parameters
+                .iter()
+                .filter(|p| p.kind != ParameterKind::Receiver)
+                .count() as u32,
+        );
         let (branch_count, max_nesting) = match block {
             Some(b) => {
                 let (c, n) = compute_complexity(b, BRANCH_KINDS_TS, NESTED_SCOPES);

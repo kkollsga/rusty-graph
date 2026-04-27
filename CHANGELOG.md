@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`ParameterKind::Receiver`** — Go method receivers (`(c *Call)`) and Rust
+  `&self`/`&mut self`/`self` are now captured as structured parameters with
+  `kind: "receiver"`, distinct from positional/variadic/kw_variadic. Excluded
+  from `param_count` (receivers aren't user-supplied arguments). Cypher
+  consumers can filter via `parameters` JSON column.
+
+- **`USES_TYPE` `position="receiver"`** — receivers contribute USES_TYPE edges
+  with their own position label. A method `(c *Call) Once() *Call` (receiver +
+  return) collapses to `position="both"` consistent with existing aggregation.
+  On testify, this drops `position="signature"` fallback from 49% → 0% and
+  raises total USES_TYPE edges 251 → 365 (+45%). On KGLite self-graph,
+  USES_TYPE edges go 2078 → 3197 (+54%) — Rust `&self` methods now surface
+  their owner type as a receiver USES_TYPE edge.
+
+### Fixed
+
+- **C++ parser ignores macro decorators** (`SPDLOG_INLINE`, `FMT_API`,
+  `FMT_BEGIN_NAMESPACE`, `Q_INVOKABLE`, etc.). Without this, tree-sitter-cpp
+  parses `SPDLOG_INLINE void foo()` so that `SPDLOG_INLINE` looks like a
+  type and `foo` becomes the return type — producing `name="unknown"` and
+  `return_type="SPDLOG_INLINE"`. Heuristic in `parsers/shared.rs::looks_like_macro_decorator`
+  matches all-caps identifiers (length ≥ 2, optional underscores/digits) and
+  is applied in `cpp.rs::get_return_type`, `get_name`, and parameter
+  extraction. `get_return_type` also recovers from tree-sitter `ERROR` wrappers
+  around primitive type keywords (`void`, `int`, `bool`, etc.) — common when
+  a macro decorator has confused the parser. On spdlog, macro names are
+  eliminated from the top return-type frequency list.
+
 ## [0.8.22] — 2026-04-27
 
 A code-graph quality round driven by analysing KGLite's own self-graph and

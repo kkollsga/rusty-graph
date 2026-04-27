@@ -6,8 +6,8 @@ use tree_sitter::{Node, Parser, Tree};
 
 use super::shared::{
     compute_complexity, count_lines, extract_comment_annotations, extract_procedure_annotations,
-    get_type_parameters, is_generated_or_minified, node_text, BRANCH_KINDS_CPP,
-    DEFAULT_COMMENT_TYPES,
+    get_type_parameters, is_generated_or_minified, looks_like_macro_decorator, node_text,
+    BRANCH_KINDS_CPP, DEFAULT_COMMENT_TYPES,
 };
 use super::LanguageParser;
 use crate::code_tree::models::{
@@ -182,7 +182,13 @@ impl CppParser {
                 || child.kind() == "field_identifier"
                 || child.kind() == "identifier"
             {
-                return Some(node_text(child, source));
+                let text = node_text(child, source);
+                // Skip macro-shaped tokens (SPDLOG_INLINE, FMT_API, etc.) so
+                // the parser doesn't pick them up as the function name.
+                if looks_like_macro_decorator(text) {
+                    continue;
+                }
+                return Some(text);
             }
         }
         None
@@ -256,8 +262,33 @@ impl CppParser {
     }
 
     fn get_return_type(node: Node, source: &[u8]) -> Option<String> {
+        // C/C++ primitive-type keywords. Used to recover return types when
+        // tree-sitter-cpp wraps the type keyword in an ERROR node — typically
+        // happens when a macro decorator confuses the parser (e.g.
+        // `SPDLOG_INLINE void foo()` parses as type_identifier=SPDLOG_INLINE
+        // followed by ERROR(void) instead of primitive_type=void).
+        const PRIMITIVE_KEYWORDS: &[&str] = &[
+            "void", "bool", "char", "int", "short", "long", "float", "double", "signed",
+            "unsigned", "size_t", "ssize_t", "auto",
+        ];
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
+            let text = node_text(child, source);
+            // Skip macro decorators like `SPDLOG_INLINE`, `FMT_API`. Without
+            // this, tree-sitter-cpp may surface them as bare `identifier` or
+            // `type_identifier` children, producing return_type="SPDLOG_INLINE"
+            // instead of the real type.
+            if looks_like_macro_decorator(text) {
+                continue;
+            }
+            // Recover from tree-sitter ERROR wrappers around primitive types.
+            if child.kind() == "ERROR" {
+                let trimmed = text.trim();
+                if PRIMITIVE_KEYWORDS.contains(&trimmed) {
+                    return Some(trimmed.to_string());
+                }
+                continue;
+            }
             if matches!(
                 child.kind(),
                 "function_declarator" | "identifier" | "pointer_declarator"
@@ -265,7 +296,7 @@ impl CppParser {
                 break;
             }
             if TYPE_NODES.contains(&child.kind()) {
-                return Some(node_text(child, source).to_string());
+                return Some(text.to_string());
             }
         }
         None
@@ -499,7 +530,12 @@ impl CppParser {
             .map(|b| Self::extract_calls(b, source))
             .unwrap_or_default();
         let parameters = Self::extract_parameters(declarator, source);
-        let param_count = Some(parameters.len() as u32);
+        let param_count = Some(
+            parameters
+                .iter()
+                .filter(|p| p.kind != ParameterKind::Receiver)
+                .count() as u32,
+        );
         let (branch_count, max_nesting) = match body {
             Some(b) => {
                 let (c, n) = compute_complexity(b, BRANCH_KINDS_CPP, NESTED_SCOPES);

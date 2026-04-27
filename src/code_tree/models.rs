@@ -125,6 +125,11 @@ pub enum ParameterKind {
     Positional,
     Variadic,
     KwVariadic,
+    /// Method receiver — Go's `(c *Call)`, Rust's `&self`/`&mut self`/`self`.
+    /// Stored in `parameters` so the USES_TYPE resolver can attribute the
+    /// receiver type with `position="receiver"`. Excluded from `param_count`
+    /// since receivers aren't user-supplied arguments.
+    Receiver,
 }
 
 /// Represents structs (Rust/C++), classes (Python/TS/Java/C#).
