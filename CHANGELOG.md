@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Lexical text predicates (Phase 2 of the completeness round).** Six
+  string-similarity primitives now expressible in Cypher without
+  dropping to Python:
+
+  - `text_edit_distance(a, b)` — Levenshtein, UTF-8 aware (uses
+    minimum-row DP for O(min(n,m)) memory).
+  - `text_normalize(s)` — lowercase, drop punctuation, collapse
+    whitespace. The thing every fuzzy-match pipeline reaches for first.
+  - `text_jaccard(a, b [, sep])` — token-set Jaccard, default whitespace
+    separator.
+  - `text_ngrams(s, n)` — character n-grams as a list.
+  - `text_contains_any(s, needles)` / `text_starts_with_any(s, prefixes)`
+    — variadic or list-argument forms; short-circuit on first match.
+
+  ```cypher
+  MATCH (a:Person), (b:Person) WHERE a.id < b.id
+  WITH a, b, text_edit_distance(
+      text_normalize(a.title), text_normalize(b.title)
+  ) AS d
+  WHERE d <= 2 RETURN a.title, b.title, d
+  ```
+
 - **Expression-engine fundamentals (Phase 1 of the completeness round).**
   The Cypher engine gains the standard scalar/aggregate/list-fold
   primitives that were missing:

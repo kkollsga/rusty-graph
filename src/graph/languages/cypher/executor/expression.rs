@@ -1362,6 +1362,190 @@ impl<'a> CypherExecutor<'a> {
                 }
                 Ok(Value::Null)
             }
+            // ── Text predicates (0.8.20) ──────────────────────────────
+            "text_edit_distance" => {
+                if args.len() != 2 {
+                    return Err("text_edit_distance() requires 2 arguments".into());
+                }
+                let a = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let b = coerce_to_string(self.evaluate_expression(&args[1], row)?);
+                match (&a, &b) {
+                    (Value::String(s1), Value::String(s2)) => {
+                        Ok(Value::Int64(levenshtein(s1, s2) as i64))
+                    }
+                    _ => Ok(Value::Null),
+                }
+            }
+            "text_normalize" => {
+                if args.len() != 1 {
+                    return Err("text_normalize() requires 1 argument".into());
+                }
+                let val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                match val {
+                    Value::String(s) => {
+                        let mut out = String::with_capacity(s.len());
+                        let mut last_space = true;
+                        for c in s.chars() {
+                            if c.is_alphanumeric() {
+                                for lc in c.to_lowercase() {
+                                    out.push(lc);
+                                }
+                                last_space = false;
+                            } else if c.is_whitespace() && !last_space {
+                                out.push(' ');
+                                last_space = true;
+                            }
+                            // punctuation: drop
+                        }
+                        Ok(Value::String(out.trim().to_string()))
+                    }
+                    _ => Ok(Value::Null),
+                }
+            }
+            "text_jaccard" => {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(
+                        "text_jaccard() requires 2-3 arguments: (a, b [, separator])".into(),
+                    );
+                }
+                let a = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let b = coerce_to_string(self.evaluate_expression(&args[1], row)?);
+                let sep = if args.len() == 3 {
+                    match self.evaluate_expression(&args[2], row)? {
+                        Value::String(s) => Some(s),
+                        _ => return Err("text_jaccard(): separator must be a string".into()),
+                    }
+                } else {
+                    None
+                };
+                match (&a, &b) {
+                    (Value::String(s1), Value::String(s2)) => {
+                        let tokenize = |s: &str| -> std::collections::HashSet<String> {
+                            match &sep {
+                                Some(d) => s.split(d.as_str()).map(|t| t.to_string()).collect(),
+                                None => s.split_whitespace().map(|t| t.to_string()).collect(),
+                            }
+                        };
+                        let set_a = tokenize(s1);
+                        let set_b = tokenize(s2);
+                        if set_a.is_empty() && set_b.is_empty() {
+                            return Ok(Value::Float64(1.0));
+                        }
+                        let inter = set_a.intersection(&set_b).count() as f64;
+                        let union = set_a.union(&set_b).count() as f64;
+                        Ok(Value::Float64(inter / union))
+                    }
+                    _ => Ok(Value::Null),
+                }
+            }
+            "text_ngrams" => {
+                if args.len() != 2 {
+                    return Err("text_ngrams() requires 2 arguments: (string, n)".into());
+                }
+                let s_val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let n_val = self.evaluate_expression(&args[1], row)?;
+                match (&s_val, &n_val) {
+                    (Value::String(s), Value::Int64(n)) => {
+                        let n = *n as usize;
+                        if n == 0 {
+                            return Err("text_ngrams(): n must be ≥ 1".into());
+                        }
+                        let chars: Vec<char> = s.chars().collect();
+                        let mut grams: Vec<String> = Vec::new();
+                        if chars.len() >= n {
+                            for i in 0..=chars.len() - n {
+                                let gram: String = chars[i..i + n].iter().collect();
+                                grams.push(format!(
+                                    "\"{}\"",
+                                    gram.replace('\\', "\\\\").replace('"', "\\\"")
+                                ));
+                            }
+                        }
+                        Ok(Value::String(format!("[{}]", grams.join(", "))))
+                    }
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    _ => Ok(Value::Null),
+                }
+            }
+            "text_contains_any" => {
+                if args.is_empty() {
+                    return Err("text_contains_any() requires at least 1 argument".into());
+                }
+                let s_val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let s = match &s_val {
+                    Value::String(s) => s.clone(),
+                    _ => return Ok(Value::Null),
+                };
+                // Accept either a literal list as second arg, or variadic remaining args.
+                if args.len() == 2 {
+                    let list_val = self.evaluate_expression(&args[1], row)?;
+                    if let Value::String(ref ls) = list_val {
+                        if ls.starts_with('[') && ls.ends_with(']') {
+                            let needles = parse_list_value(&list_val);
+                            for needle in needles {
+                                if let Value::String(n) = needle {
+                                    if s.contains(n.as_str()) {
+                                        return Ok(Value::Boolean(true));
+                                    }
+                                }
+                            }
+                            return Ok(Value::Boolean(false));
+                        }
+                        if s.contains(ls.as_str()) {
+                            return Ok(Value::Boolean(true));
+                        }
+                        return Ok(Value::Boolean(false));
+                    }
+                }
+                for arg in &args[1..] {
+                    let needle = self.evaluate_expression(arg, row)?;
+                    if let Value::String(n) = needle {
+                        if s.contains(n.as_str()) {
+                            return Ok(Value::Boolean(true));
+                        }
+                    }
+                }
+                Ok(Value::Boolean(false))
+            }
+            "text_starts_with_any" => {
+                if args.is_empty() {
+                    return Err("text_starts_with_any() requires at least 1 argument".into());
+                }
+                let s_val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
+                let s = match &s_val {
+                    Value::String(s) => s.clone(),
+                    _ => return Ok(Value::Null),
+                };
+                if args.len() == 2 {
+                    let list_val = self.evaluate_expression(&args[1], row)?;
+                    if let Value::String(ref ls) = list_val {
+                        if ls.starts_with('[') && ls.ends_with(']') {
+                            let prefixes = parse_list_value(&list_val);
+                            for prefix in prefixes {
+                                if let Value::String(p) = prefix {
+                                    if s.starts_with(p.as_str()) {
+                                        return Ok(Value::Boolean(true));
+                                    }
+                                }
+                            }
+                            return Ok(Value::Boolean(false));
+                        }
+                        if s.starts_with(ls.as_str()) {
+                            return Ok(Value::Boolean(true));
+                        }
+                        return Ok(Value::Boolean(false));
+                    }
+                }
+                for arg in &args[1..] {
+                    let prefix = self.evaluate_expression(arg, row)?;
+                    if let Value::String(p) = prefix {
+                        if s.starts_with(p.as_str()) {
+                            return Ok(Value::Boolean(true));
+                        }
+                    }
+                }
+                Ok(Value::Boolean(false))
+            }
             // ── String functions ──────────────────────────────────
             "split" => {
                 if args.len() != 2 {

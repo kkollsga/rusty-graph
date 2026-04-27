@@ -365,3 +365,148 @@ class TestReduce:
             g.cypher("RETURN reduce(m = 0, x IN [5, 3, 8, 1, 7] | CASE WHEN x > m THEN x ELSE m END) AS max_val")
         )
         assert rows[0]["max_val"] == 8
+
+
+# ── 0.8.20: text predicates ────────────────────────────────────
+
+
+class TestTextEditDistance:
+    def test_basic(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_edit_distance('kitten', 'sitting') AS d"))
+        assert rows[0]["d"] == 3
+
+    def test_identical(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_edit_distance('hello', 'hello') AS d"))
+        assert rows[0]["d"] == 0
+
+    def test_empty_string(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_edit_distance('', 'abc') AS d"))
+        assert rows[0]["d"] == 3
+
+    def test_unicode(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_edit_distance('café', 'cafe') AS d"))
+        assert rows[0]["d"] == 1
+
+    def test_null_returns_null(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_edit_distance(null, 'abc') AS d"))
+        assert rows[0]["d"] is None
+
+
+class TestTextNormalize:
+    def test_basic(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_normalize('  Hello, World!  ') AS s"))
+        assert rows[0]["s"] == "hello world"
+
+    def test_collapse_whitespace(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_normalize('a  b\\tc\\nd') AS s"))
+        assert rows[0]["s"] == "a b c d"
+
+    def test_keep_alphanumeric(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_normalize('Abc-123_xyz!') AS s"))
+        assert rows[0]["s"] == "abc123xyz"
+
+
+class TestTextJaccard:
+    def test_basic(self):
+        g = KnowledgeGraph()
+        # {a,b,c} vs {b,c,d} → intersection {b,c}=2, union {a,b,c,d}=4 → 0.5
+        rows = list(g.cypher("RETURN text_jaccard('a b c', 'b c d') AS j"))
+        assert rows[0]["j"] == 0.5
+
+    def test_identical(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_jaccard('hello world', 'hello world') AS j"))
+        assert rows[0]["j"] == 1.0
+
+    def test_disjoint(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_jaccard('a b', 'c d') AS j"))
+        assert rows[0]["j"] == 0.0
+
+    def test_custom_separator(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_jaccard('a,b,c', 'b,c,d', ',') AS j"))
+        assert rows[0]["j"] == 0.5
+
+
+class TestTextNgrams:
+    def test_basic(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_ngrams('hello', 3) AS g"))
+        assert rows[0]["g"] == ["hel", "ell", "llo"]
+
+    def test_n_equals_length(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_ngrams('abc', 3) AS g"))
+        assert rows[0]["g"] == ["abc"]
+
+    def test_n_too_large(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_ngrams('ab', 5) AS g"))
+        assert rows[0]["g"] == []
+
+
+class TestTextContainsAny:
+    def test_list_form(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_contains_any('hello world', ['foo', 'world']) AS r"))
+        assert rows[0]["r"] is True
+
+    def test_list_no_match(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_contains_any('hello world', ['foo', 'bar']) AS r"))
+        assert rows[0]["r"] is False
+
+    def test_variadic_form(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_contains_any('hello world', 'foo', 'world') AS r"))
+        assert rows[0]["r"] is True
+
+    def test_empty_list(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_contains_any('hello world', []) AS r"))
+        assert rows[0]["r"] is False
+
+
+class TestTextStartsWithAny:
+    def test_list_form(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_starts_with_any('foobar', ['foo', 'bar']) AS r"))
+        assert rows[0]["r"] is True
+
+    def test_list_no_match(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_starts_with_any('xyz', ['foo', 'bar']) AS r"))
+        assert rows[0]["r"] is False
+
+    def test_variadic_form(self):
+        g = KnowledgeGraph()
+        rows = list(g.cypher("RETURN text_starts_with_any('foobar', 'xyz', 'foo') AS r"))
+        assert rows[0]["r"] is True
+
+
+class TestTextPredicatesIntegration:
+    """Use lexical predicates against real graph rows."""
+
+    def test_fuzzy_dedup(self):
+        g = KnowledgeGraph()
+        df = pd.DataFrame({"id": [1, 2, 3], "name": ["Alice Smith", "Alice  Smith", "Bob Jones"]})
+        g.add_nodes(df, "Person", "id", "name")
+        # Find pairs with edit-distance ≤ 2 on normalized names
+        rows = list(
+            g.cypher(
+                "MATCH (a:Person), (b:Person) WHERE a.id < b.id "
+                "WITH a, b, text_edit_distance(text_normalize(a.title), text_normalize(b.title)) AS d "
+                "WHERE d <= 2 RETURN a.title, b.title, d"
+            )
+        )
+        # Alice Smith and Alice  Smith normalize to the same string
+        assert any(r["d"] == 0 for r in rows)

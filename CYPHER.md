@@ -376,6 +376,43 @@ graph.cypher("RETURN substring('hello', 1, 3) AS s")        # "ell"
 graph.cypher("RETURN left('hello', 2) AS l, right('hello', 2) AS r")  # "he", "lo"
 ```
 
+## Text Predicates
+
+Lexical similarity and fuzzy-match primitives — useful for deduplication, alias matching, and free-text indexing without dropping to Python.
+
+| Function | Returns | Description |
+|---|---|---|
+| `text_edit_distance(a, b)` | `Int64` | Levenshtein edit distance (UTF-8 aware) |
+| `text_normalize(s)` | `String` | Lowercase, drop punctuation, collapse whitespace |
+| `text_jaccard(a, b [, sep])` | `Float64` | Token-set Jaccard similarity (default separator: whitespace) |
+| `text_ngrams(s, n)` | `List<String>` | Character n-grams |
+| `text_contains_any(s, needles)` | `Boolean` | True if `s` contains any needle (variadic or list arg) |
+| `text_starts_with_any(s, prefixes)` | `Boolean` | True if `s` starts with any prefix (variadic or list arg) |
+
+```python
+# Edit distance — Levenshtein
+graph.cypher("RETURN text_edit_distance('kitten', 'sitting') AS d")  # 3
+
+# Normalize before comparing
+graph.cypher("RETURN text_normalize('  Hello, World!  ') AS s")  # "hello world"
+
+# Jaccard similarity
+graph.cypher("RETURN text_jaccard('a b c', 'b c d') AS j")  # 0.5
+
+# Fuzzy dedup pipeline
+graph.cypher("""
+    MATCH (a:Person), (b:Person) WHERE a.id < b.id
+    WITH a, b, text_edit_distance(
+        text_normalize(a.title), text_normalize(b.title)
+    ) AS d
+    WHERE d <= 2 RETURN a.title, b.title, d
+""")
+
+# Multi-prefix / multi-substring filters
+graph.cypher("MATCH (n) WHERE text_starts_with_any(n.title, ['Mr.', 'Dr.', 'Prof.']) RETURN n")
+graph.cypher("MATCH (n) WHERE text_contains_any(n.body, 'urgent', 'critical') RETURN n")
+```
+
 ## Arithmetic & String Concatenation
 
 ```python

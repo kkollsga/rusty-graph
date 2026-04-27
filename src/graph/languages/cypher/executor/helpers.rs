@@ -516,6 +516,39 @@ pub(super) fn coerce_to_string(val: Value) -> Value {
     }
 }
 
+/// Levenshtein edit distance between two UTF-8 strings.
+/// Two-row dynamic programming, O(min(n,m)) memory.
+pub(super) fn levenshtein(a: &str, b: &str) -> usize {
+    if a == b {
+        return 0;
+    }
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    if a_chars.is_empty() {
+        return b_chars.len();
+    }
+    if b_chars.is_empty() {
+        return a_chars.len();
+    }
+    // Use the shorter string for the row dimension to minimise memory.
+    let (short, long) = if a_chars.len() <= b_chars.len() {
+        (&a_chars, &b_chars)
+    } else {
+        (&b_chars, &a_chars)
+    };
+    let mut prev: Vec<usize> = (0..=short.len()).collect();
+    let mut curr: Vec<usize> = vec![0; short.len() + 1];
+    for (i, lc) in long.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, sc) in short.iter().enumerate() {
+            let cost = if lc == sc { 0 } else { 1 };
+            curr[j + 1] = (curr[j] + 1).min(prev[j + 1] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[short.len()]
+}
+
 /// Parse a JSON-style float list string "[1.0, 2.0, 3.0]" into Vec<f32>.
 pub(super) fn parse_json_float_list(s: &str) -> Result<Vec<f32>, String> {
     let trimmed = s.trim();
