@@ -187,6 +187,22 @@ impl CppParser {
             if child.kind() == "destructor_name" {
                 return Some(node_text(child, source));
             }
+            // Out-of-class definitions like `bool Foo::bar() const` produce
+            // a `qualified_identifier` (e.g. `Foo::bar`) where we want the
+            // last segment as the method name. Drill down to the trailing
+            // identifier child.
+            if child.kind() == "qualified_identifier" {
+                let mut qc = child.walk();
+                let mut last_id: Option<&str> = None;
+                for sub in child.children(&mut qc) {
+                    if matches!(sub.kind(), "identifier" | "destructor_name") {
+                        last_id = Some(node_text(sub, source));
+                    }
+                }
+                if let Some(id) = last_id {
+                    return Some(id);
+                }
+            }
             if child.kind() == name_type
                 || child.kind() == "type_identifier"
                 || child.kind() == "field_identifier"
@@ -518,7 +534,10 @@ impl CppParser {
         let mut declarator: Option<Node> = None;
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            if matches!(child.kind(), "function_declarator" | "pointer_declarator") {
+            if matches!(
+                child.kind(),
+                "function_declarator" | "pointer_declarator" | "reference_declarator"
+            ) {
                 declarator = Some(child);
                 break;
             }
@@ -533,9 +552,11 @@ impl CppParser {
                 }
             }
         }
-        // Unwrap pointer_declarator.
+        // Unwrap pointer_declarator and reference_declarator wrappers — both
+        // appear when the return type is `T *` or `T &`. The real
+        // function_declarator lives inside.
         while let Some(d) = declarator {
-            if d.kind() == "pointer_declarator" {
+            if matches!(d.kind(), "pointer_declarator" | "reference_declarator") {
                 let mut dc = d.walk();
                 let mut found: Option<Node> = None;
                 for c in d.children(&mut dc) {
@@ -664,7 +685,15 @@ impl CppParser {
                         } else if k.contains("type")
                             || k == "primitive_type"
                             || k == "qualified_identifier"
+                            || k == "struct_specifier"
+                            || k == "enum_specifier"
+                            || k == "union_specifier"
+                            || k == "class_specifier"
+                            || k == "sized_type_specifier"
                         {
+                            // C-style `struct llama_grammar *` parameters land
+                            // here as struct_specifier (not in TYPE_NODES). Same
+                            // for `enum X` / `union X` / `class X` parameter types.
                             type_ann = Some(node_text(sub, source).to_string());
                         }
                     }

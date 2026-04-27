@@ -160,6 +160,78 @@ def test_macro_decorated_constructor_extracts_parameters(tmp_path):
     assert ctors[0]["p"] == 2, f"expected 2 params, got {ctors[0]['p']}"
 
 
+def test_c_style_struct_param_type_extracted(tmp_path):
+    """`struct llama_grammar * grammar` — type_annotation should capture
+    the `struct llama_grammar` form, not be None. Previously the
+    `struct_specifier` AST node fell through extract_parameters' kind
+    matchers since `struct_specifier` doesn't contain "type" as substring.
+    """
+    _write(
+        tmp_path,
+        {
+            "main.cpp": """
+            struct llama_grammar { int dummy; };
+
+            void llama_grammar_free(struct llama_grammar * grammar) {}
+            """,
+        },
+    )
+    g = build(str(tmp_path))
+    rows = g.cypher(
+        "MATCH (f:Function) WHERE f.qualified_name ENDS WITH '::llama_grammar_free' RETURN f.parameters AS p"
+    ).to_list()
+    import json
+
+    raw = rows[0]["p"]
+    params = raw if isinstance(raw, list) else (json.loads(raw) if raw else [])
+    assert params, f"expected one parameter, got {params}"
+    assert "llama_grammar" in (params[0]["type_annotation"] or ""), params[0]
+
+
+def test_qualified_identifier_method_name_extracted(tmp_path):
+    """`bool Foo::bar() const` — name should be `bar`, not `unknown`.
+    Out-of-class definitions use `qualified_identifier` (Foo::bar) where
+    the existing identifier-walk missed the trailing identifier.
+    """
+    _write(
+        tmp_path,
+        {
+            "main.cpp": """
+            class Foo { public: bool bar() const; };
+
+            bool Foo::bar() const { return true; }
+            """,
+        },
+    )
+    g = build(str(tmp_path))
+    # Expect the out-of-class definition's name extracted as `bar`.
+    rows = g.cypher(
+        "MATCH (f:Function) WHERE f.name = 'bar' AND f.qualified_name CONTAINS 'main' RETURN count(*) AS n"
+    ).to_list()
+    assert rows[0]["n"] >= 1
+
+
+def test_reference_return_function_extracted(tmp_path):
+    """`T & foo()` — `reference_declarator` wraps the function_declarator
+    and used to leave name='unknown'.
+    """
+    _write(
+        tmp_path,
+        {
+            "main.cpp": """
+            struct stack { int dummy; };
+
+            stack & get_stack() {
+                static stack s; return s;
+            }
+            """,
+        },
+    )
+    g = build(str(tmp_path))
+    rows = g.cypher("MATCH (f:Function) WHERE f.qualified_name ENDS WITH '::get_stack' RETURN f.name AS n").to_list()
+    assert rows and rows[0]["n"] == "get_stack", rows
+
+
 def test_lowercase_function_name_not_treated_as_macro(tmp_path):
     """Don't false-positive on lowercase function names just because they
     contain uppercase letters in CamelCase or snake_case parts."""

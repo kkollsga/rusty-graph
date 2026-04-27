@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.24] — 2026-04-27
+
+C++ parser robustness round driven by analysing nlohmann/json (24% → 12%
+signature fallback) and llama.cpp's `src/` (32% → 5.9% fallback, function
+count 742 → 1,263 because previously-`unknown`-named functions can now be
+called targets, CALLS edges 352 → 2,971).
+
 ### Fixed
+
+- **C-style `struct T *` / `enum T` / `union T` parameter types** —
+  `struct_specifier`, `enum_specifier`, `union_specifier`, `class_specifier`,
+  `sized_type_specifier` were missing from C++ `extract_parameters`'s
+  type-recognition list. C-heavy headers like llama.cpp's
+  `void llama_grammar_free(struct llama_grammar * grammar)` were losing the
+  parameter type entirely (`type_annotation=None`).
+
+- **Out-of-class C++ method names** — `bool Foo::bar() const` produces a
+  `qualified_identifier` (`Foo::bar`) child in tree-sitter-cpp, which the
+  existing `get_name` walk missed. Now drills into `qualified_identifier`
+  and returns the trailing segment (`bar`).
+
+- **Reference-return functions** — `T & foo()` wraps the real
+  `function_declarator` in a `reference_declarator`. `parse_function` now
+  unwraps it just like it already did for `pointer_declarator`. Functions
+  returning references no longer show as `name="unknown"`.
 
 - **C++ template-typed methods, destructors, qualifier-stripped return types,
   and macro-decorated constructors.** Four targeted parser fixes that drop
