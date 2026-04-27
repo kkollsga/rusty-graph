@@ -624,7 +624,84 @@ fn call_param_f64_required(
         Some(other) => Err(format!(
             "CALL {proc}: parameter '{key}' must be numeric, got {other:?}"
         )),
-        None => Err(format!("CALL {proc}: missing required parameter '{key}'")),
+        None => Err(format!(
+            "CALL {proc}: missing required parameter '{key}'.{}",
+            param_schema_hint(proc)
+        )),
+    }
+}
+
+/// Per-procedure parameter schema. Used to enrich the "missing required
+/// parameter" / "must be a string" error messages so first-time users
+/// don't have to brute-force-guess parameter names. Each entry is
+/// `(proc_name, &[(param_name, required)])`.
+///
+/// Keep alphabetised by proc_name so additions land in a stable place.
+const RULE_PARAM_SCHEMAS: &[(&str, &[(&str, bool)])] = &[
+    (
+        "cardinality_violation",
+        &[
+            ("type", true),
+            ("edge", true),
+            ("min", false),
+            ("max", false),
+        ],
+    ),
+    ("cycle_2step", &[("type", true), ("edge", true)]),
+    ("duplicate_title", &[("type", true)]),
+    ("inverse_violation", &[("rel_a", true), ("rel_b", true)]),
+    (
+        "kg_knn",
+        &[
+            ("lat", true),
+            ("lon", true),
+            ("target_type", true),
+            ("k", false),
+        ],
+    ),
+    ("missing_inbound_edge", &[("type", true), ("edge", true)]),
+    ("missing_required_edge", &[("type", true), ("edge", true)]),
+    ("null_property", &[("type", true), ("property", true)]),
+    ("orphan_node", &[("type", true)]),
+    ("parallel_edges", &[("edge", true)]),
+    ("self_loop", &[("type", true), ("edge", true)]),
+    ("transitivity_violation", &[("rel", true)]),
+    (
+        "type_domain_violation",
+        &[("edge", true), ("expected_source", true)],
+    ),
+    (
+        "type_range_violation",
+        &[("edge", true), ("expected_target", true)],
+    ),
+];
+
+/// Format a parameter-schema hint to append to error messages. Returns
+/// `""` when the procedure has no registered schema (so older procedures
+/// keep their existing error format).
+fn param_schema_hint(proc: &str) -> String {
+    let Some((_, schema)) = RULE_PARAM_SCHEMAS.iter().find(|(name, _)| *name == proc) else {
+        return String::new();
+    };
+    let required: Vec<&str> = schema
+        .iter()
+        .filter_map(|(name, req)| if *req { Some(*name) } else { None })
+        .collect();
+    let optional: Vec<&str> = schema
+        .iter()
+        .filter_map(|(name, req)| if !*req { Some(*name) } else { None })
+        .collect();
+    let mut parts = Vec::new();
+    if !required.is_empty() {
+        parts.push(format!("required: [{}]", required.join(", ")));
+    }
+    if !optional.is_empty() {
+        parts.push(format!("optional: [{}]", optional.join(", ")));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" Accepted parameters — {}.", parts.join(", "))
     }
 }
 
@@ -673,7 +750,8 @@ fn require_string_param(
         )),
         None => Err(format!(
             "CALL {proc}: missing required parameter '{key}'. \
-             Use map syntax — e.g. CALL {proc}({{{key}: 'X'}})."
+             Use map syntax — e.g. CALL {proc}({{{key}: 'X'}}).{}",
+            param_schema_hint(proc)
         )),
     }
 }

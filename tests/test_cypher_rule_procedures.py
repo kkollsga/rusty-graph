@@ -87,6 +87,31 @@ def test_orphan_node_missing_param_errors(integrity_graph):
         integrity_graph.cypher("CALL orphan_node({}) YIELD node RETURN node")
 
 
+def test_orphan_node_missing_param_error_lists_accepted_params(integrity_graph):
+    """Error message includes the accepted-parameters hint so first-time
+    users don't have to brute-force-guess the param name (issue #13)."""
+    try:
+        integrity_graph.cypher("CALL orphan_node({wrong: 'X'}) YIELD node RETURN node")
+    except (ValueError, RuntimeError) as exc:
+        msg = str(exc)
+        assert "Accepted parameters" in msg, f"missing schema hint in error: {msg}"
+        assert "type" in msg, f"required param 'type' must be listed in error: {msg}"
+    else:
+        pytest.fail("expected a ValueError/RuntimeError")
+
+
+def test_cardinality_violation_error_lists_optional_params(integrity_graph):
+    """Optional params (min, max) should also appear in the schema hint."""
+    try:
+        integrity_graph.cypher("CALL cardinality_violation({}) YIELD node RETURN node")
+    except (ValueError, RuntimeError) as exc:
+        msg = str(exc)
+        assert "required: [type, edge]" in msg, f"required list missing/wrong: {msg}"
+        assert "optional: [min, max]" in msg, f"optional list missing/wrong: {msg}"
+    else:
+        pytest.fail("expected a ValueError/RuntimeError")
+
+
 # ---------------------------------------------------------------------
 # self_loop + cycle_2step
 
