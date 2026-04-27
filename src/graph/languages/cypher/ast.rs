@@ -536,11 +536,27 @@ pub struct UnwindClause {
     pub alias: String,
 }
 
-/// UNION clause: combine result sets
+/// Set-operator kind: UNION, INTERSECT, EXCEPT.
+///
+/// All three combine two result sets but differ in row-set semantics:
+/// - `Union`: rows from either side; deduped unless `all` is true.
+/// - `Intersect`: rows present in both sides; always deduped.
+/// - `Except`: rows in left but not right; always deduped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetOpKind {
+    Union,
+    Intersect,
+    Except,
+}
+
+/// UNION / INTERSECT / EXCEPT clause: combine result sets. Named
+/// `UnionClause` for backwards compatibility — the `kind` field selects
+/// the actual set operator.
 #[derive(Debug, Clone)]
 pub struct UnionClause {
     pub all: bool,
     pub query: Box<CypherQuery>,
+    pub kind: SetOpKind,
 }
 
 // ============================================================================

@@ -665,15 +665,41 @@ Expand a list into rows:
 graph.cypher("UNWIND [1, 2, 3] AS x RETURN x, x * 2 AS doubled")
 ```
 
-## UNION
+## UNION / INTERSECT / EXCEPT
+
+Set operators combine two queries with matching column shapes.
+
+| Operator | Semantics | Duplicate handling |
+|---|---|---|
+| `UNION` | Rows from either side | Deduped |
+| `UNION ALL` | Rows from either side | Duplicates kept |
+| `INTERSECT` | Rows present in both sides | Always deduped |
+| `EXCEPT` | Rows in left but not in right | Always deduped |
 
 ```python
+# UNION — combine
 graph.cypher("""
     MATCH (n:Person) WHERE n.city = 'Oslo' RETURN n.name AS name
     UNION
     MATCH (n:Person) WHERE n.age > 30 RETURN n.name AS name
 """)
+
+# INTERSECT — keep names that appear on both sides
+graph.cypher("""
+    MATCH (n:Person) WHERE n.city = 'Oslo' RETURN n.name AS name
+    INTERSECT
+    MATCH (n:Person) WHERE n.age > 30 RETURN n.name AS name
+""")
+
+# EXCEPT — Oslo residents minus everyone over 30
+graph.cypher("""
+    MATCH (n:Person) WHERE n.city = 'Oslo' RETURN n.name AS name
+    EXCEPT
+    MATCH (n:Person) WHERE n.age > 30 RETURN n.name AS name
+""")
 ```
+
+Set operators dedupe by the projected column values; column names must match between sides (positional fallback when they don't).
 
 ## Variable Binding in MATCH Patterns
 

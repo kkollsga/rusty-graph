@@ -97,6 +97,8 @@ impl CypherParser {
             | Some(CypherToken::Skip)
             | Some(CypherToken::Unwind)
             | Some(CypherToken::Union)
+            | Some(CypherToken::Intersect)
+            | Some(CypherToken::Except)
             | Some(CypherToken::Create)
             | Some(CypherToken::Set)
             | Some(CypherToken::Delete)
@@ -182,6 +184,12 @@ impl CypherParser {
                 }
                 Some(CypherToken::Union) => {
                     clauses.push(self.parse_union_clause()?);
+                }
+                Some(CypherToken::Intersect) => {
+                    clauses.push(self.parse_intersect_clause()?);
+                }
+                Some(CypherToken::Except) => {
+                    clauses.push(self.parse_except_clause()?);
                 }
                 Some(CypherToken::Create) => {
                     clauses.push(self.parse_create_clause()?);

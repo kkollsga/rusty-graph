@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cypher INTERSECT / EXCEPT (Phase 6 of the completeness round).**
+  Cypher now exposes the standard set operators:
+
+  ```cypher
+  MATCH (n:Person) WHERE n.city = 'Oslo' RETURN n.name AS name
+  INTERSECT
+  MATCH (n:Person) WHERE n.age > 30 RETURN n.name AS name
+
+  MATCH (n:Person) WHERE n.city = 'Oslo' RETURN n.name AS name
+  EXCEPT
+  MATCH (n:Person) WHERE n.age > 30 RETURN n.name AS name
+  ```
+
+  `INTERSECT` keeps rows present in both sides; `EXCEPT` keeps rows in
+  left but not in right. Both always dedupe, matching SQL/openCypher
+  conventions. Internals: new `SetOpKind` enum on `UnionClause` (the
+  same `Clause::Union` variant carries all three operators). The
+  executor dispatches on `kind`: UNION uses the existing concat-and-
+  dedup path; INTERSECT/EXCEPT pre-build a row-hash set from the
+  right-side result and filter the left.
+
+  Brings Cypher in line with the fluent-API set ops (`union`,
+  `intersection`, `difference`, `symmetric_difference`).
+
 - **Geospatial primitives (Phase 5 of the completeness round).** Round
   out the spatial surface with the standard GIS toolkit operations.
 

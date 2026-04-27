@@ -436,6 +436,43 @@ class TestExistingFeatures:
         # Oslo: Alice, Charlie, Eve; age > 35: Eve; UNION ALL keeps duplicates
         assert len(names) == 4  # 3 + 1 (Eve appears twice)
 
+    def test_intersect(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.city = 'Oslo' RETURN n.name AS name
+            INTERSECT
+            MATCH (n:Person) WHERE n.age > 35 RETURN n.name AS name
+        """)
+        names = {r["name"] for r in rows}
+        # Oslo: Alice, Charlie, Eve; age > 35: Eve; intersection = {Eve}
+        assert names == {"Eve"}
+
+    def test_intersect_disjoint(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.name AS name
+            INTERSECT
+            MATCH (n:Person) WHERE n.name = 'Bob' RETURN n.name AS name
+        """)
+        assert list(rows) == []
+
+    def test_except(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.city = 'Oslo' RETURN n.name AS name
+            EXCEPT
+            MATCH (n:Person) WHERE n.age > 35 RETURN n.name AS name
+        """)
+        names = {r["name"] for r in rows}
+        # Oslo: Alice, Charlie, Eve; minus age > 35 (Eve) = {Alice, Charlie}
+        assert names == {"Alice", "Charlie"}
+
+    def test_except_when_right_empty(self, cypher_graph):
+        rows = cypher_graph.cypher("""
+            MATCH (n:Person) WHERE n.city = 'Oslo' RETURN n.name AS name
+            EXCEPT
+            MATCH (n:Person) WHERE n.name = 'Nonexistent' RETURN n.name AS name
+        """)
+        names = {r["name"] for r in rows}
+        assert names == {"Alice", "Charlie", "Eve"}
+
     def test_var_length_path(self, cypher_graph):
         rows = cypher_graph.cypher("""
             MATCH (a:Person)-[:KNOWS*1..2]->(b:Person)

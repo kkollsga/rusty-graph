@@ -791,40 +791,121 @@ impl<'a> CypherExecutor<'a> {
             result_set.columns.clone()
         };
 
-        // Convert right result back to ResultSet
-        let mut combined_rows = result_set.rows;
-        for row_values in right_result.rows {
-            let mut projected = Bindings::with_capacity(right_result.columns.len());
-            for (i, col) in right_result.columns.iter().enumerate() {
-                if let Some(val) = row_values.get(i) {
-                    projected.insert(col.clone(), val.clone());
+        // Compute a row-hash for set operators. Returns the same value for
+        // structurally identical rows so HashSet membership matches.
+        let row_hash = |row: &ResultRow, cols: &[String]| -> u64 {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for col in cols {
+                match row.projected.get(col) {
+                    Some(val) => val.hash(&mut hasher),
+                    None => Value::Null.hash(&mut hasher),
                 }
             }
-            combined_rows.push(ResultRow::from_projected(projected));
-        }
+            hasher.finish()
+        };
 
-        // Remove duplicates for UNION (not UNION ALL)
-        // Use hash-based dedup to avoid cloning Vec<Value> per row
-        if !clause.all {
-            use std::hash::{Hash, Hasher};
-            let mut seen = HashSet::new();
-            combined_rows.retain(|row| {
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                for col in &columns {
-                    match row.projected.get(col) {
-                        Some(val) => val.hash(&mut hasher),
-                        None => Value::Null.hash(&mut hasher),
+        match clause.kind {
+            SetOpKind::Union => {
+                let mut combined_rows = result_set.rows;
+                for row_values in right_result.rows {
+                    let mut projected = Bindings::with_capacity(right_result.columns.len());
+                    for (i, col) in right_result.columns.iter().enumerate() {
+                        if let Some(val) = row_values.get(i) {
+                            projected.insert(col.clone(), val.clone());
+                        }
                     }
+                    combined_rows.push(ResultRow::from_projected(projected));
                 }
-                seen.insert(hasher.finish())
-            });
+                if !clause.all {
+                    let mut seen = HashSet::new();
+                    combined_rows.retain(|row| seen.insert(row_hash(row, &columns)));
+                }
+                Ok(ResultSet {
+                    rows: combined_rows,
+                    columns,
+                    lazy_return_items: None,
+                })
+            }
+            SetOpKind::Intersect => {
+                // Build the right-side hash set first.
+                let right_columns = right_result.columns.clone();
+                let right_hashes: HashSet<u64> = right_result
+                    .rows
+                    .iter()
+                    .map(|row_values| {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        for (i, col) in columns.iter().enumerate() {
+                            // Use the right-side column at the same positional index;
+                            // fall back to lookup-by-name if positional shapes differ.
+                            let val = right_columns
+                                .iter()
+                                .position(|rc| rc == col)
+                                .and_then(|pos| row_values.get(pos))
+                                .or_else(|| row_values.get(i));
+                            match val {
+                                Some(v) => v.hash(&mut hasher),
+                                None => Value::Null.hash(&mut hasher),
+                            }
+                        }
+                        hasher.finish()
+                    })
+                    .collect();
+                // Keep left rows whose hash appears in right; then dedup left.
+                let mut seen = HashSet::new();
+                let kept: Vec<ResultRow> = result_set
+                    .rows
+                    .into_iter()
+                    .filter(|row| {
+                        let h = row_hash(row, &columns);
+                        right_hashes.contains(&h) && seen.insert(h)
+                    })
+                    .collect();
+                Ok(ResultSet {
+                    rows: kept,
+                    columns,
+                    lazy_return_items: None,
+                })
+            }
+            SetOpKind::Except => {
+                let right_columns = right_result.columns.clone();
+                let right_hashes: HashSet<u64> = right_result
+                    .rows
+                    .iter()
+                    .map(|row_values| {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        for (i, col) in columns.iter().enumerate() {
+                            let val = right_columns
+                                .iter()
+                                .position(|rc| rc == col)
+                                .and_then(|pos| row_values.get(pos))
+                                .or_else(|| row_values.get(i));
+                            match val {
+                                Some(v) => v.hash(&mut hasher),
+                                None => Value::Null.hash(&mut hasher),
+                            }
+                        }
+                        hasher.finish()
+                    })
+                    .collect();
+                let mut seen = HashSet::new();
+                let kept: Vec<ResultRow> = result_set
+                    .rows
+                    .into_iter()
+                    .filter(|row| {
+                        let h = row_hash(row, &columns);
+                        !right_hashes.contains(&h) && seen.insert(h)
+                    })
+                    .collect();
+                Ok(ResultSet {
+                    rows: kept,
+                    columns,
+                    lazy_return_items: None,
+                })
+            }
         }
-
-        Ok(ResultSet {
-            rows: combined_rows,
-            columns,
-            lazy_return_items: None,
-        })
     }
 
     // ========================================================================

@@ -178,6 +178,27 @@ impl CypherParser {
         Ok(Clause::Union(UnionClause {
             all,
             query: Box::new(query),
+            kind: SetOpKind::Union,
+        }))
+    }
+
+    pub(super) fn parse_intersect_clause(&mut self) -> Result<Clause, String> {
+        self.expect(&CypherToken::Intersect)?;
+        let query = self.parse_query()?;
+        Ok(Clause::Union(UnionClause {
+            all: false,
+            query: Box::new(query),
+            kind: SetOpKind::Intersect,
+        }))
+    }
+
+    pub(super) fn parse_except_clause(&mut self) -> Result<Clause, String> {
+        self.expect(&CypherToken::Except)?;
+        let query = self.parse_query()?;
+        Ok(Clause::Union(UnionClause {
+            all: false,
+            query: Box::new(query),
+            kind: SetOpKind::Except,
         }))
     }
 
