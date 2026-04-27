@@ -98,19 +98,14 @@ impl GoParser {
     }
 
     fn get_return_type(node: Node, source: &[u8]) -> Option<String> {
-        let mut saw_params = false;
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            match child.kind() {
-                "parameter_list" => saw_params = true,
-                "block" if saw_params => break,
-                _ if saw_params && child.is_named() => {
-                    return Some(node_text(child, source).to_string());
-                }
-                _ => {}
-            }
-        }
-        None
+        // Use the named `result` field. Avoids the method-receiver trap:
+        // for `func (c *Call) Once() *Call`, naive child iteration sees the
+        // receiver `parameter_list` first, then mistakes the method name
+        // (`Once`) for the return type. The `result` field points directly
+        // at the return-type node for both function_declaration and
+        // method_declaration.
+        node.child_by_field_name("result")
+            .map(|c| node_text(c, source).to_string())
     }
 
     fn extract_calls(body: Node, source: &[u8]) -> Vec<(String, u32)> {
@@ -334,23 +329,12 @@ impl GoParser {
     }
 
     /// Extract structured parameters from a Go function/method declaration.
-    /// Walks `parameter_list` (looking for `parameter_declaration`s).
+    /// Uses the tree-sitter-go named field `parameters` to skip the receiver
+    /// (`method_declaration`'s `receiver` field, which is also a `parameter_list`).
     /// `variadic_parameter_declaration` becomes `ParameterKind::Variadic`.
     fn extract_parameters(node: Node, source: &[u8]) -> Vec<ParameterInfo> {
         let mut out = Vec::new();
-        let mut cursor = node.walk();
-        // For method_declaration there's a leading `parameter_list` for the
-        // receiver — we want the second `parameter_list` (the actual params).
-        // For function_declaration there's only one.
-        let mut param_lists: Vec<Node> = node
-            .children(&mut cursor)
-            .filter(|c| c.kind() == "parameter_list")
-            .collect();
-        let params_node = if node.kind() == "method_declaration" && param_lists.len() >= 2 {
-            param_lists.remove(1)
-        } else if !param_lists.is_empty() {
-            param_lists.remove(0)
-        } else {
+        let Some(params_node) = node.child_by_field_name("parameters") else {
             return out;
         };
         let mut pcursor = params_node.walk();

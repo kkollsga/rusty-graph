@@ -90,6 +90,39 @@ def test_position_both(tmp_path):
     assert _positions(g, "::transform", "Widget") == "both"
 
 
+def test_go_method_return_type_resolved(tmp_path):
+    """Regression: Go methods previously had their NAME mistaken for the return type
+    because get_return_type naively saw the receiver `parameter_list` first and
+    returned the next named child. Fix uses tree-sitter-go's `result` named field.
+    """
+    _write(
+        tmp_path,
+        {
+            "go.mod": "module demo\n\ngo 1.21\n",
+            "main.go": """
+            package demo
+
+            type Call struct{}
+
+            // Method on a struct — receiver is *Call, return is *Call. Before the
+            // fix, get_return_type returned "Once" (the method name) because the
+            // receiver parameter_list tripped the scan.
+            func (c *Call) Once() *Call { return c }
+
+            // Same shape with a real parameter.
+            func (c *Call) Run(n int) *Call { return c }
+            """,
+        },
+    )
+    g = build(str(tmp_path))
+    # Once should produce *Call → return position USES_TYPE edge.
+    pos = _positions(g, ".Once", "Call")
+    assert pos in ("return", "both"), f"expected return/both, got {pos!r}"
+    # Run takes int param, returns *Call → both positions seen.
+    pos = _positions(g, ".Run", "Call")
+    assert pos in ("return", "both"), f"expected return/both, got {pos!r}"
+
+
 def test_no_duplicate_edges_for_both_positions(tmp_path):
     """Single edge per (function, type) — position aggregated, not duplicated."""
     _write(
