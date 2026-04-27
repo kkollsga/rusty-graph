@@ -7,7 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.8.20] — 2026-04-27
+## [0.8.21] — 2026-04-27
+
+Code-analysis tooling round. Closes seven issues filed against KGLite's
+own MCP server after a self-analysis session surfaced them — all
+visible to users running `kglite.code_tree.build(...)` or
+`g.cypher("CALL ...")` against a Rust codebase.
+
+### Added
+
+- **`REFERENCES_FN` edge type — Function → Function** for bare or
+  scoped identifiers passed as arguments to higher-order calls
+  (`iter.and_then(some_fn)`, `Option::map(my_helper)`). Distinct from
+  `CALLS` because the referenced function isn't necessarily invoked
+  at the reference site. Dead-code analysis can union the two:
+
+  ```cypher
+  MATCH (f:Function)
+  WHERE NOT EXISTS { ()-[:CALLS]->(f) }
+    AND NOT EXISTS { ()-[:REFERENCES_FN]->(f) }
+  RETURN f.qualified_name
+  ```
+
+- **`REFERENCES` edge type — Function → Constant** for bare or scoped
+  identifiers in function bodies that resolve to a known constant.
+  The Rust parser uses `SCREAMING_SNAKE_CASE` as the parse-time
+  filter, so local variables don't pollute the edge set. Enables
+  detecting unreferenced constants directly from the graph rather
+  than via ripgrep.
+
+- **`orphan_node` accepts `link_type` and `direction` parameters.**
+  The default behaviour (zero edges in any direction) is unchanged;
+  the new params let queries express "no inbound matching edge of a
+  specific connection type" — the natural shape for "functions never
+  called", "files never imported", etc.:
+
+  ```cypher
+  CALL orphan_node({type: 'Function', link_type: 'CALLS', direction: 'in'})
+  YIELD node RETURN node.qualified_name
+  ```
+
+- **`EXISTS { MATCH ... MATCH ... [WHERE ...] }` multi-clause
+  subqueries.** The bare-pattern form already worked; the full
+  subquery form with multiple `MATCH` clauses (sharing variables)
+  and a `WHERE` predicate evaluated against the merged bindings now
+  parses and executes. Multi-hop existence checks no longer have to
+  be rewritten as `MATCH ... WITH collect(...) AS xs ... AND NOT y IN xs`.
+
+- **`Project.crate_type` column** captured from `[lib] crate-type` in
+  `Cargo.toml`. Lets downstream queries distinguish a regular `lib`
+  crate (where `pub fn` is a real export) from a `cdylib` PyO3 crate
+  (where only `#[pyfunction]` / `#[pymethods]` matter).
+
+- **`Function.is_test` column** surfaced as a queryable property on
+  Function nodes (previously only stored in metadata).
+
+### Fixed
+
+- **`CALLS` edges now include calls inside closure bodies.**
+  `closure_expression` was on the parser's NESTED_SCOPES skip-list,
+  so `.map(|x| foo(x))` / `.and_then(|x| bar(x))` produced zero
+  CALLS edges to the inner function. Closures are expressions in
+  Rust, not items — calls inside them belong to the enclosing
+  function semantically.
+
+- **`self.method()` receiver-type disambiguation.** When the same
+  method name exists on multiple structs, a bare `self.method()`
+  call inside a method of `Foo` now narrows to `Foo::method` ahead
+  of `Bar::method`, even when both are candidates and live in
+  different files. Uses the caller's owner short name as an implicit
+  receiver hint when no explicit one is present.
+
+- **`is_test` propagates into inline `#[cfg(test)] mod tests` blocks.**
+  Previously only `#[test]` / `#[bench]` annotated functions were
+  flagged; helpers inside the test mod weren't, inflating every
+  dead-code query against a Rust codebase. Files literally named
+  `tests.rs` are also flagged at the file level.
+
+- **`CALL` rule procedures list accepted parameters in error
+  messages.** Missing-required-parameter errors now show the full
+  schema (required + optional names), so first-time use of a
+  procedure doesn't cost three error rounds before guessing the
+  parameter name.
+
+### Removed
+
+- **`ARCHITECTURE.md`.** A refactor-time artifact from the 0.8.0
+  storage refactor; framing was past-tense and the parity test that
+  validated its file-path references was removed alongside it. The
+  three other parity gates (god-file cap, unsafe-SAFETY comments,
+  mod.rs purity) are evergreen and stay.
+
+- **Dead disk-build infrastructure** — `block_pool.rs`,
+  `block_column.rs`, `memory/build_column_store.rs`,
+  `AsyncPropertyLogWriter`, plus a sweep of unused methods, fields,
+  and enum variants. v3 disk pipeline replaced these; ~3000 lines net.
+
+- **Legacy benchmark suites** — `test_nx_comparison.py` (NetworkX
+  comparison, required scipy that wasn't in the venv) and
+  `test_performance.py` (used the old `result["stats"][...]`
+  subscript API, every Cypher-mutation test failed). Superseded by
+  `test_bench_core.py` and `test_bench_memory.py`.
 
 The "completeness round" — six phases that round out the Cypher and
 Fluent surface so no primitive a user would reasonably expect is
